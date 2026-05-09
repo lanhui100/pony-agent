@@ -1,0 +1,15 @@
+node_modules/
+dist/
+hermes/
+
+src-tauri/target/
+src-tauri/gen/
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.idea/
+.vscode/
+
+*.log
