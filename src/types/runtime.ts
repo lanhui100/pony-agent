@@ -25,3 +25,28 @@ export type TraceStep = {
   label: string;
   state: "completed" | "active" | "pending";
 };
+
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type TurnInput = {
+  message: string;
+};
+
+export type TurnResult = {
+  phase: RuntimePhase;
+  providerRequestedName: string;
+  providerName: string;
+  providerProtocol: string;
+  providerModel: string;
+  providerMode: string;
+  fallbackReason?: string | null;
+  userMessage: string;
+  assistantMessage: string;
+  traceSteps: TraceStep[];
+  toolActivities: ToolActivity[];
+  sessionSummary: string;
+};
