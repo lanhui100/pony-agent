@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri"
   },
   "devDependencies": {
     "@tauri-apps/api": "^2.8.0",
@@ -18,7 +18,13 @@
     "vue-tsc": "^3.2.8"
   },
   "dependencies": {
+    "@tailwindcss/vite": "^4.3.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.4",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.3.0",
     "vue": "^3.5.34"
   }
 }

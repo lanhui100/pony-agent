@@ -1,6 +1,7 @@
 node_modules/
 dist/
 hermes/
+claude-code-sourcemap/
 
 src-tauri/target/
 src-tauri/gen/

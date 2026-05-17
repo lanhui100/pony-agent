@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: `Ready`
+- Status: `Done`
 - Priority: `P0`
 - Owner: `Codex`
 
@@ -29,20 +29,22 @@
 
 ## 当前进展
 
-目前 Rust 侧仅有 `health_check`。
+已完成：
+
+- 定义 `TurnInput`
+- 定义 `TurnResult`
+- 增加 Rust `run_turn()` 命令入口
+- 打通前端输入到 Rust 结构化回包
+- 前端可展示 phase、trace、tool activity、session summary
+- `cargo check` 通过
 
 ## 下一步动作
 
-先定义最小领域对象：
-
-- `UserInput`
-- `AssistantMessage`
-- `TurnResult`
-- `RuntimeState`
+转入 `PA-004`，开始定义 provider 与 tool 抽象，并让 `run_turn()` 承接真实模型调用。
 
 ## 当前卡点
 
-- 依赖 `PA-001` 和 `PA-002` 完成最小调试台结构
+- 无
 
 ## 断点续跑提示
 
@@ -50,3 +52,4 @@
 
 - `docs/architecture/runtime.md`
 - `docs/guides/rust-agent.md`
+- `docs/learning/0007-first-run-turn-implementation.md`

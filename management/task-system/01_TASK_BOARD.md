@@ -3,15 +3,14 @@
 ## Backlog
 
 - `PA-004` 定义 provider 与 tool 抽象
-- `PA-005` 把 Vue 工作台接入真实 turn 执行链路
 
 ## Ready
 
-- `PA-003` 实现 Rust 单轮 runtime 骨架
+- `PA-004` 定义 provider 与 tool 抽象
 
 ## In Progress
 
-- 暂无
+- `PA-005` 把 Vue 工作台接入真实 turn 执行链路
 
 ## Review
 
@@ -26,6 +25,7 @@
 - `PA-000` 建立项目骨架、文档索引、任务系统和 ADR 体系
 - `PA-001` 迁移前端到 Vue + Pinia
 - `PA-002` 设计运行时调试台结构
+- `PA-003` 实现 Rust 单轮 runtime 骨架
 
 ## Dropped
 

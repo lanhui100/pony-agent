@@ -23,15 +23,22 @@
 
 ## 当前进展
 
-尚未开始。
+- 已有最小 `ProviderManager`、provider preset、protocol 区分与真实请求路径。
+- `run_turn()` 已不再只依赖纯 mock，而是可以命中真实 provider 并在失败时回退。
+- 但这些能力还主要集中在具体实现里，尚未收敛为稳定的 `Provider` trait / `ToolRouter` trait 边界。
 
 ## 下一步动作
 
-在 `PA-003` 基本跑通后开始设计。
+在现有运行中的最小实现上做抽象收敛：
+
+- 从 `provider.rs` 中提炼统一 provider 接口
+- 明确 `request / response / fallback / source` 这些运行时字段的边界
+- 为后续工具执行链预留结构化 `ToolCall` / `ToolResult`
 
 ## 当前卡点
 
-- 当前优先级低于前端工作台和最小 runtime
+- 代码事实已经先走到了“可用”，抽象层设计反而落后于实现
+- 需要避免在仍快速演进的阶段过早冻结 trait 设计
 
 ## 断点续跑提示
 

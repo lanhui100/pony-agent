@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:4173",
     "frontendDist": "../dist"
   },
   "app": {
@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "Pony Agent",
-        "width": 1440,
-        "height": 920,
-        "minWidth": 1080,
-        "minHeight": 720,
+        "width": 1280,
+        "height": 820,
+        "minWidth": 780,
+        "minHeight": 560,
         "resizable": true
       }
     ],

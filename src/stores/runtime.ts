@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { defineStore } from "pinia";
+import { useProviderStore } from "@/stores/providers";
 import type {
   ChatMessage,
   HealthPayload,
@@ -99,6 +100,10 @@ export const useRuntimeStore = defineStore("runtime", {
       this.draftMessage = message;
     },
     async fetchHealth() {
+      if (this.health) {
+        return;
+      }
+
       this.phase = "connecting";
       this.error = null;
 
@@ -119,7 +124,12 @@ export const useRuntimeStore = defineStore("runtime", {
       }
     },
     async submitTurn() {
-      const payload: TurnInput = { message: this.draftMessage.trim() };
+      const providerStore = useProviderStore();
+      const payload: TurnInput = {
+        message: this.draftMessage.trim(),
+        providerId: providerStore.currentProvider?.id ?? null,
+        modelId: providerStore.currentModel?.id ?? null
+      };
       if (!payload.message) {
         return;
       }

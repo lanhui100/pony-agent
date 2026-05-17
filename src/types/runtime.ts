@@ -34,6 +34,8 @@ export type ChatMessage = {
 
 export type TurnInput = {
   message: string;
+  providerId?: string | null;
+  modelId?: string | null;
 };
 
 export type TurnResult = {

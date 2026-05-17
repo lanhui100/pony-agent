@@ -1,5 +1,7 @@
 mod agent;
 
+use agent::config::{ProviderRegistryStore, ProviderRegistryView};
+use agent::runtime::{AgentRuntime, TurnInput, TurnResult};
 use serde::Serialize;
 
 #[derive(Clone, Serialize)]
@@ -13,7 +15,7 @@ struct HealthPayload {
 
 #[tauri::command]
 fn health_check() -> HealthPayload {
-    let runtime = agent::runtime::AgentRuntime::new();
+    let runtime = AgentRuntime::new();
 
     HealthPayload {
         app_name: "Pony Agent".to_string(),
@@ -23,9 +25,30 @@ fn health_check() -> HealthPayload {
     }
 }
 
+#[tauri::command]
+fn run_turn(input: TurnInput) -> TurnResult {
+    let runtime = AgentRuntime::new();
+    runtime.run_turn(input)
+}
+
+#[tauri::command]
+fn load_provider_registry() -> ProviderRegistryView {
+    ProviderRegistryStore::new().load_view()
+}
+
+#[tauri::command]
+fn save_provider_registry(registry: ProviderRegistryView) -> Result<ProviderRegistryView, String> {
+    ProviderRegistryStore::new().save_view(registry)
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![health_check])
+        .invoke_handler(tauri::generate_handler![
+            health_check,
+            load_provider_registry,
+            run_turn,
+            save_provider_registry
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run Pony Agent");
 }

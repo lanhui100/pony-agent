@@ -1,4 +1,5 @@
 use crate::agent::graph::GraphEngine;
+use crate::agent::config::ProviderRegistryStore;
 use crate::agent::provider::{ProviderManager, ProviderMessage, ProviderRequest};
 use crate::agent::session::SessionState;
 use crate::agent::tools::builtin_tools;
@@ -8,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct TurnInput {
     pub message: String,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -76,7 +79,11 @@ impl AgentRuntime {
             normalized.to_string()
         };
 
-        let provider = ProviderManager::from_env();
+        let provider_store = ProviderRegistryStore::new();
+        let provider = ProviderManager::new(provider_store.resolve_selection(
+            input.provider_id.as_deref(),
+            input.model_id.as_deref(),
+        ));
         let tools = builtin_tools();
 
         let trace_steps = vec![
