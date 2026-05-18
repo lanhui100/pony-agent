@@ -29,20 +29,23 @@
 - Rust 已能发出 `turn:started / turn:delta / turn:trace / turn:tool / turn:completed / turn:failed` 事件。
 - OpenAI 兼容协议与 Anthropic 协议都已接入真实 stream 骨架。
 - UI 已能实时更新 assistant 文本、`phase`、`traceSteps`、`toolActivities`、`sessionSummary`、`providerName`、`providerProtocol`、`providerModel`、`providerMode`、`fallbackReason`。
+- 输入区已经支持 `Enter` 发送、`Shift+Enter` 换行，assistant 消息支持 Markdown 渲染并在消息尾部显示 `provider/model`。
+- 浏览器预览模式已补上 Tauri 环境检测与兜底，不再因为 `npm run dev` 直接白屏。
 - 当前主链路已从“静态占位”推进到“真实 provider + mock fallback + 最小流式回包闭环”。
 
 ## 下一步动作
 
-继续补可见性与学习友好度：
+继续补可见性，并开始为“独立 agent core”收边界：
 
 - 在主页更直观地区分真实 provider 与 mock fallback
 - 展示 `providerMode / fallbackReason / token 统计 / 首 token 延迟`
 - 验证两类 provider 的真实 stream 体验，收敛事件字段命名
 - 在不破坏当前事件模型的前提下，为后续 tool 调用事件预留更细粒度状态
+- 明确当前 Tauri event 流与未来 HTTP/SSE event 流的共用事件契约
 
 ## 当前卡点
 
-- 主链路已接通，当前卡点已经从“是否能流式工作”转为“运行指标是否足够直观、是否便于产品化展示”
+- 主链路已接通，当前卡点已经从“是否能流式工作”转为“运行指标是否足够直观、事件契约是否足够稳定、是否便于未来脱离 Tauri 复用”
 
 ## 断点续跑提示
 

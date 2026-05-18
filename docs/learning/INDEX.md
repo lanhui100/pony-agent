@@ -28,6 +28,11 @@
 - [0005 用 Hello World 学 Rust 最基础语法](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0005-rust-hello-world-basics.md)
 - [0006 如何理解 run_turn()、while loop 和 ReAct 的关系](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0006-run-turn-while-loop-react.md)
 - [0007 Pony Agent 第一版 run_turn() 实现了什么](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0007-first-run-turn-implementation.md)
+- [0008 白屏问题、工作台布局与学习式 UI 的关系](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0008-blank-screen-and-ui.md)
+- [0009 run_turn 与 Claude queryLoop 的关系](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0009-run-turn-and-claude-query-loop.md)
+- [0010 compaction、cache 与上下文治理为什么不能粗暴处理](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0010-compaction-and-cache.md)
+- [0011 Provider 配置、env 策略与模型编辑](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0011-provider-config-and-env.md)
+- [0012 当前 stream runtime、Hermes/Claude 对照与下一步架构路径](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0012-stream-runtime-and-future-architecture.md)
 
 ## 记录模板
 
