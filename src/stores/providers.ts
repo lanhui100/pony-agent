@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { defineStore } from "pinia";
+import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 import type { ProviderConfig, ProviderModelConfig, ProviderProtocol, ProviderRegistry } from "@/types/provider";
 
 function createId(prefix: string) {
@@ -44,6 +44,29 @@ function createEmptyProvider(): ProviderConfig {
     apiKeyPresent: false,
     models: [model],
     selectedModelId: model.id
+  };
+}
+
+function createBrowserRegistry(): ProviderRegistry {
+  const provider = createEmptyProvider();
+  provider.name = "deepseek";
+  provider.protocol = "openai";
+  provider.baseUrl = "https://api.deepseek.com/v1";
+  provider.apiKeyEnvVar = deriveEnvVarName(provider.name);
+  provider.models = [
+    {
+      id: createId("model"),
+      name: "DeepSeek Chat",
+      model: "deepseek-chat",
+      temperature: 0,
+      maxOutputTokens: 0
+    }
+  ];
+  provider.selectedModelId = provider.models[0].id;
+
+  return {
+    providers: [provider],
+    selectedProviderId: provider.id
   };
 }
 
@@ -99,7 +122,13 @@ export const useProviderStore = defineStore("providers", {
       this.error = null;
 
       try {
-        const registry = await invoke<ProviderRegistry>("load_provider_registry");
+        if (!isTauriAvailable()) {
+          this.registry = createBrowserRegistry();
+          this.notice = "当前是浏览器预览模式，模型配置仅用于界面预览，不会写入本地环境变量。";
+          return;
+        }
+
+        const registry = await safeInvoke<ProviderRegistry>("load_provider_registry");
         this.registry = registry;
       } catch (error) {
         this.error = `加载模型配置失败：${String(error)}`;
@@ -122,7 +151,12 @@ export const useProviderStore = defineStore("providers", {
       this.notice = null;
 
       try {
-        const registry = await invoke<ProviderRegistry>("save_provider_registry", {
+        if (!isTauriAvailable()) {
+          this.notice = "当前是浏览器预览模式，保存结果仅保留在当前页面会话中。";
+          return;
+        }
+
+        const registry = await safeInvoke<ProviderRegistry>("save_provider_registry", {
           registry: this.registry
         });
         this.registry = registry;

@@ -30,6 +30,8 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  status?: "pending" | "done" | "error";
+  modelName?: string | null;
 };
 
 export type TurnInput = {
@@ -51,4 +53,21 @@ export type TurnResult = {
   traceSteps: TraceStep[];
   toolActivities: ToolActivity[];
   sessionSummary: string;
+};
+
+export type TurnStreamEvent = {
+  turnId: string;
+  kind: "started" | "delta" | "trace" | "tool" | "completed" | "failed";
+  phase?: RuntimePhase | string | null;
+  text?: string | null;
+  error?: string | null;
+  providerRequestedName?: string | null;
+  providerName?: string | null;
+  providerProtocol?: string | null;
+  providerModel?: string | null;
+  providerMode?: string | null;
+  fallbackReason?: string | null;
+  traceSteps?: TraceStep[] | null;
+  toolActivities?: ToolActivity[] | null;
+  sessionSummary?: string | null;
 };

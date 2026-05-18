@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
+import { marked } from "marked";
 import { ArrowUp, Bot, Check, ChevronDown, Sparkles } from "lucide-vue-next";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
@@ -10,12 +11,7 @@ import InfoTip from "@/components/InfoTip.vue";
 const runtimeStore = useRuntimeStore();
 const providerStore = useProviderStore();
 
-const {
-  draftMessage,
-  isSubmitting,
-  messages
-} = storeToRefs(runtimeStore);
-
+const { draftMessage, isSubmitting, messages } = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
 
 const providerMenuOpen = ref(false);
@@ -25,6 +21,17 @@ const modelMenuRef = ref<HTMLElement | null>(null);
 
 const providerLabel = computed(() => currentProvider.value?.name || "提供商");
 const modelLabel = computed(() => currentModel.value?.name || "模型");
+
+function formatAssistantModelLabel(modelName?: string | null) {
+  return modelName?.trim() || "";
+}
+
+function renderAssistantMarkdown(content: string) {
+  return marked.parse(content, {
+    breaks: true,
+    gfm: true
+  }) as string;
+}
 
 function handleComposerKeydown(event: KeyboardEvent) {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -95,9 +102,11 @@ onBeforeUnmount(() => {
       <div class="space-y-2">
         <div class="flex items-center gap-2">
           <h2 class="text-lg font-semibold tracking-[-0.02em] text-stone-950">用户与 Agent 对话历史</h2>
-          <InfoTip text="这里保留对话主视角。输入、历史消息和本轮模型选择都放在同一块，避免视线在多个面板之间来回跳。" />
+          <InfoTip text="这里保留对话主视角。输入、历史消息和本轮模型选择都放在同一块，避免视线在多个面板之间来回跳转。" />
         </div>
-        <p class="max-w-3xl text-sm leading-6 text-stone-500">输入会直接触发一次 run_turn()，并把返回结果写回主对话区。</p>
+        <p class="max-w-3xl text-sm leading-6 text-stone-500">
+          输入会直接触发一次 `run_turn()`，并把返回结果写回主对话区。
+        </p>
       </div>
       <div class="rounded-[0.45rem] bg-stone-900 px-3 py-1.5 text-xs font-medium text-amber-50">
         Rust core online
@@ -121,18 +130,38 @@ onBeforeUnmount(() => {
             class="max-w-[86%] px-1 py-1 text-sm leading-6 sm:max-w-[78%]"
             :class="
               message.role === 'user'
-                ? 'ml-auto rounded-[0.24rem] bg-[#766457] px-3 py-2.5 text-amber-50'
+                ? 'ml-auto rounded-[0.24rem] bg-[#766457] px-3 py-2.5 text-right text-amber-50'
                 : 'mr-auto text-stone-700'
             "
           >
             <div
               class="mb-1.5 flex items-center gap-2 text-[10px] uppercase tracking-[0.15em]"
-              :class="message.role === 'user' ? 'text-amber-100/70' : 'text-stone-400'"
+              :class="message.role === 'user' ? 'justify-end text-right text-amber-100/70' : 'text-stone-400'"
             >
               <Bot v-if="message.role === 'assistant'" class="h-3.5 w-3.5" />
               <span>{{ message.role === "user" ? "User" : "Agent" }}</span>
             </div>
-            <div class="whitespace-pre-wrap">{{ message.content }}</div>
+            <div
+              v-if="message.role === 'assistant'"
+              class="assistant-markdown"
+              :class="
+                message.status === 'pending'
+                  ? 'text-stone-400'
+                  : message.status === 'error'
+                    ? 'text-rose-700'
+                    : 'text-stone-700'
+              "
+              v-html="renderAssistantMarkdown(message.content)"
+            />
+            <div v-else class="flex w-full justify-start">
+              <div class="whitespace-pre-wrap text-left">{{ message.content }}</div>
+            </div>
+            <div
+              v-if="message.role === 'assistant' && formatAssistantModelLabel(message.modelName)"
+              class="mt-2 text-right text-[10px] leading-4 tracking-[0.02em] text-stone-400"
+            >
+              {{ formatAssistantModelLabel(message.modelName) }}
+            </div>
           </article>
         </div>
 
@@ -149,7 +178,7 @@ onBeforeUnmount(() => {
             <div class="flex flex-wrap items-end gap-3">
               <div ref="providerMenuRef" class="relative">
                 <button
-                  class="inline-flex min-w-[6.5rem] items-center gap-1 bg-transparent p-0 text-[10px] text-stone-600 outline-none"
+                  class="inline-flex min-w-[6.2rem] items-center gap-1 bg-transparent p-0 text-[10px] leading-4 text-stone-600 outline-none"
                   type="button"
                   @click.stop="toggleProviderMenu"
                 >
@@ -178,7 +207,7 @@ onBeforeUnmount(() => {
 
               <div v-if="currentProvider" ref="modelMenuRef" class="relative">
                 <button
-                  class="inline-flex min-w-[8rem] items-center gap-1 bg-transparent p-0 text-[10px] text-stone-600 outline-none"
+                  class="inline-flex min-w-[7.4rem] items-center gap-1 bg-transparent p-0 text-[10px] leading-4 text-stone-600 outline-none"
                   type="button"
                   @click.stop="toggleModelMenu"
                 >
@@ -220,3 +249,57 @@ onBeforeUnmount(() => {
     </div>
   </section>
 </template>
+
+<style scoped>
+:deep(.assistant-markdown p) {
+  margin: 0 0 0.7rem;
+}
+
+:deep(.assistant-markdown p:last-child) {
+  margin-bottom: 0;
+}
+
+:deep(.assistant-markdown ul),
+:deep(.assistant-markdown ol) {
+  margin: 0.45rem 0 0.7rem 1.2rem;
+  padding: 0;
+}
+
+:deep(.assistant-markdown li + li) {
+  margin-top: 0.2rem;
+}
+
+:deep(.assistant-markdown pre) {
+  margin: 0.7rem 0;
+  overflow-x: auto;
+  border-radius: 0.2rem;
+  background: #f3eee6;
+  padding: 0.8rem 0.9rem;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
+:deep(.assistant-markdown code) {
+  border-radius: 0.2rem;
+  background: #f3eee6;
+  padding: 0.08rem 0.28rem;
+  font-size: 0.82em;
+}
+
+:deep(.assistant-markdown pre code) {
+  background: transparent;
+  padding: 0;
+}
+
+:deep(.assistant-markdown a) {
+  color: #8b5e34;
+  text-decoration: underline;
+}
+
+:deep(.assistant-markdown blockquote) {
+  margin: 0.7rem 0;
+  border-left: 2px solid #d8c7b2;
+  padding-left: 0.8rem;
+  color: #6b6257;
+}
+</style>

@@ -2,6 +2,7 @@ use crate::agent::config::ResolvedProviderSelection;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +137,52 @@ impl ProviderManager {
         }
     }
 
+    pub fn send_stream<F>(&self, request: &ProviderRequest, mut on_delta: F) -> ProviderResponse
+    where
+        F: FnMut(String),
+    {
+        if self
+            .config
+            .requested_name
+            .eq_ignore_ascii_case("mock")
+            || self.config.api_key.is_none()
+        {
+            let reason = if self.config.requested_name.eq_ignore_ascii_case("mock") {
+                "当前显式选择了 mock provider。".to_string()
+            } else {
+                format!(
+                    "未读取到 {}（provider={}）的值，已回退到本地 mock。",
+                    self.config.api_key_env_var,
+                    self.config.provider_name
+                )
+            };
+            let response = self.mock_response(request, Some(reason));
+            on_delta(response.output_text.clone());
+            return response;
+        }
+
+        let result = match self.config.protocol {
+            ProviderProtocol::OpenAi => self.send_openai_stream_request(request, &mut on_delta),
+            ProviderProtocol::Anthropic => self.send_anthropic_stream_request(request, &mut on_delta),
+        };
+
+        match result {
+            Ok(output_text) => ProviderResponse {
+                output_text,
+                provider_mode: "live".to_string(),
+                fallback_reason: None,
+            },
+            Err(error) => {
+                let response = self.mock_response(
+                    request,
+                    Some(format!("真实 provider 请求失败，已回退到本地 mock：{}", error)),
+                );
+                on_delta(response.output_text.clone());
+                response
+            }
+        }
+    }
+
     fn send_openai_request(&self, request: &ProviderRequest) -> Result<String, String> {
         let endpoint = format!(
             "{}/chat/completions",
@@ -162,6 +209,89 @@ impl ProviderManager {
 
         extract_chat_output_text(&payload)
             .ok_or_else(|| "chat completions 接口没有返回可读文本".to_string())
+    }
+
+    fn send_openai_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        on_delta: &mut F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(String),
+    {
+        let endpoint = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        let messages = request
+            .input
+            .iter()
+            .map(|message| {
+                json!({
+                    "role": to_chat_role(&message.role),
+                    "content": message.content
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = json!({
+            "model": request.model,
+            "messages": messages,
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": true
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(90))
+            .build()
+            .map_err(|error| format!("创建 HTTP client 失败：{}", error))?;
+
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(
+                self.config
+                    .api_key
+                    .as_deref()
+                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+            )
+            .json(&body)
+            .send()
+            .map_err(|error| format!("调用 provider 失败：{}", error))?
+            .error_for_status()
+            .map_err(|error| format!("provider 返回错误状态：{}", error))?;
+
+        let reader = BufReader::new(response);
+        let mut full_text = String::new();
+
+        for line in reader.lines() {
+            let line = line.map_err(|error| format!("读取 stream 数据失败：{}", error))?;
+            let trimmed = line.trim();
+
+            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
+                continue;
+            }
+
+            let data = trimmed.trim_start_matches("data: ").trim();
+            if data == "[DONE]" {
+                break;
+            }
+
+            let payload: Value =
+                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
+
+            if let Some(delta) = extract_chat_delta_text(&payload) {
+                if !delta.is_empty() {
+                    full_text.push_str(&delta);
+                    on_delta(delta);
+                }
+            }
+        }
+
+        if full_text.trim().is_empty() {
+            Err("stream 返回中没有读取到可见文本".to_string())
+        } else {
+            Ok(full_text)
+        }
     }
 
     fn send_anthropic_request(&self, request: &ProviderRequest) -> Result<String, String> {
@@ -205,6 +335,103 @@ impl ProviderManager {
 
         extract_anthropic_output_text(&payload)
             .ok_or_else(|| "anthropic messages 接口没有返回可读文本".to_string())
+    }
+
+    fn send_anthropic_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        on_delta: &mut F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(String),
+    {
+        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
+        let system = request
+            .input
+            .iter()
+            .filter(|message| {
+                matches!(message.role, ProviderRole::System | ProviderRole::Developer)
+            })
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let messages = request
+            .input
+            .iter()
+            .filter(|message| matches!(message.role, ProviderRole::User))
+            .map(|message| {
+                json!({
+                    "role": "user",
+                    "content": message.content
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let body = json!({
+            "model": request.model,
+            "system": system,
+            "messages": if messages.is_empty() {
+                vec![json!({
+                    "role": "user",
+                    "content": "请解释当前运行状态。"
+                })]
+            } else {
+                messages
+            },
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": true
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(90))
+            .build()
+            .map_err(|error| format!("创建 HTTP client 失败：{}", error))?;
+
+        let response = client
+            .post(&endpoint)
+            .header(
+                "x-api-key",
+                self.config
+                    .api_key
+                    .as_deref()
+                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+            )
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .map_err(|error| format!("调用 provider 失败：{}", error))?
+            .error_for_status()
+            .map_err(|error| format!("provider 返回错误状态：{}", error))?;
+
+        let reader = BufReader::new(response);
+        let mut full_text = String::new();
+
+        for line in reader.lines() {
+            let line = line.map_err(|error| format!("读取 stream 数据失败：{}", error))?;
+            let trimmed = line.trim();
+
+            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
+                continue;
+            }
+
+            let data = trimmed.trim_start_matches("data: ").trim();
+            let payload: Value =
+                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
+
+            if let Some(delta) = extract_anthropic_delta_text(&payload) {
+                if !delta.is_empty() {
+                    full_text.push_str(&delta);
+                    on_delta(delta);
+                }
+            }
+        }
+
+        if full_text.trim().is_empty() {
+            Err("anthropic stream 返回中没有读取到可见文本".to_string())
+        } else {
+            Ok(full_text)
+        }
     }
 
     fn post_openai_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
@@ -322,6 +549,40 @@ fn extract_chat_output_text(payload: &Value) -> Option<String> {
     }
 }
 
+fn extract_chat_delta_text(payload: &Value) -> Option<String> {
+    let delta = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))?;
+    let content = delta.get("content")?;
+
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| {
+                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                        return Some(text.to_string());
+                    }
+                    item.get("text")
+                        .and_then(|value| value.get("value"))
+                        .and_then(Value::as_str)
+                        .map(|text| text.to_string())
+                })
+                .collect::<Vec<_>>();
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(""))
+            }
+        }
+        _ => None,
+    }
+}
+
 fn extract_anthropic_output_text(payload: &Value) -> Option<String> {
     let parts = payload
         .get("content")?
@@ -336,4 +597,18 @@ fn extract_anthropic_output_text(payload: &Value) -> Option<String> {
     } else {
         Some(parts.join("\n"))
     }
+}
+
+fn extract_anthropic_delta_text(payload: &Value) -> Option<String> {
+    let delta = payload.get("delta")?;
+    let delta_type = delta.get("type").and_then(Value::as_str)?;
+
+    if delta_type != "text_delta" {
+        return None;
+    }
+
+    delta
+        .get("text")
+        .and_then(Value::as_str)
+        .map(|text| text.to_string())
 }

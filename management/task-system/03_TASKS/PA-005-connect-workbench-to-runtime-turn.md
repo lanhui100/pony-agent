@@ -25,22 +25,24 @@
 
 ## 当前进展
 
-- 前端已可通过 Tauri `run_turn` command 发起真实回合。
-- Rust 返回后，UI 已能同步更新 `phase`、`traceSteps`、`toolActivities`、`sessionSummary`、`providerName`、`providerProtocol`、`providerModel`、`providerMode`、`fallbackReason`。
-- 当前主链路已从“静态占位”推进到“真实 provider + mock fallback 的最小闭环”。
-- 剩余问题主要是状态解释层不足，而不是链路未接通。
+- 前端已从单次阻塞式 `run_turn` 等待，切到事件驱动的 turn 流。
+- Rust 已能发出 `turn:started / turn:delta / turn:trace / turn:tool / turn:completed / turn:failed` 事件。
+- OpenAI 兼容协议与 Anthropic 协议都已接入真实 stream 骨架。
+- UI 已能实时更新 assistant 文本、`phase`、`traceSteps`、`toolActivities`、`sessionSummary`、`providerName`、`providerProtocol`、`providerModel`、`providerMode`、`fallbackReason`。
+- 当前主链路已从“静态占位”推进到“真实 provider + mock fallback + 最小流式回包闭环”。
 
 ## 下一步动作
 
 继续补可见性与学习友好度：
 
 - 在主页更直观地区分真实 provider 与 mock fallback
-- 展示凭证来源 / fallback 原因 / 当前回合模式
-- 评估是否补充更直接的 runtime 状态字段，减少前端推断
+- 展示 `providerMode / fallbackReason / token 统计 / 首 token 延迟`
+- 验证两类 provider 的真实 stream 体验，收敛事件字段命名
+- 在不破坏当前事件模型的前提下，为后续 tool 调用事件预留更细粒度状态
 
 ## 当前卡点
 
-- 主链路已接通，但“能跑”和“能一眼看懂”之间还有一段体验差距
+- 主链路已接通，当前卡点已经从“是否能流式工作”转为“运行指标是否足够直观、是否便于产品化展示”
 
 ## 断点续跑提示
 
@@ -49,4 +51,5 @@
 - `src/stores/runtime.ts`
 - `src-tauri/src/agent/runtime.rs`
 - `src-tauri/src/agent/provider.rs`
+- `src/types/runtime.ts`
 - `docs/architecture/frontend-workbench.md`

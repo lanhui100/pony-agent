@@ -214,16 +214,20 @@ runtime input > env
 4. 已有 Provider 配置页、模型切换、模型编辑
 5. 已把 `API Key` 从长期普通配置里剥离
 6. 已支持通过 UI 把 `API Key` 写入用户环境变量
+7. 已把工作台主链路从单次阻塞返回推进到事件驱动的最小流式回包
+8. OpenAI 兼容协议与 Anthropic 协议都已接入真实 stream 骨架
+9. 已具备 `turn:started / turn:delta / turn:trace / turn:tool / turn:completed / turn:failed` 最小事件模型
 
 ## 下一步最自然的学习方向
 
-下一步不应该继续深挖密钥系统，而应该回到 agent core 主线。
+下一步不应该继续深挖密钥系统，而应该回到 agent core 主线和运行时指标层。
 
 最自然的后续方向是：
 
 1. 让主页更清楚地展示“当前这轮到底是走了真实模型，还是回退到 mock”
-2. 继续增强 `run_turn()` 的真实回合信息，比如 provider 来源、工具链路和状态展示
-3. 逐步推进真实工具协议和更清晰的 runtime 状态
+2. 补齐 `providerMode / fallbackReason / token 统计 / 首 token 延迟`
+3. 继续增强 `run_turn()` 的真实回合信息，比如工具链路和更细的状态展示
+4. 逐步推进真实工具协议和更清晰的 runtime 状态
 
 ## 一句总结
 

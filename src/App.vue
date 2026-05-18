@@ -18,7 +18,7 @@ const pageTitle = computed(() =>
 );
 
 onMounted(async () => {
-  await Promise.all([providerStore.loadRegistry(), runtimeStore.fetchHealth()]);
+  await Promise.all([providerStore.loadRegistry(), runtimeStore.fetchHealth(), runtimeStore.initializeTurnEvents()]);
 });
 </script>
 

@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { defineStore } from "pinia";
+import { isTauriAvailable, safeInvoke, safeListen } from "@/lib/tauri";
 import { useProviderStore } from "@/stores/providers";
 import type {
   ChatMessage,
@@ -8,7 +8,7 @@ import type {
   ToolActivity,
   TraceStep,
   TurnInput,
-  TurnResult
+  TurnStreamEvent
 } from "../types/runtime";
 
 type RuntimeState = {
@@ -27,6 +27,8 @@ type RuntimeState = {
   messages: ChatMessage[];
   toolActivities: ToolActivity[];
   traceSteps: TraceStep[];
+  activeTurnId: string | null;
+  eventsReady: boolean;
 };
 
 const defaultToolActivities: ToolActivity[] = [
@@ -44,6 +46,10 @@ const defaultToolActivities: ToolActivity[] = [
   }
 ];
 
+function createDefaultToolActivities(): ToolActivity[] {
+  return defaultToolActivities.map((tool) => ({ ...tool }));
+}
+
 const defaultTraceSteps: TraceStep[] = [
   { id: "step-1", label: "Plan", state: "completed" },
   { id: "step-2", label: "Reason", state: "active" },
@@ -51,6 +57,25 @@ const defaultTraceSteps: TraceStep[] = [
   { id: "step-4", label: "Observe", state: "pending" },
   { id: "step-5", label: "Done", state: "pending" }
 ];
+
+function createDefaultTraceSteps(): TraceStep[] {
+  return defaultTraceSteps.map((step) => ({ ...step }));
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function buildAssistantModelLabel(providerName?: string | null, modelName?: string | null) {
+  const provider = providerName?.trim();
+  const model = modelName?.trim();
+
+  if (provider && model) {
+    return `${provider}/${model}`;
+  }
+
+  return model || provider || null;
+}
 
 export const useRuntimeStore = defineStore("runtime", {
   state: (): RuntimeState => ({
@@ -66,20 +91,24 @@ export const useRuntimeStore = defineStore("runtime", {
     providerMode: "",
     fallbackReason: null,
     isSubmitting: false,
+    activeTurnId: null,
+    eventsReady: false,
     messages: [
       {
         id: "msg-user-seed",
         role: "user",
-        content: "帮我搭一个适合调试 Rust agent runtime 的工作台。"
+        content: "帮我搭一个适合调试 Rust agent runtime 的工作台。",
+        status: "done"
       },
       {
         id: "msg-agent-seed",
         role: "assistant",
-        content: "当前界面已经接上 Vue + Pinia，接下来开始把真实模型调用和诊断信息接进 run_turn()。"
+        content: "当前界面已经接上 Vue + Pinia，下一步开始把真实模型调用和诊断信息接进来。",
+        status: "done"
       }
     ],
-    toolActivities: defaultToolActivities,
-    traceSteps: defaultTraceSteps
+    toolActivities: createDefaultToolActivities(),
+    traceSteps: createDefaultTraceSteps()
   }),
   getters: {
     phaseLabel(state): string {
@@ -108,7 +137,14 @@ export const useRuntimeStore = defineStore("runtime", {
       this.error = null;
 
       try {
-        const payload = await invoke<HealthPayload>("health_check");
+        const payload: HealthPayload = isTauriAvailable()
+          ? await safeInvoke<HealthPayload>("health_check")
+          : {
+              appName: "Pony Agent",
+              appVersion: "dev-preview",
+              runtime: "browser-preview",
+              graphEngine: "mock-stream"
+            };
         this.health = payload;
         this.phase = "ready";
         this.traceSteps = this.traceSteps.map((step) =>
@@ -123,51 +159,288 @@ export const useRuntimeStore = defineStore("runtime", {
         this.phase = "failed";
       }
     },
-    async submitTurn() {
+    async initializeTurnEvents() {
+      if (this.eventsReady) {
+        return;
+      }
+
+      if (!isTauriAvailable()) {
+        this.eventsReady = true;
+        return;
+      }
+
+      const startedUnlisten = await safeListen<TurnStreamEvent>("turn:started", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+
+        this.phase = "calling_model";
+        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+        this.providerName = payload.providerName ?? this.providerName;
+        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+        this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerMode = payload.providerMode ?? this.providerMode;
+        this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        this.traceSteps = payload.traceSteps ?? this.traceSteps;
+        this.toolActivities = payload.toolActivities ?? this.toolActivities;
+      });
+
+      const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+
+        const assistantMessage = this.messages.find(
+          (item) => item.id === `assistant-${payload.turnId}` && item.role === "assistant"
+        );
+
+        if (!assistantMessage) {
+          return;
+        }
+
+        const delta = payload.text ?? "";
+        if (assistantMessage.status === "pending" && assistantMessage.content === "正在思考...") {
+          assistantMessage.content = delta;
+        } else {
+          assistantMessage.content += delta;
+        }
+      });
+
+      const traceUnlisten = await safeListen<TurnStreamEvent>("turn:trace", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+
+        this.traceSteps = payload.traceSteps ?? this.traceSteps;
+      });
+
+      const toolUnlisten = await safeListen<TurnStreamEvent>("turn:tool", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+
+        this.toolActivities = payload.toolActivities ?? this.toolActivities;
+      });
+
+      const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+
+        const assistantMessage = this.messages.find(
+          (item) => item.id === `assistant-${payload.turnId}` && item.role === "assistant"
+        );
+
+        if (assistantMessage) {
+          assistantMessage.content = payload.text ?? assistantMessage.content;
+          assistantMessage.status = "done";
+          assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
+        }
+
+        this.phase = "ready";
+        this.traceSteps = payload.traceSteps ?? this.traceSteps;
+        this.toolActivities = payload.toolActivities ?? this.toolActivities;
+        this.sessionSummary = payload.sessionSummary ?? this.sessionSummary;
+        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+        this.providerName = payload.providerName ?? this.providerName;
+        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+        this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerMode = payload.providerMode ?? this.providerMode;
+        this.fallbackReason = payload.fallbackReason ?? null;
+        this.isSubmitting = false;
+        this.activeTurnId = null;
+      });
+
+      const failedUnlisten = await safeListen<TurnStreamEvent>("turn:failed", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+
+        const assistantMessage = this.messages.find(
+          (item) => item.id === `assistant-${payload.turnId}` && item.role === "assistant"
+        );
+
+        if (assistantMessage) {
+          assistantMessage.content = payload.text ?? "本轮执行失败，请查看右侧状态信息。";
+          assistantMessage.status = "error";
+          assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
+        }
+
+        this.phase = "failed";
+        this.error = payload.error ?? "本轮执行失败。";
+        this.traceSteps = payload.traceSteps ?? this.traceSteps;
+        this.toolActivities = payload.toolActivities ?? this.toolActivities;
+        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+        this.providerName = payload.providerName ?? this.providerName;
+        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+        this.providerModel = payload.providerModel ?? this.providerModel;
+        this.isSubmitting = false;
+        this.activeTurnId = null;
+      });
+
+      void startedUnlisten;
+      void deltaUnlisten;
+      void traceUnlisten;
+      void toolUnlisten;
+      void completedUnlisten;
+      void failedUnlisten;
+      this.eventsReady = true;
+    },
+    async runBrowserPreviewTurn(requestId: string) {
       const providerStore = useProviderStore();
+      const provider = providerStore.currentProvider;
+      const model = providerStore.currentModel;
+      const assistantMessage = this.messages.find(
+        (item) => item.id === `assistant-${requestId}` && item.role === "assistant"
+      );
+
+      this.providerRequestedName = provider?.name ?? "browser-preview";
+      this.providerName = provider?.name ?? "browser-preview";
+      this.providerProtocol = provider?.protocol ?? "openai";
+      this.providerModel = model?.model ?? model?.name ?? "mock-stream";
+      this.providerMode = "browser_preview";
+      this.fallbackReason = "当前通过 npm run dev 打开的是浏览器预览，不是 Tauri 窗口，因此不会连接 Rust 后端。";
+
+      await wait(120);
+      if (assistantMessage) {
+        assistantMessage.content = "";
+      }
+
+      const chunks = [
+        "当前看到的不是前端资源没加载，而是 dev 页面运行在普通浏览器里。",
+        "这时 @tauri-apps/api 没有注入原生桥接能力，所以直接调用 invoke/listen 会失败。\n\n",
+        "现在已经切到浏览器预览兜底模式：\n",
+        "- 可以继续预览 UI 和输入交互\n",
+        "- 不会连到 Rust agent core\n",
+        "- 真正联调用 tauri dev\n\n",
+        "如果你愿意，我下一步可以继续帮你把 tauri dev 的实际启动链路也一起验通。"
+      ];
+
+      for (const chunk of chunks) {
+        await wait(80);
+        if (assistantMessage) {
+          assistantMessage.content += chunk;
+        }
+      }
+
+      if (assistantMessage) {
+        assistantMessage.status = "done";
+        assistantMessage.modelName = buildAssistantModelLabel(
+          provider?.name ?? "browser-preview",
+          model?.model ?? model?.name ?? "mock-stream"
+        );
+      }
+
+      this.phase = "ready";
+      this.sessionSummary = "浏览器预览模式已启用，当前轮次未连接 Rust 后端。";
+      this.traceSteps = [
+        { id: "step-plan", label: "接收输入", state: "completed" },
+        { id: "step-context", label: "识别运行环境", state: "completed" },
+        { id: "step-call-model", label: "浏览器预览回放", state: "completed" },
+        { id: "step-return", label: "返回结果", state: "completed" }
+      ];
+      this.toolActivities = [
+        {
+          id: "tool-browser-preview",
+          name: "browser.preview",
+          status: "done",
+          summary: "当前轮次使用浏览器预览回放，没有触发 Rust 后端和真实 provider 调用。"
+        }
+      ];
+      this.isSubmitting = false;
+      this.activeTurnId = null;
+    },
+    async submitTurn() {
+      await this.initializeTurnEvents();
+      const providerStore = useProviderStore();
+      const message = this.draftMessage.trim();
       const payload: TurnInput = {
-        message: this.draftMessage.trim(),
+        message,
         providerId: providerStore.currentProvider?.id ?? null,
         modelId: providerStore.currentModel?.id ?? null
       };
+
       if (!payload.message) {
         return;
       }
 
+      const requestId = String(Date.now());
+      const userMessageId = `user-${requestId}`;
+      const assistantMessageId = `assistant-${requestId}`;
+
+      this.messages.push({
+        id: userMessageId,
+        role: "user",
+        content: message,
+        status: "done"
+      });
+      this.messages.push({
+        id: assistantMessageId,
+        role: "assistant",
+        content: "正在思考...",
+        status: "pending",
+        modelName: buildAssistantModelLabel(
+          providerStore.currentProvider?.name ?? null,
+          providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null
+        )
+      });
+
       this.isSubmitting = true;
       this.error = null;
       this.phase = "calling_model";
+      this.activeTurnId = requestId;
+      this.draftMessage = "";
+      this.traceSteps = [
+        { id: "step-plan", label: "接收输入", state: "completed" },
+        { id: "step-context", label: "组织上下文", state: "completed" },
+        { id: "step-call-model", label: "调用模型", state: "active" },
+        { id: "step-return", label: "返回结果", state: "pending" }
+      ];
+      this.toolActivities = [
+        {
+          id: "tool-terminal",
+          name: "terminal.exec",
+          status: "planned",
+          summary: "当前回合尚未触发本地工具调用。"
+        },
+        {
+          id: "tool-mcp",
+          name: "mcp.call",
+          status: "planned",
+          summary: "当前回合正在等待模型响应，后续会在这里承接真实工具链事件。"
+        }
+      ];
 
       try {
-        const result = await invoke<TurnResult>("run_turn", { input: payload });
+        if (!isTauriAvailable()) {
+          await this.runBrowserPreviewTurn(requestId);
+          return;
+        }
 
-        this.messages.push({
-          id: `user-${Date.now()}`,
-          role: "user",
-          content: result.userMessage
-        });
-        this.messages.push({
-          id: `assistant-${Date.now() + 1}`,
-          role: "assistant",
-          content: result.assistantMessage
-        });
-
-        this.phase = result.phase;
-        this.traceSteps = result.traceSteps;
-        this.toolActivities = result.toolActivities;
-        this.sessionSummary = result.sessionSummary;
-        this.providerRequestedName = result.providerRequestedName;
-        this.providerName = result.providerName;
-        this.providerProtocol = result.providerProtocol;
-        this.providerModel = result.providerModel;
-        this.providerMode = result.providerMode;
-        this.fallbackReason = result.fallbackReason ?? null;
-        this.draftMessage = "";
+        await safeInvoke("start_turn_stream", { turnId: requestId, input: payload });
       } catch (error) {
+        const assistantMessage = this.messages.find((item) => item.id === assistantMessageId);
+        if (assistantMessage) {
+          assistantMessage.content = "本轮执行失败，请查看右侧状态信息。";
+          assistantMessage.status = "error";
+          assistantMessage.modelName = buildAssistantModelLabel(
+            providerStore.currentProvider?.name ?? null,
+            providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null
+          );
+        }
         this.error = `本轮执行失败：${String(error)}`;
         this.phase = "failed";
+        this.activeTurnId = null;
+        this.traceSteps = [
+          { id: "step-plan", label: "接收输入", state: "completed" },
+          { id: "step-context", label: "组织上下文", state: "completed" },
+          { id: "step-call-model", label: "调用模型", state: "completed" },
+          { id: "step-return", label: "返回结果", state: "completed" }
+        ];
       } finally {
-        this.isSubmitting = false;
+        if (this.phase === "failed") {
+          this.isSubmitting = false;
+        }
       }
     }
   }

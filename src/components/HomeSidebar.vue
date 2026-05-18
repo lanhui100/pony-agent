@@ -14,25 +14,21 @@ const {
   fallbackReason,
   health,
   phaseLabel,
-  providerMode,
-  providerModel,
-  providerName,
-  providerProtocol,
   providerRequestedName,
   sessionSummary,
   toolActivities,
   traceSteps
 } = storeToRefs(runtimeStore);
 
-const { currentProvider, currentModel } = storeToRefs(providerStore);
+const { currentProvider } = storeToRefs(providerStore);
 </script>
 
 <template>
   <aside class="flex min-h-[calc(100vh-12rem)] min-w-0 flex-col gap-3 overflow-x-hidden">
     <CollapsiblePanel
       title="运行状态"
-      description="当前回合到底有没有命中真实模型、为什么回退，都放在这里。"
-      tip="学习阶段最关键的不是只看最后答案，而是确认这一轮的 provider、协议、模型和 fallback 状态。"
+      description="当前回合有没有命中真实模型、为什么回退，都放在这里。"
+      tip="学习阶段最关键的不是只看最后答案，而是确认这一轮的运行状态与 fallback 原因。"
       tone="sage"
     >
       <template #icon>
@@ -49,10 +45,6 @@ const { currentProvider, currentModel } = storeToRefs(providerStore);
 
         <div class="grid gap-2 px-1 py-1 text-[13px]">
           <div><span class="font-medium text-stone-900">目标 provider：</span>{{ providerRequestedName || currentProvider?.name || "尚未选择" }}</div>
-          <div><span class="font-medium text-stone-900">当前 provider：</span>{{ providerName || currentProvider?.name || "尚未执行" }}</div>
-          <div><span class="font-medium text-stone-900">协议：</span>{{ providerProtocol || currentProvider?.protocol || "尚未执行" }}</div>
-          <div><span class="font-medium text-stone-900">模型：</span>{{ providerModel || currentModel?.name || "尚未执行" }}</div>
-          <div><span class="font-medium text-stone-900">模式：</span>{{ providerMode || "尚未执行" }}</div>
         </div>
 
         <div v-if="fallbackReason" class="rounded-[0.45rem] bg-amber-100/70 px-3 py-3 text-[13px] text-amber-950">
@@ -75,7 +67,7 @@ const { currentProvider, currentModel } = storeToRefs(providerStore);
 
     <CollapsiblePanel
       title="Trace"
-      description="这里展示这轮返回给前端的结构化执行轨迹。"
+      description="这里展示这一轮返回给前端的结构化执行轨迹。"
       tip="后续真正接工具链后，这里应继续承接 plan / model / tool / observe 的过程信号，而不是只做静态说明。"
       tone="sky"
     >
@@ -123,7 +115,7 @@ const { currentProvider, currentModel } = storeToRefs(providerStore);
       <div class="grid gap-2 text-sm leading-6 text-stone-600">
         <div class="rounded-[0.45rem] bg-white px-3 py-3">
           <div class="font-medium text-stone-900">先看状态</div>
-          <p class="mt-1 text-[13px]">确认这轮是否真的命中了 live provider，还是因为凭证缺失或请求失败回退到 mock。</p>
+          <p class="mt-1 text-[13px]">确认这轮是否真的命中了 live provider，还是因为凭证缺失或请求失败回退到了 mock。</p>
         </div>
         <div class="rounded-[0.45rem] bg-white px-3 py-3">
           <div class="font-medium text-stone-900">再看 trace</div>

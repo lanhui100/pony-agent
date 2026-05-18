@@ -3,6 +3,7 @@ mod agent;
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
 use agent::runtime::{AgentRuntime, TurnInput, TurnResult};
 use serde::Serialize;
+use tauri::AppHandle;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +33,15 @@ fn run_turn(input: TurnInput) -> TurnResult {
 }
 
 #[tauri::command]
+fn start_turn_stream(app: AppHandle, turn_id: String, input: TurnInput) -> Result<(), String> {
+    let runtime = AgentRuntime::new();
+    std::thread::spawn(move || {
+        runtime.start_turn_stream(app, turn_id, input);
+    });
+    Ok(())
+}
+
+#[tauri::command]
 fn load_provider_registry() -> ProviderRegistryView {
     ProviderRegistryStore::new().load_view()
 }
@@ -47,6 +57,7 @@ pub fn run() {
             health_check,
             load_provider_registry,
             run_turn,
+            start_turn_stream,
             save_provider_registry
         ])
         .run(tauri::generate_context!())
