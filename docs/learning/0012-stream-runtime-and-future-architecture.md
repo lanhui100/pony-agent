@@ -176,7 +176,7 @@ Claude Code 更像状态机化、生成器驱动的完整 agent loop。
 1. 会话历史还没有真正持久化到数据库
 2. 当前仍主要是前端内存态和运行时对象态
 3. 还没有独立的 HTTP API / SSE 服务层
-4. 还没有真实工具执行闭环
+4. 还没有多工具、并发工具和更完整错误恢复
 5. 还没有 Claude 那种更完整的 query loop 继续回合机制
 
 ## 那数据库、SQLite、Postgres、Redis 怎么看
@@ -200,18 +200,20 @@ Rust 很强，不等于“天生不需要存储层”；
 1. 当前 Pony Agent 已经有真实 stream 主链，而不是只有同步整包返回
 2. 当前工作台和 Rust core 的通信机制是 Tauri command/event，不是 HTTP API
 3. `run_turn()` 是核心入口，`start_turn_stream()` 是当前流式工作链
-4. Hermes 与 Claude Code 对 Pony 的启发不是互斥，而是分层借鉴
-5. 当前任务系统已经把“独立 core、抽象层、后续 query loop 演进”放进主路径里了
+4. 当前最小工具闭环已经成立，并且 live provider 已切到 OpenAI / Anthropic 原生 tools 协议主路径
+5. Hermes 与 Claude Code 对 Pony 的启发不是互斥，而是分层借鉴
+6. 当前任务系统已经把“独立 core、抽象层、后续 query loop 演进”放进主路径里了
 
 ## 下一步最自然的学习方向
 
 如果继续沿这条线学习，最自然的顺序是：
 
 1. 把 `runtime.rs`、`provider.rs`、前端 runtime store 三者之间的数据流再梳理一遍
-2. 把当前事件契约收紧，补齐 `token 统计 / 首 token 延迟`
-3. 设计 `SessionStore` 边界，区分“内存态会话”和“持久化会话”
-4. 设计“同一 Rust core 同时服务 Tauri 与 HTTP/SSE”的交付接口
-5. 再继续把 `run_turn()` 往更完整的 query loop 推进
+2. 继续补工具层边界，包括更多工作区工具、工具错误态和多工具策略
+3. 把当前事件契约收紧，补齐 `token 统计 / 首 token 延迟`
+4. 设计 `SessionStore` 边界，区分“内存态会话”和“持久化会话”
+5. 设计“同一 Rust core 同时服务 Tauri 与 HTTP/SSE”的交付接口
+6. 再继续把 `run_turn()` 往更完整的 query loop 推进
 
 ## 一句总结
 

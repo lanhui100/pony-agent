@@ -11,7 +11,8 @@ const badgeVariants = cva(
         default: "bg-stone-900 text-amber-50",
         secondary: "bg-white/72 text-stone-700",
         success: "bg-amber-100/75 text-amber-900",
-        warning: "bg-amber-200/65 text-amber-950"
+        warning: "bg-amber-200/65 text-amber-950",
+        danger: "bg-rose-100 text-rose-900"
       }
     },
     defaultVariants: {

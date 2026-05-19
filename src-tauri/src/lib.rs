@@ -35,9 +35,7 @@ fn run_turn(input: TurnInput) -> TurnResult {
 #[tauri::command]
 fn start_turn_stream(app: AppHandle, turn_id: String, input: TurnInput) -> Result<(), String> {
     let runtime = AgentRuntime::new();
-    std::thread::spawn(move || {
-        runtime.start_turn_stream(app, turn_id, input);
-    });
+    runtime.start_turn_stream(app, turn_id, input);
     Ok(())
 }
 

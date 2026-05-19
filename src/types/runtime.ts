@@ -16,14 +16,14 @@ export type RuntimePhase =
 export type ToolActivity = {
   id: string;
   name: string;
-  status: "planned" | "running" | "done";
+  status: "planned" | "running" | "done" | "error";
   summary: string;
 };
 
 export type TraceStep = {
   id: string;
   label: string;
-  state: "completed" | "active" | "pending";
+  state: "completed" | "active" | "pending" | "error";
 };
 
 export type ChatMessage = {
@@ -38,6 +38,12 @@ export type TurnInput = {
   message: string;
   providerId?: string | null;
   modelId?: string | null;
+  history?: TurnHistoryMessage[];
+};
+
+export type TurnHistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
 };
 
 export type TurnResult = {
@@ -48,6 +54,10 @@ export type TurnResult = {
   providerModel: string;
   providerMode: string;
   fallbackReason?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  firstTokenLatencyMs?: number | null;
   userMessage: string;
   assistantMessage: string;
   traceSteps: TraceStep[];
@@ -67,6 +77,10 @@ export type TurnStreamEvent = {
   providerModel?: string | null;
   providerMode?: string | null;
   fallbackReason?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  firstTokenLatencyMs?: number | null;
   traceSteps?: TraceStep[] | null;
   toolActivities?: ToolActivity[] | null;
   sessionSummary?: string | null;

@@ -6,6 +6,7 @@ import type {
   HealthPayload,
   RuntimePhase,
   ToolActivity,
+  TurnHistoryMessage,
   TraceStep,
   TurnInput,
   TurnStreamEvent
@@ -23,6 +24,10 @@ type RuntimeState = {
   providerModel: string;
   providerMode: string;
   fallbackReason: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  firstTokenLatencyMs: number | null;
   isSubmitting: boolean;
   messages: ChatMessage[];
   toolActivities: ToolActivity[];
@@ -33,16 +38,34 @@ type RuntimeState = {
 
 const defaultToolActivities: ToolActivity[] = [
   {
-    id: "tool-1",
-    name: "terminal.exec",
+    id: "tool-time-now",
+    name: "time.now",
     status: "planned",
-    summary: "预留给后续真实工具调用接入。"
+    summary: "返回当前本机 UNIX 时间戳。"
   },
   {
-    id: "tool-2",
-    name: "mcp.call",
+    id: "tool-echo-input",
+    name: "echo.input",
     status: "planned",
-    summary: "后续统一承接外部 MCP 工具能力。"
+    summary: "把传入 text 原样返回，用于验证 tool roundtrip。"
+  },
+  {
+    id: "tool-workspace-read-file",
+    name: "workspace.read_file",
+    status: "planned",
+    summary: "读取当前工作区内的文本文件预览。"
+  },
+  {
+    id: "tool-workspace-read-file-segment",
+    name: "workspace.read_file_segment",
+    status: "planned",
+    summary: "按行读取文件的一段内容，更适合大文件局部查看。"
+  },
+  {
+    id: "tool-workspace-list-files",
+    name: "workspace.list_files",
+    status: "planned",
+    summary: "列出当前工作区目录下的文件和子目录。"
   }
 ];
 
@@ -51,11 +74,11 @@ function createDefaultToolActivities(): ToolActivity[] {
 }
 
 const defaultTraceSteps: TraceStep[] = [
-  { id: "step-1", label: "Plan", state: "completed" },
-  { id: "step-2", label: "Reason", state: "active" },
-  { id: "step-3", label: "CallTool", state: "pending" },
-  { id: "step-4", label: "Observe", state: "pending" },
-  { id: "step-5", label: "Done", state: "pending" }
+  { id: "step-plan", label: "接收输入", state: "completed" },
+  { id: "step-context", label: "组织上下文", state: "active" },
+  { id: "step-call-model", label: "调用模型", state: "pending" },
+  { id: "step-call-tool", label: "调用工具", state: "pending" },
+  { id: "step-return", label: "返回结果", state: "pending" }
 ];
 
 function createDefaultTraceSteps(): TraceStep[] {
@@ -77,12 +100,22 @@ function buildAssistantModelLabel(providerName?: string | null, modelName?: stri
   return model || provider || null;
 }
 
+function buildTurnHistory(messages: ChatMessage[]): TurnHistoryMessage[] {
+  return messages
+    .filter((message) => message.status !== "pending" && message.content.trim().length > 0)
+    .slice(-8)
+    .map((message) => ({
+      role: message.role,
+      content: message.content
+    }));
+}
+
 export const useRuntimeStore = defineStore("runtime", {
   state: (): RuntimeState => ({
     phase: "idle",
     health: null,
     error: null,
-    draftMessage: "帮我解释一下这一轮 run_turn() 做了什么。",
+    draftMessage: "",
     sessionSummary: "",
     providerRequestedName: "",
     providerName: "",
@@ -90,23 +123,14 @@ export const useRuntimeStore = defineStore("runtime", {
     providerModel: "",
     providerMode: "",
     fallbackReason: null,
+    inputTokens: null,
+    outputTokens: null,
+    totalTokens: null,
+    firstTokenLatencyMs: null,
     isSubmitting: false,
     activeTurnId: null,
     eventsReady: false,
-    messages: [
-      {
-        id: "msg-user-seed",
-        role: "user",
-        content: "帮我搭一个适合调试 Rust agent runtime 的工作台。",
-        status: "done"
-      },
-      {
-        id: "msg-agent-seed",
-        role: "assistant",
-        content: "当前界面已经接上 Vue + Pinia，下一步开始把真实模型调用和诊断信息接进来。",
-        status: "done"
-      }
-    ],
+    messages: [],
     toolActivities: createDefaultToolActivities(),
     traceSteps: createDefaultTraceSteps()
   }),
@@ -148,9 +172,9 @@ export const useRuntimeStore = defineStore("runtime", {
         this.health = payload;
         this.phase = "ready";
         this.traceSteps = this.traceSteps.map((step) =>
-          step.id === "step-2"
+          step.id === "step-context"
             ? { ...step, state: "completed" }
-            : step.id === "step-5"
+            : step.id === "step-return"
               ? { ...step, state: "active" }
               : step
         );
@@ -181,6 +205,10 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerModel = payload.providerModel ?? this.providerModel;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        this.inputTokens = payload.inputTokens ?? this.inputTokens;
+        this.outputTokens = payload.outputTokens ?? this.outputTokens;
+        this.totalTokens = payload.totalTokens ?? this.totalTokens;
+        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
       });
@@ -204,6 +232,8 @@ export const useRuntimeStore = defineStore("runtime", {
         } else {
           assistantMessage.content += delta;
         }
+
+        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
       });
 
       const traceUnlisten = await safeListen<TurnStreamEvent>("turn:trace", ({ payload }) => {
@@ -247,6 +277,10 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerModel = payload.providerModel ?? this.providerModel;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? null;
+        this.inputTokens = payload.inputTokens ?? this.inputTokens;
+        this.outputTokens = payload.outputTokens ?? this.outputTokens;
+        this.totalTokens = payload.totalTokens ?? this.totalTokens;
+        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         this.isSubmitting = false;
         this.activeTurnId = null;
       });
@@ -274,6 +308,12 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerName = payload.providerName ?? this.providerName;
         this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
         this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerMode = payload.providerMode ?? this.providerMode;
+        this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        this.inputTokens = payload.inputTokens ?? this.inputTokens;
+        this.outputTokens = payload.outputTokens ?? this.outputTokens;
+        this.totalTokens = payload.totalTokens ?? this.totalTokens;
+        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         this.isSubmitting = false;
         this.activeTurnId = null;
       });
@@ -299,6 +339,10 @@ export const useRuntimeStore = defineStore("runtime", {
       this.providerProtocol = provider?.protocol ?? "openai";
       this.providerModel = model?.model ?? model?.name ?? "mock-stream";
       this.providerMode = "browser_preview";
+      this.inputTokens = null;
+      this.outputTokens = null;
+      this.totalTokens = null;
+      this.firstTokenLatencyMs = null;
       this.fallbackReason = "当前通过 npm run dev 打开的是浏览器预览，不是 Tauri 窗口，因此不会连接 Rust 后端。";
 
       await wait(120);
@@ -337,6 +381,7 @@ export const useRuntimeStore = defineStore("runtime", {
         { id: "step-plan", label: "接收输入", state: "completed" },
         { id: "step-context", label: "识别运行环境", state: "completed" },
         { id: "step-call-model", label: "浏览器预览回放", state: "completed" },
+        { id: "step-call-tool", label: "调用工具", state: "completed" },
         { id: "step-return", label: "返回结果", state: "completed" }
       ];
       this.toolActivities = [
@@ -357,7 +402,8 @@ export const useRuntimeStore = defineStore("runtime", {
       const payload: TurnInput = {
         message,
         providerId: providerStore.currentProvider?.id ?? null,
-        modelId: providerStore.currentModel?.id ?? null
+        modelId: providerStore.currentModel?.id ?? null,
+        history: buildTurnHistory(this.messages)
       };
 
       if (!payload.message) {
@@ -390,24 +436,47 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "calling_model";
       this.activeTurnId = requestId;
       this.draftMessage = "";
+      this.inputTokens = null;
+      this.outputTokens = null;
+      this.totalTokens = null;
+      this.firstTokenLatencyMs = null;
       this.traceSteps = [
         { id: "step-plan", label: "接收输入", state: "completed" },
         { id: "step-context", label: "组织上下文", state: "completed" },
         { id: "step-call-model", label: "调用模型", state: "active" },
+        { id: "step-call-tool", label: "调用工具", state: "pending" },
         { id: "step-return", label: "返回结果", state: "pending" }
       ];
       this.toolActivities = [
         {
-          id: "tool-terminal",
-          name: "terminal.exec",
+          id: "tool-time-now",
+          name: "time.now",
           status: "planned",
-          summary: "当前回合尚未触发本地工具调用。"
+          summary: "当前回合尚未触发时间工具。"
         },
         {
-          id: "tool-mcp",
-          name: "mcp.call",
+          id: "tool-echo-input",
+          name: "echo.input",
           status: "planned",
-          summary: "当前回合正在等待模型响应，后续会在这里承接真实工具链事件。"
+          summary: "当前回合正在等待模型规划阶段。"
+        },
+        {
+          id: "tool-workspace-read-file",
+          name: "workspace.read_file",
+          status: "planned",
+          summary: "当前回合尚未触发文件读取工具。"
+        },
+        {
+          id: "tool-workspace-read-file-segment",
+          name: "workspace.read_file_segment",
+          status: "planned",
+          summary: "当前回合尚未触发文件分段读取工具。"
+        },
+        {
+          id: "tool-workspace-list-files",
+          name: "workspace.list_files",
+          status: "planned",
+          summary: "当前回合尚未触发目录列举工具。"
         }
       ];
 
@@ -435,6 +504,7 @@ export const useRuntimeStore = defineStore("runtime", {
           { id: "step-plan", label: "接收输入", state: "completed" },
           { id: "step-context", label: "组织上下文", state: "completed" },
           { id: "step-call-model", label: "调用模型", state: "completed" },
+          { id: "step-call-tool", label: "调用工具", state: "completed" },
           { id: "step-return", label: "返回结果", state: "completed" }
         ];
       } finally {

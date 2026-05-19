@@ -33,6 +33,8 @@
 - [0010 compaction、cache 与上下文治理为什么不能粗暴处理](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0010-compaction-and-cache.md)
 - [0011 Provider 配置、env 策略与模型编辑](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0011-provider-config-and-env.md)
 - [0012 当前 stream runtime、Hermes/Claude 对照与下一步架构路径](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0012-stream-runtime-and-future-architecture.md)
+- [0013 为什么要从最小 tool 闭环切到 OpenAI/Anthropic 原生 tools 协议](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0013-native-tools-protocols.md)
+- [0014 本地 planner、跨轮历史与工作区工具为什么要前置](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0014-local-planner-and-history-carry.md)
 
 ## 记录模板
 

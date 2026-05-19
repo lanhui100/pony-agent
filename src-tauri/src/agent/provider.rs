@@ -1,8 +1,11 @@
 use crate::agent::config::ResolvedProviderSelection;
+use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::error::Error;
 use std::io::{BufRead, BufReader};
+use std::time::Instant;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +65,24 @@ pub struct ProviderResponse {
     pub output_text: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
+    pub token_usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderDecision {
+    pub output_text: String,
+    pub tool_call: Option<ToolCall>,
+    pub provider_mode: String,
+    pub fallback_reason: Option<String>,
+    pub token_usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 pub struct ProviderManager {
@@ -100,7 +121,20 @@ impl ProviderManager {
         self.config.max_output_tokens
     }
 
-    pub fn send(&self, request: &ProviderRequest) -> ProviderResponse {
+    pub fn decide_with_tools(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+    ) -> ProviderDecision {
+        provider_log(format!(
+            "decision:start requested={} provider={} protocol={} model={} tools={} api_key_present={}",
+            self.config.requested_name,
+            self.config.provider_name,
+            self.protocol_label(),
+            request.model,
+            tools.len(),
+            self.config.api_key.is_some()
+        ));
         if self
             .config
             .requested_name
@@ -116,66 +150,150 @@ impl ProviderManager {
                     self.config.provider_name
                 )
             };
-            return self.mock_response(request, Some(reason));
+            let response = self.mock_response(request, Some(reason.clone()));
+            provider_log(format!("decision:fallback-to-mock reason={}", reason));
+            return ProviderDecision {
+                output_text: response.output_text,
+                tool_call: None,
+                provider_mode: response.provider_mode,
+                fallback_reason: Some(reason),
+                token_usage: response.token_usage,
+            };
         }
 
         let result = match self.config.protocol {
-            ProviderProtocol::OpenAi => self.send_openai_request(request),
-            ProviderProtocol::Anthropic => self.send_anthropic_request(request),
+            ProviderProtocol::OpenAi => self.send_openai_tool_decision_request(request, tools),
+            ProviderProtocol::Anthropic => self.send_anthropic_tool_decision_request(request, tools),
         };
 
         match result {
-            Ok(output_text) => ProviderResponse {
-                output_text,
-                provider_mode: "live".to_string(),
-                fallback_reason: None,
-            },
-            Err(error) => self.mock_response(
+            Ok(decision) => {
+                provider_log(format!(
+                    "decision:success mode={} tool_call={} output_preview={}",
+                    decision.provider_mode,
+                    decision.tool_call.as_ref().map(|call| call.name.as_str()).unwrap_or("none"),
+                    preview_text(&decision.output_text, 120)
+                ));
+                decision
+            }
+            Err(error) => {
+                provider_log(format!("decision:error {}", error));
+                let response = self.mock_response(
+                    request,
+                    Some(format!("真实 provider 请求失败，已回退到本地 mock：{}", error)),
+                );
+                ProviderDecision {
+                    output_text: response.output_text,
+                    tool_call: None,
+                    provider_mode: response.provider_mode,
+                    fallback_reason: response.fallback_reason,
+                    token_usage: response.token_usage,
+                }
+            }
+        }
+    }
+
+    pub fn continue_with_tool_result(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> ProviderResponse {
+        provider_log(format!(
+            "followup:start mode=sync requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={}",
+            self.config.requested_name,
+            self.config.provider_name,
+            self.protocol_label(),
+            request.model,
+            tool_call.name,
+            tool_result.status,
+            preview_text(&tool_result.output, 160)
+        ));
+        if self.config.api_key.is_none() || self.config.requested_name.eq_ignore_ascii_case("mock") {
+            provider_log("followup:fallback-to-mock reason=mock-selected-or-missing-api-key".to_string());
+            return self.mock_tool_followup_response(request, tool_call, tool_result);
+        }
+
+        let result = match self.config.protocol {
+            ProviderProtocol::OpenAi => {
+                self.send_openai_tool_followup_request(request, tools, tool_call, tool_result)
+            }
+            ProviderProtocol::Anthropic => {
+                self.send_anthropic_tool_followup_request(request, tools, tool_call, tool_result)
+            }
+        };
+
+        match result {
+            Ok(response) => response,
+            Err(error) => self.mock_tool_followup_response(
                 request,
-                Some(format!("真实 provider 请求失败，已回退到本地 mock：{}", error)),
+                tool_call,
+                &ToolResult {
+                    tool_name: tool_result.tool_name.clone(),
+                    status: "error".to_string(),
+                    output: format!("真实 provider tool follow-up 失败：{}", error),
+                },
             ),
         }
     }
 
-    pub fn send_stream<F>(&self, request: &ProviderRequest, mut on_delta: F) -> ProviderResponse
+    pub fn continue_with_tool_result_stream<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        mut on_delta: F,
+    ) -> ProviderResponse
     where
         F: FnMut(String),
     {
-        if self
-            .config
-            .requested_name
-            .eq_ignore_ascii_case("mock")
-            || self.config.api_key.is_none()
-        {
-            let reason = if self.config.requested_name.eq_ignore_ascii_case("mock") {
-                "当前显式选择了 mock provider。".to_string()
-            } else {
-                format!(
-                    "未读取到 {}（provider={}）的值，已回退到本地 mock。",
-                    self.config.api_key_env_var,
-                    self.config.provider_name
-                )
-            };
-            let response = self.mock_response(request, Some(reason));
+        provider_log(format!(
+            "followup:start mode=stream requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={}",
+            self.config.requested_name,
+            self.config.provider_name,
+            self.protocol_label(),
+            request.model,
+            tool_call.name,
+            tool_result.status,
+            preview_text(&tool_result.output, 160)
+        ));
+        if self.config.api_key.is_none() || self.config.requested_name.eq_ignore_ascii_case("mock") {
+            let response = self.mock_tool_followup_response(request, tool_call, tool_result);
+            provider_log("followup:fallback-to-mock reason=mock-selected-or-missing-api-key".to_string());
             on_delta(response.output_text.clone());
             return response;
         }
 
         let result = match self.config.protocol {
-            ProviderProtocol::OpenAi => self.send_openai_stream_request(request, &mut on_delta),
-            ProviderProtocol::Anthropic => self.send_anthropic_stream_request(request, &mut on_delta),
+            ProviderProtocol::OpenAi => self.send_openai_tool_followup_stream_request(
+                request,
+                tools,
+                tool_call,
+                tool_result,
+                &mut on_delta,
+            ),
+            ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_stream_request(
+                request,
+                tools,
+                tool_call,
+                tool_result,
+                &mut on_delta,
+            ),
         };
 
         match result {
-            Ok(output_text) => ProviderResponse {
-                output_text,
-                provider_mode: "live".to_string(),
-                fallback_reason: None,
-            },
+            Ok(response) => response,
             Err(error) => {
-                let response = self.mock_response(
+                let response = self.mock_tool_followup_response(
                     request,
-                    Some(format!("真实 provider 请求失败，已回退到本地 mock：{}", error)),
+                    tool_call,
+                    &ToolResult {
+                        tool_name: tool_result.tool_name.clone(),
+                        status: "error".to_string(),
+                        output: format!("真实 provider tool follow-up 失败：{}", error),
+                    },
                 );
                 on_delta(response.output_text.clone());
                 response
@@ -183,11 +301,25 @@ impl ProviderManager {
         }
     }
 
-    fn send_openai_request(&self, request: &ProviderRequest) -> Result<String, String> {
+    fn send_openai_tool_decision_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderDecision, String> {
         let endpoint = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
+        provider_log(format!(
+            "request:openai decision endpoint={} model={} safe_tools={}",
+            endpoint,
+            request.model,
+            tools
+                .iter()
+                .map(|tool| openai_safe_tool_name(tool.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
         let messages = request
             .input
             .iter()
@@ -203,244 +335,94 @@ impl ProviderManager {
             "messages": messages,
             "temperature": request.temperature,
             "max_tokens": request.max_output_tokens,
-            "stream": false
+            "stream": false,
+            "tool_choice": "auto",
+            "tools": openai_tools_payload(tools)
         });
+        provider_log(format!(
+            "request:openai decision messages={} body_chars={} body_preview={}",
+            request
+                .input
+                .iter()
+                .map(|message| format!("{:?}:{}", message.role, preview_text(&message.content, 48)))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            body.to_string().chars().count(),
+            preview_json(&body, 900)
+        ));
         let payload = self.post_openai_json(&endpoint, &body)?;
+        let message = first_openai_message(&payload)?;
 
-        extract_chat_output_text(&payload)
-            .ok_or_else(|| "chat completions 接口没有返回可读文本".to_string())
+        Ok(ProviderDecision {
+            output_text: extract_openai_message_text(message).unwrap_or_default(),
+            tool_call: extract_openai_tool_call(message),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_openai_usage(&payload)
+                    .unwrap_or_else(|| estimate_token_usage(request, extract_openai_message_text(message).as_deref().unwrap_or_default())),
+            ),
+        })
     }
 
-    fn send_openai_stream_request<F>(
+    fn send_anthropic_tool_decision_request(
         &self,
         request: &ProviderRequest,
-        on_delta: &mut F,
-    ) -> Result<String, String>
-    where
-        F: FnMut(String),
-    {
-        let endpoint = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
-        let messages = request
-            .input
-            .iter()
-            .map(|message| {
-                json!({
-                    "role": to_chat_role(&message.role),
-                    "content": message.content
-                })
-            })
-            .collect::<Vec<_>>();
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderDecision, String> {
+        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
+        provider_log(format!(
+            "request:anthropic decision endpoint={} model={} tools={}",
+            endpoint,
+            request.model,
+            tools.iter().map(|tool| tool.name).collect::<Vec<_>>().join(",")
+        ));
         let body = json!({
             "model": request.model,
-            "messages": messages,
+            "system": anthropic_system_text(&request.input),
+            "messages": anthropic_user_messages(&request.input),
             "temperature": request.temperature,
             "max_tokens": request.max_output_tokens,
-            "stream": true
+            "tools": anthropic_tools_payload(tools),
+            "tool_choice": {
+                "type": "auto",
+                "disable_parallel_tool_use": true
+            }
         });
-
-        let client = Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map_err(|error| format!("创建 HTTP client 失败：{}", error))?;
-
-        let response = client
-            .post(&endpoint)
-            .bearer_auth(
-                self.config
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-            )
-            .json(&body)
-            .send()
-            .map_err(|error| format!("调用 provider 失败：{}", error))?
-            .error_for_status()
-            .map_err(|error| format!("provider 返回错误状态：{}", error))?;
-
-        let reader = BufReader::new(response);
-        let mut full_text = String::new();
-
-        for line in reader.lines() {
-            let line = line.map_err(|error| format!("读取 stream 数据失败：{}", error))?;
-            let trimmed = line.trim();
-
-            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
-                continue;
-            }
-
-            let data = trimmed.trim_start_matches("data: ").trim();
-            if data == "[DONE]" {
-                break;
-            }
-
-            let payload: Value =
-                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
-
-            if let Some(delta) = extract_chat_delta_text(&payload) {
-                if !delta.is_empty() {
-                    full_text.push_str(&delta);
-                    on_delta(delta);
-                }
-            }
-        }
-
-        if full_text.trim().is_empty() {
-            Err("stream 返回中没有读取到可见文本".to_string())
-        } else {
-            Ok(full_text)
-        }
-    }
-
-    fn send_anthropic_request(&self, request: &ProviderRequest) -> Result<String, String> {
-        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
-        let system = request
-            .input
-            .iter()
-            .filter(|message| {
-                matches!(message.role, ProviderRole::System | ProviderRole::Developer)
-            })
-            .map(|message| message.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let messages = request
-            .input
-            .iter()
-            .filter(|message| matches!(message.role, ProviderRole::User))
-            .map(|message| {
-                json!({
-                    "role": "user",
-                    "content": message.content
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let body = json!({
-            "model": request.model,
-            "system": system,
-            "messages": if messages.is_empty() {
-                vec![json!({
-                    "role": "user",
-                    "content": "请解释当前运行状态。"
-                })]
-            } else {
-                messages
-            },
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens
-        });
+        provider_log(format!(
+            "request:anthropic decision messages={} body_chars={} body_preview={}",
+            request
+                .input
+                .iter()
+                .map(|message| format!("{:?}:{}", message.role, preview_text(&message.content, 48)))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            body.to_string().chars().count(),
+            preview_json(&body, 900)
+        ));
         let payload = self.post_anthropic_json(&endpoint, &body)?;
+        let content = payload
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "anthropic 返回中缺少 content".to_string())?;
 
-        extract_anthropic_output_text(&payload)
-            .ok_or_else(|| "anthropic messages 接口没有返回可读文本".to_string())
-    }
-
-    fn send_anthropic_stream_request<F>(
-        &self,
-        request: &ProviderRequest,
-        on_delta: &mut F,
-    ) -> Result<String, String>
-    where
-        F: FnMut(String),
-    {
-        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
-        let system = request
-            .input
-            .iter()
-            .filter(|message| {
-                matches!(message.role, ProviderRole::System | ProviderRole::Developer)
-            })
-            .map(|message| message.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let messages = request
-            .input
-            .iter()
-            .filter(|message| matches!(message.role, ProviderRole::User))
-            .map(|message| {
-                json!({
-                    "role": "user",
-                    "content": message.content
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let body = json!({
-            "model": request.model,
-            "system": system,
-            "messages": if messages.is_empty() {
-                vec![json!({
-                    "role": "user",
-                    "content": "请解释当前运行状态。"
-                })]
-            } else {
-                messages
-            },
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": true
-        });
-
-        let client = Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map_err(|error| format!("创建 HTTP client 失败：{}", error))?;
-
-        let response = client
-            .post(&endpoint)
-            .header(
-                "x-api-key",
-                self.config
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-            )
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .map_err(|error| format!("调用 provider 失败：{}", error))?
-            .error_for_status()
-            .map_err(|error| format!("provider 返回错误状态：{}", error))?;
-
-        let reader = BufReader::new(response);
-        let mut full_text = String::new();
-
-        for line in reader.lines() {
-            let line = line.map_err(|error| format!("读取 stream 数据失败：{}", error))?;
-            let trimmed = line.trim();
-
-            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
-                continue;
-            }
-
-            let data = trimmed.trim_start_matches("data: ").trim();
-            let payload: Value =
-                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
-
-            if let Some(delta) = extract_anthropic_delta_text(&payload) {
-                if !delta.is_empty() {
-                    full_text.push_str(&delta);
-                    on_delta(delta);
-                }
-            }
-        }
-
-        if full_text.trim().is_empty() {
-            Err("anthropic stream 返回中没有读取到可见文本".to_string())
-        } else {
-            Ok(full_text)
-        }
+        let output_text = extract_anthropic_text_blocks(content);
+        Ok(ProviderDecision {
+            output_text: output_text.clone(),
+            tool_call: extract_anthropic_tool_call(content),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
     }
 
     fn post_openai_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(45))
-            .build()
-            .map_err(|error| format!("创建 HTTP client 失败：{}", error))?;
+        let client = build_http_client(Duration::from_secs(45))?;
+        let started_at = Instant::now();
 
-        client
+        let response = client
             .post(endpoint)
             .bearer_auth(
                 self.config
@@ -450,20 +432,38 @@ impl ProviderManager {
             )
             .json(body)
             .send()
-            .map_err(|error| format!("调用 provider 失败：{}", error))?
-            .error_for_status()
-            .map_err(|error| format!("provider 返回错误状态：{}", error))?
-            .json::<Value>()
-            .map_err(|error| format!("解析 provider 返回失败：{}", error))
+            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .map_err(|error| format_request_error("读取 provider 返回失败", &error, started_at.elapsed()))?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+                status,
+                started_at.elapsed().as_millis(),
+                text
+            ));
+        }
+
+        serde_json::from_str::<Value>(&text)
+            .map_err(|error| {
+                format!(
+                    "解析 provider 返回失败：{}；耗时={}ms；原始响应：{}",
+                    error,
+                    started_at.elapsed().as_millis(),
+                    text
+                )
+            })
     }
 
     fn post_anthropic_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(45))
-            .build()
-            .map_err(|error| format!("创建 HTTP client 失败：{}", error))?;
+        let client = build_http_client(Duration::from_secs(45))?;
+        let started_at = Instant::now();
 
-        client
+        let response = client
             .post(endpoint)
             .header(
                 "x-api-key",
@@ -475,11 +475,31 @@ impl ProviderManager {
             .header("anthropic-version", "2023-06-01")
             .json(body)
             .send()
-            .map_err(|error| format!("调用 provider 失败：{}", error))?
-            .error_for_status()
-            .map_err(|error| format!("provider 返回错误状态：{}", error))?
-            .json::<Value>()
-            .map_err(|error| format!("解析 provider 返回失败：{}", error))
+            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .map_err(|error| format_request_error("读取 provider 返回失败", &error, started_at.elapsed()))?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+                status,
+                started_at.elapsed().as_millis(),
+                text
+            ));
+        }
+
+        serde_json::from_str::<Value>(&text)
+            .map_err(|error| {
+                format!(
+                    "解析 provider 返回失败：{}；耗时={}ms；原始响应：{}",
+                    error,
+                    started_at.elapsed().as_millis(),
+                    text
+                )
+            })
     }
 
     fn mock_response(
@@ -504,8 +524,385 @@ impl ProviderManager {
             ),
             provider_mode: "mock".to_string(),
             fallback_reason,
+            token_usage: Some(estimate_token_usage(
+                request,
+                &format!(
+                    "当前 provider 是 {} / {} 的本地 mock 路径。用户问题：{}。",
+                    self.config.requested_name,
+                    self.protocol_label(),
+                    last_user
+                ),
+            )),
         }
     }
+
+    fn send_openai_tool_followup_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        provider_log(format!(
+            "request:openai followup-sync endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": false,
+            "tool_choice": "none",
+            "tools": openai_tools_payload(tools)
+        });
+        let payload = self.post_openai_json(&endpoint, &body)?;
+
+        let output_text =
+            extract_chat_output_text(&payload).ok_or_else(|| "openai tool follow-up 没有返回可读文本".to_string())?;
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_openai_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
+    }
+
+    fn send_openai_tool_followup_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let endpoint = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        provider_log(format!(
+            "request:openai followup-stream endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": true,
+            "tool_choice": "none",
+            "tools": openai_tools_payload(tools)
+        });
+
+        self.stream_openai_request(&endpoint, &body, request, on_delta)
+    }
+
+    fn send_anthropic_tool_followup_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
+        provider_log(format!(
+            "request:anthropic followup-sync endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "system": anthropic_system_text(&request.input),
+            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "tools": anthropic_tools_payload(tools),
+            "tool_choice": {
+                "type": "auto",
+                "disable_parallel_tool_use": true
+            }
+        });
+        let payload = self.post_anthropic_json(&endpoint, &body)?;
+
+        let output_text = extract_anthropic_output_text(&payload)
+            .ok_or_else(|| "anthropic tool follow-up 没有返回可读文本".to_string())?;
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
+    }
+
+    fn send_anthropic_tool_followup_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
+        provider_log(format!(
+            "request:anthropic followup-stream endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "system": anthropic_system_text(&request.input),
+            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": true,
+            "tools": anthropic_tools_payload(tools),
+            "tool_choice": {
+                "type": "auto",
+                "disable_parallel_tool_use": true
+            }
+        });
+
+        self.stream_anthropic_request(&endpoint, &body, request, on_delta)
+    }
+
+    fn stream_openai_request<F>(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        request: &ProviderRequest,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let client = build_http_client(Duration::from_secs(90))?;
+        let started_at = Instant::now();
+
+        let response = client
+            .post(endpoint)
+            .bearer_auth(
+                self.config
+                    .api_key
+                    .as_deref()
+                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+            )
+            .json(body)
+            .send()
+            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?
+            .error_for_status()
+            .map_err(|error| format_request_error("provider 返回错误状态", &error, started_at.elapsed()))?;
+
+        let reader = BufReader::new(response);
+        let mut full_text = String::new();
+        let mut usage = None;
+
+        for line in reader.lines() {
+            let line =
+                line.map_err(|error| format!("读取 stream 数据失败：{}；耗时={}ms", error, started_at.elapsed().as_millis()))?;
+            let trimmed = line.trim();
+
+            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
+                continue;
+            }
+
+            let data = trimmed.trim_start_matches("data: ").trim();
+            if data == "[DONE]" {
+                break;
+            }
+
+            let payload: Value =
+                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
+
+            if usage.is_none() {
+                usage = extract_openai_usage(&payload);
+            }
+
+            if let Some(delta) = extract_chat_delta_text(&payload) {
+                if !delta.is_empty() {
+                    full_text.push_str(&delta);
+                    on_delta(delta);
+                }
+            }
+        }
+
+        if full_text.trim().is_empty() {
+            Err("stream 返回中没有读取到可见文本".to_string())
+        } else {
+            Ok(ProviderResponse {
+                output_text: full_text.clone(),
+                provider_mode: "live".to_string(),
+                fallback_reason: None,
+                token_usage: Some(usage.unwrap_or_else(|| estimate_token_usage(request, &full_text))),
+            })
+        }
+    }
+
+    fn stream_anthropic_request<F>(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        request: &ProviderRequest,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let client = build_http_client(Duration::from_secs(90))?;
+        let started_at = Instant::now();
+
+        let response = client
+            .post(endpoint)
+            .header(
+                "x-api-key",
+                self.config
+                    .api_key
+                    .as_deref()
+                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+            )
+            .header("anthropic-version", "2023-06-01")
+            .json(body)
+            .send()
+            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?
+            .error_for_status()
+            .map_err(|error| format_request_error("provider 返回错误状态", &error, started_at.elapsed()))?;
+
+        let reader = BufReader::new(response);
+        let mut full_text = String::new();
+        let mut usage = None;
+
+        for line in reader.lines() {
+            let line =
+                line.map_err(|error| format!("读取 stream 数据失败：{}；耗时={}ms", error, started_at.elapsed().as_millis()))?;
+            let trimmed = line.trim();
+
+            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
+                continue;
+            }
+
+            let data = trimmed.trim_start_matches("data: ").trim();
+            let payload: Value =
+                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
+
+            if usage.is_none() {
+                usage = extract_anthropic_usage(&payload);
+            }
+
+            if let Some(delta) = extract_anthropic_delta_text(&payload) {
+                if !delta.is_empty() {
+                    full_text.push_str(&delta);
+                    on_delta(delta);
+                }
+            }
+        }
+
+        if full_text.trim().is_empty() {
+            Err("anthropic stream 返回中没有读取到可见文本".to_string())
+        } else {
+            Ok(ProviderResponse {
+                output_text: full_text.clone(),
+                provider_mode: "live".to_string(),
+                fallback_reason: None,
+                token_usage: Some(usage.unwrap_or_else(|| estimate_token_usage(request, &full_text))),
+            })
+        }
+    }
+
+    fn mock_tool_followup_response(
+        &self,
+        request: &ProviderRequest,
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> ProviderResponse {
+        let last_user = request
+            .input
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, ProviderRole::User))
+            .map(|message| message.content.as_str())
+            .unwrap_or("（没有用户消息）");
+
+        let output_text = format!(
+                "当前处于 {} / {} 的本地 mock 路径。\n用户问题：{}\n已执行工具：{}\n工具结果：{}",
+                self.config.requested_name,
+                self.protocol_label(),
+                last_user,
+                tool_call.name,
+                tool_result.output
+            );
+
+        ProviderResponse {
+            output_text: output_text.clone(),
+            provider_mode: "mock".to_string(),
+            fallback_reason: Some("当前通过 mock 路径生成 tool follow-up 回答。".to_string()),
+            token_usage: Some(estimate_token_usage(request, &output_text)),
+        }
+    }
+}
+
+fn build_http_client(timeout: Duration) -> Result<Client, String> {
+    Client::builder()
+        .timeout(timeout)
+        .http1_only()
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|error| format!("创建 HTTP client 失败：{}", error))
+}
+
+fn format_request_error(prefix: &str, error: &reqwest::Error, elapsed: Duration) -> String {
+    let mut flags = Vec::new();
+    if error.is_timeout() {
+        flags.push("timeout");
+    }
+    if error.is_connect() {
+        flags.push("connect");
+    }
+    if error.is_request() {
+        flags.push("request");
+    }
+    if error.is_body() {
+        flags.push("body");
+    }
+    if error.is_decode() {
+        flags.push("decode");
+    }
+    if error.is_status() {
+        flags.push("status");
+    }
+
+    let error_type = if flags.is_empty() {
+        "unknown".to_string()
+    } else {
+        flags.join("+")
+    };
+
+    let mut details = vec![
+        format!("type={}", error_type),
+        format!("elapsed={}ms", elapsed.as_millis()),
+    ];
+
+    if let Some(url) = error.url() {
+        details.push(format!("url={}", url));
+    }
+
+    if let Some(source) = error.source() {
+        details.push(format!("source={}", source));
+    }
+
+    format!("{}：{}；{}", prefix, error, details.join("；"))
 }
 
 fn to_chat_role(role: &ProviderRole) -> &'static str {
@@ -513,6 +910,213 @@ fn to_chat_role(role: &ProviderRole) -> &'static str {
         ProviderRole::System | ProviderRole::Developer => "system",
         ProviderRole::User => "user",
     }
+}
+
+fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": openai_safe_tool_name(tool.name),
+                    "description": tool.description,
+                    "parameters": tool.input_schema.clone()
+                }
+            })
+        })
+        .collect()
+}
+
+fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema.clone()
+            })
+        })
+        .collect()
+}
+
+fn first_openai_message<'a>(payload: &'a Value) -> Result<&'a Value, String> {
+    payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .ok_or_else(|| "openai 返回中缺少 message".to_string())
+}
+
+fn extract_openai_message_text(message: &Value) -> Option<String> {
+    let content = message.get("content")?;
+
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| {
+                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                        return Some(text.to_string());
+                    }
+                    item.get("text")
+                        .and_then(|value| value.get("value"))
+                        .and_then(Value::as_str)
+                        .map(|text| text.to_string())
+                })
+                .collect::<Vec<_>>();
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        Value::Null => None,
+        _ => None,
+    }
+}
+
+fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
+    let tool_call = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .and_then(|calls| calls.first())?;
+
+    let id = tool_call.get("id").and_then(Value::as_str).map(str::to_string);
+    let function = tool_call.get("function")?;
+    let name = openai_original_tool_name(function.get("name").and_then(Value::as_str)?);
+    let arguments = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .unwrap_or_else(|| json!({}));
+
+    Some(ToolCall {
+        call_id: id,
+        name,
+        arguments,
+    })
+}
+
+fn anthropic_system_text(input: &[ProviderMessage]) -> String {
+    input
+        .iter()
+        .filter(|message| matches!(message.role, ProviderRole::System | ProviderRole::Developer))
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn anthropic_user_messages(input: &[ProviderMessage]) -> Vec<Value> {
+    input
+        .iter()
+        .filter(|message| matches!(message.role, ProviderRole::User))
+        .map(|message| {
+            json!({
+                "role": "user",
+                "content": message.content
+            })
+        })
+        .collect::<Vec<_>>()
+}
+
+fn extract_anthropic_text_blocks(content: &[Value]) -> String {
+    content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
+    let block = content
+        .iter()
+        .find(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))?;
+
+    Some(ToolCall {
+        call_id: block.get("id").and_then(Value::as_str).map(str::to_string),
+        name: block.get("name").and_then(Value::as_str)?.to_string(),
+        arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
+fn openai_messages_with_tool_result(
+    request: &ProviderRequest,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+) -> Vec<Value> {
+    let mut messages = request
+        .input
+        .iter()
+        .map(|message| {
+            json!({
+                "role": to_chat_role(&message.role),
+                "content": message.content
+            })
+        })
+        .collect::<Vec<_>>();
+
+    messages.push(json!({
+        "role": "assistant",
+        "content": Value::Null,
+        "tool_calls": [
+            {
+                "id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
+                "type": "function",
+                "function": {
+                    "name": openai_safe_tool_name(&tool_call.name),
+                    "arguments": tool_call.arguments.to_string()
+                }
+            }
+        ]
+    }));
+
+    messages.push(json!({
+        "role": "tool",
+        "tool_call_id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
+        "content": tool_result.output.clone()
+    }));
+
+    messages
+}
+
+fn anthropic_messages_with_tool_result(
+    request: &ProviderRequest,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+) -> Vec<Value> {
+    let mut messages = anthropic_user_messages(&request.input);
+    messages.push(json!({
+        "role": "assistant",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+                "name": tool_call.name.clone(),
+                "input": tool_call.arguments.clone()
+            }
+        ]
+    }));
+
+    messages.push(json!({
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+                "content": tool_result.output.clone(),
+                "is_error": tool_result.status != "ok"
+            }
+        ]
+    }));
+
+    messages
 }
 
 fn extract_chat_output_text(payload: &Value) -> Option<String> {
@@ -583,6 +1187,23 @@ fn extract_chat_delta_text(payload: &Value) -> Option<String> {
     }
 }
 
+fn extract_openai_usage(payload: &Value) -> Option<TokenUsage> {
+    let usage = payload.get("usage")?;
+    Some(normalize_token_usage(TokenUsage {
+        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+    }))
+}
+
+fn openai_safe_tool_name(name: &str) -> String {
+    name.replace('.', "__dot__")
+}
+
+fn openai_original_tool_name(name: &str) -> String {
+    name.replace("__dot__", ".")
+}
+
 fn extract_anthropic_output_text(payload: &Value) -> Option<String> {
     let parts = payload
         .get("content")?
@@ -599,6 +1220,19 @@ fn extract_anthropic_output_text(payload: &Value) -> Option<String> {
     }
 }
 
+fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
+    let usage = payload
+        .get("usage")
+        .or_else(|| payload.get("message").and_then(|message| message.get("usage")))
+        .or_else(|| payload.get("delta").and_then(|delta| delta.get("usage")))?;
+
+    Some(normalize_token_usage(TokenUsage {
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+    }))
+}
+
 fn extract_anthropic_delta_text(payload: &Value) -> Option<String> {
     let delta = payload.get("delta")?;
     let delta_type = delta.get("type").and_then(Value::as_str)?;
@@ -611,4 +1245,62 @@ fn extract_anthropic_delta_text(payload: &Value) -> Option<String> {
         .get("text")
         .and_then(Value::as_str)
         .map(|text| text.to_string())
+}
+
+fn estimate_token_usage(request: &ProviderRequest, output_text: &str) -> TokenUsage {
+    let input_chars = request
+        .input
+        .iter()
+        .map(|message| message.content.chars().count())
+        .sum::<usize>();
+    let output_chars = output_text.chars().count();
+
+    normalize_token_usage(TokenUsage {
+        input_tokens: Some(estimate_tokens_from_chars(input_chars)),
+        output_tokens: Some(estimate_tokens_from_chars(output_chars)),
+        total_tokens: None,
+    })
+}
+
+fn estimate_tokens_from_chars(char_count: usize) -> u64 {
+    if char_count == 0 {
+        0
+    } else {
+        char_count.div_ceil(4) as u64
+    }
+}
+
+fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
+    let total_tokens = usage.total_tokens.or_else(|| match (usage.input_tokens, usage.output_tokens) {
+        (Some(input_tokens), Some(output_tokens)) => Some(input_tokens + output_tokens),
+        _ => None,
+    });
+
+    TokenUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens,
+    }
+}
+
+fn provider_log(message: String) {
+    eprintln!("[pony-provider] {}", message);
+}
+
+fn preview_text(text: &str, max_chars: usize) -> String {
+    let normalized = text.replace('\n', "\\n");
+    let count = normalized.chars().count();
+    if count <= max_chars {
+        normalized
+    } else {
+        let preview = normalized.chars().take(max_chars).collect::<String>();
+        format!("{}...(+{} chars)", preview, count - max_chars)
+    }
+}
+
+fn preview_json(value: &Value, max_chars: usize) -> String {
+    match serde_json::to_string(value) {
+        Ok(text) => preview_text(&text, max_chars),
+        Err(error) => format!("json-serialize-error: {}", error),
+    }
 }
