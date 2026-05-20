@@ -1,10 +1,11 @@
 use crate::agent::provider::ProviderProtocol;
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
+const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +45,8 @@ struct ProviderConfigStorage {
     protocol: ProviderProtocol,
     base_url: String,
     api_key_env_var: String,
+    #[serde(default)]
+    api_key_value: String,
     models: Vec<ProviderModelConfig>,
     selected_model_id: Option<String>,
 }
@@ -67,6 +70,14 @@ pub struct ResolvedProviderSelection {
     pub max_output_tokens: u32,
 }
 
+pub trait ProviderSelectionResolver: Send {
+    fn resolve_provider_selection(
+        &self,
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
+    ) -> ResolvedProviderSelection;
+}
+
 pub struct ProviderRegistryStore {
     path: PathBuf,
 }
@@ -81,55 +92,36 @@ impl ProviderRegistryStore {
     }
 
     pub fn load_view(&self) -> ProviderRegistryView {
-        let storage = self.load_storage();
-
-        ProviderRegistryView {
-            selected_provider_id: storage.selected_provider_id.clone(),
-            providers: storage
-                .providers
-                .into_iter()
-                .map(|provider| {
-                    let api_key_value = read_env_var(&provider.api_key_env_var).unwrap_or_default();
-
-                    ProviderConfigView {
-                        id: provider.id,
-                        name: provider.name,
-                        protocol: provider.protocol,
-                        base_url: provider.base_url,
-                        api_key_env_var: provider.api_key_env_var,
-                        api_key_present: !api_key_value.trim().is_empty(),
-                        api_key_value,
-                        models: provider.models,
-                        selected_model_id: provider.selected_model_id,
-                    }
-                })
-                .collect(),
-        }
+        build_view_from_storage(self.load_storage())
     }
 
     pub fn save_view(&self, view: ProviderRegistryView) -> Result<ProviderRegistryView, String> {
-        for provider in &view.providers {
-            let env_var_name = derive_env_var_name(&provider.name);
-            if !provider.api_key_value.trim().is_empty() {
-                write_env_var(&env_var_name, &provider.api_key_value)?;
-            }
-        }
-
         let storage = normalize_storage(ProviderRegistryStorage {
             providers: view
                 .providers
                 .into_iter()
                 .map(|provider| {
-                    let env_var_name = derive_env_var_name(&provider.name);
+                    let ProviderConfigView {
+                        id,
+                        name,
+                        protocol,
+                        base_url,
+                        api_key_env_var: _,
+                        api_key_value,
+                        api_key_present: _,
+                        models,
+                        selected_model_id,
+                    } = provider;
 
                     ProviderConfigStorage {
-                        id: provider.id,
-                        name: provider.name,
-                        protocol: provider.protocol,
-                        base_url: provider.base_url,
-                        api_key_env_var: env_var_name,
-                        models: provider.models,
-                        selected_model_id: provider.selected_model_id,
+                        id,
+                        api_key_env_var: derive_env_var_name(&name),
+                        name,
+                        protocol,
+                        base_url,
+                        api_key_value,
+                        models,
+                        selected_model_id,
                     }
                 })
                 .collect(),
@@ -138,15 +130,23 @@ impl ProviderRegistryStore {
 
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
-                .map_err(|error| format!("创建配置目录失败：{}", error))?;
+                .map_err(|error| format!("创建 provider 配置目录失败: {}", error))?;
         }
 
         let json = serde_json::to_string_pretty(&storage)
-            .map_err(|error| format!("序列化 provider 配置失败：{}", error))?;
+            .map_err(|error| format!("序列化 provider 配置失败: {}", error))?;
 
-        fs::write(&self.path, json).map_err(|error| format!("写入 provider 配置失败：{}", error))?;
+        fs::write(&self.path, json)
+            .map_err(|error| format!("写入 provider 配置失败: {}", error))?;
 
-        Ok(self.load_view())
+        Ok(build_view_from_storage(storage))
+    }
+
+    pub fn save_view_without_env_sync(
+        &self,
+        view: ProviderRegistryView,
+    ) -> Result<ProviderRegistryView, String> {
+        self.save_view(view)
     }
 
     pub fn resolve_selection(
@@ -187,7 +187,11 @@ impl ProviderRegistryStore {
             protocol: provider.protocol.clone(),
             base_url: provider.base_url.clone(),
             api_key_env_var: provider.api_key_env_var.clone(),
-            api_key: read_env_var(&provider.api_key_env_var),
+            api_key: if provider.api_key_value.trim().is_empty() {
+                None
+            } else {
+                Some(provider.api_key_value.clone())
+            },
             model: model.model.clone(),
             temperature: model.temperature,
             max_output_tokens: model.max_output_tokens,
@@ -205,41 +209,45 @@ impl ProviderRegistryStore {
     }
 }
 
+impl ProviderSelectionResolver for ProviderRegistryStore {
+    fn resolve_provider_selection(
+        &self,
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
+    ) -> ResolvedProviderSelection {
+        self.resolve_selection(provider_id, model_id)
+    }
+}
+
+fn build_view_from_storage(storage: ProviderRegistryStorage) -> ProviderRegistryView {
+    ProviderRegistryView {
+        selected_provider_id: storage.selected_provider_id.clone(),
+        providers: storage
+            .providers
+            .into_iter()
+            .map(|provider| {
+                let api_key_value = provider.api_key_value.clone();
+
+                ProviderConfigView {
+                    id: provider.id,
+                    name: provider.name,
+                    protocol: provider.protocol,
+                    base_url: provider.base_url,
+                    api_key_env_var: provider.api_key_env_var,
+                    api_key_present: !api_key_value.trim().is_empty(),
+                    api_key_value,
+                    models: provider.models,
+                    selected_model_id: provider.selected_model_id,
+                }
+            })
+            .collect(),
+    }
+}
+
 fn default_registry() -> ProviderRegistryStorage {
     ProviderRegistryStorage {
         selected_provider_id: Some("provider-openai".to_string()),
-        providers: vec![
-            ProviderConfigStorage {
-                id: "provider-openai".to_string(),
-                name: "openai".to_string(),
-                protocol: ProviderProtocol::OpenAi,
-                base_url: "https://api.openai.com/v1".to_string(),
-                api_key_env_var: "OPENAI_API_KEY".to_string(),
-                selected_model_id: Some("model-openai-default".to_string()),
-                models: vec![ProviderModelConfig {
-                    id: "model-openai-default".to_string(),
-                    name: "GPT 4.1 Mini".to_string(),
-                    model: "gpt-4.1-mini".to_string(),
-                    temperature: 0.2,
-                    max_output_tokens: 1200,
-                }],
-            },
-            ProviderConfigStorage {
-                id: "provider-anthropic".to_string(),
-                name: "anthropic".to_string(),
-                protocol: ProviderProtocol::Anthropic,
-                base_url: "https://api.anthropic.com/v1".to_string(),
-                api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
-                selected_model_id: Some("model-anthropic-default".to_string()),
-                models: vec![ProviderModelConfig {
-                    id: "model-anthropic-default".to_string(),
-                    name: "Claude Sonnet".to_string(),
-                    model: "claude-3-7-sonnet-latest".to_string(),
-                    temperature: 0.2,
-                    max_output_tokens: 1200,
-                }],
-            },
-        ],
+        providers: default_provider_templates(),
     }
 }
 
@@ -247,6 +255,8 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
     if storage.providers.is_empty() {
         return default_registry();
     }
+
+    merge_missing_default_providers(&mut storage);
 
     for provider in &mut storage.providers {
         if provider.id.trim().is_empty() {
@@ -259,13 +269,14 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             provider.base_url = default_base_url(&provider.protocol).to_string();
         }
         provider.api_key_env_var = derive_env_var_name(&provider.name);
+        provider.api_key_value = provider.api_key_value.trim().to_string();
         if provider.models.is_empty() {
             provider.models.push(ProviderModelConfig {
                 id: format!("{}-model-default", provider.id),
                 name: "默认模型".to_string(),
                 model: default_model(&provider.protocol).to_string(),
                 temperature: 0.2,
-                max_output_tokens: 1200,
+                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             });
         }
         for model in &mut provider.models {
@@ -278,8 +289,10 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             if model.model.trim().is_empty() {
                 model.model = default_model(&provider.protocol).to_string();
             }
-            if model.max_output_tokens == 0 {
-                model.max_output_tokens = 1200;
+            if model.max_output_tokens == 0
+                || model.max_output_tokens == LEGACY_DEFAULT_MAX_OUTPUT_TOKENS
+            {
+                model.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS;
             }
         }
         if provider.selected_model_id.is_none()
@@ -302,6 +315,90 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
     }
 
     storage
+}
+
+fn merge_missing_default_providers(storage: &mut ProviderRegistryStorage) {
+    let default_providers = default_provider_templates();
+
+    for default_provider in default_providers {
+        let has_provider = storage.providers.iter().any(|provider| {
+            provider.id == default_provider.id
+                || provider.name.eq_ignore_ascii_case(&default_provider.name)
+        });
+
+        if !has_provider {
+            storage.providers.push(default_provider);
+        }
+    }
+}
+
+fn default_provider_templates() -> Vec<ProviderConfigStorage> {
+    vec![
+        ProviderConfigStorage {
+            id: "provider-openai".to_string(),
+            name: "openai".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env_var: "OPENAI_API_KEY".to_string(),
+            api_key_value: String::new(),
+            selected_model_id: Some("model-openai-default".to_string()),
+            models: vec![ProviderModelConfig {
+                id: "model-openai-default".to_string(),
+                name: "GPT 4.1 Mini".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                temperature: 0.2,
+                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            }],
+        },
+        ProviderConfigStorage {
+            id: "provider-openrouter".to_string(),
+            name: "openrouter".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            api_key_env_var: "OPENROUTER_API_KEY".to_string(),
+            api_key_value: String::new(),
+            selected_model_id: Some("model-openrouter-default".to_string()),
+            models: vec![ProviderModelConfig {
+                id: "model-openrouter-default".to_string(),
+                name: "OpenAI GPT-4.1 Mini".to_string(),
+                model: "openai/gpt-4.1-mini".to_string(),
+                temperature: 0.2,
+                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            }],
+        },
+        ProviderConfigStorage {
+            id: "provider-deepseek".to_string(),
+            name: "deepseek".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+            api_key_value: String::new(),
+            selected_model_id: Some("model-deepseek-default".to_string()),
+            models: vec![ProviderModelConfig {
+                id: "model-deepseek-default".to_string(),
+                name: "DeepSeek Chat".to_string(),
+                model: "deepseek-chat".to_string(),
+                temperature: 0.2,
+                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            }],
+        },
+        ProviderConfigStorage {
+            id: "provider-anthropic".to_string(),
+            name: "anthropic".to_string(),
+            protocol: ProviderProtocol::Anthropic,
+            base_url: "https://api.anthropic.com/v1".to_string(),
+            api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
+            api_key_value: String::new(),
+            selected_model_id: Some("model-anthropic-default".to_string()),
+            models: vec![ProviderModelConfig {
+                id: "model-anthropic-default".to_string(),
+                name: "Claude Sonnet".to_string(),
+                model: "claude-3-7-sonnet-latest".to_string(),
+                temperature: 0.2,
+                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            }],
+        },
+    ]
 }
 
 fn slugify(value: &str, fallback: &str) -> String {
@@ -365,84 +462,5 @@ fn default_model(protocol: &ProviderProtocol) -> &'static str {
     match protocol {
         ProviderProtocol::OpenAi => "gpt-4.1-mini",
         ProviderProtocol::Anthropic => "claude-3-7-sonnet-latest",
-    }
-}
-
-fn read_env_var(name: &str) -> Option<String> {
-    if let Ok(value) = env::var(name) {
-        if !value.trim().is_empty() {
-            return Some(value);
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        if let Some(value) = read_windows_env_scope(name, "User") {
-            return Some(value);
-        }
-
-        if let Some(value) = read_windows_env_scope(name, "Machine") {
-            return Some(value);
-        }
-    }
-
-    None
-}
-
-fn write_env_var(name: &str, value: &str) -> Result<bool, String> {
-    env::set_var(name, value);
-
-    #[cfg(windows)]
-    {
-        let script = format!(
-            "[Environment]::SetEnvironmentVariable('{}','{}','User')",
-            name.replace('\'', "''"),
-            value.replace('\'', "''")
-        );
-
-        Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output()
-            .map_err(|error| format!("调用 PowerShell 写入环境变量失败：{}", error))
-            .and_then(|output| {
-                if output.status.success() {
-                    Ok(true)
-                } else {
-                    Err(format!(
-                        "写入用户环境变量失败：{}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ))
-                }
-            })
-    }
-
-    #[cfg(not(windows))]
-    {
-        Ok(false)
-    }
-}
-
-#[cfg(windows)]
-fn read_windows_env_scope(name: &str, scope: &str) -> Option<String> {
-    let script = format!(
-        "[Environment]::GetEnvironmentVariable('{}','{}')",
-        name.replace('\'', "''"),
-        scope.replace('\'', "''")
-    );
-
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
     }
 }

@@ -14,3 +14,7 @@ desktop.ini
 .vscode/
 
 *.log
+.devlogs/
+src-tauri/target-check/
+src-tauri/.pony-agent/
+tmp-dev-*.png

@@ -46,20 +46,26 @@ fn run_sequence(label: &str, prompts: Vec<String>) {
             max_output_tokens: provider.max_output_tokens(),
         };
 
-        let decision = provider.decide_with_tools(&request, &tools);
-        eprintln!("provider_mode: {}", decision.provider_mode);
-        eprintln!(
-            "fallback_reason: {}",
-            decision.fallback_reason.as_deref().unwrap_or("none")
-        );
-        eprintln!(
-            "tool_call: {}",
-            decision
-                .tool_call
-                .as_ref()
-                .map(|call| call.name.as_str())
-                .unwrap_or("none")
-        );
-        eprintln!("output_text: {}", decision.output_text);
+        match provider.decide_with_tools(&request, &tools) {
+            Ok(decision) => {
+                eprintln!("provider_mode: {}", decision.provider_mode);
+                eprintln!(
+                    "fallback_reason: {}",
+                    decision.fallback_reason.as_deref().unwrap_or("none")
+                );
+                eprintln!(
+                    "tool_call: {}",
+                    decision
+                        .tool_call
+                        .as_ref()
+                        .map(|call| call.name.as_str())
+                        .unwrap_or("none")
+                );
+                eprintln!("output_text: {}", decision.output_text);
+            }
+            Err(error) => {
+                eprintln!("provider_error: {}", error);
+            }
+        }
     }
 }

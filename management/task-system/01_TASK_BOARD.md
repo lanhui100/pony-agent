@@ -6,11 +6,13 @@
 
 ## Ready
 
-- `PA-004` 定义 provider 与 tool 抽象
+- 暂无
 
 ## In Progress
 
+- `PA-004` 定义 provider 与 tool 抽象
 - `PA-005` 把 Vue 工作台接入真实 turn 执行链路
+- `PA-006` 实现新对话与历史对话管理
 
 ## Review
 

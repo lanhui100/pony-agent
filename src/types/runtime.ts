@@ -9,6 +9,7 @@ export type RuntimePhase =
   | "idle"
   | "connecting"
   | "ready"
+  | "completed"
   | "calling_model"
   | "calling_tool"
   | "failed";
@@ -18,6 +19,20 @@ export type ToolActivity = {
   name: string;
   status: "planned" | "running" | "done" | "error";
   summary: string;
+  argumentsText?: string | null;
+  resultText?: string | null;
+  durationSeconds?: number | null;
+};
+
+export type AvailableTool = {
+  name: string;
+  description: string;
+  inputSchema: {
+    type?: string;
+    properties?: Record<string, { type?: string; description?: string }>;
+    required?: string[];
+    additionalProperties?: boolean;
+  };
 };
 
 export type TraceStep = {
@@ -28,22 +43,66 @@ export type TraceStep = {
 
 export type ChatMessage = {
   id: string;
-  role: "user" | "assistant";
+  turnId: string;
+  role: "user" | "assistant" | "tool";
   content: string;
   status?: "pending" | "done" | "error";
   modelName?: string | null;
+  tokenCount?: number | null;
+  toolName?: string | null;
+  detail?: string | null;
+  durationSeconds?: number | null;
+};
+
+export type TurnTraceRecord = {
+  turnId: string;
+  title: string;
+  phase: RuntimePhase;
+  traceSteps: TraceStep[];
+  toolActivities: ToolActivity[];
+  providerRequestedName?: string | null;
+  providerName?: string | null;
+  providerProtocol?: string | null;
+  providerModel?: string | null;
+  providerMode?: string | null;
+  sessionSummary?: string | null;
+  fallbackReason?: string | null;
+  error?: string | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  firstTokenLatencyMs?: number | null;
+  updatedAt: number;
 };
 
 export type TurnInput = {
   message: string;
   providerId?: string | null;
   modelId?: string | null;
+  sessionId?: string | null;
   history?: TurnHistoryMessage[];
 };
 
 export type TurnHistoryMessage = {
   role: "user" | "assistant";
   content: string;
+};
+
+export type SessionOverview = {
+  conversationId: string;
+  summary: string;
+  turnCount: number;
+  lastReferencedFile?: string | null;
+  updatedAtMs: number;
+};
+
+export type SessionSnapshot = {
+  conversationId: string;
+  summary: string;
+  history: TurnHistoryMessage[];
+  turnCount: number;
+  lastReferencedFile?: string | null;
+  updatedAtMs: number;
 };
 
 export type TurnResult = {

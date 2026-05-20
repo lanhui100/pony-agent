@@ -4,7 +4,7 @@ mod agent;
 use agent::runtime::{AgentRuntime, TurnInput};
 
 fn main() {
-    let runtime = AgentRuntime::new();
+    let mut runtime = AgentRuntime::new();
     let prompts = vec![
         "当前文件夹中有哪些文件？".to_string(),
         "这是什么文件？tauri.conf.json，都有哪些配置？".to_string(),
@@ -18,6 +18,7 @@ fn main() {
             message: message.clone(),
             provider_id: None,
             model_id: None,
+            session_id: Some("direct-turn-probe".to_string()),
             history: vec![],
         });
 

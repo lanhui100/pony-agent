@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: `Ready`
+- Status: `In Progress`
 - Priority: `P1`
 - Owner: `Codex`
 
@@ -31,7 +31,9 @@
 - `turn:tool` 与 `trace` 已开始承接工具错误态，工具失败不再只用文字弱提示。
 - 对高确定性的工作区请求，runtime 已新增本地 planner 前置判定，能在进入远端 decision 之前直接命中 `workspace.*` 工具，减少无意义的 provider 超时。
 - `ToolRouter` 所在的最小工具层已经开始承接多轮语境：当前可以结合最近用户消息回溯上一个文件，并把“第 N 行”映射到 `workspace.read_file_segment`。
-- 但这些能力还主要集中在具体实现里，尚未收敛为稳定的 `Provider` trait / `ToolRouter` trait / `SessionStore` 边界。
+- 已明确把 provider prompt caching 作为后续抽象收敛的约束之一：工具清单、developer 指令与 history 组织方式需要尽量稳定，避免 runtime 自己把 provider cache 命中率打碎。
+- `SessionStore` 最小骨架已经落地：当前由 Rust core 维护 `sessionId -> session state`，并通过 `.pony-agent/sessions.json` 做最小持久化；Tauri command 也已切到共享 `AgentRuntime`，不再每轮重建 session。
+- 但这些能力还主要集中在具体实现里，尚未进一步收敛为更明确的 `Provider` trait / `ToolRouter` trait / 可替换 `SessionStore backend` 边界。
 
 ## 下一步动作
 
@@ -40,7 +42,8 @@
 - 从 `provider.rs` 中提炼统一 provider 接口
 - 明确 `request / response / fallback / source` 这些运行时字段的边界
 - 把当前单工具闭环继续补强到更稳定的工具层，包括更细的错误恢复、更多工作区工具和更清晰的 tool event 语义
-- 把当前“history 推断上一个文件”的临时规则，逐步收敛成更稳定的会话级文件上下文状态
+- 把当前 `SessionStore` 从“内存 + JSON 文件”继续收敛成可替换 backend，明确后续 SQLite / PostgreSQL 如何接入
+- 在抽象 `Provider` / `SessionStore` 边界时，把“哪些前缀应该稳定、哪些上下文允许频繁变化”一起设计进去
 - 把“核心 runtime”与“Tauri/HTTP 等接入层”分开思考，避免 provider 抽象继续长在 UI 交付层里
 
 ## 当前卡点
@@ -56,3 +59,8 @@
 
 - `docs/architecture/runtime.md`
 - `docs/tauri-rust-refactor.md`
+
+## 备注
+
+- 2026-05-20：`HomeSidebar.vue` 的构建阻塞已修复，`npm run build` 通过。
+- 2026-05-20：`provider / tool / session` 的抽象边界已进入可持续收口阶段，下一步继续压缩 `runtime` 的临时逻辑。

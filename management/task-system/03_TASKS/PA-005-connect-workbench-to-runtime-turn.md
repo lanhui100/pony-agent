@@ -35,21 +35,23 @@
 - 工具侧栏已能区分 `planned / running / done / error`，`trace` 里的调用工具步骤也能显式标出失败态。
 - 前端当前会把最近几轮 `history` 一起发送给 Rust runtime，后端 planning 与本地工具推断已开始消费这段最小多轮语境。
 - “文件解释 -> 继续问该文件第 N 行”这条多轮工作流已联调通过：可从最近用户消息中回溯 `tauri.conf.json`，并命中 `workspace.read_file_segment`。
+- 当前真实会话状态已开始由 Rust `SessionStore` 持有；`sessionId`、session snapshot 和回写逻辑已经从前端临时 history 中收回到 core。
+- 已把 prompt caching 纳入这一层的后续设计约束：history 不应无节制重写，工具清单和稳定指令区应尽量保持前缀稳定。
 
 ## 下一步动作
 
 继续补可见性，并开始为“独立 agent core”收边界：
 
 - 在主页更直观地区分真实 provider 与 mock fallback
-- 展示 `providerMode / fallbackReason / token 统计 / 首 token 延迟`
 - 验证两类 provider 的真实 stream 体验，收敛事件字段命名
 - 在不破坏当前事件模型的前提下，继续补 tool 调用的多工具边界
-- 继续收束 history 策略，把“最近几轮消息”升级成更明确的 session/runtime 状态，而不长期停留在前端临时拼接
+- 继续收束 history 策略，把“最近几轮消息”进一步升级成更明确的 session/runtime 状态，并减少前端对隐式固定会话的依赖
+- 在 history/session 重构时，明确区分“稳定前缀上下文”和“本轮增量上下文”，兼顾 provider cache 命中
 - 明确当前 Tauri event 流与未来 HTTP/SSE event 流的共用事件契约
 
 ## 当前卡点
 
-- 主链路已接通，当前卡点已经从“是否能流式工作”转为“运行指标是否足够直观、tool event 是否足够稳定、history/session 是否足够明确、是否便于未来脱离 Tauri 复用”
+- 主链路已接通，当前卡点已经从“是否能流式工作”转为“tool event 是否足够稳定、session 是否足够可管理、是否便于未来脱离 Tauri 复用”
 
 ## 断点续跑提示
 
@@ -60,3 +62,8 @@
 - `src-tauri/src/agent/provider.rs`
 - `src/types/runtime.ts`
 - `docs/architecture/frontend-workbench.md`
+
+## 备注
+
+- 2026-05-20：前端侧边栏语法问题已修复，`npm run build` 通过。
+- 2026-05-20：当前主线已从“静态占位”转为“真 turn + 真 stream + 真 session”，后续继续围绕 agent core 收口。

@@ -4,7 +4,6 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::error::Error;
-use std::io::{BufRead, BufReader};
 use std::time::Instant;
 use std::time::Duration;
 
@@ -85,6 +84,37 @@ pub struct TokenUsage {
     pub total_tokens: Option<u64>,
 }
 
+pub trait ProviderClient {
+    fn requested_name(&self) -> &str;
+    fn name(&self) -> &str;
+    fn model(&self) -> &str;
+    fn protocol_label(&self) -> &'static str;
+    fn temperature(&self) -> f32;
+    fn max_output_tokens(&self) -> u32;
+    fn decide_with_tools(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderDecision, String>;
+    fn continue_with_tool_result(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> Result<ProviderResponse, String>;
+    fn continue_with_tool_result_stream<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String);
+}
+
 pub struct ProviderManager {
     config: ResolvedProviderSelection,
 }
@@ -125,9 +155,9 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
-    ) -> ProviderDecision {
+    ) -> Result<ProviderDecision, String> {
         provider_log(format!(
-            "decision:start requested={} provider={} protocol={} model={} tools={} api_key_present={}",
+            "decision:start requested={} provider={} protocol={} model={} tools={} api_key_present={} ",
             self.config.requested_name,
             self.config.provider_name,
             self.protocol_label(),
@@ -135,30 +165,13 @@ impl ProviderManager {
             tools.len(),
             self.config.api_key.is_some()
         ));
-        if self
-            .config
-            .requested_name
-            .eq_ignore_ascii_case("mock")
-            || self.config.api_key.is_none()
-        {
-            let reason = if self.config.requested_name.eq_ignore_ascii_case("mock") {
-                "当前显式选择了 mock provider。".to_string()
-            } else {
-                format!(
-                    "未读取到 {}（provider={}）的值，已回退到本地 mock。",
-                    self.config.api_key_env_var,
-                    self.config.provider_name
-                )
-            };
-            let response = self.mock_response(request, Some(reason.clone()));
-            provider_log(format!("decision:fallback-to-mock reason={}", reason));
-            return ProviderDecision {
-                output_text: response.output_text,
-                tool_call: None,
-                provider_mode: response.provider_mode,
-                fallback_reason: Some(reason),
-                token_usage: response.token_usage,
-            };
+        if self.config.api_key.is_none() {
+            let error = format!(
+                "provider {} missing API key; please save a key in the model config page (field: {}).",
+                self.config.provider_name, self.config.api_key_env_var
+            );
+            provider_log(format!("decision:error {}", error));
+            return Err(error);
         }
 
         let result = match self.config.protocol {
@@ -169,26 +182,16 @@ impl ProviderManager {
         match result {
             Ok(decision) => {
                 provider_log(format!(
-                    "decision:success mode={} tool_call={} output_preview={}",
+                    "decision:success mode={} tool_call={} output_preview={} ",
                     decision.provider_mode,
                     decision.tool_call.as_ref().map(|call| call.name.as_str()).unwrap_or("none"),
                     preview_text(&decision.output_text, 120)
                 ));
-                decision
+                Ok(decision)
             }
             Err(error) => {
                 provider_log(format!("decision:error {}", error));
-                let response = self.mock_response(
-                    request,
-                    Some(format!("真实 provider 请求失败，已回退到本地 mock：{}", error)),
-                );
-                ProviderDecision {
-                    output_text: response.output_text,
-                    tool_call: None,
-                    provider_mode: response.provider_mode,
-                    fallback_reason: response.fallback_reason,
-                    token_usage: response.token_usage,
-                }
+                Err(error)
             }
         }
     }
@@ -199,9 +202,9 @@ impl ProviderManager {
         tools: &[ToolDefinition],
         tool_call: &ToolCall,
         tool_result: &ToolResult,
-    ) -> ProviderResponse {
+    ) -> Result<ProviderResponse, String> {
         provider_log(format!(
-            "followup:start mode=sync requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={}",
+            "followup:start mode=sync requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={} ",
             self.config.requested_name,
             self.config.provider_name,
             self.protocol_label(),
@@ -210,31 +213,22 @@ impl ProviderManager {
             tool_result.status,
             preview_text(&tool_result.output, 160)
         ));
-        if self.config.api_key.is_none() || self.config.requested_name.eq_ignore_ascii_case("mock") {
-            provider_log("followup:fallback-to-mock reason=mock-selected-or-missing-api-key".to_string());
-            return self.mock_tool_followup_response(request, tool_call, tool_result);
+        if self.config.api_key.is_none() {
+            let error = format!(
+                "provider {} missing API key; please save a key in the model config page (field: {}).",
+                self.config.provider_name, self.config.api_key_env_var
+            );
+            provider_log(format!("followup:error {}", error));
+            return Err(error);
         }
 
-        let result = match self.config.protocol {
+        match self.config.protocol {
             ProviderProtocol::OpenAi => {
                 self.send_openai_tool_followup_request(request, tools, tool_call, tool_result)
             }
             ProviderProtocol::Anthropic => {
                 self.send_anthropic_tool_followup_request(request, tools, tool_call, tool_result)
             }
-        };
-
-        match result {
-            Ok(response) => response,
-            Err(error) => self.mock_tool_followup_response(
-                request,
-                tool_call,
-                &ToolResult {
-                    tool_name: tool_result.tool_name.clone(),
-                    status: "error".to_string(),
-                    output: format!("真实 provider tool follow-up 失败：{}", error),
-                },
-            ),
         }
     }
 
@@ -245,12 +239,12 @@ impl ProviderManager {
         tool_call: &ToolCall,
         tool_result: &ToolResult,
         mut on_delta: F,
-    ) -> ProviderResponse
+    ) -> Result<ProviderResponse, String>
     where
         F: FnMut(String),
     {
         provider_log(format!(
-            "followup:start mode=stream requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={}",
+            "followup:start mode=stream requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={} ",
             self.config.requested_name,
             self.config.provider_name,
             self.protocol_label(),
@@ -259,14 +253,16 @@ impl ProviderManager {
             tool_result.status,
             preview_text(&tool_result.output, 160)
         ));
-        if self.config.api_key.is_none() || self.config.requested_name.eq_ignore_ascii_case("mock") {
-            let response = self.mock_tool_followup_response(request, tool_call, tool_result);
-            provider_log("followup:fallback-to-mock reason=mock-selected-or-missing-api-key".to_string());
-            on_delta(response.output_text.clone());
-            return response;
+        if self.config.api_key.is_none() {
+            let error = format!(
+                "provider {} missing API key; please save a key in the model config page (field: {}).",
+                self.config.provider_name, self.config.api_key_env_var
+            );
+            provider_log(format!("followup:error {}", error));
+            return Err(error);
         }
 
-        let result = match self.config.protocol {
+        match self.config.protocol {
             ProviderProtocol::OpenAi => self.send_openai_tool_followup_stream_request(
                 request,
                 tools,
@@ -281,24 +277,200 @@ impl ProviderManager {
                 tool_result,
                 &mut on_delta,
             ),
-        };
-
-        match result {
-            Ok(response) => response,
-            Err(error) => {
-                let response = self.mock_tool_followup_response(
-                    request,
-                    tool_call,
-                    &ToolResult {
-                        tool_name: tool_result.tool_name.clone(),
-                        status: "error".to_string(),
-                        output: format!("真实 provider tool follow-up 失败：{}", error),
-                    },
-                );
-                on_delta(response.output_text.clone());
-                response
-            }
         }
+    }
+
+    fn send_openai_tool_followup_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        provider_log(format!(
+            "request:openai followup-sync endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": false,
+            "tool_choice": "none",
+            "tools": openai_tools_payload(tools)
+        });
+        let payload = self.post_openai_json(&endpoint, &body)?;
+
+        let output_text =
+            extract_chat_output_text(&payload).ok_or_else(|| "openai tool follow-up missing text".to_string())?;
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_openai_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
+    }
+
+    fn send_openai_tool_followup_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let endpoint = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        provider_log(format!(
+            "request:openai followup-stream endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": true,
+            "tool_choice": "none",
+            "tools": openai_tools_payload(tools)
+        });
+
+        self.stream_openai_request(&endpoint, &body, request, on_delta)
+    }
+
+    fn send_anthropic_tool_followup_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
+        provider_log(format!(
+            "request:anthropic followup-sync endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "system": anthropic_system_text(&request.input),
+            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "tools": anthropic_tools_payload(tools),
+            "tool_choice": {
+                "type": "auto",
+                "disable_parallel_tool_use": true
+            }
+        });
+        let payload = self.post_anthropic_json(&endpoint, &body)?;
+
+        let output_text = extract_anthropic_output_text(&payload)
+            .ok_or_else(|| "anthropic tool follow-up missing text".to_string())?;
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
+    }
+
+    fn send_anthropic_tool_followup_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
+        provider_log(format!(
+            "request:anthropic followup-stream endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let body = json!({
+            "model": request.model,
+            "system": anthropic_system_text(&request.input),
+            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+            "temperature": request.temperature,
+            "max_tokens": request.max_output_tokens,
+            "stream": true,
+            "tools": anthropic_tools_payload(tools),
+            "tool_choice": {
+                "type": "auto",
+                "disable_parallel_tool_use": true
+            }
+        });
+
+        self.stream_anthropic_request(&endpoint, &body, request, on_delta)
+    }
+
+    fn stream_openai_request<F>(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        request: &ProviderRequest,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let payload = self.post_openai_json(endpoint, body)?;
+        let output_text =
+            extract_chat_output_text(&payload).ok_or_else(|| "openai stream follow-up missing text".to_string())?;
+        on_delta(output_text.clone());
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_openai_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
+    }
+
+    fn stream_anthropic_request<F>(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        request: &ProviderRequest,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(String),
+    {
+        let payload = self.post_anthropic_json(endpoint, body)?;
+        let output_text = extract_anthropic_output_text(&payload)
+            .ok_or_else(|| "anthropic stream follow-up missing text".to_string())?;
+        on_delta(output_text.clone());
+
+        Ok(ProviderResponse {
+            output_text: output_text.clone(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(
+                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+            ),
+        })
     }
 
     fn send_openai_tool_decision_request(
@@ -501,355 +673,70 @@ impl ProviderManager {
                 )
             })
     }
+}
 
-    fn mock_response(
-        &self,
-        request: &ProviderRequest,
-        fallback_reason: Option<String>,
-    ) -> ProviderResponse {
-        let last_user = request
-            .input
-            .iter()
-            .rev()
-            .find(|message| matches!(message.role, ProviderRole::User))
-            .map(|message| message.content.as_str())
-            .unwrap_or("（没有用户消息）");
-
-        ProviderResponse {
-            output_text: format!(
-                "当前 provider 是 {} / {} 的本地 mock 路径。用户问题：{}。",
-                self.config.requested_name,
-                self.protocol_label(),
-                last_user
-            ),
-            provider_mode: "mock".to_string(),
-            fallback_reason,
-            token_usage: Some(estimate_token_usage(
-                request,
-                &format!(
-                    "当前 provider 是 {} / {} 的本地 mock 路径。用户问题：{}。",
-                    self.config.requested_name,
-                    self.protocol_label(),
-                    last_user
-                ),
-            )),
-        }
+impl ProviderClient for ProviderManager {
+    fn requested_name(&self) -> &str {
+        self.requested_name()
     }
 
-    fn send_openai_tool_followup_request(
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn model(&self) -> &str {
+        self.model()
+    }
+
+    fn protocol_label(&self) -> &'static str {
+        self.protocol_label()
+    }
+
+    fn temperature(&self) -> f32 {
+        self.temperature()
+    }
+
+    fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens()
+    }
+
+    fn decide_with_tools(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderDecision, String> {
+        ProviderManager::decide_with_tools(self, request, tools)
+    }
+
+    fn continue_with_tool_result(
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
-        let endpoint = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
-        provider_log(format!(
-            "request:openai followup-sync endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let body = json!({
-            "model": request.model,
-            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": false,
-            "tool_choice": "none",
-            "tools": openai_tools_payload(tools)
-        });
-        let payload = self.post_openai_json(&endpoint, &body)?;
-
-        let output_text =
-            extract_chat_output_text(&payload).ok_or_else(|| "openai tool follow-up 没有返回可读文本".to_string())?;
-
-        Ok(ProviderResponse {
-            output_text: output_text.clone(),
-            provider_mode: "live".to_string(),
-            fallback_reason: None,
-            token_usage: Some(
-                extract_openai_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
-            ),
-        })
+        ProviderManager::continue_with_tool_result(self, request, tools, tool_call, tool_result)
     }
 
-    fn send_openai_tool_followup_stream_request<F>(
+    fn continue_with_tool_result_stream<F>(
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         tool_call: &ToolCall,
         tool_result: &ToolResult,
-        on_delta: &mut F,
+        on_delta: F,
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(String),
     {
-        let endpoint = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
-        provider_log(format!(
-            "request:openai followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let body = json!({
-            "model": request.model,
-            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": true,
-            "tool_choice": "none",
-            "tools": openai_tools_payload(tools)
-        });
-
-        self.stream_openai_request(&endpoint, &body, request, on_delta)
-    }
-
-    fn send_anthropic_tool_followup_request(
-        &self,
-        request: &ProviderRequest,
-        tools: &[ToolDefinition],
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
-    ) -> Result<ProviderResponse, String> {
-        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
-        provider_log(format!(
-            "request:anthropic followup-sync endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let body = json!({
-            "model": request.model,
-            "system": anthropic_system_text(&request.input),
-            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "tools": anthropic_tools_payload(tools),
-            "tool_choice": {
-                "type": "auto",
-                "disable_parallel_tool_use": true
-            }
-        });
-        let payload = self.post_anthropic_json(&endpoint, &body)?;
-
-        let output_text = extract_anthropic_output_text(&payload)
-            .ok_or_else(|| "anthropic tool follow-up 没有返回可读文本".to_string())?;
-
-        Ok(ProviderResponse {
-            output_text: output_text.clone(),
-            provider_mode: "live".to_string(),
-            fallback_reason: None,
-            token_usage: Some(
-                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
-            ),
-        })
-    }
-
-    fn send_anthropic_tool_followup_stream_request<F>(
-        &self,
-        request: &ProviderRequest,
-        tools: &[ToolDefinition],
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
-        on_delta: &mut F,
-    ) -> Result<ProviderResponse, String>
-    where
-        F: FnMut(String),
-    {
-        let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
-        provider_log(format!(
-            "request:anthropic followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let body = json!({
-            "model": request.model,
-            "system": anthropic_system_text(&request.input),
-            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": true,
-            "tools": anthropic_tools_payload(tools),
-            "tool_choice": {
-                "type": "auto",
-                "disable_parallel_tool_use": true
-            }
-        });
-
-        self.stream_anthropic_request(&endpoint, &body, request, on_delta)
-    }
-
-    fn stream_openai_request<F>(
-        &self,
-        endpoint: &str,
-        body: &Value,
-        request: &ProviderRequest,
-        on_delta: &mut F,
-    ) -> Result<ProviderResponse, String>
-    where
-        F: FnMut(String),
-    {
-        let client = build_http_client(Duration::from_secs(90))?;
-        let started_at = Instant::now();
-
-        let response = client
-            .post(endpoint)
-            .bearer_auth(
-                self.config
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-            )
-            .json(body)
-            .send()
-            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?
-            .error_for_status()
-            .map_err(|error| format_request_error("provider 返回错误状态", &error, started_at.elapsed()))?;
-
-        let reader = BufReader::new(response);
-        let mut full_text = String::new();
-        let mut usage = None;
-
-        for line in reader.lines() {
-            let line =
-                line.map_err(|error| format!("读取 stream 数据失败：{}；耗时={}ms", error, started_at.elapsed().as_millis()))?;
-            let trimmed = line.trim();
-
-            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
-                continue;
-            }
-
-            let data = trimmed.trim_start_matches("data: ").trim();
-            if data == "[DONE]" {
-                break;
-            }
-
-            let payload: Value =
-                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
-
-            if usage.is_none() {
-                usage = extract_openai_usage(&payload);
-            }
-
-            if let Some(delta) = extract_chat_delta_text(&payload) {
-                if !delta.is_empty() {
-                    full_text.push_str(&delta);
-                    on_delta(delta);
-                }
-            }
-        }
-
-        if full_text.trim().is_empty() {
-            Err("stream 返回中没有读取到可见文本".to_string())
-        } else {
-            Ok(ProviderResponse {
-                output_text: full_text.clone(),
-                provider_mode: "live".to_string(),
-                fallback_reason: None,
-                token_usage: Some(usage.unwrap_or_else(|| estimate_token_usage(request, &full_text))),
-            })
-        }
-    }
-
-    fn stream_anthropic_request<F>(
-        &self,
-        endpoint: &str,
-        body: &Value,
-        request: &ProviderRequest,
-        on_delta: &mut F,
-    ) -> Result<ProviderResponse, String>
-    where
-        F: FnMut(String),
-    {
-        let client = build_http_client(Duration::from_secs(90))?;
-        let started_at = Instant::now();
-
-        let response = client
-            .post(endpoint)
-            .header(
-                "x-api-key",
-                self.config
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-            )
-            .header("anthropic-version", "2023-06-01")
-            .json(body)
-            .send()
-            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?
-            .error_for_status()
-            .map_err(|error| format_request_error("provider 返回错误状态", &error, started_at.elapsed()))?;
-
-        let reader = BufReader::new(response);
-        let mut full_text = String::new();
-        let mut usage = None;
-
-        for line in reader.lines() {
-            let line =
-                line.map_err(|error| format!("读取 stream 数据失败：{}；耗时={}ms", error, started_at.elapsed().as_millis()))?;
-            let trimmed = line.trim();
-
-            if trimmed.is_empty() || !trimmed.starts_with("data: ") {
-                continue;
-            }
-
-            let data = trimmed.trim_start_matches("data: ").trim();
-            let payload: Value =
-                serde_json::from_str(data).map_err(|error| format!("解析 stream 数据失败：{}", error))?;
-
-            if usage.is_none() {
-                usage = extract_anthropic_usage(&payload);
-            }
-
-            if let Some(delta) = extract_anthropic_delta_text(&payload) {
-                if !delta.is_empty() {
-                    full_text.push_str(&delta);
-                    on_delta(delta);
-                }
-            }
-        }
-
-        if full_text.trim().is_empty() {
-            Err("anthropic stream 返回中没有读取到可见文本".to_string())
-        } else {
-            Ok(ProviderResponse {
-                output_text: full_text.clone(),
-                provider_mode: "live".to_string(),
-                fallback_reason: None,
-                token_usage: Some(usage.unwrap_or_else(|| estimate_token_usage(request, &full_text))),
-            })
-        }
-    }
-
-    fn mock_tool_followup_response(
-        &self,
-        request: &ProviderRequest,
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
-    ) -> ProviderResponse {
-        let last_user = request
-            .input
-            .iter()
-            .rev()
-            .find(|message| matches!(message.role, ProviderRole::User))
-            .map(|message| message.content.as_str())
-            .unwrap_or("（没有用户消息）");
-
-        let output_text = format!(
-                "当前处于 {} / {} 的本地 mock 路径。\n用户问题：{}\n已执行工具：{}\n工具结果：{}",
-                self.config.requested_name,
-                self.protocol_label(),
-                last_user,
-                tool_call.name,
-                tool_result.output
-            );
-
-        ProviderResponse {
-            output_text: output_text.clone(),
-            provider_mode: "mock".to_string(),
-            fallback_reason: Some("当前通过 mock 路径生成 tool follow-up 回答。".to_string()),
-            token_usage: Some(estimate_token_usage(request, &output_text)),
-        }
+        ProviderManager::continue_with_tool_result_stream(
+            self,
+            request,
+            tools,
+            tool_call,
+            tool_result,
+            on_delta,
+        )
     }
 }
 

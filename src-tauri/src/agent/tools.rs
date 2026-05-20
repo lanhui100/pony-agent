@@ -2,9 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {
     pub name: &'static str,
     pub description: &'static str,
@@ -23,6 +25,11 @@ pub struct ToolResult {
     pub tool_name: String,
     pub status: String,
     pub output: String,
+    pub duration_ms: u64,
+}
+
+pub trait ToolExecutor: Send {
+    fn execute(&self, call: &ToolCall) -> ToolResult;
 }
 
 pub struct ToolRouter {
@@ -37,7 +44,8 @@ impl ToolRouter {
     }
 
     pub fn execute(&self, call: &ToolCall) -> ToolResult {
-        match call.name.as_str() {
+        let started_at = Instant::now();
+        let mut result = match call.name.as_str() {
             "time.now" => self.time_now(),
             "echo.input" => self.echo_input(call),
             "workspace.list_files" => self.list_files(call),
@@ -47,8 +55,11 @@ impl ToolRouter {
                 tool_name: other.to_string(),
                 status: "error".to_string(),
                 output: format!("当前 runtime 还没有实现工具：{}", other),
+                duration_ms: 0,
             },
-        }
+        };
+        result.duration_ms = started_at.elapsed().as_millis() as u64;
+        result
     }
 
     fn time_now(&self) -> ToolResult {
@@ -64,6 +75,7 @@ impl ToolRouter {
                 "当前 UNIX 时间戳（秒）为 {}。如果需要本地格式化时间，可以在下一阶段补充 chrono/time 支持。",
                 unix_seconds
             ),
+            duration_ms: 0,
         }
     }
 
@@ -81,6 +93,7 @@ impl ToolRouter {
                 tool_name: "echo.input".to_string(),
                 status: "error".to_string(),
                 output: "echo.input 需要参数 {\"text\":\"...\"}。".to_string(),
+                duration_ms: 0,
             };
         }
 
@@ -88,6 +101,7 @@ impl ToolRouter {
             tool_name: "echo.input".to_string(),
             status: "ok".to_string(),
             output: format!("echo.input 返回：{}", text),
+            duration_ms: 0,
         }
     }
 
@@ -97,6 +111,7 @@ impl ToolRouter {
                 tool_name: "workspace.read_file".to_string(),
                 status: "error".to_string(),
                 output: "workspace.read_file 需要参数 {\"path\":\"相对工作区路径\"}。".to_string(),
+                duration_ms: 0,
             };
         };
 
@@ -112,18 +127,21 @@ impl ToolRouter {
                             resolved.display(),
                             preview
                         ),
+                        duration_ms: 0,
                     }
                 }
                 Err(error) => ToolResult {
                     tool_name: "workspace.read_file".to_string(),
                     status: "error".to_string(),
                     output: format!("读取文件失败：{}。", error),
+                    duration_ms: 0,
                 },
             },
             Err(error) => ToolResult {
                 tool_name: "workspace.read_file".to_string(),
                 status: "error".to_string(),
                 output: error,
+                duration_ms: 0,
             },
         }
     }
@@ -134,6 +152,7 @@ impl ToolRouter {
                 tool_name: "workspace.read_file_segment".to_string(),
                 status: "error".to_string(),
                 output: "workspace.read_file_segment 需要参数 {\"path\":\"相对工作区路径\",\"startLine\":1,\"lineCount\":40}。".to_string(),
+                duration_ms: 0,
             };
         };
 
@@ -159,6 +178,7 @@ impl ToolRouter {
                             tool_name: "workspace.read_file_segment".to_string(),
                             status: "ok".to_string(),
                             output: format!("文件 {} 为空。", resolved.display()),
+                            duration_ms: 0,
                         };
                     }
 
@@ -172,6 +192,7 @@ impl ToolRouter {
                                 start_line,
                                 lines.len()
                             ),
+                            duration_ms: 0,
                         };
                     }
 
@@ -193,18 +214,21 @@ impl ToolRouter {
                             end_index,
                             segment
                         ),
+                        duration_ms: 0,
                     }
                 }
                 Err(error) => ToolResult {
                     tool_name: "workspace.read_file_segment".to_string(),
                     status: "error".to_string(),
                     output: format!("读取文件失败：{}。", error),
+                    duration_ms: 0,
                 },
             },
             Err(error) => ToolResult {
                 tool_name: "workspace.read_file_segment".to_string(),
                 status: "error".to_string(),
                 output: error,
+                duration_ms: 0,
             },
         }
     }
@@ -256,18 +280,21 @@ impl ToolRouter {
                             preview.len(),
                             preview.join("\n")
                         ),
+                        duration_ms: 0,
                     }
                 }
                 Err(error) => ToolResult {
                     tool_name: "workspace.list_files".to_string(),
                     status: "error".to_string(),
                     output: format!("读取目录失败：{}。", error),
+                    duration_ms: 0,
                 },
             },
             Err(error) => ToolResult {
                 tool_name: "workspace.list_files".to_string(),
                 status: "error".to_string(),
                 output: error,
+                duration_ms: 0,
             },
         }
     }
@@ -318,6 +345,12 @@ impl ToolRouter {
         }
 
         Ok(canonical)
+    }
+}
+
+impl ToolExecutor for ToolRouter {
+    fn execute(&self, call: &ToolCall) -> ToolResult {
+        ToolRouter::execute(self, call)
     }
 }
 

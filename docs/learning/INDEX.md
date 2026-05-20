@@ -35,6 +35,10 @@
 - [0012 当前 stream runtime、Hermes/Claude 对照与下一步架构路径](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0012-stream-runtime-and-future-architecture.md)
 - [0013 为什么要从最小 tool 闭环切到 OpenAI/Anthropic 原生 tools 协议](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0013-native-tools-protocols.md)
 - [0014 本地 planner、跨轮历史与工作区工具为什么要前置](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0014-local-planner-and-history-carry.md)
+- [0015 为什么要把缓存命中纳入 runtime 重构约束](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0015-prompt-caching-as-runtime-design-constraint.md)
+- [0016 为什么工具调用要先变成 ToolCall / ToolResult，而不是直接调函数](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0016-tool-call-as-data-not-direct-function-call.md)
+- [0017 为什么要先做 SessionStore，再做新对话和历史对话](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0017-session-store-and-context-boundary.md)
+- [0018 对话历史侧栏与会话管理 UI 的设计取舍](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0018-session-navigation-ui-and-tradeoffs.md)
 
 ## 记录模板
 

@@ -1,6 +1,8 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
-import type { ProviderConfig, ProviderModelConfig, ProviderProtocol, ProviderRegistry } from "@/types/provider";
+import type { ProviderConfig, ProviderModelConfig, ProviderRegistry } from "@/types/provider";
+
+const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -16,7 +18,7 @@ function createEmptyModel(): ProviderModelConfig {
     name: "",
     model: "",
     temperature: 0,
-    maxOutputTokens: 0
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS
   };
 }
 
@@ -47,26 +49,55 @@ function createEmptyProvider(): ProviderConfig {
   };
 }
 
-function createBrowserRegistry(): ProviderRegistry {
-  const provider = createEmptyProvider();
-  provider.name = "deepseek";
-  provider.protocol = "openai";
-  provider.baseUrl = "https://api.deepseek.com/v1";
-  provider.apiKeyEnvVar = deriveEnvVarName(provider.name);
-  provider.models = [
-    {
-      id: createId("model"),
-      name: "DeepSeek Chat",
-      model: "deepseek-chat",
-      temperature: 0,
-      maxOutputTokens: 0
-    }
-  ];
-  provider.selectedModelId = provider.models[0].id;
+function createPresetProvider(
+  id: string,
+  name: string,
+  baseUrl: string,
+  modelName: string,
+  modelIdValue: string
+): ProviderConfig {
+  const modelId = createId("model");
 
   return {
-    providers: [provider],
-    selectedProviderId: provider.id
+    id,
+    name,
+    protocol: "openai",
+    baseUrl,
+    apiKeyEnvVar: deriveEnvVarName(name),
+    apiKeyValue: "",
+    apiKeyPresent: false,
+    models: [
+      {
+        id: modelId,
+        name: modelName,
+        model: modelIdValue,
+        temperature: 0.2,
+        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS
+      }
+    ],
+    selectedModelId: modelId
+  };
+}
+
+function createBrowserRegistry(): ProviderRegistry {
+  const openrouter = createPresetProvider(
+    "provider-openrouter",
+    "openrouter",
+    "https://openrouter.ai/api/v1",
+    "OpenAI GPT-4.1 Mini",
+    "openai/gpt-4.1-mini"
+  );
+  const deepseek = createPresetProvider(
+    "provider-deepseek",
+    "deepseek",
+    "https://api.deepseek.com/v1",
+    "DeepSeek Chat",
+    "deepseek-chat"
+  );
+
+  return {
+    providers: [openrouter, deepseek],
+    selectedProviderId: openrouter.id
   };
 }
 
@@ -124,7 +155,7 @@ export const useProviderStore = defineStore("providers", {
       try {
         if (!isTauriAvailable()) {
           this.registry = createBrowserRegistry();
-          this.notice = "当前是浏览器预览模式，模型配置仅用于界面预览，不会写入本地环境变量。";
+          this.notice = "当前是浏览器预览模式，模型配置只用于界面预览，不会写入本地 providers.json。";
           return;
         }
 
@@ -152,7 +183,7 @@ export const useProviderStore = defineStore("providers", {
 
       try {
         if (!isTauriAvailable()) {
-          this.notice = "当前是浏览器预览模式，保存结果仅保留在当前页面会话中。";
+          this.notice = "当前是浏览器预览模式，保存结果只保留在当前页面会话中。";
           return;
         }
 
@@ -160,7 +191,7 @@ export const useProviderStore = defineStore("providers", {
           registry: this.registry
         });
         this.registry = registry;
-        this.notice = "模型配置已保存，API Key 已同步写入环境变量。";
+        this.notice = "模型配置已保存到本地 providers.json。";
       } catch (error) {
         this.error = `保存模型配置失败：${String(error)}`;
       } finally {
@@ -187,7 +218,7 @@ export const useProviderStore = defineStore("providers", {
       provider.selectedModelId = modelId;
       this.registry.selectedProviderId = providerId;
     },
-    addProvider(protocol: ProviderProtocol = "openai") {
+    addProvider() {
       if (!this.registry) {
         this.registry = {
           providers: [],
@@ -196,16 +227,10 @@ export const useProviderStore = defineStore("providers", {
       }
 
       const provider = createEmptyProvider();
-      provider.protocol = protocol;
-      provider.baseUrl =
-        protocol === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1";
-      provider.name = protocol === "anthropic" ? "anthropic" : "openai";
-      provider.apiKeyEnvVar = deriveEnvVarName(provider.name);
-      provider.models[0].name = protocol === "anthropic" ? "Claude Sonnet" : "GPT 4.1 Mini";
-      provider.models[0].model = protocol === "anthropic" ? "claude-3-7-sonnet-latest" : "gpt-4.1-mini";
 
       this.registry.providers.push(provider);
       this.registry.selectedProviderId = provider.id;
+      return provider.id;
     },
     removeProvider(providerId: string) {
       if (!this.registry) {
