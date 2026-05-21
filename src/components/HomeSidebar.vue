@@ -359,6 +359,7 @@ function buildStepRows(turn: TurnTraceRecord, step: TraceStep) {
     pushRow(rows, "Provider", turn.providerName);
     pushRow(rows, "Protocol", turn.providerProtocol);
     pushRow(rows, "Model", turn.providerModel);
+    pushRow(rows, "Source", turn.providerSource);
     pushRow(rows, "Mode", turn.providerMode);
     pushRow(rows, "Session", turn.sessionSummary, { multiline: true });
     pushRow(rows, "Fallback", turn.fallbackReason, { multiline: true, tone: "warning" });
@@ -366,6 +367,7 @@ function buildStepRows(turn: TurnTraceRecord, step: TraceStep) {
 
   if (step.id === "step-call-model") {
     pushRow(rows, "模型", providerModelLabel(turn));
+    pushRow(rows, "来源", turn.providerSource);
     pushRow(rows, "协议", turn.providerProtocol);
     pushRow(rows, "模式", turn.providerMode);
     pushRow(rows, "耗时", stepDurationText(turn, step));

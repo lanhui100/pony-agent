@@ -30,6 +30,7 @@ pub struct PersistedTurnOutcome {
 
 pub struct SyncToolTurnOutcome {
     pub assistant_message: String,
+    pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
     pub token_usage: Option<TokenUsage>,
@@ -65,6 +66,7 @@ pub fn build_failed_turn_result(
         provider_model: provider_meta
             .map(|meta| meta.model.clone())
             .unwrap_or_default(),
+        provider_source: "failed".to_string(),
         provider_mode: "failed".to_string(),
         fallback_reason: None,
         input_tokens: None,
@@ -110,6 +112,7 @@ pub fn emit_stream_failed(
             provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
             provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
             provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source: None,
             provider_mode: None,
             fallback_reason: None,
             input_tokens: None,
@@ -132,6 +135,7 @@ pub fn emit_stream_event(
     phase: Option<&str>,
     text: Option<String>,
     provider_meta: Option<&ProviderEventMeta>,
+    provider_source: Option<String>,
     provider_mode: Option<String>,
     fallback_reason: Option<String>,
     input_tokens: Option<u64>,
@@ -155,6 +159,7 @@ pub fn emit_stream_event(
             provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
             provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
             provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source,
             provider_mode,
             fallback_reason,
             input_tokens,
@@ -184,14 +189,14 @@ pub fn emit_turn_failed(
         provider_protocol,
         provider_model,
     ) {
-        (Some(requested_name), Some(provider_name), Some(protocol), Some(model)) => Some(
-            ProviderEventMeta {
+        (Some(requested_name), Some(provider_name), Some(protocol), Some(model)) => {
+            Some(ProviderEventMeta {
                 requested_name,
                 provider_name,
                 protocol,
                 model,
-            },
-        ),
+            })
+        }
         _ => None,
     };
     emit_stream_failed(
@@ -230,7 +235,9 @@ pub fn normalize_user_message(message: &str) -> String {
     }
 }
 
-pub fn token_usage_parts(token_usage: Option<&TokenUsage>) -> (Option<u64>, Option<u64>, Option<u64>) {
+pub fn token_usage_parts(
+    token_usage: Option<&TokenUsage>,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
     match token_usage {
         Some(token_usage) => (
             token_usage.input_tokens,
@@ -241,7 +248,10 @@ pub fn token_usage_parts(token_usage: Option<&TokenUsage>) -> (Option<u64>, Opti
     }
 }
 
-pub fn provider_failure_message(provider_mode: &str, fallback_reason: Option<&str>) -> Option<String> {
+pub fn provider_failure_message(
+    provider_mode: &str,
+    fallback_reason: Option<&str>,
+) -> Option<String> {
     if provider_mode == "mock" {
         return Some(
             fallback_reason
@@ -286,6 +296,7 @@ pub fn stream_text_chunks(
             None,
             None,
             latency,
+            None,
             None,
             None,
             None,

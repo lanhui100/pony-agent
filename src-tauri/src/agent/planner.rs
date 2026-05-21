@@ -49,17 +49,17 @@ impl LocalTurnPlanner {
         if lowered.contains("time") || lowered.contains("时间") || lowered.contains("几点") {
             return Some(ToolCall {
                 call_id: None,
-                name: "time.now".to_string(),
+                name: "time_now".to_string(),
                 arguments: json!({}),
             });
         }
 
-        if let Some(path) =
-            Self::extract_explicit_file_name(user_message).or_else(|| Self::infer_last_referenced_file(history))
+        if let Some(path) = Self::extract_explicit_file_name(user_message)
+            .or_else(|| Self::infer_last_referenced_file(history))
         {
             return Some(ToolCall {
                 call_id: None,
-                name: "workspace.read_file".to_string(),
+                name: "workspace_read_file".to_string(),
                 arguments: json!({ "path": path }),
             });
         }
@@ -71,7 +71,7 @@ impl LocalTurnPlanner {
         {
             return Some(ToolCall {
                 call_id: None,
-                name: "workspace.list_files".to_string(),
+                name: "workspace_list_files".to_string(),
                 arguments: json!({ "path": "." }),
             });
         }
@@ -97,6 +97,7 @@ impl LocalTurnPlanner {
                 tool_call.name, context_hint
             ),
             tool_call: Some(tool_call),
+            provider_source: "local_planner".to_string(),
             provider_mode: "tool-first".to_string(),
             fallback_reason: None,
             token_usage: None,

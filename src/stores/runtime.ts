@@ -28,6 +28,7 @@ type RuntimeState = {
   providerName: string;
   providerProtocol: string;
   providerModel: string;
+  providerSource: string;
   providerMode: string;
   fallbackReason: string | null;
   inputTokens: number | null;
@@ -52,6 +53,7 @@ type PersistedRuntimeState = {
   providerName: string;
   providerProtocol: string;
   providerModel: string;
+  providerSource: string;
   providerMode: string;
   fallbackReason: string | null;
   inputTokens: number | null;
@@ -402,6 +404,7 @@ export const useRuntimeStore = defineStore("runtime", {
       providerName: persisted?.providerName ?? "",
       providerProtocol: persisted?.providerProtocol ?? "",
       providerModel: persisted?.providerModel ?? "",
+      providerSource: persisted?.providerSource ?? "",
       providerMode: persisted?.providerMode ?? "",
       fallbackReason: persisted?.fallbackReason ?? null,
       inputTokens: persisted?.inputTokens ?? null,
@@ -442,6 +445,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.providerName = "";
       this.providerProtocol = "";
       this.providerModel = "";
+      this.providerSource = "";
       this.providerMode = "";
       this.fallbackReason = null;
       this.inputTokens = null;
@@ -464,6 +468,7 @@ export const useRuntimeStore = defineStore("runtime", {
         providerName: this.providerName,
         providerProtocol: this.providerProtocol,
         providerModel: this.providerModel,
+        providerSource: this.providerSource,
         providerMode: this.providerMode,
         fallbackReason: this.fallbackReason,
         inputTokens: this.inputTokens,
@@ -519,6 +524,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.providerName = persisted?.providerName ?? "";
       this.providerProtocol = persisted?.providerProtocol ?? "";
       this.providerModel = persisted?.providerModel ?? "";
+      this.providerSource = persisted?.providerSource ?? "";
       this.providerMode = persisted?.providerMode ?? "";
       this.fallbackReason = persisted?.fallbackReason ?? null;
       this.inputTokens = persisted?.inputTokens ?? null;
@@ -617,6 +623,7 @@ export const useRuntimeStore = defineStore("runtime", {
         providerName: patch.providerName ?? null,
         providerProtocol: patch.providerProtocol ?? null,
         providerModel: patch.providerModel ?? null,
+        providerSource: patch.providerSource ?? null,
         providerMode: patch.providerMode ?? null,
         sessionSummary: patch.sessionSummary ?? "",
         fallbackReason: patch.fallbackReason ?? null,
@@ -796,6 +803,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerName = payload.providerName ?? this.providerName;
         this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
         this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerSource = payload.providerSource ?? this.providerSource;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
         this.inputTokens = payload.inputTokens ?? this.inputTokens;
@@ -813,6 +821,7 @@ export const useRuntimeStore = defineStore("runtime", {
           providerName: payload.providerName ?? this.providerName,
           providerProtocol: payload.providerProtocol ?? this.providerProtocol,
           providerModel: payload.providerModel ?? this.providerModel,
+          providerSource: payload.providerSource ?? this.providerSource,
           providerMode: payload.providerMode ?? this.providerMode,
           fallbackReason: payload.fallbackReason ?? this.fallbackReason,
           inputTokens: payload.inputTokens ?? this.inputTokens,
@@ -910,6 +919,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerName = payload.providerName ?? this.providerName;
         this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
         this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerSource = payload.providerSource ?? this.providerSource;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? null;
         this.inputTokens = payload.inputTokens ?? this.inputTokens;
@@ -926,6 +936,7 @@ export const useRuntimeStore = defineStore("runtime", {
           providerName: payload.providerName ?? this.providerName,
           providerProtocol: payload.providerProtocol ?? this.providerProtocol,
           providerModel: payload.providerModel ?? this.providerModel,
+          providerSource: payload.providerSource ?? this.providerSource,
           providerMode: payload.providerMode ?? this.providerMode,
           sessionSummary: payload.sessionSummary ?? this.sessionSummary,
           fallbackReason: payload.fallbackReason ?? null,
@@ -969,6 +980,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerName = payload.providerName ?? this.providerName;
         this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
         this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerSource = payload.providerSource ?? this.providerSource;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
         this.inputTokens = payload.inputTokens ?? this.inputTokens;
@@ -985,6 +997,7 @@ export const useRuntimeStore = defineStore("runtime", {
           providerName: payload.providerName ?? this.providerName,
           providerProtocol: payload.providerProtocol ?? this.providerProtocol,
           providerModel: payload.providerModel ?? this.providerModel,
+          providerSource: payload.providerSource ?? this.providerSource,
           providerMode: payload.providerMode ?? this.providerMode,
           fallbackReason: payload.fallbackReason ?? this.fallbackReason,
           inputTokens: payload.inputTokens ?? this.inputTokens,
@@ -1021,6 +1034,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.providerName = provider?.name ?? "browser-preview";
       this.providerProtocol = provider?.protocol ?? "openai";
       this.providerModel = model?.model ?? model?.name ?? "mock-stream";
+      this.providerSource = "browser_preview";
       this.providerMode = "browser_preview";
       this.inputTokens = null;
       this.outputTokens = null;
@@ -1178,6 +1192,7 @@ export const useRuntimeStore = defineStore("runtime", {
         providerName: providerStore.currentProvider?.name ?? null,
         providerProtocol: providerStore.currentProvider?.protocol ?? null,
         providerModel: providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null,
+        providerSource: isTauriAvailable() ? null : "browser_preview",
         providerMode: isTauriAvailable() ? null : "browser_preview",
         sessionSummary: "",
         fallbackReason: null,

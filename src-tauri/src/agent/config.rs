@@ -311,7 +311,10 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             .iter()
             .all(|provider| Some(provider.id.as_str()) != storage.selected_provider_id.as_deref())
     {
-        storage.selected_provider_id = storage.providers.first().map(|provider| provider.id.clone());
+        storage.selected_provider_id = storage
+            .providers
+            .first()
+            .map(|provider| provider.id.clone());
     }
 
     storage

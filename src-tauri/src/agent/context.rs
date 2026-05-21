@@ -41,7 +41,11 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
             )),
         ];
 
-        for message in session.history.iter().filter_map(to_provider_history_message) {
+        for message in session
+            .history
+            .iter()
+            .filter_map(to_provider_history_message)
+        {
             messages.push(message);
         }
         messages.push(ProviderMessage::user(user_message.to_string()));

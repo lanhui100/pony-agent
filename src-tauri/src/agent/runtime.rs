@@ -1,23 +1,19 @@
-﻿use crate::agent::config::{ProviderRegistryStore, ProviderSelectionResolver};
+use crate::agent::config::{ProviderRegistryStore, ProviderSelectionResolver};
 use crate::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
 use crate::agent::graph::GraphEngine;
 use crate::agent::planner::{LocalTurnPlanner, TurnPlanner};
-use crate::agent::provider::{
-    ProviderDecision, ProviderManager, ProviderRequest, TokenUsage,
-};
+use crate::agent::provider::{ProviderDecision, ProviderManager, ProviderRequest, TokenUsage};
 use crate::agent::session::{SessionOverview, SessionSnapshot, SessionStore, TurnHistoryMessage};
 use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
+use crate::agent::tools::{builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter};
 use crate::agent::turn_flow::{
     build_failed_turn_result, emit_stream_event, emit_stream_failed, emit_turn_failed,
     normalize_user_message, preview_text, provider_decision, provider_event_meta,
     provider_failure_message, provider_followup, provider_followup_stream, runtime_log,
     stream_text_chunks, token_usage_parts, PersistedTurnOutcome, PlannedTurn, PreparedTurn,
     ProviderEventMeta, SyncToolTurnOutcome,
-};
-use crate::agent::tools::{
-    builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -44,6 +40,7 @@ pub struct TurnResult {
     pub provider_name: String,
     pub provider_protocol: String,
     pub provider_model: String,
+    pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
     pub input_tokens: Option<u64>,
@@ -69,6 +66,7 @@ pub struct TurnStreamEvent {
     pub provider_name: Option<String>,
     pub provider_protocol: Option<String>,
     pub provider_model: Option<String>,
+    pub provider_source: Option<String>,
     pub provider_mode: Option<String>,
     pub fallback_reason: Option<String>,
     pub input_tokens: Option<u64>,
@@ -141,7 +139,11 @@ impl AgentRuntime {
         self.sessions.remove_session(session_id)
     }
 
-    fn prepare_turn(&mut self, input: &TurnInput, reject_empty: bool) -> Result<PreparedTurn, String> {
+    fn prepare_turn(
+        &mut self,
+        input: &TurnInput,
+        reject_empty: bool,
+    ) -> Result<PreparedTurn, String> {
         let user_message = if reject_empty {
             let trimmed = input.message.trim();
             if trimmed.is_empty() {
@@ -157,9 +159,12 @@ impl AgentRuntime {
             .snapshot(input.session_id.as_deref(), &input.history);
         let provider = self.resolve_provider(input);
         let tools = builtin_tools();
-        let planning_request = self
-            .context_builder
-            .build_request(self.graph.name(), &provider, &user_message, &session);
+        let planning_request = self.context_builder.build_request(
+            self.graph.name(),
+            &provider,
+            &user_message,
+            &session,
+        );
 
         Ok(PreparedTurn {
             user_message,
@@ -176,7 +181,11 @@ impl AgentRuntime {
             .preflight_decision(&prepared.user_message, &prepared.session.history)
         {
             Some(decision) => decision,
-            None => provider_decision(&prepared.provider, &prepared.planning_request, &prepared.tools)?,
+            None => provider_decision(
+                &prepared.provider,
+                &prepared.planning_request,
+                &prepared.tools,
+            )?,
         };
 
         if let Some(error) = provider_failure_message(
@@ -207,9 +216,9 @@ impl AgentRuntime {
         provider_mode: &str,
         token_usage: Option<&TokenUsage>,
     ) -> PersistedTurnOutcome {
-        let updated_session = self
-            .sessions
-            .append_turn(session_id, user_message, assistant_message);
+        let updated_session =
+            self.sessions
+                .append_turn(session_id, user_message, assistant_message);
         let session_summary = self.context_builder.build_session_summary(
             self.graph.name(),
             &updated_session,
@@ -255,6 +264,7 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
             Some(self.telemetry_builder.trace_tool_active()),
             None,
             None,
@@ -266,6 +276,7 @@ impl AgentRuntime {
             turn_id.to_string(),
             "tool",
             Some("calling_tool"),
+            None,
             None,
             None,
             None,
@@ -296,7 +307,11 @@ impl AgentRuntime {
             None,
             None,
             None,
-            Some(self.telemetry_builder.tool_activities_after_result(&tool_call, &tool_result)),
+            None,
+            Some(
+                self.telemetry_builder
+                    .tool_activities_after_result(&tool_call, &tool_result),
+            ),
             None,
         );
 
@@ -314,7 +329,11 @@ impl AgentRuntime {
             None,
             None,
             None,
-            Some(self.telemetry_builder.trace_return_active(tool_result.status == "ok")),
+            None,
+            Some(
+                self.telemetry_builder
+                    .trace_return_active(tool_result.status == "ok"),
+            ),
             None,
             None,
         );
@@ -346,6 +365,7 @@ impl AgentRuntime {
                     "delta",
                     Some("calling_model"),
                     Some(delta),
+                    None,
                     None,
                     None,
                     None,
@@ -417,6 +437,7 @@ impl AgentRuntime {
             Some("ready"),
             Some(final_response.output_text),
             Some(provider_meta),
+            Some(final_response.provider_source.clone()),
             Some(final_response.provider_mode.clone()),
             final_response
                 .fallback_reason
@@ -458,26 +479,21 @@ impl AgentRuntime {
             preview_text(&tool_result.output, 160)
         ));
 
-        let final_response = match provider_followup(
-            provider,
-            planning_request,
-            tools,
-            &tool_call,
-            &tool_result,
-        ) {
-            Ok(response) => response,
-            Err(error) => {
-                return Err(build_failed_turn_result(
-                    Some(provider_meta),
-                    user_message,
-                    error,
-                    self.telemetry_builder
-                        .failed_trace_after_tool(tool_result.status == "ok"),
-                    self.telemetry_builder
-                        .tool_activities_after_result(&tool_call, &tool_result),
-                ));
-            }
-        };
+        let final_response =
+            match provider_followup(provider, planning_request, tools, &tool_call, &tool_result) {
+                Ok(response) => response,
+                Err(error) => {
+                    return Err(build_failed_turn_result(
+                        Some(provider_meta),
+                        user_message,
+                        error,
+                        self.telemetry_builder
+                            .failed_trace_after_tool(tool_result.status == "ok"),
+                        self.telemetry_builder
+                            .tool_activities_after_result(&tool_call, &tool_result),
+                    ));
+                }
+            };
 
         if let Some(error) = provider_failure_message(
             &final_response.provider_mode,
@@ -496,6 +512,7 @@ impl AgentRuntime {
 
         Ok(SyncToolTurnOutcome {
             assistant_message: final_response.output_text,
+            provider_source: final_response.provider_source,
             provider_mode: final_response.provider_mode,
             fallback_reason: final_response.fallback_reason,
             token_usage: final_response.token_usage,
@@ -572,6 +589,7 @@ impl AgentRuntime {
         }
         let (
             assistant_message,
+            provider_source,
             provider_mode,
             fallback_reason,
             token_usage,
@@ -588,6 +606,7 @@ impl AgentRuntime {
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,
+                    outcome.provider_source,
                     outcome.provider_mode,
                     outcome.fallback_reason,
                     outcome.token_usage,
@@ -599,6 +618,7 @@ impl AgentRuntime {
         } else {
             (
                 first_decision.output_text.clone(),
+                first_decision.provider_source.clone(),
                 first_decision.provider_mode.clone(),
                 first_decision.fallback_reason.clone(),
                 first_decision.token_usage.clone(),
@@ -621,6 +641,7 @@ impl AgentRuntime {
             provider_name: provider.name().to_string(),
             provider_protocol: provider.protocol_label().to_string(),
             provider_model: provider.model().to_string(),
+            provider_source,
             provider_mode,
             fallback_reason,
             input_tokens: persisted.input_tokens,
@@ -673,6 +694,7 @@ impl AgentRuntime {
             Some("calling_model"),
             Some(prepared.user_message.clone()),
             Some(&prepared_provider_meta),
+            None,
             None,
             None,
             None,
@@ -738,6 +760,7 @@ impl AgentRuntime {
             Some("calling_model"),
             None,
             None,
+            Some(first_decision.provider_source.clone()),
             None,
             None,
             None,
@@ -749,8 +772,13 @@ impl AgentRuntime {
             None,
         );
 
-        let first_token_latency_ms =
-            stream_text_chunks(&app, &turn_id, "calling_model", &first_decision.output_text, &turn_started_at);
+        let first_token_latency_ms = stream_text_chunks(
+            &app,
+            &turn_id,
+            "calling_model",
+            &first_decision.output_text,
+            &turn_started_at,
+        );
         let completed_text = first_decision.output_text.clone();
         let completed_mode = first_decision.provider_mode.clone();
         let persisted = self.persist_turn_outcome(
@@ -770,6 +798,7 @@ impl AgentRuntime {
             Some("ready"),
             Some(first_decision.output_text),
             Some(&provider_meta),
+            Some(first_decision.provider_source.clone()),
             Some(first_decision.provider_mode.clone()),
             first_decision.fallback_reason.clone(),
             Some(persisted.input_tokens).flatten(),
@@ -783,10 +812,12 @@ impl AgentRuntime {
     }
 
     fn resolve_provider(&self, input: &TurnInput) -> ProviderManager {
-        ProviderManager::new(self.provider_resolver.resolve_provider_selection(
-            input.provider_id.as_deref(),
-            input.model_id.as_deref(),
-        ))
+        ProviderManager::new(
+            self.provider_resolver.resolve_provider_selection(
+                input.provider_id.as_deref(),
+                input.model_id.as_deref(),
+            ),
+        )
     }
 
     fn resolve_tool_call(

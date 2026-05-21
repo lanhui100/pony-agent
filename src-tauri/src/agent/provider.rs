@@ -4,8 +4,8 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::error::Error;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +62,7 @@ pub struct ProviderRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub output_text: String,
+    pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
     pub token_usage: Option<TokenUsage>,
@@ -71,6 +72,7 @@ pub struct ProviderResponse {
 pub struct ProviderDecision {
     pub output_text: String,
     pub tool_call: Option<ToolCall>,
+    pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
     pub token_usage: Option<TokenUsage>,
@@ -176,7 +178,9 @@ impl ProviderManager {
 
         let result = match self.config.protocol {
             ProviderProtocol::OpenAi => self.send_openai_tool_decision_request(request, tools),
-            ProviderProtocol::Anthropic => self.send_anthropic_tool_decision_request(request, tools),
+            ProviderProtocol::Anthropic => {
+                self.send_anthropic_tool_decision_request(request, tools)
+            }
         };
 
         match result {
@@ -184,7 +188,11 @@ impl ProviderManager {
                 provider_log(format!(
                     "decision:success mode={} tool_call={} output_preview={} ",
                     decision.provider_mode,
-                    decision.tool_call.as_ref().map(|call| call.name.as_str()).unwrap_or("none"),
+                    decision
+                        .tool_call
+                        .as_ref()
+                        .map(|call| call.name.as_str())
+                        .unwrap_or("none"),
                     preview_text(&decision.output_text, 120)
                 ));
                 Ok(decision)
@@ -306,15 +314,17 @@ impl ProviderManager {
         });
         let payload = self.post_openai_json(&endpoint, &body)?;
 
-        let output_text =
-            extract_chat_output_text(&payload).ok_or_else(|| "openai tool follow-up missing text".to_string())?;
+        let output_text = extract_chat_output_text(&payload)
+            .ok_or_else(|| "openai tool follow-up missing text".to_string())?;
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(
-                extract_openai_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+                extract_openai_usage(&payload)
+                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
             ),
         })
     }
@@ -382,10 +392,12 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(
-                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+                extract_anthropic_usage(&payload)
+                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
             ),
         })
     }
@@ -434,16 +446,18 @@ impl ProviderManager {
         F: FnMut(String),
     {
         let payload = self.post_openai_json(endpoint, body)?;
-        let output_text =
-            extract_chat_output_text(&payload).ok_or_else(|| "openai stream follow-up missing text".to_string())?;
+        let output_text = extract_chat_output_text(&payload)
+            .ok_or_else(|| "openai stream follow-up missing text".to_string())?;
         on_delta(output_text.clone());
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(
-                extract_openai_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+                extract_openai_usage(&payload)
+                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
             ),
         })
     }
@@ -465,10 +479,12 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(
-                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+                extract_anthropic_usage(&payload)
+                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
             ),
         })
     }
@@ -528,12 +544,17 @@ impl ProviderManager {
         Ok(ProviderDecision {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
             tool_call: extract_openai_tool_call(message),
+            provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
-            token_usage: Some(
-                extract_openai_usage(&payload)
-                    .unwrap_or_else(|| estimate_token_usage(request, extract_openai_message_text(message).as_deref().unwrap_or_default())),
-            ),
+            token_usage: Some(extract_openai_usage(&payload).unwrap_or_else(|| {
+                estimate_token_usage(
+                    request,
+                    extract_openai_message_text(message)
+                        .as_deref()
+                        .unwrap_or_default(),
+                )
+            })),
         })
     }
 
@@ -547,7 +568,11 @@ impl ProviderManager {
             "request:anthropic decision endpoint={} model={} tools={}",
             endpoint,
             request.model,
-            tools.iter().map(|tool| tool.name).collect::<Vec<_>>().join(",")
+            tools
+                .iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
+                .join(",")
         ));
         let body = json!({
             "model": request.model,
@@ -582,10 +607,12 @@ impl ProviderManager {
         Ok(ProviderDecision {
             output_text: output_text.clone(),
             tool_call: extract_anthropic_tool_call(content),
+            provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(
-                extract_anthropic_usage(&payload).unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+                extract_anthropic_usage(&payload)
+                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
             ),
         })
     }
@@ -604,12 +631,14 @@ impl ProviderManager {
             )
             .json(body)
             .send()
-            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?;
+            .map_err(|error| {
+                format_request_error("调用 provider 失败", &error, started_at.elapsed())
+            })?;
 
         let status = response.status();
-        let text = response
-            .text()
-            .map_err(|error| format_request_error("读取 provider 返回失败", &error, started_at.elapsed()))?;
+        let text = response.text().map_err(|error| {
+            format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
+        })?;
 
         if !status.is_success() {
             return Err(format!(
@@ -620,15 +649,14 @@ impl ProviderManager {
             ));
         }
 
-        serde_json::from_str::<Value>(&text)
-            .map_err(|error| {
-                format!(
-                    "解析 provider 返回失败：{}；耗时={}ms；原始响应：{}",
-                    error,
-                    started_at.elapsed().as_millis(),
-                    text
-                )
-            })
+        serde_json::from_str::<Value>(&text).map_err(|error| {
+            format!(
+                "解析 provider 返回失败：{}；耗时={}ms；原始响应：{}",
+                error,
+                started_at.elapsed().as_millis(),
+                text
+            )
+        })
     }
 
     fn post_anthropic_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
@@ -647,12 +675,14 @@ impl ProviderManager {
             .header("anthropic-version", "2023-06-01")
             .json(body)
             .send()
-            .map_err(|error| format_request_error("调用 provider 失败", &error, started_at.elapsed()))?;
+            .map_err(|error| {
+                format_request_error("调用 provider 失败", &error, started_at.elapsed())
+            })?;
 
         let status = response.status();
-        let text = response
-            .text()
-            .map_err(|error| format_request_error("读取 provider 返回失败", &error, started_at.elapsed()))?;
+        let text = response.text().map_err(|error| {
+            format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
+        })?;
 
         if !status.is_success() {
             return Err(format!(
@@ -663,15 +693,14 @@ impl ProviderManager {
             ));
         }
 
-        serde_json::from_str::<Value>(&text)
-            .map_err(|error| {
-                format!(
-                    "解析 provider 返回失败：{}；耗时={}ms；原始响应：{}",
-                    error,
-                    started_at.elapsed().as_millis(),
-                    text
-                )
-            })
+        serde_json::from_str::<Value>(&text).map_err(|error| {
+            format!(
+                "解析 provider 返回失败：{}；耗时={}ms；原始响应：{}",
+                error,
+                started_at.elapsed().as_millis(),
+                text
+            )
+        })
     }
 }
 
@@ -873,7 +902,10 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
         .and_then(Value::as_array)
         .and_then(|calls| calls.first())?;
 
-    let id = tool_call.get("id").and_then(Value::as_str).map(str::to_string);
+    let id = tool_call
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let function = tool_call.get("function")?;
     let name = openai_original_tool_name(function.get("name").and_then(Value::as_str)?);
     let arguments = function
@@ -1110,7 +1142,11 @@ fn extract_anthropic_output_text(payload: &Value) -> Option<String> {
 fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
     let usage = payload
         .get("usage")
-        .or_else(|| payload.get("message").and_then(|message| message.get("usage")))
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        })
         .or_else(|| payload.get("delta").and_then(|delta| delta.get("usage")))?;
 
     Some(normalize_token_usage(TokenUsage {
@@ -1158,10 +1194,13 @@ fn estimate_tokens_from_chars(char_count: usize) -> u64 {
 }
 
 fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
-    let total_tokens = usage.total_tokens.or_else(|| match (usage.input_tokens, usage.output_tokens) {
-        (Some(input_tokens), Some(output_tokens)) => Some(input_tokens + output_tokens),
-        _ => None,
-    });
+    let total_tokens =
+        usage
+            .total_tokens
+            .or_else(|| match (usage.input_tokens, usage.output_tokens) {
+                (Some(input_tokens), Some(output_tokens)) => Some(input_tokens + output_tokens),
+                _ => None,
+            });
 
     TokenUsage {
         input_tokens: usage.input_tokens,

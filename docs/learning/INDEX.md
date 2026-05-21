@@ -39,6 +39,7 @@
 - [0016 为什么工具调用要先变成 ToolCall / ToolResult，而不是直接调函数](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0016-tool-call-as-data-not-direct-function-call.md)
 - [0017 为什么要先做 SessionStore，再做新对话和历史对话](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0017-session-store-and-context-boundary.md)
 - [0018 对话历史侧栏与会话管理 UI 的设计取舍](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0018-session-navigation-ui-and-tradeoffs.md)
+- [0019 session 完善与模块化重构背后的设计哲学](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0019-session-and-modularization-design-philosophy.md)
 
 ## 记录模板
 

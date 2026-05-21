@@ -64,6 +64,7 @@ export type TurnTraceRecord = {
   providerName?: string | null;
   providerProtocol?: string | null;
   providerModel?: string | null;
+  providerSource?: string | null;
   providerMode?: string | null;
   sessionSummary?: string | null;
   fallbackReason?: string | null;
@@ -90,6 +91,7 @@ export type TurnHistoryMessage = {
 
 export type SessionOverview = {
   conversationId: string;
+  title?: string | null;
   summary: string;
   turnCount: number;
   lastReferencedFile?: string | null;
@@ -98,6 +100,7 @@ export type SessionOverview = {
 
 export type SessionSnapshot = {
   conversationId: string;
+  title?: string | null;
   summary: string;
   history: TurnHistoryMessage[];
   turnCount: number;
@@ -111,6 +114,7 @@ export type TurnResult = {
   providerName: string;
   providerProtocol: string;
   providerModel: string;
+  providerSource: string;
   providerMode: string;
   fallbackReason?: string | null;
   inputTokens?: number | null;
@@ -134,6 +138,7 @@ export type TurnStreamEvent = {
   providerName?: string | null;
   providerProtocol?: string | null;
   providerModel?: string | null;
+  providerSource?: string | null;
   providerMode?: string | null;
   fallbackReason?: string | null;
   inputTokens?: number | null;

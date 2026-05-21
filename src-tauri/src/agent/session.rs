@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 const DEFAULT_SESSION_ID: &str = "local-dev-session";
 const DEFAULT_SESSION_SUMMARY: &str = "Pony Agent 本地开发会话";
 const DEFAULT_HISTORY_LIMIT: usize = 24;
+const DEFAULT_SESSION_TITLE: &str = "\u{65B0}\u{5BF9}\u{8BDD}";
+const TITLE_MAX_CHARS: usize = 28;
 
 type SessionMap = HashMap<String, SessionState>;
 
@@ -20,6 +22,8 @@ pub struct TurnHistoryMessage {
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
     pub conversation_id: String,
+    #[serde(default = "default_session_title")]
+    pub title: String,
     pub summary: String,
     pub history: Vec<TurnHistoryMessage>,
     pub turn_count: usize,
@@ -32,6 +36,7 @@ pub struct SessionState {
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
     pub conversation_id: String,
+    pub title: String,
     pub summary: String,
     pub history: Vec<TurnHistoryMessage>,
     pub turn_count: usize,
@@ -43,6 +48,7 @@ pub struct SessionSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct SessionOverview {
     pub conversation_id: String,
+    pub title: String,
     pub summary: String,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
@@ -81,7 +87,13 @@ impl SessionStore {
     }
 
     pub fn with_backend(backend: Box<dyn SessionBackend>) -> Self {
-        let sessions = backend.load_sessions().unwrap_or_else(default_sessions);
+        let mut sessions = backend.load_sessions().unwrap_or_else(default_sessions);
+        for session in sessions.values_mut() {
+            refresh_session_metadata(session, false);
+            if session.updated_at_ms == 0 {
+                session.updated_at_ms = now_timestamp_ms();
+            }
+        }
         Self { sessions, backend }
     }
 
@@ -95,17 +107,7 @@ impl SessionStore {
             let session = self.ensure_session(session_id.unwrap_or(DEFAULT_SESSION_ID));
             if session.history.is_empty() && !fallback_history.is_empty() {
                 session.history = fallback_history.to_vec();
-                session.turn_count = session
-                    .history
-                    .iter()
-                    .filter(|message| message.role == "user")
-                    .count();
-                session.last_referenced_file = session
-                    .history
-                    .iter()
-                    .rev()
-                    .find_map(|message| extract_explicit_file_name(&message.content));
-                session.summary = build_summary(session.turn_count, session.last_referenced_file.as_deref());
+                refresh_session_metadata(session, false);
                 should_save = true;
             }
 
@@ -141,12 +143,7 @@ impl SessionStore {
                 session.history = session.history[keep_from..].to_vec();
             }
 
-            session.turn_count += 1;
-            if let Some(file_name) = extract_explicit_file_name(user_message) {
-                session.last_referenced_file = Some(file_name);
-            }
-            session.summary = build_summary(session.turn_count, session.last_referenced_file.as_deref());
-            session.updated_at_ms = now_timestamp_ms();
+            refresh_session_metadata(session, true);
 
             snapshot_from_state(session)
         };
@@ -161,6 +158,7 @@ impl SessionStore {
             .values()
             .map(|session| SessionOverview {
                 conversation_id: session.conversation_id.clone(),
+                title: session.title.clone(),
                 summary: session.summary.clone(),
                 turn_count: session.turn_count,
                 last_referenced_file: session.last_referenced_file.clone(),
@@ -193,6 +191,7 @@ impl SessionStore {
             .entry(session_id.to_string())
             .or_insert_with(|| SessionState {
                 conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
                 summary: DEFAULT_SESSION_SUMMARY.to_string(),
                 history: Vec::new(),
                 turn_count: 0,
@@ -254,6 +253,7 @@ impl SessionBackend for MemorySessionBackend {
 fn snapshot_from_state(session: &SessionState) -> SessionSnapshot {
     SessionSnapshot {
         conversation_id: session.conversation_id.clone(),
+        title: session.title.clone(),
         summary: session.summary.clone(),
         history: session.history.clone(),
         turn_count: session.turn_count,
@@ -262,12 +262,78 @@ fn snapshot_from_state(session: &SessionState) -> SessionSnapshot {
     }
 }
 
+fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) {
+    session.turn_count = session
+        .history
+        .iter()
+        .filter(|message| message.role == "user")
+        .count();
+    session.last_referenced_file = session
+        .history
+        .iter()
+        .rev()
+        .find_map(|message| extract_explicit_file_name(&message.content));
+    session.title = build_title(&session.history);
+    session.summary = build_summary(session.turn_count, session.last_referenced_file.as_deref());
+    if touch_updated_at {
+        session.updated_at_ms = now_timestamp_ms();
+    }
+}
+
+fn build_title(history: &[TurnHistoryMessage]) -> String {
+    history
+        .iter()
+        .find(|message| message.role == "user")
+        .and_then(|message| normalize_title_candidate(&message.content))
+        .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string())
+}
+
 fn build_summary(turn_count: usize, last_referenced_file: Option<&str>) -> String {
     match (turn_count, last_referenced_file) {
         (0, _) => DEFAULT_SESSION_SUMMARY.to_string(),
-        (_, Some(path)) => format!("{} / 已完成 {} 轮 / 当前关注 {}", DEFAULT_SESSION_SUMMARY, turn_count, path),
+        (_, Some(path)) => format!(
+            "{} / 已完成 {} 轮 / 当前关注 {}",
+            DEFAULT_SESSION_SUMMARY, turn_count, path
+        ),
         (_, None) => format!("{} / 已完成 {} 轮", DEFAULT_SESSION_SUMMARY, turn_count),
     }
+}
+
+fn normalize_title_candidate(text: &str) -> Option<String> {
+    let normalized = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))?;
+
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let title = truncate_chars(&normalized, TITLE_MAX_CHARS);
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut truncated = String::new();
+    let mut count = 0;
+    for ch in text.chars() {
+        if count >= max_chars {
+            truncated.push_str("...");
+            return truncated;
+        }
+        truncated.push(ch);
+        count += 1;
+    }
+    truncated
+}
+
+fn default_session_title() -> String {
+    DEFAULT_SESSION_TITLE.to_string()
 }
 
 fn extract_explicit_file_name(text: &str) -> Option<String> {
@@ -288,7 +354,11 @@ fn extract_explicit_file_name(text: &str) -> Option<String> {
 
     candidates
         .into_iter()
-        .map(|segment| segment.trim_matches(|ch: char| ch == '`' || ch == '.' || ch == '!').to_string())
+        .map(|segment| {
+            segment
+                .trim_matches(|ch: char| ch == '`' || ch == '.' || ch == '!')
+                .to_string()
+        })
         .find(|segment| {
             !segment.is_empty()
                 && segment.contains('.')
@@ -317,6 +387,7 @@ fn default_sessions() -> SessionMap {
         DEFAULT_SESSION_ID.to_string(),
         SessionState {
             conversation_id: DEFAULT_SESSION_ID.to_string(),
+            title: DEFAULT_SESSION_TITLE.to_string(),
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: Vec::new(),
             turn_count: 0,
@@ -355,9 +426,13 @@ mod tests {
         store.append_turn(Some("test"), "查看 tauri.conf.json", "已读取");
 
         let snapshot = store.snapshot(Some("test"), &[]);
+        assert_eq!(snapshot.title, "鏌ョ湅 tauri.conf.json");
         assert_eq!(snapshot.turn_count, 1);
         assert_eq!(snapshot.history.len(), 2);
-        assert_eq!(snapshot.last_referenced_file.as_deref(), Some("tauri.conf.json"));
+        assert_eq!(
+            snapshot.last_referenced_file.as_deref(),
+            Some("tauri.conf.json")
+        );
     }
 
     #[test]
@@ -370,12 +445,41 @@ mod tests {
         let reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
         let mut reloaded = reloaded;
         let snapshot = reloaded.snapshot(Some("persisted"), &[]);
+        assert_eq!(snapshot.title, "鎵撳紑 Cargo.toml");
 
         assert_eq!(snapshot.turn_count, 1);
         assert_eq!(snapshot.history.len(), 2);
         assert_eq!(snapshot.last_referenced_file.as_deref(), Some("Cargo.toml"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn session_title_uses_first_user_message_preview() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(
+            Some("preview"),
+            "Please inspect runtime.rs session switching and trace consistency after tool execution.",
+            "I will check it.",
+        );
+        store.append_turn(
+            Some("preview"),
+            "Also verify provider fallback behavior.",
+            "Done.",
+        );
+
+        let snapshot = store.snapshot(Some("preview"), &[]);
+        assert_eq!(snapshot.title, "Please inspect runtime.rs se...");
+    }
+
+    #[test]
+    fn removing_last_session_recreates_default_session() {
+        let mut store = SessionStore::memory_only();
+        let sessions = store.remove_session(DEFAULT_SESSION_ID);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].conversation_id, DEFAULT_SESSION_ID);
+        assert_eq!(sessions[0].title, DEFAULT_SESSION_TITLE);
     }
 
     fn temp_sessions_path() -> PathBuf {

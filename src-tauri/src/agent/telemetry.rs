@@ -213,7 +213,10 @@ fn tool_activities_running(active_call: &ToolCall) -> Vec<TurnToolActivity> {
     }]
 }
 
-fn tool_activities_after_result(active_call: &ToolCall, result: &ToolResult) -> Vec<TurnToolActivity> {
+fn tool_activities_after_result(
+    active_call: &ToolCall,
+    result: &ToolResult,
+) -> Vec<TurnToolActivity> {
     vec![TurnToolActivity {
         id: format!("tool-{}", active_call.name.replace('.', "-")),
         name: active_call.name.to_string(),
