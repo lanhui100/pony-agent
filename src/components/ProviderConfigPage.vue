@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { ChevronDown, Pencil, Plus, Save, Shield, Trash2 } from "lucide-vue-next";
@@ -7,7 +7,12 @@ import Button from "@/components/ui/Button.vue";
 import Input from "@/components/ui/Input.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import { useProviderStore } from "@/stores/providers";
-import type { ProviderConfig, ProviderModelConfig, ProviderProtocol } from "@/types/provider";
+import type {
+  ProviderConfig,
+  ProviderModelConfig,
+  ProviderProtocol,
+  ProviderReasoningEffort
+} from "@/types/provider";
 
 type ProviderFormState = {
   name: string;
@@ -22,6 +27,13 @@ type ModelFormState = {
   model: string;
   temperature: string;
   maxOutputTokens: string;
+  contextWindowTokens: string;
+  reasoningEffort: ProviderReasoningEffort | "";
+  reasoningBudgetTokens: string;
+  supportsTools: boolean;
+  supportsStreaming: boolean;
+  supportsImageInput: boolean;
+  supportsReasoning: boolean;
   showAdvanced: boolean;
 };
 
@@ -57,6 +69,13 @@ const modelForm = reactive<ModelFormState>({
   model: "",
   temperature: "",
   maxOutputTokens: "",
+  contextWindowTokens: "",
+  reasoningEffort: "",
+  reasoningBudgetTokens: "",
+  supportsTools: true,
+  supportsStreaming: true,
+  supportsImageInput: false,
+  supportsReasoning: false,
   showAdvanced: false
 });
 
@@ -65,7 +84,7 @@ const editorTitle = computed(() => {
     return editorState.mode === "edit" ? "编辑提供商" : "新增提供商";
   }
 
-  return editorState.mode === "edit" ? "编辑模型" : "新增模型";
+  return editorState.mode === "edit" ? "缂栬緫妯″瀷" : "鏂板妯″瀷";
 });
 
 const editorDescription = computed(() => {
@@ -145,6 +164,13 @@ function resetModelForm() {
   modelForm.model = "";
   modelForm.temperature = "";
   modelForm.maxOutputTokens = "";
+  modelForm.contextWindowTokens = "";
+  modelForm.reasoningEffort = "";
+  modelForm.reasoningBudgetTokens = "";
+  modelForm.supportsTools = true;
+  modelForm.supportsStreaming = true;
+  modelForm.supportsImageInput = false;
+  modelForm.supportsReasoning = false;
   modelForm.showAdvanced = false;
 }
 
@@ -154,7 +180,25 @@ function fillModelForm(model: ProviderModelConfig) {
   modelForm.model = model.model;
   modelForm.temperature = model.temperature > 0 ? String(model.temperature) : "";
   modelForm.maxOutputTokens = model.maxOutputTokens > 0 ? String(model.maxOutputTokens) : "";
-  modelForm.showAdvanced = model.temperature > 0 || model.maxOutputTokens > 0;
+  modelForm.contextWindowTokens = model.capabilities.contextWindowTokens
+    ? String(model.capabilities.contextWindowTokens)
+    : "";
+  modelForm.reasoningEffort = model.reasoningEffort ?? "";
+  modelForm.reasoningBudgetTokens = model.reasoningBudgetTokens ? String(model.reasoningBudgetTokens) : "";
+  modelForm.supportsTools = model.capabilities.supportsTools;
+  modelForm.supportsStreaming = model.capabilities.supportsStreaming;
+  modelForm.supportsImageInput = model.capabilities.supportsImageInput;
+  modelForm.supportsReasoning = model.capabilities.supportsReasoning;
+  modelForm.showAdvanced =
+    model.temperature > 0 ||
+    model.maxOutputTokens > 0 ||
+    !!model.capabilities.contextWindowTokens ||
+    !!model.reasoningEffort ||
+    !!model.reasoningBudgetTokens ||
+    !model.capabilities.supportsStreaming ||
+    !model.capabilities.supportsTools ||
+    model.capabilities.supportsImageInput ||
+    model.capabilities.supportsReasoning;
 }
 
 function toggleProvider(providerId: string) {
@@ -289,7 +333,19 @@ async function saveModelForm() {
     name,
     model: modelIdValue,
     temperature: modelForm.temperature.trim() ? Number(modelForm.temperature) : 0,
-    maxOutputTokens: modelForm.maxOutputTokens.trim() ? Number(modelForm.maxOutputTokens) : 0
+    maxOutputTokens: modelForm.maxOutputTokens.trim() ? Number(modelForm.maxOutputTokens) : 0,
+    reasoningEffort: modelForm.supportsReasoning && modelForm.reasoningEffort ? modelForm.reasoningEffort : null,
+    reasoningBudgetTokens:
+      modelForm.supportsReasoning && modelForm.reasoningBudgetTokens.trim()
+        ? Number(modelForm.reasoningBudgetTokens)
+        : null,
+    capabilities: {
+      contextWindowTokens: modelForm.contextWindowTokens.trim() ? Number(modelForm.contextWindowTokens) : null,
+      supportsTools: modelForm.supportsTools,
+      supportsStreaming: modelForm.supportsStreaming,
+      supportsImageInput: modelForm.supportsImageInput,
+      supportsReasoning: modelForm.supportsReasoning
+    }
   });
   providerStore.selectModel(editorState.providerId, payloadId);
 
@@ -364,12 +420,11 @@ watch(
     <aside class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/76 px-4 py-4">
       <div class="flex items-start justify-between gap-3 border-b border-stone-200/70 pb-4">
         <div>
-          <h2 class="text-lg font-semibold tracking-[-0.02em] text-stone-950">提供商 / 模型</h2>
+          <h2 class="text-lg font-semibold tracking-[-0.02em] text-stone-950">鎻愪緵鍟?/ 妯″瀷</h2>
         </div>
         <Button size="sm" @click="beginCreateProvider()">
           <Plus class="mr-1 h-3.5 w-3.5" />
-          新增提供商
-        </Button>
+          鏂板鎻愪緵鍟?        </Button>
       </div>
 
       <ScrollArea class="mt-4 min-h-0 flex-1" viewport-class="h-full w-full pr-2">
@@ -393,7 +448,7 @@ watch(
                         :class="openProviderId === provider.id ? 'rotate-180' : ''"
                       />
                       <span class="truncate text-sm font-medium text-stone-950">
-                        {{ provider.name || "未命名提供商" }}
+                        {{ provider.name || "鏈懡鍚嶆彁渚涘晢" }}
                       </span>
                     </div>
                     <span
@@ -402,8 +457,7 @@ watch(
                       {{ provider.protocol }}
                     </span>
                     <span class="truncate text-[11px] text-stone-600">
-                      {{ provider.models.length }} 个模型
-                    </span>
+                      {{ provider.models.length }} 涓ā鍨?                    </span>
                   </div>
                 </div>
               </button>
@@ -415,6 +469,62 @@ watch(
                 <Button size="sm" variant="ghost" class="px-2" @click.stop="beginEditProvider(provider.id)">
                   <Pencil class="h-3.5 w-3.5" />
                 </Button>
+                <label class="space-y-1 text-xs text-stone-500">
+                  <span>涓婁笅鏂囩獥鍙?Tokens</span>
+                  <Input
+                    :model-value="modelForm.contextWindowTokens"
+                    type="number"
+                    placeholder="渚嬪 128000"
+                    @update:model-value="modelForm.contextWindowTokens = $event"
+                  />
+                </label>
+
+                <label class="space-y-1 text-xs text-stone-500">
+                  <span>鎺ㄧ悊寮哄害</span>
+                  <select
+                    :value="modelForm.reasoningEffort"
+                    class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
+                    @change="modelForm.reasoningEffort = ($event.target as HTMLSelectElement).value as ProviderReasoningEffort | ''"
+                  >
+                    <option value="">未设置</option>
+                    <option value="minimal">minimal</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                </label>
+
+                <label class="space-y-1 text-xs text-stone-500">
+                  <span>鎺ㄧ悊棰勭畻 Tokens</span>
+                  <Input
+                    :model-value="modelForm.reasoningBudgetTokens"
+                    type="number"
+                    placeholder="渚嬪 2048"
+                    @update:model-value="modelForm.reasoningBudgetTokens = $event"
+                  />
+                </label>
+
+                <div class="space-y-2 text-xs text-stone-500 xl:col-span-2">
+                  <span class="block">鑳藉姏澹版槑</span>
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+                      <input v-model="modelForm.supportsStreaming" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+                      <span>鏀寔娴佸紡杈撳嚭</span>
+                    </label>
+                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+                      <input v-model="modelForm.supportsTools" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+                      <span>鏀寔宸ュ叿璋冪敤</span>
+                    </label>
+                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+                      <input v-model="modelForm.supportsImageInput" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+                      <span>鏀寔鍥剧墖杈撳叆</span>
+                    </label>
+                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+                      <input v-model="modelForm.supportsReasoning" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+                      <span>鏀寔鎺ㄧ悊鎺у埗</span>
+                    </label>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -459,15 +569,14 @@ watch(
             v-if="!providers.length"
             class="rounded-[0.45rem] bg-[#f6efe3] px-4 py-4 text-sm leading-6 text-stone-500"
           >
-            当前还没有提供商，先从上方新增一个。
-          </div>
+            褰撳墠杩樻病鏈夋彁渚涘晢锛屽厛浠庝笂鏂规柊澧炰竴涓€?          </div>
         </div>
       </ScrollArea>
     </aside>
 
     <section class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/76 px-4 py-4 sm:px-5">
       <div v-if="loading" class="rounded-[0.45rem] bg-[#f6efe3] px-4 py-4 text-sm text-stone-500">
-        正在读取配置...
+        姝ｅ湪璇诲彇閰嶇疆...
       </div>
 
       <template v-else>
@@ -488,7 +597,7 @@ watch(
               @click="removeCurrentProvider()"
             >
               <Trash2 class="mr-1 h-4 w-4" />
-              删除
+              鍒犻櫎
             </Button>
             <Button
               v-if="editorState.entity === 'model' && editorState.mode === 'edit' && activeProvider"
@@ -496,7 +605,7 @@ watch(
               @click="removeCurrentModel()"
             >
               <Trash2 class="mr-1 h-4 w-4" />
-              删除
+              鍒犻櫎
             </Button>
             <Button
               v-if="editorState.entity === 'provider'"
@@ -505,7 +614,7 @@ watch(
               @click="saveProviderForm()"
             >
               <Save class="mr-1 h-4 w-4" />
-              {{ saving ? "保存中..." : "保存" }}
+              {{ saving ? "淇濆瓨涓?.." : "淇濆瓨" }}
             </Button>
             <Button
               v-else
@@ -514,7 +623,7 @@ watch(
               @click="saveModelForm()"
             >
               <Save class="mr-1 h-4 w-4" />
-              {{ saving ? "保存中..." : "保存" }}
+              {{ saving ? "淇濆瓨涓?.." : "淇濆瓨" }}
             </Button>
           </div>
         </div>
@@ -522,130 +631,187 @@ watch(
         <ScrollArea class="mt-4 min-h-0 flex-1" viewport-class="h-full w-full pr-2">
           <div class="space-y-4 pb-1">
             <section v-if="editorState.entity === 'provider'" class="rounded-[0.45rem] bg-[#f6efe5] px-4 py-4">
-              <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>提供商名称</span>
-                  <Input
-                    :model-value="providerForm.name"
-                    placeholder="例如：DeepSeek"
-                    @update:model-value="providerForm.name = $event"
-                  />
-                </label>
+  <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>提供商名称</span>
+      <Input
+        :model-value="providerForm.name"
+        placeholder="例如：DeepSeek"
+        @update:model-value="providerForm.name = $event"
+      />
+    </label>
 
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>协议</span>
-                  <select
-                    :value="providerForm.protocol"
-                    class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
-                    @change="providerForm.protocol = ($event.target as HTMLSelectElement).value as ProviderProtocol"
-                  >
-                    <option value="openai">openai</option>
-                    <option value="anthropic">anthropic</option>
-                  </select>
-                </label>
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>协议</span>
+      <select
+        :value="providerForm.protocol"
+        class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
+        @change="providerForm.protocol = ($event.target as HTMLSelectElement).value as ProviderProtocol"
+      >
+        <option value="openai">openai</option>
+        <option value="anthropic">anthropic</option>
+      </select>
+    </label>
 
-                <label class="space-y-1 text-xs text-stone-500 xl:col-span-2">
-                  <span>Base URL</span>
-                  <Input
-                    :model-value="providerForm.baseUrl"
-                    placeholder="例如：https://api.openai.com/v1"
-                    @update:model-value="providerForm.baseUrl = $event"
-                  />
-                </label>
-              </div>
+    <label class="space-y-1 text-xs text-stone-500 xl:col-span-2">
+      <span>Base URL</span>
+      <Input
+        :model-value="providerForm.baseUrl"
+        placeholder="例如：https://api.openai.com/v1"
+        @update:model-value="providerForm.baseUrl = $event"
+      />
+    </label>
+  </div>
 
-              <div class="mt-4 rounded-[0.45rem] bg-white/72 px-4 py-4">
-                <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
-                  API Key
-                  <Shield class="h-3.5 w-3.5 text-stone-500" />
-                  <InfoTip text="保存后会写入本地 providers.json，运行时直接从该配置文件读取。" />
-                </div>
+  <div class="mt-4 rounded-[0.45rem] bg-white/72 px-4 py-4">
+    <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
+      API Key
+      <Shield class="h-3.5 w-3.5 text-stone-500" />
+      <InfoTip text="保存后会写入本地 providers.json，运行时直接从这里读取。" />
+    </div>
 
-                <div class="mt-3">
-                  <label class="space-y-1 text-xs text-stone-500">
-                    <span>当前密钥</span>
-                    <Input
-                      :model-value="providerForm.apiKeyValue"
-                      type="password"
-                      placeholder="输入后保存即可"
-                      @update:model-value="providerForm.apiKeyValue = $event"
-                    />
-                  </label>
-                </div>
-              </div>
+    <div class="mt-3">
+      <label class="space-y-1 text-xs text-stone-500">
+        <span>当前密钥</span>
+        <Input
+          :model-value="providerForm.apiKeyValue"
+          type="password"
+          placeholder="输入后保存即可"
+          @update:model-value="providerForm.apiKeyValue = $event"
+        />
+      </label>
+    </div>
+  </div>
 
-              <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
-                <p class="text-[12px] leading-5 text-stone-500">
-                  提供商保存后，可以继续在左侧为它新增或编辑模型。
-                </p>
-              </div>
-            </section>
+  <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+    <p class="text-[12px] leading-5 text-stone-500">
+      提供商保存后，可以继续在左侧为它新增或编辑模型。
+    </p>
+  </div>
+</section>
 
-            <section v-else class="rounded-[0.45rem] bg-[#f6efe5] px-4 py-4">
-              <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>所属提供商</span>
-                  <Input :model-value="modelParentProvider?.name ?? ''" disabled />
-                </label>
+<section v-else class="rounded-[0.45rem] bg-[#f6efe5] px-4 py-4">
+  <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>所属提供商</span>
+      <Input :model-value="modelParentProvider?.name ?? ''" disabled />
+    </label>
 
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>名称</span>
-                  <Input
-                    :model-value="modelForm.name"
-                    placeholder="例如：DeepSeek Chat"
-                    @update:model-value="modelForm.name = $event"
-                  />
-                </label>
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>名称</span>
+      <Input
+        :model-value="modelForm.name"
+        placeholder="例如：DeepSeek Chat"
+        @update:model-value="modelForm.name = $event"
+      />
+    </label>
 
-                <label class="space-y-1 text-xs text-stone-500 xl:col-span-2">
-                  <span>模型 ID</span>
-                  <Input
-                    :model-value="modelForm.model"
-                    placeholder="例如：deepseek-chat"
-                    @update:model-value="modelForm.model = $event"
-                  />
-                </label>
-              </div>
+    <label class="space-y-1 text-xs text-stone-500 xl:col-span-2">
+      <span>模型 ID</span>
+      <Input
+        :model-value="modelForm.model"
+        placeholder="例如：deepseek-chat"
+        @update:model-value="modelForm.model = $event"
+      />
+    </label>
+  </div>
 
-              <button
-                type="button"
-                class="mt-4 inline-flex items-center gap-1 text-[11px] text-stone-500"
-                @click="modelForm.showAdvanced = !modelForm.showAdvanced"
-              >
-                <ChevronDown class="h-3.5 w-3.5 transition-transform duration-200" :class="modelForm.showAdvanced ? 'rotate-180' : ''" />
-                {{ modelForm.showAdvanced ? "收起可选参数" : "展开可选参数" }}
-              </button>
+  <button
+    type="button"
+    class="mt-4 inline-flex items-center gap-1 text-[11px] text-stone-500"
+    @click="modelForm.showAdvanced = !modelForm.showAdvanced"
+  >
+    <ChevronDown class="h-3.5 w-3.5 transition-transform duration-200" :class="modelForm.showAdvanced ? 'rotate-180' : ''" />
+    {{ modelForm.showAdvanced ? "收起可选参数" : "展开可选参数" }}
+  </button>
 
-              <div v-if="modelForm.showAdvanced" class="mt-3 grid gap-3 xl:grid-cols-2">
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>Temperature</span>
-                  <Input
-                    :model-value="modelForm.temperature"
-                    type="number"
-                    placeholder="留空则使用默认值"
-                    @update:model-value="modelForm.temperature = $event"
-                  />
-                </label>
+  <div v-if="modelForm.showAdvanced" class="mt-3 grid gap-3 xl:grid-cols-2">
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>Temperature</span>
+      <Input
+        :model-value="modelForm.temperature"
+        type="number"
+        placeholder="留空则使用默认值"
+        @update:model-value="modelForm.temperature = $event"
+      />
+    </label>
 
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>Max Output Tokens</span>
-                  <Input
-                    :model-value="modelForm.maxOutputTokens"
-                    type="number"
-                    placeholder="留空则使用通用值 8192"
-                    @update:model-value="modelForm.maxOutputTokens = $event"
-                  />
-                </label>
-              </div>
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>Max Output Tokens</span>
+      <Input
+        :model-value="modelForm.maxOutputTokens"
+        type="number"
+        placeholder="留空则使用通用值 8192"
+        @update:model-value="modelForm.maxOutputTokens = $event"
+      />
+    </label>
 
-              <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
-                <p class="text-[12px] leading-5 text-stone-500">
-                  右侧只维护当前模型表单，不再重复展示左侧列表内容。
-                </p>
-              </div>
-            </section>
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>上下文窗口 Tokens</span>
+      <Input
+        :model-value="modelForm.contextWindowTokens"
+        type="number"
+        placeholder="例如 128000"
+        @update:model-value="modelForm.contextWindowTokens = $event"
+      />
+    </label>
 
-            <div v-if="notice" class="rounded-[0.45rem] bg-amber-100/70 px-4 py-3 text-sm text-amber-950">
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>推理强度</span>
+      <select
+        :value="modelForm.reasoningEffort"
+        class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
+        @change="modelForm.reasoningEffort = ($event.target as HTMLSelectElement).value as ProviderReasoningEffort | ''"
+      >
+        <option value="">未设置</option>
+        <option value="minimal">minimal</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+      </select>
+    </label>
+
+    <label class="space-y-1 text-xs text-stone-500">
+      <span>推理预算 Tokens</span>
+      <Input
+        :model-value="modelForm.reasoningBudgetTokens"
+        type="number"
+        placeholder="例如 2048"
+        @update:model-value="modelForm.reasoningBudgetTokens = $event"
+      />
+    </label>
+
+    <div class="space-y-2 text-xs text-stone-500 xl:col-span-2">
+      <span class="block">能力声明</span>
+      <div class="grid gap-2 sm:grid-cols-2">
+        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+          <input v-model="modelForm.supportsStreaming" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+          <span>支持流式输出</span>
+        </label>
+        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+          <input v-model="modelForm.supportsTools" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+          <span>支持工具调用</span>
+        </label>
+        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+          <input v-model="modelForm.supportsImageInput" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+          <span>支持图片输入</span>
+        </label>
+        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
+          <input v-model="modelForm.supportsReasoning" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
+          <span>支持推理控制</span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+    <p class="text-[12px] leading-5 text-stone-500">
+      右侧只维护当前模型表单，不再重复展示左侧列表内容。
+    </p>
+  </div>
+</section>
+
+<div v-if="notice" class="rounded-[0.45rem] bg-amber-100/70 px-4 py-3 text-sm text-amber-950">
               {{ notice }}
             </div>
             <div v-if="error" class="rounded-[0.45rem] bg-rose-50 px-4 py-3 text-sm text-rose-800">
@@ -657,3 +823,5 @@ watch(
     </section>
   </section>
 </template>
+
+

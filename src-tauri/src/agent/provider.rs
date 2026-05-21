@@ -1,4 +1,4 @@
-use crate::agent::config::ResolvedProviderSelection;
+use crate::agent::config::{ProviderReasoningEffort, ResolvedProviderSelection};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -303,7 +303,8 @@ impl ProviderManager {
             "request:openai followup-sync endpoint={} model={} tool={}",
             endpoint, request.model, tool_call.name
         ));
-        let body = json!({
+        let body = with_openai_request_options(
+            json!({
             "model": request.model,
             "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
             "temperature": request.temperature,
@@ -311,7 +312,9 @@ impl ProviderManager {
             "stream": false,
             "tool_choice": "none",
             "tools": openai_tools_payload(tools)
-        });
+        }),
+            &self.config,
+        );
         let payload = self.post_openai_json(&endpoint, &body)?;
 
         let output_text = extract_chat_output_text(&payload)
@@ -348,7 +351,8 @@ impl ProviderManager {
             "request:openai followup-stream endpoint={} model={} tool={}",
             endpoint, request.model, tool_call.name
         ));
-        let body = json!({
+        let body = with_openai_request_options(
+            json!({
             "model": request.model,
             "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
             "temperature": request.temperature,
@@ -356,7 +360,9 @@ impl ProviderManager {
             "stream": true,
             "tool_choice": "none",
             "tools": openai_tools_payload(tools)
-        });
+        }),
+            &self.config,
+        );
 
         self.stream_openai_request(&endpoint, &body, request, on_delta)
     }
@@ -373,7 +379,8 @@ impl ProviderManager {
             "request:anthropic followup-sync endpoint={} model={} tool={}",
             endpoint, request.model, tool_call.name
         ));
-        let body = json!({
+        let body = with_anthropic_request_options(
+            json!({
             "model": request.model,
             "system": anthropic_system_text(&request.input),
             "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
@@ -384,7 +391,9 @@ impl ProviderManager {
                 "type": "auto",
                 "disable_parallel_tool_use": true
             }
-        });
+        }),
+            &self.config,
+        );
         let payload = self.post_anthropic_json(&endpoint, &body)?;
 
         let output_text = extract_anthropic_output_text(&payload)
@@ -418,7 +427,8 @@ impl ProviderManager {
             "request:anthropic followup-stream endpoint={} model={} tool={}",
             endpoint, request.model, tool_call.name
         ));
-        let body = json!({
+        let body = with_anthropic_request_options(
+            json!({
             "model": request.model,
             "system": anthropic_system_text(&request.input),
             "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
@@ -430,7 +440,9 @@ impl ProviderManager {
                 "type": "auto",
                 "disable_parallel_tool_use": true
             }
-        });
+        }),
+            &self.config,
+        );
 
         self.stream_anthropic_request(&endpoint, &body, request, on_delta)
     }
@@ -445,10 +457,8 @@ impl ProviderManager {
     where
         F: FnMut(String),
     {
-        let payload = self.post_openai_json(endpoint, body)?;
-        let output_text = extract_chat_output_text(&payload)
-            .ok_or_else(|| "openai stream follow-up missing text".to_string())?;
-        on_delta(output_text.clone());
+        let raw_text = self.post_openai_stream_text(endpoint, body)?;
+        let output_text = collect_openai_sse_text(&raw_text, on_delta)?;
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
@@ -456,10 +466,44 @@ impl ProviderManager {
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(
-                extract_openai_usage(&payload)
-                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
+                estimate_token_usage(request, &output_text),
             ),
         })
+    }
+
+    fn post_openai_stream_text(&self, endpoint: &str, body: &Value) -> Result<String, String> {
+        let client = build_http_client(Duration::from_secs(45))?;
+        let started_at = Instant::now();
+
+        let response = client
+            .post(endpoint)
+            .bearer_auth(
+                self.config
+                    .api_key
+                    .as_deref()
+                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+            )
+            .json(body)
+            .send()
+            .map_err(|error| {
+                format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
+            })?;
+
+        let status = response.status();
+        let text = response.text().map_err(|error| {
+            format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
+        })?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+                status,
+                started_at.elapsed().as_millis(),
+                text
+            ));
+        }
+
+        Ok(text)
     }
 
     fn stream_anthropic_request<F>(
@@ -518,7 +562,8 @@ impl ProviderManager {
                 })
             })
             .collect::<Vec<_>>();
-        let body = json!({
+        let body = with_openai_request_options(
+            json!({
             "model": request.model,
             "messages": messages,
             "temperature": request.temperature,
@@ -526,7 +571,9 @@ impl ProviderManager {
             "stream": false,
             "tool_choice": "auto",
             "tools": openai_tools_payload(tools)
-        });
+        }),
+            &self.config,
+        );
         provider_log(format!(
             "request:openai decision messages={} body_chars={} body_preview={}",
             request
@@ -574,7 +621,8 @@ impl ProviderManager {
                 .collect::<Vec<_>>()
                 .join(",")
         ));
-        let body = json!({
+        let body = with_anthropic_request_options(
+            json!({
             "model": request.model,
             "system": anthropic_system_text(&request.input),
             "messages": anthropic_user_messages(&request.input),
@@ -585,7 +633,9 @@ impl ProviderManager {
                 "type": "auto",
                 "disable_parallel_tool_use": true
             }
-        });
+        }),
+            &self.config,
+        );
         provider_log(format!(
             "request:anthropic decision messages={} body_chars={} body_preview={}",
             request
@@ -819,6 +869,107 @@ fn format_request_error(prefix: &str, error: &reqwest::Error, elapsed: Duration)
     }
 
     format!("{}：{}；{}", prefix, error, details.join("；"))
+}
+
+fn collect_openai_sse_text<F>(raw_text: &str, on_delta: &mut F) -> Result<String, String>
+where
+    F: FnMut(String),
+{
+    let mut combined = String::new();
+    let mut saw_data = false;
+
+    for line in raw_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Some(data) = trimmed.strip_prefix("data:") else {
+            continue;
+        };
+
+        let payload = data.trim();
+        if payload == "[DONE]" {
+            break;
+        }
+
+        saw_data = true;
+        let value = serde_json::from_str::<Value>(payload).map_err(|error| {
+            format!(
+                "解析 provider SSE chunk 失败：{}；原始 chunk：{}",
+                error, payload
+            )
+        })?;
+
+        let delta_text = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("delta"))
+            .and_then(|delta| delta.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        if !delta_text.is_empty() {
+            let piece = delta_text.to_string();
+            combined.push_str(&piece);
+            on_delta(piece);
+        }
+    }
+
+    if !saw_data {
+        return Err(format!(
+            "provider 流式返回中未找到 SSE data 事件；原始响应：{}",
+            raw_text
+        ));
+    }
+
+    if combined.is_empty() {
+        return Err(format!(
+            "provider 流式返回中未提取到文本内容；原始响应：{}",
+            raw_text
+        ));
+    }
+
+    Ok(combined)
+}
+
+fn with_openai_request_options(
+    mut body: Value,
+    config: &ResolvedProviderSelection,
+) -> Value {
+    if config.capabilities.supports_reasoning {
+        if let Some(effort) = config.reasoning_effort.as_ref() {
+            body["reasoning_effort"] = Value::String(reasoning_effort_label(effort).to_string());
+        }
+    }
+
+    body
+}
+
+fn with_anthropic_request_options(
+    mut body: Value,
+    config: &ResolvedProviderSelection,
+) -> Value {
+    if config.capabilities.supports_reasoning {
+        if let Some(budget_tokens) = config.reasoning_budget_tokens.filter(|budget| *budget > 0) {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget_tokens
+            });
+        }
+    }
+
+    body
+}
+
+fn reasoning_effort_label(effort: &ProviderReasoningEffort) -> &'static str {
+    match effort {
+        ProviderReasoningEffort::Minimal => "minimal",
+        ProviderReasoningEffort::Low => "low",
+        ProviderReasoningEffort::Medium => "medium",
+        ProviderReasoningEffort::High => "high",
+    }
 }
 
 fn to_chat_role(role: &ProviderRole) -> &'static str {

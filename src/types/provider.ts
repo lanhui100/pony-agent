@@ -1,11 +1,24 @@
 export type ProviderProtocol = "openai" | "anthropic";
 
+export type ProviderReasoningEffort = "minimal" | "low" | "medium" | "high";
+
+export type ProviderModelCapabilities = {
+  contextWindowTokens: number | null;
+  supportsTools: boolean;
+  supportsStreaming: boolean;
+  supportsImageInput: boolean;
+  supportsReasoning: boolean;
+};
+
 export type ProviderModelConfig = {
   id: string;
   name: string;
   model: string;
   temperature: number;
   maxOutputTokens: number;
+  reasoningEffort: ProviderReasoningEffort | null;
+  reasoningBudgetTokens: number | null;
+  capabilities: ProviderModelCapabilities;
 };
 
 export type ProviderConfig = {

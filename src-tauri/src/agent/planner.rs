@@ -45,8 +45,10 @@ impl LocalTurnPlanner {
         history: &[TurnHistoryMessage],
     ) -> Option<ToolCall> {
         let lowered = user_message.to_lowercase();
+        let explicit_path = Self::extract_explicit_path(user_message);
+        let referenced_path = explicit_path.or_else(|| Self::infer_last_referenced_path(history));
 
-        if lowered.contains("time") || lowered.contains("时间") || lowered.contains("几点") {
+        if contains_any(&lowered, &["time", "时间", "几点", "timestamp"]) {
             return Some(ToolCall {
                 call_id: None,
                 name: "time_now".to_string(),
@@ -54,25 +56,71 @@ impl LocalTurnPlanner {
             });
         }
 
-        if let Some(path) = Self::extract_explicit_file_name(user_message)
-            .or_else(|| Self::infer_last_referenced_file(history))
-        {
-            return Some(ToolCall {
-                call_id: None,
-                name: "workspace_read_file".to_string(),
-                arguments: json!({ "path": path }),
-            });
-        }
-
-        if lowered.contains("目录")
-            || lowered.contains("文件夹")
-            || lowered.contains("有哪些文件")
-            || lowered.contains("list files")
-        {
+        if contains_any(&lowered, &["有哪些文件", "文件夹里", "目录里", "list files", "列出文件"]) {
             return Some(ToolCall {
                 call_id: None,
                 name: "workspace_list_files".to_string(),
-                arguments: json!({ "path": "." }),
+                arguments: json!({
+                    "path": referenced_path.unwrap_or_else(|| ".".to_string()),
+                    "limit": 60,
+                }),
+            });
+        }
+
+        if contains_any(&lowered, &["搜索", "查找", "find ", "grep", "包含"]) {
+            if let Some(query) = Self::extract_search_query(user_message, referenced_path.as_deref()) {
+                return Some(ToolCall {
+                    call_id: None,
+                    name: "workspace_search_text".to_string(),
+                    arguments: json!({
+                        "query": query,
+                        "path": referenced_path.clone().unwrap_or_else(|| ".".to_string()),
+                        "limit": 20,
+                        "ignoreCase": true,
+                    }),
+                });
+            }
+        }
+
+        if let Some(path) = referenced_path {
+            if contains_any(
+                &lowered,
+                &[
+                    "什么文件",
+                    "是什么文件",
+                    "这个文件",
+                    "这个目录",
+                    "what is",
+                    "path info",
+                    "看一下",
+                    "看看",
+                    "查看",
+                    "内容",
+                    "实现",
+                    "源码",
+                    "read",
+                    "show",
+                ],
+            ) {
+                return Some(ToolCall {
+                    call_id: None,
+                    name: "workspace_gather_context".to_string(),
+                    arguments: json!({
+                        "path": path,
+                        "lineCount": 80,
+                        "limit": 40,
+                    }),
+                });
+            }
+
+            return Some(ToolCall {
+                call_id: None,
+                name: "workspace_gather_context".to_string(),
+                arguments: json!({
+                    "path": path,
+                    "lineCount": 80,
+                    "limit": 40,
+                }),
             });
         }
 
@@ -104,7 +152,47 @@ impl LocalTurnPlanner {
         })
     }
 
-    fn extract_explicit_file_name(text: &str) -> Option<String> {
+    fn extract_explicit_path(text: &str) -> Option<String> {
+        let candidates = Self::extract_path_candidates(text);
+        candidates.into_iter().find(|segment| looks_like_path(segment))
+    }
+
+    fn infer_last_referenced_path(history: &[TurnHistoryMessage]) -> Option<String> {
+        history
+            .iter()
+            .rev()
+            .find_map(|message| Self::extract_explicit_path(&message.content))
+    }
+
+    fn extract_search_query(text: &str, referenced_path: Option<&str>) -> Option<String> {
+        if let Some(quoted) = Self::extract_quoted_segment(text) {
+            let trimmed = quoted.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        let mut cleaned = text.replace('\n', " ");
+        if let Some(path) = referenced_path {
+            cleaned = cleaned.replace(path, " ");
+        }
+        for path in Self::extract_path_candidates(text) {
+            cleaned = cleaned.replace(&path, " ");
+        }
+        for keyword in ["搜索", "查找", "find", "grep", "包含", "帮我", "一下", "看看"] {
+            cleaned = cleaned.replace(keyword, " ");
+        }
+
+        let query = cleaned
+            .split_whitespace()
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if query.is_empty() { None } else { Some(query) }
+    }
+
+    fn extract_path_candidates(text: &str) -> Vec<String> {
         let mut candidates = Vec::new();
         let mut current = String::new();
 
@@ -120,25 +208,44 @@ impl LocalTurnPlanner {
             candidates.push(current);
         }
 
-        candidates.into_iter().find(|segment| {
-            segment.contains('.')
-                && !segment.starts_with("http://")
-                && !segment.starts_with("https://")
-                && segment
-                    .rsplit('.')
-                    .next()
-                    .map(|ext| !ext.is_empty() && ext.chars().all(|ch| ch.is_ascii_alphanumeric()))
-                    .unwrap_or(false)
-        })
+        candidates
     }
 
-    fn infer_last_referenced_file(history: &[TurnHistoryMessage]) -> Option<String> {
-        history
-            .iter()
-            .rev()
-            .filter(|message| message.role == "user")
-            .find_map(|message| Self::extract_explicit_file_name(&message.content))
+    fn extract_quoted_segment(text: &str) -> Option<String> {
+        let quotes = [('`', '`'), ('"', '"'), ('\'', '\''), ('“', '”')];
+        for (open, close) in quotes {
+            let start = text.find(open)?;
+            let remainder = &text[start + open.len_utf8()..];
+            let end = remainder.find(close)?;
+            let segment = &remainder[..end];
+            if !segment.trim().is_empty() {
+                return Some(segment.to_string());
+            }
+        }
+        None
     }
+}
+
+fn looks_like_path(segment: &str) -> bool {
+    if segment.starts_with("http://") || segment.starts_with("https://") {
+        return false;
+    }
+
+    segment.contains('/')
+        || segment.contains('\\')
+        || segment
+            .rsplit('.')
+            .next()
+            .map(|ext| {
+                !ext.is_empty()
+                    && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+                    && segment.contains('.')
+            })
+            .unwrap_or(false)
+}
+
+fn contains_any(text: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|keyword| text.contains(keyword))
 }
 
 fn preview_text(text: &str, max_chars: usize) -> String {
@@ -149,5 +256,71 @@ fn preview_text(text: &str, max_chars: usize) -> String {
     } else {
         let preview = normalized.chars().take(max_chars).collect::<String>();
         format!("{}...(+{} chars)", preview, count - max_chars)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn history(role: &str, content: &str) -> TurnHistoryMessage {
+        TurnHistoryMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn planner_prefers_gather_context_for_explicit_file_questions() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "src-tauri/src/agent/tools.rs 是什么文件？",
+            &[],
+        )
+        .expect("tool call");
+
+        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(
+            call.arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            Some("src-tauri/src/agent/tools.rs")
+        );
+    }
+
+    #[test]
+    fn planner_can_follow_last_referenced_path_from_history() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "这个文件是什么？",
+            &[
+                history("user", "先看看 src-tauri/src/agent/planner.rs"),
+                history("assistant", "好的"),
+            ],
+        )
+        .expect("tool call");
+
+        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(
+            call.arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            Some("src-tauri/src/agent/planner.rs")
+        );
+    }
+
+    #[test]
+    fn planner_extracts_search_query_from_quotes() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "在 src-tauri/src/agent 中搜索 `tool_result`",
+            &[],
+        )
+        .expect("tool call");
+
+        assert_eq!(call.name, "workspace_search_text");
+        assert_eq!(
+            call.arguments
+                .get("query")
+                .and_then(serde_json::Value::as_str),
+            Some("tool_result")
+        );
     }
 }

@@ -112,7 +112,7 @@ function formatSessionTime(updatedAtMs?: number) {
           "
           type="button"
           :disabled="isSubmitting"
-          :title="session.summary || session.conversationId"
+          :title="session.title || session.summary || session.conversationId"
           @click="runtimeStore.switchSession(session.conversationId)"
         >
           <Clock3 class="h-3.5 w-3.5" />
@@ -155,13 +155,14 @@ function formatSessionTime(updatedAtMs?: number) {
                     class="truncate text-[12px] leading-5"
                     :class="session.conversationId === sessionId ? 'text-stone-900' : 'text-stone-700'"
                   >
-                    {{ session.summary || session.conversationId }}
+                    {{ session.title || session.summary || session.conversationId }}
                   </div>
                   <div class="mt-0.5 truncate text-[10px] text-stone-400">
-                    {{ session.turnCount }} 轮<span v-if="session.lastReferencedFile"> · {{ session.lastReferencedFile }}</span>
+                    {{ session.summary }}
                   </div>
                   <div class="mt-0.5 text-[10px] text-stone-400">
-                    {{ formatSessionTime(session.updatedAtMs) }}
+                    {{ session.turnCount }} 轮<span v-if="session.lastReferencedFile"> · {{ session.lastReferencedFile }}</span>
+                    <span v-if="session.updatedAtMs"> · {{ formatSessionTime(session.updatedAtMs) }}</span>
                   </div>
                 </button>
 

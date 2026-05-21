@@ -1,8 +1,24 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
-import type { ProviderConfig, ProviderModelConfig, ProviderRegistry } from "@/types/provider";
+import type {
+  ProviderConfig,
+  ProviderModelCapabilities,
+  ProviderModelConfig,
+  ProviderReasoningEffort,
+  ProviderRegistry
+} from "@/types/provider";
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+
+function createDefaultCapabilities(): ProviderModelCapabilities {
+  return {
+    contextWindowTokens: null,
+    supportsTools: true,
+    supportsStreaming: true,
+    supportsImageInput: false,
+    supportsReasoning: false
+  };
+}
 
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -18,7 +34,17 @@ function createEmptyModel(): ProviderModelConfig {
     name: "",
     model: "",
     temperature: 0,
-    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoningEffort: null,
+    reasoningBudgetTokens: null,
+    capabilities: createDefaultCapabilities()
+  };
+}
+
+function createCapabilities(overrides: Partial<ProviderModelCapabilities>): ProviderModelCapabilities {
+  return {
+    ...createDefaultCapabilities(),
+    ...overrides
   };
 }
 
@@ -72,10 +98,54 @@ function createPresetProvider(
         name: modelName,
         model: modelIdValue,
         temperature: 0.2,
-        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS
+        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        reasoningEffort: null,
+        reasoningBudgetTokens: null,
+        capabilities: createCapabilities({
+          contextWindowTokens: protocolAwareContextWindow(baseUrl),
+          supportsImageInput: supportsImageInputByDefault(baseUrl, modelIdValue),
+          supportsReasoning: supportsReasoningByDefault(modelIdValue)
+        })
       }
     ],
     selectedModelId: modelId
+  };
+}
+
+function protocolAwareContextWindow(baseUrl: string) {
+  if (baseUrl.includes("anthropic")) {
+    return 200000;
+  }
+
+  return 128000;
+}
+
+function supportsImageInputByDefault(baseUrl: string, modelIdValue: string) {
+  const lower = `${baseUrl} ${modelIdValue}`.toLowerCase();
+  return lower.includes("gpt-4.1") || lower.includes("claude") || lower.includes("vision");
+}
+
+function supportsReasoningByDefault(modelIdValue: string) {
+  const lower = modelIdValue.toLowerCase();
+  return lower.includes("o1") || lower.includes("o3") || lower.includes("reason") || lower.includes("claude-3-7");
+}
+
+function normalizeReasoningEffort(value: ProviderReasoningEffort | null | undefined): ProviderReasoningEffort | null {
+  return value ?? null;
+}
+
+function normalizeCapabilities(
+  capabilities: Partial<ProviderModelCapabilities> | null | undefined
+): ProviderModelCapabilities {
+  return createCapabilities(capabilities ?? {});
+}
+
+function normalizeModel(model: ProviderModelConfig): ProviderModelConfig {
+  return {
+    ...model,
+    reasoningEffort: normalizeReasoningEffort(model.reasoningEffort),
+    reasoningBudgetTokens: model.reasoningBudgetTokens ?? null,
+    capabilities: normalizeCapabilities(model.capabilities)
   };
 }
 
@@ -160,7 +230,13 @@ export const useProviderStore = defineStore("providers", {
         }
 
         const registry = await safeInvoke<ProviderRegistry>("load_provider_registry");
-        this.registry = registry;
+        this.registry = {
+          ...registry,
+          providers: registry.providers.map((provider) => ({
+            ...provider,
+            models: provider.models.map(normalizeModel)
+          }))
+        };
       } catch (error) {
         this.error = `加载模型配置失败：${String(error)}`;
       } finally {
@@ -174,7 +250,8 @@ export const useProviderStore = defineStore("providers", {
 
       this.registry.providers = this.registry.providers.map((provider) => ({
         ...provider,
-        apiKeyEnvVar: deriveEnvVarName(provider.name)
+        apiKeyEnvVar: deriveEnvVarName(provider.name),
+        models: provider.models.map(normalizeModel)
       }));
 
       this.saving = true;
@@ -271,16 +348,18 @@ export const useProviderStore = defineStore("providers", {
         return;
       }
 
-      const index = provider.models.findIndex((item) => item.id === payload.id);
+      const normalizedPayload = normalizeModel(payload);
+
+      const index = provider.models.findIndex((item) => item.id === normalizedPayload.id);
 
       if (index >= 0) {
-        provider.models[index] = payload;
+        provider.models[index] = normalizedPayload;
       } else {
-        provider.models.push(payload);
+        provider.models.push(normalizedPayload);
       }
 
       if (!provider.selectedModelId) {
-        provider.selectedModelId = payload.id;
+        provider.selectedModelId = normalizedPayload.id;
       }
     },
     updateModelField<K extends keyof ProviderModelConfig>(

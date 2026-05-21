@@ -102,9 +102,14 @@ impl SessionStore {
         session_id: Option<&str>,
         fallback_history: &[TurnHistoryMessage],
     ) -> SessionSnapshot {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
         let mut should_save = false;
         let snapshot = {
-            let session = self.ensure_session(session_id.unwrap_or(DEFAULT_SESSION_ID));
+            let created = !self.sessions.contains_key(session_key);
+            let session = self.ensure_session(session_key);
+            if created {
+                should_save = true;
+            }
             if session.history.is_empty() && !fallback_history.is_empty() {
                 session.history = fallback_history.to_vec();
                 refresh_session_metadata(session, false);
@@ -426,7 +431,7 @@ mod tests {
         store.append_turn(Some("test"), "查看 tauri.conf.json", "已读取");
 
         let snapshot = store.snapshot(Some("test"), &[]);
-        assert_eq!(snapshot.title, "鏌ョ湅 tauri.conf.json");
+        assert_eq!(snapshot.title, "查看 tauri.conf.json");
         assert_eq!(snapshot.turn_count, 1);
         assert_eq!(snapshot.history.len(), 2);
         assert_eq!(
@@ -445,7 +450,7 @@ mod tests {
         let reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
         let mut reloaded = reloaded;
         let snapshot = reloaded.snapshot(Some("persisted"), &[]);
-        assert_eq!(snapshot.title, "鎵撳紑 Cargo.toml");
+        assert_eq!(snapshot.title, "打开 Cargo.toml");
 
         assert_eq!(snapshot.turn_count, 1);
         assert_eq!(snapshot.history.len(), 2);
@@ -488,5 +493,23 @@ mod tests {
             .expect("system clock before unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("pony-agent-session-test-{}.json", stamp))
+    }
+
+    #[test]
+    fn snapshot_persists_new_empty_session() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        let snapshot = store.snapshot(Some("fresh"), &[]);
+        assert_eq!(snapshot.conversation_id, "fresh");
+        assert_eq!(snapshot.turn_count, 0);
+
+        let mut reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let reloaded_snapshot = reloaded.snapshot(Some("fresh"), &[]);
+        assert_eq!(reloaded_snapshot.conversation_id, "fresh");
+        assert_eq!(reloaded_snapshot.turn_count, 0);
+
+        let _ = fs::remove_file(path);
     }
 }

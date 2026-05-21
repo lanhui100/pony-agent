@@ -69,6 +69,8 @@ type PersistedRuntimeCache = {
   sessions: Record<string, PersistedRuntimeState>;
 };
 
+const DEFAULT_BROWSER_SESSION_SUMMARY = "浏览器预览会话";
+
 function debugLog(event: string, payload?: Record<string, unknown>) {
   const message = {
     event,
@@ -349,6 +351,33 @@ function createHistoryTurnId(index: number) {
   return `history-turn-${index + 1}`;
 }
 
+function buildSessionTitleFromMessages(messages: ChatMessage[]) {
+  const firstUserMessage = messages.find((message) => message.role === "user");
+  return firstUserMessage ? buildTurnTitle(firstUserMessage.content) : "新对话";
+}
+
+function isPersistedStateCompatible(
+  snapshot: SessionSnapshot,
+  persisted: PersistedRuntimeState | null
+) {
+  if (!persisted) {
+    return false;
+  }
+
+  const persistedHistory = buildTurnHistory(persisted.messages);
+  if (persistedHistory.length !== snapshot.history.length) {
+    return false;
+  }
+
+  return persistedHistory.every((message, index) => {
+    const snapshotMessage = snapshot.history[index];
+    return (
+      message.role === snapshotMessage?.role &&
+      message.content.trim() === snapshotMessage?.content.trim()
+    );
+  });
+}
+
 function hydrateMessagesFromHistory(history: TurnHistoryMessage[]): ChatMessage[] {
   const messages: ChatMessage[] = [];
   let currentTurnId: string | null = null;
@@ -500,7 +529,8 @@ export const useRuntimeStore = defineStore("runtime", {
       this.sessionList = Object.entries(cache.sessions)
         .map(([conversationId, state]) => ({
           conversationId,
-          summary: state.sessionSummary || "浏览器预览会话",
+          title: buildSessionTitleFromMessages(state.messages),
+          summary: state.sessionSummary || DEFAULT_BROWSER_SESSION_SUMMARY,
           turnCount: state.messages.filter((message) => message.role === "user").length,
           lastReferencedFile: null,
           updatedAtMs:
@@ -512,25 +542,30 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     applySessionSnapshot(sessionId: string, snapshot: SessionSnapshot) {
       const persisted = loadPersistedRuntimeState(sessionId);
+      const canReusePersistedState = isPersistedStateCompatible(snapshot, persisted);
+      const restoredState = canReusePersistedState ? persisted : null;
 
       this.sessionId = sessionId;
       this.error = null;
       this.isSubmitting = false;
       this.activeTurnId = null;
+      this.draftMessage = "";
       this.sessionSummary = snapshot.summary;
-      this.messages = persisted?.messages?.length ? persisted.messages : hydrateMessagesFromHistory(snapshot.history);
-      this.turnTraceHistory = persisted?.turnTraceHistory ?? [];
-      this.providerRequestedName = persisted?.providerRequestedName ?? "";
-      this.providerName = persisted?.providerName ?? "";
-      this.providerProtocol = persisted?.providerProtocol ?? "";
-      this.providerModel = persisted?.providerModel ?? "";
-      this.providerSource = persisted?.providerSource ?? "";
-      this.providerMode = persisted?.providerMode ?? "";
-      this.fallbackReason = persisted?.fallbackReason ?? null;
-      this.inputTokens = persisted?.inputTokens ?? null;
-      this.outputTokens = persisted?.outputTokens ?? null;
-      this.totalTokens = persisted?.totalTokens ?? null;
-      this.firstTokenLatencyMs = persisted?.firstTokenLatencyMs ?? null;
+      this.messages = restoredState?.messages?.length
+        ? restoredState.messages
+        : hydrateMessagesFromHistory(snapshot.history);
+      this.turnTraceHistory = restoredState?.turnTraceHistory ?? [];
+      this.providerRequestedName = restoredState?.providerRequestedName ?? "";
+      this.providerName = restoredState?.providerName ?? "";
+      this.providerProtocol = restoredState?.providerProtocol ?? "";
+      this.providerModel = restoredState?.providerModel ?? "";
+      this.providerSource = restoredState?.providerSource ?? "";
+      this.providerMode = restoredState?.providerMode ?? "";
+      this.fallbackReason = restoredState?.fallbackReason ?? null;
+      this.inputTokens = restoredState?.inputTokens ?? null;
+      this.outputTokens = restoredState?.outputTokens ?? null;
+      this.totalTokens = restoredState?.totalTokens ?? null;
+      this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? null;
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
       this.phase = this.messages.length ? "ready" : "idle";
@@ -553,7 +588,8 @@ export const useRuntimeStore = defineStore("runtime", {
       const persisted = loadPersistedRuntimeState(nextSessionId);
       this.applySessionSnapshot(nextSessionId, {
         conversationId: nextSessionId,
-        summary: persisted?.sessionSummary ?? "浏览器预览会话",
+        title: buildSessionTitleFromMessages(persisted?.messages ?? []),
+        summary: persisted?.sessionSummary ?? DEFAULT_BROWSER_SESSION_SUMMARY,
         history: buildTurnHistory(persisted?.messages ?? []),
         turnCount: persisted?.messages?.filter((message) => message.role === "user").length ?? 0,
         lastReferencedFile: null,

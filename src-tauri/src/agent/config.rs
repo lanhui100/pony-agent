@@ -8,6 +8,29 @@ const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelCapabilities {
+    pub context_window_tokens: Option<u32>,
+    #[serde(default)]
+    pub supports_tools: bool,
+    #[serde(default)]
+    pub supports_streaming: bool,
+    #[serde(default)]
+    pub supports_image_input: bool,
+    #[serde(default)]
+    pub supports_reasoning: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelConfig {
     pub id: String,
@@ -15,6 +38,12 @@ pub struct ProviderModelConfig {
     pub model: String,
     pub temperature: f32,
     pub max_output_tokens: u32,
+    #[serde(default)]
+    pub reasoning_effort: Option<ProviderReasoningEffort>,
+    #[serde(default)]
+    pub reasoning_budget_tokens: Option<u32>,
+    #[serde(default)]
+    pub capabilities: ProviderModelCapabilities,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -68,6 +97,9 @@ pub struct ResolvedProviderSelection {
     pub model: String,
     pub temperature: f32,
     pub max_output_tokens: u32,
+    pub reasoning_effort: Option<ProviderReasoningEffort>,
+    pub reasoning_budget_tokens: Option<u32>,
+    pub capabilities: ProviderModelCapabilities,
 }
 
 pub trait ProviderSelectionResolver: Send {
@@ -195,6 +227,9 @@ impl ProviderRegistryStore {
             model: model.model.clone(),
             temperature: model.temperature,
             max_output_tokens: model.max_output_tokens,
+            reasoning_effort: model.reasoning_effort.clone(),
+            reasoning_budget_tokens: model.reasoning_budget_tokens,
+            capabilities: model.capabilities.clone(),
         }
     }
 
@@ -277,6 +312,12 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
                 model: default_model(&provider.protocol).to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                capabilities: default_model_capabilities(
+                    &provider.protocol,
+                    default_model(&provider.protocol),
+                ),
             });
         }
         for model in &mut provider.models {
@@ -294,6 +335,14 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             {
                 model.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS;
             }
+            if model.reasoning_budget_tokens == Some(0) {
+                model.reasoning_budget_tokens = None;
+            }
+            model.capabilities = normalize_model_capabilities(
+                &provider.protocol,
+                &model.model,
+                model.capabilities.clone(),
+            );
         }
         if provider.selected_model_id.is_none()
             || provider
@@ -351,6 +400,12 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 model: "gpt-4.1-mini".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                capabilities: default_model_capabilities(
+                    &ProviderProtocol::OpenAi,
+                    "gpt-4.1-mini",
+                ),
             }],
         },
         ProviderConfigStorage {
@@ -367,6 +422,12 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 model: "openai/gpt-4.1-mini".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                capabilities: default_model_capabilities(
+                    &ProviderProtocol::OpenAi,
+                    "openai/gpt-4.1-mini",
+                ),
             }],
         },
         ProviderConfigStorage {
@@ -383,6 +444,12 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 model: "deepseek-chat".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                capabilities: default_model_capabilities(
+                    &ProviderProtocol::OpenAi,
+                    "deepseek-chat",
+                ),
             }],
         },
         ProviderConfigStorage {
@@ -399,9 +466,68 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 model: "claude-3-7-sonnet-latest".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                capabilities: default_model_capabilities(
+                    &ProviderProtocol::Anthropic,
+                    "claude-3-7-sonnet-latest",
+                ),
             }],
         },
     ]
+}
+
+fn default_model_capabilities(
+    protocol: &ProviderProtocol,
+    model_name: &str,
+) -> ProviderModelCapabilities {
+    let lower = model_name.to_ascii_lowercase();
+    let supports_reasoning = lower.contains("o1")
+        || lower.contains("o3")
+        || lower.contains("reason")
+        || lower.contains("claude-3-7");
+    let supports_image_input = lower.contains("gpt-4.1")
+        || lower.contains("claude")
+        || lower.contains("vision");
+    let context_window_tokens = match protocol {
+        ProviderProtocol::Anthropic => Some(200_000),
+        ProviderProtocol::OpenAi => Some(128_000),
+    };
+
+    ProviderModelCapabilities {
+        context_window_tokens,
+        supports_tools: true,
+        supports_streaming: true,
+        supports_image_input,
+        supports_reasoning,
+    }
+}
+
+fn normalize_model_capabilities(
+    protocol: &ProviderProtocol,
+    model_name: &str,
+    capabilities: ProviderModelCapabilities,
+) -> ProviderModelCapabilities {
+    let defaults = default_model_capabilities(protocol, model_name);
+    let looks_like_legacy_empty = capabilities.context_window_tokens.is_none()
+        && !capabilities.supports_tools
+        && !capabilities.supports_streaming
+        && !capabilities.supports_image_input
+        && !capabilities.supports_reasoning;
+
+    if looks_like_legacy_empty {
+        return defaults;
+    }
+
+    ProviderModelCapabilities {
+        context_window_tokens: capabilities
+            .context_window_tokens
+            .or(defaults.context_window_tokens),
+        supports_tools: capabilities.supports_tools,
+        supports_streaming: capabilities.supports_streaming,
+        supports_image_input: capabilities.supports_image_input,
+        supports_reasoning: capabilities.supports_reasoning,
+    }
 }
 
 fn slugify(value: &str, fallback: &str) -> String {
