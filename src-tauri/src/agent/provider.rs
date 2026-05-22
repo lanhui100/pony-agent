@@ -55,6 +55,8 @@ impl ProviderMessage {
 pub struct ProviderRequest {
     pub model: String,
     pub input: Vec<ProviderMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_messages: Vec<Value>,
     pub temperature: f32,
     pub max_output_tokens: u32,
 }
@@ -62,6 +64,8 @@ pub struct ProviderRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub output_text: String,
+    pub reasoning_content: Option<String>,
+    pub assistant_message: Option<Value>,
     pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
@@ -72,6 +76,8 @@ pub struct ProviderResponse {
 pub struct ProviderDecision {
     pub output_text: String,
     pub tool_call: Option<ToolCall>,
+    pub reasoning_content: Option<String>,
+    pub assistant_message: Option<Value>,
     pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
@@ -102,6 +108,7 @@ pub trait ProviderClient {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String>;
@@ -109,6 +116,7 @@ pub trait ProviderClient {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
         on_delta: F,
@@ -151,6 +159,11 @@ impl ProviderManager {
 
     pub fn max_output_tokens(&self) -> u32 {
         self.config.max_output_tokens
+    }
+
+    pub fn requires_provider_native_tool_flow(&self) -> bool {
+        matches!(self.config.protocol, ProviderProtocol::OpenAi)
+            && self.config.capabilities.supports_reasoning
     }
 
     pub fn decide_with_tools(
@@ -208,6 +221,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
@@ -232,10 +246,22 @@ impl ProviderManager {
 
         match self.config.protocol {
             ProviderProtocol::OpenAi => {
-                self.send_openai_tool_followup_request(request, tools, tool_call, tool_result)
+                self.send_openai_tool_followup_request(
+                    request,
+                    tools,
+                    assistant_message,
+                    tool_call,
+                    tool_result,
+                )
             }
             ProviderProtocol::Anthropic => {
-                self.send_anthropic_tool_followup_request(request, tools, tool_call, tool_result)
+                self.send_anthropic_tool_followup_request(
+                    request,
+                    tools,
+                    assistant_message,
+                    tool_call,
+                    tool_result,
+                )
             }
         }
     }
@@ -244,6 +270,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
         mut on_delta: F,
@@ -274,6 +301,7 @@ impl ProviderManager {
             ProviderProtocol::OpenAi => self.send_openai_tool_followup_stream_request(
                 request,
                 tools,
+                assistant_message,
                 tool_call,
                 tool_result,
                 &mut on_delta,
@@ -281,6 +309,7 @@ impl ProviderManager {
             ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_stream_request(
                 request,
                 tools,
+                assistant_message,
                 tool_call,
                 tool_result,
                 &mut on_delta,
@@ -292,6 +321,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
@@ -305,23 +335,30 @@ impl ProviderManager {
         ));
         let body = with_openai_request_options(
             json!({
-            "model": request.model,
-            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": false,
-            "tool_choice": "none",
-            "tools": openai_tools_payload(tools)
-        }),
+                "model": request.model,
+                "messages": openai_messages_with_tool_result(
+                    request,
+                    assistant_message,
+                    tool_call,
+                    tool_result
+                ),
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "stream": false,
+                "tool_choice": "none",
+                "tools": openai_tools_payload(tools)
+            }),
             &self.config,
         );
         let payload = self.post_openai_json(&endpoint, &body)?;
-
-        let output_text = extract_chat_output_text(&payload)
+        let message = first_openai_message(&payload)?;
+        let output_text = extract_openai_message_text(message)
             .ok_or_else(|| "openai tool follow-up missing text".to_string())?;
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            reasoning_content: extract_openai_message_reasoning_content(message),
+            assistant_message: Some(message.clone()),
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -336,6 +373,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
         on_delta: &mut F,
@@ -353,14 +391,19 @@ impl ProviderManager {
         ));
         let body = with_openai_request_options(
             json!({
-            "model": request.model,
-            "messages": openai_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": true,
-            "tool_choice": "none",
-            "tools": openai_tools_payload(tools)
-        }),
+                "model": request.model,
+                "messages": openai_messages_with_tool_result(
+                    request,
+                    assistant_message,
+                    tool_call,
+                    tool_result
+                ),
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "stream": true,
+                "tool_choice": "none",
+                "tools": openai_tools_payload(tools)
+            }),
             &self.config,
         );
 
@@ -371,6 +414,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        _assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
@@ -381,17 +425,17 @@ impl ProviderManager {
         ));
         let body = with_anthropic_request_options(
             json!({
-            "model": request.model,
-            "system": anthropic_system_text(&request.input),
-            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "tools": anthropic_tools_payload(tools),
-            "tool_choice": {
-                "type": "auto",
-                "disable_parallel_tool_use": true
-            }
-        }),
+                "model": request.model,
+                "system": anthropic_system_text(&request.input),
+                "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "tools": anthropic_tools_payload(tools),
+                "tool_choice": {
+                    "type": "auto",
+                    "disable_parallel_tool_use": true
+                }
+            }),
             &self.config,
         );
         let payload = self.post_anthropic_json(&endpoint, &body)?;
@@ -401,6 +445,8 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            reasoning_content: None,
+            assistant_message: None,
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -415,6 +461,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        _assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
         on_delta: &mut F,
@@ -429,18 +476,18 @@ impl ProviderManager {
         ));
         let body = with_anthropic_request_options(
             json!({
-            "model": request.model,
-            "system": anthropic_system_text(&request.input),
-            "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": true,
-            "tools": anthropic_tools_payload(tools),
-            "tool_choice": {
-                "type": "auto",
-                "disable_parallel_tool_use": true
-            }
-        }),
+                "model": request.model,
+                "system": anthropic_system_text(&request.input),
+                "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "stream": true,
+                "tools": anthropic_tools_payload(tools),
+                "tool_choice": {
+                    "type": "auto",
+                    "disable_parallel_tool_use": true
+                }
+            }),
             &self.config,
         );
 
@@ -462,12 +509,12 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            reasoning_content: None,
+            assistant_message: None,
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
-            token_usage: Some(
-                estimate_token_usage(request, &output_text),
-            ),
+            token_usage: Some(estimate_token_usage(request, &output_text)),
         })
     }
 
@@ -523,6 +570,8 @@ impl ProviderManager {
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            reasoning_content: None,
+            assistant_message: Some(provider_native_assistant_message(&output_text)),
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -552,26 +601,17 @@ impl ProviderManager {
                 .collect::<Vec<_>>()
                 .join(",")
         ));
-        let messages = request
-            .input
-            .iter()
-            .map(|message| {
-                json!({
-                    "role": to_chat_role(&message.role),
-                    "content": message.content
-                })
-            })
-            .collect::<Vec<_>>();
+        let messages = openai_request_messages(request);
         let body = with_openai_request_options(
             json!({
-            "model": request.model,
-            "messages": messages,
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "stream": false,
-            "tool_choice": "auto",
-            "tools": openai_tools_payload(tools)
-        }),
+                "model": request.model,
+                "messages": messages,
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "stream": false,
+                "tool_choice": "auto",
+                "tools": openai_tools_payload(tools)
+            }),
             &self.config,
         );
         provider_log(format!(
@@ -591,6 +631,8 @@ impl ProviderManager {
         Ok(ProviderDecision {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
             tool_call: extract_openai_tool_call(message),
+            reasoning_content: extract_openai_message_reasoning_content(message),
+            assistant_message: Some(message.clone()),
             provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -623,17 +665,17 @@ impl ProviderManager {
         ));
         let body = with_anthropic_request_options(
             json!({
-            "model": request.model,
-            "system": anthropic_system_text(&request.input),
-            "messages": anthropic_user_messages(&request.input),
-            "temperature": request.temperature,
-            "max_tokens": request.max_output_tokens,
-            "tools": anthropic_tools_payload(tools),
-            "tool_choice": {
-                "type": "auto",
-                "disable_parallel_tool_use": true
-            }
-        }),
+                "model": request.model,
+                "system": anthropic_system_text(&request.input),
+                "messages": anthropic_user_messages(&request.input),
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "tools": anthropic_tools_payload(tools),
+                "tool_choice": {
+                    "type": "auto",
+                    "disable_parallel_tool_use": true
+                }
+            }),
             &self.config,
         );
         provider_log(format!(
@@ -657,6 +699,8 @@ impl ProviderManager {
         Ok(ProviderDecision {
             output_text: output_text.clone(),
             tool_call: extract_anthropic_tool_call(content),
+            reasoning_content: None,
+            assistant_message: None,
             provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -791,16 +835,25 @@ impl ProviderClient for ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
-        ProviderManager::continue_with_tool_result(self, request, tools, tool_call, tool_result)
+        ProviderManager::continue_with_tool_result(
+            self,
+            request,
+            tools,
+            assistant_message,
+            tool_call,
+            tool_result,
+        )
     }
 
     fn continue_with_tool_result_stream<F>(
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
         on_delta: F,
@@ -812,6 +865,7 @@ impl ProviderClient for ProviderManager {
             self,
             request,
             tools,
+            assistant_message,
             tool_call,
             tool_result,
             on_delta,
@@ -934,10 +988,7 @@ where
     Ok(combined)
 }
 
-fn with_openai_request_options(
-    mut body: Value,
-    config: &ResolvedProviderSelection,
-) -> Value {
+fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelection) -> Value {
     if config.capabilities.supports_reasoning {
         if let Some(effort) = config.reasoning_effort.as_ref() {
             body["reasoning_effort"] = Value::String(reasoning_effort_label(effort).to_string());
@@ -947,10 +998,7 @@ fn with_openai_request_options(
     body
 }
 
-fn with_anthropic_request_options(
-    mut body: Value,
-    config: &ResolvedProviderSelection,
-) -> Value {
+fn with_anthropic_request_options(mut body: Value, config: &ResolvedProviderSelection) -> Value {
     if config.capabilities.supports_reasoning {
         if let Some(budget_tokens) = config.reasoning_budget_tokens.filter(|budget| *budget > 0) {
             body["thinking"] = json!({
@@ -1118,10 +1166,29 @@ fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
 
 fn openai_messages_with_tool_result(
     request: &ProviderRequest,
+    assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Vec<Value> {
-    let mut messages = request
+    let mut messages = openai_request_messages(request);
+
+    messages.push(
+        assistant_message
+            .cloned()
+            .unwrap_or_else(|| provider_native_assistant_tool_call_message(None, None, tool_call)),
+    );
+
+    messages.push(provider_native_tool_result_message(tool_call, tool_result));
+
+    messages
+}
+
+fn openai_request_messages(request: &ProviderRequest) -> Vec<Value> {
+    if !request.native_messages.is_empty() {
+        return request.native_messages.clone();
+    }
+
+    request
         .input
         .iter()
         .map(|message| {
@@ -1130,11 +1197,32 @@ fn openai_messages_with_tool_result(
                 "content": message.content
             })
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
-    messages.push(json!({
+pub fn provider_native_user_message(content: &str) -> Value {
+    json!({
+        "role": "user",
+        "content": content
+    })
+}
+
+pub fn provider_native_assistant_message(content: &str) -> Value {
+    json!({
         "role": "assistant",
-        "content": Value::Null,
+        "content": content
+    })
+}
+
+pub fn provider_native_assistant_tool_call_message(
+    content: Option<&str>,
+    reasoning_content: Option<&str>,
+    tool_call: &ToolCall,
+) -> Value {
+    json!({
+        "role": "assistant",
+        "content": content,
+        "reasoning_content": reasoning_content,
         "tool_calls": [
             {
                 "id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
@@ -1145,15 +1233,15 @@ fn openai_messages_with_tool_result(
                 }
             }
         ]
-    }));
+    })
+}
 
-    messages.push(json!({
+pub fn provider_native_tool_result_message(tool_call: &ToolCall, tool_result: &ToolResult) -> Value {
+    json!({
         "role": "tool",
         "tool_call_id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
         "content": tool_result.output.clone()
-    }));
-
-    messages
+    })
 }
 
 fn anthropic_messages_with_tool_result(
@@ -1221,6 +1309,13 @@ fn extract_chat_output_text(payload: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn extract_openai_message_reasoning_content(message: &Value) -> Option<String> {
+    message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn extract_chat_delta_text(payload: &Value) -> Option<String> {
@@ -1379,5 +1474,51 @@ fn preview_json(value: &Value, max_chars: usize) -> String {
     match serde_json::to_string(value) {
         Ok(text) => preview_text(&text, max_chars),
         Err(error) => format!("json-serialize-error: {}", error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_tool_followup_replays_reasoning_content() {
+        let request = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            input: vec![ProviderMessage::user("检查 src-tauri/src/agent/provider.rs")],
+            native_messages: Vec::new(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+        let tool_call = ToolCall {
+            call_id: Some("call_123".to_string()),
+            name: "workspace.read_file".to_string(),
+            arguments: json!({ "path": "src-tauri/src/agent/provider.rs" }),
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace.read_file".to_string(),
+            status: "ok".to_string(),
+            output: "file content".to_string(),
+            duration_ms: 12,
+        };
+
+        let messages = openai_messages_with_tool_result(
+            &request,
+            Some(&provider_native_assistant_tool_call_message(
+                Some("先读取文件，再给出结论。"),
+                Some("先确认 provider 协议分支，再继续调用工具。"),
+                &tool_call,
+            )),
+            &tool_call,
+            &tool_result,
+        );
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages[1]
+                .get("reasoning_content")
+                .and_then(Value::as_str),
+            Some("先确认 provider 协议分支，再继续调用工具。")
+        );
     }
 }

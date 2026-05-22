@@ -3,6 +3,7 @@ use crate::agent::provider::{
 };
 use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
+use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
 use super::runtime::{TurnResult, TurnStreamEvent};
@@ -30,6 +31,7 @@ pub struct PersistedTurnOutcome {
 
 pub struct SyncToolTurnOutcome {
     pub assistant_message: String,
+    pub provider_native_transcript: Option<Vec<Value>>,
     pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
@@ -333,16 +335,24 @@ pub fn provider_followup<P: ProviderClient>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
+    assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Result<crate::agent::provider::ProviderResponse, String> {
-    provider.continue_with_tool_result(request, tools, tool_call, tool_result)
+    provider.continue_with_tool_result(
+        request,
+        tools,
+        assistant_message,
+        tool_call,
+        tool_result,
+    )
 }
 
 pub fn provider_followup_stream<P, F>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
+    assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
     on_delta: F,
@@ -351,5 +361,12 @@ where
     P: ProviderClient,
     F: FnMut(String),
 {
-    provider.continue_with_tool_result_stream(request, tools, tool_call, tool_result, on_delta)
+    provider.continue_with_tool_result_stream(
+        request,
+        tools,
+        assistant_message,
+        tool_call,
+        tool_result,
+        on_delta,
+    )
 }

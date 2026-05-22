@@ -1,8 +1,14 @@
-use crate::agent::config::{ProviderRegistryStore, ProviderSelectionResolver};
+use crate::agent::config::{
+    ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
+};
 use crate::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
 use crate::agent::graph::GraphEngine;
 use crate::agent::planner::{LocalTurnPlanner, TurnPlanner};
-use crate::agent::provider::{ProviderDecision, ProviderManager, ProviderRequest, TokenUsage};
+use crate::agent::provider::{
+    provider_native_assistant_message, provider_native_assistant_tool_call_message,
+    provider_native_tool_result_message, provider_native_user_message, ProviderDecision,
+    ProviderManager, ProviderRequest, TokenUsage,
+};
 use crate::agent::session::{SessionOverview, SessionSnapshot, SessionStore, TurnHistoryMessage};
 use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
@@ -16,6 +22,7 @@ use crate::agent::turn_flow::{
     ProviderEventMeta, SyncToolTurnOutcome,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
@@ -27,6 +34,7 @@ pub struct TurnInput {
     pub message: String,
     pub provider_id: Option<String>,
     pub model_id: Option<String>,
+    pub reasoning_effort: Option<ProviderReasoningEffort>,
     pub session_id: Option<String>,
     #[serde(default)]
     pub history: Vec<TurnHistoryMessage>,
@@ -176,16 +184,24 @@ impl AgentRuntime {
     }
 
     fn plan_turn(&self, prepared: &PreparedTurn) -> Result<PlannedTurn, String> {
-        let first_decision = match self
-            .planner
-            .preflight_decision(&prepared.user_message, &prepared.session.history)
-        {
-            Some(decision) => decision,
-            None => provider_decision(
+        let first_decision = if prepared.provider.requires_provider_native_tool_flow() {
+            provider_decision(
                 &prepared.provider,
                 &prepared.planning_request,
                 &prepared.tools,
-            )?,
+            )?
+        } else {
+            match self
+                .planner
+                .preflight_decision(&prepared.user_message, &prepared.session.history)
+            {
+                Some(decision) => decision,
+                None => provider_decision(
+                    &prepared.provider,
+                    &prepared.planning_request,
+                    &prepared.tools,
+                )?,
+            }
         };
 
         if let Some(error) = provider_failure_message(
@@ -199,6 +215,7 @@ impl AgentRuntime {
             &prepared.user_message,
             &prepared.session.history,
             first_decision.tool_call.clone(),
+            !prepared.provider.requires_provider_native_tool_flow(),
         );
 
         Ok(PlannedTurn {
@@ -215,10 +232,16 @@ impl AgentRuntime {
         provider_name: &str,
         provider_mode: &str,
         token_usage: Option<&TokenUsage>,
+        provider_native_transcript: Option<Vec<Value>>,
     ) -> PersistedTurnOutcome {
         let updated_session =
             self.sessions
-                .append_turn(session_id, user_message, assistant_message);
+                .append_turn(
+                    session_id,
+                    user_message,
+                    assistant_message,
+                    provider_native_transcript,
+                );
         let session_summary = self.context_builder.build_session_summary(
             self.graph.name(),
             &updated_session,
@@ -347,6 +370,7 @@ impl AgentRuntime {
             provider,
             planning_request,
             tools,
+            first_decision.assistant_message.as_ref(),
             &tool_call,
             &tool_result,
             move |delta| {
@@ -427,6 +451,7 @@ impl AgentRuntime {
             provider.name(),
             &completed_mode,
             final_response.token_usage.as_ref(),
+            native_transcript_for_tool_turn(user_message, first_decision, &tool_call, &tool_result, &final_response),
         );
 
         emit_stream_event(
@@ -465,6 +490,7 @@ impl AgentRuntime {
         provider_meta: &ProviderEventMeta,
         tools: &[ToolDefinition],
         planning_request: &ProviderRequest,
+        first_decision: &ProviderDecision,
         tool_call: ToolCall,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
         runtime_log(format!(
@@ -480,7 +506,14 @@ impl AgentRuntime {
         ));
 
         let final_response =
-            match provider_followup(provider, planning_request, tools, &tool_call, &tool_result) {
+            match provider_followup(
+                provider,
+                planning_request,
+                tools,
+                first_decision.assistant_message.as_ref(),
+                &tool_call,
+                &tool_result,
+            ) {
                 Ok(response) => response,
                 Err(error) => {
                     return Err(build_failed_turn_result(
@@ -511,7 +544,14 @@ impl AgentRuntime {
         }
 
         Ok(SyncToolTurnOutcome {
-            assistant_message: final_response.output_text,
+            assistant_message: final_response.output_text.clone(),
+            provider_native_transcript: native_transcript_for_tool_turn(
+                &user_message,
+                first_decision,
+                &tool_call,
+                &tool_result,
+                &final_response,
+            ),
             provider_source: final_response.provider_source,
             provider_mode: final_response.provider_mode,
             fallback_reason: final_response.fallback_reason,
@@ -589,6 +629,7 @@ impl AgentRuntime {
         }
         let (
             assistant_message,
+            provider_native_transcript,
             provider_source,
             provider_mode,
             fallback_reason,
@@ -602,10 +643,12 @@ impl AgentRuntime {
                 &provider_meta,
                 &tools,
                 &planning_request,
+                &first_decision,
                 tool_call,
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,
+                    outcome.provider_native_transcript,
                     outcome.provider_source,
                     outcome.provider_mode,
                     outcome.fallback_reason,
@@ -618,6 +661,11 @@ impl AgentRuntime {
         } else {
             (
                 first_decision.output_text.clone(),
+                native_transcript_for_completed_turn(
+                    &user_message,
+                    &first_decision,
+                    provider.requires_provider_native_tool_flow(),
+                ),
                 first_decision.provider_source.clone(),
                 first_decision.provider_mode.clone(),
                 first_decision.fallback_reason.clone(),
@@ -633,6 +681,7 @@ impl AgentRuntime {
             provider.name(),
             &provider_mode,
             token_usage.as_ref(),
+            provider_native_transcript,
         );
 
         TurnResult {
@@ -788,6 +837,7 @@ impl AgentRuntime {
             provider.name(),
             &completed_mode,
             first_decision.token_usage.as_ref(),
+            native_transcript_for_completed_turn(&user_message, &first_decision, provider.requires_provider_native_tool_flow()),
         );
 
         emit_stream_event(
@@ -812,12 +862,18 @@ impl AgentRuntime {
     }
 
     fn resolve_provider(&self, input: &TurnInput) -> ProviderManager {
-        ProviderManager::new(
-            self.provider_resolver.resolve_provider_selection(
-                input.provider_id.as_deref(),
-                input.model_id.as_deref(),
-            ),
-        )
+        let mut selection = self.provider_resolver.resolve_provider_selection(
+            input.provider_id.as_deref(),
+            input.model_id.as_deref(),
+        );
+
+        if selection.capabilities.supports_reasoning {
+            selection.reasoning_effort = input.reasoning_effort.clone();
+        } else {
+            selection.reasoning_effort = None;
+        }
+
+        ProviderManager::new(selection)
     }
 
     fn resolve_tool_call(
@@ -825,8 +881,60 @@ impl AgentRuntime {
         user_message: &str,
         history: &[TurnHistoryMessage],
         provider_tool_call: Option<ToolCall>,
+        allow_local_fallback: bool,
     ) -> Option<ToolCall> {
-        self.planner
-            .select_tool_call(user_message, history, provider_tool_call)
+        if allow_local_fallback {
+            self.planner
+                .select_tool_call(user_message, history, provider_tool_call)
+        } else {
+            provider_tool_call
+        }
     }
+}
+
+fn native_transcript_for_completed_turn(
+    user_message: &str,
+    decision: &ProviderDecision,
+    use_provider_native_tool_flow: bool,
+) -> Option<Vec<Value>> {
+    if !use_provider_native_tool_flow {
+        return None;
+    }
+
+    let assistant_message = decision
+        .assistant_message
+        .clone()
+        .unwrap_or_else(|| provider_native_assistant_message(&decision.output_text));
+
+    Some(vec![
+        provider_native_user_message(user_message),
+        assistant_message,
+    ])
+}
+
+fn native_transcript_for_tool_turn(
+    user_message: &str,
+    first_decision: &ProviderDecision,
+    tool_call: &ToolCall,
+    tool_result: &crate::agent::tools::ToolResult,
+    final_response: &crate::agent::provider::ProviderResponse,
+) -> Option<Vec<Value>> {
+    let first_message = first_decision.assistant_message.clone().unwrap_or_else(|| {
+        provider_native_assistant_tool_call_message(
+            Some(first_decision.output_text.as_str()),
+            first_decision.reasoning_content.as_deref(),
+            tool_call,
+        )
+    });
+    let final_message = final_response
+        .assistant_message
+        .clone()
+        .unwrap_or_else(|| provider_native_assistant_message(&final_response.output_text));
+
+    Some(vec![
+        provider_native_user_message(user_message),
+        first_message,
+        provider_native_tool_result_message(tool_call, tool_result),
+        final_message,
+    ])
 }

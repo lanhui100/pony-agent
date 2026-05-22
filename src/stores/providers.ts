@@ -20,6 +20,14 @@ function createDefaultCapabilities(): ProviderModelCapabilities {
   };
 }
 
+function normalizeNullablePositiveInteger(value: number | null | undefined): number | null {
+  if (!Number.isFinite(value) || !value || value <= 0) {
+    return null;
+  }
+
+  return Math.trunc(value);
+}
+
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `${prefix}-${crypto.randomUUID()}`;
@@ -127,7 +135,15 @@ function supportsImageInputByDefault(baseUrl: string, modelIdValue: string) {
 
 function supportsReasoningByDefault(modelIdValue: string) {
   const lower = modelIdValue.toLowerCase();
-  return lower.includes("o1") || lower.includes("o3") || lower.includes("reason") || lower.includes("claude-3-7");
+  return (
+    lower.includes("o1") ||
+    lower.includes("o3") ||
+    lower.includes("reason") ||
+    lower.includes("claude-3-7") ||
+    lower.includes("deepseek-r1") ||
+    lower.includes("deepseek-reasoner") ||
+    lower.includes("deepseek-v4-pro")
+  );
 }
 
 function normalizeReasoningEffort(value: ProviderReasoningEffort | null | undefined): ProviderReasoningEffort | null {
@@ -137,15 +153,27 @@ function normalizeReasoningEffort(value: ProviderReasoningEffort | null | undefi
 function normalizeCapabilities(
   capabilities: Partial<ProviderModelCapabilities> | null | undefined
 ): ProviderModelCapabilities {
-  return createCapabilities(capabilities ?? {});
+  const normalized = createCapabilities(capabilities ?? {});
+
+  return {
+    contextWindowTokens: normalizeNullablePositiveInteger(normalized.contextWindowTokens),
+    supportsTools: normalized.supportsTools,
+    supportsStreaming: normalized.supportsStreaming,
+    supportsImageInput: normalized.supportsImageInput,
+    supportsReasoning: normalized.supportsReasoning
+  };
 }
 
 function normalizeModel(model: ProviderModelConfig): ProviderModelConfig {
+  const capabilities = normalizeCapabilities(model.capabilities);
+
   return {
     ...model,
-    reasoningEffort: normalizeReasoningEffort(model.reasoningEffort),
-    reasoningBudgetTokens: model.reasoningBudgetTokens ?? null,
-    capabilities: normalizeCapabilities(model.capabilities)
+    reasoningEffort: capabilities.supportsReasoning ? normalizeReasoningEffort(model.reasoningEffort) : null,
+    reasoningBudgetTokens: capabilities.supportsReasoning
+      ? normalizeNullablePositiveInteger(model.reasoningBudgetTokens)
+      : null,
+    capabilities
   };
 }
 
@@ -173,6 +201,7 @@ function createBrowserRegistry(): ProviderRegistry {
 
 type ProviderState = {
   registry: ProviderRegistry | null;
+  selectedReasoningEffort: ProviderReasoningEffort | null;
   loading: boolean;
   saving: boolean;
   error: string | null;
@@ -182,6 +211,7 @@ type ProviderState = {
 export const useProviderStore = defineStore("providers", {
   state: (): ProviderState => ({
     registry: null,
+    selectedReasoningEffort: null,
     loading: false,
     saving: false,
     error: null,
@@ -212,9 +242,17 @@ export const useProviderStore = defineStore("providers", {
         this.currentProvider.models[0] ??
         null
       );
+    },
+    currentReasoningEffort(state): ProviderReasoningEffort | null {
+      return state.selectedReasoningEffort;
     }
   },
   actions: {
+    syncReasoningEffortFromCurrentModel() {
+      this.selectedReasoningEffort = this.currentModel?.capabilities.supportsReasoning
+        ? this.currentModel.reasoningEffort ?? null
+        : null;
+    },
     clearNotice() {
       this.notice = null;
     },
@@ -237,7 +275,10 @@ export const useProviderStore = defineStore("providers", {
             models: provider.models.map(normalizeModel)
           }))
         };
+        this.syncReasoningEffortFromCurrentModel();
       } catch (error) {
+        this.registry = createBrowserRegistry();
+        this.syncReasoningEffortFromCurrentModel();
         this.error = `加载模型配置失败：${String(error)}`;
       } finally {
         this.loading = false;
@@ -268,6 +309,7 @@ export const useProviderStore = defineStore("providers", {
           registry: this.registry
         });
         this.registry = registry;
+        this.syncReasoningEffortFromCurrentModel();
         this.notice = "模型配置已保存到本地 providers.json。";
       } catch (error) {
         this.error = `保存模型配置失败：${String(error)}`;
@@ -281,6 +323,7 @@ export const useProviderStore = defineStore("providers", {
       }
 
       this.registry.selectedProviderId = providerId;
+      this.syncReasoningEffortFromCurrentModel();
     },
     selectModel(providerId: string, modelId: string) {
       if (!this.registry) {
@@ -294,6 +337,10 @@ export const useProviderStore = defineStore("providers", {
 
       provider.selectedModelId = modelId;
       this.registry.selectedProviderId = providerId;
+      this.syncReasoningEffortFromCurrentModel();
+    },
+    setCurrentReasoningEffort(value: ProviderReasoningEffort | null) {
+      this.selectedReasoningEffort = value;
     },
     addProvider() {
       if (!this.registry) {

@@ -1,7 +1,19 @@
 ﻿<script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ChevronDown, Pencil, Plus, Save, Shield, Trash2 } from "lucide-vue-next";
+import {
+  Check,
+  ChevronDown,
+  Image as ImageIcon,
+  Orbit,
+  Pencil,
+  Plus,
+  Save,
+  ScanSearch,
+  Shield,
+  Trash2,
+  Wrench
+} from "lucide-vue-next";
 import InfoTip from "@/components/InfoTip.vue";
 import Button from "@/components/ui/Button.vue";
 import Input from "@/components/ui/Input.vue";
@@ -44,11 +56,17 @@ type EditorState = {
   modelId: string | null;
 };
 
+type ModelCapabilityKey = "supportsStreaming" | "supportsTools" | "supportsImageInput" | "supportsReasoning";
+
 const providerStore = useProviderStore();
 const { currentProvider, error, loading, notice, providers, saving } = storeToRefs(providerStore);
 
 const openProviderId = ref<string | null>(null);
 const hasInitializedEditor = ref(false);
+const modelSaveSucceeded = ref(false);
+const modelDeleteConfirming = ref(false);
+let modelSaveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
+let modelDeleteConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 const editorState = reactive<EditorState>({
   entity: "provider",
   mode: "create",
@@ -84,7 +102,7 @@ const editorTitle = computed(() => {
     return editorState.mode === "edit" ? "编辑提供商" : "新增提供商";
   }
 
-  return editorState.mode === "edit" ? "缂栬緫妯″瀷" : "鏂板妯″瀷";
+  return editorState.mode === "edit" ? "编辑模型" : "新增模型";
 });
 
 const editorDescription = computed(() => {
@@ -115,12 +133,78 @@ const modelParentProvider = computed(() => {
   return providers.value.find((provider) => provider.id === editorState.providerId) ?? null;
 });
 
+const capabilityOptions = [
+  {
+    key: "supportsStreaming",
+    label: "流式输出",
+    hint: "支持以流式方式返回内容",
+    icon: Orbit
+  },
+  {
+    key: "supportsTools",
+    label: "工具调用",
+    hint: "支持模型发起工具调用",
+    icon: Wrench
+  },
+  {
+    key: "supportsImageInput",
+    label: "图片输入",
+    hint: "支持多模态图片输入",
+    icon: ImageIcon
+  },
+  {
+    key: "supportsReasoning",
+    label: "推理控制",
+    hint: "支持推理强度与预算参数",
+    icon: ScanSearch
+  }
+] as const;
+
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return `${prefix}-${crypto.randomUUID()}`;
   }
 
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function clearModelSaveSuccess() {
+  modelSaveSucceeded.value = false;
+  if (modelSaveSuccessTimer) {
+    clearTimeout(modelSaveSuccessTimer);
+    modelSaveSuccessTimer = null;
+  }
+}
+
+function setModelSaveSuccess() {
+  clearModelSaveSuccess();
+  modelSaveSucceeded.value = true;
+  modelSaveSuccessTimer = setTimeout(() => {
+    modelSaveSucceeded.value = false;
+    modelSaveSuccessTimer = null;
+  }, 5000);
+}
+
+function clearModelDeleteConfirm() {
+  modelDeleteConfirming.value = false;
+  if (modelDeleteConfirmTimer) {
+    clearTimeout(modelDeleteConfirmTimer);
+    modelDeleteConfirmTimer = null;
+  }
+}
+
+function armModelDeleteConfirm() {
+  clearModelDeleteConfirm();
+  modelDeleteConfirming.value = true;
+  modelDeleteConfirmTimer = setTimeout(() => {
+    modelDeleteConfirming.value = false;
+    modelDeleteConfirmTimer = null;
+  }, 5000);
+}
+
+function resetModelActionStates() {
+  clearModelSaveSuccess();
+  clearModelDeleteConfirm();
 }
 
 function defaultBaseUrlFor(protocol: ProviderProtocol) {
@@ -174,17 +258,26 @@ function resetModelForm() {
   modelForm.showAdvanced = false;
 }
 
+function toPositiveIntegerString(value: number | null | undefined) {
+  return value && value > 0 ? String(value) : "";
+}
+
+function parseOptionalPositiveInteger(value: string) {
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null;
+}
+
 function fillModelForm(model: ProviderModelConfig) {
   modelForm.id = model.id;
   modelForm.name = model.name;
   modelForm.model = model.model;
   modelForm.temperature = model.temperature > 0 ? String(model.temperature) : "";
   modelForm.maxOutputTokens = model.maxOutputTokens > 0 ? String(model.maxOutputTokens) : "";
-  modelForm.contextWindowTokens = model.capabilities.contextWindowTokens
-    ? String(model.capabilities.contextWindowTokens)
+  modelForm.contextWindowTokens = toPositiveIntegerString(model.capabilities.contextWindowTokens);
+  modelForm.reasoningEffort = model.capabilities.supportsReasoning ? model.reasoningEffort ?? "" : "";
+  modelForm.reasoningBudgetTokens = model.capabilities.supportsReasoning
+    ? toPositiveIntegerString(model.reasoningBudgetTokens)
     : "";
-  modelForm.reasoningEffort = model.reasoningEffort ?? "";
-  modelForm.reasoningBudgetTokens = model.reasoningBudgetTokens ? String(model.reasoningBudgetTokens) : "";
   modelForm.supportsTools = model.capabilities.supportsTools;
   modelForm.supportsStreaming = model.capabilities.supportsStreaming;
   modelForm.supportsImageInput = model.capabilities.supportsImageInput;
@@ -207,6 +300,7 @@ function toggleProvider(providerId: string) {
 }
 
 function beginCreateProvider() {
+  resetModelActionStates();
   resetProviderForm();
   editorState.entity = "provider";
   editorState.mode = "create";
@@ -220,6 +314,7 @@ function beginEditProvider(providerId: string) {
     return;
   }
 
+  resetModelActionStates();
   providerStore.selectProvider(providerId);
   openProviderId.value = providerId;
   fillProviderForm(provider);
@@ -235,6 +330,7 @@ function beginCreateModel(providerId: string) {
     return;
   }
 
+  resetModelActionStates();
   providerStore.selectProvider(providerId);
   openProviderId.value = providerId;
   resetModelForm();
@@ -251,6 +347,7 @@ function beginEditModel(providerId: string, modelId: string) {
     return;
   }
 
+  resetModelActionStates();
   providerStore.selectProvider(providerId);
   openProviderId.value = providerId;
   fillModelForm(model);
@@ -327,6 +424,7 @@ async function saveModelForm() {
   }
 
   const payloadId = editorState.mode === "edit" && modelForm.id ? modelForm.id : createId("model");
+  const supportsReasoning = modelForm.supportsReasoning;
 
   providerStore.upsertModel(editorState.providerId, {
     id: payloadId,
@@ -334,17 +432,14 @@ async function saveModelForm() {
     model: modelIdValue,
     temperature: modelForm.temperature.trim() ? Number(modelForm.temperature) : 0,
     maxOutputTokens: modelForm.maxOutputTokens.trim() ? Number(modelForm.maxOutputTokens) : 0,
-    reasoningEffort: modelForm.supportsReasoning && modelForm.reasoningEffort ? modelForm.reasoningEffort : null,
-    reasoningBudgetTokens:
-      modelForm.supportsReasoning && modelForm.reasoningBudgetTokens.trim()
-        ? Number(modelForm.reasoningBudgetTokens)
-        : null,
+    reasoningEffort: supportsReasoning && modelForm.reasoningEffort ? modelForm.reasoningEffort : null,
+    reasoningBudgetTokens: supportsReasoning ? parseOptionalPositiveInteger(modelForm.reasoningBudgetTokens) : null,
     capabilities: {
-      contextWindowTokens: modelForm.contextWindowTokens.trim() ? Number(modelForm.contextWindowTokens) : null,
+      contextWindowTokens: parseOptionalPositiveInteger(modelForm.contextWindowTokens),
       supportsTools: modelForm.supportsTools,
       supportsStreaming: modelForm.supportsStreaming,
       supportsImageInput: modelForm.supportsImageInput,
-      supportsReasoning: modelForm.supportsReasoning
+      supportsReasoning
     }
   });
   providerStore.selectModel(editorState.providerId, payloadId);
@@ -354,6 +449,7 @@ async function saveModelForm() {
   if (!providerStore.error) {
     providerStore.notice = editorState.mode === "edit" ? "模型已更新。" : "模型已新增。";
     beginEditModel(editorState.providerId, payloadId);
+    setModelSaveSuccess();
   }
 }
 
@@ -371,14 +467,47 @@ async function removeCurrentModel() {
   }
 
   providerStore.notice = "模型已删除。";
+  clearModelDeleteConfirm();
   beginEditProvider(providerId);
 }
+
+function enabledCapabilityOptions(model: ProviderModelConfig) {
+  return capabilityOptions.filter((option) => model.capabilities[option.key]);
+}
+
+function toggleCapability(key: ModelCapabilityKey) {
+  modelForm[key] = !modelForm[key];
+}
+
+function handleModelDeleteClick() {
+  if (modelDeleteConfirming.value) {
+    void removeCurrentModel();
+    return;
+  }
+
+  armModelDeleteConfirm();
+}
+
+onBeforeUnmount(() => {
+  clearModelSaveSuccess();
+  clearModelDeleteConfirm();
+});
 
 watch(
   () => providerForm.protocol,
   (protocol, previous) => {
     if (!providerForm.baseUrl || providerForm.baseUrl === defaultBaseUrlFor(previous ?? protocol)) {
       providerForm.baseUrl = defaultBaseUrlFor(protocol);
+    }
+  }
+);
+
+watch(
+  () => modelForm.supportsReasoning,
+  (supportsReasoning) => {
+    if (!supportsReasoning) {
+      modelForm.reasoningEffort = "";
+      modelForm.reasoningBudgetTokens = "";
     }
   }
 );
@@ -420,11 +549,12 @@ watch(
     <aside class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/76 px-4 py-4">
       <div class="flex items-start justify-between gap-3 border-b border-stone-200/70 pb-4">
         <div>
-          <h2 class="text-lg font-semibold tracking-[-0.02em] text-stone-950">鎻愪緵鍟?/ 妯″瀷</h2>
+          <h2 class="text-lg font-semibold tracking-[-0.02em] text-stone-950">提供商 / 模型</h2>
         </div>
         <Button size="sm" @click="beginCreateProvider()">
           <Plus class="mr-1 h-3.5 w-3.5" />
-          鏂板鎻愪緵鍟?        </Button>
+          新增提供商
+        </Button>
       </div>
 
       <ScrollArea class="mt-4 min-h-0 flex-1" viewport-class="h-full w-full pr-2">
@@ -448,7 +578,7 @@ watch(
                         :class="openProviderId === provider.id ? 'rotate-180' : ''"
                       />
                       <span class="truncate text-sm font-medium text-stone-950">
-                        {{ provider.name || "鏈懡鍚嶆彁渚涘晢" }}
+                        {{ provider.name || "未命名提供商" }}
                       </span>
                     </div>
                     <span
@@ -457,7 +587,8 @@ watch(
                       {{ provider.protocol }}
                     </span>
                     <span class="truncate text-[11px] text-stone-600">
-                      {{ provider.models.length }} 涓ā鍨?                    </span>
+                      {{ provider.models.length }} 个模型
+                    </span>
                   </div>
                 </div>
               </button>
@@ -469,62 +600,6 @@ watch(
                 <Button size="sm" variant="ghost" class="px-2" @click.stop="beginEditProvider(provider.id)">
                   <Pencil class="h-3.5 w-3.5" />
                 </Button>
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>涓婁笅鏂囩獥鍙?Tokens</span>
-                  <Input
-                    :model-value="modelForm.contextWindowTokens"
-                    type="number"
-                    placeholder="渚嬪 128000"
-                    @update:model-value="modelForm.contextWindowTokens = $event"
-                  />
-                </label>
-
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>鎺ㄧ悊寮哄害</span>
-                  <select
-                    :value="modelForm.reasoningEffort"
-                    class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
-                    @change="modelForm.reasoningEffort = ($event.target as HTMLSelectElement).value as ProviderReasoningEffort | ''"
-                  >
-                    <option value="">未设置</option>
-                    <option value="minimal">minimal</option>
-                    <option value="low">low</option>
-                    <option value="medium">medium</option>
-                    <option value="high">high</option>
-                  </select>
-                </label>
-
-                <label class="space-y-1 text-xs text-stone-500">
-                  <span>鎺ㄧ悊棰勭畻 Tokens</span>
-                  <Input
-                    :model-value="modelForm.reasoningBudgetTokens"
-                    type="number"
-                    placeholder="渚嬪 2048"
-                    @update:model-value="modelForm.reasoningBudgetTokens = $event"
-                  />
-                </label>
-
-                <div class="space-y-2 text-xs text-stone-500 xl:col-span-2">
-                  <span class="block">鑳藉姏澹版槑</span>
-                  <div class="grid gap-2 sm:grid-cols-2">
-                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-                      <input v-model="modelForm.supportsStreaming" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-                      <span>鏀寔娴佸紡杈撳嚭</span>
-                    </label>
-                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-                      <input v-model="modelForm.supportsTools" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-                      <span>鏀寔宸ュ叿璋冪敤</span>
-                    </label>
-                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-                      <input v-model="modelForm.supportsImageInput" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-                      <span>鏀寔鍥剧墖杈撳叆</span>
-                    </label>
-                    <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-                      <input v-model="modelForm.supportsReasoning" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-                      <span>鏀寔鎺ㄧ悊鎺у埗</span>
-                    </label>
-                  </div>
-                </div>
               </div>
             </div>
 
@@ -553,6 +628,17 @@ watch(
                         {{ model.model || "未填写模型 ID" }}
                       </div>
                     </div>
+                    <div class="mt-1 flex items-center gap-1.5 text-stone-500">
+                      <span
+                        v-for="option in enabledCapabilityOptions(model)"
+                        :key="option.key"
+                        class="inline-flex h-6 w-6 items-center justify-center rounded-[0.45rem] bg-white/72"
+                        :title="option.label"
+                        :aria-label="option.label"
+                      >
+                        <component :is="option.icon" class="h-3.5 w-3.5" />
+                      </span>
+                    </div>
                   </button>
 
                   <div class="flex shrink-0 items-center gap-0.5">
@@ -569,14 +655,15 @@ watch(
             v-if="!providers.length"
             class="rounded-[0.45rem] bg-[#f6efe3] px-4 py-4 text-sm leading-6 text-stone-500"
           >
-            褰撳墠杩樻病鏈夋彁渚涘晢锛屽厛浠庝笂鏂规柊澧炰竴涓€?          </div>
+            当前还没有提供商，先从上方新增一个。
+          </div>
         </div>
       </ScrollArea>
     </aside>
 
     <section class="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/76 px-4 py-4 sm:px-5">
       <div v-if="loading" class="rounded-[0.45rem] bg-[#f6efe3] px-4 py-4 text-sm text-stone-500">
-        姝ｅ湪璇诲彇閰嶇疆...
+        正在读取配置...
       </div>
 
       <template v-else>
@@ -597,15 +684,15 @@ watch(
               @click="removeCurrentProvider()"
             >
               <Trash2 class="mr-1 h-4 w-4" />
-              鍒犻櫎
+              删除
             </Button>
             <Button
               v-if="editorState.entity === 'model' && editorState.mode === 'edit' && activeProvider"
-              variant="ghost"
-              @click="removeCurrentModel()"
+              :variant="modelDeleteConfirming ? 'outline' : 'ghost'"
+              @click="handleModelDeleteClick()"
             >
               <Trash2 class="mr-1 h-4 w-4" />
-              鍒犻櫎
+              {{ modelDeleteConfirming ? "确认删除" : "删除" }}
             </Button>
             <Button
               v-if="editorState.entity === 'provider'"
@@ -614,7 +701,7 @@ watch(
               @click="saveProviderForm()"
             >
               <Save class="mr-1 h-4 w-4" />
-              {{ saving ? "淇濆瓨涓?.." : "淇濆瓨" }}
+              {{ saving ? "保存中..." : "保存" }}
             </Button>
             <Button
               v-else
@@ -622,8 +709,9 @@ watch(
               :disabled="saving || !modelForm.name.trim() || !modelForm.model.trim()"
               @click="saveModelForm()"
             >
-              <Save class="mr-1 h-4 w-4" />
-              {{ saving ? "淇濆瓨涓?.." : "淇濆瓨" }}
+              <Check v-if="modelSaveSucceeded && !saving" class="mr-1 h-4 w-4" />
+              <Save v-else class="mr-1 h-4 w-4" />
+              {{ saving ? "保存中..." : modelSaveSucceeded ? "已保存" : "保存" }}
             </Button>
           </div>
         </div>
@@ -725,7 +813,33 @@ watch(
     {{ modelForm.showAdvanced ? "收起可选参数" : "展开可选参数" }}
   </button>
 
-  <div v-if="modelForm.showAdvanced" class="mt-3 grid gap-3 xl:grid-cols-2">
+  <div v-if="modelForm.showAdvanced" class="mt-3 space-y-4">
+    <div class="rounded-[0.55rem] bg-white/78 px-4 py-4">
+      <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
+        能力开关
+        <InfoTip text="图标亮起表示该能力开启。当前数据模型仅支持真实存在的能力字段，暂未拆分语音/视频独立开关。" />
+      </div>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button
+          v-for="option in capabilityOptions"
+          :key="option.key"
+          type="button"
+          class="inline-flex h-10 w-10 items-center justify-center rounded-[0.6rem] border transition-colors"
+          :class="
+            modelForm[option.key]
+              ? 'border-stone-300 bg-stone-900 text-stone-50 shadow-[0_6px_18px_rgba(41,32,25,0.12)]'
+              : 'border-stone-200 bg-white text-stone-500 hover:border-stone-300 hover:text-stone-700'
+          "
+          :title="`${option.label}：${option.hint}`"
+          :aria-label="option.label"
+          @click="toggleCapability(option.key)"
+        >
+          <component :is="option.icon" class="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+
+    <div class="grid gap-3 xl:grid-cols-2">
     <label class="space-y-1 text-xs text-stone-500">
       <span>Temperature</span>
       <Input
@@ -756,59 +870,9 @@ watch(
       />
     </label>
 
-    <label class="space-y-1 text-xs text-stone-500">
-      <span>推理强度</span>
-      <select
-        :value="modelForm.reasoningEffort"
-        class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
-        @change="modelForm.reasoningEffort = ($event.target as HTMLSelectElement).value as ProviderReasoningEffort | ''"
-      >
-        <option value="">未设置</option>
-        <option value="minimal">minimal</option>
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-      </select>
-    </label>
-
-    <label class="space-y-1 text-xs text-stone-500">
-      <span>推理预算 Tokens</span>
-      <Input
-        :model-value="modelForm.reasoningBudgetTokens"
-        type="number"
-        placeholder="例如 2048"
-        @update:model-value="modelForm.reasoningBudgetTokens = $event"
-      />
-    </label>
-
-    <div class="space-y-2 text-xs text-stone-500 xl:col-span-2">
-      <span class="block">能力声明</span>
-      <div class="grid gap-2 sm:grid-cols-2">
-        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-          <input v-model="modelForm.supportsStreaming" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-          <span>支持流式输出</span>
-        </label>
-        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-          <input v-model="modelForm.supportsTools" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-          <span>支持工具调用</span>
-        </label>
-        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-          <input v-model="modelForm.supportsImageInput" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-          <span>支持图片输入</span>
-        </label>
-        <label class="flex items-center gap-2 rounded-[0.45rem] bg-white px-3 py-2 text-sm text-stone-700">
-          <input v-model="modelForm.supportsReasoning" type="checkbox" class="h-3.5 w-3.5 accent-stone-700" />
-          <span>支持推理控制</span>
-        </label>
-      </div>
     </div>
   </div>
 
-  <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
-    <p class="text-[12px] leading-5 text-stone-500">
-      右侧只维护当前模型表单，不再重复展示左侧列表内容。
-    </p>
-  </div>
 </section>
 
 <div v-if="notice" class="rounded-[0.45rem] bg-amber-100/70 px-4 py-3 text-sm text-amber-950">

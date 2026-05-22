@@ -190,6 +190,23 @@ function buildAssistantModelLabel(providerName?: string | null, modelName?: stri
   return model || provider || null;
 }
 
+function createBlankSessionRuntimeFields() {
+  return {
+    sessionSummary: "",
+    providerRequestedName: "",
+    providerName: "",
+    providerProtocol: "",
+    providerModel: "",
+    providerSource: "",
+    providerMode: "",
+    fallbackReason: null as string | null,
+    inputTokens: null as number | null,
+    outputTokens: null as number | null,
+    totalTokens: null as number | null,
+    firstTokenLatencyMs: null as number | null
+  };
+}
+
 const defaultAvailableTools: AvailableTool[] = [
   {
     name: "time.now",
@@ -467,20 +484,22 @@ export const useRuntimeStore = defineStore("runtime", {
   },
   actions: {
     resetSessionRuntimeState() {
+      const blankFields = createBlankSessionRuntimeFields();
       this.phase = "idle";
       this.error = null;
-      this.sessionSummary = "";
-      this.providerRequestedName = "";
-      this.providerName = "";
-      this.providerProtocol = "";
-      this.providerModel = "";
-      this.providerSource = "";
-      this.providerMode = "";
-      this.fallbackReason = null;
-      this.inputTokens = null;
-      this.outputTokens = null;
-      this.totalTokens = null;
-      this.firstTokenLatencyMs = null;
+      this.draftMessage = "";
+      this.sessionSummary = blankFields.sessionSummary;
+      this.providerRequestedName = blankFields.providerRequestedName;
+      this.providerName = blankFields.providerName;
+      this.providerProtocol = blankFields.providerProtocol;
+      this.providerModel = blankFields.providerModel;
+      this.providerSource = blankFields.providerSource;
+      this.providerMode = blankFields.providerMode;
+      this.fallbackReason = blankFields.fallbackReason;
+      this.inputTokens = blankFields.inputTokens;
+      this.outputTokens = blankFields.outputTokens;
+      this.totalTokens = blankFields.totalTokens;
+      this.firstTokenLatencyMs = blankFields.firstTokenLatencyMs;
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.messages = [];
@@ -544,28 +563,30 @@ export const useRuntimeStore = defineStore("runtime", {
       const persisted = loadPersistedRuntimeState(sessionId);
       const canReusePersistedState = isPersistedStateCompatible(snapshot, persisted);
       const restoredState = canReusePersistedState ? persisted : null;
+      const blankFields = createBlankSessionRuntimeFields();
+      const sessionSummary = restoredState?.sessionSummary ?? (snapshot.history.length > 0 ? snapshot.summary : "");
 
       this.sessionId = sessionId;
       this.error = null;
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.draftMessage = "";
-      this.sessionSummary = snapshot.summary;
+      this.sessionSummary = sessionSummary;
       this.messages = restoredState?.messages?.length
         ? restoredState.messages
         : hydrateMessagesFromHistory(snapshot.history);
       this.turnTraceHistory = restoredState?.turnTraceHistory ?? [];
-      this.providerRequestedName = restoredState?.providerRequestedName ?? "";
-      this.providerName = restoredState?.providerName ?? "";
-      this.providerProtocol = restoredState?.providerProtocol ?? "";
-      this.providerModel = restoredState?.providerModel ?? "";
-      this.providerSource = restoredState?.providerSource ?? "";
-      this.providerMode = restoredState?.providerMode ?? "";
-      this.fallbackReason = restoredState?.fallbackReason ?? null;
-      this.inputTokens = restoredState?.inputTokens ?? null;
-      this.outputTokens = restoredState?.outputTokens ?? null;
-      this.totalTokens = restoredState?.totalTokens ?? null;
-      this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? null;
+      this.providerRequestedName = restoredState?.providerRequestedName ?? blankFields.providerRequestedName;
+      this.providerName = restoredState?.providerName ?? blankFields.providerName;
+      this.providerProtocol = restoredState?.providerProtocol ?? blankFields.providerProtocol;
+      this.providerModel = restoredState?.providerModel ?? blankFields.providerModel;
+      this.providerSource = restoredState?.providerSource ?? blankFields.providerSource;
+      this.providerMode = restoredState?.providerMode ?? blankFields.providerMode;
+      this.fallbackReason = restoredState?.fallbackReason ?? blankFields.fallbackReason;
+      this.inputTokens = restoredState?.inputTokens ?? blankFields.inputTokens;
+      this.outputTokens = restoredState?.outputTokens ?? blankFields.outputTokens;
+      this.totalTokens = restoredState?.totalTokens ?? blankFields.totalTokens;
+      this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? blankFields.firstTokenLatencyMs;
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
       this.phase = this.messages.length ? "ready" : "idle";
@@ -575,6 +596,10 @@ export const useRuntimeStore = defineStore("runtime", {
       if (this.isSubmitting) {
         return;
       }
+
+      this.resetSessionRuntimeState();
+      this.sessionId = nextSessionId;
+      this.phase = "connecting";
 
       if (isTauriAvailable()) {
         const snapshot = await safeInvoke<SessionSnapshot>("load_session_snapshot", {
@@ -589,7 +614,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.applySessionSnapshot(nextSessionId, {
         conversationId: nextSessionId,
         title: buildSessionTitleFromMessages(persisted?.messages ?? []),
-        summary: persisted?.sessionSummary ?? DEFAULT_BROWSER_SESSION_SUMMARY,
+        summary: persisted?.sessionSummary ?? (persisted?.messages?.length ? DEFAULT_BROWSER_SESSION_SUMMARY : ""),
         history: buildTurnHistory(persisted?.messages ?? []),
         turnCount: persisted?.messages?.filter((message) => message.role === "user").length ?? 0,
         lastReferencedFile: null,
@@ -1144,6 +1169,7 @@ export const useRuntimeStore = defineStore("runtime", {
         message,
         providerId: providerStore.currentProvider?.id ?? null,
         modelId: providerStore.currentModel?.id ?? null,
+        reasoningEffort: providerStore.currentReasoningEffort ?? null,
         sessionId: this.sessionId,
         history: buildTurnHistory(this.messages)
       };

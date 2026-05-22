@@ -108,6 +108,7 @@ fn run_direct_scenario(runtime: &mut AgentRuntime, scenario: &DirectScenario) {
             message: (*message).to_string(),
             provider_id: None,
             model_id: None,
+            reasoning_effort: None,
             session_id: Some(scenario.session_id.to_string()),
             history: vec![],
         });

@@ -1,5 +1,6 @@
 use crate::agent::provider::{ProviderManager, ProviderMessage, ProviderRequest, ProviderRole};
 use crate::agent::session::{SessionSnapshot, TurnHistoryMessage};
+use serde_json::json;
 
 pub trait TurnContextBuilder: Send {
     fn build_request(
@@ -50,9 +51,36 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         }
         messages.push(ProviderMessage::user(user_message.to_string()));
 
+        let native_messages = if provider.requires_provider_native_tool_flow() {
+            let mut transcript = vec![
+                json!({
+                    "role": "system",
+                    "content": "You are Pony Agent. Reply in Chinese and use tools when workspace inspection is needed.",
+                }),
+                json!({
+                    "role": "system",
+                    "content": format!(
+                        "Session summary: {} / graph={} / session={}",
+                        session.summary,
+                        graph_name,
+                        session.conversation_id
+                    )
+                }),
+            ];
+            transcript.extend(session.provider_native_transcript.clone());
+            transcript.push(json!({
+                "role": "user",
+                "content": user_message
+            }));
+            transcript
+        } else {
+            Vec::new()
+        };
+
         ProviderRequest {
             model: provider.model().to_string(),
             input: messages,
+            native_messages,
             temperature: provider.temperature(),
             max_output_tokens: provider.max_output_tokens(),
         }

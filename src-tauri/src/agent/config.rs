@@ -16,18 +16,30 @@ pub enum ProviderReasoningEffort {
     High,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelCapabilities {
     pub context_window_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub supports_tools: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub supports_streaming: bool,
     #[serde(default)]
     pub supports_image_input: bool,
     #[serde(default)]
     pub supports_reasoning: bool,
+}
+
+impl Default for ProviderModelCapabilities {
+    fn default() -> Self {
+        Self {
+            context_window_tokens: None,
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: false,
+            supports_reasoning: false,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -343,6 +355,10 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
                 &model.model,
                 model.capabilities.clone(),
             );
+            if !model.capabilities.supports_reasoning {
+                model.reasoning_effort = None;
+                model.reasoning_budget_tokens = None;
+            }
         }
         if provider.selected_model_id.is_none()
             || provider
@@ -402,10 +418,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
-                capabilities: default_model_capabilities(
-                    &ProviderProtocol::OpenAi,
-                    "gpt-4.1-mini",
-                ),
+                capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "gpt-4.1-mini"),
             }],
         },
         ProviderConfigStorage {
@@ -485,10 +498,12 @@ fn default_model_capabilities(
     let supports_reasoning = lower.contains("o1")
         || lower.contains("o3")
         || lower.contains("reason")
-        || lower.contains("claude-3-7");
-    let supports_image_input = lower.contains("gpt-4.1")
-        || lower.contains("claude")
-        || lower.contains("vision");
+        || lower.contains("claude-3-7")
+        || lower.contains("deepseek-r1")
+        || lower.contains("deepseek-reasoner")
+        || lower.contains("deepseek-v4-pro");
+    let supports_image_input =
+        lower.contains("gpt-4.1") || lower.contains("claude") || lower.contains("vision");
     let context_window_tokens = match protocol {
         ProviderProtocol::Anthropic => Some(200_000),
         ProviderProtocol::OpenAi => Some(128_000),
@@ -503,6 +518,10 @@ fn default_model_capabilities(
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn normalize_model_capabilities(
     protocol: &ProviderProtocol,
     model_name: &str,
@@ -514,8 +533,13 @@ fn normalize_model_capabilities(
         && !capabilities.supports_streaming
         && !capabilities.supports_image_input
         && !capabilities.supports_reasoning;
+    let looks_like_implicit_defaults = capabilities.context_window_tokens.is_none()
+        && capabilities.supports_tools
+        && capabilities.supports_streaming
+        && !capabilities.supports_image_input
+        && !capabilities.supports_reasoning;
 
-    if looks_like_legacy_empty {
+    if looks_like_legacy_empty || looks_like_implicit_defaults {
         return defaults;
     }
 
@@ -591,5 +615,105 @@ fn default_model(protocol: &ProviderProtocol) -> &'static str {
     match protocol {
         ProviderProtocol::OpenAi => "gpt-4.1-mini",
         ProviderProtocol::Anthropic => "claude-3-7-sonnet-latest",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_capabilities_fields_use_stable_defaults() {
+        let storage = serde_json::from_str::<ProviderRegistryStorage>(
+            r#"
+            {
+              "providers": [
+                {
+                  "id": "provider-openai",
+                  "name": "openai",
+                  "protocol": "openai",
+                  "base_url": "https://api.openai.com/v1",
+                  "api_key_env_var": "OPENAI_API_KEY",
+                  "models": [
+                    {
+                      "id": "model-openai-default",
+                      "name": "GPT 5.5",
+                      "model": "gpt-5.5",
+                      "temperature": 0.2,
+                      "maxOutputTokens": 8192,
+                      "capabilities": {
+                        "supportsReasoning": true
+                      },
+                      "reasoningEffort": "medium",
+                      "reasoningBudgetTokens": 2048
+                    }
+                  ],
+                  "selected_model_id": "model-openai-default"
+                }
+              ],
+              "selected_provider_id": "provider-openai"
+            }
+            "#,
+        )
+        .expect("storage should deserialize");
+
+        let normalized = normalize_storage(storage);
+        let model = &normalized.providers[0].models[0];
+
+        assert_eq!(model.capabilities.context_window_tokens, Some(128_000));
+        assert!(model.capabilities.supports_tools);
+        assert!(model.capabilities.supports_streaming);
+        assert!(model.capabilities.supports_reasoning);
+        assert_eq!(
+            model
+                .reasoning_effort
+                .as_ref()
+                .map(|effort| matches!(effort, ProviderReasoningEffort::Medium)),
+            Some(true)
+        );
+        assert_eq!(model.reasoning_budget_tokens, Some(2048));
+    }
+
+    #[test]
+    fn disabling_reasoning_clears_reasoning_fields() {
+        let storage = serde_json::from_str::<ProviderRegistryStorage>(
+            r#"
+            {
+              "providers": [
+                {
+                  "id": "provider-openai",
+                  "name": "openai",
+                  "protocol": "openai",
+                  "base_url": "https://api.openai.com/v1",
+                  "api_key_env_var": "OPENAI_API_KEY",
+                  "models": [
+                    {
+                      "id": "model-openai-default",
+                      "name": "GPT 4.1 Mini",
+                      "model": "gpt-4.1-mini",
+                      "temperature": 0.2,
+                      "maxOutputTokens": 8192,
+                      "capabilities": {
+                        "supportsReasoning": false
+                      },
+                      "reasoningEffort": "high",
+                      "reasoningBudgetTokens": 4096
+                    }
+                  ],
+                  "selected_model_id": "model-openai-default"
+                }
+              ],
+              "selected_provider_id": "provider-openai"
+            }
+            "#,
+        )
+        .expect("storage should deserialize");
+
+        let normalized = normalize_storage(storage);
+        let model = &normalized.providers[0].models[0];
+
+        assert!(!model.capabilities.supports_reasoning);
+        assert!(model.reasoning_effort.is_none());
+        assert!(model.reasoning_budget_tokens.is_none());
     }
 }

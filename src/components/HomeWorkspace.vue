@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { marked } from "marked";
 import { ArrowUp, Bot, Check, ChevronDown, LoaderCircle, UserRound, Wrench } from "lucide-vue-next";
+import type { ProviderReasoningEffort } from "@/types/provider";
 import type { ChatMessage } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import Button from "@/components/ui/Button.vue";
+import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 
 type TurnBucket = {
@@ -24,13 +25,32 @@ const { currentProvider, currentModel } = storeToRefs(providerStore);
 
 const providerMenuOpen = ref(false);
 const modelMenuOpen = ref(false);
+const reasoningMenuOpen = ref(false);
 const providerMenuRef = ref<HTMLElement | null>(null);
 const modelMenuRef = ref<HTMLElement | null>(null);
+const reasoningMenuRef = ref<HTMLElement | null>(null);
 const timelineScrollAreaRef = ref<{ scrollToBottom: (behavior?: ScrollBehavior) => void } | null>(null);
+const bottomAnchorRef = ref<HTMLElement | null>(null);
 const scrollFrameId = ref<number | null>(null);
+let lastMessageSignature = "";
 
-const providerLabel = computed(() => currentProvider.value?.name || "提供方");
-const modelLabel = computed(() => currentModel.value?.name || "模型");
+const providerLabel = computed(() => currentProvider.value?.name || "选择提供商");
+const modelLabel = computed(() => currentModel.value?.name || "选择模型");
+const reasoningLabel = computed(() => {
+  if (!currentModel.value?.capabilities.supportsReasoning) {
+    return "";
+  }
+
+  return providerStore.currentReasoningEffort ? `思考 ${providerStore.currentReasoningEffort}` : "思考 默认";
+});
+
+const reasoningOptions: Array<{ label: string; value: ProviderReasoningEffort | null }> = [
+  { label: "默认", value: null },
+  { label: "minimal", value: "minimal" },
+  { label: "low", value: "low" },
+  { label: "medium", value: "medium" },
+  { label: "high", value: "high" }
+];
 
 const turns = computed<TurnBucket[]>(() => {
   const buckets = new Map<string, TurnBucket>();
@@ -75,13 +95,6 @@ function formatToolDuration(durationSeconds?: number | null) {
   }
 
   return `${Math.round(durationSeconds)}s`;
-}
-
-function renderAssistantMarkdown(content: string) {
-  return marked.parse(content, {
-    breaks: true,
-    gfm: true
-  }) as string;
 }
 
 function assistantHeaderModel(message: ChatMessage | null) {
@@ -141,17 +154,27 @@ function toggleProviderMenu() {
   providerMenuOpen.value = !providerMenuOpen.value;
   if (providerMenuOpen.value) {
     modelMenuOpen.value = false;
+    reasoningMenuOpen.value = false;
   }
 }
 
 function toggleModelMenu() {
-  if (!currentProvider.value) {
-    return;
-  }
-
   modelMenuOpen.value = !modelMenuOpen.value;
   if (modelMenuOpen.value) {
     providerMenuOpen.value = false;
+    reasoningMenuOpen.value = false;
+  }
+}
+
+function toggleReasoningMenu() {
+  if (!currentModel.value?.capabilities.supportsReasoning) {
+    return;
+  }
+
+  reasoningMenuOpen.value = !reasoningMenuOpen.value;
+  if (reasoningMenuOpen.value) {
+    providerMenuOpen.value = false;
+    modelMenuOpen.value = false;
   }
 }
 
@@ -159,6 +182,7 @@ function selectProvider(providerId: string) {
   providerStore.selectProvider(providerId);
   providerMenuOpen.value = false;
   modelMenuOpen.value = false;
+  reasoningMenuOpen.value = false;
 }
 
 function selectModel(modelId: string) {
@@ -168,6 +192,11 @@ function selectModel(modelId: string) {
 
   providerStore.selectModel(currentProvider.value.id, modelId);
   modelMenuOpen.value = false;
+}
+
+function selectReasoningEffort(value: ProviderReasoningEffort | null) {
+  providerStore.setCurrentReasoningEffort(value);
+  reasoningMenuOpen.value = false;
 }
 
 function handleClickOutside(event: MouseEvent) {
@@ -180,6 +209,10 @@ function handleClickOutside(event: MouseEvent) {
   if (modelMenuRef.value && target && !modelMenuRef.value.contains(target)) {
     modelMenuOpen.value = false;
   }
+
+  if (reasoningMenuRef.value && target && !reasoningMenuRef.value.contains(target)) {
+    reasoningMenuOpen.value = false;
+  }
 }
 
 function queueScrollToLatestTurn(behavior: ScrollBehavior = "smooth") {
@@ -190,12 +223,25 @@ function queueScrollToLatestTurn(behavior: ScrollBehavior = "smooth") {
   scrollFrameId.value = window.requestAnimationFrame(async () => {
     scrollFrameId.value = null;
     await nextTick();
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+
+    if (bottomAnchorRef.value) {
+      bottomAnchorRef.value.scrollIntoView({
+        block: "end",
+        behavior
+      });
+      return;
+    }
+
     timelineScrollAreaRef.value?.scrollToBottom(behavior);
   });
 }
 
 onMounted(() => {
   window.addEventListener("click", handleClickOutside);
+  queueScrollToLatestTurn("auto");
 });
 
 onBeforeUnmount(() => {
@@ -207,8 +253,14 @@ onBeforeUnmount(() => {
 
 watch(
   () => messages.value.map((message) => `${message.id}:${message.content.length}:${message.status ?? ""}:${message.tokenCount ?? ""}`).join("|"),
-  () => {
-    queueScrollToLatestTurn("smooth");
+  (signature) => {
+    const behavior: ScrollBehavior =
+      signature.startsWith(lastMessageSignature) && lastMessageSignature.length > 0
+        ? "auto"
+        : "smooth";
+
+    lastMessageSignature = signature;
+    queueScrollToLatestTurn(behavior);
   }
 ,
   { flush: "post" }
@@ -292,11 +344,7 @@ watch(
 
             <Transition name="stream-fade" mode="out-in">
               <div v-if="turn.assistant" :key="`${turn.turnId}:${turn.assistant.content.length}:${turn.assistant.status}`" class="mt-2">
-                <div
-                  class="assistant-markdown text-sm leading-[1.2]"
-                  :class="assistantTone(turn.assistant)"
-                  v-html="renderAssistantMarkdown(turn.assistant.content)"
-                />
+                <MarkdownRenderer class="assistant-markdown text-sm" :content="turn.assistant.content" :tone-class="assistantTone(turn.assistant)" />
               </div>
             </Transition>
             <div
@@ -308,6 +356,7 @@ watch(
           </article>
         </section>
       </TransitionGroup>
+      <div ref="bottomAnchorRef" class="h-px w-full" aria-hidden="true"></div>
     </ScrollArea>
 
     <div class="border-t border-stone-200/70 bg-white/76 px-4 py-3 sm:px-5">
@@ -350,8 +399,9 @@ watch(
             </div>
           </div>
 
-          <div v-if="currentProvider" ref="modelMenuRef" class="relative">
+          <div ref="modelMenuRef" class="relative">
             <button
+              :disabled="!currentProvider"
               class="inline-flex min-w-[7.4rem] items-center gap-1 bg-transparent p-0 text-[11px] leading-4 text-stone-600 outline-none"
               type="button"
               @click.stop="toggleModelMenu"
@@ -366,15 +416,52 @@ watch(
             >
               <div class="px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-stone-400">模型</div>
               <div class="mx-2 border-t border-stone-200/90"></div>
+              <template v-if="currentProvider">
+                <button
+                  v-for="model in currentProvider.models"
+                  :key="model.id"
+                  class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-stone-700 hover:bg-[#f8f4ed]"
+                  type="button"
+                  @click="selectModel(model.id)"
+                >
+                  <span>{{ model.name }}</span>
+                  <Check v-if="currentModel?.id === model.id" class="h-3.5 w-3.5 text-stone-700" />
+                </button>
+              </template>
+              <div v-else class="px-3 py-2 text-stone-500">
+                暂无可用模型
+              </div>
+            </div>
+          </div>
+
+          <div v-if="currentModel?.capabilities.supportsReasoning" ref="reasoningMenuRef" class="relative">
+            <button
+              class="inline-flex min-w-[7.4rem] items-center gap-1 bg-transparent p-0 text-[11px] leading-4 text-stone-600 outline-none"
+              type="button"
+              @click.stop="toggleReasoningMenu"
+            >
+              <span class="truncate text-[11px] leading-4">{{ reasoningLabel }}</span>
+              <ChevronDown class="h-2.5 w-2.5 text-stone-400" />
+            </button>
+
+            <div
+              v-if="reasoningMenuOpen"
+              class="absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[11rem] rounded-[0.45rem] border border-stone-200/80 bg-white py-1 text-[12px] text-stone-700 shadow-[0_10px_30px_rgba(61,47,34,0.08)]"
+            >
+              <div class="px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-stone-400">思考强度</div>
+              <div class="mx-2 border-t border-stone-200/90"></div>
               <button
-                v-for="model in currentProvider.models"
-                :key="model.id"
+                v-for="option in reasoningOptions"
+                :key="option.label"
                 class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-stone-700 hover:bg-[#f8f4ed]"
                 type="button"
-                @click="selectModel(model.id)"
+                @click="selectReasoningEffort(option.value)"
               >
-                <span>{{ model.name }}</span>
-                <Check v-if="currentModel?.id === model.id" class="h-3.5 w-3.5 text-stone-700" />
+                <span>{{ option.label }}</span>
+                <Check
+                  v-if="(providerStore.currentReasoningEffort ?? null) === option.value"
+                  class="h-3.5 w-3.5 text-stone-700"
+                />
               </button>
             </div>
           </div>
@@ -394,38 +481,81 @@ watch(
 </template>
 
 <style scoped>
+:deep(.markdown-body) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.65;
+}
+
 :deep(.assistant-markdown p) {
-  margin: 0 0 0.7rem;
+  margin: 0 0 0.85rem;
 }
 
 :deep(.assistant-markdown p:last-child) {
   margin-bottom: 0;
 }
 
+:deep(.assistant-markdown h1),
+:deep(.assistant-markdown h2),
+:deep(.assistant-markdown h3),
+:deep(.assistant-markdown h4),
+:deep(.assistant-markdown h5),
+:deep(.assistant-markdown h6) {
+  margin: 1rem 0 0.55rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #2f261d;
+}
+
+:deep(.assistant-markdown h1) {
+  font-size: 1.28rem;
+}
+
+:deep(.assistant-markdown h2) {
+  font-size: 1.16rem;
+}
+
+:deep(.assistant-markdown h3) {
+  font-size: 1.07rem;
+}
+
+:deep(.assistant-markdown h4),
+:deep(.assistant-markdown h5),
+:deep(.assistant-markdown h6) {
+  font-size: 0.98rem;
+}
+
 :deep(.assistant-markdown ul),
 :deep(.assistant-markdown ol) {
-  margin: 0.45rem 0 0.7rem 1.2rem;
+  margin: 0.45rem 0 0.85rem 1.35rem;
   padding: 0;
 }
 
 :deep(.assistant-markdown li + li) {
-  margin-top: 0.2rem;
+  margin-top: 0.3rem;
+}
+
+:deep(.assistant-markdown li > p) {
+  margin: 0.35rem 0;
 }
 
 :deep(.assistant-markdown pre) {
-  margin: 0.7rem 0;
+  margin: 0.9rem 0;
   overflow-x: auto;
-  border-radius: 0.35rem;
-  background: #f3eee6;
-  padding: 0.8rem 0.9rem;
+  border: 1px solid #e3d7c6;
+  border-radius: 0.75rem;
+  background: #f7f2ea;
+  padding: 0.95rem 1rem;
   font-size: 0.82rem;
-  line-height: 1.2;
+  line-height: 1.45;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
 }
 
 :deep(.assistant-markdown code) {
-  border-radius: 0.2rem;
+  border-radius: 0.32rem;
   background: #f3eee6;
-  padding: 0.08rem 0.28rem;
+  padding: 0.08rem 0.32rem;
   font-size: 0.82em;
 }
 
@@ -434,16 +564,87 @@ watch(
   padding: 0;
 }
 
+:deep(.assistant-markdown table) {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  margin: 0.95rem 0;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid #e2d6c6;
+  border-radius: 0.75rem;
+  background: #fffdf8;
+}
+
+:deep(.assistant-markdown thead th) {
+  background: #f5ede1;
+  font-weight: 600;
+}
+
+:deep(.assistant-markdown th),
+:deep(.assistant-markdown td) {
+  padding: 0.55rem 0.7rem;
+  border-right: 1px solid #e9ded1;
+  border-bottom: 1px solid #e9ded1;
+  vertical-align: top;
+  text-align: left;
+  white-space: normal;
+}
+
+:deep(.assistant-markdown tr:last-child td),
+:deep(.assistant-markdown tr:last-child th) {
+  border-bottom: 0;
+}
+
+:deep(.assistant-markdown th:last-child),
+:deep(.assistant-markdown td:last-child) {
+  border-right: 0;
+}
+
+:deep(.assistant-markdown tbody tr:nth-child(even)) {
+  background: rgba(245, 237, 225, 0.42);
+}
+
 :deep(.assistant-markdown a) {
   color: #8b5e34;
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 :deep(.assistant-markdown blockquote) {
-  margin: 0.7rem 0;
+  margin: 0.9rem 0;
   border-left: 2px solid #d8c7b2;
-  padding-left: 0.8rem;
+  padding: 0.1rem 0 0.1rem 0.9rem;
   color: #6b6257;
+  background: rgba(243, 238, 230, 0.55);
+  border-radius: 0 0.5rem 0.5rem 0;
+}
+
+:deep(.assistant-markdown hr) {
+  margin: 1rem 0;
+  border: 0;
+  border-top: 1px solid #e4d6c2;
+}
+
+:deep(.assistant-markdown img) {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.55rem;
+}
+
+:deep(.assistant-markdown strong) {
+  color: #1f1712;
+}
+
+:deep(.assistant-markdown del) {
+  color: #8a7c6c;
+}
+
+:deep(.assistant-markdown input[type="checkbox"]) {
+  margin: 0 0.35rem 0 0;
+  transform: translateY(1px);
+  accent-color: #8b5e34;
 }
 
 .turn-flow-enter-active,

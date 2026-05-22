@@ -1,3 +1,5 @@
+import type { ProviderReasoningEffort } from "@/types/provider";
+
 export type HealthPayload = {
   appName: string;
   appVersion: string;
@@ -80,6 +82,7 @@ export type TurnInput = {
   message: string;
   providerId?: string | null;
   modelId?: string | null;
+  reasoningEffort?: ProviderReasoningEffort | null;
   sessionId?: string | null;
   history?: TurnHistoryMessage[];
 };

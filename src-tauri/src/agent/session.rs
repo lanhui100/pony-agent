@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,8 @@ pub struct SessionState {
     pub title: String,
     pub summary: String,
     pub history: Vec<TurnHistoryMessage>,
+    #[serde(default)]
+    pub provider_native_transcript: Vec<Value>,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     #[serde(default)]
@@ -39,6 +42,8 @@ pub struct SessionSnapshot {
     pub title: String,
     pub summary: String,
     pub history: Vec<TurnHistoryMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_native_transcript: Vec<Value>,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     pub updated_at_ms: u64,
@@ -131,6 +136,7 @@ impl SessionStore {
         session_id: Option<&str>,
         user_message: &str,
         assistant_message: &str,
+        provider_native_transcript: Option<Vec<Value>>,
     ) -> SessionSnapshot {
         let snapshot = {
             let session = self.ensure_session(session_id.unwrap_or(DEFAULT_SESSION_ID));
@@ -146,6 +152,10 @@ impl SessionStore {
             if session.history.len() > DEFAULT_HISTORY_LIMIT {
                 let keep_from = session.history.len() - DEFAULT_HISTORY_LIMIT;
                 session.history = session.history[keep_from..].to_vec();
+            }
+
+            if let Some(messages) = provider_native_transcript {
+                session.provider_native_transcript.extend(messages);
             }
 
             refresh_session_metadata(session, true);
@@ -199,6 +209,7 @@ impl SessionStore {
                 title: DEFAULT_SESSION_TITLE.to_string(),
                 summary: DEFAULT_SESSION_SUMMARY.to_string(),
                 history: Vec::new(),
+                provider_native_transcript: Vec::new(),
                 turn_count: 0,
                 last_referenced_file: None,
                 updated_at_ms: now_timestamp_ms(),
@@ -261,6 +272,7 @@ fn snapshot_from_state(session: &SessionState) -> SessionSnapshot {
         title: session.title.clone(),
         summary: session.summary.clone(),
         history: session.history.clone(),
+        provider_native_transcript: session.provider_native_transcript.clone(),
         turn_count: session.turn_count,
         last_referenced_file: session.last_referenced_file.clone(),
         updated_at_ms: session.updated_at_ms,
@@ -395,6 +407,7 @@ fn default_sessions() -> SessionMap {
             title: DEFAULT_SESSION_TITLE.to_string(),
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: Vec::new(),
+            provider_native_transcript: Vec::new(),
             turn_count: 0,
             last_referenced_file: None,
             updated_at_ms: now_timestamp_ms(),
@@ -428,7 +441,7 @@ mod tests {
     #[test]
     fn memory_backend_keeps_turns_in_process() {
         let mut store = SessionStore::memory_only();
-        store.append_turn(Some("test"), "查看 tauri.conf.json", "已读取");
+        store.append_turn(Some("test"), "查看 tauri.conf.json", "已读取", None);
 
         let snapshot = store.snapshot(Some("test"), &[]);
         assert_eq!(snapshot.title, "查看 tauri.conf.json");
@@ -445,7 +458,7 @@ mod tests {
         let path = temp_sessions_path();
         let backend = Box::new(FileSessionBackend::new(path.clone()));
         let mut store = SessionStore::with_backend(backend);
-        store.append_turn(Some("persisted"), "打开 Cargo.toml", "已读取");
+        store.append_turn(Some("persisted"), "打开 Cargo.toml", "已读取", None);
 
         let reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
         let mut reloaded = reloaded;
@@ -466,11 +479,13 @@ mod tests {
             Some("preview"),
             "Please inspect runtime.rs session switching and trace consistency after tool execution.",
             "I will check it.",
+            None,
         );
         store.append_turn(
             Some("preview"),
             "Also verify provider fallback behavior.",
             "Done.",
+            None,
         );
 
         let snapshot = store.snapshot(Some("preview"), &[]);
@@ -505,7 +520,8 @@ mod tests {
         assert_eq!(snapshot.conversation_id, "fresh");
         assert_eq!(snapshot.turn_count, 0);
 
-        let mut reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
         let reloaded_snapshot = reloaded.snapshot(Some("fresh"), &[]);
         assert_eq!(reloaded_snapshot.conversation_id, "fresh");
         assert_eq!(reloaded_snapshot.turn_count, 0);

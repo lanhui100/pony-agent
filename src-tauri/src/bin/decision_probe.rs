@@ -136,6 +136,7 @@ fn run_sequence(label: &str, scenario: &DecisionScenario) {
         let request = ProviderRequest {
             model: provider.model().to_string(),
             input,
+            native_messages: Vec::new(),
             temperature: provider.temperature(),
             max_output_tokens: provider.max_output_tokens(),
         };

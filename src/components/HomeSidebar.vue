@@ -497,6 +497,13 @@ watch(
   { immediate: true }
 );
 
+watch(sessionId, () => {
+  activeTurnId.value = "";
+  activeTraceStepKey.value = "";
+  copiedKey.value = "";
+  expandedResultKeys.value = [];
+});
+
 watch(
   orderedTurnTraces,
   (turns) => {

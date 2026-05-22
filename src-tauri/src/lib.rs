@@ -36,11 +36,7 @@ fn run_turn(runtime: State<'_, Mutex<AgentRuntime>>, input: TurnInput) -> TurnRe
 }
 
 #[tauri::command]
-fn start_turn_stream(
-    app: AppHandle,
-    turn_id: String,
-    input: TurnInput,
-) -> Result<(), String> {
+fn start_turn_stream(app: AppHandle, turn_id: String, input: TurnInput) -> Result<(), String> {
     let app_handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let runtime_state = app_handle.state::<Mutex<AgentRuntime>>();
