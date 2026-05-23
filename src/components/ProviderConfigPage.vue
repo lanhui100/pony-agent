@@ -18,9 +18,11 @@ import InfoTip from "@/components/InfoTip.vue";
 import Button from "@/components/ui/Button.vue";
 import Input from "@/components/ui/Input.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
-import { useProviderStore } from "@/stores/providers";
+import { resolveCapabilityDeclaration, useProviderStore } from "@/stores/providers";
 import type {
+  ProviderCapabilityPresetId,
   ProviderConfig,
+  ProviderModelCapabilities,
   ProviderModelConfig,
   ProviderProtocol,
   ProviderReasoningEffort
@@ -37,6 +39,7 @@ type ModelFormState = {
   id: string | null;
   name: string;
   model: string;
+  capabilityPreset: ProviderCapabilityPresetId;
   temperature: string;
   maxOutputTokens: string;
   contextWindowTokens: string;
@@ -85,6 +88,7 @@ const modelForm = reactive<ModelFormState>({
   id: null,
   name: "",
   model: "",
+  capabilityPreset: "auto",
   temperature: "",
   maxOutputTokens: "",
   contextWindowTokens: "",
@@ -133,6 +137,33 @@ const modelParentProvider = computed(() => {
   return providers.value.find((provider) => provider.id === editorState.providerId) ?? null;
 });
 
+const capabilityPresetOptions = computed(() => {
+  const protocol = modelParentProvider.value?.protocol ?? "openai";
+
+  if (protocol === "anthropic") {
+    return [
+      { value: "auto", label: "自动推断" },
+      { value: "anthropic-thinking", label: "Claude Thinking" },
+      { value: "custom", label: "自定义能力" }
+    ] satisfies Array<{ value: ProviderCapabilityPresetId; label: string }>;
+  }
+
+  return [
+    { value: "auto", label: "自动推断" },
+    { value: "open-ai-chat", label: "OpenAI Chat" },
+    { value: "open-ai-reasoning", label: "OpenAI Reasoning" },
+    { value: "deepseek-chat", label: "DeepSeek Chat" },
+    { value: "deepseek-reasoner", label: "DeepSeek Reasoner" },
+    { value: "custom", label: "自定义能力" }
+  ] satisfies Array<{ value: ProviderCapabilityPresetId; label: string }>;
+});
+
+const usesCapabilityPreset = computed(() => modelForm.capabilityPreset !== "custom");
+
+function getModelProtocol() {
+  return modelParentProvider.value?.protocol ?? "openai";
+}
+
 const capabilityOptions = [
   {
     key: "supportsStreaming",
@@ -159,6 +190,16 @@ const capabilityOptions = [
     icon: ScanSearch
   }
 ] as const;
+
+function getSafeCapabilities(model: Pick<ProviderModelConfig, "capabilities">) {
+  return {
+    contextWindowTokens: model.capabilities?.contextWindowTokens ?? null,
+    supportsTools: model.capabilities?.supportsTools ?? true,
+    supportsStreaming: model.capabilities?.supportsStreaming ?? true,
+    supportsImageInput: model.capabilities?.supportsImageInput ?? false,
+    supportsReasoning: model.capabilities?.supportsReasoning ?? false
+  };
+}
 
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -246,6 +287,7 @@ function resetModelForm() {
   modelForm.id = null;
   modelForm.name = "";
   modelForm.model = "";
+  modelForm.capabilityPreset = "auto";
   modelForm.temperature = "";
   modelForm.maxOutputTokens = "";
   modelForm.contextWindowTokens = "";
@@ -267,31 +309,59 @@ function parseOptionalPositiveInteger(value: string) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null;
 }
 
+function assignCapabilitiesToForm(capabilities: ProviderModelCapabilities) {
+  modelForm.contextWindowTokens = toPositiveIntegerString(capabilities.contextWindowTokens);
+  modelForm.supportsTools = capabilities.supportsTools;
+  modelForm.supportsStreaming = capabilities.supportsStreaming;
+  modelForm.supportsImageInput = capabilities.supportsImageInput;
+  modelForm.supportsReasoning = capabilities.supportsReasoning;
+}
+
+function resolveFormCapabilities(preset = modelForm.capabilityPreset): ProviderModelCapabilities {
+  return resolveCapabilityDeclaration(getModelProtocol(), modelForm.model.trim(), preset, {
+    contextWindowTokens: parseOptionalPositiveInteger(modelForm.contextWindowTokens),
+    supportsTools: modelForm.supportsTools,
+    supportsStreaming: modelForm.supportsStreaming,
+    supportsImageInput: modelForm.supportsImageInput,
+    supportsReasoning: modelForm.supportsReasoning
+  }).capabilities;
+}
+
+const resolvedModelCapabilities = computed(() => resolveFormCapabilities());
+
+const displayedContextWindowTokens = computed(() =>
+  usesCapabilityPreset.value
+    ? toPositiveIntegerString(resolvedModelCapabilities.value.contextWindowTokens)
+    : modelForm.contextWindowTokens
+);
+
 function fillModelForm(model: ProviderModelConfig) {
+  const capabilities = getSafeCapabilities(model);
   modelForm.id = model.id;
   modelForm.name = model.name;
   modelForm.model = model.model;
+  modelForm.capabilityPreset = model.capabilityPreset;
   modelForm.temperature = model.temperature > 0 ? String(model.temperature) : "";
   modelForm.maxOutputTokens = model.maxOutputTokens > 0 ? String(model.maxOutputTokens) : "";
-  modelForm.contextWindowTokens = toPositiveIntegerString(model.capabilities.contextWindowTokens);
-  modelForm.reasoningEffort = model.capabilities.supportsReasoning ? model.reasoningEffort ?? "" : "";
-  modelForm.reasoningBudgetTokens = model.capabilities.supportsReasoning
+  modelForm.contextWindowTokens = toPositiveIntegerString(capabilities.contextWindowTokens);
+  modelForm.reasoningEffort = capabilities.supportsReasoning ? model.reasoningEffort ?? "" : "";
+  modelForm.reasoningBudgetTokens = capabilities.supportsReasoning
     ? toPositiveIntegerString(model.reasoningBudgetTokens)
     : "";
-  modelForm.supportsTools = model.capabilities.supportsTools;
-  modelForm.supportsStreaming = model.capabilities.supportsStreaming;
-  modelForm.supportsImageInput = model.capabilities.supportsImageInput;
-  modelForm.supportsReasoning = model.capabilities.supportsReasoning;
+  modelForm.supportsTools = capabilities.supportsTools;
+  modelForm.supportsStreaming = capabilities.supportsStreaming;
+  modelForm.supportsImageInput = capabilities.supportsImageInput;
+  modelForm.supportsReasoning = capabilities.supportsReasoning;
   modelForm.showAdvanced =
     model.temperature > 0 ||
     model.maxOutputTokens > 0 ||
-    !!model.capabilities.contextWindowTokens ||
+    !!capabilities.contextWindowTokens ||
     !!model.reasoningEffort ||
     !!model.reasoningBudgetTokens ||
-    !model.capabilities.supportsStreaming ||
-    !model.capabilities.supportsTools ||
-    model.capabilities.supportsImageInput ||
-    model.capabilities.supportsReasoning;
+    !capabilities.supportsStreaming ||
+    !capabilities.supportsTools ||
+    capabilities.supportsImageInput ||
+    capabilities.supportsReasoning;
 }
 
 function toggleProvider(providerId: string) {
@@ -424,7 +494,8 @@ async function saveModelForm() {
   }
 
   const payloadId = editorState.mode === "edit" && modelForm.id ? modelForm.id : createId("model");
-  const supportsReasoning = modelForm.supportsReasoning;
+  const declaredCapabilities = resolvedModelCapabilities.value;
+  const supportsReasoning = declaredCapabilities.supportsReasoning;
 
   providerStore.upsertModel(editorState.providerId, {
     id: payloadId,
@@ -432,15 +503,10 @@ async function saveModelForm() {
     model: modelIdValue,
     temperature: modelForm.temperature.trim() ? Number(modelForm.temperature) : 0,
     maxOutputTokens: modelForm.maxOutputTokens.trim() ? Number(modelForm.maxOutputTokens) : 0,
+    capabilityPreset: modelForm.capabilityPreset,
     reasoningEffort: supportsReasoning && modelForm.reasoningEffort ? modelForm.reasoningEffort : null,
     reasoningBudgetTokens: supportsReasoning ? parseOptionalPositiveInteger(modelForm.reasoningBudgetTokens) : null,
-    capabilities: {
-      contextWindowTokens: parseOptionalPositiveInteger(modelForm.contextWindowTokens),
-      supportsTools: modelForm.supportsTools,
-      supportsStreaming: modelForm.supportsStreaming,
-      supportsImageInput: modelForm.supportsImageInput,
-      supportsReasoning
-    }
+    capabilities: declaredCapabilities
   });
   providerStore.selectModel(editorState.providerId, payloadId);
 
@@ -472,10 +538,15 @@ async function removeCurrentModel() {
 }
 
 function enabledCapabilityOptions(model: ProviderModelConfig) {
-  return capabilityOptions.filter((option) => model.capabilities[option.key]);
+  const capabilities = getSafeCapabilities(model);
+  return capabilityOptions.filter((option) => capabilities[option.key]);
 }
 
 function toggleCapability(key: ModelCapabilityKey) {
+  if (usesCapabilityPreset.value) {
+    return;
+  }
+
   modelForm[key] = !modelForm[key];
 }
 
@@ -503,12 +574,40 @@ watch(
 );
 
 watch(
-  () => modelForm.supportsReasoning,
+  () => resolvedModelCapabilities.value.supportsReasoning,
   (supportsReasoning) => {
     if (!supportsReasoning) {
       modelForm.reasoningEffort = "";
       modelForm.reasoningBudgetTokens = "";
     }
+  }
+);
+
+watch(
+  () => modelForm.capabilityPreset,
+  (preset, previous) => {
+    if (preset === "custom") {
+      const seedPreset = previous && previous !== "custom" ? previous : "custom";
+      assignCapabilitiesToForm(resolveFormCapabilities(seedPreset));
+      return;
+    }
+
+    if (previous === "custom") {
+      assignCapabilitiesToForm(resolveFormCapabilities(preset));
+    }
+
+    modelForm.contextWindowTokens = "";
+  }
+);
+
+watch(
+  () => modelForm.model,
+  () => {
+    if (!usesCapabilityPreset.value) {
+      return;
+    }
+
+    modelForm.contextWindowTokens = "";
   }
 );
 
@@ -802,6 +901,26 @@ watch(
         @update:model-value="modelForm.model = $event"
       />
     </label>
+
+    <label class="space-y-1 text-xs text-stone-500 xl:col-span-2">
+      <span>能力预设</span>
+      <select
+        :value="modelForm.capabilityPreset"
+        class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
+        @change="modelForm.capabilityPreset = ($event.target as HTMLSelectElement).value as ProviderCapabilityPresetId"
+      >
+        <option
+          v-for="option in capabilityPresetOptions"
+          :key="option.value"
+          :value="option.value"
+        >
+          {{ option.label }}
+        </option>
+      </select>
+      <p class="text-[11px] leading-5 text-stone-500">
+        预设用于声明模型事实；只有切到“自定义能力”时，才手动覆盖上下文窗口和能力开关。
+      </p>
+    </label>
   </div>
 
   <button
@@ -817,21 +936,25 @@ watch(
     <div class="rounded-[0.55rem] bg-white/78 px-4 py-4">
       <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
         能力开关
-        <InfoTip text="图标亮起表示该能力开启。当前数据模型仅支持真实存在的能力字段，暂未拆分语音/视频独立开关。" />
+        <InfoTip text="图标亮起表示该能力开启。预设模式下这些能力由模型事实驱动；切换到自定义后才允许手动改写。" />
       </div>
+      <p class="mt-2 text-[11px] leading-5 text-stone-500">
+        {{ usesCapabilityPreset ? "当前为预设驱动，能力只读。" : "当前为自定义能力，改动会直接写入 providers.json。" }}
+      </p>
       <div class="mt-3 flex flex-wrap gap-2">
         <button
           v-for="option in capabilityOptions"
           :key="option.key"
           type="button"
-          class="inline-flex h-10 w-10 items-center justify-center rounded-[0.6rem] border transition-colors"
+          class="inline-flex h-10 w-10 items-center justify-center rounded-[0.6rem] border transition-colors disabled:cursor-not-allowed disabled:opacity-55"
           :class="
-            modelForm[option.key]
+            resolvedModelCapabilities[option.key]
               ? 'border-stone-300 bg-stone-900 text-stone-50 shadow-[0_6px_18px_rgba(41,32,25,0.12)]'
               : 'border-stone-200 bg-white text-stone-500 hover:border-stone-300 hover:text-stone-700'
           "
           :title="`${option.label}：${option.hint}`"
           :aria-label="option.label"
+          :disabled="usesCapabilityPreset"
           @click="toggleCapability(option.key)"
         >
           <component :is="option.icon" class="h-4 w-4" />
@@ -863,10 +986,36 @@ watch(
     <label class="space-y-1 text-xs text-stone-500">
       <span>上下文窗口 Tokens</span>
       <Input
-        :model-value="modelForm.contextWindowTokens"
+        :model-value="displayedContextWindowTokens"
         type="number"
-        placeholder="例如 128000"
+        :disabled="usesCapabilityPreset"
+        :placeholder="usesCapabilityPreset ? '由能力预设自动决定' : '例如 128000'"
         @update:model-value="modelForm.contextWindowTokens = $event"
+      />
+    </label>
+
+    <label v-if="resolvedModelCapabilities.supportsReasoning" class="space-y-1 text-xs text-stone-500">
+      <span>推理强度</span>
+      <select
+        :value="modelForm.reasoningEffort"
+        class="h-11 w-full rounded-[0.5rem] bg-white px-3 text-sm text-stone-900 outline-none transition-colors"
+        @change="modelForm.reasoningEffort = ($event.target as HTMLSelectElement).value as ProviderReasoningEffort | ''"
+      >
+        <option value="">跟随模型默认值</option>
+        <option value="minimal">minimal</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+      </select>
+    </label>
+
+    <label v-if="resolvedModelCapabilities.supportsReasoning" class="space-y-1 text-xs text-stone-500">
+      <span>推理预算 Tokens</span>
+      <Input
+        :model-value="modelForm.reasoningBudgetTokens"
+        type="number"
+        placeholder="例如 2048"
+        @update:model-value="modelForm.reasoningBudgetTokens = $event"
       />
     </label>
 

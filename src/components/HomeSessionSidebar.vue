@@ -11,13 +11,41 @@ import {
 } from "lucide-vue-next";
 import { useRuntimeStore } from "@/stores/runtime";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
+import type { ChatMessage, SessionOverview } from "@/types/runtime";
 
 const SESSION_SIDEBAR_STORAGE_KEY = "pony-agent.session-sidebar-collapsed.v1";
 
 const runtimeStore = useRuntimeStore();
-const { isSubmitting, sessionId, sessionList } = storeToRefs(runtimeStore);
+const { isSubmitting, messages, sessionId, sessionList, sessionOperation } = storeToRefs(runtimeStore);
 
 const collapsed = ref(loadCollapsedState());
+
+const hasPersistableCurrentSession = computed(() => hasPersistableMessages(messages.value));
+const canCreateSession = computed(
+  () => !isSubmitting.value && !sessionOperation.value && hasPersistableCurrentSession.value
+);
+const createSessionTitle = computed(() =>
+  hasPersistableCurrentSession.value
+    ? "新建一个空白对话，会保留当前历史会话。"
+    : "当前已经是空白新对话，发送首条消息后才会保存到历史。"
+);
+const visibleSessions = computed<SessionOverview[]>(() => {
+  if (hasPersistableCurrentSession.value) {
+    return sessionList.value;
+  }
+
+  return [
+    {
+      conversationId: sessionId.value,
+      title: "新对话",
+      summary: "发送第一条消息后保存到历史",
+      turnCount: 0,
+      lastReferencedFile: null,
+      updatedAtMs: 0
+    },
+    ...sessionList.value.filter((session) => session.conversationId !== sessionId.value)
+  ];
+});
 
 const asideClass = computed(() =>
   collapsed.value
@@ -48,7 +76,7 @@ function toggleCollapsed() {
 
 function formatSessionTime(updatedAtMs?: number) {
   if (!updatedAtMs) {
-    return "--";
+    return "未保存";
   }
 
   return new Intl.DateTimeFormat("zh-CN", {
@@ -57,6 +85,21 @@ function formatSessionTime(updatedAtMs?: number) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(updatedAtMs);
+}
+
+function hasPersistableMessages(sessionMessages: ChatMessage[]) {
+  return sessionMessages.some(
+    (message) =>
+      (message.role === "user" || message.role === "assistant") && message.content.trim().length > 0
+  );
+}
+
+function isTransientSession(session: SessionOverview) {
+  return session.conversationId === sessionId.value && !hasPersistableCurrentSession.value;
+}
+
+function canDeleteSession(session: SessionOverview) {
+  return !isSubmitting.value && !sessionOperation.value && !isTransientSession(session);
 }
 </script>
 
@@ -95,14 +138,15 @@ function formatSessionTime(updatedAtMs?: number) {
         <button
           class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] bg-transparent text-stone-500 transition hover:bg-[#f6efe3] hover:text-stone-900 disabled:cursor-not-allowed disabled:text-stone-300"
           type="button"
-          :disabled="isSubmitting"
+          :disabled="!canCreateSession"
+          :title="createSessionTitle"
           @click="runtimeStore.createSession()"
         >
           <Plus class="h-4 w-4" />
         </button>
 
         <button
-          v-for="session in sessionList"
+          v-for="session in visibleSessions"
           :key="session.conversationId"
           class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
           :class="
@@ -111,7 +155,7 @@ function formatSessionTime(updatedAtMs?: number) {
               : 'bg-transparent text-stone-500 hover:bg-[#f6efe3] hover:text-stone-900'
           "
           type="button"
-          :disabled="isSubmitting"
+          :disabled="isSubmitting || Boolean(sessionOperation)"
           :title="session.title || session.summary || session.conversationId"
           @click="runtimeStore.switchSession(session.conversationId)"
         >
@@ -124,18 +168,25 @@ function formatSessionTime(updatedAtMs?: number) {
           <button
             class="inline-flex h-8 items-center gap-2 rounded-[0.42rem] bg-[#f6efe3] px-3 text-[12px] text-stone-700 transition hover:text-stone-950 disabled:cursor-not-allowed disabled:text-stone-300"
             type="button"
-            :disabled="isSubmitting"
+            :disabled="!canCreateSession"
+            :title="createSessionTitle"
             @click="runtimeStore.createSession()"
           >
             <Plus class="h-3.5 w-3.5" />
             <span>新对话</span>
           </button>
+          <div
+            v-if="!hasPersistableCurrentSession"
+            class="text-[10px] text-stone-400"
+          >
+            当前为空对话，发送首条消息后才会保存
+          </div>
         </div>
 
         <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="h-full w-full pr-1">
           <div class="space-y-1.5">
             <div
-              v-for="session in sessionList"
+              v-for="session in visibleSessions"
               :key="session.conversationId"
               class="group rounded-[0.45rem] transition hover:bg-[#f6efe3]/70"
               :class="
@@ -148,7 +199,7 @@ function formatSessionTime(updatedAtMs?: number) {
                 <button
                   class="min-w-0 flex-1 text-left"
                   type="button"
-                  :disabled="isSubmitting"
+                  :disabled="isSubmitting || Boolean(sessionOperation)"
                   @click="runtimeStore.switchSession(session.conversationId)"
                 >
                   <div
@@ -156,6 +207,12 @@ function formatSessionTime(updatedAtMs?: number) {
                     :class="session.conversationId === sessionId ? 'text-stone-900' : 'text-stone-700'"
                   >
                     {{ session.title || session.summary || session.conversationId }}
+                    <span
+                      v-if="isTransientSession(session)"
+                      class="ml-1 text-[10px] text-amber-600"
+                    >
+                      未保存
+                    </span>
                   </div>
                   <div class="mt-0.5 truncate text-[10px] text-stone-400">
                     {{ session.summary }}
@@ -169,8 +226,8 @@ function formatSessionTime(updatedAtMs?: number) {
                 <button
                   class="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-white hover:text-rose-600 disabled:cursor-not-allowed disabled:text-stone-300"
                   type="button"
-                  :disabled="isSubmitting"
-                  title="删除对话"
+                  :disabled="!canDeleteSession(session)"
+                  :title="isTransientSession(session) ? '空白新对话会在切换后自动丢弃，无需单独删除。' : '删除对话'"
                   @click.stop="runtimeStore.deleteSession(session.conversationId)"
                 >
                   <Trash2 class="h-3.5 w-3.5" />

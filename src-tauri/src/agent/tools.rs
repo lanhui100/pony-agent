@@ -25,6 +25,7 @@ const MAX_BATCH_CALLS: usize = 6;
 const MAX_SEGMENT_LINES: usize = 400;
 const DEFAULT_SEGMENT_LINES: usize = 80;
 const DEFAULT_LIST_LIMIT: usize = 40;
+const SUMMARY_ITEM_LIMIT: usize = 3;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -470,22 +471,46 @@ impl ToolRouter {
             .map(|value| value.trim().to_lowercase())
             .filter(|value| !value.is_empty());
 
-        let root_dir = match self.resolve_workspace_dir(relative_dir) {
+        let root_entry = match self.resolve_workspace_entry(relative_dir) {
             Ok(value) => value,
             Err(error) => {
                 return error_result(TOOL_WORKSPACE_SEARCH_TEXT, "invalid_path", error, None)
             }
         };
 
-        let mut files = Vec::new();
-        if let Err(error) = collect_files_recursively(&root_dir, &mut files, MAX_SEARCH_FILES) {
+        let searched_path = self.display_workspace_relative(&root_entry);
+        let path_kind = if root_entry.is_file() {
+            "file"
+        } else if root_entry.is_dir() {
+            "directory"
+        } else {
+            "other"
+        };
+
+        let mut files = if root_entry.is_file() {
+            vec![root_entry.clone()]
+        } else if root_entry.is_dir() {
+            let mut collected = Vec::new();
+            if let Err(error) =
+                collect_files_recursively(&root_entry, &mut collected, MAX_SEARCH_FILES)
+            {
+                return error_result(
+                    TOOL_WORKSPACE_SEARCH_TEXT,
+                    "walk_failed",
+                    format!("遍历目录失败：{}。", error),
+                    Some("请缩小 path 范围后重试。".to_string()),
+                );
+            }
+            collected
+        } else {
             return error_result(
                 TOOL_WORKSPACE_SEARCH_TEXT,
-                "walk_failed",
-                format!("遍历目录失败：{}。", error),
-                Some("请缩小 path 范围后重试。".to_string()),
+                "unsupported_path_kind",
+                format!("当前路径类型不支持文本搜索：{}。", searched_path),
+                Some("请传入工作区内的文件或目录路径。".to_string()),
             );
-        }
+        };
+        files.sort();
 
         let normalized_query = if ignore_case {
             query.to_lowercase()
@@ -506,7 +531,7 @@ impl ToolRouter {
 
             let relative = self.display_workspace_relative(&file_path);
             if let Some(pattern) = &file_filter {
-                if !relative.to_lowercase().contains(pattern) {
+                if !path_matches_filter(&relative, pattern) {
                     continue;
                 }
             }
@@ -551,7 +576,8 @@ impl ToolRouter {
             status: "ok".to_string(),
             output: json_string(json!({
                 "query": query,
-                "path": self.display_workspace_relative(&root_dir),
+                "path": searched_path,
+                "pathKind": path_kind,
                 "ignoreCase": ignore_case,
                 "filePattern": file_filter,
                 "scannedFiles": scanned_files,
@@ -639,16 +665,26 @@ impl ToolRouter {
             thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(nested_calls.len());
                 for (index, nested_call) in nested_calls.iter().cloned().enumerate() {
-                    handles.push(scope.spawn(move || {
-                        let result = self.execute_internal(&nested_call, false);
-                        (index, nested_call, result)
-                    }));
+                    let worker_call = nested_call.clone();
+                    handles.push((
+                        index,
+                        nested_call,
+                        scope.spawn(move || self.execute_internal(&worker_call, false)),
+                    ));
                 }
 
-                let mut collected = handles
-                    .into_iter()
-                    .filter_map(|handle| handle.join().ok())
-                    .collect::<Vec<_>>();
+                let mut collected = Vec::with_capacity(handles.len());
+                for (index, nested_call, handle) in handles {
+                    let result = handle.join().unwrap_or_else(|_| {
+                        error_result(
+                            canonical_tool_name(&nested_call.name).unwrap_or(&nested_call.name),
+                            "join_failed",
+                            format!("并发执行子调用 `{}` 失败。", nested_call.name),
+                            Some("请改为串行执行，或检查该子调用是否触发了内部 panic。".to_string()),
+                        )
+                    });
+                    collected.push((index, nested_call, result));
+                }
                 collected.sort_by_key(|(index, _, _)| *index);
                 collected
             })
@@ -722,6 +758,65 @@ impl ToolRouter {
             .and_then(Value::as_u64)
             .map(|value| value.clamp(1, MAX_SEGMENT_LINES as u64) as usize)
             .unwrap_or(DEFAULT_SEGMENT_LINES);
+        let paths = call
+            .arguments
+            .get("paths")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let paths = unique_paths(paths);
+
+        if !paths.is_empty() {
+            if paths.len() > MAX_BATCH_CALLS {
+                return error_result(
+                    TOOL_WORKSPACE_GATHER_CONTEXT,
+                    "too_many_paths",
+                    format!(
+                        "单次 workspace_gather_context 最多允许 {} 个路径，当前收到 {} 个。",
+                        MAX_BATCH_CALLS,
+                        paths.len()
+                    ),
+                    Some("请缩小本次聚合范围，或拆成多个 gather/batch 调用。".to_string()),
+                );
+            }
+
+            let nested = paths
+                .iter()
+                .enumerate()
+                .map(|(index, path)| {
+                    let nested_call = ToolCall {
+                        call_id: None,
+                        name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+                        arguments: json!({
+                            "path": path,
+                            "query": if query.is_empty() { Value::Null } else { Value::String(query.clone()) },
+                            "limit": limit,
+                            "lineCount": line_count,
+                        }),
+                    };
+                    let result = self.gather_context(&nested_call);
+                    (index, nested_call, result)
+                })
+                .collect::<Vec<_>>();
+
+            return self.aggregate_nested_results(
+                TOOL_WORKSPACE_GATHER_CONTEXT,
+                json!({
+                    "mode": "multi_path",
+                    "paths": paths,
+                    "query": if query.is_empty() { Value::Null } else { Value::String(query) },
+                }),
+                nested,
+            );
+        }
 
         let path = if raw_path.is_empty() { "." } else { raw_path };
         let resolved = match self.resolve_workspace_entry(path) {
@@ -925,90 +1020,66 @@ impl ToolRouter {
                         first_search_match_line(&search_result.output, &display_path);
                     collected.push((1usize, search_call, search_result));
 
-                    if let Some(line) = segment_line {
-                        let start_line = line.saturating_sub(line_count / 2).max(1);
-                        let segment_call = ToolCall {
-                            call_id: None,
-                            name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
-                            arguments: json!({
-                                "path": display_path,
-                                "startLine": start_line,
-                                "lineCount": line_count,
-                            }),
-                        };
-                        collected.push((
-                            2usize,
-                            segment_call.clone(),
-                            self.read_file_segment(&segment_call),
-                        ));
-                    }
+                    let start_line = segment_line
+                        .map(|line| line.saturating_sub(line_count / 2).max(1))
+                        .unwrap_or(1);
+                    let segment_call = ToolCall {
+                        call_id: None,
+                        name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
+                        arguments: json!({
+                            "path": display_path,
+                            "startLine": start_line,
+                            "lineCount": line_count,
+                        }),
+                    };
+                    collected.push((
+                        2usize,
+                        segment_call.clone(),
+                        self.read_file_segment(&segment_call),
+                    ));
 
                     collected
                 } else {
-                    thread::scope(|scope| {
-                        let path_info_call = ToolCall {
+                    let path_info_call = ToolCall {
+                        call_id: None,
+                        name: TOOL_WORKSPACE_PATH_INFO.to_string(),
+                        arguments: json!({ "path": display_path }),
+                    };
+                    let search_call = ToolCall {
+                        call_id: None,
+                        name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
+                        arguments: json!({
+                            "query": query,
+                            "path": search_path,
+                            "limit": limit,
+                            "filePattern": file_pattern,
+                        }),
+                    };
+
+                    let mut collected = Vec::with_capacity(3);
+                    collected.push((
+                        0usize,
+                        path_info_call.clone(),
+                        self.path_info(&path_info_call),
+                    ));
+                    let search_result = self.search_text(&search_call);
+                    let should_add_listing =
+                        search_result.status != "ok" || search_match_count(&search_result.output) == 0;
+                    collected.push((1usize, search_call, search_result));
+
+                    if should_add_listing {
+                        let list_call = ToolCall {
                             call_id: None,
-                            name: TOOL_WORKSPACE_PATH_INFO.to_string(),
-                            arguments: json!({ "path": display_path }),
-                        };
-                        let search_call = ToolCall {
-                            call_id: None,
-                            name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
+                            name: TOOL_WORKSPACE_LIST_FILES.to_string(),
                             arguments: json!({
-                                "query": query,
-                                "path": search_path,
+                                "path": display_path,
                                 "limit": limit,
-                                "filePattern": file_pattern,
                             }),
                         };
-                        let info_handle = scope.spawn(|| {
-                            let result = self.path_info(&path_info_call);
-                            (0usize, path_info_call, result)
-                        });
-                        let search_handle = scope.spawn(|| {
-                            let result = self.search_text(&search_call);
-                            (1usize, search_call, result)
-                        });
-                        vec![
-                            info_handle.join().unwrap_or_else(|_| {
-                                (
-                                    0,
-                                    ToolCall {
-                                        call_id: None,
-                                        name: TOOL_WORKSPACE_PATH_INFO.to_string(),
-                                        arguments: json!({ "path": display_path }),
-                                    },
-                                    error_result(
-                                        TOOL_WORKSPACE_PATH_INFO,
-                                        "join_failed",
-                                        "并发执行 workspace_path_info 失败。".to_string(),
-                                        None,
-                                    ),
-                                )
-                            }),
-                            search_handle.join().unwrap_or_else(|_| {
-                                (
-                                    1,
-                                    ToolCall {
-                                        call_id: None,
-                                        name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
-                                        arguments: json!({
-                                            "query": query,
-                                            "path": search_path,
-                                            "limit": limit,
-                                            "filePattern": file_pattern,
-                                        }),
-                                    },
-                                    error_result(
-                                        TOOL_WORKSPACE_SEARCH_TEXT,
-                                        "join_failed",
-                                        "并发执行 workspace_search_text 失败。".to_string(),
-                                        None,
-                                    ),
-                                )
-                            }),
-                        ]
-                    })
+                        collected.push((2usize, list_call.clone(), self.list_files(&list_call)));
+                    }
+
+                    collected
                 }
             }
         };
@@ -1361,6 +1432,13 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "目标路径，默认为 ."
                     },
+                    "paths": {
+                        "type": "array",
+                        "description": "可选的多路径聚合输入；提供后会依次对每个路径执行单路径 gather 并汇总结果",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
                     "query": {
                         "type": "string",
                         "description": "可选搜索词；提供后会进入搜索模式"
@@ -1463,6 +1541,66 @@ fn should_skip_dir(path: &Path) -> bool {
     )
 }
 
+fn unique_paths(paths: Vec<String>) -> Vec<String> {
+    let mut unique = Vec::new();
+    for path in paths {
+        if !unique.iter().any(|existing| existing == &path) {
+            unique.push(path);
+        }
+    }
+    unique
+}
+
+fn path_matches_filter(relative_path: &str, pattern: &str) -> bool {
+    let path = relative_path.replace('\\', "/").to_lowercase();
+    let pattern = pattern.replace('\\', "/").trim().to_lowercase();
+    if pattern.is_empty() {
+        return true;
+    }
+
+    if !pattern.contains('*') {
+        return path.contains(&pattern);
+    }
+
+    wildcard_match(&path, &pattern)
+}
+
+fn wildcard_match(input: &str, pattern: &str) -> bool {
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    if parts.len() == 1 {
+        return input == pattern;
+    }
+
+    let mut remainder = input;
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
+
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+
+        if index == 0 && anchored_start {
+            let Some(next) = remainder.strip_prefix(part) else {
+                return false;
+            };
+            remainder = next;
+            continue;
+        }
+
+        if index == parts.len() - 1 && anchored_end {
+            return remainder.ends_with(part);
+        }
+
+        let Some(position) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[position + part.len()..];
+    }
+
+    true
+}
+
 fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
     ToolResult {
         tool_name: tool_name.to_string(),
@@ -1543,33 +1681,27 @@ fn first_search_match_line(output: &str, target_path: &str) -> Option<usize> {
         })
 }
 
+fn search_match_count(output: &str) -> usize {
+    parse_tool_output(output)
+        .get("matchCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize
+}
+
 fn build_nested_results_summary(
     tool_name: &str,
     results: &[Value],
     aggregate_status: &str,
 ) -> Value {
-    let first_error = results.iter().find_map(|entry| {
-        let status = entry.get("aggregateStatus").and_then(Value::as_str)?;
-        if matches!(status, "error" | "aborted") {
-            Some(json!({
-                "tool": entry.get("tool").cloned().unwrap_or(Value::Null),
-                "index": entry.get("index").cloned().unwrap_or(Value::Null),
-                "status": status,
-                "error": entry.get("error").cloned().unwrap_or(Value::Null),
-            }))
-        } else {
-            None
-        }
-    });
+    let first_error = results
+        .iter()
+        .find_map(extract_first_error_from_nested_result);
 
     let top_matches = results
         .iter()
-        .find(|entry| entry.get("tool").and_then(Value::as_str) == Some(TOOL_WORKSPACE_SEARCH_TEXT))
-        .and_then(|entry| entry.get("output"))
-        .and_then(|output| output.get("matches"))
-        .and_then(Value::as_array)
-        .map(|matches| matches.iter().take(3).cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+        .flat_map(extract_top_matches_from_nested_result)
+        .take(SUMMARY_ITEM_LIMIT)
+        .collect::<Vec<_>>();
 
     let listed_paths = results
         .iter()
@@ -1610,6 +1742,52 @@ fn build_nested_results_summary(
         "topMatches": top_matches,
         "listedPaths": listed_paths,
     })
+}
+
+fn extract_first_error_from_nested_result(result: &Value) -> Option<Value> {
+    let status = result.get("aggregateStatus").and_then(Value::as_str)?;
+    if matches!(status, "error" | "aborted") {
+        return Some(json!({
+            "tool": result.get("tool").cloned().unwrap_or(Value::Null),
+            "index": result.get("index").cloned().unwrap_or(Value::Null),
+            "status": status,
+            "error": result.get("error").cloned().unwrap_or(Value::Null),
+        }));
+    }
+
+    result
+        .get("output")
+        .and_then(|output| output.get("summary"))
+        .and_then(|summary| summary.get("firstError"))
+        .cloned()
+        .filter(|value| !value.is_null())
+}
+
+fn extract_top_matches_from_nested_result(result: &Value) -> Vec<Value> {
+    let Some(output) = result.get("output") else {
+        return Vec::new();
+    };
+
+    if let Some(matches) = output.get("matches").and_then(Value::as_array) {
+        return matches
+            .iter()
+            .take(SUMMARY_ITEM_LIMIT)
+            .cloned()
+            .collect::<Vec<_>>();
+    }
+
+    output
+        .get("summary")
+        .and_then(|summary| summary.get("topMatches"))
+        .and_then(Value::as_array)
+        .map(|matches| {
+            matches
+                .iter()
+                .take(SUMMARY_ITEM_LIMIT)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 enum FileSegment {
@@ -1746,5 +1924,162 @@ mod tests {
             Some("file")
         );
         assert_eq!(payload.get("successCount").and_then(Value::as_u64), Some(2));
+    }
+
+    #[test]
+    fn gather_context_can_aggregate_multiple_paths() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("one.rs"), "fn one() {}\n").expect("write one");
+        fs::write(workspace.join("two.rs"), "fn two() {}\n").expect("write two");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "paths": ["one.rs", "two.rs"],
+                "lineCount": 20
+            }),
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(
+            payload
+                .get("meta")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("mode"))
+                .and_then(Value::as_str),
+            Some("multi_path")
+        );
+        assert_eq!(payload.get("successCount").and_then(Value::as_u64), Some(2));
+    }
+
+    #[test]
+    fn gather_context_rejects_too_many_paths() {
+        let workspace = temp_workspace();
+        for index in 0..=MAX_BATCH_CALLS {
+            fs::write(workspace.join(format!("demo-{index}.rs")), "fn demo() {}\n")
+                .expect("write demo");
+        }
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+        let paths = (0..=MAX_BATCH_CALLS)
+            .map(|index| Value::String(format!("demo-{index}.rs")))
+            .collect::<Vec<_>>();
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "paths": paths,
+                "lineCount": 20
+            }),
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("too_many_paths")
+        );
+    }
+
+    #[test]
+    fn search_text_supports_file_path_input_and_wildcard_filter() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("src")).expect("create src dir");
+        fs::write(workspace.join("src/lib.rs"), "pub struct ToolRouter;\n").expect("write lib");
+        fs::write(workspace.join("src/lib.txt"), "ToolRouter in text\n").expect("write txt");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
+            arguments: json!({
+                "query": "ToolRouter",
+                "path": "src/lib.rs",
+                "filePattern": "*.rs"
+            }),
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
+        assert_eq!(payload.get("pathKind").and_then(Value::as_str), Some("file"));
+        assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            payload
+                .get("matches")
+                .and_then(Value::as_array)
+                .and_then(|matches| matches.first())
+                .and_then(|entry| entry.get("path"))
+                .and_then(Value::as_str),
+            Some("src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn gather_context_search_file_includes_segment_even_without_match() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.rs"), "fn main() {}\nprintln!(\"hi\");\n")
+            .expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "path": "demo.rs",
+                "query": "missing_symbol",
+                "lineCount": 20
+            }),
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload.get("plannedCount").and_then(Value::as_u64), Some(3));
+        assert!(payload
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|results| {
+                results.iter().any(|entry| {
+                    entry.get("tool").and_then(Value::as_str)
+                        == Some(TOOL_WORKSPACE_READ_FILE_SEGMENT)
+                })
+            })
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn gather_context_search_directory_falls_back_to_listing_on_empty_match() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("src")).expect("create src dir");
+        fs::write(workspace.join("src/lib.rs"), "pub struct ToolRouter;\n").expect("write lib");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "path": "src",
+                "query": "missing_symbol",
+                "limit": 10
+            }),
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload.get("plannedCount").and_then(Value::as_u64), Some(3));
+        assert!(payload
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|results| {
+                results.iter().any(|entry| {
+                    entry.get("tool").and_then(Value::as_str) == Some(TOOL_WORKSPACE_LIST_FILES)
+                })
+            })
+            .unwrap_or(false));
     }
 }

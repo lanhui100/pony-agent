@@ -2,6 +2,15 @@ export type ProviderProtocol = "openai" | "anthropic";
 
 export type ProviderReasoningEffort = "minimal" | "low" | "medium" | "high";
 
+export type ProviderCapabilityPresetId =
+  | "auto"
+  | "open-ai-chat"
+  | "open-ai-reasoning"
+  | "anthropic-thinking"
+  | "deepseek-chat"
+  | "deepseek-reasoner"
+  | "custom";
+
 export type ProviderModelCapabilities = {
   contextWindowTokens: number | null;
   supportsTools: boolean;
@@ -10,15 +19,28 @@ export type ProviderModelCapabilities = {
   supportsReasoning: boolean;
 };
 
-export type ProviderModelConfig = {
-  id: string;
-  name: string;
-  model: string;
+export type ProviderModelCapabilityDeclaration = {
+  capabilityPreset: ProviderCapabilityPresetId;
+  capabilities: ProviderModelCapabilities;
+};
+
+export type ProviderModelUserConfig = {
   temperature: number;
   maxOutputTokens: number;
   reasoningEffort: ProviderReasoningEffort | null;
   reasoningBudgetTokens: number | null;
-  capabilities: ProviderModelCapabilities;
+};
+
+export type ProviderModelConfig = {
+  id: string;
+  name: string;
+  model: string;
+  capabilityPreset: ProviderModelCapabilityDeclaration["capabilityPreset"];
+  capabilities: ProviderModelCapabilityDeclaration["capabilities"];
+  temperature: ProviderModelUserConfig["temperature"];
+  maxOutputTokens: ProviderModelUserConfig["maxOutputTokens"];
+  reasoningEffort: ProviderModelUserConfig["reasoningEffort"];
+  reasoningBudgetTokens: ProviderModelUserConfig["reasoningBudgetTokens"];
 };
 
 export type ProviderConfig = {

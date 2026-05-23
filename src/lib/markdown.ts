@@ -157,8 +157,192 @@ function sanitizeMarkdownHtml(html: string) {
   return template.innerHTML;
 }
 
+function normalizeMarkdownLine(line: string) {
+  if (/^\s{0,3}(#{1,6})([^\s#].*)$/.test(line)) {
+    return line.replace(/^(\s{0,3}#{1,6})([^\s#].*)$/, "$1 $2");
+  }
+
+  if (/^\s{0,3}(>+)([^\s>].*)$/.test(line)) {
+    return line.replace(/^(\s{0,3}>+)([^\s>].*)$/, "$1 $2");
+  }
+
+  if (/^\s{0,3}\d+\.([^\s].*)$/.test(line)) {
+    return line.replace(/^(\s{0,3}\d+\.)([^\s].*)$/, "$1 $2");
+  }
+
+  if (/^\s{0,3}[-+*]\s*\[[ xX]\]([^\s].*)$/.test(line)) {
+    return line.replace(/^(\s{0,3}[-+*]\s*\[[ xX]\])([^\s].*)$/, "$1 $2");
+  }
+
+  if (/^\s{0,3}[-+*]([^\s*+-].*)$/.test(line) && !/^\s{0,3}([-+*])\1{2,}\s*$/.test(line)) {
+    return line.replace(/^(\s{0,3}[-+*])([^\s*+-].*)$/, "$1 $2");
+  }
+
+  return line;
+}
+
+function escapeForRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function markdownSignalScore(content: string) {
+  const signals = [
+    /^\s{0,3}#{1,6}\s+\S/m,
+    /^\s{0,3}#{1,6}\S/m,
+    /^\s{0,3}>+\s+\S/m,
+    /^\s{0,3}>+\S/m,
+    /^\s{0,3}[-+*]\s+\S/m,
+    /^\s{0,3}[-+*]\S/m,
+    /^\s{0,3}\d+\.\s+\S/m,
+    /^\s{0,3}\d+\.\S/m,
+    /\*\*[^*\n]+\*\*/,
+    /(?:^|\n)\|.+\|(?:\n|$)/,
+    /`[^`\n]+`/,
+    /^\s{0,3}[-+*]\s*\[[ xX]\]\s+\S/m
+  ];
+
+  return signals.reduce((score, pattern) => score + Number(pattern.test(content)), 0);
+}
+
+function looksLikeMarkdownDocument(content: string) {
+  return markdownSignalScore(content) >= 2;
+}
+
+function maybeParseSerializedMarkdown(content: string) {
+  const trimmed = content.trim();
+
+  if (!trimmed) {
+    return content;
+  }
+
+  const tryParse = (candidate: string) => {
+    try {
+      const parsed = JSON.parse(candidate);
+      return typeof parsed === "string" ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const directlyParsed = tryParse(trimmed);
+  if (directlyParsed && looksLikeMarkdownDocument(directlyParsed)) {
+    return directlyParsed;
+  }
+
+  if (!trimmed.startsWith("\"") && (trimmed.includes("\\n") || trimmed.includes("\\u") || trimmed.includes("\\\""))) {
+    const escaped = trimmed
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, "\\\"");
+    const reparsed = tryParse(`"${escaped}"`);
+
+    if (reparsed && looksLikeMarkdownDocument(reparsed)) {
+      return reparsed;
+    }
+  }
+
+  return content;
+}
+
+function maybeDecodeEscapedMarkdown(content: string) {
+  if (content.includes("\n") || !content.includes("\\n")) {
+    return content;
+  }
+
+  const decoded = content
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t");
+
+  return looksLikeMarkdownDocument(decoded) ? decoded : content;
+}
+
+function unwrapOuterMarkdownFence(content: string) {
+  const decodedContent = maybeDecodeEscapedMarkdown(maybeParseSerializedMarkdown(content));
+  const lines = decodedContent.split(/\r?\n/);
+  const openIndex = lines.findIndex((line) => /^\s*([`~]{3,})(?:\s*([A-Za-z0-9_-]+))?\s*$/.test(line));
+
+  if (openIndex === -1) {
+    return decodedContent;
+  }
+
+  const openMatch = lines[openIndex].match(/^\s*([`~]{3,})(?:\s*([A-Za-z0-9_-]+))?\s*$/);
+
+  if (!openMatch) {
+    return decodedContent;
+  }
+
+  let lastNonEmptyIndex = lines.length - 1;
+
+  while (lastNonEmptyIndex >= 0 && lines[lastNonEmptyIndex].trim().length === 0) {
+    lastNonEmptyIndex -= 1;
+  }
+
+  if (lastNonEmptyIndex <= openIndex) {
+    return decodedContent;
+  }
+
+  const fenceToken = openMatch[1];
+  const fenceLanguage = openMatch[2]?.trim().toLowerCase() ?? "";
+  const closingPattern = new RegExp(`^\\s*${escapeForRegExp(fenceToken[0])}{${fenceToken.length},}\\s*$`);
+
+  if (!closingPattern.test(lines[lastNonEmptyIndex])) {
+    return decodedContent;
+  }
+
+  const nestedMarkdownFenceExists = lines
+    .slice(openIndex + 1, lastNonEmptyIndex)
+    .some((line) => /^\s*([`~]{3,})\s*(md|markdown)\s*$/i.test(line));
+
+  if (nestedMarkdownFenceExists) {
+    return decodedContent;
+  }
+
+  const innerContent = lines.slice(openIndex + 1, lastNonEmptyIndex).join("\n");
+  const canUnwrap =
+    fenceLanguage === "md" ||
+    fenceLanguage === "markdown" ||
+    (!fenceLanguage && looksLikeMarkdownDocument(innerContent));
+
+  if (!canUnwrap) {
+    return decodedContent;
+  }
+
+  return [...lines.slice(0, openIndex), ...lines.slice(openIndex + 1, lastNonEmptyIndex), ...lines.slice(lastNonEmptyIndex + 1)].join("\n");
+}
+
+function unwrapInlineMarkdownFences(content: string) {
+  return content.replace(
+    /(^|\n)\s*```(?:md|markdown)\s*\r?\n([\s\S]*?)\r?\n\s*```(?=\s*(?:\n|$))/gi,
+    (_, prefix: string, inner: string) => `${prefix}${inner.trim()}`
+  );
+}
+
+export function normalizeMarkdownSource(content: string) {
+  const unwrappedContent = unwrapInlineMarkdownFences(
+    unwrapOuterMarkdownFence(maybeDecodeEscapedMarkdown(maybeParseSerializedMarkdown(content)))
+  );
+  const lines = unwrappedContent.split(/\r?\n/);
+  let inFence = false;
+
+  return lines
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+
+      if (inFence) {
+        return line;
+      }
+
+      return normalizeMarkdownLine(line);
+    })
+    .join("\n");
+}
+
 export function renderMarkdown(content: string) {
-  const html = marked.parse(content, {
+  const normalizedContent = normalizeMarkdownSource(content);
+  const html = marked.parse(normalizedContent, {
     breaks: true,
     gfm: true
   }) as string;

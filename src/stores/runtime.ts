@@ -19,6 +19,8 @@ import type {
 type RuntimeState = {
   sessionId: string;
   sessionList: SessionOverview[];
+  sessionOperation: "initializing" | "switching" | "deleting" | null;
+  sessionError: string | null;
   phase: RuntimePhase;
   health: HealthPayload | null;
   error: string | null;
@@ -62,6 +64,32 @@ type PersistedRuntimeState = {
   firstTokenLatencyMs: number | null;
 };
 
+type SessionRuntimeSnapshot = {
+  sessionId: string;
+  sessionList: SessionOverview[];
+  phase: RuntimePhase;
+  error: string | null;
+  draftMessage: string;
+  sessionSummary: string;
+  providerRequestedName: string;
+  providerName: string;
+  providerProtocol: string;
+  providerModel: string;
+  providerSource: string;
+  providerMode: string;
+  fallbackReason: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  firstTokenLatencyMs: number | null;
+  isSubmitting: boolean;
+  activeTurnId: string | null;
+  messages: ChatMessage[];
+  toolActivities: ToolActivity[];
+  traceSteps: TraceStep[];
+  turnTraceHistory: TurnTraceRecord[];
+};
+
 const RUNTIME_STORAGE_KEY = "pony-agent.runtime-history.v1";
 const DEFAULT_SESSION_ID = "local-dev-session";
 
@@ -70,6 +98,31 @@ type PersistedRuntimeCache = {
 };
 
 const DEFAULT_BROWSER_SESSION_SUMMARY = "浏览器预览会话";
+const DEFAULT_FAILED_TURN_MESSAGE = "本轮执行失败，请查看右侧 trace。";
+const DEFAULT_FAILED_TURN_ERROR = "本轮执行失败。";
+const BROWSER_PREVIEW_PROVIDER_NAME = "browser-preview";
+const BROWSER_PREVIEW_MODEL_NAME = "mock-stream";
+const BROWSER_PREVIEW_FALLBACK_REASON =
+  "当前通过 npm run dev 打开的是浏览器预览，而不是 Tauri 桌面窗口，因此不会连接 Rust 后端。";
+const BROWSER_PREVIEW_SESSION_SUMMARY = "浏览器预览模式已启用，当前轮次未连接 Rust 后端。";
+const BROWSER_PREVIEW_TRACE_TITLE = "浏览器预览";
+const BROWSER_PREVIEW_CHUNKS = [
+  "当前看到的不是前端资源没加载，而是页面运行在普通浏览器里。\n\n",
+  "此时 @tauri-apps/api 不会注入原生桥接能力，所以直接调用 invoke/listen 会失败。\n\n",
+  "现在已切换到浏览器预览兜底模式：\n",
+  "- 可以继续预览 UI 和输入交互\n",
+  "- 不会连接 Rust agent core\n",
+  "- 真正联调需要运行 tauri dev\n"
+];
+const TRACE_STEP_LABELS = {
+  plan: "接收输入",
+  context: "组织上下文",
+  contextBrowser: "识别运行环境",
+  callModel: "调用模型",
+  callModelBrowser: "浏览器预览回放",
+  callTool: "调用工具",
+  return: "返回结果"
+} as const;
 
 function debugLog(event: string, payload?: Record<string, unknown>) {
   const message = {
@@ -99,6 +152,10 @@ function cloneToolActivities(toolActivities?: ToolActivity[] | null) {
   return (toolActivities ?? []).map((tool) => ({ ...tool }));
 }
 
+function cloneMessages(messages?: ChatMessage[] | null) {
+  return (messages ?? []).map((message) => ({ ...message }));
+}
+
 function buildToolMessageDetail(tool: ToolActivity) {
   const blocks = [tool.summary.trim()];
 
@@ -122,51 +179,65 @@ function buildTurnTitle(message: string) {
   return compact.length > 44 ? `${compact.slice(0, 44)}…` : compact;
 }
 
-const defaultToolActivities: ToolActivity[] = [
-  {
-    id: "tool-time-now",
-    name: "time.now",
-    status: "planned",
-    summary: "返回当前本机 UNIX 时间戳。"
-  },
-  {
-    id: "tool-echo-input",
-    name: "echo.input",
-    status: "planned",
-    summary: "把传入 text 原样返回，用于验证 tool roundtrip。"
-  },
-  {
-    id: "tool-workspace-read-file",
-    name: "workspace.read_file",
-    status: "planned",
-    summary: "读取当前工作区内的文本文件预览。"
-  },
-  {
-    id: "tool-workspace-read-file-segment",
-    name: "workspace.read_file_segment",
-    status: "planned",
-    summary: "按行读取文件的一段内容，更适合大文件局部查看。"
-  },
-  {
-    id: "tool-workspace-list-files",
-    name: "workspace.list_files",
-    status: "planned",
-    summary: "列出当前工作区目录下的文件和子目录。"
-  }
-];
+const TRACE_STEP_IDS = {
+  plan: "step-plan",
+  context: "step-context",
+  contextBrowser: "step-context",
+  callModel: "step-call-model",
+  callModelBrowser: "step-call-model",
+  callTool: "step-call-tool",
+  return: "step-return"
+} as const;
 
-void defaultToolActivities;
+type TraceStepKey = keyof typeof TRACE_STEP_LABELS;
+type TraceStepState = TraceStep["state"];
 
-const defaultTraceSteps: TraceStep[] = [
-  { id: "step-plan", label: "接收输入", state: "completed" },
-  { id: "step-context", label: "组织上下文", state: "active" },
-  { id: "step-call-model", label: "调用模型", state: "pending" },
-  { id: "step-call-tool", label: "调用工具", state: "pending" },
-  { id: "step-return", label: "返回结果", state: "pending" }
-];
+function buildTraceSteps(entries: Array<{ key: TraceStepKey; state: TraceStepState }>) {
+  return entries.map(({ key, state }) => ({
+    id: TRACE_STEP_IDS[key],
+    label: TRACE_STEP_LABELS[key],
+    state
+  }));
+}
 
 function createDefaultTraceSteps() {
-  return cloneTraceSteps(defaultTraceSteps);
+  return buildTraceSteps([
+    { key: "plan", state: "completed" },
+    { key: "context", state: "active" },
+    { key: "callModel", state: "pending" },
+    { key: "callTool", state: "pending" },
+    { key: "return", state: "pending" }
+  ]);
+}
+
+function createSubmitTraceSteps() {
+  return buildTraceSteps([
+    { key: "plan", state: "completed" },
+    { key: "context", state: "completed" },
+    { key: "callModel", state: "active" },
+    { key: "callTool", state: "pending" },
+    { key: "return", state: "pending" }
+  ]);
+}
+
+function createBrowserPreviewTraceSteps() {
+  return buildTraceSteps([
+    { key: "plan", state: "completed" },
+    { key: "contextBrowser", state: "completed" },
+    { key: "callModelBrowser", state: "completed" },
+    { key: "callTool", state: "pending" },
+    { key: "return", state: "completed" }
+  ]);
+}
+
+function createSubmitFailureTraceSteps() {
+  return buildTraceSteps([
+    { key: "plan", state: "completed" },
+    { key: "context", state: "completed" },
+    { key: "callModel", state: "error" },
+    { key: "callTool", state: "pending" },
+    { key: "return", state: "pending" }
+  ]);
 }
 
 function wait(ms: number) {
@@ -205,6 +276,68 @@ function createBlankSessionRuntimeFields() {
     totalTokens: null as number | null,
     firstTokenLatencyMs: null as number | null
   };
+}
+
+function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapshot {
+  return {
+    sessionId: state.sessionId,
+    sessionList: state.sessionList.map((session) => ({ ...session })),
+    phase: state.phase,
+    error: state.error,
+    draftMessage: state.draftMessage,
+    sessionSummary: state.sessionSummary,
+    providerRequestedName: state.providerRequestedName,
+    providerName: state.providerName,
+    providerProtocol: state.providerProtocol,
+    providerModel: state.providerModel,
+    providerSource: state.providerSource,
+    providerMode: state.providerMode,
+    fallbackReason: state.fallbackReason,
+    inputTokens: state.inputTokens,
+    outputTokens: state.outputTokens,
+    totalTokens: state.totalTokens,
+    firstTokenLatencyMs: state.firstTokenLatencyMs,
+    isSubmitting: state.isSubmitting,
+    activeTurnId: state.activeTurnId,
+    messages: cloneMessages(state.messages),
+    toolActivities: cloneToolActivities(state.toolActivities),
+    traceSteps: cloneTraceSteps(state.traceSteps),
+    turnTraceHistory: state.turnTraceHistory.map((trace) => ({
+      ...trace,
+      traceSteps: cloneTraceSteps(trace.traceSteps),
+      toolActivities: cloneToolActivities(trace.toolActivities)
+    }))
+  };
+}
+
+function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRuntimeSnapshot) {
+  state.sessionId = snapshot.sessionId;
+  state.sessionList = snapshot.sessionList.map((session) => ({ ...session }));
+  state.phase = snapshot.phase;
+  state.error = snapshot.error;
+  state.draftMessage = snapshot.draftMessage;
+  state.sessionSummary = snapshot.sessionSummary;
+  state.providerRequestedName = snapshot.providerRequestedName;
+  state.providerName = snapshot.providerName;
+  state.providerProtocol = snapshot.providerProtocol;
+  state.providerModel = snapshot.providerModel;
+  state.providerSource = snapshot.providerSource;
+  state.providerMode = snapshot.providerMode;
+  state.fallbackReason = snapshot.fallbackReason;
+  state.inputTokens = snapshot.inputTokens;
+  state.outputTokens = snapshot.outputTokens;
+  state.totalTokens = snapshot.totalTokens;
+  state.firstTokenLatencyMs = snapshot.firstTokenLatencyMs;
+  state.isSubmitting = snapshot.isSubmitting;
+  state.activeTurnId = snapshot.activeTurnId;
+  state.messages = cloneMessages(snapshot.messages);
+  state.toolActivities = cloneToolActivities(snapshot.toolActivities);
+  state.traceSteps = cloneTraceSteps(snapshot.traceSteps);
+  state.turnTraceHistory = snapshot.turnTraceHistory.map((trace) => ({
+    ...trace,
+    traceSteps: cloneTraceSteps(trace.traceSteps),
+    toolActivities: cloneToolActivities(trace.toolActivities)
+  }));
 }
 
 const defaultAvailableTools: AvailableTool[] = [
@@ -368,6 +501,30 @@ function createHistoryTurnId(index: number) {
   return `history-turn-${index + 1}`;
 }
 
+function hasPersistableMessages(messages: ChatMessage[]) {
+  return messages.some(
+    (message) =>
+      (message.role === "user" || message.role === "assistant") && message.content.trim().length > 0
+  );
+}
+
+function buildSessionOverviewFromPersistedState(
+  conversationId: string,
+  state: PersistedRuntimeState
+): SessionOverview {
+  return {
+    conversationId,
+    title: buildSessionTitleFromMessages(state.messages),
+    summary: state.sessionSummary || DEFAULT_BROWSER_SESSION_SUMMARY,
+    turnCount: state.messages.filter((message) => message.role === "user").length,
+    lastReferencedFile: null,
+    updatedAtMs:
+      state.turnTraceHistory.length > 0
+        ? state.turnTraceHistory[state.turnTraceHistory.length - 1].updatedAt
+        : 0
+  };
+}
+
 function buildSessionTitleFromMessages(messages: ChatMessage[]) {
   const firstUserMessage = messages.find((message) => message.role === "user");
   return firstUserMessage ? buildTurnTitle(firstUserMessage.content) : "新对话";
@@ -395,42 +552,102 @@ function isPersistedStateCompatible(
   });
 }
 
-function hydrateMessagesFromHistory(history: TurnHistoryMessage[]): ChatMessage[] {
+function collectPersistedHistoryMessages(messages?: ChatMessage[] | null) {
+  return (messages ?? []).filter(
+    (message) =>
+      (message.role === "user" || message.role === "assistant") &&
+      message.status !== "pending" &&
+      message.content.trim().length > 0
+  );
+}
+
+function isPersistedMessageShapeCompatible(
+  snapshot: SessionSnapshot,
+  persisted: PersistedRuntimeState | null
+) {
+  if (!persisted) {
+    return false;
+  }
+
+  const persistedHistory = collectPersistedHistoryMessages(persisted.messages);
+  if (persistedHistory.length !== snapshot.history.length) {
+    return false;
+  }
+
+  return persistedHistory.every((message, index) => message.role === snapshot.history[index]?.role);
+}
+
+function hydrateMessagesFromHistory(
+  history: TurnHistoryMessage[],
+  persistedMessages?: ChatMessage[] | null
+): ChatMessage[] {
   const messages: ChatMessage[] = [];
+  const restoredHistoryMessages = collectPersistedHistoryMessages(persistedMessages);
+  const toolMessagesByTurnId = new Map<string, ChatMessage[]>();
   let currentTurnId: string | null = null;
   let turnIndex = 0;
 
+  for (const message of persistedMessages ?? []) {
+    if (message.role !== "tool") {
+      continue;
+    }
+
+    const turnMessages = toolMessagesByTurnId.get(message.turnId) ?? [];
+    turnMessages.push({ ...message });
+    toolMessagesByTurnId.set(message.turnId, turnMessages);
+  }
+
+  const appendToolMessagesForTurn = (turnId: string | null) => {
+    if (!turnId) {
+      return;
+    }
+
+    const toolMessages = toolMessagesByTurnId.get(turnId);
+    if (!toolMessages?.length) {
+      return;
+    }
+
+    messages.push(...toolMessages.map((message) => ({ ...message })));
+    toolMessagesByTurnId.delete(turnId);
+  };
+
   for (const item of history) {
+    const restoredMessage = restoredHistoryMessages[messages.filter((message) => message.role !== "tool").length];
+
     if (item.role === "user") {
-      currentTurnId = createHistoryTurnId(turnIndex);
+      currentTurnId = restoredMessage?.turnId ?? createHistoryTurnId(turnIndex);
       turnIndex += 1;
       messages.push({
-        id: `history-user-${turnIndex}`,
+        id: restoredMessage?.id ?? `history-user-${turnIndex}`,
         turnId: currentTurnId,
         role: "user",
         content: item.content,
         status: "done",
-        tokenCount: null
+        tokenCount: restoredMessage?.tokenCount ?? null
       });
       continue;
     }
 
     if (!currentTurnId) {
-      currentTurnId = createHistoryTurnId(turnIndex);
+      currentTurnId = restoredMessage?.turnId ?? createHistoryTurnId(turnIndex);
       turnIndex += 1;
     }
 
     messages.push({
-      id: `history-assistant-${turnIndex}`,
+      id: restoredMessage?.id ?? `history-assistant-${turnIndex}`,
       turnId: currentTurnId,
       role: "assistant",
       content: item.content,
       status: "done",
-      tokenCount: null
+      reasoningContent: restoredMessage?.reasoningContent ?? null,
+      tokenCount: restoredMessage?.tokenCount ?? null,
+      modelName: restoredMessage?.modelName ?? null
     });
+    appendToolMessagesForTurn(currentTurnId);
     currentTurnId = null;
   }
 
+  appendToolMessagesForTurn(currentTurnId);
   return messages;
 }
 
@@ -441,6 +658,8 @@ export const useRuntimeStore = defineStore("runtime", {
     return {
       sessionId: DEFAULT_SESSION_ID,
       sessionList: [],
+      sessionOperation: null,
+      sessionError: null,
       phase: persisted?.messages?.length ? "ready" : "idle",
       health: null,
       error: null,
@@ -508,6 +727,14 @@ export const useRuntimeStore = defineStore("runtime", {
       this.turnTraceHistory = [];
     },
     persistHistory() {
+      if (!hasPersistableMessages(this.messages)) {
+        removePersistedSessionState(this.sessionId);
+        debugLog("persist:skip-empty", {
+          sessionId: this.sessionId
+        });
+        return;
+      }
+
       const payload: PersistedRuntimeState = {
         messages: this.messages,
         turnTraceHistory: this.turnTraceHistory,
@@ -546,25 +773,49 @@ export const useRuntimeStore = defineStore("runtime", {
 
       const cache = loadPersistedRuntimeCache();
       this.sessionList = Object.entries(cache.sessions)
-        .map(([conversationId, state]) => ({
-          conversationId,
-          title: buildSessionTitleFromMessages(state.messages),
-          summary: state.sessionSummary || DEFAULT_BROWSER_SESSION_SUMMARY,
-          turnCount: state.messages.filter((message) => message.role === "user").length,
-          lastReferencedFile: null,
-          updatedAtMs:
-            state.turnTraceHistory.length > 0
-              ? state.turnTraceHistory[state.turnTraceHistory.length - 1].updatedAt
-              : 0
-        }))
+        .map(([conversationId, state]) => buildSessionOverviewFromPersistedState(conversationId, state))
         .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+    },
+    async loadSessionState(nextSessionId: string, options?: { refreshCatalog?: boolean }) {
+      const refreshCatalog = options?.refreshCatalog ?? true;
+
+      if (isTauriAvailable()) {
+        const snapshot = await safeInvoke<SessionSnapshot>("load_session_snapshot", {
+          sessionId: nextSessionId
+        });
+        this.applySessionSnapshot(nextSessionId, snapshot);
+        if (refreshCatalog) {
+          await this.loadSessionCatalog();
+        }
+        return;
+      }
+
+      const persisted = loadPersistedRuntimeState(nextSessionId);
+      this.applySessionSnapshot(nextSessionId, {
+        conversationId: nextSessionId,
+        title: buildSessionTitleFromMessages(persisted?.messages ?? []),
+        summary: persisted?.sessionSummary ?? (persisted?.messages?.length ? DEFAULT_BROWSER_SESSION_SUMMARY : ""),
+        history: buildTurnHistory(persisted?.messages ?? []),
+        turnCount: persisted?.messages?.filter((message) => message.role === "user").length ?? 0,
+        lastReferencedFile: null,
+        updatedAtMs:
+          persisted && persisted.turnTraceHistory.length > 0
+            ? persisted.turnTraceHistory[persisted.turnTraceHistory.length - 1].updatedAt
+            : Date.now()
+      });
+
+      if (refreshCatalog) {
+        await this.loadSessionCatalog();
+      }
     },
     applySessionSnapshot(sessionId: string, snapshot: SessionSnapshot) {
       const persisted = loadPersistedRuntimeState(sessionId);
       const canReusePersistedState = isPersistedStateCompatible(snapshot, persisted);
+      const canMergePersistedMessages = isPersistedMessageShapeCompatible(snapshot, persisted);
       const restoredState = canReusePersistedState ? persisted : null;
       const blankFields = createBlankSessionRuntimeFields();
       const sessionSummary = restoredState?.sessionSummary ?? (snapshot.history.length > 0 ? snapshot.summary : "");
+      const snapshotTurnTraceHistory = snapshot.turnTraceHistory ?? [];
 
       this.sessionId = sessionId;
       this.error = null;
@@ -572,10 +823,13 @@ export const useRuntimeStore = defineStore("runtime", {
       this.activeTurnId = null;
       this.draftMessage = "";
       this.sessionSummary = sessionSummary;
-      this.messages = restoredState?.messages?.length
-        ? restoredState.messages
-        : hydrateMessagesFromHistory(snapshot.history);
-      this.turnTraceHistory = restoredState?.turnTraceHistory ?? [];
+      this.messages = hydrateMessagesFromHistory(
+        snapshot.history,
+        canMergePersistedMessages ? persisted?.messages : null
+      );
+      this.turnTraceHistory = snapshotTurnTraceHistory.length
+        ? snapshotTurnTraceHistory
+        : restoredState?.turnTraceHistory ?? [];
       this.providerRequestedName = restoredState?.providerRequestedName ?? blankFields.providerRequestedName;
       this.providerName = restoredState?.providerName ?? blankFields.providerName;
       this.providerProtocol = restoredState?.providerProtocol ?? blankFields.providerProtocol;
@@ -593,73 +847,166 @@ export const useRuntimeStore = defineStore("runtime", {
       this.persistHistory();
     },
     async switchSession(nextSessionId: string) {
-      if (this.isSubmitting) {
+      if (this.isSubmitting || this.sessionOperation) {
+        return;
+      }
+      if (nextSessionId === this.sessionId) {
         return;
       }
 
+      const previousSnapshot = createSessionRuntimeSnapshot(this);
+      this.sessionOperation = "switching";
+      this.sessionError = null;
       this.resetSessionRuntimeState();
       this.sessionId = nextSessionId;
       this.phase = "connecting";
 
-      if (isTauriAvailable()) {
-        const snapshot = await safeInvoke<SessionSnapshot>("load_session_snapshot", {
-          sessionId: nextSessionId
+      try {
+        await this.loadSessionState(nextSessionId);
+        debugLog("session:switch", {
+          from: previousSnapshot.sessionId,
+          to: nextSessionId
         });
-        this.applySessionSnapshot(nextSessionId, snapshot);
-        await this.loadSessionCatalog();
+      } catch (error) {
+        restoreSessionRuntimeSnapshot(this, previousSnapshot);
+        this.sessionError = `切换对话失败：${String(error)}`;
+        debugLog("session:switch:error", {
+          from: previousSnapshot.sessionId,
+          to: nextSessionId,
+          error: String(error)
+        });
+      } finally {
+        this.sessionOperation = null;
+      }
+    },
+    async createSession() {
+      if (this.sessionOperation || !hasPersistableMessages(this.messages)) {
         return;
       }
 
-      const persisted = loadPersistedRuntimeState(nextSessionId);
-      this.applySessionSnapshot(nextSessionId, {
-        conversationId: nextSessionId,
-        title: buildSessionTitleFromMessages(persisted?.messages ?? []),
-        summary: persisted?.sessionSummary ?? (persisted?.messages?.length ? DEFAULT_BROWSER_SESSION_SUMMARY : ""),
-        history: buildTurnHistory(persisted?.messages ?? []),
-        turnCount: persisted?.messages?.filter((message) => message.role === "user").length ?? 0,
-        lastReferencedFile: null,
-        updatedAtMs:
-          persisted && persisted.turnTraceHistory.length > 0
-            ? persisted.turnTraceHistory[persisted.turnTraceHistory.length - 1].updatedAt
-            : Date.now()
-      });
-      await this.loadSessionCatalog();
-    },
-    async createSession() {
       const nextSessionId = `session-${Date.now()}`;
       await this.switchSession(nextSessionId);
     },
     async deleteSession(targetSessionId: string) {
-      if (this.isSubmitting) {
+      if (this.isSubmitting || this.sessionOperation) {
         return;
       }
 
-      removePersistedSessionState(targetSessionId);
+      const deletingActiveEmptySession =
+        targetSessionId === this.sessionId && !hasPersistableMessages(this.messages);
+      const previousSnapshot = createSessionRuntimeSnapshot(this);
+      const persistedStateToRestore = loadPersistedRuntimeState(targetSessionId);
+      this.sessionOperation = "deleting";
+      this.sessionError = null;
 
-      if (isTauriAvailable()) {
-        this.sessionList = await safeInvoke<SessionOverview[]>("delete_session", {
-          sessionId: targetSessionId
+      try {
+        removePersistedSessionState(targetSessionId);
+
+        if (isTauriAvailable() && !deletingActiveEmptySession) {
+          this.sessionList = await safeInvoke<SessionOverview[]>("delete_session", {
+            sessionId: targetSessionId
+          });
+        } else {
+          await this.loadSessionCatalog();
+        }
+
+        const fallbackSessionId =
+          this.sessionList.find((session) => session.conversationId !== targetSessionId)?.conversationId ??
+          this.sessionList[0]?.conversationId ??
+          DEFAULT_SESSION_ID;
+
+        const shouldLoadFallbackSession =
+          deletingActiveEmptySession ||
+          this.sessionId === targetSessionId ||
+          !this.sessionList.some((session) => session.conversationId === this.sessionId);
+
+        if (!shouldLoadFallbackSession) {
+          debugLog("session:delete", {
+            targetSessionId
+          });
+          return;
+        }
+
+        this.resetSessionRuntimeState();
+        this.sessionId = fallbackSessionId;
+        this.phase = "connecting";
+
+        try {
+          if (this.sessionList.length === 0 && fallbackSessionId === DEFAULT_SESSION_ID) {
+            this.phase = "idle";
+            debugLog("session:delete:empty-fallback", {
+              targetSessionId
+            });
+            return;
+          }
+
+          await this.loadSessionState(fallbackSessionId, { refreshCatalog: false });
+          debugLog("session:delete:fallback", {
+            targetSessionId,
+            fallbackSessionId
+          });
+        } catch (error) {
+          this.resetSessionRuntimeState();
+          this.sessionId = fallbackSessionId;
+          this.phase = "idle";
+          this.sessionError = `删除对话后加载替代对话失败：${String(error)}`;
+          debugLog("session:delete:fallback-error", {
+            targetSessionId,
+            fallbackSessionId,
+            error: String(error)
+          });
+        }
+      } catch (error) {
+        if (persistedStateToRestore) {
+          persistSessionState(targetSessionId, persistedStateToRestore);
+        }
+        restoreSessionRuntimeSnapshot(this, previousSnapshot);
+        this.sessionError = `删除对话失败：${String(error)}`;
+        debugLog("session:delete:error", {
+          targetSessionId,
+          error: String(error)
         });
-      } else {
-        await this.loadSessionCatalog();
+      } finally {
+        this.sessionOperation = null;
       }
-
-      const fallbackSessionId =
-        this.sessionList.find((session) => session.conversationId !== targetSessionId)?.conversationId ??
-        this.sessionList[0]?.conversationId ??
-        DEFAULT_SESSION_ID;
-
-      if (this.sessionId === targetSessionId || !this.sessionList.some((session) => session.conversationId === this.sessionId)) {
-        await this.switchSession(fallbackSessionId);
-        return;
-      }
-
-      await this.loadSessionCatalog();
     },
     async initializeSessions() {
-      await this.loadSessionCatalog();
-      const preferredSessionId = this.sessionList[0]?.conversationId ?? this.sessionId;
-      await this.switchSession(preferredSessionId);
+      if (this.sessionOperation) {
+        return;
+      }
+
+      const previousSnapshot = createSessionRuntimeSnapshot(this);
+      this.sessionOperation = "initializing";
+      this.sessionError = null;
+
+      try {
+        await this.loadSessionCatalog();
+        const preferredSessionId = this.sessionList[0]?.conversationId ?? this.sessionId;
+
+        if (this.sessionList.length === 0 && preferredSessionId === this.sessionId) {
+          this.resetSessionRuntimeState();
+          this.sessionId = preferredSessionId;
+          this.phase = "idle";
+          debugLog("session:init:empty");
+          return;
+        }
+
+        this.resetSessionRuntimeState();
+        this.sessionId = preferredSessionId;
+        this.phase = "connecting";
+        await this.loadSessionState(preferredSessionId, { refreshCatalog: false });
+        debugLog("session:init", {
+          preferredSessionId
+        });
+      } catch (error) {
+        restoreSessionRuntimeSnapshot(this, previousSnapshot);
+        this.sessionError = `初始化对话失败：${String(error)}`;
+        debugLog("session:init:error", {
+          error: String(error)
+        });
+      } finally {
+        this.sessionOperation = null;
+      }
     },
     upsertTurnTrace(
       turnId: string,
@@ -726,7 +1073,8 @@ export const useRuntimeStore = defineStore("runtime", {
         id: messageId,
         turnId,
         role: "assistant",
-        content: "正在思考...",
+        reasoningContent: null,
+        content: "",
         status: "pending",
         tokenCount: null,
         modelName: modelName?.trim() || undefined
@@ -874,22 +1222,6 @@ export const useRuntimeStore = defineStore("runtime", {
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.upsertTurnTrace(payload.turnId, {
-          phase: this.phase,
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
-          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-          providerName: payload.providerName ?? this.providerName,
-          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-          providerModel: payload.providerModel ?? this.providerModel,
-          providerSource: payload.providerSource ?? this.providerSource,
-          providerMode: payload.providerMode ?? this.providerMode,
-          fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-          inputTokens: payload.inputTokens ?? this.inputTokens,
-          outputTokens: payload.outputTokens ?? this.outputTokens,
-          totalTokens: payload.totalTokens ?? this.totalTokens,
-          firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs
-        });
       });
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
@@ -902,21 +1234,23 @@ export const useRuntimeStore = defineStore("runtime", {
           buildAssistantModelLabel(this.providerName, this.providerModel)
         );
 
-        const delta = payload.text ?? "";
-        if (assistantMessage.status === "pending" && assistantMessage.content === "正在思考...") {
-          assistantMessage.content = delta;
-        } else {
-          assistantMessage.content += delta;
+        const deltaText = payload.text ?? "";
+        const deltaReasoning = payload.reasoningContent ?? "";
+
+        if (deltaReasoning) {
+          assistantMessage.reasoningContent = `${assistantMessage.reasoningContent ?? ""}${deltaReasoning}`;
+        }
+
+        if (deltaText) {
+          assistantMessage.content += deltaText;
         }
 
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         this.persistHistory();
         debugLog("event:delta", {
           turnId: payload.turnId,
-          deltaLength: delta.length
-        });
-        this.upsertTurnTrace(payload.turnId, {
-          firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs
+          deltaLength: deltaText.length,
+          reasoningLength: deltaReasoning.length
         });
       });
 
@@ -929,10 +1263,6 @@ export const useRuntimeStore = defineStore("runtime", {
         debugLog("event:trace", {
           turnId: payload.turnId,
           steps: this.traceSteps.length
-        });
-        this.upsertTurnTrace(payload.turnId, {
-          phase: (payload.phase as RuntimePhase | null) ?? this.phase,
-          traceSteps: payload.traceSteps ?? this.traceSteps
         });
       });
 
@@ -948,11 +1278,6 @@ export const useRuntimeStore = defineStore("runtime", {
         });
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.upsertTurnTrace(payload.turnId, {
-          phase: "calling_tool",
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities
-        });
       });
 
       const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
@@ -969,6 +1294,7 @@ export const useRuntimeStore = defineStore("runtime", {
         if (finalText) {
           assistantMessage.content = payload.text ?? assistantMessage.content;
         }
+        assistantMessage.reasoningContent = payload.reasoningContent ?? assistantMessage.reasoningContent ?? null;
         assistantMessage.status = "done";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
@@ -1029,12 +1355,13 @@ export const useRuntimeStore = defineStore("runtime", {
           buildAssistantModelLabel(payload.providerName, payload.providerModel)
         );
 
-        assistantMessage.content = payload.text ?? "本轮执行失败，请查看右侧 trace。";
+        assistantMessage.content = payload.text ?? DEFAULT_FAILED_TURN_MESSAGE;
+        assistantMessage.reasoningContent = payload.reasoningContent ?? null;
         assistantMessage.status = "error";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
         this.phase = "failed";
-        this.error = payload.error ?? "本轮执行失败。";
+        this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
@@ -1065,7 +1392,7 @@ export const useRuntimeStore = defineStore("runtime", {
           outputTokens: payload.outputTokens ?? this.outputTokens,
           totalTokens: payload.totalTokens ?? this.totalTokens,
           firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-          error: payload.error ?? "本轮执行失败。"
+          error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
         });
         this.persistHistory();
         debugLog("event:failed", {
@@ -1088,69 +1415,52 @@ export const useRuntimeStore = defineStore("runtime", {
       const providerStore = useProviderStore();
       const provider = providerStore.currentProvider;
       const model = providerStore.currentModel;
-      this.providerRequestedName = provider?.name ?? "browser-preview";
+      const previewProviderName = provider?.name ?? BROWSER_PREVIEW_PROVIDER_NAME;
+      const previewModelName = model?.model ?? model?.name ?? BROWSER_PREVIEW_MODEL_NAME;
+      const assistantModelLabel = buildAssistantModelLabel(previewProviderName, previewModelName);
+
+      this.providerRequestedName = previewProviderName;
       debugLog("browser-preview:start", {
         turnId: requestId
       });
-      this.providerName = provider?.name ?? "browser-preview";
+      this.providerName = previewProviderName;
       this.providerProtocol = provider?.protocol ?? "openai";
-      this.providerModel = model?.model ?? model?.name ?? "mock-stream";
+      this.providerModel = previewModelName;
       this.providerSource = "browser_preview";
       this.providerMode = "browser_preview";
       this.inputTokens = null;
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
-      this.fallbackReason = "当前通过 npm run dev 打开的是浏览器预览，不是 Tauri 桌面窗口，因此不会接入 Rust 后端。";
+      this.fallbackReason = BROWSER_PREVIEW_FALLBACK_REASON;
 
       await wait(120);
-      const assistantMessage = this.ensureAssistantMessage(
-        requestId,
-        buildAssistantModelLabel(provider?.name ?? "browser-preview", model?.model ?? model?.name ?? "mock-stream")
-      );
+      const assistantMessage = this.ensureAssistantMessage(requestId, assistantModelLabel);
       assistantMessage.content = "";
 
-      const chunks = [
-        "当前看到的不是前端资源没加载，而是页面运行在普通浏览器里。\n\n",
-        "此时 `@tauri-apps/api` 不会注入原生桥接能力，所以直接调用 `invoke/listen` 会失败。\n\n",
-        "现在已切换到浏览器预览兜底模式：\n",
-        "- 可以继续预览 UI 和输入交互\n",
-        "- 不会连接 Rust agent core\n",
-        "- 真正联调需要运行 `tauri dev`\n"
-      ];
-
-      for (const chunk of chunks) {
+      for (const chunk of BROWSER_PREVIEW_CHUNKS) {
         await wait(80);
         assistantMessage.content += chunk;
       }
 
       assistantMessage.status = "done";
-      assistantMessage.modelName = buildAssistantModelLabel(
-        provider?.name ?? "browser-preview",
-        model?.model ?? model?.name ?? "mock-stream"
-      );
+      assistantMessage.modelName = assistantModelLabel;
       assistantMessage.tokenCount = null;
 
       this.phase = "completed";
-      this.sessionSummary = "浏览器预览模式已启用，当前轮次未连接 Rust 后端。";
-      this.traceSteps = [
-        { id: "step-plan", label: "接收输入", state: "completed" },
-        { id: "step-context", label: "识别运行环境", state: "completed" },
-        { id: "step-call-model", label: "浏览器预览回放", state: "completed" },
-        { id: "step-call-tool", label: "调用工具", state: "completed" },
-        { id: "step-return", label: "返回结果", state: "completed" }
-      ];
+      this.sessionSummary = BROWSER_PREVIEW_SESSION_SUMMARY;
+      this.traceSteps = createBrowserPreviewTraceSteps();
       this.toolActivities = [];
-      this.traceSteps = this.traceSteps.map((step) =>
-        step.id === "step-call-tool" ? { ...step, state: "pending" } : step
-      );
       this.upsertTurnTrace(requestId, {
         phase: "completed",
         traceSteps: this.traceSteps,
         toolActivities: [],
         sessionSummary: this.sessionSummary,
         fallbackReason: this.fallbackReason,
-        title: this.turnTraceHistory.find((item) => item.turnId === requestId)?.title ?? "浏览器预览",
+        title:
+          this.messages.find((item) => item.turnId === requestId && item.role === "user")?.content
+            ? buildTurnTitle(this.messages.find((item) => item.turnId === requestId && item.role === "user")?.content ?? "")
+            : BROWSER_PREVIEW_TRACE_TITLE,
         error: null
       });
       this.persistHistory();
@@ -1205,65 +1515,8 @@ export const useRuntimeStore = defineStore("runtime", {
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
-      this.traceSteps = [
-        { id: "step-plan", label: "接收输入", state: "completed" },
-        { id: "step-context", label: "组织上下文", state: "completed" },
-        { id: "step-call-model", label: "调用模型", state: "active" },
-        { id: "step-call-tool", label: "调用工具", state: "pending" },
-        { id: "step-return", label: "返回结果", state: "pending" }
-      ];
-      this.toolActivities = [
-        {
-          id: "tool-time-now",
-          name: "time.now",
-          status: "planned",
-          summary: "当前回合尚未触发时间工具。"
-        },
-        {
-          id: "tool-echo-input",
-          name: "echo.input",
-          status: "planned",
-          summary: "当前回合正在等待模型规划阶段。"
-        },
-        {
-          id: "tool-workspace-read-file",
-          name: "workspace.read_file",
-          status: "planned",
-          summary: "当前回合尚未触发文件读取工具。"
-        },
-        {
-          id: "tool-workspace-read-file-segment",
-          name: "workspace.read_file_segment",
-          status: "planned",
-          summary: "当前回合尚未触发分段读取工具。"
-        },
-        {
-          id: "tool-workspace-list-files",
-          name: "workspace.list_files",
-          status: "planned",
-          summary: "当前回合尚未触发目录枚举工具。"
-        }
-      ];
+      this.traceSteps = createSubmitTraceSteps();
       this.toolActivities = [];
-      this.upsertTurnTrace(requestId, {
-        title: buildTurnTitle(message),
-        phase: "calling_model",
-        traceSteps: this.traceSteps,
-        toolActivities: this.toolActivities,
-        providerRequestedName: providerStore.currentProvider?.name ?? null,
-        providerName: providerStore.currentProvider?.name ?? null,
-        providerProtocol: providerStore.currentProvider?.protocol ?? null,
-        providerModel: providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null,
-        providerSource: isTauriAvailable() ? null : "browser_preview",
-        providerMode: isTauriAvailable() ? null : "browser_preview",
-        sessionSummary: "",
-        fallbackReason: null,
-        error: null,
-        inputTokens: null,
-        outputTokens: null,
-        totalTokens: null,
-        firstTokenLatencyMs: null
-      });
 
       try {
         await waitForNextPaint();
@@ -1286,7 +1539,8 @@ export const useRuntimeStore = defineStore("runtime", {
             providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null
           )
         );
-        assistantMessage.content = "本轮执行失败，请查看右侧 trace。";
+        assistantMessage.content = DEFAULT_FAILED_TURN_MESSAGE;
+        assistantMessage.reasoningContent = null;
         assistantMessage.status = "error";
         assistantMessage.modelName = buildAssistantModelLabel(
           providerStore.currentProvider?.name ?? null,
@@ -1295,24 +1549,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.error = `本轮执行失败：${String(error)}`;
         this.phase = "failed";
         this.activeTurnId = null;
-        this.traceSteps = [
-          { id: "step-plan", label: "接收输入", state: "completed" },
-          { id: "step-context", label: "组织上下文", state: "completed" },
-          { id: "step-call-model", label: "调用模型", state: "completed" },
-          { id: "step-call-tool", label: "调用工具", state: "completed" },
-          { id: "step-return", label: "返回结果", state: "error" }
-        ];
-        this.traceSteps = this.traceSteps.map((step) => {
-          if (step.id === "step-call-model") {
-            return { ...step, state: "error" };
-          }
-
-          if (step.id === "step-call-tool" || step.id === "step-return") {
-            return { ...step, state: "pending" };
-          }
-
-          return step;
-        });
+        this.traceSteps = createSubmitFailureTraceSteps();
         this.upsertTurnTrace(requestId, {
           phase: "failed",
           traceSteps: this.traceSteps,

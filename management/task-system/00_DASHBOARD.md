@@ -3,14 +3,14 @@
 ## 项目状态
 - 项目：`Pony Agent`
 - 类型：学习模式重构项目
-- 当前主线：在已完成的 Vue 工作台、真实 stream 主链路和原生 tools 闭环上，继续收束运行时可见性，并把 agent core 逐步推向可独立部署的 Rust 引擎
+- 当前主线：在已完成的 Vue 工作台、真实 stream 主链路和原生 tools 闭环上，完成一轮 `provider / session / runtime / tool` 收口与验证闭环，接下来转向更明确的 adapter/service 边界整理
 - 当前阶段：`Phase 3 / Runtime Expansion`
 - 总体状态：`In Progress`
 
 ## 当前重点
-1. 继续把 `run_turn()` 从“单轮最小闭环”推进到“更完整的 query loop 骨架”
-2. 收束 `provider / tool / stream / trace / fallback` 的运行时可见性，减少学习成本
-3. 在已有 `SessionStore` 基础上，继续把 agent core 推向“可管理多会话、可独立接入、可缓存友好组织上下文”的形态
+1. 基于已经稳定下来的 core 边界，开始评估 `PA-007` 的 adapter 抽离前置条件
+2. 继续把 provider 能力声明真正接入 runtime 输入编排与限制逻辑
+3. 继续把工具层从“组合工具可用”推进到“多工具语义和更细粒度 telemetry 可解释”
 
 ## 当前任务摘要
 - `PA-003`：实现 Rust 单轮 runtime 骨架
@@ -39,13 +39,18 @@
 - 当前真实工具执行链已经具备单工具 roundtrip，并已有 `workspace.list_files / workspace.read_file / workspace.read_file_segment`
 - 当前已经补出最小会话 UI：左侧“对话历史”可折叠，可新建、可切换、可清除
 - 当前 provider 仍处在“最小可用”阶段，尚未系统纳入模型思考、推理强度、多模态输入、上下文窗口与模型能力矩阵
+- 2026-05-23 这一轮已完成重构收口：
+- `runtime.ts` 已统一 trace、browser-preview、失败态文案与状态流，并抽出重复 helper
+- 前端已建立固定验证闭环：`npm run verify = test:unit + build + cargo check`
+- 已补齐组件层回归测试：`HomeWorkspace` / `HomeSessionSidebar`
+- Rust `cargo check` warning 已清干净，probe-only dead_code 噪音已隔离
+- 已完成真实 `tauri dev --no-watch` 冒烟，确认桌面壳、Vite dev server 和 Rust 进程可正常拉起
 
 ## 下一步最小动作
-1. 在 `PA-006` 上继续收敛会话列表元数据、清除交互和切换恢复规则
-2. 并行推进 `PA-008`，补强工具层的多工具和错误恢复能力
-3. 并行推进 `PA-009`，系统化整理 provider 能力配置与能力矩阵
-4. 继续补齐 provider 侧可观测性，特别是真实流式、fallback、token 统计和首 token 延迟
-5. `PA-007` 暂以后置，等 core 语义稳定后再抽 adapter
+1. 为 `PA-007` 做一次“现在能否从 Tauri command/event 抽出独立 adapter”的边界审计
+2. 把 `supportsImageInput / contextWindowTokens / reasoning` 继续接入 runtime 的真实输入限制与提示逻辑
+3. 继续完善工具 telemetry，让 batch/gather 这类组合工具在 trace 中有更细粒度展开
+4. 在真实 provider 联调下补一轮非 mock 的长链路人工回归
 
 ## 关联入口
 - 项目记忆：`AGENT.md`

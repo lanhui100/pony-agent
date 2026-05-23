@@ -30,14 +30,19 @@
 - `workspace_read_file` 大文件保护：超限时引导改用 `segment / gather`
 - `workspace_search_text` 目录预算保护：默认跳过 `.git / node_modules / target / dist / build`
 - `LocalTurnPlanner` 已升级为区分目录列举、显式路径概览、基于历史路径的继续追问和带引号的本地搜索语句
+- 2026-05-23 这一轮继续完成工具/runtime 收口：
+- 前端 runtime 已统一失败态与 browser-preview fallback 的 trace 构造，减少工具相关状态在 UI 侧的重复拼装
+- store 层已验证 `turn:started -> delta -> completed`、`turn:started -> failed`、即时 `start_turn_stream` 失败和 browser-preview 回退链路
+- Rust probe 二进制引入的 warning 噪音已隔离，便于后续继续观察真正的工具层 warning 与 regression
 
 ## 本轮验证
-- `cargo check --target-dir ../target-check` 通过
+- `cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check` 通过
 - 已补充 `tools.rs / planner.rs` 单元测试，覆盖：
 - batch 的部分成功语义
 - gather context 的文件聚合路径
 - planner 对显式路径、历史路径、搜索语句的本地命中
-- `cargo test --lib` 已启动过，但这轮提交前以 `cargo check` 和新增测试为主验证依据
+- `npm run test:unit` 通过（含 tool/runtime 事件链前端回归）
+- `npm run verify` 通过
 
 ## 下一步动作
 - 把 batch / gather 的结果在 trace / tool activity 里做更细粒度展开

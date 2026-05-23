@@ -49,6 +49,7 @@ impl ProviderMessage {
             content: content.into(),
         }
     }
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +85,18 @@ pub struct ProviderDecision {
     pub token_usage: Option<TokenUsage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenAiStreamMessage {
+    output_text: String,
+    reasoning_content: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderStreamChunk {
+    Text(String),
+    Reasoning(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
@@ -92,6 +105,7 @@ pub struct TokenUsage {
     pub total_tokens: Option<u64>,
 }
 
+#[allow(dead_code)]
 pub trait ProviderClient {
     fn requested_name(&self) -> &str;
     fn name(&self) -> &str;
@@ -122,7 +136,7 @@ pub trait ProviderClient {
         on_delta: F,
     ) -> Result<ProviderResponse, String>
     where
-        F: FnMut(String);
+        F: FnMut(ProviderStreamChunk);
 }
 
 pub struct ProviderManager {
@@ -276,8 +290,23 @@ impl ProviderManager {
         mut on_delta: F,
     ) -> Result<ProviderResponse, String>
     where
-        F: FnMut(String),
+        F: FnMut(ProviderStreamChunk),
     {
+        if !self.config.capabilities.supports_streaming {
+            let response = self.continue_with_tool_result(
+                request,
+                tools,
+                assistant_message,
+                tool_call,
+                tool_result,
+            )?;
+            if let Some(reasoning_content) = response.reasoning_content.clone() {
+                on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
+            }
+            on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
+            return Ok(response);
+        }
+
         provider_log(format!(
             "followup:start mode=stream requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={} ",
             self.config.requested_name,
@@ -333,15 +362,16 @@ impl ProviderManager {
             "request:openai followup-sync endpoint={} model={} tool={}",
             endpoint, request.model, tool_call.name
         ));
+        let messages = normalize_openai_messages(openai_messages_with_tool_result(
+            request,
+            assistant_message,
+            tool_call,
+            tool_result,
+        ));
         let body = with_openai_request_options(
             json!({
                 "model": request.model,
-                "messages": openai_messages_with_tool_result(
-                    request,
-                    assistant_message,
-                    tool_call,
-                    tool_result
-                ),
+                "messages": messages,
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": false,
@@ -350,6 +380,7 @@ impl ProviderManager {
             }),
             &self.config,
         );
+        let body = apply_openai_tool_capability(body, tools, &self.config);
         let payload = self.post_openai_json(&endpoint, &body)?;
         let message = first_openai_message(&payload)?;
         let output_text = extract_openai_message_text(message)
@@ -358,7 +389,7 @@ impl ProviderManager {
         Ok(ProviderResponse {
             output_text: output_text.clone(),
             reasoning_content: extract_openai_message_reasoning_content(message),
-            assistant_message: Some(message.clone()),
+            assistant_message: Some(normalize_openai_assistant_message(message)),
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -379,7 +410,7 @@ impl ProviderManager {
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
-        F: FnMut(String),
+        F: FnMut(ProviderStreamChunk),
     {
         let endpoint = format!(
             "{}/chat/completions",
@@ -389,15 +420,16 @@ impl ProviderManager {
             "request:openai followup-stream endpoint={} model={} tool={}",
             endpoint, request.model, tool_call.name
         ));
+        let messages = normalize_openai_messages(openai_messages_with_tool_result(
+            request,
+            assistant_message,
+            tool_call,
+            tool_result,
+        ));
         let body = with_openai_request_options(
             json!({
                 "model": request.model,
-                "messages": openai_messages_with_tool_result(
-                    request,
-                    assistant_message,
-                    tool_call,
-                    tool_result
-                ),
+                "messages": messages,
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": true,
@@ -467,7 +499,7 @@ impl ProviderManager {
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
-        F: FnMut(String),
+        F: FnMut(ProviderStreamChunk),
     {
         let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
         provider_log(format!(
@@ -502,15 +534,19 @@ impl ProviderManager {
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
-        F: FnMut(String),
+        F: FnMut(ProviderStreamChunk),
     {
         let raw_text = self.post_openai_stream_text(endpoint, body)?;
-        let output_text = collect_openai_sse_text(&raw_text, on_delta)?;
+        let message = collect_openai_sse_message(&raw_text, on_delta)?;
+        let output_text = message.output_text.clone();
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
-            reasoning_content: None,
-            assistant_message: None,
+            reasoning_content: message.reasoning_content.clone(),
+            assistant_message: Some(provider_native_assistant_message_with_reasoning(
+                &output_text,
+                message.reasoning_content.as_deref(),
+            )),
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -561,12 +597,12 @@ impl ProviderManager {
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
-        F: FnMut(String),
+        F: FnMut(ProviderStreamChunk),
     {
         let payload = self.post_anthropic_json(endpoint, body)?;
         let output_text = extract_anthropic_output_text(&payload)
             .ok_or_else(|| "anthropic stream follow-up missing text".to_string())?;
-        on_delta(output_text.clone());
+        on_delta(ProviderStreamChunk::Text(output_text.clone()));
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
@@ -601,7 +637,7 @@ impl ProviderManager {
                 .collect::<Vec<_>>()
                 .join(",")
         ));
-        let messages = openai_request_messages(request);
+        let messages = normalize_openai_messages(openai_request_messages(request));
         let body = with_openai_request_options(
             json!({
                 "model": request.model,
@@ -614,6 +650,7 @@ impl ProviderManager {
             }),
             &self.config,
         );
+        let body = apply_openai_tool_capability(body, tools, &self.config);
         provider_log(format!(
             "request:openai decision messages={} body_chars={} body_preview={}",
             request
@@ -632,7 +669,7 @@ impl ProviderManager {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
             tool_call: extract_openai_tool_call(message),
             reasoning_content: extract_openai_message_reasoning_content(message),
-            assistant_message: Some(message.clone()),
+            assistant_message: Some(normalize_openai_assistant_message(message)),
             provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -678,6 +715,7 @@ impl ProviderManager {
             }),
             &self.config,
         );
+        let body = apply_anthropic_tool_capability(body, tools, &self.config);
         provider_log(format!(
             "request:anthropic decision messages={} body_chars={} body_preview={}",
             request
@@ -796,6 +834,7 @@ impl ProviderManager {
             )
         })
     }
+
 }
 
 impl ProviderClient for ProviderManager {
@@ -859,7 +898,7 @@ impl ProviderClient for ProviderManager {
         on_delta: F,
     ) -> Result<ProviderResponse, String>
     where
-        F: FnMut(String),
+        F: FnMut(ProviderStreamChunk),
     {
         ProviderManager::continue_with_tool_result_stream(
             self,
@@ -871,6 +910,30 @@ impl ProviderClient for ProviderManager {
             on_delta,
         )
     }
+
+    /*
+    */
+    #[cfg(any())]
+    fn openai_stream_message_collects_content_and_reasoning() {
+        let raw_text = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先看文件结构。\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"第 3 行是 \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"use crate::...\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut deltas = Vec::new();
+
+        let message = collect_openai_sse_message(raw_text, &mut |delta| deltas.push(delta))
+            .expect("stream message should parse");
+
+        assert_eq!(message.output_text, "第 3 行是 use crate::...");
+        assert_eq!(message.reasoning_content.as_deref(), Some("先看文件结构。"));
+        assert_eq!(
+            deltas,
+            vec!["第 3 行是 ".to_string(), "use crate::...".to_string()]
+        );
+    }
+    // */
 }
 
 fn build_http_client(timeout: Duration) -> Result<Client, String> {
@@ -925,11 +988,12 @@ fn format_request_error(prefix: &str, error: &reqwest::Error, elapsed: Duration)
     format!("{}：{}；{}", prefix, error, details.join("；"))
 }
 
-fn collect_openai_sse_text<F>(raw_text: &str, on_delta: &mut F) -> Result<String, String>
+fn collect_openai_sse_message<F>(raw_text: &str, on_delta: &mut F) -> Result<OpenAiStreamMessage, String>
 where
-    F: FnMut(String),
+    F: FnMut(ProviderStreamChunk),
 {
     let mut combined = String::new();
+    let mut reasoning = String::new();
     let mut saw_data = false;
 
     for line in raw_text.lines() {
@@ -955,19 +1019,27 @@ where
             )
         })?;
 
-        let delta_text = value
+        let delta = value
             .get("choices")
             .and_then(Value::as_array)
             .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("delta"))
-            .and_then(|delta| delta.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
+            .and_then(|choice| choice.get("delta"));
+
+        let delta_text = delta
+            .and_then(extract_openai_delta_content_text)
+            .unwrap_or_default();
+        let delta_reasoning = delta
+            .and_then(extract_openai_delta_reasoning_content)
+            .unwrap_or_default();
 
         if !delta_text.is_empty() {
-            let piece = delta_text.to_string();
-            combined.push_str(&piece);
-            on_delta(piece);
+            combined.push_str(&delta_text);
+            on_delta(ProviderStreamChunk::Text(delta_text));
+        }
+
+        if !delta_reasoning.is_empty() {
+            reasoning.push_str(&delta_reasoning);
+            on_delta(ProviderStreamChunk::Reasoning(delta_reasoning));
         }
     }
 
@@ -985,10 +1057,23 @@ where
         ));
     }
 
-    Ok(combined)
+    Ok(OpenAiStreamMessage {
+        output_text: combined,
+        reasoning_content: if reasoning.trim().is_empty() {
+            None
+        } else {
+            Some(reasoning)
+        },
+    })
 }
 
 fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelection) -> Value {
+    if openai_requires_thinking_mode(config) {
+        body["thinking"] = json!({
+            "type": "enabled"
+        });
+    }
+
     if config.capabilities.supports_reasoning {
         if let Some(effort) = config.reasoning_effort.as_ref() {
             body["reasoning_effort"] = Value::String(reasoning_effort_label(effort).to_string());
@@ -1011,13 +1096,95 @@ fn with_anthropic_request_options(mut body: Value, config: &ResolvedProviderSele
     body
 }
 
+fn apply_openai_tool_capability(
+    mut body: Value,
+    tools: &[ToolDefinition],
+    config: &ResolvedProviderSelection,
+) -> Value {
+    let supports_tools = config.capabilities.supports_tools && !tools.is_empty();
+    let supports_tool_choice = openai_supports_tool_choice(config);
+
+    if supports_tools {
+        if !supports_tool_choice {
+            if let Some(object) = body.as_object_mut() {
+                object.remove("tool_choice");
+            }
+        }
+        return body;
+    }
+
+    if let Some(object) = body.as_object_mut() {
+        object.remove("tools");
+        object.remove("tool_choice");
+    }
+    body
+}
+
+fn apply_anthropic_tool_capability(
+    mut body: Value,
+    tools: &[ToolDefinition],
+    config: &ResolvedProviderSelection,
+) -> Value {
+    if config.capabilities.supports_tools && !tools.is_empty() {
+        return body;
+    }
+
+    if let Some(object) = body.as_object_mut() {
+        object.remove("tools");
+        object.remove("tool_choice");
+    }
+    body
+}
+
+fn openai_requires_thinking_mode(config: &ResolvedProviderSelection) -> bool {
+    config.capabilities.supports_reasoning && is_deepseek_provider(config)
+}
+
+fn openai_supports_tool_choice(config: &ResolvedProviderSelection) -> bool {
+    !openai_requires_thinking_mode(config)
+}
+
+fn is_deepseek_provider(config: &ResolvedProviderSelection) -> bool {
+    let requested = config.requested_name.to_lowercase();
+    let provider = config.provider_name.to_lowercase();
+    let base_url = config.base_url.to_lowercase();
+    let model = config.model.to_lowercase();
+
+    requested.contains("deepseek")
+        || provider.contains("deepseek")
+        || base_url.contains("deepseek")
+        || model.contains("deepseek")
+}
+
 fn reasoning_effort_label(effort: &ProviderReasoningEffort) -> &'static str {
-    match effort {
+    return match effort {
         ProviderReasoningEffort::Minimal => "minimal",
         ProviderReasoningEffort::Low => "low",
         ProviderReasoningEffort::Medium => "medium",
         ProviderReasoningEffort::High => "high",
+    };
+
+    #[cfg(any())]
+    fn openai_stream_message_collects_content_and_reasoning() {
+        let raw_text = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先看文件结构。\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"第 3 行是 \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"use crate::...\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut deltas = Vec::new();
+
+        let message = collect_openai_sse_message(raw_text, &mut |delta| deltas.push(delta))
+            .expect("stream message should parse");
+
+        assert_eq!(message.output_text, "第 3 行是 use crate::...");
+        assert_eq!(message.reasoning_content.as_deref(), Some("先看文件结构。"));
+        assert_eq!(
+            deltas,
+            vec!["第 3 行是 ".to_string(), "use crate::...".to_string()]
+        );
     }
+    // */
 }
 
 fn to_chat_role(role: &ProviderRole) -> &'static str {
@@ -1063,6 +1230,56 @@ fn first_openai_message<'a>(payload: &'a Value) -> Result<&'a Value, String> {
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
         .ok_or_else(|| "openai 返回中缺少 message".to_string())
+}
+
+fn normalize_openai_assistant_message(message: &Value) -> Value {
+    let tool_calls = message.get("tool_calls").cloned();
+    let content_value = match message.get("content") {
+        Some(Value::String(text)) => Value::String(text.clone()),
+        Some(Value::Array(items)) => Value::Array(items.clone()),
+        Some(Value::Null) | None => {
+            if tool_calls.as_ref().and_then(Value::as_array).map(|calls| !calls.is_empty()).unwrap_or(false)
+            {
+                Value::String(extract_openai_message_text(message).unwrap_or_default())
+            } else {
+                Value::Null
+            }
+        }
+        Some(other) => other.clone(),
+    };
+
+    let reasoning_value = message
+        .get("reasoning_content")
+        .cloned()
+        .or_else(|| {
+            extract_openai_message_reasoning_content(message).map(Value::String)
+        })
+        .unwrap_or(Value::Null);
+
+    let mut normalized = json!({
+        "role": "assistant",
+        "content": content_value,
+        "reasoning_content": reasoning_value,
+    });
+
+    if let Some(tool_calls) = tool_calls {
+        normalized["tool_calls"] = tool_calls;
+    }
+
+    normalized
+}
+
+fn normalize_openai_messages(messages: Vec<Value>) -> Vec<Value> {
+    messages
+        .into_iter()
+        .map(|message| {
+            if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                normalize_openai_assistant_message(&message)
+            } else {
+                message
+            }
+        })
+        .collect()
 }
 
 fn extract_openai_message_text(message: &Value) -> Option<String> {
@@ -1174,7 +1391,7 @@ fn openai_messages_with_tool_result(
 
     messages.push(
         assistant_message
-            .cloned()
+            .map(normalize_openai_assistant_message)
             .unwrap_or_else(|| provider_native_assistant_tool_call_message(None, None, tool_call)),
     );
 
@@ -1208,9 +1425,17 @@ pub fn provider_native_user_message(content: &str) -> Value {
 }
 
 pub fn provider_native_assistant_message(content: &str) -> Value {
+    provider_native_assistant_message_with_reasoning(content, None)
+}
+
+pub fn provider_native_assistant_message_with_reasoning(
+    content: &str,
+    reasoning_content: Option<&str>,
+) -> Value {
     json!({
         "role": "assistant",
-        "content": content
+        "content": content,
+        "reasoning_content": reasoning_content
     })
 }
 
@@ -1277,6 +1502,7 @@ fn anthropic_messages_with_tool_result(
     messages
 }
 
+#[allow(dead_code)]
 fn extract_chat_output_text(payload: &Value) -> Option<String> {
     let message = payload
         .get("choices")
@@ -1318,6 +1544,61 @@ fn extract_openai_message_reasoning_content(message: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn extract_openai_delta_content_text(delta: &Value) -> Option<String> {
+    match delta.get("content")? {
+        Value::String(text) => Some(text.to_string()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| {
+                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                        return Some(text.to_string());
+                    }
+                    item.get("text")
+                        .and_then(|value| value.get("value"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(""))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_openai_delta_reasoning_content(delta: &Value) -> Option<String> {
+    match delta.get("reasoning_content")? {
+        Value::String(text) => Some(text.to_string()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| {
+                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                        return Some(text.to_string());
+                    }
+                    item.get("text")
+                        .and_then(|value| value.get("value"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(""))
+            }
+        }
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
 fn extract_chat_delta_text(payload: &Value) -> Option<String> {
     let delta = payload
         .get("choices")
@@ -1402,6 +1683,7 @@ fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
     }))
 }
 
+#[allow(dead_code)]
 fn extract_anthropic_delta_text(payload: &Value) -> Option<String> {
     let delta = payload.get("delta")?;
     let delta_type = delta.get("type").and_then(Value::as_str)?;
@@ -1480,6 +1762,128 @@ fn preview_json(value: &Value, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::config::ProviderModelCapabilities;
+    use crate::agent::config::ResolvedProviderSelection;
+
+    #[test]
+    fn tool_capability_disabled_removes_openai_tool_fields() {
+        let config = ResolvedProviderSelection {
+            requested_name: "openai".to_string(),
+            provider_name: "openai".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env_var: "OPENAI_API_KEY".to_string(),
+            api_key: Some("test".to_string()),
+            model: "gpt-4.1-mini".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 8192,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: false,
+                supports_streaming: true,
+                supports_image_input: true,
+                supports_reasoning: false,
+            },
+        };
+
+        let body = apply_openai_tool_capability(
+            json!({
+                "tool_choice": "auto",
+                "tools": [{ "type": "function" }]
+            }),
+            &[ToolDefinition {
+                name: "workspace.read_file",
+                description: "read file",
+                input_schema: json!({ "type": "object" }),
+            }],
+            &config,
+        );
+
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn deepseek_reasoning_removes_openai_tool_choice_but_keeps_tools() {
+        let config = ResolvedProviderSelection {
+            requested_name: "deepseek".to_string(),
+            provider_name: "deepseek".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+            api_key: Some("test".to_string()),
+            model: "deepseek-v4-pro".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 8192,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: true,
+                supports_reasoning: true,
+            },
+        };
+
+        let body = apply_openai_tool_capability(
+            json!({
+                "tool_choice": "auto",
+                "tools": [{ "type": "function", "function": { "name": "workspace_read_file" } }]
+            }),
+            &[ToolDefinition {
+                name: "workspace.read_file",
+                description: "read file",
+                input_schema: json!({ "type": "object" }),
+            }],
+            &config,
+        );
+
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tools").is_some());
+    }
+
+    #[test]
+    fn tool_capability_disabled_removes_anthropic_tool_fields() {
+        let config = ResolvedProviderSelection {
+            requested_name: "anthropic".to_string(),
+            provider_name: "anthropic".to_string(),
+            protocol: ProviderProtocol::Anthropic,
+            base_url: "https://api.anthropic.com/v1".to_string(),
+            api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
+            api_key: Some("test".to_string()),
+            model: "claude-3-7-sonnet-latest".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 8192,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(200_000),
+                supports_tools: false,
+                supports_streaming: true,
+                supports_image_input: true,
+                supports_reasoning: true,
+            },
+        };
+
+        let body = apply_anthropic_tool_capability(
+            json!({
+                "tools": [{ "name": "workspace.read_file" }],
+                "tool_choice": { "type": "auto" }
+            }),
+            &[ToolDefinition {
+                name: "workspace.read_file",
+                description: "read file",
+                input_schema: json!({ "type": "object" }),
+            }],
+            &config,
+        );
+
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
 
     #[test]
     fn openai_tool_followup_replays_reasoning_content() {

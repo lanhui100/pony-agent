@@ -44,10 +44,16 @@
 - OpenAI 兼容：支持推理模型时按需附加 reasoning 配置
 - Anthropic：支持推理模型时按需附加 thinking 预算配置
 - 多模态和上下文窗口当前先完成建模与配置，不强行接入实际消息格式
+- 2026-05-23 这一轮继续完成 provider/runtime 收口：
+- provider 相关前端状态已纳入更稳定的 runtime trace 持久化与恢复流程，减少 session 切换时的串状态风险
+- `HomeWorkspace` 中 provider/model 选择器、思考强度选择与失败态展示已纳入组件级回归验证
+- `npm run verify` 已把 provider 类型、前端构建和 Rust 编译放进同一条固定验证链
 
 ## 本轮验证
-- `cargo check --target-dir ../target-check` 通过
+- `cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check` 通过
+- `npm run test:unit` 通过（含 provider 相关前端工作台回归）
 - `npm run build` 通过
+- `npm run verify` 通过
 
 ## 下一步动作
 - 把 capability 默认值从启发式判断继续抽成更明确的模型能力目录

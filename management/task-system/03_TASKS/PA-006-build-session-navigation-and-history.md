@@ -32,11 +32,17 @@
 - 若前端缓存与后端 snapshot 不一致，则以后端历史为真相源，避免串会话或串旧状态
 - 切换/新建会话时会清空输入草稿
 - 会话列表优先显示 `title`，`summary` 作为辅助信息
+- 2026-05-23 这一轮继续补齐了回归保护：
+- store 层已覆盖 session 初始化、切换失败回滚、删除成功回退、删除后 fallback 加载失败等关键路径
+- 已新增 `HomeSessionSidebar` / `HomeWorkspace` 组件测试，覆盖临时空会话禁用行为、会话操作期间禁用交互、错误横幅与切换横幅
+- 浏览器预览态下的临时 session、删除回退和排序逻辑已有前端自动化验证
 
 ## 本轮验证
-- `cargo check --target-dir ../target-check` 通过
-- `cargo test session --lib --target-dir ../target-check` 通过
-- `npm run build` 当前未作为本任务单独通过项，因为被 `PA-009` 引入的 provider 类型扩展影响；在 provider 线合流后需要做一次全量前端构建复验
+- `npm run test:unit` 通过（18/18）
+- `npm run build` 通过
+- `cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check` 通过
+- `npm run verify` 通过
+- `tauri dev --no-watch` 冒烟通过
 
 ## 下一步动作
 - 继续收敛会话列表元数据和命名策略
@@ -45,8 +51,7 @@
 - 为未来的 HTTP/SSE adapter 保持 session 接口稳定
 
 ## 当前卡点
-- 还缺少真实 UI 手工回归，特别是“新对话 -> 不发消息直接切走 -> 再切回”这条路径
-- provider 相关前端类型正在演进，session 线的全量前端构建需要等 provider 线一起复核
+- 当前没有阻塞性卡点；剩余工作主要是更细的元数据策略和真实使用路径的人机回归
 
 ## 断点续跑提示
 继续前先看：

@@ -16,6 +16,24 @@ pub enum ProviderReasoningEffort {
     High,
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderCapabilityPreset {
+    Auto,
+    OpenAiChat,
+    OpenAiReasoning,
+    AnthropicThinking,
+    DeepseekChat,
+    DeepseekReasoner,
+    Custom,
+}
+
+impl Default for ProviderCapabilityPreset {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelCapabilities {
@@ -50,6 +68,8 @@ pub struct ProviderModelConfig {
     pub model: String,
     pub temperature: f32,
     pub max_output_tokens: u32,
+    #[serde(default)]
+    pub capability_preset: ProviderCapabilityPreset,
     #[serde(default)]
     pub reasoning_effort: Option<ProviderReasoningEffort>,
     #[serde(default)]
@@ -293,7 +313,7 @@ fn build_view_from_storage(storage: ProviderRegistryStorage) -> ProviderRegistry
 
 fn default_registry() -> ProviderRegistryStorage {
     ProviderRegistryStorage {
-        selected_provider_id: Some("provider-openai".to_string()),
+        selected_provider_id: Some("provider-ppx".to_string()),
         providers: default_provider_templates(),
     }
 }
@@ -302,8 +322,6 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
     if storage.providers.is_empty() {
         return default_registry();
     }
-
-    merge_missing_default_providers(&mut storage);
 
     for provider in &mut storage.providers {
         if provider.id.trim().is_empty() {
@@ -324,6 +342,10 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
                 model: default_model(&provider.protocol).to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                capability_preset: infer_capability_preset(
+                    &provider.protocol,
+                    default_model(&provider.protocol),
+                ),
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
                 capabilities: default_model_capabilities(
@@ -350,9 +372,12 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             if model.reasoning_budget_tokens == Some(0) {
                 model.reasoning_budget_tokens = None;
             }
+            model.capability_preset =
+                normalize_capability_preset(&provider.protocol, &model.model, &model.capability_preset);
             model.capabilities = normalize_model_capabilities(
                 &provider.protocol,
                 &model.model,
+                &model.capability_preset,
                 model.capabilities.clone(),
             );
             if !model.capabilities.supports_reasoning {
@@ -385,23 +410,28 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
     storage
 }
 
-fn merge_missing_default_providers(storage: &mut ProviderRegistryStorage) {
-    let default_providers = default_provider_templates();
-
-    for default_provider in default_providers {
-        let has_provider = storage.providers.iter().any(|provider| {
-            provider.id == default_provider.id
-                || provider.name.eq_ignore_ascii_case(&default_provider.name)
-        });
-
-        if !has_provider {
-            storage.providers.push(default_provider);
-        }
-    }
-}
-
 fn default_provider_templates() -> Vec<ProviderConfigStorage> {
     vec![
+        ProviderConfigStorage {
+            id: "provider-ppx".to_string(),
+            name: "ppx".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url: "https://api.psydo.top/v1".to_string(),
+            api_key_env_var: "PPX_API_KEY".to_string(),
+            api_key_value: String::new(),
+            selected_model_id: Some("model-ppx-default".to_string()),
+            models: vec![ProviderModelConfig {
+                id: "model-ppx-default".to_string(),
+                name: "GPT 5.4".to_string(),
+                model: "gpt-5.4".to_string(),
+                temperature: 0.2,
+                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
+                reasoning_effort: None,
+                reasoning_budget_tokens: None,
+                capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "gpt-5.4"),
+            }],
+        },
         ProviderConfigStorage {
             id: "provider-openai".to_string(),
             name: "openai".to_string(),
@@ -416,6 +446,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 model: "gpt-4.1-mini".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                capability_preset: ProviderCapabilityPreset::OpenAiChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
                 capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "gpt-4.1-mini"),
@@ -435,6 +466,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 model: "openai/gpt-4.1-mini".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                capability_preset: ProviderCapabilityPreset::OpenAiChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
                 capabilities: default_model_capabilities(
@@ -453,15 +485,16 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
             selected_model_id: Some("model-deepseek-default".to_string()),
             models: vec![ProviderModelConfig {
                 id: "model-deepseek-default".to_string(),
-                name: "DeepSeek Chat".to_string(),
-                model: "deepseek-chat".to_string(),
+                name: "DeepSeek V4 Flash".to_string(),
+                model: "deepseek-v4-flash".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                capability_preset: ProviderCapabilityPreset::DeepseekChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
                 capabilities: default_model_capabilities(
                     &ProviderProtocol::OpenAi,
-                    "deepseek-chat",
+                    "deepseek-v4-flash",
                 ),
             }],
         },
@@ -479,6 +512,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 model: "claude-3-7-sonnet-latest".to_string(),
                 temperature: 0.2,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                capability_preset: ProviderCapabilityPreset::AnthropicThinking,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
                 capabilities: default_model_capabilities(
@@ -494,27 +528,117 @@ fn default_model_capabilities(
     protocol: &ProviderProtocol,
     model_name: &str,
 ) -> ProviderModelCapabilities {
+    preset_model_capabilities(
+        &infer_capability_preset(protocol, model_name),
+        protocol,
+        model_name,
+    )
+}
+
+fn infer_capability_preset(
+    protocol: &ProviderProtocol,
+    model_name: &str,
+) -> ProviderCapabilityPreset {
     let lower = model_name.to_ascii_lowercase();
-    let supports_reasoning = lower.contains("o1")
+
+    if matches!(protocol, ProviderProtocol::Anthropic) {
+        return ProviderCapabilityPreset::AnthropicThinking;
+    }
+
+    if lower.contains("deepseek-reasoner")
+        || lower.contains("deepseek-r1")
+        || lower.contains("deepseek-v4-pro")
+    {
+        return ProviderCapabilityPreset::DeepseekReasoner;
+    }
+
+    if lower.contains("deepseek-chat") || lower.contains("deepseek-v4-flash") {
+        return ProviderCapabilityPreset::DeepseekChat;
+    }
+
+    if lower.contains("gpt-5")
+        || lower.contains("o1")
         || lower.contains("o3")
         || lower.contains("reason")
-        || lower.contains("claude-3-7")
-        || lower.contains("deepseek-r1")
-        || lower.contains("deepseek-reasoner")
-        || lower.contains("deepseek-v4-pro");
-    let supports_image_input =
-        lower.contains("gpt-4.1") || lower.contains("claude") || lower.contains("vision");
-    let context_window_tokens = match protocol {
-        ProviderProtocol::Anthropic => Some(200_000),
-        ProviderProtocol::OpenAi => Some(128_000),
+    {
+        return ProviderCapabilityPreset::OpenAiReasoning;
+    }
+
+    if lower.contains("gpt-4.1") || lower.contains("vision") {
+        return ProviderCapabilityPreset::OpenAiChat;
+    }
+
+    ProviderCapabilityPreset::Auto
+}
+
+fn preset_model_capabilities(
+    preset: &ProviderCapabilityPreset,
+    protocol: &ProviderProtocol,
+    model_name: &str,
+) -> ProviderModelCapabilities {
+    let lower = model_name.to_ascii_lowercase();
+    let inferred_preset = if matches!(preset, ProviderCapabilityPreset::Auto) {
+        infer_capability_preset(protocol, model_name)
+    } else {
+        preset.clone()
     };
 
-    ProviderModelCapabilities {
-        context_window_tokens,
-        supports_tools: true,
-        supports_streaming: true,
-        supports_image_input,
-        supports_reasoning,
+    match inferred_preset {
+        ProviderCapabilityPreset::OpenAiChat => ProviderModelCapabilities {
+            context_window_tokens: Some(128_000),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: true,
+            supports_reasoning: false,
+        },
+        ProviderCapabilityPreset::OpenAiReasoning => ProviderModelCapabilities {
+            context_window_tokens: Some(128_000),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: false,
+            supports_reasoning: true,
+        },
+        ProviderCapabilityPreset::AnthropicThinking => ProviderModelCapabilities {
+            context_window_tokens: Some(200_000),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: true,
+            supports_reasoning: true,
+        },
+        ProviderCapabilityPreset::DeepseekChat => ProviderModelCapabilities {
+            context_window_tokens: Some(128_000),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: false,
+            supports_reasoning: false,
+        },
+        ProviderCapabilityPreset::DeepseekReasoner => ProviderModelCapabilities {
+            context_window_tokens: Some(128_000),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: false,
+            supports_reasoning: true,
+        },
+        ProviderCapabilityPreset::Auto => ProviderModelCapabilities {
+            context_window_tokens: Some(match protocol {
+                ProviderProtocol::Anthropic => 200_000,
+                ProviderProtocol::OpenAi => 128_000,
+            }),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: lower.contains("gpt-4.1")
+                || lower.contains("claude")
+                || lower.contains("vision"),
+            supports_reasoning: lower.contains("gpt-5")
+                || lower.contains("o1")
+                || lower.contains("o3")
+                || lower.contains("reason")
+                || lower.contains("claude-3-7")
+                || lower.contains("deepseek-r1")
+                || lower.contains("deepseek-reasoner")
+                || lower.contains("deepseek-v4-pro"),
+        },
+        ProviderCapabilityPreset::Custom => ProviderModelCapabilities::default(),
     }
 }
 
@@ -522,12 +646,44 @@ fn default_true() -> bool {
     true
 }
 
+fn normalize_capability_preset(
+    protocol: &ProviderProtocol,
+    model_name: &str,
+    capability_preset: &ProviderCapabilityPreset,
+) -> ProviderCapabilityPreset {
+    match capability_preset {
+        ProviderCapabilityPreset::Custom => ProviderCapabilityPreset::Custom,
+        ProviderCapabilityPreset::Auto => {
+            if model_name.trim().is_empty() {
+                infer_capability_preset(protocol, default_model(protocol))
+            } else {
+                ProviderCapabilityPreset::Auto
+            }
+        }
+        preset => preset.clone(),
+    }
+}
+
 fn normalize_model_capabilities(
     protocol: &ProviderProtocol,
     model_name: &str,
+    capability_preset: &ProviderCapabilityPreset,
     capabilities: ProviderModelCapabilities,
 ) -> ProviderModelCapabilities {
-    let defaults = default_model_capabilities(protocol, model_name);
+    if matches!(capability_preset, ProviderCapabilityPreset::Custom) {
+        let defaults = default_model_capabilities(protocol, model_name);
+        return ProviderModelCapabilities {
+            context_window_tokens: capabilities
+                .context_window_tokens
+                .or(defaults.context_window_tokens),
+            supports_tools: capabilities.supports_tools,
+            supports_streaming: capabilities.supports_streaming,
+            supports_image_input: capabilities.supports_image_input,
+            supports_reasoning: capabilities.supports_reasoning,
+        };
+    }
+
+    let defaults = preset_model_capabilities(capability_preset, protocol, model_name);
     let looks_like_legacy_empty = capabilities.context_window_tokens.is_none()
         && !capabilities.supports_tools
         && !capabilities.supports_streaming
@@ -543,15 +699,7 @@ fn normalize_model_capabilities(
         return defaults;
     }
 
-    ProviderModelCapabilities {
-        context_window_tokens: capabilities
-            .context_window_tokens
-            .or(defaults.context_window_tokens),
-        supports_tools: capabilities.supports_tools,
-        supports_streaming: capabilities.supports_streaming,
-        supports_image_input: capabilities.supports_image_input,
-        supports_reasoning: capabilities.supports_reasoning,
-    }
+    defaults
 }
 
 fn slugify(value: &str, fallback: &str) -> String {
@@ -675,6 +823,48 @@ mod tests {
     }
 
     #[test]
+    fn auto_preset_is_preserved_while_capabilities_are_inferred() {
+        let storage = serde_json::from_str::<ProviderRegistryStorage>(
+            r#"
+            {
+              "providers": [
+                {
+                  "id": "provider-openai",
+                  "name": "openai",
+                  "protocol": "openai",
+                  "base_url": "https://api.openai.com/v1",
+                  "api_key_env_var": "OPENAI_API_KEY",
+                  "models": [
+                    {
+                      "id": "model-openai-auto",
+                      "name": "GPT 5 Auto",
+                      "model": "gpt-5.5",
+                      "temperature": 0.2,
+                      "maxOutputTokens": 8192,
+                      "capabilityPreset": "auto"
+                    }
+                  ],
+                  "selected_model_id": "model-openai-auto"
+                }
+              ],
+              "selected_provider_id": "provider-openai"
+            }
+            "#,
+        )
+        .expect("fixture should parse");
+
+        let normalized = normalize_storage(storage);
+        let model = &normalized.providers[0].models[0];
+
+        assert!(matches!(
+            model.capability_preset,
+            ProviderCapabilityPreset::Auto
+        ));
+        assert_eq!(model.capabilities.context_window_tokens, Some(128_000));
+        assert!(model.capabilities.supports_reasoning);
+    }
+
+    #[test]
     fn disabling_reasoning_clears_reasoning_fields() {
         let storage = serde_json::from_str::<ProviderRegistryStorage>(
             r#"
@@ -715,5 +905,95 @@ mod tests {
         assert!(!model.capabilities.supports_reasoning);
         assert!(model.reasoning_effort.is_none());
         assert!(model.reasoning_budget_tokens.is_none());
+    }
+
+    #[test]
+    fn custom_capability_preset_preserves_manual_capabilities() {
+        let storage = serde_json::from_str::<ProviderRegistryStorage>(
+            r#"
+            {
+              "providers": [
+                {
+                  "id": "provider-openai",
+                  "name": "openai",
+                  "protocol": "openai",
+                  "base_url": "https://api.openai.com/v1",
+                  "api_key_env_var": "OPENAI_API_KEY",
+                  "models": [
+                    {
+                      "id": "model-openai-custom",
+                      "name": "Custom Chat",
+                      "model": "gpt-4.1-mini",
+                      "temperature": 0.2,
+                      "maxOutputTokens": 8192,
+                      "capabilityPreset": "custom",
+                      "capabilities": {
+                        "contextWindowTokens": 64000,
+                        "supportsTools": false,
+                        "supportsStreaming": false,
+                        "supportsImageInput": true,
+                        "supportsReasoning": false
+                      }
+                    }
+                  ],
+                  "selected_model_id": "model-openai-custom"
+                }
+              ],
+              "selected_provider_id": "provider-openai"
+            }
+            "#,
+        )
+        .expect("storage should deserialize");
+
+        let normalized = normalize_storage(storage);
+        let model = &normalized.providers[0].models[0];
+
+        assert!(matches!(
+            model.capability_preset,
+            ProviderCapabilityPreset::Custom
+        ));
+        assert_eq!(model.capabilities.context_window_tokens, Some(64_000));
+        assert!(!model.capabilities.supports_tools);
+        assert!(!model.capabilities.supports_streaming);
+        assert!(model.capabilities.supports_image_input);
+    }
+
+    #[test]
+    fn existing_custom_registry_does_not_reinsert_default_providers() {
+        let storage = serde_json::from_str::<ProviderRegistryStorage>(
+            r#"
+            {
+              "providers": [
+                {
+                  "id": "acme-router",
+                  "name": "Acme Router",
+                  "protocol": "openai",
+                  "base_url": "https://router.example/v1",
+                  "api_key_env_var": "ACME_ROUTER_API_KEY",
+                  "api_key_value": "secret-token",
+                  "models": [
+                    {
+                      "id": "reasoning-alpha",
+                      "name": "Reasoning Alpha",
+                      "model": "gpt-5-alpha",
+                      "temperature": 0.2,
+                      "maxOutputTokens": 8192,
+                      "capabilityPreset": "open-ai-reasoning"
+                    }
+                  ],
+                  "selected_model_id": "reasoning-alpha"
+                }
+              ],
+              "selected_provider_id": "acme-router"
+            }
+            "#,
+        )
+        .expect("storage should deserialize");
+
+        let normalized = normalize_storage(storage);
+
+        assert_eq!(normalized.providers.len(), 1);
+        assert_eq!(normalized.providers[0].id, "acme-router");
+        assert_eq!(normalized.selected_provider_id.as_deref(), Some("acme-router"));
     }
 }

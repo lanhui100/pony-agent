@@ -1,5 +1,6 @@
 use crate::agent::provider::{
-    ProviderClient, ProviderDecision, ProviderManager, ProviderRequest, TokenUsage,
+    ProviderClient, ProviderDecision, ProviderManager, ProviderRequest, ProviderStreamChunk,
+    TokenUsage,
 };
 use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
@@ -109,6 +110,7 @@ pub fn emit_stream_failed(
             kind: "failed".to_string(),
             phase: Some("failed".to_string()),
             text: Some("This turn failed.".to_string()),
+            reasoning_content: None,
             error: Some(error),
             provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
             provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
@@ -136,6 +138,7 @@ pub fn emit_stream_event(
     kind: &str,
     phase: Option<&str>,
     text: Option<String>,
+    reasoning_content: Option<String>,
     provider_meta: Option<&ProviderEventMeta>,
     provider_source: Option<String>,
     provider_mode: Option<String>,
@@ -156,6 +159,7 @@ pub fn emit_stream_event(
             kind: kind.to_string(),
             phase: phase.map(|value| value.to_string()),
             text,
+            reasoning_content,
             error: None,
             provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
             provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
@@ -265,17 +269,24 @@ pub fn provider_failure_message(
     None
 }
 
-pub fn stream_text_chunks(
+fn stream_delta_chunks(
     app: &AppHandle,
     turn_id: &str,
     phase: &str,
-    text: &str,
+    text: Option<&str>,
+    reasoning_content: Option<&str>,
     started_at: &std::time::Instant,
+    initial_latency_ms: Option<u64>,
 ) -> Option<u64> {
-    let mut first_token_latency_ms = None;
+    let source = text.or(reasoning_content).unwrap_or_default();
+    let mut first_token_latency_ms = initial_latency_ms;
+    let chunks = source
+        .as_bytes()
+        .chunks(48)
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        .collect::<Vec<_>>();
 
-    for chunk in text.as_bytes().chunks(48) {
-        let delta = String::from_utf8_lossy(chunk).to_string();
+    for (index, delta) in chunks.iter().enumerate() {
         let latency = if first_token_latency_ms.is_none() {
             let value = started_at.elapsed().as_millis() as u64;
             first_token_latency_ms = Some(value);
@@ -290,7 +301,9 @@ pub fn stream_text_chunks(
             turn_id.to_string(),
             "delta",
             Some(phase),
-            Some(delta),
+            text.as_ref().map(|_| delta.clone()),
+            reasoning_content.as_ref().map(|_| delta.clone()),
+            None,
             None,
             None,
             None,
@@ -301,11 +314,52 @@ pub fn stream_text_chunks(
             None,
             None,
             None,
-            None,
         );
+
+        if index + 1 < chunks.len() {
+            std::thread::sleep(std::time::Duration::from_millis(14));
+        }
     }
 
     first_token_latency_ms
+}
+
+pub fn stream_reasoning_chunks(
+    app: &AppHandle,
+    turn_id: &str,
+    phase: &str,
+    reasoning_content: &str,
+    started_at: &std::time::Instant,
+    initial_latency_ms: Option<u64>,
+) -> Option<u64> {
+    stream_delta_chunks(
+        app,
+        turn_id,
+        phase,
+        None,
+        Some(reasoning_content),
+        started_at,
+        initial_latency_ms,
+    )
+}
+
+pub fn stream_text_chunks(
+    app: &AppHandle,
+    turn_id: &str,
+    phase: &str,
+    text: &str,
+    started_at: &std::time::Instant,
+    initial_latency_ms: Option<u64>,
+) -> Option<u64> {
+    stream_delta_chunks(
+        app,
+        turn_id,
+        phase,
+        Some(text),
+        None,
+        started_at,
+        initial_latency_ms,
+    )
 }
 
 pub fn runtime_log(message: String) {
@@ -359,7 +413,7 @@ pub fn provider_followup_stream<P, F>(
 ) -> Result<crate::agent::provider::ProviderResponse, String>
 where
     P: ProviderClient,
-    F: FnMut(String),
+    F: FnMut(ProviderStreamChunk),
 {
     provider.continue_with_tool_result_stream(
         request,

@@ -25,6 +25,7 @@
 - `PA-001` 迁移前端到 Vue + Pinia
 - `PA-002` 设计运行时调试台结构
 - `PA-003` 实现 Rust 单轮 runtime 骨架
+- `2026-05-23` 重构收口轮：完成 `provider / session / runtime / tool` 稳定化、18 条前端单测、`npm run verify` 闭环和 `tauri dev --no-watch` 冒烟验证
 
 ## Dropped
 - 暂无

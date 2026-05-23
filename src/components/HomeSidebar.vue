@@ -537,27 +537,27 @@ watch(
                   <span class="break-words text-right text-stone-800 [overflow-wrap:anywhere]">{{ sessionId }}</span>
                 </div>
                 <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">闃舵</span>
+                  <span class="text-stone-400">阶段</span>
                   <span class="text-right text-stone-800">{{ phaseLabel }}</span>
                 </div>
                 <div v-if="displayModel" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">妯″瀷</span>
+                  <span class="text-stone-400">模型</span>
                   <span class="break-words text-right text-stone-800 [overflow-wrap:anywhere]">{{ displayModel }}</span>
                 </div>
                 <div v-if="providerProtocol" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">鍗忚</span>
+                  <span class="text-stone-400">协议</span>
                   <span class="text-right text-stone-800">{{ providerProtocol }}</span>
                 </div>
                 <div v-if="providerMode" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">妯″紡</span>
+                  <span class="text-stone-400">模式</span>
                   <span class="text-right text-stone-800">{{ providerMode }}</span>
                 </div>
                 <div v-if="totalTokens != null" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">鎬?token</span>
+                  <span class="text-stone-400">总 token</span>
                   <span class="text-right text-stone-800">{{ totalTokens }}</span>
                 </div>
                 <div v-if="firstTokenLatencyMs != null" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">棣?token</span>
+                  <span class="text-stone-400">首 token</span>
                   <span class="text-right text-stone-800">{{ firstTokenLatencyMs }} ms</span>
                 </div>
               </div>
@@ -585,39 +585,39 @@ watch(
           </button>
 
           <div class="collapsible-body">
-            <section class="collapsible-content mt-3 space-y-2">
+            <section class="collapsible-content mt-2 space-y-1">
               <section
                 v-for="tool in availableTools"
                 :key="tool.name"
-                class="collapsible-shell overflow-hidden rounded-[0.45rem] bg-[#faf7f1] px-3 py-2"
+                class="collapsible-shell overflow-hidden rounded-[0.35rem] px-2 py-1"
                 :data-open="activeTraceStepKey === toolPanelKey(tool.name)"
               >
                 <button
-                  class="flex w-full items-start justify-between gap-3 text-left"
+                  class="flex w-full items-start justify-between gap-1.5 text-left"
                   type="button"
                   @click="activeTraceStepKey = activeTraceStepKey === toolPanelKey(tool.name) ? '' : toolPanelKey(tool.name)"
                 >
                   <div class="min-w-0">
-                    <div class="text-[12px] font-medium text-stone-800">{{ tool.name }}</div>
-                    <p class="mt-1 text-[11px] leading-4 text-stone-500">
+                    <div class="text-[11px] font-medium text-stone-800">{{ tool.name }}</div>
+                    <p class="mt-0.5 text-[11px] leading-[1.3] text-stone-500">
                       {{ tool.description }}
                     </p>
                   </div>
                   <ChevronRight
-                    class="mt-0.5 h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200"
+                    class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
                     :class="{ 'rotate-90': activeTraceStepKey === toolPanelKey(tool.name) }"
                   />
                 </button>
                 <div class="collapsible-body">
-                  <div class="collapsible-content mt-2">
-                    <section class="rounded-[0.35rem] bg-white/72 px-2.5 py-2">
-                      <div class="space-y-2 text-[11px] leading-4">
-                        <div class="space-y-1">
-                          <div class="text-stone-400">鍙傛暟</div>
+                  <div class="collapsible-content mt-1">
+                    <section class="border-l border-stone-200 pl-2">
+                      <div class="space-y-1 text-[10px] leading-[1.3]">
+                        <div class="space-y-0.5">
+                          <div class="text-stone-400">参数</div>
                           <div class="text-stone-700">{{ toolInputSummary(tool.name) }}</div>
                         </div>
-                        <div class="space-y-1">
-                          <div class="text-stone-400">蹇呭～</div>
+                        <div class="space-y-0.5">
+                          <div class="text-stone-400">必填</div>
                           <div class="text-stone-700">{{ toolRequiredSummary(tool.name) }}</div>
                         </div>
                       </div>
@@ -639,19 +639,19 @@ watch(
           </button>
 
           <div class="collapsible-body">
-            <section class="collapsible-content mt-3 space-y-2">
+            <section class="collapsible-content mt-2 space-y-1">
               <section
                 v-for="turn in orderedTurnTraces"
                 :key="turn.turnId"
-                class="collapsible-shell overflow-hidden rounded-[0.45rem] bg-[#faf7f1] px-2.5 py-2"
+                class="collapsible-shell overflow-hidden border-b border-stone-200/70 py-1.5 last:border-b-0"
                 :data-open="activeTurnId === turn.turnId"
               >
-                <button class="flex w-full items-start justify-between gap-3 text-left" type="button" @click="toggleTurn(turn.turnId)">
-                  <div class="min-w-0 space-y-1">
-                    <div class="flex items-center gap-2 text-[13px] text-stone-800">
+                <button class="flex w-full items-start justify-between gap-2 text-left" type="button" @click="toggleTurn(turn.turnId)">
+                  <div class="min-w-0 space-y-0.5">
+                    <div class="flex items-center gap-1.5 text-[12px] font-medium text-stone-800">
                       <component
                         :is="turnStateIcon(turn)"
-                        class="h-3.5 w-3.5 shrink-0"
+                        class="h-3 w-3 shrink-0"
                         :class="{
                           'animate-spin text-stone-500': turn.phase === 'calling_model' || turn.phase === 'calling_tool',
                           'text-rose-600': turn.phase === 'failed' || !!turn.error,
@@ -661,35 +661,35 @@ watch(
                       />
                       <span class="truncate">{{ turn.title }}</span>
                     </div>
-                    <div v-if="turnMeta(turn)" class="text-[11px] leading-4 text-stone-400">
+                    <div v-if="turnMeta(turn)" class="text-[10px] leading-[1.3] text-stone-400">
                       {{ turnMeta(turn) }}
                     </div>
                   </div>
-                  <ChevronRight class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': activeTurnId === turn.turnId }" />
+                  <ChevronRight class="h-3 w-3 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': activeTurnId === turn.turnId }" />
                 </button>
 
                 <div class="collapsible-body">
-                  <div class="collapsible-content mt-2 space-y-1.5 pl-1">
-                    <p v-if="detailText(turn)" class="break-words text-[11px] leading-4 text-stone-600 [overflow-wrap:anywhere]">
+                  <div class="collapsible-content mt-1 space-y-1 pl-4">
+                    <p v-if="detailText(turn)" class="break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]">
                       {{ detailText(turn) }}
                     </p>
 
                     <section
                       v-for="step in turn.traceSteps"
                       :key="step.id"
-                      class="collapsible-shell overflow-hidden rounded-[0.4rem] bg-white/78 px-2 py-1.5"
-                :data-open="activeTraceStepKey === turnStepKey(turn.turnId, step.id)"
+                      class="collapsible-shell overflow-hidden py-0.5"
+                      :data-open="activeTraceStepKey === turnStepKey(turn.turnId, step.id)"
                     >
                       <button
-                        class="flex w-full items-start justify-between gap-2 text-left"
+                        class="flex w-full items-start justify-between gap-1.5 text-left"
                         type="button"
                         @click="toggleTraceStep(turn.turnId, step.id)"
                       >
-                        <div class="min-w-0 space-y-1">
-                          <div class="flex min-w-0 items-center gap-2 text-[11px] leading-4 text-stone-700">
+                        <div class="min-w-0 space-y-0.5">
+                          <div class="flex min-w-0 items-center gap-1.5 text-[11px] leading-[1.3] text-stone-700">
                             <component
                               :is="traceStateIcon(step.state)"
-                              class="h-3.5 w-3.5 shrink-0"
+                              class="h-3 w-3 shrink-0"
                               :class="{
                                 'text-stone-500': step.state === 'completed',
                                 'animate-spin text-stone-500': step.state === 'active',
@@ -699,50 +699,50 @@ watch(
                             />
                             <span class="truncate">{{ step.label }}</span>
                           </div>
-                          <div class="flex flex-wrap items-center gap-1.5 text-[10px] text-stone-400">
+                          <div class="flex flex-wrap items-center gap-2 text-[10px] text-stone-400">
                             <span
                               v-for="stat in stepTokenStats(turn, step)"
                                 :key="turn.turnId + '-' + step.id + '-' + stat"
-                              class="rounded-full bg-[#f4ede1] px-2 py-0.5 text-stone-500"
+                              class="text-stone-400"
                             >
                               {{ stat }}
                             </span>
-                            <span v-if="stepDurationText(turn, step)" class="rounded-full bg-[#f4ede1] px-2 py-0.5 text-stone-500">
+                            <span v-if="stepDurationText(turn, step)" class="text-stone-400">
                               {{ stepDurationText(turn, step) }}
                             </span>
                           </div>
                         </div>
 
-                        <div class="flex items-center gap-1.5">
+                        <div class="flex items-center gap-1">
                           <button
-                            class="inline-flex h-6 w-6 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                            class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                             type="button"
                             @click.stop="copyText(traceCopyKey(turn.turnId, step.id), buildCopyText(turn, step))"
                           >
-                            <component :is="copiedKey === traceCopyKey(turn.turnId, step.id) ? Check : Copy" class="h-3.5 w-3.5" />
+                            <component :is="copiedKey === traceCopyKey(turn.turnId, step.id) ? Check : Copy" class="h-3 w-3" />
                           </button>
                           <ChevronRight
-                            class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200"
+                            class="h-3 w-3 shrink-0 text-stone-300 transition duration-200"
                             :class="{ 'rotate-90': activeTraceStepKey === turnStepKey(turn.turnId, step.id) }"
                           />
                         </div>
                       </button>
 
                       <div class="collapsible-body">
-                        <div class="collapsible-content mt-2">
-                          <section class="rounded-[0.35rem] bg-[#fbf8f3] px-2.5 py-2">
-                            <div class="space-y-2">
+                        <div class="collapsible-content mt-1 pl-4">
+                          <section>
+                            <div class="space-y-1">
                               <div
                                 v-for="row in buildStepRows(turn, step)"
                                 :key="turn.turnId + '-' + step.id + '-' + row.label"
-                                class="space-y-1 text-[11px] leading-4"
+                                class="space-y-0.5 text-[10px] leading-[1.35]"
                               >
                                 <div class="flex items-center justify-between gap-3">
                                   <span class="text-stone-400">{{ row.label }}</span>
                                   <component
                                     v-if="row.inputKind"
                                     :is="inputKindIcon(row.inputKind)"
-                                    class="h-3.5 w-3.5 shrink-0 text-stone-400"
+                                    class="h-3 w-3 shrink-0 text-stone-400"
                                   />
                                 </div>
                                 <div

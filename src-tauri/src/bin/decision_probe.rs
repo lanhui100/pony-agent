@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[path = "../agent/mod.rs"]
 mod agent;
 

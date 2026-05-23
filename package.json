@@ -6,15 +6,21 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test": "npm run test:unit",
+    "test:unit": "vitest run",
+    "verify": "npm run test:unit && npm run build && cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check",
     "preview": "vite preview",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri"
   },
   "devDependencies": {
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/cli": "^2.8.0",
+    "@vue/test-utils": "^2.4.6",
     "@vitejs/plugin-vue": "^6.0.6",
+    "jsdom": "^26.1.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.9",
+    "vitest": "^3.2.4",
     "vue-tsc": "^3.2.8"
   },
   "dependencies": {

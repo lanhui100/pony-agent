@@ -5,11 +5,13 @@ use crate::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
 use crate::agent::graph::GraphEngine;
 use crate::agent::planner::{LocalTurnPlanner, TurnPlanner};
 use crate::agent::provider::{
-    provider_native_assistant_message, provider_native_assistant_tool_call_message,
+    provider_native_assistant_message_with_reasoning, provider_native_assistant_tool_call_message,
     provider_native_tool_result_message, provider_native_user_message, ProviderDecision,
-    ProviderManager, ProviderRequest, TokenUsage,
+    ProviderManager, ProviderRequest, ProviderStreamChunk, TokenUsage,
 };
-use crate::agent::session::{SessionOverview, SessionSnapshot, SessionStore, TurnHistoryMessage};
+use crate::agent::session::{
+    SessionOverview, SessionSnapshot, SessionStore, TurnHistoryMessage, TurnTraceRecord,
+};
 use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
@@ -18,8 +20,8 @@ use crate::agent::turn_flow::{
     build_failed_turn_result, emit_stream_event, emit_stream_failed, emit_turn_failed,
     normalize_user_message, preview_text, provider_decision, provider_event_meta,
     provider_failure_message, provider_followup, provider_followup_stream, runtime_log,
-    stream_text_chunks, token_usage_parts, PersistedTurnOutcome, PlannedTurn, PreparedTurn,
-    ProviderEventMeta, SyncToolTurnOutcome,
+    stream_reasoning_chunks, stream_text_chunks, token_usage_parts, PersistedTurnOutcome,
+    PlannedTurn, PreparedTurn, ProviderEventMeta, SyncToolTurnOutcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,6 +71,7 @@ pub struct TurnStreamEvent {
     pub kind: String,
     pub phase: Option<String>,
     pub text: Option<String>,
+    pub reasoning_content: Option<String>,
     pub error: Option<String>,
     pub provider_requested_name: Option<String>,
     pub provider_name: Option<String>,
@@ -259,6 +262,52 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn persist_turn_trace(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        phase: &str,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_meta: Option<&ProviderEventMeta>,
+        provider_source: Option<String>,
+        provider_mode: Option<String>,
+        fallback_reason: Option<String>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+        first_token_latency_ms: Option<u64>,
+        session_summary: Option<String>,
+        error: Option<String>,
+    ) {
+        self.sessions.record_turn_trace(
+            session_id,
+            TurnTraceRecord {
+                turn_id: turn_id.to_string(),
+                title: build_turn_trace_title(user_message),
+                phase: phase.to_string(),
+                trace_steps,
+                tool_activities,
+                provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+                provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+                provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+                provider_model: provider_meta.map(|meta| meta.model.clone()),
+                provider_source,
+                provider_mode,
+                session_summary,
+                fallback_reason,
+                error,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                first_token_latency_ms,
+                updated_at: 0,
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn handle_stream_tool_turn(
         &mut self,
         app: &AppHandle,
@@ -288,6 +337,7 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
             Some(self.telemetry_builder.trace_tool_active()),
             None,
             None,
@@ -299,6 +349,7 @@ impl AgentRuntime {
             turn_id.to_string(),
             "tool",
             Some("calling_tool"),
+            None,
             None,
             None,
             None,
@@ -331,6 +382,7 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
             Some(
                 self.telemetry_builder
                     .tool_activities_after_result(&tool_call, &tool_result),
@@ -344,6 +396,7 @@ impl AgentRuntime {
             turn_id.to_string(),
             "trace",
             Some("calling_model"),
+            None,
             None,
             None,
             None,
@@ -382,13 +435,19 @@ impl AgentRuntime {
                     None
                 };
 
+                let (text, reasoning_content) = match delta {
+                    ProviderStreamChunk::Text(text) => (Some(text), None),
+                    ProviderStreamChunk::Reasoning(reasoning) => (None, Some(reasoning)),
+                };
+
                 emit_stream_event(
                     &delta_app,
                     "turn:delta",
                     delta_turn_id.clone(),
                     "delta",
                     Some("calling_model"),
-                    Some(delta),
+                    text,
+                    reasoning_content,
                     None,
                     None,
                     None,
@@ -405,16 +464,36 @@ impl AgentRuntime {
         ) {
             Ok(response) => response,
             Err(error) => {
+                let trace_steps = self
+                    .telemetry_builder
+                    .failed_trace_after_tool(tool_result.status == "ok");
+                let tool_activities = self
+                    .telemetry_builder
+                    .tool_activities_after_result(&tool_call, &tool_result);
+                self.persist_turn_trace(
+                    input.session_id.as_deref(),
+                    turn_id,
+                    user_message,
+                    "failed",
+                    trace_steps.clone(),
+                    tool_activities.clone(),
+                    Some(provider_meta),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    first_token_latency.get(),
+                    None,
+                    Some(error.clone()),
+                );
                 emit_stream_failed(
                     app,
                     turn_id.to_string(),
                     Some(provider_meta),
-                    self.telemetry_builder
-                        .failed_trace_after_tool(tool_result.status == "ok"),
-                    Some(
-                        self.telemetry_builder
-                            .tool_activities_after_result(&tool_call, &tool_result),
-                    ),
+                    trace_steps,
+                    Some(tool_activities),
                     first_token_latency.get(),
                     error,
                 );
@@ -426,16 +505,36 @@ impl AgentRuntime {
             &final_response.provider_mode,
             final_response.fallback_reason.as_deref(),
         ) {
+            let trace_steps = self
+                .telemetry_builder
+                .failed_trace_after_tool(tool_result.status == "ok");
+            let tool_activities = self
+                .telemetry_builder
+                .tool_activities_after_result(&tool_call, &tool_result);
+            self.persist_turn_trace(
+                input.session_id.as_deref(),
+                turn_id,
+                user_message,
+                "failed",
+                trace_steps.clone(),
+                tool_activities.clone(),
+                Some(provider_meta),
+                None,
+                Some(final_response.provider_mode.clone()),
+                final_response.fallback_reason.clone(),
+                None,
+                None,
+                None,
+                first_token_latency.get(),
+                None,
+                Some(error.clone()),
+            );
             emit_stream_failed(
                 app,
                 turn_id.to_string(),
                 Some(provider_meta),
-                self.telemetry_builder
-                    .failed_trace_after_tool(tool_result.status == "ok"),
-                Some(
-                    self.telemetry_builder
-                        .tool_activities_after_result(&tool_call, &tool_result),
-                ),
+                trace_steps,
+                Some(tool_activities),
                 first_token_latency.get(),
                 error,
             );
@@ -453,6 +552,33 @@ impl AgentRuntime {
             final_response.token_usage.as_ref(),
             native_transcript_for_tool_turn(user_message, first_decision, &tool_call, &tool_result, &final_response),
         );
+        let trace_steps = self
+            .telemetry_builder
+            .completed_trace_with_tool(tool_result.status == "ok");
+        let tool_activities = self
+            .telemetry_builder
+            .tool_activities_after_result(&tool_call, &tool_result);
+        self.persist_turn_trace(
+            input.session_id.as_deref(),
+            turn_id,
+            user_message,
+            "completed",
+            trace_steps.clone(),
+            tool_activities.clone(),
+            Some(provider_meta),
+            Some(final_response.provider_source.clone()),
+            Some(final_response.provider_mode.clone()),
+            final_response
+                .fallback_reason
+                .clone()
+                .or(first_decision.fallback_reason.clone()),
+            persisted.input_tokens,
+            persisted.output_tokens,
+            persisted.total_tokens,
+            first_token_latency.get(),
+            Some(persisted.session_summary.clone()),
+            None,
+        );
 
         emit_stream_event(
             app,
@@ -461,6 +587,7 @@ impl AgentRuntime {
             "completed",
             Some("ready"),
             Some(final_response.output_text),
+            final_response.reasoning_content.clone(),
             Some(provider_meta),
             Some(final_response.provider_source.clone()),
             Some(final_response.provider_mode.clone()),
@@ -471,14 +598,8 @@ impl AgentRuntime {
             persisted.output_tokens,
             persisted.total_tokens,
             first_token_latency.get(),
-            Some(
-                self.telemetry_builder
-                    .completed_trace_with_tool(tool_result.status == "ok"),
-            ),
-            Some(
-                self.telemetry_builder
-                    .tool_activities_after_result(&tool_call, &tool_result),
-            ),
+            Some(trace_steps),
+            Some(tool_activities),
             Some(persisted.session_summary),
         );
     }
@@ -742,6 +863,7 @@ impl AgentRuntime {
             "started",
             Some("calling_model"),
             Some(prepared.user_message.clone()),
+            None,
             Some(&prepared_provider_meta),
             None,
             None,
@@ -758,6 +880,24 @@ impl AgentRuntime {
         let planned = match self.plan_turn(&prepared) {
             Ok(planned) => planned,
             Err(error) => {
+                self.persist_turn_trace(
+                    input.session_id.as_deref(),
+                    &turn_id,
+                    &prepared.user_message,
+                    "failed",
+                    self.telemetry_builder.failed_trace_before_tool(),
+                    Vec::new(),
+                    Some(&prepared_provider_meta),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(error.clone()),
+                );
                 emit_turn_failed(
                     &app,
                     turn_id,
@@ -784,6 +924,40 @@ impl AgentRuntime {
         } = prepared;
         let provider_meta = provider_event_meta(&provider);
 
+        if let Some(error) = provider_failure_message(
+            &first_decision.provider_mode,
+            first_decision.fallback_reason.as_deref(),
+        ) {
+            self.persist_turn_trace(
+                input.session_id.as_deref(),
+                &turn_id,
+                &user_message,
+                "failed",
+                self.telemetry_builder.failed_trace_before_tool(),
+                Vec::new(),
+                Some(&provider_meta),
+                Some(first_decision.provider_source.clone()),
+                Some(first_decision.provider_mode.clone()),
+                first_decision.fallback_reason.clone(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(error.clone()),
+            );
+            emit_stream_failed(
+                &app,
+                turn_id,
+                Some(&provider_meta),
+                self.telemetry_builder.failed_trace_before_tool(),
+                None,
+                None,
+                error,
+            );
+            return;
+        }
+
         if let Some(tool_call) = resolved_tool_call {
             self.handle_stream_tool_turn(
                 &app,
@@ -809,6 +983,7 @@ impl AgentRuntime {
             Some("calling_model"),
             None,
             None,
+            None,
             Some(first_decision.provider_source.clone()),
             None,
             None,
@@ -821,12 +996,27 @@ impl AgentRuntime {
             None,
         );
 
+        let first_token_latency_ms = if let Some(reasoning_content) =
+            first_decision.reasoning_content.as_deref()
+        {
+            stream_reasoning_chunks(
+                &app,
+                &turn_id,
+                "calling_model",
+                reasoning_content,
+                &turn_started_at,
+                None,
+            )
+        } else {
+            None
+        };
         let first_token_latency_ms = stream_text_chunks(
             &app,
             &turn_id,
             "calling_model",
             &first_decision.output_text,
             &turn_started_at,
+            first_token_latency_ms,
         );
         let completed_text = first_decision.output_text.clone();
         let completed_mode = first_decision.provider_mode.clone();
@@ -839,6 +1029,25 @@ impl AgentRuntime {
             first_decision.token_usage.as_ref(),
             native_transcript_for_completed_turn(&user_message, &first_decision, provider.requires_provider_native_tool_flow()),
         );
+        let trace_steps = self.telemetry_builder.completed_trace_without_tool();
+        self.persist_turn_trace(
+            input.session_id.as_deref(),
+            &turn_id,
+            &user_message,
+            "completed",
+            trace_steps.clone(),
+            Vec::new(),
+            Some(&provider_meta),
+            Some(first_decision.provider_source.clone()),
+            Some(first_decision.provider_mode.clone()),
+            first_decision.fallback_reason.clone(),
+            persisted.input_tokens,
+            persisted.output_tokens,
+            persisted.total_tokens,
+            first_token_latency_ms,
+            Some(persisted.session_summary.clone()),
+            None,
+        );
 
         emit_stream_event(
             &app,
@@ -847,6 +1056,7 @@ impl AgentRuntime {
             "completed",
             Some("ready"),
             Some(first_decision.output_text),
+            first_decision.reasoning_content.clone(),
             Some(&provider_meta),
             Some(first_decision.provider_source.clone()),
             Some(first_decision.provider_mode.clone()),
@@ -855,7 +1065,7 @@ impl AgentRuntime {
             Some(persisted.output_tokens).flatten(),
             Some(persisted.total_tokens).flatten(),
             first_token_latency_ms,
-            Some(self.telemetry_builder.completed_trace_without_tool()),
+            Some(trace_steps),
             Some(Vec::new()),
             Some(persisted.session_summary),
         );
@@ -904,12 +1114,31 @@ fn native_transcript_for_completed_turn(
     let assistant_message = decision
         .assistant_message
         .clone()
-        .unwrap_or_else(|| provider_native_assistant_message(&decision.output_text));
+        .unwrap_or_else(|| {
+            provider_native_assistant_message_with_reasoning(
+                &decision.output_text,
+                decision.reasoning_content.as_deref(),
+            )
+        });
 
     Some(vec![
         provider_native_user_message(user_message),
         assistant_message,
     ])
+}
+
+fn build_turn_trace_title(message: &str) -> String {
+    let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return "空白输入".to_string();
+    }
+
+    let count = compact.chars().count();
+    if count <= 44 {
+        compact
+    } else {
+        format!("{}…", compact.chars().take(44).collect::<String>())
+    }
 }
 
 fn native_transcript_for_tool_turn(
@@ -929,7 +1158,12 @@ fn native_transcript_for_tool_turn(
     let final_message = final_response
         .assistant_message
         .clone()
-        .unwrap_or_else(|| provider_native_assistant_message(&final_response.output_text));
+        .unwrap_or_else(|| {
+            provider_native_assistant_message_with_reasoning(
+                &final_response.output_text,
+                final_response.reasoning_content.as_deref(),
+            )
+        });
 
     Some(vec![
         provider_native_user_message(user_message),

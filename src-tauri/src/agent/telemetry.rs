@@ -1,7 +1,7 @@
 use crate::agent::tools::{ToolCall, ToolResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnTraceStep {
     pub id: String,
@@ -9,7 +9,7 @@ pub struct TurnTraceStep {
     pub state: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnToolActivity {
     pub id: String,

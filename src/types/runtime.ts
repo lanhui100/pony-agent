@@ -48,6 +48,7 @@ export type ChatMessage = {
   turnId: string;
   role: "user" | "assistant" | "tool";
   content: string;
+  reasoningContent?: string | null;
   status?: "pending" | "done" | "error";
   modelName?: string | null;
   tokenCount?: number | null;
@@ -106,6 +107,7 @@ export type SessionSnapshot = {
   title?: string | null;
   summary: string;
   history: TurnHistoryMessage[];
+  turnTraceHistory?: TurnTraceRecord[];
   turnCount: number;
   lastReferencedFile?: string | null;
   updatedAtMs: number;
@@ -120,6 +122,7 @@ export type TurnResult = {
   providerSource: string;
   providerMode: string;
   fallbackReason?: string | null;
+  reasoningContent?: string | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
   totalTokens?: number | null;
@@ -136,6 +139,7 @@ export type TurnStreamEvent = {
   kind: "started" | "delta" | "trace" | "tool" | "completed" | "failed";
   phase?: RuntimePhase | string | null;
   text?: string | null;
+  reasoningContent?: string | null;
   error?: string | null;
   providerRequestedName?: string | null;
   providerName?: string | null;

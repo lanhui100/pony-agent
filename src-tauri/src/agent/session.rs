@@ -1,3 +1,4 @@
+use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ pub struct SessionState {
     pub history: Vec<TurnHistoryMessage>,
     #[serde(default)]
     pub provider_native_transcript: Vec<Value>,
+    #[serde(default)]
+    pub turn_trace_history: Vec<TurnTraceRecord>,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     #[serde(default)]
@@ -44,6 +47,8 @@ pub struct SessionSnapshot {
     pub history: Vec<TurnHistoryMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_native_transcript: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turn_trace_history: Vec<TurnTraceRecord>,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     pub updated_at_ms: u64,
@@ -58,6 +63,33 @@ pub struct SessionOverview {
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnTraceRecord {
+    pub turn_id: String,
+    pub title: String,
+    pub phase: String,
+    #[serde(default)]
+    pub trace_steps: Vec<TurnTraceStep>,
+    #[serde(default)]
+    pub tool_activities: Vec<TurnToolActivity>,
+    pub provider_requested_name: Option<String>,
+    pub provider_name: Option<String>,
+    pub provider_protocol: Option<String>,
+    pub provider_model: Option<String>,
+    pub provider_source: Option<String>,
+    pub provider_mode: Option<String>,
+    pub session_summary: Option<String>,
+    pub fallback_reason: Option<String>,
+    pub error: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub first_token_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 pub trait SessionBackend: Send {
@@ -80,6 +112,7 @@ pub struct FileSessionBackend {
     storage_path: PathBuf,
 }
 
+#[cfg(test)]
 pub struct MemorySessionBackend;
 
 impl SessionStore {
@@ -87,6 +120,7 @@ impl SessionStore {
         Self::with_backend(Box::new(FileSessionBackend::new(default_storage_path())))
     }
 
+    #[cfg(test)]
     pub fn memory_only() -> Self {
         Self::with_backend(Box::new(MemorySessionBackend))
     }
@@ -110,9 +144,8 @@ impl SessionStore {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
         let mut should_save = false;
         let snapshot = {
-            let created = !self.sessions.contains_key(session_key);
             let session = self.ensure_session(session_key);
-            if created {
+            if sanitize_provider_native_transcript(session) {
                 should_save = true;
             }
             if session.history.is_empty() && !fallback_history.is_empty() {
@@ -167,10 +200,43 @@ impl SessionStore {
         snapshot
     }
 
+    pub fn record_turn_trace(
+        &mut self,
+        session_id: Option<&str>,
+        mut trace: TurnTraceRecord,
+    ) -> SessionSnapshot {
+        let snapshot = {
+            let session = self.ensure_session(session_id.unwrap_or(DEFAULT_SESSION_ID));
+            trace.updated_at = now_timestamp_ms();
+
+            if let Some(existing) = session
+                .turn_trace_history
+                .iter_mut()
+                .find(|item| item.turn_id == trace.turn_id)
+            {
+                *existing = trace;
+            } else {
+                session.turn_trace_history.push(trace);
+            }
+
+            if session.turn_trace_history.len() > DEFAULT_HISTORY_LIMIT {
+                let keep_from = session.turn_trace_history.len() - DEFAULT_HISTORY_LIMIT;
+                session.turn_trace_history = session.turn_trace_history[keep_from..].to_vec();
+            }
+
+            refresh_session_metadata(session, true);
+            snapshot_from_state(session)
+        };
+
+        self.save_to_backend();
+        snapshot
+    }
+
     pub fn list_sessions(&self) -> Vec<SessionOverview> {
         let mut sessions = self
             .sessions
             .values()
+            .filter(|session| session_is_persistable(session))
             .map(|session| SessionOverview {
                 conversation_id: session.conversation_id.clone(),
                 title: session.title.clone(),
@@ -210,6 +276,7 @@ impl SessionStore {
                 summary: DEFAULT_SESSION_SUMMARY.to_string(),
                 history: Vec::new(),
                 provider_native_transcript: Vec::new(),
+                turn_trace_history: Vec::new(),
                 turn_count: 0,
                 last_referenced_file: None,
                 updated_at_ms: now_timestamp_ms(),
@@ -237,6 +304,12 @@ impl SessionBackend for FileSessionBackend {
     }
 
     fn save_sessions(&self, sessions: &SessionMap) {
+        let sessions = sessions
+            .iter()
+            .filter(|(_, session)| session_is_persistable(session))
+            .map(|(session_id, session)| (session_id.clone(), session.clone()))
+            .collect::<SessionMap>();
+
         let Some(parent) = self.storage_path.parent() else {
             return;
         };
@@ -245,7 +318,7 @@ impl SessionBackend for FileSessionBackend {
         }
 
         let payload = PersistedSessions {
-            sessions: sessions.clone(),
+            sessions,
         };
         let Ok(serialized) = serde_json::to_string_pretty(&payload) else {
             return;
@@ -258,6 +331,7 @@ impl SessionBackend for FileSessionBackend {
     }
 }
 
+#[cfg(test)]
 impl SessionBackend for MemorySessionBackend {
     fn load_sessions(&self) -> Option<SessionMap> {
         None
@@ -273,6 +347,7 @@ fn snapshot_from_state(session: &SessionState) -> SessionSnapshot {
         summary: session.summary.clone(),
         history: session.history.clone(),
         provider_native_transcript: session.provider_native_transcript.clone(),
+        turn_trace_history: session.turn_trace_history.clone(),
         turn_count: session.turn_count,
         last_referenced_file: session.last_referenced_file.clone(),
         updated_at_ms: session.updated_at_ms,
@@ -290,11 +365,74 @@ fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) 
         .iter()
         .rev()
         .find_map(|message| extract_explicit_file_name(&message.content));
-    session.title = build_title(&session.history);
-    session.summary = build_summary(session.turn_count, session.last_referenced_file.as_deref());
+    if session.history.is_empty() && !session.turn_trace_history.is_empty() {
+        if let Some(trace) = session.turn_trace_history.last() {
+            session.title = trace.title.clone();
+            session.summary = trace
+                .session_summary
+                .clone()
+                .or(trace.error.clone())
+                .or(trace.fallback_reason.clone())
+                .unwrap_or_else(|| DEFAULT_SESSION_SUMMARY.to_string());
+        }
+    } else {
+        session.title = build_title(&session.history);
+        session.summary = build_summary(session.turn_count, session.last_referenced_file.as_deref());
+    }
     if touch_updated_at {
         session.updated_at_ms = now_timestamp_ms();
     }
+}
+
+fn sanitize_provider_native_transcript(session: &mut SessionState) -> bool {
+    if !has_legacy_reasoning_gap(&session.provider_native_transcript) {
+        return false;
+    }
+
+    session.provider_native_transcript.clear();
+    true
+}
+
+fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
+    let mut awaiting_tool_turn_reasoning = false;
+
+    for message in transcript {
+        match message.get("role").and_then(Value::as_str) {
+            Some("user") => {
+                awaiting_tool_turn_reasoning = false;
+            }
+            Some("tool") => {
+                awaiting_tool_turn_reasoning = true;
+            }
+            Some("assistant") => {
+                let has_tool_calls = message
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .map(|calls| !calls.is_empty())
+                    .unwrap_or(false);
+                let missing_reasoning = message
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .map(|value| value.trim().is_empty())
+                    .unwrap_or(true);
+
+                if (has_tool_calls || awaiting_tool_turn_reasoning) && missing_reasoning {
+                    return true;
+                }
+
+                if has_tool_calls {
+                    awaiting_tool_turn_reasoning = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn session_is_persistable(session: &SessionState) -> bool {
+    !session.history.is_empty() || !session.turn_trace_history.is_empty()
 }
 
 fn build_title(history: &[TurnHistoryMessage]) -> String {
@@ -408,6 +546,7 @@ fn default_sessions() -> SessionMap {
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: Vec::new(),
             provider_native_transcript: Vec::new(),
+            turn_trace_history: Vec::new(),
             turn_count: 0,
             last_referenced_file: None,
             updated_at_ms: now_timestamp_ms(),
@@ -497,9 +636,108 @@ mod tests {
         let mut store = SessionStore::memory_only();
         let sessions = store.remove_session(DEFAULT_SESSION_ID);
 
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].conversation_id, DEFAULT_SESSION_ID);
-        assert_eq!(sessions[0].title, DEFAULT_SESSION_TITLE);
+        assert!(sessions.is_empty());
+        let snapshot = store.snapshot(Some(DEFAULT_SESSION_ID), &[]);
+        assert_eq!(snapshot.conversation_id, DEFAULT_SESSION_ID);
+        assert_eq!(snapshot.title, DEFAULT_SESSION_TITLE);
+    }
+
+    #[test]
+    fn snapshot_clears_legacy_native_transcript_without_reasoning_content() {
+        let session_id = "legacy-reasoning";
+        let mut store = SessionStore::memory_only();
+        store.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history: vec![TurnHistoryMessage {
+                    role: "user".to_string(),
+                    content: "继续".to_string(),
+                }],
+                provider_native_transcript: vec![
+                    serde_json::json!({
+                        "role": "user",
+                        "content": "看看文件"
+                    }),
+                    serde_json::json!({
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_legacy",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_list_files",
+                                    "arguments": "{}"
+                                }
+                            }
+                        ]
+                    }),
+                ],
+                turn_trace_history: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: None,
+                updated_at_ms: now_timestamp_ms(),
+            },
+        );
+
+        let snapshot = store.snapshot(Some(session_id), &[]);
+        assert!(snapshot.provider_native_transcript.is_empty());
+    }
+
+    #[test]
+    fn snapshot_clears_tool_turn_transcript_when_final_assistant_lacks_reasoning() {
+        let session_id = "legacy-tool-final";
+        let mut store = SessionStore::memory_only();
+        store.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history: vec![TurnHistoryMessage {
+                    role: "user".to_string(),
+                    content: "继续".to_string(),
+                }],
+                provider_native_transcript: vec![
+                    serde_json::json!({
+                        "role": "user",
+                        "content": "读取 tauri.conf.json"
+                    }),
+                    serde_json::json!({
+                        "role": "assistant",
+                        "reasoning_content": "先读取文件。",
+                        "tool_calls": [
+                            {
+                                "id": "call_tool",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_read_file",
+                                    "arguments": "{\"path\":\"src-tauri/tauri.conf.json\"}"
+                                }
+                            }
+                        ]
+                    }),
+                    serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": "call_tool",
+                        "content": "{...}"
+                    }),
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": "这是 Tauri 配置文件。"
+                    }),
+                ],
+                turn_trace_history: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: Some("src-tauri/tauri.conf.json".to_string()),
+                updated_at_ms: now_timestamp_ms(),
+            },
+        );
+
+        let snapshot = store.snapshot(Some(session_id), &[]);
+        assert!(snapshot.provider_native_transcript.is_empty());
     }
 
     fn temp_sessions_path() -> PathBuf {
@@ -511,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_persists_new_empty_session() {
+    fn snapshot_does_not_persist_new_empty_session() {
         let path = temp_sessions_path();
         let backend = Box::new(FileSessionBackend::new(path.clone()));
         let mut store = SessionStore::with_backend(backend);
@@ -520,11 +758,60 @@ mod tests {
         assert_eq!(snapshot.conversation_id, "fresh");
         assert_eq!(snapshot.turn_count, 0);
 
-        let mut reloaded =
-            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
-        let reloaded_snapshot = reloaded.snapshot(Some("fresh"), &[]);
-        assert_eq!(reloaded_snapshot.conversation_id, "fresh");
-        assert_eq!(reloaded_snapshot.turn_count, 0);
+        let persisted = load_sessions_from_path(&path);
+        assert!(persisted.is_none());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backend_roundtrip_restores_turn_trace_history() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+        store.record_turn_trace(
+            Some("trace-persisted"),
+            TurnTraceRecord {
+                turn_id: "turn-1".to_string(),
+                title: "检查流式输出".to_string(),
+                phase: "completed".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-return".to_string(),
+                    label: "Return result".to_string(),
+                    state: "completed".to_string(),
+                }],
+                tool_activities: vec![TurnToolActivity {
+                    id: "tool-1".to_string(),
+                    name: "workspace.read_file".to_string(),
+                    status: "done".to_string(),
+                    summary: "读取文件".to_string(),
+                    arguments_text: Some("{\"path\":\"src/main.ts\"}".to_string()),
+                    result_text: Some("ok".to_string()),
+                    duration_seconds: Some(0.12),
+                }],
+                provider_requested_name: Some("ppx".to_string()),
+                provider_name: Some("ppx".to_string()),
+                provider_protocol: Some("openai".to_string()),
+                provider_model: Some("gpt-5.4".to_string()),
+                provider_source: Some("provider_decision".to_string()),
+                provider_mode: Some("live".to_string()),
+                session_summary: Some("测试 trace 持久化".to_string()),
+                fallback_reason: None,
+                error: None,
+                input_tokens: Some(12),
+                output_tokens: Some(34),
+                total_tokens: Some(46),
+                first_token_latency_ms: Some(180),
+                updated_at: 0,
+            },
+        );
+
+        let mut reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("trace-persisted"), &[]);
+
+        assert_eq!(snapshot.turn_trace_history.len(), 1);
+        assert_eq!(snapshot.turn_trace_history[0].turn_id, "turn-1");
+        assert_eq!(snapshot.turn_trace_history[0].provider_model.as_deref(), Some("gpt-5.4"));
 
         let _ = fs::remove_file(path);
     }

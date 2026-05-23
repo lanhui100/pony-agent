@@ -3,6 +3,8 @@ use crate::agent::session::TurnHistoryMessage;
 use crate::agent::tools::ToolCall;
 use serde_json::json;
 
+const MAX_LOCAL_BATCH_PATHS: usize = 6;
+
 pub trait TurnPlanner: Send {
     fn preflight_decision(
         &self,
@@ -45,8 +47,15 @@ impl LocalTurnPlanner {
         history: &[TurnHistoryMessage],
     ) -> Option<ToolCall> {
         let lowered = user_message.to_lowercase();
-        let explicit_path = Self::extract_explicit_path(user_message);
+        let explicit_paths = Self::extract_explicit_paths(user_message);
+        let explicit_path = explicit_paths.first().cloned();
         let referenced_path = explicit_path.or_else(|| Self::infer_last_referenced_path(history));
+
+        if let Some(batch_call) =
+            Self::infer_multi_path_tool_call(user_message, &lowered, &explicit_paths)
+        {
+            return Some(batch_call);
+        }
 
         if contains_any(&lowered, &["time", "时间", "几点", "timestamp"]) {
             return Some(ToolCall {
@@ -153,7 +162,7 @@ impl LocalTurnPlanner {
                     "这个目录",
                     "what is",
                     "path info",
-                    "看一个",
+                    "看一下",
                     "看看",
                     "查看",
                     "内容",
@@ -190,6 +199,70 @@ impl LocalTurnPlanner {
         None
     }
 
+    fn infer_multi_path_tool_call(
+        user_message: &str,
+        lowered: &str,
+        explicit_paths: &[String],
+    ) -> Option<ToolCall> {
+        if explicit_paths.len() < 2 {
+            return None;
+        }
+
+        let has_compare_intent = contains_any(
+            lowered,
+            &[
+                "compare",
+                "vs",
+                "diff",
+                "对比",
+                "比较",
+                "一起看",
+                "同时看",
+                "分别看",
+            ],
+        );
+        let has_overview_intent = contains_any(
+            lowered,
+            &[
+                "看", "看看", "查看", "分析", "解释", "实现", "内容", "what is", "show", "read",
+            ],
+        );
+        let search_query = Self::extract_search_query(user_message, None);
+
+        if !has_compare_intent && !has_overview_intent && search_query.is_none() {
+            return None;
+        }
+
+        let calls = explicit_paths
+            .iter()
+            .take(MAX_LOCAL_BATCH_PATHS)
+            .map(|path| {
+                let mut arguments = json!({
+                    "path": path,
+                    "lineCount": 80,
+                    "limit": 20,
+                });
+                if let Some(query) = &search_query {
+                    arguments["query"] = json!(query);
+                }
+                json!({
+                    "name": "workspace_gather_context",
+                    "arguments": arguments,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Some(ToolCall {
+            call_id: None,
+            name: "workspace_batch".to_string(),
+            arguments: json!({
+                "parallel": true,
+                "continueOnError": true,
+                "calls": calls,
+            }),
+        })
+    }
+
     fn preflight_tool_decision(
         user_message: &str,
         history: &[TurnHistoryMessage],
@@ -218,10 +291,17 @@ impl LocalTurnPlanner {
     }
 
     fn extract_explicit_path(text: &str) -> Option<String> {
-        let candidates = Self::extract_path_candidates(text);
-        candidates
-            .into_iter()
-            .find(|segment| looks_like_path(segment))
+        Self::extract_explicit_paths(text).into_iter().next()
+    }
+
+    fn extract_explicit_paths(text: &str) -> Vec<String> {
+        let mut seen = Vec::new();
+        for segment in Self::extract_path_candidates(text) {
+            if looks_like_path(&segment) && !seen.iter().any(|existing| existing == &segment) {
+                seen.push(segment);
+            }
+        }
+        seen
     }
 
     fn infer_last_referenced_path(history: &[TurnHistoryMessage]) -> Option<String> {
@@ -234,7 +314,7 @@ impl LocalTurnPlanner {
     fn extract_search_query(text: &str, referenced_path: Option<&str>) -> Option<String> {
         if let Some(quoted) = Self::extract_quoted_segment(text) {
             let trimmed = quoted.trim();
-            if !trimmed.is_empty() {
+            if !trimmed.is_empty() && !looks_like_path(trimmed) {
                 return Some(trimmed.to_string());
             }
         }
@@ -479,5 +559,90 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("error_result")
         );
+    }
+
+    #[test]
+    fn planner_uses_batch_for_multi_path_overview_requests() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "同时看看 src-tauri/src/agent/tools.rs 和 src-tauri/src/agent/planner.rs",
+            &[],
+        )
+        .expect("tool call");
+
+        assert_eq!(call.name, "workspace_batch");
+        let calls = call
+            .arguments
+            .get("calls")
+            .and_then(serde_json::Value::as_array)
+            .expect("batch calls");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|entry| {
+            entry.get("name").and_then(serde_json::Value::as_str)
+                == Some("workspace_gather_context")
+        }));
+    }
+
+    #[test]
+    fn planner_uses_batch_for_multi_path_search_requests() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "对比 src-tauri/src/agent/tools.rs 和 src-tauri/src/agent/planner.rs 里 `ToolCall` 的用法",
+            &[],
+        )
+        .expect("tool call");
+
+        assert_eq!(call.name, "workspace_batch");
+        let calls = call
+            .arguments
+            .get("calls")
+            .and_then(serde_json::Value::as_array)
+            .expect("batch calls");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|entry| {
+            entry
+                .get("arguments")
+                .and_then(|args| args.get("query"))
+                .and_then(serde_json::Value::as_str)
+                == Some("ToolCall")
+        }));
+    }
+
+    #[test]
+    fn planner_ignores_quoted_path_when_extracting_search_query() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "在 `src-tauri/src/agent/tools.rs` 里搜索 ToolResult",
+            &[],
+        )
+        .expect("tool call");
+
+        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(
+            call.arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            Some("src-tauri/src/agent/tools.rs")
+        );
+        assert_eq!(
+            call.arguments
+                .get("query")
+                .and_then(serde_json::Value::as_str),
+            Some("ToolResult")
+        );
+    }
+
+    #[test]
+    fn planner_caps_multi_path_batch_size_to_tool_limit() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "同时看 a.rs b.rs c.rs d.rs e.rs f.rs g.rs",
+            &[],
+        )
+        .expect("tool call");
+
+        assert_eq!(call.name, "workspace_batch");
+        let calls = call
+            .arguments
+            .get("calls")
+            .and_then(serde_json::Value::as_array)
+            .expect("batch calls");
+        assert_eq!(calls.len(), MAX_LOCAL_BATCH_PATHS);
     }
 }

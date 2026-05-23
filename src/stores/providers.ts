@@ -1,16 +1,20 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 import type {
+  ProviderCapabilityPresetId,
+  ProviderModelCapabilityDeclaration,
   ProviderConfig,
   ProviderModelCapabilities,
   ProviderModelConfig,
+  ProviderModelUserConfig,
   ProviderReasoningEffort,
+  ProviderProtocol,
   ProviderRegistry
 } from "@/types/provider";
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 
-function createDefaultCapabilities(): ProviderModelCapabilities {
+export function createDefaultCapabilities(): ProviderModelCapabilities {
   return {
     contextWindowTokens: null,
     supportsTools: true,
@@ -18,6 +22,139 @@ function createDefaultCapabilities(): ProviderModelCapabilities {
     supportsImageInput: false,
     supportsReasoning: false
   };
+}
+
+function getSafeCapabilities(
+  capabilities: Partial<ProviderModelCapabilities> | null | undefined
+): ProviderModelCapabilities {
+  return {
+    ...createDefaultCapabilities(),
+    ...(capabilities ?? {})
+  };
+}
+
+function normalizeCapabilityPresetId(
+  preset: ProviderCapabilityPresetId | string | null | undefined,
+  protocol: ProviderProtocol,
+  modelIdValue: string
+): ProviderCapabilityPresetId {
+  switch (preset) {
+    case "auto":
+    case "open-ai-chat":
+    case "open-ai-reasoning":
+    case "anthropic-thinking":
+    case "deepseek-chat":
+    case "deepseek-reasoner":
+    case "custom":
+      return preset;
+    case "openai-chat":
+      return "open-ai-chat";
+    case "openai-reasoning":
+      return "open-ai-reasoning";
+    default:
+      return inferCapabilityPreset(protocol, modelIdValue);
+  }
+}
+
+function inferCapabilityPreset(
+  protocol: ProviderProtocol,
+  modelIdValue: string
+): Exclude<ProviderCapabilityPresetId, "custom"> {
+  const lower = modelIdValue.toLowerCase();
+
+  if (protocol === "anthropic") {
+    return "anthropic-thinking";
+  }
+
+  if (lower.includes("deepseek-reasoner") || lower.includes("deepseek-r1") || lower.includes("deepseek-v4-pro")) {
+    return "deepseek-reasoner";
+  }
+
+  if (lower.includes("deepseek-chat") || lower.includes("deepseek-v4-flash")) {
+    return "deepseek-chat";
+  }
+
+  if (lower.includes("gpt-5") || lower.includes("o1") || lower.includes("o3") || lower.includes("reason")) {
+    return "open-ai-reasoning";
+  }
+
+  if (lower.includes("gpt-4.1") || lower.includes("vision")) {
+    return "open-ai-chat";
+  }
+
+  return "auto";
+}
+
+function capabilitiesForPreset(
+  preset: Exclude<ProviderCapabilityPresetId, "custom">,
+  protocol: ProviderProtocol,
+  modelIdValue: string
+): ProviderModelCapabilities {
+  const inferredPreset = preset === "auto" ? inferCapabilityPreset(protocol, modelIdValue) : preset;
+
+  switch (inferredPreset) {
+    case "open-ai-chat":
+      return createCapabilities({
+        contextWindowTokens: 128000,
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsImageInput: true,
+        supportsReasoning: false
+      });
+    case "open-ai-reasoning":
+      return createCapabilities({
+        contextWindowTokens: 128000,
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsImageInput: false,
+        supportsReasoning: true
+      });
+    case "anthropic-thinking":
+      return createCapabilities({
+        contextWindowTokens: 200000,
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsImageInput: true,
+        supportsReasoning: true
+      });
+    case "deepseek-chat":
+      return createCapabilities({
+        contextWindowTokens: 128000,
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsImageInput: false,
+        supportsReasoning: false
+      });
+    case "deepseek-reasoner":
+      return createCapabilities({
+        contextWindowTokens: 128000,
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsImageInput: false,
+        supportsReasoning: true
+      });
+    case "auto":
+      return createCapabilities({
+        contextWindowTokens: protocol === "anthropic" ? 200000 : 128000,
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsImageInput:
+          modelIdValue.toLowerCase().includes("gpt-4.1") ||
+          modelIdValue.toLowerCase().includes("claude") ||
+          modelIdValue.toLowerCase().includes("vision"),
+        supportsReasoning:
+          modelIdValue.toLowerCase().includes("gpt-5") ||
+          modelIdValue.toLowerCase().includes("o1") ||
+          modelIdValue.toLowerCase().includes("o3") ||
+          modelIdValue.toLowerCase().includes("reason") ||
+          modelIdValue.toLowerCase().includes("claude-3-7") ||
+          modelIdValue.toLowerCase().includes("deepseek-r1") ||
+          modelIdValue.toLowerCase().includes("deepseek-reasoner") ||
+          modelIdValue.toLowerCase().includes("deepseek-v4-pro")
+      });
+    default:
+      return capabilitiesForPreset("auto", protocol, modelIdValue);
+  }
 }
 
 function normalizeNullablePositiveInteger(value: number | null | undefined): number | null {
@@ -45,6 +182,7 @@ function createEmptyModel(): ProviderModelConfig {
     maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
     reasoningEffort: null,
     reasoningBudgetTokens: null,
+    capabilityPreset: "auto",
     capabilities: createDefaultCapabilities()
   };
 }
@@ -86,16 +224,18 @@ function createEmptyProvider(): ProviderConfig {
 function createPresetProvider(
   id: string,
   name: string,
+  protocol: ProviderProtocol,
   baseUrl: string,
   modelName: string,
   modelIdValue: string
 ): ProviderConfig {
   const modelId = createId("model");
+  const capabilityPreset = inferCapabilityPreset(protocol, modelIdValue);
 
   return {
     id,
     name,
-    protocol: "openai",
+    protocol,
     baseUrl,
     apiKeyEnvVar: deriveEnvVarName(name),
     apiKeyValue: "",
@@ -109,78 +249,85 @@ function createPresetProvider(
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         reasoningEffort: null,
         reasoningBudgetTokens: null,
-        capabilities: createCapabilities({
-          contextWindowTokens: protocolAwareContextWindow(baseUrl),
-          supportsImageInput: supportsImageInputByDefault(baseUrl, modelIdValue),
-          supportsReasoning: supportsReasoningByDefault(modelIdValue)
-        })
+        capabilityPreset,
+        capabilities: capabilitiesForPreset(capabilityPreset, protocol, modelIdValue)
       }
     ],
     selectedModelId: modelId
   };
 }
 
-function protocolAwareContextWindow(baseUrl: string) {
-  if (baseUrl.includes("anthropic")) {
-    return 200000;
-  }
-
-  return 128000;
-}
-
-function supportsImageInputByDefault(baseUrl: string, modelIdValue: string) {
-  const lower = `${baseUrl} ${modelIdValue}`.toLowerCase();
-  return lower.includes("gpt-4.1") || lower.includes("claude") || lower.includes("vision");
-}
-
-function supportsReasoningByDefault(modelIdValue: string) {
-  const lower = modelIdValue.toLowerCase();
-  return (
-    lower.includes("o1") ||
-    lower.includes("o3") ||
-    lower.includes("reason") ||
-    lower.includes("claude-3-7") ||
-    lower.includes("deepseek-r1") ||
-    lower.includes("deepseek-reasoner") ||
-    lower.includes("deepseek-v4-pro")
-  );
-}
-
 function normalizeReasoningEffort(value: ProviderReasoningEffort | null | undefined): ProviderReasoningEffort | null {
   return value ?? null;
 }
 
-function normalizeCapabilities(
+export function resolveCapabilityDeclaration(
+  protocol: ProviderProtocol,
+  modelIdValue: string,
+  preset: ProviderCapabilityPresetId,
   capabilities: Partial<ProviderModelCapabilities> | null | undefined
-): ProviderModelCapabilities {
-  const normalized = createCapabilities(capabilities ?? {});
+): ProviderModelCapabilityDeclaration {
+  if (preset !== "custom") {
+    return {
+      capabilityPreset: preset,
+      capabilities: capabilitiesForPreset(preset, protocol, modelIdValue)
+    };
+  }
+
+  const normalized = getSafeCapabilities(capabilities);
 
   return {
-    contextWindowTokens: normalizeNullablePositiveInteger(normalized.contextWindowTokens),
-    supportsTools: normalized.supportsTools,
-    supportsStreaming: normalized.supportsStreaming,
-    supportsImageInput: normalized.supportsImageInput,
-    supportsReasoning: normalized.supportsReasoning
+    capabilityPreset: preset,
+    capabilities: {
+      contextWindowTokens: normalizeNullablePositiveInteger(normalized.contextWindowTokens),
+      supportsTools: normalized.supportsTools,
+      supportsStreaming: normalized.supportsStreaming,
+      supportsImageInput: normalized.supportsImageInput,
+      supportsReasoning: normalized.supportsReasoning
+    }
   };
 }
 
-function normalizeModel(model: ProviderModelConfig): ProviderModelConfig {
-  const capabilities = normalizeCapabilities(model.capabilities);
-
+function normalizeModelUserConfig(
+  model: ProviderModelConfig,
+  capabilities: ProviderModelCapabilities
+): ProviderModelUserConfig {
   return {
-    ...model,
+    temperature: model.temperature,
+    maxOutputTokens: model.maxOutputTokens,
     reasoningEffort: capabilities.supportsReasoning ? normalizeReasoningEffort(model.reasoningEffort) : null,
     reasoningBudgetTokens: capabilities.supportsReasoning
       ? normalizeNullablePositiveInteger(model.reasoningBudgetTokens)
-      : null,
-    capabilities
+      : null
+  };
+}
+
+function normalizeModel(model: ProviderModelConfig, protocol: ProviderProtocol): ProviderModelConfig {
+  const capabilityPreset = normalizeCapabilityPresetId(model.capabilityPreset, protocol, model.model);
+  const declaration = resolveCapabilityDeclaration(protocol, model.model, capabilityPreset, model.capabilities);
+  const userConfig = normalizeModelUserConfig(model, declaration.capabilities);
+
+  return {
+    ...model,
+    capabilityPreset: declaration.capabilityPreset,
+    capabilities: declaration.capabilities,
+    ...userConfig
   };
 }
 
 function createBrowserRegistry(): ProviderRegistry {
+  const ppx = createPresetProvider(
+    "provider-ppx",
+    "ppx",
+    "openai",
+    "https://api.psydo.top/v1",
+    "GPT 5.4",
+    "gpt-5.4"
+  );
   const openrouter = createPresetProvider(
     "provider-openrouter",
     "openrouter",
+    "openai",
     "https://openrouter.ai/api/v1",
     "OpenAI GPT-4.1 Mini",
     "openai/gpt-4.1-mini"
@@ -188,14 +335,15 @@ function createBrowserRegistry(): ProviderRegistry {
   const deepseek = createPresetProvider(
     "provider-deepseek",
     "deepseek",
+    "openai",
     "https://api.deepseek.com/v1",
-    "DeepSeek Chat",
-    "deepseek-chat"
+    "DeepSeek V4 Flash",
+    "deepseek-v4-flash"
   );
 
   return {
-    providers: [openrouter, deepseek],
-    selectedProviderId: openrouter.id
+    providers: [ppx, deepseek, openrouter],
+    selectedProviderId: ppx.id
   };
 }
 
@@ -249,9 +397,9 @@ export const useProviderStore = defineStore("providers", {
   },
   actions: {
     syncReasoningEffortFromCurrentModel() {
-      this.selectedReasoningEffort = this.currentModel?.capabilities.supportsReasoning
-        ? this.currentModel.reasoningEffort ?? null
-        : null;
+      const currentModel = this.currentModel;
+      const supportsReasoning = currentModel?.capabilities?.supportsReasoning ?? false;
+      this.selectedReasoningEffort = supportsReasoning ? currentModel?.reasoningEffort ?? null : null;
     },
     clearNotice() {
       this.notice = null;
@@ -272,13 +420,12 @@ export const useProviderStore = defineStore("providers", {
           ...registry,
           providers: registry.providers.map((provider) => ({
             ...provider,
-            models: provider.models.map(normalizeModel)
+            models: provider.models.map((model) => normalizeModel(model, provider.protocol))
           }))
         };
         this.syncReasoningEffortFromCurrentModel();
       } catch (error) {
-        this.registry = createBrowserRegistry();
-        this.syncReasoningEffortFromCurrentModel();
+        this.selectedReasoningEffort = null;
         this.error = `加载模型配置失败：${String(error)}`;
       } finally {
         this.loading = false;
@@ -292,7 +439,7 @@ export const useProviderStore = defineStore("providers", {
       this.registry.providers = this.registry.providers.map((provider) => ({
         ...provider,
         apiKeyEnvVar: deriveEnvVarName(provider.name),
-        models: provider.models.map(normalizeModel)
+        models: provider.models.map((model) => normalizeModel(model, provider.protocol))
       }));
 
       this.saving = true;
@@ -308,7 +455,13 @@ export const useProviderStore = defineStore("providers", {
         const registry = await safeInvoke<ProviderRegistry>("save_provider_registry", {
           registry: this.registry
         });
-        this.registry = registry;
+        this.registry = {
+          ...registry,
+          providers: registry.providers.map((provider) => ({
+            ...provider,
+            models: provider.models.map((model) => normalizeModel(model, provider.protocol))
+          }))
+        };
         this.syncReasoningEffortFromCurrentModel();
         this.notice = "模型配置已保存到本地 providers.json。";
       } catch (error) {
@@ -395,7 +548,7 @@ export const useProviderStore = defineStore("providers", {
         return;
       }
 
-      const normalizedPayload = normalizeModel(payload);
+      const normalizedPayload = normalizeModel(payload, provider.protocol);
 
       const index = provider.models.findIndex((item) => item.id === normalizedPayload.id);
 
