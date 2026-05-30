@@ -2,17 +2,52 @@ import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 import type {
   ProviderCapabilityPresetId,
+  ProviderModelIdentity,
   ProviderModelCapabilityDeclaration,
   ProviderConfig,
   ProviderModelCapabilities,
   ProviderModelConfig,
-  ProviderModelUserConfig,
+  ProviderModelUserPolicy,
   ProviderReasoningEffort,
   ProviderProtocol,
-  ProviderRegistry
+  ProviderRegistry,
 } from "@/types/provider";
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+
+type CapabilityFactCatalogEntry = {
+  protocol?: ProviderProtocol;
+  patterns: string[];
+  preset: Exclude<ProviderCapabilityPresetId, "auto" | "custom">;
+};
+
+const CAPABILITY_CATALOG: CapabilityFactCatalogEntry[] = [
+  {
+    protocol: "anthropic",
+    patterns: ["claude-3-7", "claude-sonnet-4", "claude-opus-4"],
+    preset: "anthropic-thinking",
+  },
+  {
+    protocol: "openai",
+    patterns: ["gpt-5", "gpt-5.4", "gpt-5.5", "o1", "o3", "reason"],
+    preset: "open-ai-reasoning",
+  },
+  {
+    protocol: "openai",
+    patterns: ["gpt-4.1", "vision"],
+    preset: "open-ai-chat",
+  },
+  {
+    protocol: "openai",
+    patterns: ["deepseek-reasoner", "deepseek-r1", "deepseek-v4-pro"],
+    preset: "deepseek-reasoner",
+  },
+  {
+    protocol: "openai",
+    patterns: ["deepseek-chat", "deepseek-v4-flash"],
+    preset: "deepseek-chat",
+  },
+];
 
 export function createDefaultCapabilities(): ProviderModelCapabilities {
   return {
@@ -20,23 +55,32 @@ export function createDefaultCapabilities(): ProviderModelCapabilities {
     supportsTools: true,
     supportsStreaming: true,
     supportsImageInput: false,
-    supportsReasoning: false
+    supportsReasoning: false,
+  };
+}
+
+export function createDefaultModelUserPolicy(): ProviderModelUserPolicy {
+  return {
+    temperature: 0,
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoningEffort: null,
+    reasoningBudgetTokens: null,
   };
 }
 
 function getSafeCapabilities(
-  capabilities: Partial<ProviderModelCapabilities> | null | undefined
+  capabilities: Partial<ProviderModelCapabilities> | null | undefined,
 ): ProviderModelCapabilities {
   return {
     ...createDefaultCapabilities(),
-    ...(capabilities ?? {})
+    ...(capabilities ?? {}),
   };
 }
 
 function normalizeCapabilityPresetId(
   preset: ProviderCapabilityPresetId | string | null | undefined,
   protocol: ProviderProtocol,
-  modelIdValue: string
+  modelIdValue: string,
 ): ProviderCapabilityPresetId {
   switch (preset) {
     case "auto":
@@ -58,28 +102,21 @@ function normalizeCapabilityPresetId(
 
 function inferCapabilityPreset(
   protocol: ProviderProtocol,
-  modelIdValue: string
+  modelIdValue: string,
 ): Exclude<ProviderCapabilityPresetId, "custom"> {
   const lower = modelIdValue.toLowerCase();
 
+  const matched = CAPABILITY_CATALOG.find(
+    (entry) =>
+      (!entry.protocol || entry.protocol === protocol) &&
+      entry.patterns.some((pattern) => lower.includes(pattern)),
+  );
+  if (matched) {
+    return matched.preset;
+  }
+
   if (protocol === "anthropic") {
     return "anthropic-thinking";
-  }
-
-  if (lower.includes("deepseek-reasoner") || lower.includes("deepseek-r1") || lower.includes("deepseek-v4-pro")) {
-    return "deepseek-reasoner";
-  }
-
-  if (lower.includes("deepseek-chat") || lower.includes("deepseek-v4-flash")) {
-    return "deepseek-chat";
-  }
-
-  if (lower.includes("gpt-5") || lower.includes("o1") || lower.includes("o3") || lower.includes("reason")) {
-    return "open-ai-reasoning";
-  }
-
-  if (lower.includes("gpt-4.1") || lower.includes("vision")) {
-    return "open-ai-chat";
   }
 
   return "auto";
@@ -88,9 +125,10 @@ function inferCapabilityPreset(
 function capabilitiesForPreset(
   preset: Exclude<ProviderCapabilityPresetId, "custom">,
   protocol: ProviderProtocol,
-  modelIdValue: string
+  modelIdValue: string,
 ): ProviderModelCapabilities {
-  const inferredPreset = preset === "auto" ? inferCapabilityPreset(protocol, modelIdValue) : preset;
+  const inferredPreset =
+    preset === "auto" ? inferCapabilityPreset(protocol, modelIdValue) : preset;
 
   switch (inferredPreset) {
     case "open-ai-chat":
@@ -99,7 +137,7 @@ function capabilitiesForPreset(
         supportsTools: true,
         supportsStreaming: true,
         supportsImageInput: true,
-        supportsReasoning: false
+        supportsReasoning: false,
       });
     case "open-ai-reasoning":
       return createCapabilities({
@@ -107,7 +145,7 @@ function capabilitiesForPreset(
         supportsTools: true,
         supportsStreaming: true,
         supportsImageInput: false,
-        supportsReasoning: true
+        supportsReasoning: true,
       });
     case "anthropic-thinking":
       return createCapabilities({
@@ -115,7 +153,7 @@ function capabilitiesForPreset(
         supportsTools: true,
         supportsStreaming: true,
         supportsImageInput: true,
-        supportsReasoning: true
+        supportsReasoning: true,
       });
     case "deepseek-chat":
       return createCapabilities({
@@ -123,7 +161,7 @@ function capabilitiesForPreset(
         supportsTools: true,
         supportsStreaming: true,
         supportsImageInput: false,
-        supportsReasoning: false
+        supportsReasoning: false,
       });
     case "deepseek-reasoner":
       return createCapabilities({
@@ -131,7 +169,7 @@ function capabilitiesForPreset(
         supportsTools: true,
         supportsStreaming: true,
         supportsImageInput: false,
-        supportsReasoning: true
+        supportsReasoning: true,
       });
     case "auto":
       return createCapabilities({
@@ -150,14 +188,16 @@ function capabilitiesForPreset(
           modelIdValue.toLowerCase().includes("claude-3-7") ||
           modelIdValue.toLowerCase().includes("deepseek-r1") ||
           modelIdValue.toLowerCase().includes("deepseek-reasoner") ||
-          modelIdValue.toLowerCase().includes("deepseek-v4-pro")
+          modelIdValue.toLowerCase().includes("deepseek-v4-pro"),
       });
     default:
       return capabilitiesForPreset("auto", protocol, modelIdValue);
   }
 }
 
-function normalizeNullablePositiveInteger(value: number | null | undefined): number | null {
+function normalizeNullablePositiveInteger(
+  value: number | null | undefined,
+): number | null {
   if (!Number.isFinite(value) || !value || value <= 0) {
     return null;
   }
@@ -174,23 +214,26 @@ function createId(prefix: string) {
 }
 
 function createEmptyModel(): ProviderModelConfig {
-  return {
-    id: createId("model"),
-    name: "",
-    model: "",
-    temperature: 0,
-    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-    reasoningEffort: null,
-    reasoningBudgetTokens: null,
-    capabilityPreset: "auto",
-    capabilities: createDefaultCapabilities()
-  };
+  return buildProviderModelConfig(
+    {
+      id: createId("model"),
+      name: "",
+      model: "",
+    },
+    {
+      capabilityPreset: "auto",
+      capabilities: createDefaultCapabilities(),
+    },
+    createDefaultModelUserPolicy(),
+  );
 }
 
-function createCapabilities(overrides: Partial<ProviderModelCapabilities>): ProviderModelCapabilities {
+function createCapabilities(
+  overrides: Partial<ProviderModelCapabilities>,
+): ProviderModelCapabilities {
   return {
     ...createDefaultCapabilities(),
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -217,7 +260,7 @@ function createEmptyProvider(): ProviderConfig {
     apiKeyValue: "",
     apiKeyPresent: false,
     models: [model],
-    selectedModelId: model.id
+    selectedModelId: model.id,
   };
 }
 
@@ -227,10 +270,15 @@ function createPresetProvider(
   protocol: ProviderProtocol,
   baseUrl: string,
   modelName: string,
-  modelIdValue: string
+  modelIdValue: string,
 ): ProviderConfig {
   const modelId = createId("model");
-  const capabilityPreset = inferCapabilityPreset(protocol, modelIdValue);
+  const declaration = resolveCapabilityDeclaration(
+    protocol,
+    modelIdValue,
+    inferCapabilityPreset(protocol, modelIdValue),
+    null,
+  );
 
   return {
     id,
@@ -241,23 +289,26 @@ function createPresetProvider(
     apiKeyValue: "",
     apiKeyPresent: false,
     models: [
-      {
-        id: modelId,
-        name: modelName,
-        model: modelIdValue,
-        temperature: 0.2,
-        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-        reasoningEffort: null,
-        reasoningBudgetTokens: null,
-        capabilityPreset,
-        capabilities: capabilitiesForPreset(capabilityPreset, protocol, modelIdValue)
-      }
+      buildProviderModelConfig(
+        {
+          id: modelId,
+          name: modelName,
+          model: modelIdValue,
+        },
+        declaration,
+        {
+          ...createDefaultModelUserPolicy(),
+          temperature: 0.2,
+        },
+      ),
     ],
-    selectedModelId: modelId
+    selectedModelId: modelId,
   };
 }
 
-function normalizeReasoningEffort(value: ProviderReasoningEffort | null | undefined): ProviderReasoningEffort | null {
+function normalizeReasoningEffort(
+  value: ProviderReasoningEffort | null | undefined,
+): ProviderReasoningEffort | null {
   return value ?? null;
 }
 
@@ -265,12 +316,12 @@ export function resolveCapabilityDeclaration(
   protocol: ProviderProtocol,
   modelIdValue: string,
   preset: ProviderCapabilityPresetId,
-  capabilities: Partial<ProviderModelCapabilities> | null | undefined
+  capabilities: Partial<ProviderModelCapabilities> | null | undefined,
 ): ProviderModelCapabilityDeclaration {
   if (preset !== "custom") {
     return {
       capabilityPreset: preset,
-      capabilities: capabilitiesForPreset(preset, protocol, modelIdValue)
+      capabilities: capabilitiesForPreset(preset, protocol, modelIdValue),
     };
   }
 
@@ -279,40 +330,87 @@ export function resolveCapabilityDeclaration(
   return {
     capabilityPreset: preset,
     capabilities: {
-      contextWindowTokens: normalizeNullablePositiveInteger(normalized.contextWindowTokens),
+      contextWindowTokens: normalizeNullablePositiveInteger(
+        normalized.contextWindowTokens,
+      ),
       supportsTools: normalized.supportsTools,
       supportsStreaming: normalized.supportsStreaming,
       supportsImageInput: normalized.supportsImageInput,
-      supportsReasoning: normalized.supportsReasoning
-    }
+      supportsReasoning: normalized.supportsReasoning,
+    },
   };
 }
 
-function normalizeModelUserConfig(
-  model: ProviderModelConfig,
-  capabilities: ProviderModelCapabilities
-): ProviderModelUserConfig {
+export function resolveModelCapabilityDeclaration(
+  model: Pick<
+    ProviderModelConfig,
+    "model" | "capabilityPreset" | "capabilities"
+  >,
+  protocol: ProviderProtocol,
+): ProviderModelCapabilityDeclaration {
+  const capabilityPreset = normalizeCapabilityPresetId(
+    model.capabilityPreset,
+    protocol,
+    model.model,
+  );
+  return resolveCapabilityDeclaration(
+    protocol,
+    model.model,
+    capabilityPreset,
+    model.capabilities,
+  );
+}
+
+export function resolveModelUserPolicy(
+  model: Pick<
+    ProviderModelConfig,
+    | "temperature"
+    | "maxOutputTokens"
+    | "reasoningEffort"
+    | "reasoningBudgetTokens"
+  >,
+  capabilities: ProviderModelCapabilities,
+): ProviderModelUserPolicy {
   return {
     temperature: model.temperature,
     maxOutputTokens: model.maxOutputTokens,
-    reasoningEffort: capabilities.supportsReasoning ? normalizeReasoningEffort(model.reasoningEffort) : null,
+    reasoningEffort: capabilities.supportsReasoning
+      ? normalizeReasoningEffort(model.reasoningEffort)
+      : null,
     reasoningBudgetTokens: capabilities.supportsReasoning
       ? normalizeNullablePositiveInteger(model.reasoningBudgetTokens)
-      : null
+      : null,
   };
 }
 
-function normalizeModel(model: ProviderModelConfig, protocol: ProviderProtocol): ProviderModelConfig {
-  const capabilityPreset = normalizeCapabilityPresetId(model.capabilityPreset, protocol, model.model);
-  const declaration = resolveCapabilityDeclaration(protocol, model.model, capabilityPreset, model.capabilities);
-  const userConfig = normalizeModelUserConfig(model, declaration.capabilities);
-
+export function buildProviderModelConfig(
+  identity: ProviderModelIdentity,
+  declaration: ProviderModelCapabilityDeclaration,
+  userPolicy: ProviderModelUserPolicy,
+): ProviderModelConfig {
   return {
-    ...model,
-    capabilityPreset: declaration.capabilityPreset,
-    capabilities: declaration.capabilities,
-    ...userConfig
+    ...identity,
+    ...declaration,
+    ...userPolicy,
   };
+}
+
+function normalizeModel(
+  model: ProviderModelConfig,
+  protocol: ProviderProtocol,
+): ProviderModelConfig {
+  const declaration = resolveModelCapabilityDeclaration(model, protocol);
+  const userPolicy = resolveModelUserPolicy(model, declaration.capabilities);
+
+  return buildProviderModelConfig(
+    {
+      id: model.id,
+      name: model.name,
+      model: model.model,
+    },
+    declaration,
+    userPolicy,
+  );
 }
 
 function createBrowserRegistry(): ProviderRegistry {
@@ -322,7 +420,7 @@ function createBrowserRegistry(): ProviderRegistry {
     "openai",
     "https://api.psydo.top/v1",
     "GPT 5.4",
-    "gpt-5.4"
+    "gpt-5.4",
   );
   const openrouter = createPresetProvider(
     "provider-openrouter",
@@ -330,7 +428,7 @@ function createBrowserRegistry(): ProviderRegistry {
     "openai",
     "https://openrouter.ai/api/v1",
     "OpenAI GPT-4.1 Mini",
-    "openai/gpt-4.1-mini"
+    "openai/gpt-4.1-mini",
   );
   const deepseek = createPresetProvider(
     "provider-deepseek",
@@ -338,12 +436,12 @@ function createBrowserRegistry(): ProviderRegistry {
     "openai",
     "https://api.deepseek.com/v1",
     "DeepSeek V4 Flash",
-    "deepseek-v4-flash"
+    "deepseek-v4-flash",
   );
 
   return {
     providers: [ppx, deepseek, openrouter],
-    selectedProviderId: ppx.id
+    selectedProviderId: ppx.id,
   };
 }
 
@@ -363,7 +461,7 @@ export const useProviderStore = defineStore("providers", {
     loading: false,
     saving: false,
     error: null,
-    notice: null
+    notice: null,
   }),
   getters: {
     providers(state): ProviderConfig[] {
@@ -375,8 +473,9 @@ export const useProviderStore = defineStore("providers", {
       }
 
       const provider =
-        state.registry.providers.find((item) => item.id === state.registry?.selectedProviderId) ??
-        state.registry.providers[0];
+        state.registry.providers.find(
+          (item) => item.id === state.registry?.selectedProviderId,
+        ) ?? state.registry.providers[0];
 
       return provider ?? null;
     },
@@ -386,20 +485,25 @@ export const useProviderStore = defineStore("providers", {
       }
 
       return (
-        this.currentProvider.models.find((model) => model.id === this.currentProvider?.selectedModelId) ??
+        this.currentProvider.models.find(
+          (model) => model.id === this.currentProvider?.selectedModelId,
+        ) ??
         this.currentProvider.models[0] ??
         null
       );
     },
     currentReasoningEffort(state): ProviderReasoningEffort | null {
       return state.selectedReasoningEffort;
-    }
+    },
   },
   actions: {
     syncReasoningEffortFromCurrentModel() {
       const currentModel = this.currentModel;
-      const supportsReasoning = currentModel?.capabilities?.supportsReasoning ?? false;
-      this.selectedReasoningEffort = supportsReasoning ? currentModel?.reasoningEffort ?? null : null;
+      const supportsReasoning =
+        currentModel?.capabilities?.supportsReasoning ?? false;
+      this.selectedReasoningEffort = supportsReasoning
+        ? (currentModel?.reasoningEffort ?? null)
+        : null;
     },
     clearNotice() {
       this.notice = null;
@@ -411,17 +515,22 @@ export const useProviderStore = defineStore("providers", {
       try {
         if (!isTauriAvailable()) {
           this.registry = createBrowserRegistry();
-          this.notice = "当前是浏览器预览模式，模型配置只用于界面预览，不会写入本地 providers.json。";
+          this.notice =
+            "当前是浏览器预览模式，模型配置只用于界面预览，不会写入本地 providers.json。";
           return;
         }
 
-        const registry = await safeInvoke<ProviderRegistry>("load_provider_registry");
+        const registry = await safeInvoke<ProviderRegistry>(
+          "load_provider_registry",
+        );
         this.registry = {
           ...registry,
           providers: registry.providers.map((provider) => ({
             ...provider,
-            models: provider.models.map((model) => normalizeModel(model, provider.protocol))
-          }))
+            models: provider.models.map((model) =>
+              normalizeModel(model, provider.protocol),
+            ),
+          })),
         };
         this.syncReasoningEffortFromCurrentModel();
       } catch (error) {
@@ -439,7 +548,9 @@ export const useProviderStore = defineStore("providers", {
       this.registry.providers = this.registry.providers.map((provider) => ({
         ...provider,
         apiKeyEnvVar: deriveEnvVarName(provider.name),
-        models: provider.models.map((model) => normalizeModel(model, provider.protocol))
+        models: provider.models.map((model) =>
+          normalizeModel(model, provider.protocol),
+        ),
       }));
 
       this.saving = true;
@@ -448,22 +559,28 @@ export const useProviderStore = defineStore("providers", {
 
       try {
         if (!isTauriAvailable()) {
-          this.notice = "当前是浏览器预览模式，保存结果只保留在当前页面会话中。";
+          this.notice =
+            "当前是浏览器预览模式，保存结果只保留在当前页面会话中。";
           return;
         }
 
-        const registry = await safeInvoke<ProviderRegistry>("save_provider_registry", {
-          registry: this.registry
-        });
+        const registry = await safeInvoke<ProviderRegistry>(
+          "save_provider_registry",
+          {
+            registry: this.registry,
+          },
+        );
         this.registry = {
           ...registry,
           providers: registry.providers.map((provider) => ({
             ...provider,
-            models: provider.models.map((model) => normalizeModel(model, provider.protocol))
-          }))
+            models: provider.models.map((model) =>
+              normalizeModel(model, provider.protocol),
+            ),
+          })),
         };
         this.syncReasoningEffortFromCurrentModel();
-        this.notice = "模型配置已保存到本地 providers.json。";
+        this.notice = "提供商配置已保存；敏感密钥已写入应用密钥存储。";
       } catch (error) {
         this.error = `保存模型配置失败：${String(error)}`;
       } finally {
@@ -483,7 +600,9 @@ export const useProviderStore = defineStore("providers", {
         return;
       }
 
-      const provider = this.registry.providers.find((item) => item.id === providerId);
+      const provider = this.registry.providers.find(
+        (item) => item.id === providerId,
+      );
       if (!provider) {
         return;
       }
@@ -499,7 +618,7 @@ export const useProviderStore = defineStore("providers", {
       if (!this.registry) {
         this.registry = {
           providers: [],
-          selectedProviderId: null
+          selectedProviderId: null,
         };
       }
 
@@ -514,14 +633,23 @@ export const useProviderStore = defineStore("providers", {
         return;
       }
 
-      this.registry.providers = this.registry.providers.filter((item) => item.id !== providerId);
+      this.registry.providers = this.registry.providers.filter(
+        (item) => item.id !== providerId,
+      );
 
       if (this.registry.selectedProviderId === providerId) {
-        this.registry.selectedProviderId = this.registry.providers[0]?.id ?? null;
+        this.registry.selectedProviderId =
+          this.registry.providers[0]?.id ?? null;
       }
     },
-    updateProviderField<K extends keyof ProviderConfig>(providerId: string, key: K, value: ProviderConfig[K]) {
-      const provider = this.registry?.providers.find((item) => item.id === providerId);
+    updateProviderField<K extends keyof ProviderConfig>(
+      providerId: string,
+      key: K,
+      value: ProviderConfig[K],
+    ) {
+      const provider = this.registry?.providers.find(
+        (item) => item.id === providerId,
+      );
       if (!provider) {
         return;
       }
@@ -533,7 +661,9 @@ export const useProviderStore = defineStore("providers", {
       }
     },
     addModel(providerId: string) {
-      const provider = this.registry?.providers.find((item) => item.id === providerId);
+      const provider = this.registry?.providers.find(
+        (item) => item.id === providerId,
+      );
       if (!provider) {
         return;
       }
@@ -543,14 +673,18 @@ export const useProviderStore = defineStore("providers", {
       provider.selectedModelId = model.id;
     },
     upsertModel(providerId: string, payload: ProviderModelConfig) {
-      const provider = this.registry?.providers.find((item) => item.id === providerId);
+      const provider = this.registry?.providers.find(
+        (item) => item.id === providerId,
+      );
       if (!provider) {
         return;
       }
 
       const normalizedPayload = normalizeModel(payload, provider.protocol);
 
-      const index = provider.models.findIndex((item) => item.id === normalizedPayload.id);
+      const index = provider.models.findIndex(
+        (item) => item.id === normalizedPayload.id,
+      );
 
       if (index >= 0) {
         provider.models[index] = normalizedPayload;
@@ -566,9 +700,11 @@ export const useProviderStore = defineStore("providers", {
       providerId: string,
       modelId: string,
       key: K,
-      value: ProviderModelConfig[K]
+      value: ProviderModelConfig[K],
     ) {
-      const provider = this.registry?.providers.find((item) => item.id === providerId);
+      const provider = this.registry?.providers.find(
+        (item) => item.id === providerId,
+      );
       const model = provider?.models.find((item) => item.id === modelId);
 
       if (!model) {
@@ -578,7 +714,9 @@ export const useProviderStore = defineStore("providers", {
       model[key] = value;
     },
     removeModel(providerId: string, modelId: string) {
-      const provider = this.registry?.providers.find((item) => item.id === providerId);
+      const provider = this.registry?.providers.find(
+        (item) => item.id === providerId,
+      );
       if (!provider) {
         return;
       }
@@ -594,6 +732,6 @@ export const useProviderStore = defineStore("providers", {
         provider.models = [model];
         provider.selectedModelId = model.id;
       }
-    }
-  }
+    },
+  },
 });

@@ -24,24 +24,24 @@ export type ProviderModelCapabilityDeclaration = {
   capabilities: ProviderModelCapabilities;
 };
 
-export type ProviderModelUserConfig = {
+export type ProviderModelUserPolicy = {
   temperature: number;
   maxOutputTokens: number;
   reasoningEffort: ProviderReasoningEffort | null;
   reasoningBudgetTokens: number | null;
 };
 
-export type ProviderModelConfig = {
+export type ProviderModelUserConfig = ProviderModelUserPolicy;
+
+export type ProviderModelIdentity = {
   id: string;
   name: string;
   model: string;
-  capabilityPreset: ProviderModelCapabilityDeclaration["capabilityPreset"];
-  capabilities: ProviderModelCapabilityDeclaration["capabilities"];
-  temperature: ProviderModelUserConfig["temperature"];
-  maxOutputTokens: ProviderModelUserConfig["maxOutputTokens"];
-  reasoningEffort: ProviderModelUserConfig["reasoningEffort"];
-  reasoningBudgetTokens: ProviderModelUserConfig["reasoningBudgetTokens"];
 };
+
+export type ProviderModelConfig = ProviderModelIdentity &
+  ProviderModelCapabilityDeclaration &
+  ProviderModelUserPolicy;
 
 export type ProviderConfig = {
   id: string;
