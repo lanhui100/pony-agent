@@ -271,6 +271,27 @@ describe("HomeWorkspace", () => {
     expect(composerShell.classes()).not.toContain("border-t");
   });
 
+  it("keeps composer input typography understated and compact", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "idle",
+      error: null,
+      messages: []
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const textareaClassName = wrapper.get("textarea").attributes("class") ?? "";
+
+    expect(textareaClassName).toContain("text-[13px]");
+    expect(textareaClassName).toContain("leading-[1.55]");
+    expect(textareaClassName).toContain("text-stone-800");
+    expect(textareaClassName).toContain("placeholder:text-[12px]");
+    expect(textareaClassName).toContain("placeholder:text-stone-400/70");
+  });
+
   it("renders assistant messages full width and removes user or assistant token footer", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -544,6 +565,54 @@ describe("HomeWorkspace", () => {
     expect(wrapper.text()).toContain("1s");
     expect(wrapper.text()).toContain("!");
     expect(wrapper.html()).toContain("animate-spin");
+  });
+
+  it("keeps tool calls and reasoning disclosures collapsed by default with semantic headings", async () => {
+    window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "tool-collapsed",
+          turnId: "turn-collapsed",
+          role: "tool",
+          content: "",
+          status: "pending",
+          tokenCount: 9,
+          toolName: "Search",
+          detail: "running",
+          durationSeconds: 2.2
+        }),
+        createMessage({
+          id: "assistant-collapsed",
+          turnId: "turn-collapsed",
+          role: "assistant",
+          content: "answer",
+          status: "pending",
+          reasoningContent: "reasoning trace",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const disclosures = wrapper.findAll("details");
+    expect(disclosures).toHaveLength(2);
+    expect(disclosures.every((node) => node.attributes("open") === undefined)).toBe(true);
+
+    const summaries = wrapper.findAll("summary");
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0].text()).toContain("工具调用");
+    expect(summaries[0].text()).toContain("1 项");
+    expect(summaries[0].html()).toContain("lucide-wrench");
+    expect(summaries[1].text()).toContain("思考过程");
+    expect(summaries[1].html()).toContain("lucide-brain");
   });
 
   it("shows reasoning placeholder for pending assistant with empty reasoning", async () => {

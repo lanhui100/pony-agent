@@ -526,14 +526,14 @@ watch(showReasoningContent, (value) => {
       <textarea
         :value="draftMessage"
         :disabled="Boolean(sessionOperation)"
-        class="min-h-[82px] w-full resize-none bg-transparent px-0 py-0 text-sm leading-6 text-stone-900 outline-none placeholder:text-stone-400"
+        class="min-h-[82px] w-full resize-none bg-transparent px-0 py-0 text-[13px] leading-[1.55] text-stone-800 outline-none placeholder:text-[12px] placeholder:font-normal placeholder:tracking-[0.01em] placeholder:text-stone-400/70"
         placeholder="输入消息，按 Enter 发送，Shift+Enter 换行。"
         @input="runtimeStore.setDraftMessage(($event.target as HTMLTextAreaElement).value)"
         @keydown="handleComposerKeydown"
       />
 
-      <div class="mt-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-2">
-        <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+      <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200/70 pt-2.5">
+        <div class="flex min-w-0 flex-wrap items-center gap-2">
           <div ref="providerMenuRef" class="relative">
             <button
               class="composer-select-trigger"
@@ -546,15 +546,15 @@ watch(showReasoningContent, (value) => {
 
             <div
               v-if="providerMenuOpen"
-              class="absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[15rem] rounded-[0.45rem] border border-stone-200/80 bg-white py-1 text-[12px] text-stone-700 shadow-[0_10px_30px_rgba(61,47,34,0.08)]"
+              class="composer-menu-panel absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[14rem]"
             >
-              <div class="px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-stone-400">提供商</div>
-              <div class="mx-2 border-t border-stone-200/90"></div>
+              <div class="composer-menu-caption">提供商</div>
+              <div class="composer-menu-divider"></div>
               <div class="relative py-0.5">
                 <button
                   v-for="provider in providerStore.providers"
                   :key="provider.id"
-                  class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-stone-700 hover:bg-[#f8f4ed]"
+                  class="composer-menu-item"
                   type="button"
                   @mouseenter="hoveredProviderId = provider.id"
                   @focus="hoveredProviderId = provider.id"
@@ -567,14 +567,14 @@ watch(showReasoningContent, (value) => {
                 </button>
                 <div
                   v-if="hoveredProviderId"
-                  class="absolute left-full top-0 ml-1 min-w-[15rem] rounded-[0.45rem] border border-stone-200/80 bg-white py-1 text-[12px] text-stone-700 shadow-[0_10px_30px_rgba(61,47,34,0.08)]"
+                  class="composer-menu-panel absolute left-full top-0 ml-1 min-w-[14rem]"
                 >
-              <div class="px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-stone-400">模型</div>
-                  <div class="mx-2 border-t border-stone-200/90"></div>
+              <div class="composer-menu-caption">模型</div>
+                  <div class="composer-menu-divider"></div>
                   <button
                     v-for="model in providerStore.providers.find((provider) => provider.id === hoveredProviderId)?.models ?? []"
                     :key="model.id"
-                    class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-stone-600 hover:bg-[#fbf7f1]"
+                    class="composer-menu-item"
                     type="button"
                     @click="selectModel(hoveredProviderId, model.id)"
                   >
@@ -603,14 +603,14 @@ watch(showReasoningContent, (value) => {
 
             <div
               v-if="currentModelSupportsReasoning && reasoningMenuOpen"
-              class="absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[11rem] rounded-[0.45rem] border border-stone-200/80 bg-white py-1 text-[12px] text-stone-700 shadow-[0_10px_30px_rgba(61,47,34,0.08)]"
+              class="composer-menu-panel absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[10rem]"
             >
-              <div class="px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-stone-400">思考强度</div>
-              <div class="mx-2 border-t border-stone-200/90"></div>
+              <div class="composer-menu-caption">思考强度</div>
+              <div class="composer-menu-divider"></div>
               <button
                 v-for="option in reasoningOptions"
                 :key="option.label"
-                class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-stone-700 hover:bg-[#f8f4ed]"
+                class="composer-menu-item"
                 type="button"
                 @click="selectReasoningEffort(option.value)"
               >
@@ -902,14 +902,27 @@ watch(showReasoningContent, (value) => {
 .composer-select-trigger {
   display: inline-flex;
   max-width: 12rem;
+  min-height: 1.75rem;
   align-items: center;
-  gap: 0.25rem;
-  background: transparent;
-  padding: 0;
+  gap: 0.35rem;
+  border: 1px solid rgba(214, 211, 209, 0.85);
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 0 0.7rem;
   font-size: 11px;
-  line-height: 1.1;
+  font-weight: 500;
+  line-height: 1;
   color: rgb(87 83 78);
   outline: none;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.composer-select-trigger:hover {
+  border-color: rgba(168, 162, 158, 0.7);
+  background: rgba(250, 250, 249, 0.96);
 }
 
 .composer-select-trigger:disabled {
@@ -917,8 +930,7 @@ watch(showReasoningContent, (value) => {
 }
 
 .composer-select-trigger:focus-visible {
-  border-radius: 0.2rem;
-  box-shadow: 0 0 0 2px rgba(252, 211, 77, 0.35);
+  box-shadow: 0 0 0 2px rgba(231, 229, 228, 0.95);
 }
 
 .composer-toggle-trigger {
@@ -930,16 +942,61 @@ watch(showReasoningContent, (value) => {
   box-shadow: 0 0 0 2px rgba(252, 211, 77, 0.35);
 }
 
+.composer-menu-panel {
+  border: 1px solid rgba(231, 229, 228, 0.95);
+  border-radius: 0.7rem;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 0.35rem 0;
+  color: rgb(87 83 78);
+  box-shadow: 0 12px 32px rgba(41, 37, 36, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.composer-menu-caption {
+  padding: 0 0.9rem 0.35rem;
+  font-size: 10px;
+  line-height: 1;
+  color: rgb(168 162 158);
+}
+
+.composer-menu-divider {
+  margin: 0 0.55rem 0.2rem;
+  border-top: 1px solid rgba(231, 229, 228, 0.92);
+}
+
+.composer-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.9rem;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.2;
+  color: rgb(87 83 78);
+  transition: background-color 0.16s ease;
+}
+
+.composer-menu-item:hover {
+  background: rgba(245, 245, 244, 0.9);
+}
+
 .composer-switch-row {
   display: inline-flex;
-  min-height: 1.5rem;
+  min-height: 1.75rem;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.45rem;
+  border: 1px solid rgba(214, 211, 209, 0.85);
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 0 0.7rem 0 0.35rem;
   color: rgb(87 83 78);
 }
 
 .composer-switch-label {
   font-size: 11px;
-  line-height: 1.1;
+  font-weight: 500;
+  line-height: 1;
 }
 </style>
