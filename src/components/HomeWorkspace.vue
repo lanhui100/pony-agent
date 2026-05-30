@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { AlertTriangle, ArrowUp, Bot, Check, ChevronDown, LoaderCircle, UserRound, Wrench } from "lucide-vue-next";
+import {
+  AlertTriangle,
+  ArrowUp,
+  Bot,
+  Check,
+  ChevronDown,
+  LoaderCircle,
+  UserRound,
+  Wrench
+} from "lucide-vue-next";
 import type { ProviderReasoningEffort } from "@/types/provider";
 import type { ChatMessage } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
@@ -148,10 +157,6 @@ function formatAssistantModelLabel(modelName?: string | null) {
 
 function formatTokenBadge(tokenCount?: number | null) {
   return `T:${tokenCount != null ? tokenCount : "--"}`;
-}
-
-function formatInlineToken(kind: "IN" | "OUT", tokenCount?: number | null) {
-  return `${kind}:${tokenCount != null ? tokenCount : "--"}`;
 }
 
 function formatToolDuration(durationSeconds?: number | null) {
@@ -354,8 +359,13 @@ watch(showReasoningContent, (value) => {
 </script>
 
 <template>
-  <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] bg-[#fdfbf7]/88">
-    <ScrollArea ref="timelineScrollAreaRef" class="min-h-0 flex-1" viewport-class="px-4 py-4 sm:px-5">
+  <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-t-[0.6rem]">
+    <ScrollArea
+      ref="timelineScrollAreaRef"
+      class="min-h-0 flex-1 rounded-t-[0.6rem]"
+      viewport-class="px-4 py-4 sm:px-5"
+    >
+      <div class="mx-auto w-full max-w-[58rem]" data-testid="workspace-content-column">
       <div v-if="sessionBanner || runtimeErrorBanner" class="mb-4 space-y-2">
         <div
           v-if="sessionBanner"
@@ -395,16 +405,10 @@ watch(showReasoningContent, (value) => {
                   {{ turn.user.content }}
                 </div>
               </div>
-              <div
-                v-if="turn.user.tokenCount != null"
-                class="mt-1 w-full text-left text-[10px] normal-case tracking-normal text-stone-400"
-              >
-                {{ formatInlineToken("IN", turn.user.tokenCount) }}
-              </div>
             </div>
           </article>
 
-          <article v-if="turn.assistant || turn.tools.length" class="max-w-[86%] px-0 py-1 sm:max-w-[78%]">
+          <article v-if="turn.assistant || turn.tools.length" class="w-full px-0 py-1">
             <div class="flex items-center justify-between gap-3">
               <div :class="actorLabelClass()" class="min-w-0">
                 <Bot class="h-3.5 w-3.5" />
@@ -483,19 +487,18 @@ watch(showReasoningContent, (value) => {
                 />
               </div>
             </Transition>
-            <div
-              v-if="turn.assistant && turn.assistant.tokenCount != null"
-              class="mt-1 w-full text-right text-[10px] normal-case tracking-normal text-stone-400"
-            >
-              {{ formatInlineToken("OUT", turn.assistant.tokenCount) }}
-            </div>
           </article>
         </section>
       </TransitionGroup>
       <div ref="bottomAnchorRef" class="h-px w-full" aria-hidden="true"></div>
+      </div>
     </ScrollArea>
 
-    <div class="border-t border-stone-200/70 bg-white/76 px-4 py-3 sm:px-5">
+    <div class="px-4 py-3 sm:px-5">
+      <div
+        class="mx-auto w-full max-w-[58rem] rounded-[0.6rem] bg-white/76 px-4 py-3"
+        data-testid="workspace-composer-shell"
+      >
       <textarea
         :value="draftMessage"
         :disabled="Boolean(sessionOperation)"
@@ -505,7 +508,7 @@ watch(showReasoningContent, (value) => {
         @keydown="handleComposerKeydown"
       />
 
-      <div class="mt-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-100 pt-2">
+      <div class="mt-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-2">
         <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
           <div ref="providerMenuRef" class="relative">
             <button
@@ -610,6 +613,7 @@ watch(showReasoningContent, (value) => {
         >
           <ArrowUp class="h-3.5 w-3.5" />
         </Button>
+        </div>
       </div>
     </div>
   </section>
@@ -887,4 +891,3 @@ watch(showReasoningContent, (value) => {
   line-height: 1.1;
 }
 </style>
-

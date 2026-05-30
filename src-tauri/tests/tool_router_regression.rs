@@ -22,8 +22,11 @@ fn search_text_respects_file_pattern_and_skips_node_modules() {
     let workspace = temp_workspace();
     fs::create_dir_all(workspace.join("src")).expect("create src dir");
     fs::create_dir_all(workspace.join("node_modules")).expect("create node_modules");
-    fs::write(workspace.join("src").join("hit.rs"), "const NEEDLE: &str = \"needle\";\n")
-        .expect("write hit.rs");
+    fs::write(
+        workspace.join("src").join("hit.rs"),
+        "const NEEDLE: &str = \"needle\";\n",
+    )
+    .expect("write hit.rs");
     fs::write(
         workspace.join("node_modules").join("ignored.txt"),
         "needle from dependency\n",
@@ -41,6 +44,7 @@ fn search_text_respects_file_pattern_and_skips_node_modules() {
             "limit": 10,
             "ignoreCase": true
         }),
+        plan: None,
     });
 
     assert_eq!(result.status, "ok");
@@ -56,7 +60,10 @@ fn search_text_respects_file_pattern_and_skips_node_modules() {
         matches[0].get("path").and_then(Value::as_str),
         Some("src/hit.rs")
     );
-    assert_eq!(payload.get("skippedLargeFiles").and_then(Value::as_u64), Some(0));
+    assert_eq!(
+        payload.get("skippedLargeFiles").and_then(Value::as_u64),
+        Some(0)
+    );
 
     let _ = fs::remove_dir_all(workspace);
 }
@@ -84,6 +91,7 @@ fn batch_stops_following_calls_when_continue_on_error_is_false() {
                 }
             ]
         }),
+        plan: None,
     });
 
     assert_eq!(result.status, "error");
@@ -96,15 +104,11 @@ fn batch_stops_following_calls_when_continue_on_error_is_false() {
     assert_eq!(payload.get("status").and_then(Value::as_str), Some("error"));
     assert_eq!(payload.get("abortedCount").and_then(Value::as_u64), Some(1));
     assert_eq!(
-        results[0]
-            .get("aggregateStatus")
-            .and_then(Value::as_str),
+        results[0].get("aggregateStatus").and_then(Value::as_str),
         Some("error")
     );
     assert_eq!(
-        results[1]
-            .get("aggregateStatus")
-            .and_then(Value::as_str),
+        results[1].get("aggregateStatus").and_then(Value::as_str),
         Some("aborted")
     );
 
@@ -130,6 +134,7 @@ fn gather_context_with_query_on_file_returns_search_and_segment_results() {
             "lineCount": 3,
             "limit": 5
         }),
+        plan: None,
     });
 
     assert_eq!(result.status, "ok");
@@ -152,7 +157,9 @@ fn gather_context_with_query_on_file_returns_search_and_segment_results() {
     }));
     let segment_output = results
         .iter()
-        .find(|entry| entry.get("tool").and_then(Value::as_str) == Some("workspace_read_file_segment"))
+        .find(|entry| {
+            entry.get("tool").and_then(Value::as_str) == Some("workspace_read_file_segment")
+        })
         .and_then(|entry| entry.get("output"))
         .and_then(Value::as_str)
         .expect("segment output should be plain text");

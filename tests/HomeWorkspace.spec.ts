@@ -5,7 +5,8 @@ import { mount } from "@vue/test-utils";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
-import type { ProviderRegistry } from "@/types/provider";
+import type { ProviderReasoningEffort, ProviderRegistry } from "@/types/provider";
+import type { ChatMessage } from "@/types/runtime";
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -28,9 +29,17 @@ const MarkdownRendererStub = defineComponent({
     content: {
       type: String,
       default: ""
+    },
+    wrapperClass: {
+      type: String,
+      default: ""
+    },
+    toneClass: {
+      type: String,
+      default: ""
     }
   },
-  template: '<div class="markdown-stub">{{ content }}</div>'
+  template: '<div class="markdown-stub" :class="[wrapperClass, toneClass]">{{ content }}</div>'
 });
 
 const ButtonStub = defineComponent({
@@ -41,7 +50,8 @@ const ButtonStub = defineComponent({
     }
   },
   emits: ["click"],
-  template: "<button class=\"button-stub\" type=\"button\" :disabled=\"disabled\" @click=\"$emit('click')\"><slot /></button>"
+  template:
+    '<button class="button-stub" type="button" :disabled="disabled" @click="$emit(\'click\')"><slot /></button>'
 });
 
 const SwitchStub = defineComponent({
@@ -51,12 +61,17 @@ const SwitchStub = defineComponent({
       default: false
     }
   },
-  template: '<input class="switch-stub" type="checkbox" :checked="modelValue" />'
+  emits: ["update:modelValue"],
+  template:
+    '<input class="switch-stub" type="checkbox" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />'
 });
 
-function createProviderRegistry(): ProviderRegistry {
+function createProviderRegistry(options?: {
+  supportsReasoning?: boolean;
+  selectedProviderId?: string;
+}): ProviderRegistry {
   return {
-    selectedProviderId: "provider-openai",
+    selectedProviderId: options?.selectedProviderId ?? "provider-openai",
     providers: [
       {
         id: "provider-openai",
@@ -82,6 +97,44 @@ function createProviderRegistry(): ProviderRegistry {
               supportsTools: true,
               supportsStreaming: true,
               supportsImageInput: false,
+              supportsReasoning: options?.supportsReasoning ?? true
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+function createMultiProviderRegistry(): ProviderRegistry {
+  return {
+    selectedProviderId: "provider-openai",
+    providers: [
+      ...createProviderRegistry().providers,
+      {
+        id: "provider-anthropic",
+        name: "Anthropic",
+        protocol: "anthropic",
+        baseUrl: "https://api.anthropic.com/v1",
+        apiKeyEnvVar: "ANTHROPIC_API_KEY",
+        apiKeyValue: "",
+        apiKeyPresent: false,
+        selectedModelId: "model-claude-4",
+        models: [
+          {
+            id: "model-claude-4",
+            name: "Claude 4",
+            model: "claude-4",
+            temperature: 0,
+            maxOutputTokens: 4096,
+            reasoningEffort: "medium",
+            reasoningBudgetTokens: null,
+            capabilityPreset: "anthropic-thinking",
+            capabilities: {
+              contextWindowTokens: 200000,
+              supportsTools: true,
+              supportsStreaming: true,
+              supportsImageInput: true,
               supportsReasoning: true
             }
           }
@@ -91,11 +144,30 @@ function createProviderRegistry(): ProviderRegistry {
   };
 }
 
-function mountWorkspace() {
+function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: partial.id ?? "msg-1",
+    turnId: partial.turnId ?? "turn-1",
+    role: partial.role ?? "user",
+    content: partial.content ?? "hello",
+    status: partial.status ?? "done",
+    tokenCount: partial.tokenCount ?? null,
+    reasoningContent: partial.reasoningContent ?? null,
+    modelName: partial.modelName ?? null,
+    toolName: partial.toolName ?? null,
+    detail: partial.detail ?? null,
+    durationSeconds: partial.durationSeconds ?? null
+  };
+}
+
+function mountWorkspace(options?: {
+  registry?: ProviderRegistry | null;
+  selectedReasoningEffort?: ProviderReasoningEffort | null;
+}) {
   const providerStore = useProviderStore();
   providerStore.$patch({
-    registry: createProviderRegistry(),
-    selectedReasoningEffort: null
+    registry: options?.registry === undefined ? createProviderRegistry() : options.registry,
+    selectedReasoningEffort: options?.selectedReasoningEffort ?? null
   });
 
   return mount(HomeWorkspace, {
@@ -139,10 +211,10 @@ describe("HomeWorkspace", () => {
     vi.restoreAllMocks();
   });
 
-  it("在切换会话时展示横幅并禁用输入区", async () => {
+  it("disables composer while switching session", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
-      draftMessage: "继续推进",
+      draftMessage: "keep going",
       sessionOperation: "switching",
       sessionError: null,
       phase: "idle",
@@ -153,12 +225,11 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.text()).toContain("正在切换对话…");
     expect((wrapper.get("textarea").element as HTMLTextAreaElement).disabled).toBe(true);
     expect((wrapper.get("button.button-stub").element as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("在运行失败时展示错误横幅", async () => {
+  it("shows runtime failure banner without disabling input", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
@@ -172,5 +243,332 @@ describe("HomeWorkspace", () => {
 
     expect(wrapper.text()).toContain("tool chain exploded");
     expect((wrapper.get("textarea").element as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it("keeps the open workspace shell and rounded white composer", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "idle",
+      error: null,
+      messages: []
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.element.className).toContain("rounded-t-[0.6rem]");
+    expect(wrapper.element.className).not.toContain("bg-[#fdfbf7]/88");
+
+    const timeline = wrapper.get(".scroll-area-stub");
+    expect(timeline.element.className).toContain("rounded-t-[0.6rem]");
+    expect(wrapper.get('[data-testid="workspace-content-column"]').classes()).toContain("max-w-[58rem]");
+
+    const composerShell = wrapper.get('[data-testid="workspace-composer-shell"]');
+    expect(composerShell.classes()).toContain("max-w-[58rem]");
+    expect(composerShell.classes()).toContain("rounded-[0.6rem]");
+    expect(composerShell.classes()).toContain("bg-white/76");
+    expect(composerShell.classes()).not.toContain("border-t");
+  });
+
+  it("renders assistant messages full width and removes user or assistant token footer", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "user message",
+          tokenCount: 123
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "assistant reply",
+          tokenCount: 456,
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const assistantArticle = wrapper.findAll("article").find((node) => node.text().includes("Agent"));
+
+    expect(assistantArticle).toBeDefined();
+    expect(assistantArticle?.classes()).toContain("w-full");
+    expect(assistantArticle?.classes()).not.toContain("max-w-[86%]");
+    expect(assistantArticle?.classes()).not.toContain("sm:max-w-[78%]");
+    expect(wrapper.text()).not.toContain("IN:123");
+    expect(wrapper.text()).not.toContain("OUT:456");
+  });
+
+  it("opens provider menu, selects another model, and closes afterwards", async () => {
+    const providerStore = useProviderStore();
+    const selectModelSpy = vi.spyOn(providerStore, "selectModel");
+
+    const wrapper = mountWorkspace({
+      registry: createMultiProviderRegistry()
+    });
+    await nextTick();
+
+    const [providerTrigger] = wrapper.findAll("button.composer-select-trigger");
+    await providerTrigger.trigger("click");
+    await nextTick();
+
+    expect(wrapper.text()).toContain("OpenAI");
+    expect(wrapper.text()).toContain("GPT-5");
+
+    const anthropicButton = wrapper.findAll("button").find((node) => node.text().includes("Anthropic"));
+    expect(anthropicButton).toBeDefined();
+
+    await anthropicButton?.trigger("mouseenter");
+    await nextTick();
+
+    const claudeButton = wrapper.findAll("button").find((node) => node.text().includes("Claude 4"));
+    expect(claudeButton).toBeDefined();
+
+    await claudeButton?.trigger("click");
+    await nextTick();
+
+    expect(selectModelSpy).toHaveBeenCalledWith("provider-anthropic", "model-claude-4");
+    expect(providerStore.currentProvider?.id).toBe("provider-anthropic");
+    expect(providerStore.currentModel?.id).toBe("model-claude-4");
+    expect(wrapper.findAll("div.absolute")).toHaveLength(0);
+  });
+
+  it("closes provider and reasoning menus on outside click", async () => {
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const [providerTrigger, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
+    await providerTrigger.trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("OpenAI");
+
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(wrapper.findAll("div.absolute")).toHaveLength(0);
+
+    await reasoningTrigger.trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("minimal");
+
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+    expect(wrapper.findAll("div.absolute")).toHaveLength(0);
+  });
+
+  it("syncs reasoning menu selection and toggle persistence", async () => {
+    window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
+
+    const providerStore = useProviderStore();
+    const setReasoningSpy = vi.spyOn(providerStore, "setCurrentReasoningEffort");
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const switchInput = wrapper.get("input.switch-stub");
+    expect((switchInput.element as HTMLInputElement).checked).toBe(true);
+
+    const [, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
+    await reasoningTrigger.trigger("click");
+    await nextTick();
+
+    const highButton = wrapper.findAll("button").find((node) => node.text().includes("high"));
+    expect(highButton).toBeDefined();
+
+    await highButton?.trigger("click");
+    await nextTick();
+
+    expect(setReasoningSpy).toHaveBeenCalledWith("high");
+    expect(providerStore.currentReasoningEffort).toBe("high");
+    expect(wrapper.text()).not.toContain("minimal");
+
+    await switchInput.setValue(false);
+    expect(window.localStorage.getItem("pony-agent.ui.show-reasoning-content")).toBe("false");
+  });
+
+  it("disables reasoning controls for models without reasoning support", async () => {
+    const wrapper = mountWorkspace({
+      registry: createProviderRegistry({ supportsReasoning: false })
+    });
+    await nextTick();
+
+    const [, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
+    expect(reasoningTrigger.attributes("disabled")).toBeDefined();
+
+    await reasoningTrigger.trigger("click");
+    await nextTick();
+
+    expect(wrapper.text()).not.toContain("minimal");
+    expect(wrapper.text()).not.toContain("medium");
+  });
+
+  it("submits on Enter but not on Shift+Enter or while submitting", async () => {
+    const runtimeStore = useRuntimeStore();
+    const submitTurnSpy = vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const textarea = wrapper.get("textarea");
+
+    await textarea.trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      preventDefault: vi.fn()
+    });
+    expect(submitTurnSpy).toHaveBeenCalledTimes(1);
+
+    await textarea.trigger("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      preventDefault: vi.fn()
+    });
+    expect(submitTurnSpy).toHaveBeenCalledTimes(1);
+
+    runtimeStore.$patch({ isSubmitting: true });
+    await nextTick();
+
+    await textarea.trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      preventDefault: vi.fn()
+    });
+    expect(submitTurnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders assistant tone, reasoning blocks, and tool status badges", async () => {
+    window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "question"
+        }),
+        createMessage({
+          id: "tool-1",
+          turnId: "turn-1",
+          role: "tool",
+          content: "",
+          status: "pending",
+          tokenCount: 33,
+          toolName: "Search",
+          detail: "running",
+          durationSeconds: 2.4
+        }),
+        createMessage({
+          id: "tool-2",
+          turnId: "turn-1",
+          role: "tool",
+          content: "",
+          status: "done",
+          tokenCount: 12,
+          toolName: "Edit",
+          detail: "done",
+          durationSeconds: 1.2
+        }),
+        createMessage({
+          id: "tool-3",
+          turnId: "turn-1",
+          role: "tool",
+          content: "",
+          status: "error",
+          tokenCount: null,
+          toolName: "Fail",
+          detail: "boom",
+          durationSeconds: null
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "thinking...",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "assistant-2",
+          turnId: "turn-2",
+          role: "assistant",
+          content: "failed answer",
+          status: "error",
+          reasoningContent: "error reasoning",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "assistant-3",
+          turnId: "turn-3",
+          role: "assistant",
+          content: "done answer",
+          status: "done",
+          reasoningContent: "final reasoning",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const markdownBlocks = wrapper.findAll(".markdown-stub");
+    expect(markdownBlocks.some((node) => node.classes().includes("text-stone-400"))).toBe(true);
+    expect(markdownBlocks.some((node) => node.classes().includes("text-rose-800"))).toBe(true);
+    expect(markdownBlocks.some((node) => node.classes().includes("text-stone-800"))).toBe(true);
+
+    const reasoningBlocks = wrapper.findAll(".assistant-reasoning-markdown");
+    expect(reasoningBlocks).toHaveLength(2);
+    expect(reasoningBlocks[0].text()).toContain("error reasoning");
+    expect(reasoningBlocks[1].text()).toContain("final reasoning");
+
+    expect(wrapper.text()).toContain("Search");
+    expect(wrapper.text()).toContain("Edit");
+    expect(wrapper.text()).toContain("Fail");
+    expect(wrapper.text()).toContain("T:33");
+    expect(wrapper.text()).toContain("T:12");
+    expect(wrapper.text()).toContain("2s");
+    expect(wrapper.text()).toContain("1s");
+    expect(wrapper.text()).toContain("!");
+    expect(wrapper.html()).toContain("animate-spin");
+  });
+
+  it("shows reasoning placeholder for pending assistant with empty reasoning", async () => {
+    window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "assistant-pending",
+          turnId: "turn-pending",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.find(".assistant-reasoning").exists()).toBe(true);
   });
 });

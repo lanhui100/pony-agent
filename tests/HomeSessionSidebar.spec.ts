@@ -41,21 +41,47 @@ function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
 function createSession(partial: Partial<SessionOverview> = {}): SessionOverview {
   return {
     conversationId: partial.conversationId ?? "session-1",
-    title: partial.title ?? "会话 1",
-    summary: partial.summary ?? "摘要",
+    title: partial.title ?? "Session 1",
+    summary: partial.summary ?? "Summary",
     turnCount: partial.turnCount ?? 1,
     lastReferencedFile: partial.lastReferencedFile ?? null,
     updatedAtMs: partial.updatedAtMs ?? 1000
   };
 }
 
-function mountSidebar() {
+function mountSidebar(currentPage: "home" | "providers" | "model-monitor" = "home") {
   return mount(HomeSessionSidebar, {
+    props: {
+      currentPage
+    },
     global: {
       stubs: {
         ScrollArea: ScrollAreaStub
       }
     }
+  });
+}
+
+function seedSidebarSessions() {
+  const runtimeStore = useRuntimeStore();
+  runtimeStore.$patch({
+    sessionId: "session-current",
+    sessionOperation: null,
+    isSubmitting: false,
+    messages: [createMessage({ content: "existing content" })],
+    sessionList: [
+      createSession({
+        conversationId: "session-current",
+        title: "Current session",
+        summary: "Current summary"
+      }),
+      createSession({
+        conversationId: "session-other",
+        title: "Other session",
+        summary: "Other summary",
+        updatedAtMs: 2000
+      })
+    ]
   });
 }
 
@@ -73,7 +99,7 @@ describe("HomeSessionSidebar", () => {
     vi.restoreAllMocks();
   });
 
-  it("对空白临时会话禁用新建和删除操作", async () => {
+  it("disables create and delete controls for a transient empty session", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionId: "session-transient",
@@ -86,33 +112,28 @@ describe("HomeSessionSidebar", () => {
     const wrapper = mountSidebar();
     await nextTick();
 
-    expect(wrapper.text()).toContain("当前为空对话，发送首条消息后才会保存");
     expect(wrapper.text()).toContain("未保存");
-    expect(
-      wrapper.get('button[title="当前已经是空白新对话，发送首条消息后才会保存到历史。"]').attributes("disabled")
-    ).toBeDefined();
-    expect(
-      wrapper.get('button[title="空白新对话会在切换后自动丢弃，无需单独删除。"]').attributes("disabled")
-    ).toBeDefined();
+    expect(wrapper.get('[data-testid="session-sidebar-new-chat"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="session-delete-session-transient"]').attributes("disabled")).toBeDefined();
   });
 
-  it("在会话操作期间禁用新建、切换和删除按钮", async () => {
+  it("disables switching and deletion during a session operation", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionId: "session-current",
       sessionOperation: "deleting",
       isSubmitting: false,
-      messages: [createMessage({ content: "已有内容" })],
+      messages: [createMessage({ content: "existing content" })],
       sessionList: [
         createSession({
           conversationId: "session-current",
-          title: "已保存对话",
-          summary: "当前摘要"
+          title: "Saved session",
+          summary: "Current summary"
         }),
         createSession({
           conversationId: "session-other",
-          title: "其他对话",
-          summary: "其他摘要",
+          title: "Other session",
+          summary: "Other summary",
           updatedAtMs: 2000
         })
       ]
@@ -121,18 +142,260 @@ describe("HomeSessionSidebar", () => {
     const wrapper = mountSidebar();
     await nextTick();
 
-    expect(
-      wrapper.get('button[title="新建一个空白对话，会保留当前历史会话。"]').attributes("disabled")
-    ).toBeDefined();
+    expect(wrapper.get('[data-testid="session-sidebar-new-chat"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="session-switch-session-current"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="session-switch-session-other"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="session-delete-session-current"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="session-delete-session-other"]').attributes("disabled")).toBeDefined();
+  });
 
-    const sessionButtons = wrapper
-      .findAll("button")
-      .filter((button) => button.text().includes("已保存对话") || button.text().includes("其他对话"));
-    expect(sessionButtons).toHaveLength(2);
-    expect(sessionButtons.every((button) => button.attributes("disabled") !== undefined)).toBe(true);
+  it("keeps create actions above history and model sections", async () => {
+    seedSidebarSessions();
 
-    const deleteButtons = wrapper.findAll('button[title="删除对话"]');
-    expect(deleteButtons).toHaveLength(2);
-    expect(deleteButtons.every((button) => button.attributes("disabled") !== undefined)).toBe(true);
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    const actions = wrapper.get('[data-testid="session-sidebar-actions"]').element;
+    const history = wrapper.get('[data-testid="session-sidebar-history-panel"]').element;
+    const model = wrapper.get('[data-testid="session-sidebar-model-nav"]').element;
+
+    expect(actions.compareDocumentPosition(history) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(history.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("navigates back to home when history entry point is clicked from another page", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("providers");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-history-toggle"]').trigger("click");
+    expect(wrapper.emitted("navigate")).toEqual([["home"]]);
+  });
+
+  it("toggles history open state in home and persists it", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("home");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-history"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="session-sidebar-history-toggle"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-history"]').exists()).toBe(false);
+    expect(window.localStorage.getItem("pony-agent.session-sidebar-history-open.v1")).toBe("0");
+    expect(wrapper.emitted("navigate")).toBeUndefined();
+
+    await wrapper.get('[data-testid="session-sidebar-history-toggle"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-history"]').exists()).toBe(true);
+    expect(window.localStorage.getItem("pony-agent.session-sidebar-history-open.v1")).toBe("1");
+  });
+
+  it("navigates home before switching when a concrete session is opened from another page", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    const switchSessionSpy = vi.spyOn(runtimeStore, "switchSession").mockResolvedValue();
+    const wrapper = mountSidebar("model-monitor");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-switch-session-other"]').trigger("click");
+
+    expect(wrapper.emitted("navigate")).toEqual([["home"]]);
+    expect(switchSessionSpy).toHaveBeenCalledWith("session-other");
+  });
+
+  it("switches sessions inside home without emitting a redundant navigation", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    const switchSessionSpy = vi.spyOn(runtimeStore, "switchSession").mockResolvedValue();
+    const wrapper = mountSidebar("home");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-switch-session-other"]').trigger("click");
+
+    expect(switchSessionSpy).toHaveBeenCalledWith("session-other");
+    expect(wrapper.emitted("navigate")).toBeUndefined();
+  });
+
+  it("renders provider config and model monitor inside model management", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="session-sidebar-nav-providers"]').text()).toContain("配置");
+    expect(wrapper.get('[data-testid="session-sidebar-nav-model-monitor"]').text()).toContain("监控");
+  });
+
+  it("keeps the top brand entry and no longer renders a separate home item", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="session-sidebar-brand"]').text()).toContain("Pony Agent");
+    expect(wrapper.text()).not.toContain("主页");
+  });
+
+  it("brand click routes back to the home workspace", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("providers");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-brand"]').trigger("click");
+    expect(wrapper.emitted("navigate")).toEqual([["home"]]);
+  });
+
+  it("keeps history and model management at the same primary level", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("providers");
+    await nextTick();
+
+    const historyToggle = wrapper.get('[data-testid="session-sidebar-history-toggle"]');
+    const modelToggle = wrapper.get('[data-testid="session-sidebar-model-toggle"]');
+    const providerItem = wrapper.get('[data-testid="session-sidebar-nav-providers"]');
+    const monitorItem = wrapper.get('[data-testid="session-sidebar-nav-model-monitor"]');
+
+    expect(historyToggle.classes()).toContain("text-left");
+    expect(modelToggle.classes()).toContain("text-left");
+    expect(providerItem.classes()).toContain("justify-start");
+    expect(monitorItem.classes()).toContain("justify-start");
+  });
+
+  it("shares the same warm orange hover and selected guardrails across menu items", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("providers");
+    await nextTick();
+
+    const newChat = wrapper.get('[data-testid="session-sidebar-new-chat"]');
+    const historyToggle = wrapper.get('[data-testid="session-sidebar-history-toggle"]');
+    const sessionItem = wrapper.get('[data-testid="session-switch-session-current"]').element.parentElement?.parentElement;
+    const modelToggle = wrapper.get('[data-testid="session-sidebar-model-toggle"]');
+    const providerItem = wrapper.get('[data-testid="session-sidebar-nav-providers"]');
+
+    expect(newChat.classes()).toContain("hover:bg-[#f6dfb8]");
+    expect(historyToggle.classes()).toContain("hover:bg-[#f6dfb8]");
+    expect(modelToggle.classes()).toContain("bg-[#f3c98d]");
+    expect(providerItem.classes()).toContain("bg-[#f3c98d]");
+    expect(providerItem.classes()).toContain("rounded-[0.2rem]");
+    expect(sessionItem?.className).toContain("bg-[#f3c98d]");
+  });
+
+  it("keeps only the four key entries in collapsed mode", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("model-monitor");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-brand"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-new-chat-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-history-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-providers-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("主页");
+  });
+
+  it("uses narrower horizontal padding and smooth width or padding transitions when collapsed", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.element.className).toContain("transition-[width]");
+    expect(wrapper.element.className).toContain("duration-200");
+    expect(wrapper.element.className).toContain("ease-in-out");
+
+    await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
+    await nextTick();
+
+    const innerShell = wrapper.get("aside > div");
+    expect(innerShell.element.className).toContain("transition-[padding]");
+    expect(innerShell.element.className).toContain("duration-200");
+    expect(innerShell.element.className).toContain("ease-in-out");
+    expect(innerShell.element.className).toContain("px-1");
+    expect(innerShell.element.className).not.toContain("px-1.5");
+    expect(innerShell.element.className).not.toContain("px-2");
+  });
+
+  it("collapsed history icon always routes back to home and reopens history", async () => {
+    seedSidebarSessions();
+    window.localStorage.setItem("pony-agent.session-sidebar-history-open.v1", "0");
+
+    const wrapper = mountSidebar("model-monitor");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-history-collapsed"]').trigger("click");
+
+    expect(wrapper.emitted("navigate")).toEqual([["home"]]);
+    expect(window.localStorage.getItem("pony-agent.session-sidebar-history-open.v1")).toBe("1");
+  });
+
+  it("persists collapse state and exposes collapsed provider or monitor navigation", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("home");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
+    await nextTick();
+
+    expect(window.localStorage.getItem("pony-agent.session-sidebar-collapsed.v1")).toBe("1");
+
+    await wrapper.get('[data-testid="session-sidebar-nav-providers-collapsed"]').trigger("click");
+    await wrapper.get('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').trigger("click");
+
+    expect(wrapper.emitted("navigate")).toEqual([["providers"], ["model-monitor"]]);
+  });
+
+  it("toggles model management open state and persists it", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar("providers");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="session-sidebar-model-toggle"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(false);
+    expect(window.localStorage.getItem("pony-agent.session-sidebar-model-open.v1")).toBe("0");
+
+    await wrapper.get('[data-testid="session-sidebar-model-toggle"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(true);
+    expect(window.localStorage.getItem("pony-agent.session-sidebar-model-open.v1")).toBe("1");
+  });
+
+  it("forwards create and delete actions to the runtime store when enabled", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    const createSessionSpy = vi.spyOn(runtimeStore, "createSession").mockResolvedValue();
+    const deleteSessionSpy = vi.spyOn(runtimeStore, "deleteSession").mockResolvedValue();
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-new-chat"]').trigger("click");
+    await wrapper.get('[data-testid="session-delete-session-other"]').trigger("click");
+
+    expect(createSessionSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSessionSpy).toHaveBeenCalledWith("session-other");
   });
 });

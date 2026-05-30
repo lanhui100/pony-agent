@@ -1,21 +1,26 @@
 use crate::agent::provider::{
-    ProviderClient, ProviderDecision, ProviderManager, ProviderRequest, ProviderStreamChunk,
-    TokenUsage,
+    BuildContextObservation, ProviderClient, ProviderDecision, ProviderManager, ProviderRequest,
+    ProviderStreamChunk, TokenUsage,
 };
 use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
 
+use super::context::RetrievedContextState;
 use super::runtime::{TurnResult, TurnStreamEvent};
-use super::session::SessionSnapshot;
+
+pub trait TurnEventSink {
+    fn emit(&self, name: &str, payload: TurnStreamEvent);
+}
 
 pub struct PreparedTurn {
     pub user_message: String,
-    pub session: SessionSnapshot,
+    pub display_message: String,
+    pub retrieved: RetrievedContextState,
     pub provider: ProviderManager,
     pub tools: Vec<ToolDefinition>,
     pub planning_request: ProviderRequest,
+    pub build_context_observation: BuildContextObservation,
 }
 
 pub struct PlannedTurn {
@@ -72,6 +77,7 @@ pub fn build_failed_turn_result(
         provider_source: "failed".to_string(),
         provider_mode: "failed".to_string(),
         fallback_reason: None,
+        build_context_observation: None,
         input_tokens: None,
         output_tokens: None,
         total_tokens: None,
@@ -94,16 +100,17 @@ pub fn provider_event_meta(provider: &ProviderManager) -> ProviderEventMeta {
 }
 
 pub fn emit_stream_failed(
-    app: &AppHandle,
+    sink: &impl TurnEventSink,
     turn_id: String,
     provider_meta: Option<&ProviderEventMeta>,
     trace_steps: Vec<TurnTraceStep>,
     tool_activities: Option<Vec<TurnToolActivity>>,
     first_token_latency_ms: Option<u64>,
+    build_context_observation: Option<BuildContextObservation>,
     error: String,
 ) {
     emit_event(
-        app,
+        sink,
         "turn:failed",
         TurnStreamEvent {
             turn_id,
@@ -119,6 +126,47 @@ pub fn emit_stream_failed(
             provider_source: None,
             provider_mode: None,
             fallback_reason: None,
+            build_context_observation,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms,
+            trace_steps: Some(trace_steps),
+            tool_activities,
+            session_summary: None,
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stream_cancelled(
+    sink: &impl TurnEventSink,
+    turn_id: String,
+    provider_meta: Option<&ProviderEventMeta>,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    first_token_latency_ms: Option<u64>,
+    build_context_observation: Option<BuildContextObservation>,
+    error: String,
+) {
+    emit_event(
+        sink,
+        "turn:cancelled",
+        TurnStreamEvent {
+            turn_id,
+            kind: "cancelled".to_string(),
+            phase: Some("cancelled".to_string()),
+            text: Some("This turn was cancelled.".to_string()),
+            reasoning_content: None,
+            error: Some(error),
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+            provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation,
             input_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -132,7 +180,7 @@ pub fn emit_stream_failed(
 
 #[allow(clippy::too_many_arguments)]
 pub fn emit_stream_event(
-    app: &AppHandle,
+    sink: &impl TurnEventSink,
     name: &str,
     turn_id: String,
     kind: &str,
@@ -143,6 +191,7 @@ pub fn emit_stream_event(
     provider_source: Option<String>,
     provider_mode: Option<String>,
     fallback_reason: Option<String>,
+    build_context_observation: Option<BuildContextObservation>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
@@ -152,7 +201,7 @@ pub fn emit_stream_event(
     session_summary: Option<String>,
 ) {
     emit_event(
-        app,
+        sink,
         name,
         TurnStreamEvent {
             turn_id,
@@ -168,6 +217,7 @@ pub fn emit_stream_event(
             provider_source,
             provider_mode,
             fallback_reason,
+            build_context_observation,
             input_tokens,
             output_tokens,
             total_tokens,
@@ -180,7 +230,7 @@ pub fn emit_stream_event(
 }
 
 pub fn emit_turn_failed(
-    app: &AppHandle,
+    sink: &impl TurnEventSink,
     turn_id: String,
     provider_requested_name: Option<String>,
     provider_name: Option<String>,
@@ -206,17 +256,18 @@ pub fn emit_turn_failed(
         _ => None,
     };
     emit_stream_failed(
-        app,
+        sink,
         turn_id,
         provider_meta.as_ref(),
         trace_steps,
+        None,
         None,
         None,
         error,
     );
 }
 
-pub fn emit_event(app: &AppHandle, name: &str, payload: TurnStreamEvent) {
+pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEvent) {
     eprintln!(
         "[pony-agent][runtime] emit {} turn={} phase={:?} text_len={} tools={}",
         name,
@@ -229,7 +280,7 @@ pub fn emit_event(app: &AppHandle, name: &str, payload: TurnStreamEvent) {
             .map(|tools| tools.len())
             .unwrap_or(0)
     );
-    let _ = app.emit(name, payload);
+    sink.emit(name, payload);
 }
 
 pub fn normalize_user_message(message: &str) -> String {
@@ -270,7 +321,7 @@ pub fn provider_failure_message(
 }
 
 fn stream_delta_chunks(
-    app: &AppHandle,
+    sink: &impl TurnEventSink,
     turn_id: &str,
     phase: &str,
     text: Option<&str>,
@@ -296,13 +347,14 @@ fn stream_delta_chunks(
         };
 
         emit_stream_event(
-            app,
+            sink,
             "turn:delta",
             turn_id.to_string(),
             "delta",
             Some(phase),
             text.as_ref().map(|_| delta.clone()),
             reasoning_content.as_ref().map(|_| delta.clone()),
+            None,
             None,
             None,
             None,
@@ -325,7 +377,7 @@ fn stream_delta_chunks(
 }
 
 pub fn stream_reasoning_chunks(
-    app: &AppHandle,
+    sink: &impl TurnEventSink,
     turn_id: &str,
     phase: &str,
     reasoning_content: &str,
@@ -333,7 +385,7 @@ pub fn stream_reasoning_chunks(
     initial_latency_ms: Option<u64>,
 ) -> Option<u64> {
     stream_delta_chunks(
-        app,
+        sink,
         turn_id,
         phase,
         None,
@@ -344,7 +396,7 @@ pub fn stream_reasoning_chunks(
 }
 
 pub fn stream_text_chunks(
-    app: &AppHandle,
+    sink: &impl TurnEventSink,
     turn_id: &str,
     phase: &str,
     text: &str,
@@ -352,7 +404,7 @@ pub fn stream_text_chunks(
     initial_latency_ms: Option<u64>,
 ) -> Option<u64> {
     stream_delta_chunks(
-        app,
+        sink,
         turn_id,
         phase,
         Some(text),
@@ -393,13 +445,7 @@ pub fn provider_followup<P: ProviderClient>(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Result<crate::agent::provider::ProviderResponse, String> {
-    provider.continue_with_tool_result(
-        request,
-        tools,
-        assistant_message,
-        tool_call,
-        tool_result,
-    )
+    provider.continue_with_tool_result(request, tools, assistant_message, tool_call, tool_result)
 }
 
 pub fn provider_followup_stream<P, F>(

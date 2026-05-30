@@ -1,14 +1,19 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { PanelRightClose, PanelRightOpen } from "lucide-vue-next";
 import HomeSidebar from "@/components/HomeSidebar.vue";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
+import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
 import ProviderConfigPage from "@/components/ProviderConfigPage.vue";
-import Button from "@/components/ui/Button.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 
-const currentPage = ref<"home" | "providers">("home");
+type AppPage = "home" | "providers" | "model-monitor";
+
+const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "pony-agent.ui.right-sidebar-open";
+const currentPage = ref<AppPage>("home");
+const rightSidebarOpen = ref(true);
 const providerStore = useProviderStore();
 const runtimeStore = useRuntimeStore();
 let onBeforeUnload: (() => void) | null = null;
@@ -25,8 +30,24 @@ function logLifecycle(event: string) {
   });
 }
 
+async function runStartupTask(label: string, task: () => Promise<unknown>) {
+  try {
+    await task();
+  } catch (error) {
+    console.error(`[pony-agent][app] startup failed: ${label}`, {
+      error: String(error)
+    });
+  }
+}
+
 onMounted(async () => {
   logLifecycle("mounted");
+  if (typeof window !== "undefined") {
+    const storedSidebarPreference = window.localStorage.getItem(RIGHT_SIDEBAR_OPEN_STORAGE_KEY);
+    if (storedSidebarPreference != null) {
+      rightSidebarOpen.value = storedSidebarPreference !== "false";
+    }
+  }
   onBeforeUnload = () => logLifecycle("beforeunload");
   onPageHide = () => logLifecycle("pagehide");
   onVisibility = () => logLifecycle(`visibility:${document.visibilityState}`);
@@ -36,12 +57,12 @@ onMounted(async () => {
   document.addEventListener("visibilitychange", onVisibility);
 
   await Promise.all([
-    providerStore.loadRegistry(),
-    runtimeStore.fetchHealth(),
-    runtimeStore.fetchAvailableTools(),
-    runtimeStore.initializeTurnEvents()
+    runStartupTask("providerRegistry", () => providerStore.loadRegistry()),
+    runStartupTask("health", () => runtimeStore.fetchHealth()),
+    runStartupTask("availableTools", () => runtimeStore.fetchAvailableTools()),
+    runStartupTask("turnEvents", () => runtimeStore.initializeTurnEvents())
   ]);
-  await runtimeStore.initializeSessions();
+  await runStartupTask("sessions", () => runtimeStore.initializeSessions());
 });
 
 onBeforeUnmount(() => {
@@ -56,57 +77,66 @@ onBeforeUnmount(() => {
   }
   logLifecycle("beforeUnmount");
 });
+
+watch(rightSidebarOpen, (value) => {
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(RIGHT_SIDEBAR_OPEN_STORAGE_KEY, value ? "true" : "false");
+  }
+});
 </script>
 
 <template>
   <main
-    class="h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(245,218,161,0.22),transparent_24%),linear-gradient(180deg,#f7f4ee_0%,#f1ece4_48%,#ece7de_100%)] text-stone-900"
+    class="h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] text-stone-900"
   >
-    <section class="mx-auto flex h-full min-h-0 w-full max-w-[1480px] min-w-0 flex-col px-4 pt-4 pb-2 sm:px-5 lg:px-6">
-      <header class="flex items-start justify-between gap-4 border-b border-stone-200/70 pb-4">
-        <div class="min-w-0">
-          <h1 class="text-[2rem] font-black leading-none tracking-[-0.06em] text-stone-950 sm:text-[2.4rem]">
-            Pony Agent
-          </h1>
-          <p class="mt-1 text-[12px] tracking-[0.2em] text-stone-500 uppercase">
-            Rust Agent Core
-          </p>
-        </div>
+    <section class="mx-auto flex h-full min-h-0 w-full max-w-[1540px] min-w-0 gap-4 px-3 py-3 sm:px-4 lg:px-5">
+      <HomeSessionSidebar :current-page="currentPage" @navigate="currentPage = $event" />
 
-        <div class="inline-flex rounded-[0.55rem] border border-stone-200/80 bg-white/70 p-1">
-          <Button
-            class="rounded-[0.4rem] px-4"
-            :variant="currentPage === 'home' ? 'default' : 'ghost'"
-            size="sm"
-            @click="currentPage = 'home'"
-          >
-            主页
-          </Button>
-          <Button
-            class="rounded-[0.4rem] px-4"
-            :variant="currentPage === 'providers' ? 'default' : 'ghost'"
-            size="sm"
-            @click="currentPage = 'providers'"
-          >
-            模型配置
-          </Button>
-        </div>
-      </header>
-
-      <section class="min-h-0 min-w-0 flex-1 pt-4 pb-2">
+      <section class="min-h-0 min-w-0 flex-1">
         <div
           v-if="currentPage === 'home'"
-          class="flex h-full min-h-0 min-w-0 flex-col gap-4 lg:flex-row"
+          :class="rightSidebarOpen ? 'gap-4' : 'gap-0'"
+          class="relative flex h-full min-h-0 min-w-0 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
+          data-testid="home-layout-shell"
         >
-          <HomeSessionSidebar />
+          <button
+            type="button"
+            :class="
+              rightSidebarOpen
+                ? 'right-3 lg:right-[calc(20rem+1rem+0.5rem)] xl:right-[calc(21rem+1rem+0.5rem)]'
+                : 'right-3'
+            "
+            class="absolute top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[right,background-color,color] duration-300 ease-out hover:bg-[#f7e3bf] hover:text-stone-900"
+            :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+            :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+            :data-open="rightSidebarOpen ? 'true' : 'false'"
+            data-testid="workspace-right-sidebar-toggle"
+            @click="rightSidebarOpen = !rightSidebarOpen"
+          >
+            <PanelRightClose v-if="rightSidebarOpen" class="h-4 w-4" />
+            <PanelRightOpen v-else class="h-4 w-4" />
+          </button>
           <div class="min-h-0 min-w-0 flex-1">
             <HomeWorkspace />
           </div>
-          <div class="min-h-0 min-w-0 shrink-0 lg:w-[20rem] xl:w-[21rem]">
-            <HomeSidebar />
+          <div
+            :class="
+              rightSidebarOpen
+                ? 'max-h-[70rem] opacity-100 translate-x-0 lg:w-[20rem] lg:max-h-none xl:w-[21rem]'
+                : 'pointer-events-none max-h-0 opacity-0 translate-x-6 lg:w-0 lg:max-h-none'
+            "
+            class="min-h-0 min-w-0 shrink-0 overflow-hidden transition-[width,max-height,opacity,transform] duration-300 ease-out"
+            :data-open="rightSidebarOpen ? 'true' : 'false'"
+            data-testid="home-right-sidebar-shell"
+          >
+            <div class="h-full min-h-0 min-w-0 lg:w-[20rem] xl:w-[21rem]">
+              <HomeSidebar />
+            </div>
           </div>
         </div>
-        <ProviderConfigPage v-else />
+
+        <ProviderConfigPage v-else-if="currentPage === 'providers'" class="h-full" />
+        <ModelMonitorPage v-else class="h-full" />
       </section>
     </section>
   </main>

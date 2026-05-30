@@ -1,9 +1,13 @@
 pub mod config;
 pub mod context;
+pub mod control_plane;
+pub mod execution_control;
 pub mod graph;
+pub mod input;
 pub mod planner;
 pub mod provider;
 pub mod runtime;
+pub mod secret_store;
 pub mod session;
 pub mod telemetry;
 pub mod tools;

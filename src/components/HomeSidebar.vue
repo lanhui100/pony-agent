@@ -17,6 +17,7 @@ import {
   Video,
   Wrench
 } from "lucide-vue-next";
+import { extractActiveTaskFocus } from "@/types/runtime";
 import type { TraceStep, TurnTraceRecord } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
@@ -46,6 +47,7 @@ const {
   providerModel,
   providerName,
   providerProtocol,
+  retrievedContext,
   sessionId,
   sessionSummary,
   totalTokens,
@@ -68,6 +70,37 @@ const displayModel = computed(() => {
   }
 
   return model || provider || "";
+});
+
+const retrievedSessionContext = computed(() => retrievedContext.value?.sessionContext ?? null);
+const retrievedRunState = computed(() => retrievedContext.value?.runState ?? null);
+const retrievedLongTermMemory = computed(() => retrievedContext.value?.longTermMemory ?? null);
+const retrievedRecentHistoryCount = computed(() => retrievedSessionContext.value?.recentHistory?.length ?? 0);
+const retrievedRecentAttachmentCount = computed(
+  () => retrievedSessionContext.value?.recentAttachmentAssets?.length ?? 0
+);
+const retrievedLastReferencedFile = computed(() => retrievedSessionContext.value?.lastReferencedFile?.trim() ?? "");
+const retrievedRunGoal = computed(() => retrievedRunState.value?.goal?.trim() ?? "");
+const retrievedRunPhase = computed(
+  () =>
+    retrievedRunState.value?.phase?.trim() ||
+    retrievedRunState.value?.executionCheckpointPhase?.trim() ||
+    retrievedRunState.value?.executionCheckpointStatus?.trim() ||
+    ""
+);
+const longTermMemoryEntries = computed(() => retrievedLongTermMemory.value?.entries ?? []);
+const longTermMemoryPreviewEntries = computed(() => longTermMemoryEntries.value.slice(0, 3));
+const retrievedActiveTaskFocus = computed(() => extractActiveTaskFocus(longTermMemoryEntries.value)?.trim() ?? "");
+const longTermMemoryStatusLabel = computed(() => {
+  const status = retrievedLongTermMemory.value?.status?.trim().toLowerCase() ?? "";
+  if (status === "available") {
+    return `${longTermMemoryEntries.value.length} 条`;
+  }
+  if (status === "empty") {
+    return "空";
+  }
+
+  return status || "";
 });
 
 const orderedTurnTraces = computed(() => [...turnTraceHistory.value]);
@@ -521,7 +554,7 @@ watch(
     <ScrollArea class="min-h-0 flex-1" viewport-class="px-4 py-4">
       <div class="flex min-h-full flex-col gap-3">
         <section class="collapsible-shell border-b border-stone-200/70 pb-4" :data-open="activePanel === 'status'">
-          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" @click="togglePanel('status')">
+          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="status-panel-toggle" @click="togglePanel('status')">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <ScanSearch class="h-3.5 w-3.5" />
               <span>状态</span>
@@ -576,7 +609,7 @@ watch(
         </section>
 
         <section class="collapsible-shell border-b border-stone-200/60 pb-4" :data-open="activePanel === 'tools'">
-          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" @click="togglePanel('tools')">
+          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="tools-panel-toggle" @click="togglePanel('tools')">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <Wrench class="h-3.5 w-3.5" />
               <span>Tools</span>
@@ -630,7 +663,7 @@ watch(
         </section>
 
         <section class="collapsible-shell mt-auto pb-1" :data-open="activePanel === 'trace'">
-          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" @click="togglePanel('trace')">
+          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="trace-panel-toggle" @click="togglePanel('trace')">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <Clock3 class="h-3.5 w-3.5" />
               <span>Trace</span>
@@ -640,6 +673,77 @@ watch(
 
           <div class="collapsible-body">
             <section class="collapsible-content mt-2 space-y-1">
+              <div
+                v-if="retrievedSessionContext || retrievedRunState || retrievedLongTermMemory"
+                class="mb-2 rounded-[0.5rem] border border-stone-200/80 bg-stone-50/75 px-3 py-2"
+                data-testid="retrieved-context-summary"
+              >
+                <div class="flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.16em] text-stone-500">
+                  <span>Retrieval</span>
+                  <span v-if="retrievedSessionContext?.conversationId" class="truncate text-right">
+                    {{ retrievedSessionContext?.conversationId }}
+                  </span>
+                </div>
+                <div class="mt-2 grid gap-2 text-[12px] leading-5 text-stone-600">
+                  <div class="flex items-start justify-between gap-3">
+                    <span class="text-stone-400">Recent history</span>
+                    <span class="text-right text-stone-800">{{ retrievedRecentHistoryCount }}</span>
+                  </div>
+                  <div class="flex items-start justify-between gap-3">
+                    <span class="text-stone-400">Recent attachments</span>
+                    <span class="text-right text-stone-800">{{ retrievedRecentAttachmentCount }}</span>
+                  </div>
+                  <div v-if="longTermMemoryStatusLabel" class="flex items-start justify-between gap-3">
+                    <span class="text-stone-400">Long-term memory</span>
+                    <span class="text-right text-stone-800">{{ longTermMemoryStatusLabel }}</span>
+                  </div>
+                  <div v-if="retrievedRunPhase" class="flex items-start justify-between gap-3">
+                    <span class="text-stone-400">Run phase</span>
+                    <span class="text-right text-stone-800">{{ retrievedRunPhase }}</span>
+                  </div>
+                </div>
+                <p
+                  v-if="retrievedRunGoal"
+                  class="mt-2 break-words text-[11px] leading-5 text-stone-600 [overflow-wrap:anywhere]"
+                  data-testid="retrieved-run-goal"
+                >
+                  Goal: {{ retrievedRunGoal }}
+                </p>
+                <p
+                  v-if="retrievedActiveTaskFocus"
+                  class="mt-2 break-words text-[11px] leading-5 text-stone-600 [overflow-wrap:anywhere]"
+                  data-testid="retrieved-active-task"
+                >
+                  Active task: {{ retrievedActiveTaskFocus }}
+                </p>
+                <p
+                  v-if="retrievedLastReferencedFile"
+                  class="mt-2 break-words text-[11px] leading-5 text-stone-600 [overflow-wrap:anywhere]"
+                  data-testid="retrieved-last-file"
+                >
+                  Last file: {{ retrievedLastReferencedFile }}
+                </p>
+                <div
+                  v-if="longTermMemoryPreviewEntries.length"
+                  class="mt-2 space-y-1 border-t border-stone-200/80 pt-2"
+                  data-testid="retrieved-memory-list"
+                >
+                  <div class="text-[10px] uppercase tracking-[0.14em] text-stone-400">Memory entries</div>
+                  <div
+                    v-for="entry in longTermMemoryPreviewEntries"
+                    :key="`${entry.kind}:${entry.content}`"
+                    class="rounded-[0.4rem] border border-stone-200/80 bg-white/80 px-2 py-1"
+                  >
+                    <div class="break-words text-[11px] leading-4 text-stone-700 [overflow-wrap:anywhere]">
+                      {{ entry.content }}
+                    </div>
+                    <div class="mt-0.5 text-[10px] leading-4 text-stone-400">
+                      {{ entry.kind }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <section
                 v-for="turn in orderedTurnTraces"
                 :key="turn.turnId"

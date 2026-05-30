@@ -1,9 +1,12 @@
 use crate::agent::config::{ProviderReasoningEffort, ResolvedProviderSelection};
+use crate::agent::input::TurnInputImage;
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -49,7 +52,6 @@ impl ProviderMessage {
             content: content.into(),
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,20 +59,67 @@ pub struct ProviderRequest {
     pub model: String,
     pub input: Vec<ProviderMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<TurnInputImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_messages: Vec<Value>,
     pub temperature: f32,
     pub max_output_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildContextObservation {
+    pub request_format: String,
+    pub message_count: usize,
+    pub image_count: usize,
+    pub tool_count: usize,
+    pub temperature: f32,
+    pub max_output_tokens: u32,
+    pub request_messages_text: String,
+    pub tool_definitions_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderResponse {
     pub output_text: String,
+    pub tool_call: Option<ToolCall>,
     pub reasoning_content: Option<String>,
     pub assistant_message: Option<Value>,
     pub provider_source: String,
     pub provider_mode: String,
     pub fallback_reason: Option<String>,
     pub token_usage: Option<TokenUsage>,
+}
+
+pub fn build_context_observation(
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+) -> BuildContextObservation {
+    let (request_format, request_messages_text, message_count) =
+        if !request.native_messages.is_empty() {
+            (
+                "provider-native".to_string(),
+                render_native_messages(&request.native_messages),
+                request.native_messages.len(),
+            )
+        } else {
+            (
+                "normalized-input".to_string(),
+                render_input_messages(&request.input),
+                request.input.len(),
+            )
+        };
+
+    BuildContextObservation {
+        request_format,
+        message_count,
+        image_count: request.images.len(),
+        tool_count: tools.len(),
+        temperature: request.temperature,
+        max_output_tokens: request.max_output_tokens,
+        request_messages_text,
+        tool_definitions_text: render_tool_definitions(tools),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,10 +134,26 @@ pub struct ProviderDecision {
     pub token_usage: Option<TokenUsage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct OpenAiStreamMessage {
     output_text: String,
+    tool_call: Option<ToolCall>,
     reasoning_content: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct OpenAiSseAccumulator {
+    output_text: String,
+    reasoning_content: String,
+    tool_calls: BTreeMap<usize, PartialOpenAiToolCall>,
+    saw_data: bool,
+}
+
+#[derive(Debug, Default)]
+struct PartialOpenAiToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +240,14 @@ impl ProviderManager {
         self.config.max_output_tokens
     }
 
+    pub fn context_window_tokens(&self) -> Option<u32> {
+        self.config.capabilities.context_window_tokens
+    }
+
+    pub fn supports_image_input(&self) -> bool {
+        self.config.capabilities.supports_image_input
+    }
+
     pub fn requires_provider_native_tool_flow(&self) -> bool {
         matches!(self.config.protocol, ProviderProtocol::OpenAi)
             && self.config.capabilities.supports_reasoning
@@ -259,24 +332,33 @@ impl ProviderManager {
         }
 
         match self.config.protocol {
-            ProviderProtocol::OpenAi => {
-                self.send_openai_tool_followup_request(
+            ProviderProtocol::OpenAi => self
+                .send_openai_tool_followup_request(
                     request,
                     tools,
                     assistant_message,
                     tool_call,
                     tool_result,
                 )
-            }
-            ProviderProtocol::Anthropic => {
-                self.send_anthropic_tool_followup_request(
-                    request,
-                    tools,
-                    assistant_message,
-                    tool_call,
-                    tool_result,
-                )
-            }
+                .or_else(|error| {
+                    provider_log(format!(
+                        "followup:local-fallback protocol=openai provider={} model={} reason={}",
+                        self.config.provider_name, request.model, error
+                    ));
+                    Ok(local_tool_followup_fallback_response(
+                        request,
+                        tool_call,
+                        tool_result,
+                        error,
+                    ))
+                }),
+            ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_request(
+                request,
+                tools,
+                assistant_message,
+                tool_call,
+                tool_result,
+            ),
         }
     }
 
@@ -327,14 +409,57 @@ impl ProviderManager {
         }
 
         match self.config.protocol {
-            ProviderProtocol::OpenAi => self.send_openai_tool_followup_stream_request(
+            ProviderProtocol::OpenAi => match self.send_openai_tool_followup_stream_request(
                 request,
                 tools,
                 assistant_message,
                 tool_call,
                 tool_result,
                 &mut on_delta,
-            ),
+            ) {
+                Ok(response) => Ok(response),
+                Err(stream_error) => {
+                    provider_log(format!(
+                        "followup:stream-fallback protocol=openai provider={} model={} reason={}",
+                        self.config.provider_name, request.model, stream_error
+                    ));
+                    let mut response = match self.send_openai_tool_followup_request(
+                        request,
+                        tools,
+                        assistant_message,
+                        tool_call,
+                        tool_result,
+                    ) {
+                        Ok(response) => response,
+                        Err(sync_error) => {
+                            provider_log(format!(
+                                "followup:stream-local-fallback protocol=openai provider={} model={} reason={}",
+                                self.config.provider_name, request.model, sync_error
+                            ));
+                            local_tool_followup_fallback_response(
+                                request,
+                                tool_call,
+                                tool_result,
+                                sync_error,
+                            )
+                        }
+                    };
+                    if let Some(reasoning_content) = response.reasoning_content.clone() {
+                        on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
+                    }
+                    on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
+                    response.provider_source = "provider_followup_stream_sync_fallback".to_string();
+                    response.fallback_reason = Some(match response.fallback_reason.take() {
+                        Some(existing) => format!(
+                            "stream_followup_failed: {}; {}",
+                            preview_text(&stream_error, 160),
+                            existing
+                        ),
+                        None => stream_error,
+                    });
+                    Ok(response)
+                }
+            },
             ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_stream_request(
                 request,
                 tools,
@@ -375,7 +500,7 @@ impl ProviderManager {
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": false,
-                "tool_choice": "none",
+                "tool_choice": "auto",
                 "tools": openai_tools_payload(tools)
             }),
             &self.config,
@@ -383,11 +508,15 @@ impl ProviderManager {
         let body = apply_openai_tool_capability(body, tools, &self.config);
         let payload = self.post_openai_json(&endpoint, &body)?;
         let message = first_openai_message(&payload)?;
-        let output_text = extract_openai_message_text(message)
-            .ok_or_else(|| "openai tool follow-up missing text".to_string())?;
+        let output_text = extract_openai_message_text(message).unwrap_or_default();
+        let tool_call = extract_openai_tool_call(message);
+        if output_text.trim().is_empty() && tool_call.is_none() {
+            return Err("openai tool follow-up missing text or tool call".to_string());
+        }
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
             assistant_message: Some(normalize_openai_assistant_message(message)),
             provider_source: "provider_followup_sync".to_string(),
@@ -433,11 +562,12 @@ impl ProviderManager {
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": true,
-                "tool_choice": "none",
+                "tool_choice": "auto",
                 "tools": openai_tools_payload(tools)
             }),
             &self.config,
         );
+        let body = apply_openai_tool_capability(body, tools, &self.config);
 
         self.stream_openai_request(&endpoint, &body, request, on_delta)
     }
@@ -472,13 +602,30 @@ impl ProviderManager {
         );
         let payload = self.post_anthropic_json(&endpoint, &body)?;
 
-        let output_text = extract_anthropic_output_text(&payload)
-            .ok_or_else(|| "anthropic tool follow-up missing text".to_string())?;
+        let output_text = extract_anthropic_output_text(&payload).unwrap_or_default();
+        let content = payload
+            .get("content")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let tool_call = extract_anthropic_tool_call(&content);
+        if output_text.trim().is_empty() && tool_call.is_none() {
+            return Err("anthropic tool follow-up missing text or tool call".to_string());
+        }
+        let assistant_message = match tool_call.as_ref() {
+            Some(tool_call) => Some(provider_native_assistant_tool_call_message(
+                text_if_present(&output_text),
+                None,
+                tool_call,
+            )),
+            None => Some(provider_native_assistant_message(&output_text)),
+        };
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_call,
             reasoning_content: None,
-            assistant_message: None,
+            assistant_message,
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -536,17 +683,28 @@ impl ProviderManager {
     where
         F: FnMut(ProviderStreamChunk),
     {
-        let raw_text = self.post_openai_stream_text(endpoint, body)?;
-        let message = collect_openai_sse_message(&raw_text, on_delta)?;
+        let response = self.post_openai_stream_response(endpoint, body)?;
+        let message =
+            collect_openai_sse_message_from_response(response, Instant::now(), endpoint, on_delta)?;
         let output_text = message.output_text.clone();
+        let assistant_message = if let Some(tool_call) = message.tool_call.as_ref() {
+            Some(provider_native_assistant_tool_call_message(
+                text_if_present(&output_text),
+                message.reasoning_content.as_deref(),
+                tool_call,
+            ))
+        } else {
+            Some(provider_native_assistant_message_with_reasoning(
+                &output_text,
+                message.reasoning_content.as_deref(),
+            ))
+        };
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_call: message.tool_call,
             reasoning_content: message.reasoning_content.clone(),
-            assistant_message: Some(provider_native_assistant_message_with_reasoning(
-                &output_text,
-                message.reasoning_content.as_deref(),
-            )),
+            assistant_message,
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -554,8 +712,16 @@ impl ProviderManager {
         })
     }
 
-    fn post_openai_stream_text(&self, endpoint: &str, body: &Value) -> Result<String, String> {
-        let client = build_http_client(Duration::from_secs(45))?;
+    fn post_openai_stream_response(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::blocking::Response, String> {
+        let client = build_streaming_http_client(
+            Duration::from_secs(15),
+            Duration::from_secs(180),
+            Duration::from_secs(180),
+        )?;
         let started_at = Instant::now();
 
         let response = client
@@ -573,11 +739,11 @@ impl ProviderManager {
             })?;
 
         let status = response.status();
-        let text = response.text().map_err(|error| {
-            format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
-        })?;
-
         if !status.is_success() {
+            let text = response.text().map_err(|error| {
+                format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
+            })?;
+
             return Err(format!(
                 "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
                 status,
@@ -586,7 +752,7 @@ impl ProviderManager {
             ));
         }
 
-        Ok(text)
+        Ok(response)
     }
 
     fn stream_anthropic_request<F>(
@@ -600,14 +766,33 @@ impl ProviderManager {
         F: FnMut(ProviderStreamChunk),
     {
         let payload = self.post_anthropic_json(endpoint, body)?;
-        let output_text = extract_anthropic_output_text(&payload)
-            .ok_or_else(|| "anthropic stream follow-up missing text".to_string())?;
-        on_delta(ProviderStreamChunk::Text(output_text.clone()));
+        let output_text = extract_anthropic_output_text(&payload).unwrap_or_default();
+        let content = payload
+            .get("content")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let tool_call = extract_anthropic_tool_call(&content);
+        if output_text.trim().is_empty() && tool_call.is_none() {
+            return Err("anthropic stream follow-up missing text or tool call".to_string());
+        }
+        if !output_text.is_empty() {
+            on_delta(ProviderStreamChunk::Text(output_text.clone()));
+        }
+        let assistant_message = match tool_call.as_ref() {
+            Some(tool_call) => Some(provider_native_assistant_tool_call_message(
+                text_if_present(&output_text),
+                None,
+                tool_call,
+            )),
+            None => Some(provider_native_assistant_message(&output_text)),
+        };
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
+            tool_call,
             reasoning_content: None,
-            assistant_message: Some(provider_native_assistant_message(&output_text)),
+            assistant_message,
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -704,7 +889,7 @@ impl ProviderManager {
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_user_messages(&request.input),
+                "messages": anthropic_user_messages(request),
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "tools": anthropic_tools_payload(tools),
@@ -834,7 +1019,6 @@ impl ProviderManager {
             )
         })
     }
-
 }
 
 impl ProviderClient for ProviderManager {
@@ -912,7 +1096,7 @@ impl ProviderClient for ProviderManager {
     }
 
     /*
-    */
+     */
     #[cfg(any())]
     fn openai_stream_message_collects_content_and_reasoning() {
         let raw_text = concat!(
@@ -943,6 +1127,25 @@ fn build_http_client(timeout: Duration) -> Result<Client, String> {
         .pool_max_idle_per_host(0)
         .build()
         .map_err(|error| format!("创建 HTTP client 失败：{}", error))
+}
+
+fn build_streaming_http_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    timeout: Duration,
+) -> Result<Client, String> {
+    let effective_timeout = if read_timeout > timeout {
+        read_timeout
+    } else {
+        timeout
+    };
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(effective_timeout)
+        .http1_only()
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|error| format!("创建流式 HTTP client 失败: {}", error))
 }
 
 fn format_request_error(prefix: &str, error: &reqwest::Error, elapsed: Duration) -> String {
@@ -988,7 +1191,140 @@ fn format_request_error(prefix: &str, error: &reqwest::Error, elapsed: Duration)
     format!("{}：{}；{}", prefix, error, details.join("；"))
 }
 
-fn collect_openai_sse_message<F>(raw_text: &str, on_delta: &mut F) -> Result<OpenAiStreamMessage, String>
+impl OpenAiSseAccumulator {
+    fn push_payload<F>(&mut self, payload: &str, on_delta: &mut F) -> Result<bool, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        if payload == "[DONE]" {
+            return Ok(true);
+        }
+
+        self.saw_data = true;
+        let value = serde_json::from_str::<Value>(payload).map_err(|error| {
+            format!(
+                "解析 provider SSE chunk 失败: {}; 原始 chunk: {}",
+                error, payload
+            )
+        })?;
+
+        let delta = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("delta"));
+
+        let delta_text = delta
+            .and_then(extract_openai_delta_content_text)
+            .unwrap_or_default();
+        let delta_reasoning = delta
+            .and_then(extract_openai_delta_reasoning_content)
+            .unwrap_or_default();
+        if let Some(delta) = delta {
+            merge_openai_stream_tool_calls(&mut self.tool_calls, delta);
+        }
+
+        if !delta_text.is_empty() {
+            self.output_text.push_str(&delta_text);
+            on_delta(ProviderStreamChunk::Text(delta_text));
+        }
+
+        if !delta_reasoning.is_empty() {
+            self.reasoning_content.push_str(&delta_reasoning);
+            on_delta(ProviderStreamChunk::Reasoning(delta_reasoning));
+        }
+
+        Ok(false)
+    }
+
+    fn finish(self, response_preview: &str) -> Result<OpenAiStreamMessage, String> {
+        if !self.saw_data {
+            return Err(format!(
+                "provider 流式返回中未找到 SSE data 事件；响应预览: {}",
+                response_preview
+            ));
+        }
+
+        let tool_call = self
+            .tool_calls
+            .into_iter()
+            .next()
+            .and_then(|(_, partial)| partial_openai_tool_call_to_tool_call(partial));
+
+        if self.output_text.is_empty() && tool_call.is_none() {
+            return Err(format!(
+                "provider 流式返回中未提取到文本内容；响应预览: {}",
+                response_preview
+            ));
+        }
+
+        Ok(OpenAiStreamMessage {
+            output_text: self.output_text,
+            tool_call,
+            reasoning_content: if self.reasoning_content.trim().is_empty() {
+                None
+            } else {
+                Some(self.reasoning_content)
+            },
+        })
+    }
+}
+
+fn collect_openai_sse_message_from_reader<R, F>(
+    reader: R,
+    response_preview: &str,
+    on_delta: &mut F,
+) -> Result<OpenAiStreamMessage, String>
+where
+    R: BufRead,
+    F: FnMut(ProviderStreamChunk),
+{
+    let mut accumulator = OpenAiSseAccumulator::default();
+
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("读取 provider SSE 数据失败: {}", error))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Some(data) = trimmed.strip_prefix("data:") else {
+            continue;
+        };
+
+        if accumulator.push_payload(data.trim(), on_delta)? {
+            break;
+        }
+    }
+
+    accumulator.finish(response_preview)
+}
+
+fn collect_openai_sse_message_from_response<F>(
+    response: reqwest::blocking::Response,
+    started_at: Instant,
+    endpoint: &str,
+    on_delta: &mut F,
+) -> Result<OpenAiStreamMessage, String>
+where
+    F: FnMut(ProviderStreamChunk),
+{
+    let reader = BufReader::new(response);
+    collect_openai_sse_message_from_reader(reader, endpoint, on_delta).map_err(|error| {
+        format!(
+            "解析 provider SSE 流失败: {}; elapsed={}ms; endpoint={}",
+            error,
+            started_at.elapsed().as_millis(),
+            endpoint
+        )
+    })
+}
+
+#[cfg(test)]
+fn collect_openai_sse_message<F>(
+    raw_text: &str,
+    on_delta: &mut F,
+) -> Result<OpenAiStreamMessage, String>
 where
     F: FnMut(ProviderStreamChunk),
 {
@@ -1059,6 +1395,7 @@ where
 
     Ok(OpenAiStreamMessage {
         output_text: combined,
+        tool_call: None,
         reasoning_content: if reasoning.trim().is_empty() {
             None
         } else {
@@ -1238,7 +1575,11 @@ fn normalize_openai_assistant_message(message: &Value) -> Value {
         Some(Value::String(text)) => Value::String(text.clone()),
         Some(Value::Array(items)) => Value::Array(items.clone()),
         Some(Value::Null) | None => {
-            if tool_calls.as_ref().and_then(Value::as_array).map(|calls| !calls.is_empty()).unwrap_or(false)
+            if tool_calls
+                .as_ref()
+                .and_then(Value::as_array)
+                .map(|calls| !calls.is_empty())
+                .unwrap_or(false)
             {
                 Value::String(extract_openai_message_text(message).unwrap_or_default())
             } else {
@@ -1251,9 +1592,7 @@ fn normalize_openai_assistant_message(message: &Value) -> Value {
     let reasoning_value = message
         .get("reasoning_content")
         .cloned()
-        .or_else(|| {
-            extract_openai_message_reasoning_content(message).map(Value::String)
-        })
+        .or_else(|| extract_openai_message_reasoning_content(message).map(Value::String))
         .unwrap_or(Value::Null);
 
     let mut normalized = json!({
@@ -1334,7 +1673,64 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
         call_id: id,
         name,
         arguments,
+        plan: None,
     })
+}
+
+fn merge_openai_stream_tool_calls(
+    tool_calls: &mut BTreeMap<usize, PartialOpenAiToolCall>,
+    delta: &Value,
+) {
+    let Some(items) = delta.get("tool_calls").and_then(Value::as_array) else {
+        return;
+    };
+
+    for item in items {
+        let index = item
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0);
+        let partial = tool_calls.entry(index).or_default();
+
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            partial.id = Some(id.to_string());
+        }
+
+        if let Some(function) = item.get("function") {
+            if let Some(name) = function.get("name").and_then(Value::as_str) {
+                partial.name = Some(name.to_string());
+            }
+
+            if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                partial.arguments.push_str(arguments);
+            }
+        }
+    }
+}
+
+fn partial_openai_tool_call_to_tool_call(partial: PartialOpenAiToolCall) -> Option<ToolCall> {
+    let name = openai_original_tool_name(partial.name.as_deref()?);
+    let arguments = if partial.arguments.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str::<Value>(&partial.arguments).unwrap_or_else(|_| json!({}))
+    };
+
+    Some(ToolCall {
+        call_id: partial.id,
+        name,
+        arguments,
+        plan: None,
+    })
+}
+
+fn text_if_present(text: &str) -> Option<&str> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn anthropic_system_text(input: &[ProviderMessage]) -> String {
@@ -1346,14 +1742,30 @@ fn anthropic_system_text(input: &[ProviderMessage]) -> String {
         .join("\n\n")
 }
 
-fn anthropic_user_messages(input: &[ProviderMessage]) -> Vec<Value> {
-    input
+fn anthropic_user_messages(request: &ProviderRequest) -> Vec<Value> {
+    let user_indexes = request
+        .input
         .iter()
-        .filter(|message| matches!(message.role, ProviderRole::User))
-        .map(|message| {
+        .enumerate()
+        .filter_map(|(index, message)| {
+            if matches!(message.role, ProviderRole::User) {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let last_user_index = user_indexes.last().copied();
+
+    request
+        .input
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| matches!(message.role, ProviderRole::User))
+        .map(|(index, message)| {
             json!({
                 "role": "user",
-                "content": message.content
+                "content": anthropic_user_content(message.content.as_str(), is_last_user_with_images(index, last_user_index, &request.images), &request.images)
             })
         })
         .collect::<Vec<_>>()
@@ -1378,6 +1790,7 @@ fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
         call_id: block.get("id").and_then(Value::as_str).map(str::to_string),
         name: block.get("name").and_then(Value::as_str)?.to_string(),
         arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+        plan: None,
     })
 }
 
@@ -1389,15 +1802,60 @@ fn openai_messages_with_tool_result(
 ) -> Vec<Value> {
     let mut messages = openai_request_messages(request);
 
-    messages.push(
-        assistant_message
-            .map(normalize_openai_assistant_message)
-            .unwrap_or_else(|| provider_native_assistant_tool_call_message(None, None, tool_call)),
-    );
+    messages.push(openai_assistant_message_for_tool_result(
+        assistant_message,
+        tool_call,
+    ));
 
-    messages.push(provider_native_tool_result_message(tool_call, tool_result));
+    messages.push(openai_followup_tool_result_message(tool_call, tool_result));
 
     messages
+}
+
+fn openai_assistant_message_for_tool_result(
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+) -> Value {
+    let Some(message) = assistant_message else {
+        return provider_native_assistant_tool_call_message(None, None, tool_call);
+    };
+
+    let mut normalized = normalize_openai_assistant_message(message);
+    let filtered_tool_calls = normalized
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter(|call| openai_tool_call_matches_executed_call(call, tool_call))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if filtered_tool_calls.is_empty() {
+        return provider_native_assistant_tool_call_message(
+            normalized.get("content").and_then(Value::as_str),
+            normalized.get("reasoning_content").and_then(Value::as_str),
+            tool_call,
+        );
+    }
+
+    normalized["tool_calls"] = Value::Array(filtered_tool_calls);
+    normalized
+}
+
+fn openai_tool_call_matches_executed_call(call: &Value, executed_call: &ToolCall) -> bool {
+    if let Some(executed_call_id) = executed_call.call_id.as_deref() {
+        return call.get("id").and_then(Value::as_str) == Some(executed_call_id);
+    }
+
+    call.get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+        .map(openai_original_tool_name)
+        .as_deref()
+        == Some(executed_call.name.as_str())
 }
 
 fn openai_request_messages(request: &ProviderRequest) -> Vec<Value> {
@@ -1405,16 +1863,98 @@ fn openai_request_messages(request: &ProviderRequest) -> Vec<Value> {
         return request.native_messages.clone();
     }
 
+    let user_indexes = request
+        .input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            if matches!(message.role, ProviderRole::User) {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let last_user_index = user_indexes.last().copied();
+
     request
         .input
         .iter()
-        .map(|message| {
+        .enumerate()
+        .map(|(index, message)| {
             json!({
                 "role": to_chat_role(&message.role),
-                "content": message.content
+                "content": openai_message_content(message.content.as_str(), is_last_user_with_images(index, last_user_index, &request.images), &request.images)
             })
         })
         .collect::<Vec<_>>()
+}
+
+fn is_last_user_with_images(
+    index: usize,
+    last_user_index: Option<usize>,
+    images: &[TurnInputImage],
+) -> bool {
+    !images.is_empty() && Some(index) == last_user_index
+}
+
+fn openai_message_content(content: &str, include_images: bool, images: &[TurnInputImage]) -> Value {
+    if !include_images {
+        return Value::String(content.to_string());
+    }
+
+    Value::Array(openai_user_content_blocks(content, images))
+}
+
+fn openai_user_content_blocks(content: &str, images: &[TurnInputImage]) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    if !content.trim().is_empty() {
+        blocks.push(json!({
+            "type": "text",
+            "text": content
+        }));
+    }
+
+    blocks.extend(images.iter().map(|image| {
+        json!({
+            "type": "image_url",
+            "image_url": {
+                "url": image.data_url
+            }
+        })
+    }));
+    blocks
+}
+
+fn anthropic_user_content(content: &str, include_images: bool, images: &[TurnInputImage]) -> Value {
+    if !include_images {
+        return Value::String(content.to_string());
+    }
+
+    let mut blocks = Vec::new();
+    if !content.trim().is_empty() {
+        blocks.push(json!({
+            "type": "text",
+            "text": content
+        }));
+    }
+
+    for image in images {
+        let Some(base64_data) = image.base64_data() else {
+            continue;
+        };
+
+        blocks.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.mime_type,
+                "data": base64_data
+            }
+        }));
+    }
+
+    Value::Array(blocks)
 }
 
 pub fn provider_native_user_message(content: &str) -> Value {
@@ -1461,7 +2001,10 @@ pub fn provider_native_assistant_tool_call_message(
     })
 }
 
-pub fn provider_native_tool_result_message(tool_call: &ToolCall, tool_result: &ToolResult) -> Value {
+pub fn provider_native_tool_result_message(
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+) -> Value {
     json!({
         "role": "tool",
         "tool_call_id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
@@ -1469,12 +2012,186 @@ pub fn provider_native_tool_result_message(tool_call: &ToolCall, tool_result: &T
     })
 }
 
+const OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS: usize = 12_000;
+const OPENAI_TOOL_RESULT_HEAD_CHARS: usize = 4_500;
+const OPENAI_TOOL_RESULT_TAIL_CHARS: usize = 2_500;
+const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
+
+fn openai_followup_tool_result_message(tool_call: &ToolCall, tool_result: &ToolResult) -> Value {
+    json!({
+        "role": "tool",
+        "tool_call_id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
+        "content": openai_followup_tool_result_content(tool_result)
+    })
+}
+
+fn openai_followup_tool_result_content(tool_result: &ToolResult) -> String {
+    let output_chars = tool_result.output.chars().count();
+    if output_chars <= OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS {
+        return tool_result.output.clone();
+    }
+
+    let total_lines = tool_result.output.lines().count();
+    let head = take_chars(
+        &tool_result.output,
+        OPENAI_TOOL_RESULT_HEAD_CHARS.min(output_chars),
+    );
+    let remaining_chars = output_chars.saturating_sub(head.chars().count());
+    let tail = take_last_chars(
+        &tool_result.output,
+        OPENAI_TOOL_RESULT_TAIL_CHARS.min(remaining_chars),
+    );
+    let payload = json!({
+        "tool_name": tool_result.tool_name,
+        "status": tool_result.status,
+        "compression": {
+            "applied": true,
+            "strategy": "head_tail_excerpt",
+            "reason": "provider_followup_size_guard",
+            "original_chars": output_chars,
+            "original_lines": total_lines,
+            "included_head_chars": head.chars().count(),
+            "included_tail_chars": tail.chars().count(),
+            "omitted_chars": output_chars.saturating_sub(head.chars().count() + tail.chars().count())
+        },
+        "summary": summarize_large_tool_output(&tool_result.output),
+        "head": head,
+        "tail": tail
+    });
+
+    serde_json::to_string(&payload).unwrap_or_else(|_| {
+        format!(
+            "{{\"tool_name\":\"{}\",\"status\":\"{}\",\"compression\":{{\"applied\":true,\"reason\":\"provider_followup_size_guard\",\"original_chars\":{}}}}}",
+            escape_json_fragment(&tool_result.tool_name),
+            escape_json_fragment(&tool_result.status),
+            output_chars
+        )
+    })
+}
+
+fn local_tool_followup_fallback_response(
+    request: &ProviderRequest,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+    error: String,
+) -> ProviderResponse {
+    let fallback_reason = format!("provider_followup_failed: {}", preview_text(&error, 240));
+    let summary = local_tool_followup_summary(tool_result);
+    let output_text = format!(
+        "工具 `{}` 已执行完成，但 provider 在整合工具结果时失败。\n失败原因：{}\n\n本地兜底摘要：{}\n\n结果预览：\n{}",
+        tool_call.name,
+        preview_text(&error, 240),
+        summary,
+        preview_text(&tool_result.output, 2200)
+    );
+
+    ProviderResponse {
+        output_text: output_text.clone(),
+        tool_call: None,
+        reasoning_content: None,
+        assistant_message: Some(provider_native_assistant_message(&output_text)),
+        provider_source: "provider_followup_local_fallback".to_string(),
+        provider_mode: "fallback".to_string(),
+        fallback_reason: Some(fallback_reason),
+        token_usage: Some(estimate_token_usage(request, &output_text)),
+    }
+}
+
+fn local_tool_followup_summary(tool_result: &ToolResult) -> String {
+    if let Ok(value) = serde_json::from_str::<Value>(&tool_result.output) {
+        if let Some(summary_text) = value
+            .get("summary")
+            .and_then(|summary| summary.get("text"))
+            .and_then(Value::as_str)
+        {
+            return summary_text.to_string();
+        }
+
+        if let Some(plan_summary) = value
+            .get("plan")
+            .and_then(|plan| plan.get("summary"))
+            .and_then(Value::as_str)
+        {
+            return plan_summary.to_string();
+        }
+
+        return summarize_json_value(&value).to_string();
+    }
+
+    format!(
+        "status={}；tool={}；chars={}",
+        tool_result.status,
+        tool_result.tool_name,
+        tool_result.output.chars().count()
+    )
+}
+
+fn summarize_large_tool_output(output: &str) -> Value {
+    if let Ok(value) = serde_json::from_str::<Value>(output) {
+        return summarize_json_value(&value);
+    }
+
+    let first_non_empty_line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+
+    json!({
+        "kind": "text",
+        "first_line_preview": preview_text(first_non_empty_line, OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS)
+    })
+}
+
+fn summarize_json_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => json!({
+            "kind": "json_object",
+            "key_count": map.len(),
+            "keys": map.keys().take(12).cloned().collect::<Vec<_>>()
+        }),
+        Value::Array(items) => json!({
+            "kind": "json_array",
+            "length": items.len(),
+            "first_item_kind": items.first().map(json_value_kind).unwrap_or("empty")
+        }),
+        Value::String(_) => json!({ "kind": "json_string" }),
+        Value::Number(_) => json!({ "kind": "json_number" }),
+        Value::Bool(_) => json!({ "kind": "json_boolean" }),
+        Value::Null => json!({ "kind": "json_null" }),
+    }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "object",
+        Value::Array(_) => "array",
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Null => "null",
+    }
+}
+
+fn take_chars(text: &str, count: usize) -> String {
+    text.chars().take(count).collect()
+}
+
+fn take_last_chars(text: &str, count: usize) -> String {
+    let total = text.chars().count();
+    text.chars().skip(total.saturating_sub(count)).collect()
+}
+
+fn escape_json_fragment(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn anthropic_messages_with_tool_result(
     request: &ProviderRequest,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Vec<Value> {
-    let mut messages = anthropic_user_messages(&request.input);
+    let mut messages = anthropic_user_messages(request);
     messages.push(json!({
         "role": "assistant",
         "content": [
@@ -1699,11 +2416,19 @@ fn extract_anthropic_delta_text(payload: &Value) -> Option<String> {
 }
 
 fn estimate_token_usage(request: &ProviderRequest, output_text: &str) -> TokenUsage {
-    let input_chars = request
-        .input
-        .iter()
-        .map(|message| message.content.chars().count())
-        .sum::<usize>();
+    let input_chars = if !request.native_messages.is_empty() {
+        request
+            .native_messages
+            .iter()
+            .map(estimate_native_message_chars)
+            .sum::<usize>()
+    } else {
+        request
+            .input
+            .iter()
+            .map(|message| message.content.chars().count())
+            .sum::<usize>()
+    };
     let output_chars = output_text.chars().count();
 
     normalize_token_usage(TokenUsage {
@@ -1721,6 +2446,40 @@ fn estimate_tokens_from_chars(char_count: usize) -> u64 {
     }
 }
 
+fn estimate_native_message_chars(message: &Value) -> usize {
+    if let Some(content) = message.get("content").and_then(Value::as_str) {
+        return content.chars().count();
+    }
+
+    if let Some(content) = message.get("content").and_then(Value::as_array) {
+        return content.iter().map(estimate_native_content_chars).sum();
+    }
+
+    message.to_string().chars().count()
+}
+
+fn estimate_native_content_chars(block: &Value) -> usize {
+    if block.get("type").and_then(Value::as_str) == Some("image")
+        || block.get("type").and_then(Value::as_str) == Some("image_url")
+    {
+        return 1024;
+    }
+
+    if let Some(text) = block.get("text").and_then(Value::as_str) {
+        return text.chars().count();
+    }
+
+    if let Some(text) = block
+        .get("text")
+        .and_then(|value| value.get("value"))
+        .and_then(Value::as_str)
+    {
+        return text.chars().count();
+    }
+
+    block.to_string().chars().count()
+}
+
 fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
     let total_tokens =
         usage
@@ -1735,6 +2494,66 @@ fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
         output_tokens: usage.output_tokens,
         total_tokens,
     }
+}
+
+fn render_input_messages(messages: &[ProviderMessage]) -> String {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            format!(
+                "[{}] {}\n{}",
+                index,
+                to_chat_role(&message.role),
+                message.content.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_native_messages(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let content = match message.get("content") {
+                Some(Value::String(text)) => text.trim().to_string(),
+                Some(other) => {
+                    serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())
+                }
+                None => message.to_string(),
+            };
+            format!("[{}] {}\n{}", index, role, content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_tool_definitions(tools: &[ToolDefinition]) -> String {
+    if tools.is_empty() {
+        return "none".to_string();
+    }
+
+    tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            format!(
+                "[{}] {}\ndescription: {}\nschema:\n{}",
+                index,
+                tool.name,
+                tool.description,
+                serde_json::to_string_pretty(&tool.input_schema)
+                    .unwrap_or_else(|_| tool.input_schema.to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn provider_log(message: String) {
@@ -1764,6 +2583,76 @@ mod tests {
     use super::*;
     use crate::agent::config::ProviderModelCapabilities;
     use crate::agent::config::ResolvedProviderSelection;
+    use crate::agent::input::TurnInputImage;
+
+    #[test]
+    fn openai_request_messages_encode_image_blocks_for_last_user_message() {
+        let request = ProviderRequest {
+            model: "gpt-5.4".to_string(),
+            input: vec![
+                ProviderMessage::developer("Keep answers short."),
+                ProviderMessage::user("请描述这张图"),
+            ],
+            images: vec![TurnInputImage {
+                data_url: "data:image/png;base64,Zm9v".to_string(),
+                mime_type: "image/png".to_string(),
+                name: Some("demo.png".to_string()),
+            }],
+            native_messages: Vec::new(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+
+        let messages = openai_request_messages(&request);
+        let content = messages[1]
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("last user message should use content blocks");
+
+        assert_eq!(content[0].get("type").and_then(Value::as_str), Some("text"));
+        assert_eq!(
+            content[1]
+                .get("image_url")
+                .and_then(|value| value.get("url"))
+                .and_then(Value::as_str),
+            Some("data:image/png;base64,Zm9v")
+        );
+    }
+
+    #[test]
+    fn anthropic_user_messages_encode_base64_image_blocks_for_last_user_message() {
+        let request = ProviderRequest {
+            model: "claude-3-7-sonnet".to_string(),
+            input: vec![ProviderMessage::user("请看图回答")],
+            images: vec![TurnInputImage {
+                data_url: "data:image/png;base64,Zm9v".to_string(),
+                mime_type: "image/png".to_string(),
+                name: Some("demo.png".to_string()),
+            }],
+            native_messages: Vec::new(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+
+        let messages = anthropic_user_messages(&request);
+        let content = messages[0]
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("anthropic user message should use content blocks");
+
+        assert_eq!(content[0].get("type").and_then(Value::as_str), Some("text"));
+        assert_eq!(
+            content[1].get("type").and_then(Value::as_str),
+            Some("image")
+        );
+        assert_eq!(
+            content[1]
+                .get("source")
+                .and_then(|value| value.get("data"))
+                .and_then(Value::as_str),
+            Some("Zm9v")
+        );
+    }
 
     #[test]
     fn tool_capability_disabled_removes_openai_tool_fields() {
@@ -1889,7 +2778,10 @@ mod tests {
     fn openai_tool_followup_replays_reasoning_content() {
         let request = ProviderRequest {
             model: "deepseek-v4-pro".to_string(),
-            input: vec![ProviderMessage::user("检查 src-tauri/src/agent/provider.rs")],
+            input: vec![ProviderMessage::user(
+                "检查 src-tauri/src/agent/provider.rs",
+            )],
+            images: Vec::new(),
             native_messages: Vec::new(),
             temperature: 0.2,
             max_output_tokens: 1024,
@@ -1898,6 +2790,7 @@ mod tests {
             call_id: Some("call_123".to_string()),
             name: "workspace.read_file".to_string(),
             arguments: json!({ "path": "src-tauri/src/agent/provider.rs" }),
+            plan: None,
         };
         let tool_result = ToolResult {
             tool_name: "workspace.read_file".to_string(),
@@ -1919,10 +2812,293 @@ mod tests {
 
         assert_eq!(messages.len(), 3);
         assert_eq!(
-            messages[1]
-                .get("reasoning_content")
-                .and_then(Value::as_str),
+            messages[1].get("reasoning_content").and_then(Value::as_str),
             Some("先确认 provider 协议分支，再继续调用工具。")
         );
+    }
+
+    #[test]
+    fn openai_tool_followup_filters_unexecuted_parallel_tool_calls() {
+        let request = ProviderRequest {
+            model: "gpt-5.4".to_string(),
+            input: vec![ProviderMessage::user("检查 capabilities 目录")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+        let tool_call = ToolCall {
+            call_id: Some("call_path_info".to_string()),
+            name: "workspace_path_info".to_string(),
+            arguments: json!({ "path": "capabilities" }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace_path_info".to_string(),
+            status: "ok".to_string(),
+            output: "{\"kind\":\"directory\"}".to_string(),
+            duration_ms: 10,
+        };
+        let assistant_message = json!({
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "需要查看目录信息。",
+            "tool_calls": [
+                {
+                    "id": "call_path_info",
+                    "type": "function",
+                    "function": {
+                        "name": "workspace_path_info",
+                        "arguments": "{\"path\":\"capabilities\"}"
+                    }
+                },
+                {
+                    "id": "call_list_files",
+                    "type": "function",
+                    "function": {
+                        "name": "workspace_list_files",
+                        "arguments": "{\"path\":\"capabilities\"}"
+                    }
+                }
+            ]
+        });
+
+        let messages = openai_messages_with_tool_result(
+            &request,
+            Some(&assistant_message),
+            &tool_call,
+            &tool_result,
+        );
+
+        let assistant_tool_calls = messages[1]
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .expect("assistant tool calls");
+        assert_eq!(assistant_tool_calls.len(), 1);
+        assert_eq!(
+            assistant_tool_calls[0].get("id").and_then(Value::as_str),
+            Some("call_path_info")
+        );
+        assert_eq!(
+            messages[2].get("tool_call_id").and_then(Value::as_str),
+            Some("call_path_info")
+        );
+        assert!(!serde_json::to_string(&messages)
+            .expect("messages serialize")
+            .contains("call_list_files"));
+    }
+
+    #[test]
+    fn openai_tool_followup_keeps_small_tool_output_raw() {
+        let tool_call = ToolCall {
+            call_id: Some("call_small".to_string()),
+            name: "workspace.read_file".to_string(),
+            arguments: json!({ "path": "src/main.rs" }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace.read_file".to_string(),
+            status: "ok".to_string(),
+            output: "small output".to_string(),
+            duration_ms: 3,
+        };
+
+        let message = openai_followup_tool_result_message(&tool_call, &tool_result);
+
+        assert_eq!(
+            message.get("content").and_then(Value::as_str),
+            Some("small output")
+        );
+    }
+
+    #[test]
+    fn openai_tool_followup_truncates_large_tool_output() {
+        let tool_call = ToolCall {
+            call_id: Some("call_large".to_string()),
+            name: "workspace.gather_context".to_string(),
+            arguments: json!({ "paths": ["src"] }),
+            plan: None,
+        };
+        let large_output = format!(
+            "{{\"files\":\"{}\",\"tail\":\"{}\"}}",
+            "a".repeat(OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS),
+            "z".repeat(4_000)
+        );
+        let tool_result = ToolResult {
+            tool_name: "workspace.gather_context".to_string(),
+            status: "ok".to_string(),
+            output: large_output.clone(),
+            duration_ms: 42,
+        };
+
+        let message = openai_followup_tool_result_message(&tool_call, &tool_result);
+        let content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .expect("content string");
+        let payload: Value = serde_json::from_str(content).expect("compressed json payload");
+
+        assert!(content.chars().count() < large_output.chars().count());
+        assert_eq!(
+            payload
+                .get("compression")
+                .and_then(|value| value.get("applied"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            payload
+                .get("summary")
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str),
+            Some("json_object")
+        );
+        assert_eq!(
+            payload
+                .get("summary")
+                .and_then(|value| value.get("keys"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(payload.get("head").and_then(Value::as_str).is_some());
+        assert!(payload.get("tail").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn openai_sse_reader_streams_reasoning_and_text_in_order() {
+        let raw_text = concat!(
+            ": keep-alive\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先看工具输出。\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"第一段\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"第二段\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut deltas = Vec::new();
+
+        let message = collect_openai_sse_message_from_reader(
+            std::io::Cursor::new(raw_text.as_bytes()),
+            "unit-test",
+            &mut |delta| deltas.push(delta),
+        )
+        .expect("stream message should parse");
+
+        assert_eq!(message.output_text, "第一段第二段");
+        assert_eq!(message.reasoning_content.as_deref(), Some("先看工具输出。"));
+        assert_eq!(
+            deltas,
+            vec![
+                ProviderStreamChunk::Reasoning("先看工具输出。".to_string()),
+                ProviderStreamChunk::Text("第一段".to_string()),
+                ProviderStreamChunk::Text("第二段".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_sse_string_collector_still_parses_full_payload() {
+        let raw_text = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"alpha\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"beta\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut deltas = Vec::new();
+
+        let message = collect_openai_sse_message(raw_text, &mut |delta| deltas.push(delta))
+            .expect("string helper should parse");
+
+        assert_eq!(message.output_text, "alphabeta");
+        assert_eq!(message.reasoning_content, None);
+        assert_eq!(
+            deltas,
+            vec![
+                ProviderStreamChunk::Text("alpha".to_string()),
+                ProviderStreamChunk::Text("beta".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_reasoning_tool_followup_stream_attempts_live_stream_before_fallback() {
+        let config = ResolvedProviderSelection {
+            requested_name: "ppx".to_string(),
+            provider_name: "ppx".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            api_key_env_var: "PPX_API_KEY".to_string(),
+            api_key: Some("test".to_string()),
+            model: "gpt-5.4".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 8192,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+            },
+        };
+        let manager = ProviderManager::new(config);
+        let request = ProviderRequest {
+            model: "gpt-5.4".to_string(),
+            input: vec![ProviderMessage::user("继续总结工具结果")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+        let tool_call = ToolCall {
+            call_id: Some("call_followup".to_string()),
+            name: "workspace.gather_context".to_string(),
+            arguments: json!({ "paths": ["src-tauri/src/agent/provider.rs"] }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace.gather_context".to_string(),
+            status: "ok".to_string(),
+            output: "{\"summary\":{\"text\":\"已读取 provider follow-up 相关实现\"}}".to_string(),
+            duration_ms: 18,
+        };
+        let mut deltas = Vec::new();
+
+        let response = manager
+            .continue_with_tool_result_stream(
+                &request,
+                &[ToolDefinition {
+                    name: "workspace.gather_context",
+                    description: "gather context",
+                    input_schema: json!({ "type": "object" }),
+                }],
+                None,
+                &tool_call,
+                &tool_result,
+                |delta| deltas.push(delta),
+            )
+            .expect("follow-up should degrade after stream failure");
+
+        assert_eq!(
+            response.provider_source,
+            "provider_followup_stream_sync_fallback"
+        );
+        assert_eq!(response.provider_mode, "fallback");
+        assert!(response
+            .fallback_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("stream_followup_failed"));
+        assert!(response
+            .fallback_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("provider_followup_failed"));
+        assert_eq!(deltas.len(), 1);
+        match &deltas[0] {
+            ProviderStreamChunk::Text(text) => {
+                assert!(text.contains("工具 `workspace.gather_context` 已执行完成"));
+            }
+            ProviderStreamChunk::Reasoning(_) => panic!("unexpected reasoning delta"),
+        }
     }
 }

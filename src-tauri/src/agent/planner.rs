@@ -1,9 +1,14 @@
+use crate::agent::graph::{
+    GraphDecision, GraphDecisionKind, GraphDecisionReason, GraphRun, GraphRunPhase,
+    GraphTurnHandoff,
+};
 use crate::agent::provider::ProviderDecision;
 use crate::agent::session::TurnHistoryMessage;
-use crate::agent::tools::ToolCall;
+use crate::agent::tools::{ToolCall, ToolPlan, ToolPlanStep};
 use serde_json::json;
 
 const MAX_LOCAL_BATCH_PATHS: usize = 6;
+const MAX_GRAPH_AUTO_CONTINUE_STEPS: usize = 8;
 
 pub trait TurnPlanner: Send {
     fn preflight_decision(
@@ -20,7 +25,52 @@ pub trait TurnPlanner: Send {
     ) -> Option<ToolCall>;
 }
 
+pub struct GraphPlanningContext<'a> {
+    pub run: &'a GraphRun,
+    pub handoff: &'a GraphTurnHandoff,
+}
+
+pub trait GraphPlanner: Send + Sync {
+    fn decide_after_turn(&self, context: GraphPlanningContext<'_>) -> GraphDecision;
+}
+
+pub struct DefaultGraphPlanner;
+
 pub struct LocalTurnPlanner;
+
+impl GraphPlanner for DefaultGraphPlanner {
+    fn decide_after_turn(&self, context: GraphPlanningContext<'_>) -> GraphDecision {
+        let assistant_message = context.handoff.assistant_message.trim();
+        let goal = context.run.goal.trim();
+
+        if assistant_requests_user_input(assistant_message) {
+            return GraphDecision {
+                kind: GraphDecisionKind::WaitUser,
+                reason: GraphDecisionReason::TurnCompletedAwaitingUser,
+                summary: String::new(),
+                target_phase: GraphRunPhase::WaitingUser,
+            };
+        }
+
+        if goal_supports_auto_continue(goal)
+            && context.run.steps.len() < MAX_GRAPH_AUTO_CONTINUE_STEPS
+        {
+            return GraphDecision {
+                kind: GraphDecisionKind::Continue,
+                reason: GraphDecisionReason::PlannerRequestedContinue,
+                summary: build_next_action_summary(goal, context.handoff),
+                target_phase: GraphRunPhase::Ready,
+            };
+        }
+
+        GraphDecision {
+            kind: GraphDecisionKind::WaitUser,
+            reason: GraphDecisionReason::TurnCompletedAwaitingUser,
+            summary: String::new(),
+            target_phase: GraphRunPhase::WaitingUser,
+        }
+    }
+}
 
 impl TurnPlanner for LocalTurnPlanner {
     fn preflight_decision(
@@ -37,11 +87,37 @@ impl TurnPlanner for LocalTurnPlanner {
         history: &[TurnHistoryMessage],
         provider_tool_call: Option<ToolCall>,
     ) -> Option<ToolCall> {
-        provider_tool_call.or_else(|| Self::infer_local_tool_call(user_message, history))
+        let local_tool_call = Self::infer_local_tool_call(user_message, history);
+        match (provider_tool_call, local_tool_call) {
+            (Some(provider), Some(local))
+                if Self::should_prefer_local_tool_call(&provider, &local) =>
+            {
+                Some(local)
+            }
+            (Some(provider), _) => Some(provider),
+            (None, Some(local)) => Some(local),
+            (None, None) => None,
+        }
     }
 }
 
 impl LocalTurnPlanner {
+    fn should_prefer_local_tool_call(
+        provider_tool_call: &ToolCall,
+        local_tool_call: &ToolCall,
+    ) -> bool {
+        let local_has_explicit_plan = local_tool_call.plan.is_some();
+        let local_is_multi_path = local_tool_call.name == "workspace_batch"
+            || local_tool_call.arguments.get("paths").is_some();
+        let provider_is_single_path = provider_tool_call.arguments.get("paths").is_none();
+
+        local_has_explicit_plan
+            && local_is_multi_path
+            && provider_is_single_path
+            && (provider_tool_call.name != local_tool_call.name
+                || provider_tool_call.plan.is_none())
+    }
+
     fn infer_local_tool_call(
         user_message: &str,
         history: &[TurnHistoryMessage],
@@ -62,6 +138,7 @@ impl LocalTurnPlanner {
                 call_id: None,
                 name: "time_now".to_string(),
                 arguments: json!({}),
+                plan: None,
             });
         }
 
@@ -76,6 +153,7 @@ impl LocalTurnPlanner {
                     "path": referenced_path.unwrap_or_else(|| ".".to_string()),
                     "limit": 60,
                 }),
+                plan: None,
             });
         }
 
@@ -93,6 +171,7 @@ impl LocalTurnPlanner {
                             "lineCount": 80,
                             "limit": 20,
                         }),
+                        plan: None,
                     });
                 }
 
@@ -105,6 +184,7 @@ impl LocalTurnPlanner {
                         "limit": 20,
                         "ignoreCase": true,
                     }),
+                    plan: None,
                 });
             }
         }
@@ -136,6 +216,7 @@ impl LocalTurnPlanner {
                             "lineCount": 80,
                             "limit": 20,
                         }),
+                        plan: None,
                     });
                 }
 
@@ -148,6 +229,7 @@ impl LocalTurnPlanner {
                         "limit": 20,
                         "ignoreCase": true,
                     }),
+                    plan: None,
                 });
             }
         }
@@ -182,6 +264,7 @@ impl LocalTurnPlanner {
                         "lineCount": 80,
                         "limit": 40,
                     }),
+                    plan: None,
                 });
             }
 
@@ -193,6 +276,7 @@ impl LocalTurnPlanner {
                     "lineCount": 80,
                     "limit": 40,
                 }),
+                plan: None,
             });
         }
 
@@ -251,6 +335,21 @@ impl LocalTurnPlanner {
                 })
             })
             .collect::<Vec<_>>();
+        let tool_plan_steps = explicit_paths
+            .iter()
+            .take(MAX_LOCAL_BATCH_PATHS)
+            .enumerate()
+            .map(|(index, path)| ToolPlanStep {
+                name: "workspace_gather_context".to_string(),
+                arguments: json!({
+                    "path": path,
+                    "query": search_query.clone(),
+                    "lineCount": 80,
+                    "limit": 20,
+                }),
+                summary: format!("第 {} 个路径聚合：`{}`。", index + 1, path),
+            })
+            .collect::<Vec<_>>();
 
         Some(ToolCall {
             call_id: None,
@@ -259,6 +358,13 @@ impl LocalTurnPlanner {
                 "parallel": true,
                 "continueOnError": true,
                 "calls": calls,
+            }),
+            plan: Some(ToolPlan {
+                kind: "batch".to_string(),
+                summary: format!("批量聚合 {} 个显式路径。", tool_plan_steps.len()),
+                parallel: true,
+                continue_on_error: true,
+                steps: tool_plan_steps,
             }),
         })
     }
@@ -420,6 +526,120 @@ impl LocalTurnPlanner {
     }
 }
 
+fn assistant_requests_user_input(message: &str) -> bool {
+    let normalized = message.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if normalized.contains('?') || normalized.contains('？') {
+        return true;
+    }
+
+    [
+        "需要我",
+        "是否继续",
+        "请提供",
+        "告诉我",
+        "如果你愿意",
+        "want me to",
+        "please provide",
+        "can you",
+        "should i",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn goal_supports_auto_continue(goal: &str) -> bool {
+    let normalized = goal.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    [
+        "逐步",
+        "继续",
+        "系统",
+        "完整",
+        "全面",
+        "端到端",
+        "多轮",
+        "直到",
+        "最终",
+        "推进",
+        "收口",
+        "排查并修复",
+        "验证并修复",
+        "梳理",
+        "continue",
+        "step by step",
+        "iterative",
+        "end-to-end",
+        "investigate",
+        "debug and fix",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn build_next_action_summary(goal: &str, handoff: &GraphTurnHandoff) -> String {
+    let goal_excerpt = truncate_text(goal.trim(), 72);
+    let summary_excerpt = truncate_text(handoff.session_summary.trim(), 96);
+    let acceptance_note = handoff
+        .acceptance_focus
+        .as_deref()
+        .map(|note| format!(" 验收要求：{}。", truncate_text(note, 88)))
+        .unwrap_or_default();
+    let active_task_note = handoff
+        .active_task_focus
+        .as_deref()
+        .map(|task| format!(" 当前激活任务：{}。", truncate_text(task, 32)))
+        .unwrap_or_default();
+    let focus_note = handoff
+        .last_referenced_file
+        .as_deref()
+        .map(|path| format!(" 当前焦点文件：{}。", truncate_text(path, 72)))
+        .unwrap_or_default();
+    let focus_note = format!("{acceptance_note}{focus_note}");
+    let memory_note = if handoff.long_term_memory_entry_count > 0 {
+        format!(
+            " 已保留 {} 条长期记忆可供下一轮继续消费。",
+            handoff.long_term_memory_entry_count
+        )
+    } else {
+        String::new()
+    };
+
+    if summary_excerpt.is_empty() {
+        return format!(
+            "继续围绕目标“{}”推进下一轮，并把新的发现回写到 run 状态。{}{}{}",
+            goal_excerpt, active_task_note, focus_note, memory_note
+        );
+    }
+
+    format!(
+        "继续围绕目标“{}”推进下一轮，优先扩展当前上下文：{}。{}{}{}",
+        goal_excerpt, summary_excerpt, active_task_note, focus_note, memory_note
+    )
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut truncated = String::new();
+    let mut count = 0;
+
+    for ch in text.chars() {
+        if count >= max_chars {
+            truncated.push_str("...");
+            return truncated;
+        }
+        truncated.push(ch);
+        count += 1;
+    }
+
+    truncated
+}
+
 fn looks_like_path(segment: &str) -> bool {
     if segment.starts_with("http://") || segment.starts_with("https://") {
         return false;
@@ -456,11 +676,60 @@ fn preview_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::graph::{GraphRun, GraphRunPhase};
 
     fn history(role: &str, content: &str) -> TurnHistoryMessage {
         TurnHistoryMessage {
             role: role.to_string(),
             content: content.to_string(),
+            attachments: Vec::new(),
+        }
+    }
+
+    fn sample_run(goal: &str) -> GraphRun {
+        GraphRun {
+            id: "run-1".to_string(),
+            goal: goal.to_string(),
+            session_id: Some("session-1".to_string()),
+            phase: GraphRunPhase::Running,
+            steps: Vec::new(),
+            active_turn_id: None,
+            last_completed_turn_id: None,
+            stop_reason: None,
+            last_handoff: None,
+            resume_count: 0,
+            last_decision: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn sample_handoff(assistant_message: &str) -> GraphTurnHandoff {
+        GraphTurnHandoff {
+            contract_version: "graph-run-contract-v1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            turn_phase: "ready".to_string(),
+            checkpoint_status: Some("completed".to_string()),
+            checkpoint_phase: Some("ready".to_string()),
+            user_message: "请继续排查 provider 适配".to_string(),
+            assistant_message: assistant_message.to_string(),
+            session_summary: "已经完成第一轮排查，发现需要继续核对 provider fallback 行为。"
+                .to_string(),
+            conversation_id: "session-1".to_string(),
+            session_turn_count: 1,
+            run_id: Some("run-1".to_string()),
+            run_phase: Some("waiting_user".to_string()),
+            active_task_focus: Some("PA-018".to_string()),
+            acceptance_focus: None,
+            last_referenced_file: Some("src-tauri/src/agent/provider.rs".to_string()),
+            recent_attachment_asset_count: 0,
+            long_term_memory_status: "empty".to_string(),
+            long_term_memory_entry_count: 0,
+            trace_step_count: 4,
+            tool_activity_count: 1,
+            provider_name: "OpenAI".to_string(),
+            provider_model: "gpt-5".to_string(),
         }
     }
 
@@ -570,6 +839,8 @@ mod tests {
         .expect("tool call");
 
         assert_eq!(call.name, "workspace_batch");
+        assert!(call.plan.is_some());
+        assert!(call.arguments.get("toolPlan").is_none());
         let calls = call
             .arguments
             .get("calls")
@@ -591,6 +862,8 @@ mod tests {
         .expect("tool call");
 
         assert_eq!(call.name, "workspace_batch");
+        assert!(call.plan.is_some());
+        assert!(call.arguments.get("toolPlan").is_none());
         let calls = call
             .arguments
             .get("calls")
@@ -644,5 +917,124 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .expect("batch calls");
         assert_eq!(calls.len(), MAX_LOCAL_BATCH_PATHS);
+    }
+
+    #[test]
+    fn planner_prefers_local_multi_path_plan_over_provider_single_path_call() {
+        let provider_tool_call = ToolCall {
+            call_id: Some("call_provider".to_string()),
+            name: "workspace_read_file".to_string(),
+            arguments: json!({
+                "path": "src-tauri/src/agent/tools.rs"
+            }),
+            plan: None,
+        };
+
+        let call = LocalTurnPlanner
+            .select_tool_call(
+                "请同时查看 src-tauri/src/agent/tools.rs、src-tauri/src/agent/planner.rs，并概括差异",
+                &[],
+                Some(provider_tool_call),
+            )
+            .expect("selected tool call");
+
+        assert_eq!(call.name, "workspace_batch");
+        assert!(call.plan.is_some());
+        assert!(call.arguments.get("calls").is_some());
+    }
+
+    #[test]
+    fn graph_planner_waits_when_assistant_is_asking_user() {
+        let planner = DefaultGraphPlanner;
+        let run = sample_run("逐步排查 provider 配置问题并收口");
+        let handoff = sample_handoff(
+            "我已经定位到第一处配置差异。是否继续帮你核对下一层 provider fallback？",
+        );
+
+        let decision = planner.decide_after_turn(GraphPlanningContext {
+            run: &run,
+            handoff: &handoff,
+        });
+
+        assert_eq!(decision.kind, GraphDecisionKind::WaitUser);
+        assert_eq!(
+            decision.reason,
+            GraphDecisionReason::TurnCompletedAwaitingUser
+        );
+        assert_eq!(decision.target_phase, GraphRunPhase::WaitingUser);
+    }
+
+    #[test]
+    fn graph_planner_can_request_continue_for_iterative_goal() {
+        let planner = DefaultGraphPlanner;
+        let run = sample_run("逐步排查 provider 配置问题并收口");
+        let handoff = sample_handoff("我已经完成第一轮核对，并整理出继续排查的上下文。");
+
+        let decision = planner.decide_after_turn(GraphPlanningContext {
+            run: &run,
+            handoff: &handoff,
+        });
+
+        assert_eq!(decision.kind, GraphDecisionKind::Continue);
+        assert_eq!(
+            decision.reason,
+            GraphDecisionReason::PlannerRequestedContinue
+        );
+        assert_eq!(decision.target_phase, GraphRunPhase::Ready);
+        assert!(decision.summary.contains("继续围绕目标"));
+        assert!(decision.summary.contains("当前激活任务：PA-018"));
+        assert!(decision.summary.contains("当前焦点文件"));
+    }
+
+    #[test]
+    fn graph_planner_continue_summary_can_surface_long_term_memory_facts() {
+        let planner = DefaultGraphPlanner;
+        let run = sample_run("逐步排查 provider 配置问题并收口");
+        let mut handoff = sample_handoff("我已经完成第一轮核对，并整理出继续排查的上下文。");
+        handoff.long_term_memory_status = "available".to_string();
+        handoff.long_term_memory_entry_count = 2;
+
+        let decision = planner.decide_after_turn(GraphPlanningContext {
+            run: &run,
+            handoff: &handoff,
+        });
+
+        assert_eq!(decision.kind, GraphDecisionKind::Continue);
+        assert!(decision.summary.contains("已保留 2 条长期记忆"));
+    }
+
+    #[test]
+    fn graph_planner_continue_summary_can_surface_acceptance_focus() {
+        let planner = DefaultGraphPlanner;
+        let run = sample_run("逐步推进 PA-018 并完成交付");
+        let mut handoff = sample_handoff("我已经补齐了当前验收证据，并准备继续推进。");
+        handoff.acceptance_focus = Some(
+            "Establish acceptance criteria and run a closeout audit before claiming delivery."
+                .to_string(),
+        );
+
+        let decision = planner.decide_after_turn(GraphPlanningContext {
+            run: &run,
+            handoff: &handoff,
+        });
+
+        assert_eq!(decision.kind, GraphDecisionKind::Continue);
+        assert!(decision.summary.contains("验收要求"));
+        assert!(decision.summary.contains("closeout audit"));
+    }
+
+    #[test]
+    fn graph_planner_defaults_to_wait_user_without_iterative_goal_signal() {
+        let planner = DefaultGraphPlanner;
+        let run = sample_run("解释 tauri.conf.json 是什么");
+        let handoff = sample_handoff("tauri.conf.json 是 Tauri 应用的主配置文件。");
+
+        let decision = planner.decide_after_turn(GraphPlanningContext {
+            run: &run,
+            handoff: &handoff,
+        });
+
+        assert_eq!(decision.kind, GraphDecisionKind::WaitUser);
+        assert_eq!(decision.target_phase, GraphRunPhase::WaitingUser);
     }
 }

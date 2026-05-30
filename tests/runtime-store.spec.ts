@@ -1,6 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import type { ChatMessage, SessionOverview, SessionSnapshot, TurnTraceRecord } from "@/types/runtime";
+import type {
+  AttachmentAsset,
+  ChatMessage,
+  ExecutionCheckpoint,
+  RetrievedContextState,
+  SessionOverview,
+  SessionSnapshot,
+  SessionRuntimeView,
+  TurnTraceRecord
+} from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -23,6 +32,7 @@ function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
     turnId: partial.turnId ?? "turn-1",
     role: partial.role ?? "user",
     content: partial.content ?? "hello",
+    attachments: partial.attachments ?? [],
     status: partial.status ?? "done",
     tokenCount: partial.tokenCount ?? null,
     reasoningContent: partial.reasoningContent ?? null,
@@ -46,6 +56,7 @@ function createTrace(partial: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
     providerModel: partial.providerModel ?? null,
     providerSource: partial.providerSource ?? null,
     providerMode: partial.providerMode ?? null,
+    buildContextObservation: partial.buildContextObservation ?? null,
     sessionSummary: partial.sessionSummary ?? "",
     fallbackReason: partial.fallbackReason ?? null,
     error: partial.error ?? null,
@@ -63,9 +74,80 @@ function createSnapshot(partial: Partial<SessionSnapshot> = {}): SessionSnapshot
     title: partial.title ?? "Session 1",
     summary: partial.summary ?? "Session summary",
     history: partial.history ?? [],
+    attachmentAssets: partial.attachmentAssets ?? [],
     turnCount: partial.turnCount ?? 0,
     lastReferencedFile: partial.lastReferencedFile ?? null,
     updatedAtMs: partial.updatedAtMs ?? 1000
+  };
+}
+
+function createRetrievedContext(snapshot: SessionSnapshot): RetrievedContextState {
+  const lastUserMessage =
+    [...snapshot.history].reverse().find((message) => message.role === "user")?.content ?? "";
+
+  return {
+    turnContext: {
+      userMessage: lastUserMessage,
+      images: [],
+      referencesImage: false
+    },
+    sessionContext: {
+      conversationId: snapshot.conversationId,
+      title: snapshot.title ?? "Session",
+      summary: snapshot.summary,
+      recentHistory: snapshot.history.map((message) => ({
+        ...message,
+        attachments: (message.attachments ?? []).map((attachment) => ({ ...attachment }))
+      })),
+      recentAttachmentAssets: (snapshot.attachmentAssets ?? []).map((asset) => ({ ...asset })),
+      turnCount: snapshot.turnCount,
+      lastReferencedFile: snapshot.lastReferencedFile ?? null
+    },
+    runState: {},
+    longTermMemory: {
+      status: "empty",
+      summary: "No long-term memory entries are stored for this session yet.",
+      entries: []
+    },
+    transcript: {
+      providerNativeMessages: []
+    }
+  };
+}
+
+function createCheckpoint(partial: Partial<ExecutionCheckpoint> = {}): ExecutionCheckpoint {
+  return {
+    turnId: partial.turnId ?? "turn-1",
+    sessionId: partial.sessionId ?? "session-1",
+    status: partial.status ?? "running",
+    phase: partial.phase ?? "calling_model",
+    providerRequestedName: partial.providerRequestedName ?? null,
+    providerName: partial.providerName ?? null,
+    providerProtocol: partial.providerProtocol ?? null,
+    providerModel: partial.providerModel ?? null,
+    providerSource: partial.providerSource ?? null,
+    providerMode: partial.providerMode ?? null,
+    fallbackReason: partial.fallbackReason ?? null,
+    completedHops: partial.completedHops ?? 0,
+    maxHops: partial.maxHops ?? 0,
+    activeToolName: partial.activeToolName ?? null,
+    traceSteps: partial.traceSteps ?? [],
+    toolActivities: partial.toolActivities ?? [],
+    error: partial.error ?? null,
+    startedAtMs: partial.startedAtMs ?? 1000,
+    updatedAtMs: partial.updatedAtMs ?? 1001,
+    stopRequestedAtMs: partial.stopRequestedAtMs ?? null
+  };
+}
+
+function createSessionRuntimeView(
+  session: SessionSnapshot,
+  partial: Partial<SessionRuntimeView> = {}
+): SessionRuntimeView {
+  return {
+    session,
+    retrieved: partial.retrieved ?? createRetrievedContext(session),
+    checkpoint: partial.checkpoint ?? null
   };
 }
 
@@ -131,7 +213,7 @@ describe("runtime session resilience", () => {
     });
 
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
-      if (command === "load_session_snapshot") {
+      if (command === "load_session_runtime_view") {
         throw new Error("snapshot exploded");
       }
       throw new Error(`unexpected command: ${command}`);
@@ -146,6 +228,130 @@ describe("runtime session resilience", () => {
     expect(store.sessionList).toEqual(originalSessionList);
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionError).toContain("snapshot exploded");
+  });
+
+  it("keeps the current session content visible until the next session finishes loading", async () => {
+    const store = useRuntimeStore();
+    const originalMessages = [
+      createMessage({ id: "user-current", turnId: "turn-current", role: "user", content: "current session" }),
+      createMessage({
+        id: "assistant-current",
+        turnId: "turn-current",
+        role: "assistant",
+        content: "current reply"
+      })
+    ];
+    const nextSnapshot = createSnapshot({
+      conversationId: "session-next",
+      title: "Next session",
+      summary: "Next summary",
+      history: [
+        { role: "user", content: "next session" },
+        { role: "assistant", content: "next reply" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 2400
+    });
+    const nextSessionList: SessionOverview[] = [
+      {
+        conversationId: "session-next",
+        title: "Next session",
+        summary: "Next summary",
+        turnCount: 1,
+        lastReferencedFile: null,
+        updatedAtMs: 2400
+      },
+      {
+        conversationId: "session-current",
+        title: "Current session",
+        summary: "Current summary",
+        turnCount: 1,
+        lastReferencedFile: null,
+        updatedAtMs: 1000
+      }
+    ];
+
+    let resolveRuntimeView: ((value: SessionRuntimeView) => void) | null = null;
+    const runtimeViewPromise = new Promise<SessionRuntimeView>((resolve) => {
+      resolveRuntimeView = resolve;
+    });
+
+    store.$patch({
+      sessionId: "session-current",
+      sessionList: [nextSessionList[1]],
+      phase: "ready",
+      sessionSummary: "Current summary",
+      messages: originalMessages
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return runtimeViewPromise;
+      }
+
+      if (command === "list_sessions") {
+        return nextSessionList;
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const switchingPromise = store.switchSession("session-next");
+    await flushMicrotasks();
+
+    expect(store.sessionOperation).toBe("switching");
+    expect(store.sessionId).toBe("session-current");
+    expect(store.phase).toBe("ready");
+    expect(store.messages).toEqual(originalMessages);
+
+    resolveRuntimeView?.(createSessionRuntimeView(nextSnapshot));
+    await switchingPromise;
+
+    expect(store.sessionOperation).toBeNull();
+    expect(store.sessionId).toBe("session-next");
+    expect(store.phase).toBe("ready");
+    expect(store.retrievedContext?.sessionContext.conversationId).toBe("session-next");
+    expect(store.sessionList).toEqual(nextSessionList);
+    expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+      "user:next session",
+      "assistant:next reply"
+    ]);
+  });
+
+  it("prefers retrieval session summary over raw snapshot summary when loading a session", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "session-retrieved-summary",
+      title: "Retrieved summary session",
+      summary: "legacy snapshot summary",
+      history: [
+        { role: "user", content: "请继续推进 PA-018" },
+        { role: "assistant", content: "继续处理中" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 2600
+    });
+    const retrieved = createRetrievedContext({
+      ...snapshot,
+      summary: "retrieval summary from host"
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(snapshot, { retrieved });
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState("session-retrieved-summary");
+
+    expect(store.retrievedContext?.sessionContext.summary).toBe("retrieval summary from host");
+    expect(store.sessionSummary).toBe("retrieval summary from host");
   });
 
   it("rolls back initializeSessions when loading the latest session fails", async () => {
@@ -185,7 +391,7 @@ describe("runtime session resilience", () => {
         ] satisfies SessionOverview[];
       }
 
-      if (command === "load_session_snapshot") {
+      if (command === "load_session_runtime_view") {
         throw new Error("load latest failed");
       }
 
@@ -209,6 +415,44 @@ describe("runtime session resilience", () => {
     ]);
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionError).toContain("load latest failed");
+  });
+
+  it("falls back to a derived retrieved context when runtime view omits retrieved context", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "session-derived",
+      title: "Derived session",
+      summary: "Derived summary",
+      history: [
+        { role: "user", content: "请继续推进 PA-018" },
+        { role: "assistant", content: "继续处理中" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 2400
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return {
+          session: snapshot,
+          checkpoint: null
+        } as SessionRuntimeView;
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState("session-derived");
+
+    expect(store.sessionId).toBe("session-derived");
+    expect(store.retrievedContext?.turnContext.userMessage).toBe("请继续推进 PA-018");
+    expect(store.retrievedContext?.sessionContext.summary).toBe("Derived summary");
+    expect(store.retrievedContext?.longTermMemory.status).toBe("empty");
+    expect(store.sessionList).toEqual([]);
   });
 
   it("restores session state and cache when delete_session fails", async () => {
@@ -340,8 +584,8 @@ describe("runtime session resilience", () => {
         ] satisfies SessionOverview[];
       }
 
-      if (command === "load_session_snapshot") {
-        return fallbackSnapshot;
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(fallbackSnapshot);
       }
 
       throw new Error(`unexpected command: ${command}`);
@@ -423,7 +667,7 @@ describe("runtime session resilience", () => {
         summary: "snapshot summary",
         history: [
           { role: "user", content: "请整理 markdown" },
-          { role: "assistant", content: "# 新标题\n\n> 新引用\n\n**已修复**" }
+          { role: "assistant", content: "# 新标题\n> 新引用\n**已修复**" }
         ],
         turnCount: 1
       })
@@ -431,7 +675,7 @@ describe("runtime session resilience", () => {
 
     expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
       "user:请整理 markdown",
-      "assistant:# 新标题\n\n> 新引用\n\n**已修复**",
+      "assistant:# 新标题\n> 新引用\n**已修复**",
       "tool:{\"ok\":true}"
     ]);
     expect(store.messages[1]?.reasoningContent).toBe("旧思考");
@@ -442,7 +686,65 @@ describe("runtime session resilience", () => {
     const persisted = readPersistedSessions().sessions["session-restore"] as {
       messages: ChatMessage[];
     };
-    expect(persisted.messages[1]?.content).toBe("# 新标题\n\n> 新引用\n\n**已修复**");
+    expect(persisted.messages[1]?.content).toBe("# 新标题\n> 新引用\n**已修复**");
+  });
+
+  it("preserves attachment asset lifecycle metadata from snapshots and supports local filtering", () => {
+    const store = useRuntimeStore();
+    const attachmentAssets: AttachmentAsset[] = [
+      {
+        id: "asset:session-assets/keep.dataurl",
+        sessionId: "session-assets",
+        name: "keep.png",
+        mimeType: "image/png",
+        relativePath: "session-assets/keep.dataurl",
+        sizeBytes: 4,
+        createdAtMs: 3000,
+        status: "active",
+        referenceCount: 1,
+        lastReferencedAtMs: 3001,
+        expiresAtMs: null
+      },
+      {
+        id: "asset:session-assets/draft.dataurl",
+        sessionId: "session-assets",
+        name: "draft.webp",
+        mimeType: "image/webp",
+        relativePath: "session-assets/draft.dataurl",
+        sizeBytes: 4,
+        createdAtMs: 1000,
+        status: "reclaimable",
+        referenceCount: 0,
+        lastReferencedAtMs: null,
+        expiresAtMs: 1000 + 7 * 24 * 60 * 60 * 1000
+      }
+    ];
+
+    store.applySessionSnapshot(
+      "session-assets",
+      createSnapshot({
+        conversationId: "session-assets",
+        summary: "asset summary",
+        history: [
+          { role: "user", content: "inspect image" },
+          { role: "assistant", content: "done" }
+        ],
+        attachmentAssets
+      })
+    );
+
+    expect(store.attachmentAssets).toEqual(attachmentAssets);
+    expect(
+      store.getAttachmentAssets({
+        mimeType: "webp",
+        statuses: ["reclaimable"]
+      })
+    ).toEqual([attachmentAssets[1]]);
+
+    const persisted = readPersistedSessions().sessions["session-assets"] as {
+      attachmentAssets: AttachmentAsset[];
+    };
+    expect(persisted.attachmentAssets).toEqual(attachmentAssets);
   });
 
   it("keeps the fallback target but surfaces an error when fallback loading fails", async () => {
@@ -489,7 +791,7 @@ describe("runtime session resilience", () => {
         ] satisfies SessionOverview[];
       }
 
-      if (command === "load_session_snapshot") {
+      if (command === "load_session_runtime_view") {
         throw new Error("fallback load failed");
       }
 
@@ -533,6 +835,18 @@ describe("runtime session resilience", () => {
         return [] satisfies SessionOverview[];
       }
 
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(
+          createSnapshot({
+            conversationId: "session-empty",
+            summary: "",
+            history: [],
+            turnCount: 0,
+            updatedAtMs: 1000
+          })
+        );
+      }
+
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -544,6 +858,142 @@ describe("runtime session resilience", () => {
     expect(store.sessionError).toBeNull();
     expect(store.messages).toEqual([]);
     expect(store.sessionList).toEqual([]);
+  });
+
+  it("restores the active turn from an execution checkpoint during initialization", async () => {
+    const store = useRuntimeStore();
+
+    writePersistedSessions({
+      "session-running": {
+        messages: [
+          createMessage({
+            id: "running-user",
+            turnId: "turn-running",
+            role: "user",
+            content: "continue this run"
+          }),
+          createMessage({
+            id: "running-assistant",
+            turnId: "turn-running",
+            role: "assistant",
+            content: "partial answer",
+            status: "pending",
+            modelName: "OpenAI/gpt-5"
+          }),
+          createMessage({
+            id: "running-tool",
+            turnId: "turn-running",
+            role: "tool",
+            content: "{\"status\":\"working\"}",
+            status: "pending",
+            toolName: "workspace.read_file"
+          })
+        ],
+        turnTraceHistory: [],
+        sessionSummary: "Running summary",
+        providerRequestedName: "OpenAI",
+        providerName: "OpenAI",
+        providerProtocol: "openai",
+        providerModel: "gpt-5",
+        providerSource: "primary",
+        providerMode: "standard",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null
+      }
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      if (command === "stop_graph_run") {
+        expect(payload).toEqual({ runId: "run-running" });
+        return null;
+      }
+
+      if (command === "load_session_runtime_view") {
+        const snapshot = createSnapshot({
+          conversationId: "session-running",
+          summary: "Running summary",
+          history: [],
+          turnCount: 0,
+          updatedAtMs: 2200
+        });
+        return createSessionRuntimeView(snapshot, {
+          retrieved: {
+            ...createRetrievedContext(snapshot),
+            runState: {
+              runId: "run-running",
+              goal: "continue this run",
+              phase: "running",
+              activeTurnId: "turn-running",
+              lastCompletedTurnId: null,
+              resumeCount: 0,
+              lastDecisionSummary: "Continue current run",
+              executionCheckpointStatus: "running",
+              executionCheckpointPhase: "queued"
+            }
+          },
+          checkpoint: createCheckpoint({
+            turnId: "turn-running",
+            sessionId: "session-running",
+            phase: "queued",
+            providerRequestedName: "OpenAI",
+            providerName: "OpenAI",
+            providerProtocol: "openai",
+            providerModel: "gpt-5",
+            providerSource: "primary",
+            providerMode: "standard",
+            activeToolName: "workspace.read_file",
+            traceSteps: [{ id: "step-call-tool", label: "Call tool", state: "active" }],
+            toolActivities: [
+              {
+                id: "tool-1",
+                name: "workspace.read_file",
+                status: "running",
+                summary: "Reading workspace"
+              }
+            ],
+            updatedAtMs: 2200
+          })
+        });
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "session-running",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.initializeSessions();
+
+    expect(store.sessionId).toBe("session-running");
+    expect(store.phase).toBe("calling_tool");
+    expect(store.isSubmitting).toBe(true);
+    expect(store.activeTurnId).toBe("turn-running");
+    expect(store.activeRunId).toBe("run-running");
+    expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+      "user:continue this run",
+      "assistant:partial answer",
+      "tool:{\"status\":\"working\"}"
+    ]);
+    expect(store.providerName).toBe("OpenAI");
+    expect(store.providerModel).toBe("gpt-5");
+    expect(store.turnTraceHistory[0]?.turnId).toBe("turn-running");
+    expect(store.turnTraceHistory[0]?.phase).toBe("calling_tool");
+
+    await store.stopTurn();
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("stop_graph_run", {
+      runId: "run-running"
+    });
   });
 
   it("creates a transient browser-preview session while keeping the previous session persisted", async () => {
@@ -808,13 +1258,418 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
-  it("marks the turn as failed when start_turn_stream throws immediately", async () => {
+  it("forwards image attachments to start_graph_run_stream and records an image summary", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8181);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-image" },
+          turnId: "8181"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "image-session",
+      draftMessage: "",
+      phase: "idle",
+      messages: []
+    });
+
+    const started = await store.submitTurn({
+      images: [
+        {
+          dataUrl: "data:image/png;base64,Zm9v",
+          mimeType: "image/png",
+          name: "demo.png"
+        }
+      ]
+    });
+
+    expect(started).toBe(true);
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("start_graph_run_stream", {
+      turnId: "8181",
+      runId: null,
+      goal: "[已附图片 1 张：demo.png]",
+      input: expect.objectContaining({
+        message: "请基于附图回答。",
+        images: [
+          {
+            dataUrl: "data:image/png;base64,Zm9v",
+            mimeType: "image/png",
+            name: "demo.png"
+          }
+        ]
+      })
+    });
+    expect(store.messages[0]?.content).toContain("[已附图片 1 张：demo.png]");
+    nowSpy.mockRestore();
+  });
+
+  it("prefers retrievedContext.runState when continuing an existing graph run", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8383);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "continue_graph_run_stream") {
+        expect(payload).toEqual({
+          turnId: "8383",
+          runId: "run-existing",
+          input: expect.objectContaining({
+            message: "keep going"
+          })
+        });
+        return {
+          run: { id: "run-existing" },
+          turnId: "8383"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const snapshot = createSnapshot({
+      conversationId: "existing-run-session",
+      summary: "existing run summary"
+    });
+    store.$patch({
+      sessionId: "existing-run-session",
+      draftMessage: "keep going",
+      phase: "idle",
+      messages: [],
+      retrievedContext: {
+        ...createRetrievedContext(snapshot),
+        runState: {
+          runId: "run-existing",
+          phase: "waiting_user",
+          goal: "continue existing run"
+        }
+      }
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("inspect_host", expect.anything());
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith(
+      "continue_graph_run_stream",
+      expect.objectContaining({
+        turnId: "8383",
+        runId: "run-existing"
+      })
+    );
+    nowSpy.mockRestore();
+  });
+
+  it("prefers retrievedContext.runState when resuming a paused graph run", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8484);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "resume_graph_run_stream") {
+        expect(payload).toEqual({
+          turnId: "8484",
+          runId: "run-paused",
+          input: expect.objectContaining({
+            message: "resume please"
+          })
+        });
+        return {
+          run: { id: "run-paused" },
+          turnId: "8484"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const snapshot = createSnapshot({
+      conversationId: "paused-run-session",
+      summary: "paused run summary"
+    });
+    store.$patch({
+      sessionId: "paused-run-session",
+      draftMessage: "resume please",
+      phase: "idle",
+      messages: [],
+      retrievedContext: {
+        ...createRetrievedContext(snapshot),
+        runState: {
+          runId: "run-paused",
+          phase: "paused",
+          goal: "resume paused run"
+        }
+      }
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("inspect_host", expect.anything());
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith(
+      "resume_graph_run_stream",
+      expect.objectContaining({
+        turnId: "8484",
+        runId: "run-paused"
+      })
+    );
+    nowSpy.mockRestore();
+  });
+
+  it("refreshes host retrieval before falling back to inspect_host when local runState is insufficient", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8585);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_retrieved_context") {
+        expect(payload).toEqual({
+          sessionId: "retrieval-refresh-session",
+          runId: null,
+          turnId: null
+        });
+        return {
+          ...createRetrievedContext(
+            createSnapshot({
+              conversationId: "retrieval-refresh-session",
+              summary: "retrieval refresh summary"
+            })
+          ),
+          runState: {
+            runId: "run-refreshed",
+            phase: "waiting_user",
+            goal: "continue after host retrieval refresh"
+          }
+        };
+      }
+
+      if (command === "continue_graph_run_stream") {
+        expect(payload).toEqual({
+          turnId: "8585",
+          runId: "run-refreshed",
+          input: expect.objectContaining({
+            message: "use refreshed retrieval"
+          })
+        });
+        return {
+          run: { id: "run-refreshed" },
+          turnId: "8585"
+        };
+      }
+
+      if (command === "inspect_host") {
+        throw new Error("inspect_host should not be required");
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "retrieval-refresh-session",
+      draftMessage: "use refreshed retrieval",
+      phase: "idle",
+      messages: [],
+      retrievedContext: {
+        ...createRetrievedContext(
+          createSnapshot({
+            conversationId: "retrieval-refresh-session",
+            summary: "stale retrieval summary"
+          })
+        ),
+        runState: {}
+      }
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    expect(store.retrievedContext?.runState.runId).toBe("run-refreshed");
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("inspect_host", expect.anything());
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith(
+      "continue_graph_run_stream",
+      expect.objectContaining({
+        turnId: "8585",
+        runId: "run-refreshed"
+      })
+    );
+    nowSpy.mockRestore();
+  });
+
+  it("starts a new graph run without inspect_host when refreshed retrieval has no active run", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8686);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_retrieved_context") {
+        expect(payload).toEqual({
+          sessionId: "fresh-run-session",
+          runId: null,
+          turnId: null
+        });
+        return {
+          ...createRetrievedContext(
+            createSnapshot({
+              conversationId: "fresh-run-session",
+              summary: "fresh retrieval summary"
+            })
+          ),
+          runState: {}
+        };
+      }
+
+      if (command === "start_graph_run_stream") {
+        expect(payload).toEqual({
+          turnId: "8686",
+          runId: null,
+          goal: "brand new request",
+          input: expect.objectContaining({
+            message: "brand new request"
+          })
+        });
+        return {
+          run: { id: "run-fresh" },
+          turnId: "8686"
+        };
+      }
+
+      if (command === "inspect_host") {
+        throw new Error("inspect_host should not be required");
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "fresh-run-session",
+      draftMessage: "brand new request",
+      phase: "idle",
+      messages: [],
+      retrievedContext: {
+        ...createRetrievedContext(
+          createSnapshot({
+            conversationId: "fresh-run-session",
+            summary: "stale retrieval summary"
+          })
+        ),
+        runState: {}
+      }
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    expect(store.activeRunId).toBe("run-fresh");
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("inspect_host", expect.anything());
+    nowSpy.mockRestore();
+  });
+
+  it("filters placeholder attachments out of replayed turn history", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8282);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        expect(payload).toEqual({
+          turnId: "8282",
+          runId: null,
+          goal: "new request",
+          input: expect.objectContaining({
+            history: [
+              {
+                role: "user",
+                content: "look at these files",
+                attachments: [
+                  expect.objectContaining({
+                    id: "real-1",
+                    relativePath: "uploads/demo.png"
+                  })
+                ]
+              },
+              {
+                role: "assistant",
+                content: "ready for the next step",
+                attachments: []
+              }
+            ]
+          })
+        });
+        return {
+          run: { id: "run-history" },
+          turnId: "8282"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "history-attachment-session",
+      draftMessage: "new request",
+      phase: "idle",
+      messages: [
+        createMessage({
+          id: "history-user",
+          turnId: "turn-history",
+          role: "user",
+          content: "look at these files",
+          attachments: [
+            {
+              id: "pending-1",
+              name: "pending.png",
+              mimeType: "image/png",
+              relativePath: null
+            },
+            {
+              id: "real-1",
+              name: "demo.png",
+              mimeType: "image/png",
+              relativePath: "uploads/demo.png"
+            }
+          ]
+        }),
+        createMessage({
+          id: "history-assistant",
+          turnId: "turn-history",
+          role: "assistant",
+          content: "ready for the next step"
+        })
+      ]
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    nowSpy.mockRestore();
+  });
+
+  it("marks the turn as failed when start_graph_run_stream throws immediately", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9090);
 
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
-      if (command === "start_turn_stream") {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
         throw new Error("stream bootstrap failed");
       }
 
@@ -856,8 +1711,15 @@ describe("runtime session resilience", () => {
       return () => {};
     });
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
-      if (command === "start_turn_stream") {
-        return null;
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stream" },
+          turnId: "6060"
+        };
       }
 
       if (command === "list_sessions") {
@@ -879,6 +1741,9 @@ describe("runtime session resilience", () => {
     expect(store.phase).toBe("calling_model");
     expect(store.activeTurnId).toBe("6060");
     expect(store.isSubmitting).toBe(true);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.turnId).toBe("6060");
+    expect(store.turnTraceHistory[0]?.phase).toBe("calling_model");
 
     eventHandlers.get("turn:started")?.({
       payload: {
@@ -902,6 +1767,8 @@ describe("runtime session resilience", () => {
         firstTokenLatencyMs: 321
       }
     });
+
+    expect(store.turnTraceHistory[0]?.firstTokenLatencyMs).toBe(321);
 
     eventHandlers.get("turn:completed")?.({
       payload: {
@@ -941,7 +1808,81 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory).toHaveLength(1);
     expect(store.turnTraceHistory[0]?.phase).toBe("completed");
     expect(store.turnTraceHistory[0]?.sessionSummary).toBe("Completed summary");
+    expect(store.turnTraceHistory[0]?.title).toBe("stream request");
 
+    nowSpy.mockRestore();
+  });
+
+  it("strips the leading thinking prefix from streamed reasoning content", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(6161);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-reasoning" },
+          turnId: "6161"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "reasoning-prefix-session",
+      draftMessage: "reasoning prefix request",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "6161",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerRequestedName: "OpenAI"
+      }
+    });
+
+    eventHandlers.get("turn:delta")?.({
+      payload: {
+        turnId: "6161",
+        reasoningContent: "thinking: first pass"
+      }
+    });
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "6161",
+        text: "final answer",
+        reasoningContent: "thinking: final pass",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerRequestedName: "OpenAI",
+        traceSteps: store.traceSteps,
+        toolActivities: []
+      }
+    });
+
+    await flushMicrotasks();
+
+    expect(store.messages[1]?.reasoningContent).toBe("final pass");
     nowSpy.mockRestore();
   });
 
@@ -956,8 +1897,15 @@ describe("runtime session resilience", () => {
       return () => {};
     });
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
-      if (command === "start_turn_stream") {
-        return null;
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-failed" },
+          turnId: "7070"
+        };
       }
 
       throw new Error(`unexpected command: ${command}`);
@@ -1007,6 +1955,94 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory).toHaveLength(1);
     expect(store.turnTraceHistory[0]?.phase).toBe("failed");
     expect(store.turnTraceHistory[0]?.error).toContain("tool chain exploded");
+    expect(store.turnTraceHistory[0]?.title).toBe("failing stream request");
+
+    nowSpy.mockRestore();
+  });
+
+  it("stops the active turn and handles cancelled stream events", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8080);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-cancelled" },
+          turnId: "8080"
+        };
+      }
+
+      if (command === "stop_graph_run") {
+        return null;
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "cancelled-stream-session",
+      draftMessage: "cancel this turn",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+    await store.stopTurn();
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("stop_graph_run", {
+      runId: "run-cancelled"
+    });
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "8080",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerRequestedName: "OpenAI"
+      }
+    });
+    eventHandlers.get("turn:cancelled")?.({
+      payload: {
+        turnId: "8080",
+        text: "This turn was cancelled.",
+        error: "stopped_by_user",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerRequestedName: "OpenAI",
+        toolActivities: []
+      }
+    });
+
+    expect(store.phase).toBe("cancelled");
+    expect(store.isSubmitting).toBe(false);
+    expect(store.activeTurnId).toBeNull();
+    expect(store.messages[1]?.content).toBe("This turn was cancelled.");
+    expect(store.turnTraceHistory[0]?.phase).toBe("cancelled");
+    expect(store.turnTraceHistory[0]?.error).toBe("stopped_by_user");
+    expect(store.traceSteps.map((step) => step.state)).toEqual([
+      "completed",
+      "completed",
+      "cancelled",
+      "cancelled",
+      "cancelled"
+    ]);
+    expect(store.turnTraceHistory[0]?.traceSteps.map((step) => step.state)).toEqual([
+      "completed",
+      "completed",
+      "cancelled",
+      "cancelled",
+      "cancelled"
+    ]);
 
     nowSpy.mockRestore();
   });
