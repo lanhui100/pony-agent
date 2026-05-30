@@ -1,5 +1,4 @@
 use crate::agent::context::RetrievedContextState;
-use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::planner::{GraphPlanner, GraphPlanningContext};
 use crate::agent::runtime::TurnResult;
 use serde::{Deserialize, Serialize};
@@ -202,6 +201,7 @@ pub struct GraphTurnHandoff {
     pub run_phase: Option<String>,
     pub active_task_focus: Option<String>,
     pub acceptance_focus: Option<String>,
+    pub closeout_focus: Option<String>,
     pub last_referenced_file: Option<String>,
     pub recent_attachment_asset_count: usize,
     pub long_term_memory_status: String,
@@ -268,18 +268,16 @@ impl GraphEngine {
         session_id: Option<&str>,
         result: &TurnResult,
         retrieved: &RetrievedContextState,
-        checkpoint: Option<&ExecutionCheckpoint>,
     ) -> GraphTurnHandoff {
         GraphTurnHandoff {
             contract_version: self.contract_version().to_string(),
             turn_id: turn_id.map(str::to_string),
             session_id: session_id
                 .map(str::to_string)
-                .or_else(|| checkpoint.and_then(|item| item.session_id.clone()))
                 .or_else(|| Some(retrieved.session_context.conversation_id.clone())),
             turn_phase: result.phase.clone(),
-            checkpoint_status: checkpoint.map(|item| item.status.clone()),
-            checkpoint_phase: checkpoint.map(|item| item.phase.clone()),
+            checkpoint_status: retrieved.run_state.execution_checkpoint_status.clone(),
+            checkpoint_phase: retrieved.run_state.execution_checkpoint_phase.clone(),
             user_message: result.user_message.clone(),
             assistant_message: result.assistant_message.clone(),
             session_summary: retrieved.session_context.summary.clone(),
@@ -289,6 +287,7 @@ impl GraphEngine {
             run_phase: retrieved.run_state.phase.clone(),
             active_task_focus: extract_active_task_focus(&retrieved.long_term_memory.entries),
             acceptance_focus: extract_acceptance_focus(&retrieved.long_term_memory.entries),
+            closeout_focus: extract_closeout_focus(&retrieved.long_term_memory.entries),
             last_referenced_file: retrieved.session_context.last_referenced_file.clone(),
             recent_attachment_asset_count: retrieved.session_context.recent_attachment_assets.len(),
             long_term_memory_status: retrieved.long_term_memory.status.clone(),
@@ -359,7 +358,7 @@ impl GraphEngine {
 
         match normalize_handoff_phase(handoff) {
             "failed" | "cancelled" => self.decide_after_turn(handoff),
-            _ => planner.decide_after_turn(GraphPlanningContext { run, handoff }),
+            _ => planner.decide_after_turn(GraphPlanningContext::from_run(run, handoff)),
         }
     }
 
@@ -675,6 +674,17 @@ fn extract_acceptance_focus(
         .map(str::to_string)
 }
 
+fn extract_closeout_focus(
+    entries: &[crate::agent::context::LongTermMemoryEntry],
+) -> Option<String> {
+    entries
+        .iter()
+        .find(|entry| entry.kind == "project_workflow.closeout_requirement")
+        .map(|entry| entry.content.trim())
+        .filter(|content| !content.is_empty())
+        .map(str::to_string)
+}
+
 fn first_task_like_token(text: &str) -> Option<String> {
     let mut current = String::new();
     for ch in text.chars().chain(std::iter::once(' ')) {
@@ -809,7 +819,6 @@ mod tests {
         LongTermMemory, LongTermMemoryEntry, RunState, SessionContext, TranscriptContext,
         TurnContext,
     };
-    use crate::agent::execution_control::ExecutionCheckpoint;
     use crate::agent::planner::DefaultGraphPlanner;
     use crate::agent::runtime::TurnResult;
     use std::fs;
@@ -858,6 +867,8 @@ mod tests {
             run_state: RunState {
                 run_id: Some("run-1".to_string()),
                 phase: Some("waiting_user".to_string()),
+                execution_checkpoint_status: Some("completed".to_string()),
+                execution_checkpoint_phase: Some("ready".to_string()),
                 ..RunState::default()
             },
             long_term_memory: LongTermMemory {
@@ -878,34 +889,23 @@ mod tests {
                         source: "explicit_user_message".to_string(),
                         updated_at_ms: 2,
                     },
+                    LongTermMemoryEntry {
+                        kind: "project_workflow.closeout_requirement".to_string(),
+                        content:
+                            "Summarize changed files, verification performed, and unresolved risks at closeout."
+                                .to_string(),
+                        source: "explicit_user_message".to_string(),
+                        updated_at_ms: 3,
+                    },
+                    LongTermMemoryEntry {
+                        kind: "project_scope.task_boundary".to_string(),
+                        content: "Do not expand scope into PA-024, PA-025.".to_string(),
+                        source: "explicit_user_message".to_string(),
+                        updated_at_ms: 4,
+                    },
                 ],
             },
             transcript: TranscriptContext::default(),
-        }
-    }
-
-    fn sample_checkpoint(status: &str, phase: &str) -> ExecutionCheckpoint {
-        ExecutionCheckpoint {
-            turn_id: "turn-1".to_string(),
-            session_id: Some("session-1".to_string()),
-            status: status.to_string(),
-            phase: phase.to_string(),
-            provider_requested_name: Some("OpenAI".to_string()),
-            provider_name: Some("OpenAI".to_string()),
-            provider_protocol: Some("openai".to_string()),
-            provider_model: Some("gpt-5".to_string()),
-            provider_source: Some("primary".to_string()),
-            provider_mode: Some("standard".to_string()),
-            fallback_reason: None,
-            completed_hops: 0,
-            max_hops: 16,
-            active_tool_name: None,
-            trace_steps: Vec::new(),
-            tool_activities: Vec::new(),
-            error: None,
-            started_at_ms: 0,
-            updated_at_ms: 0,
-            stop_requested_at_ms: None,
         }
     }
 
@@ -927,7 +927,6 @@ mod tests {
             Some("session-1"),
             &sample_result("ready"),
             &sample_retrieved(),
-            Some(&sample_checkpoint("completed", "ready")),
         );
 
         assert_eq!(handoff.contract_version, GRAPH_CONTRACT_VERSION);
@@ -936,11 +935,19 @@ mod tests {
         assert_eq!(handoff.conversation_id, "session-1");
         assert_eq!(handoff.run_id.as_deref(), Some("run-1"));
         assert_eq!(handoff.run_phase.as_deref(), Some("waiting_user"));
+        assert_eq!(handoff.checkpoint_status.as_deref(), Some("completed"));
+        assert_eq!(handoff.checkpoint_phase.as_deref(), Some("ready"));
         assert_eq!(handoff.active_task_focus.as_deref(), Some("PA-018"));
         assert_eq!(
             handoff.acceptance_focus.as_deref(),
             Some(
                 "Establish acceptance criteria and run a closeout audit before claiming delivery."
+            )
+        );
+        assert_eq!(
+            handoff.closeout_focus.as_deref(),
+            Some(
+                "Summarize changed files, verification performed, and unresolved risks at closeout."
             )
         );
         assert_eq!(handoff.long_term_memory_status, "available");
@@ -950,12 +957,14 @@ mod tests {
     #[test]
     fn graph_engine_uses_continue_boundary_while_runtime_is_still_running() {
         let engine = GraphEngine::new("state-machine-v1");
+        let mut retrieved = sample_retrieved();
+        retrieved.run_state.execution_checkpoint_status = Some("running".to_string());
+        retrieved.run_state.execution_checkpoint_phase = Some("calling_tool".to_string());
         let handoff = engine.build_turn_handoff(
             Some("turn-1"),
             Some("session-1"),
             &sample_result("calling_tool"),
-            &sample_retrieved(),
-            Some(&sample_checkpoint("running", "calling_tool")),
+            &retrieved,
         );
 
         let decision = engine.decide_after_turn(&handoff);
@@ -971,7 +980,6 @@ mod tests {
             Some("session-1"),
             &sample_result("ready"),
             &sample_retrieved(),
-            Some(&sample_checkpoint("completed", "ready")),
         );
 
         let decision = engine.decide_after_turn(&handoff);
@@ -993,7 +1001,6 @@ mod tests {
             Some("session-1"),
             &sample_result("ready"),
             &sample_retrieved(),
-            Some(&sample_checkpoint("completed", "ready")),
         );
 
         let decision = engine.decide_after_turn_with_planner(&run, &handoff, &planner);
@@ -1014,14 +1021,12 @@ mod tests {
             Some("session-1"),
             &sample_result("failed"),
             &sample_retrieved(),
-            Some(&sample_checkpoint("failed", "failed")),
         );
         let cancelled = engine.build_turn_handoff(
             Some("turn-2"),
             Some("session-1"),
             &sample_result("cancelled"),
             &sample_retrieved(),
-            Some(&sample_checkpoint("cancelled", "cancelled")),
         );
 
         assert_eq!(
@@ -1058,7 +1063,6 @@ mod tests {
             Some("session-1"),
             &sample_result("ready"),
             &sample_retrieved(),
-            Some(&sample_checkpoint("completed", "ready")),
         );
         let decision = engine.decide_after_turn(&handoff);
         let advance = runner
@@ -1102,7 +1106,6 @@ mod tests {
             Some("session-1"),
             &sample_result("ready"),
             &sample_retrieved(),
-            Some(&sample_checkpoint("completed", "ready")),
         );
         let decision = engine.decide_after_turn_with_planner(&running.run, &handoff, &planner);
         let advance = runner

@@ -232,7 +232,7 @@ impl AgentRuntime {
             checkpoint,
         );
         self.graph
-            .build_turn_handoff(turn_id, session_id, result, &retrieved, checkpoint)
+            .build_turn_handoff(turn_id, session_id, result, &retrieved)
     }
 
     #[allow(dead_code)]

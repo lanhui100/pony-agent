@@ -26,8 +26,26 @@ pub trait TurnPlanner: Send {
 }
 
 pub struct GraphPlanningContext<'a> {
-    pub run: &'a GraphRun,
+    pub run: GraphPlanningRunView<'a>,
     pub handoff: &'a GraphTurnHandoff,
+}
+
+#[derive(Clone, Copy)]
+pub struct GraphPlanningRunView<'a> {
+    pub goal: &'a str,
+    pub step_count: usize,
+}
+
+impl<'a> GraphPlanningContext<'a> {
+    pub fn from_run(run: &'a GraphRun, handoff: &'a GraphTurnHandoff) -> Self {
+        Self {
+            run: GraphPlanningRunView {
+                goal: run.goal.as_str(),
+                step_count: run.steps.len(),
+            },
+            handoff,
+        }
+    }
 }
 
 pub trait GraphPlanner: Send + Sync {
@@ -53,7 +71,7 @@ impl GraphPlanner for DefaultGraphPlanner {
         }
 
         if goal_supports_auto_continue(goal)
-            && context.run.steps.len() < MAX_GRAPH_AUTO_CONTINUE_STEPS
+            && context.run.step_count < MAX_GRAPH_AUTO_CONTINUE_STEPS
         {
             return GraphDecision {
                 kind: GraphDecisionKind::Continue,
@@ -591,6 +609,11 @@ fn build_next_action_summary(goal: &str, handoff: &GraphTurnHandoff) -> String {
         .as_deref()
         .map(|note| format!(" 验收要求：{}。", truncate_text(note, 88)))
         .unwrap_or_default();
+    let closeout_note = handoff
+        .closeout_focus
+        .as_deref()
+        .map(|note| format!(" 收口要求：{}。", truncate_text(note, 88)))
+        .unwrap_or_default();
     let active_task_note = handoff
         .active_task_focus
         .as_deref()
@@ -601,7 +624,7 @@ fn build_next_action_summary(goal: &str, handoff: &GraphTurnHandoff) -> String {
         .as_deref()
         .map(|path| format!(" 当前焦点文件：{}。", truncate_text(path, 72)))
         .unwrap_or_default();
-    let focus_note = format!("{acceptance_note}{focus_note}");
+    let focus_note = format!("{acceptance_note}{closeout_note}{focus_note}");
     let memory_note = if handoff.long_term_memory_entry_count > 0 {
         format!(
             " 已保留 {} 条长期记忆可供下一轮继续消费。",
@@ -722,6 +745,7 @@ mod tests {
             run_phase: Some("waiting_user".to_string()),
             active_task_focus: Some("PA-018".to_string()),
             acceptance_focus: None,
+            closeout_focus: None,
             last_referenced_file: Some("src-tauri/src/agent/provider.rs".to_string()),
             recent_attachment_asset_count: 0,
             long_term_memory_status: "empty".to_string(),
@@ -951,10 +975,7 @@ mod tests {
             "我已经定位到第一处配置差异。是否继续帮你核对下一层 provider fallback？",
         );
 
-        let decision = planner.decide_after_turn(GraphPlanningContext {
-            run: &run,
-            handoff: &handoff,
-        });
+        let decision = planner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
 
         assert_eq!(decision.kind, GraphDecisionKind::WaitUser);
         assert_eq!(
@@ -970,10 +991,7 @@ mod tests {
         let run = sample_run("逐步排查 provider 配置问题并收口");
         let handoff = sample_handoff("我已经完成第一轮核对，并整理出继续排查的上下文。");
 
-        let decision = planner.decide_after_turn(GraphPlanningContext {
-            run: &run,
-            handoff: &handoff,
-        });
+        let decision = planner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
 
         assert_eq!(decision.kind, GraphDecisionKind::Continue);
         assert_eq!(
@@ -994,10 +1012,7 @@ mod tests {
         handoff.long_term_memory_status = "available".to_string();
         handoff.long_term_memory_entry_count = 2;
 
-        let decision = planner.decide_after_turn(GraphPlanningContext {
-            run: &run,
-            handoff: &handoff,
-        });
+        let decision = planner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
 
         assert_eq!(decision.kind, GraphDecisionKind::Continue);
         assert!(decision.summary.contains("已保留 2 条长期记忆"));
@@ -1013,14 +1028,28 @@ mod tests {
                 .to_string(),
         );
 
-        let decision = planner.decide_after_turn(GraphPlanningContext {
-            run: &run,
-            handoff: &handoff,
-        });
+        let decision = planner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
 
         assert_eq!(decision.kind, GraphDecisionKind::Continue);
         assert!(decision.summary.contains("验收要求"));
         assert!(decision.summary.contains("closeout audit"));
+    }
+
+    #[test]
+    fn graph_planner_continue_summary_can_surface_closeout_focus() {
+        let planner = DefaultGraphPlanner;
+        let run = sample_run("逐步推进 PA-018 并完成交付");
+        let mut handoff = sample_handoff("我已经补齐了当前验收证据，并准备继续推进。");
+        handoff.closeout_focus = Some(
+            "Summarize changed files, verification performed, and unresolved risks at closeout."
+                .to_string(),
+        );
+
+        let decision = planner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+
+        assert_eq!(decision.kind, GraphDecisionKind::Continue);
+        assert!(decision.summary.contains("收口要求"));
+        assert!(decision.summary.contains("verification performed"));
     }
 
     #[test]
@@ -1029,10 +1058,7 @@ mod tests {
         let run = sample_run("解释 tauri.conf.json 是什么");
         let handoff = sample_handoff("tauri.conf.json 是 Tauri 应用的主配置文件。");
 
-        let decision = planner.decide_after_turn(GraphPlanningContext {
-            run: &run,
-            handoff: &handoff,
-        });
+        let decision = planner.decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
 
         assert_eq!(decision.kind, GraphDecisionKind::WaitUser);
         assert_eq!(decision.target_phase, GraphRunPhase::WaitingUser);

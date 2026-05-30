@@ -393,21 +393,8 @@ fn provider_context_note(
         ),
     ];
 
-    if let Some(run_id) = retrieved.run_state.run_id.as_deref() {
-        notes.push(format!(
-            "Run state: runId={} / phase={} / checkpointStatus={}.",
-            run_id,
-            retrieved
-                .run_state
-                .phase
-                .as_deref()
-                .unwrap_or("unavailable"),
-            retrieved
-                .run_state
-                .execution_checkpoint_status
-                .as_deref()
-                .unwrap_or("unavailable"),
-        ));
+    if let Some(goal) = retrieved.run_state.goal.as_deref() {
+        notes.push(format!("Run goal: {}.", goal));
     }
 
     if !retrieved.long_term_memory.entries.is_empty() {
@@ -537,14 +524,27 @@ fn build_long_term_memory(entries: &[LongTermMemoryRecord]) -> LongTermMemory {
         return LongTermMemory::default();
     }
 
+    let mut sorted_entries = entries.to_vec();
+    // Keep prompt-adjacent memory facts deterministic so retrieval order does not drift with writes.
+    sorted_entries.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.content.cmp(&right.content))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+
     LongTermMemory {
         status: "available".to_string(),
         summary: Some(format!(
             "Retrieved {} long-term memory entr{} for this session.",
-            entries.len(),
-            if entries.len() == 1 { "y" } else { "ies" }
+            sorted_entries.len(),
+            if sorted_entries.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
         )),
-        entries: entries
+        entries: sorted_entries
             .iter()
             .map(|entry| LongTermMemoryEntry {
                 kind: entry.kind.clone(),
@@ -1032,14 +1032,13 @@ mod tests {
 
         assert_eq!(retrieved.long_term_memory.status, "available");
         assert_eq!(retrieved.long_term_memory.entries.len(), 2);
-        assert_eq!(
-            retrieved.long_term_memory.entries[0].kind,
-            "user_preference"
-        );
-        assert_eq!(
-            retrieved.long_term_memory.entries[0].source,
-            "explicit_user_message"
-        );
+        assert!(retrieved
+            .long_term_memory
+            .entries
+            .iter()
+            .any(
+                |entry| entry.kind == "user_preference" && entry.source == "explicit_user_message"
+            ));
     }
 
     #[test]

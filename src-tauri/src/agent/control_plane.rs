@@ -3,8 +3,8 @@ use crate::agent::execution_control::{
     ExecutionCheckpoint, ExecutionControlRegistry, StopTurnResponse,
 };
 use crate::agent::graph::{
-    GraphDecision, GraphRun, GraphRunCheckpoint, GraphRunEvent, GraphRunPhase,
-    GraphRunStopReason, GraphRunStore, GraphRunner, GraphTurnHandoff,
+    GraphDecision, GraphRun, GraphRunCheckpoint, GraphRunEvent, GraphRunPhase, GraphRunStopReason,
+    GraphRunStore, GraphRunner, GraphTurnHandoff,
 };
 use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
 use crate::agent::runtime::{AgentRuntime, TurnInput, TurnResult, TurnStreamEvent};
@@ -747,7 +747,9 @@ impl HostControlPlane {
     }
 
     fn load_active_graph_run_for_session(&self, session_id: Option<&str>) -> Option<GraphRun> {
-        let session_id = session_id.map(str::trim).filter(|session_id| !session_id.is_empty())?;
+        let session_id = session_id
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())?;
         let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
         graph_runs.list_runs().into_iter().find(|run| {
             run.session_id.as_deref() == Some(session_id)
@@ -797,12 +799,17 @@ impl HostControlPlane {
                 .as_ref()
                 .and_then(|checkpoint| checkpoint.session_id.clone())
         });
-        let run = self
-            .resolve_graph_run_for_retrieval(query.run_id.as_deref(), resolved_session_id.as_deref());
+        let run = self.resolve_graph_run_for_retrieval(
+            query.run_id.as_deref(),
+            resolved_session_id.as_deref(),
+        );
         let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
         let session = runtime.load_session_snapshot(resolved_session_id.as_deref());
-        let retrieved =
-            runtime.inspect_retrieved_context(resolved_session_id.as_deref(), run.as_ref(), checkpoint.as_ref());
+        let retrieved = runtime.inspect_retrieved_context(
+            resolved_session_id.as_deref(),
+            run.as_ref(),
+            checkpoint.as_ref(),
+        );
 
         SessionRuntimeView {
             session,
@@ -821,8 +828,10 @@ impl HostControlPlane {
                 .as_ref()
                 .and_then(|checkpoint| checkpoint.session_id.clone())
         });
-        let run = self
-            .resolve_graph_run_for_retrieval(query.run_id.as_deref(), resolved_session_id.as_deref());
+        let run = self.resolve_graph_run_for_retrieval(
+            query.run_id.as_deref(),
+            resolved_session_id.as_deref(),
+        );
         let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
         runtime.inspect_retrieved_context(
             resolved_session_id.as_deref(),
@@ -1344,7 +1353,8 @@ mod tests {
 
     #[test]
     fn session_runtime_view_queries_flow_through_control_plane() {
-        let (control_plane, server) = build_test_control_plane(vec![json_completion("runtime-view")]);
+        let (control_plane, server) =
+            build_test_control_plane(vec![json_completion("runtime-view")]);
 
         {
             let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
@@ -1437,7 +1447,10 @@ mod tests {
         });
 
         assert_eq!(started.run.id, "run-session-aware");
-        assert_eq!(retrieved.run_state.run_id.as_deref(), Some("run-session-aware"));
+        assert_eq!(
+            retrieved.run_state.run_id.as_deref(),
+            Some("run-session-aware")
+        );
         assert_eq!(retrieved.run_state.phase.as_deref(), Some("waiting_user"));
         server.finish();
     }

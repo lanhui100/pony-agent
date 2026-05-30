@@ -10,13 +10,13 @@ use agent::control_plane::{
     GraphRunStreamStartResponse, GraphRunTurnResponse, HostControlPlane, HostHealthSnapshot,
     HostInspectionQuery, HostInspectionSnapshot, ResumeGraphRunCommand,
     ResumeGraphRunStreamCommand, RetrievedContextQuery, RunTurnCommand, SessionRuntimeView,
-    SessionRuntimeViewQuery, SessionSnapshotQuery, StartGraphRunCommand,
-    StartGraphRunStreamCommand, StartTurnStreamCommand, StopGraphRunCommand, StopTurnCommand,
+    SessionRuntimeViewQuery, StartGraphRunCommand, StartGraphRunStreamCommand,
+    StartTurnStreamCommand, StopGraphRunCommand, StopTurnCommand,
 };
 use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
 use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
-use agent::session::{SessionOverview, SessionSnapshot};
+use agent::session::SessionOverview;
 use agent::tools::ToolDefinition;
 use tauri::{AppHandle, Manager, State};
 
@@ -206,14 +206,6 @@ fn list_sessions(control_plane: State<'_, HostControlPlane>) -> Vec<SessionOverv
 }
 
 #[tauri::command]
-fn load_session_snapshot(
-    control_plane: State<'_, HostControlPlane>,
-    session_id: Option<String>,
-) -> SessionSnapshot {
-    control_plane.load_session_snapshot(SessionSnapshotQuery { session_id })
-}
-
-#[tauri::command]
 fn load_session_runtime_view(
     control_plane: State<'_, HostControlPlane>,
     turn_id: Option<String>,
@@ -268,7 +260,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_check,
             list_sessions,
-            load_session_snapshot,
             load_session_runtime_view,
             load_retrieved_context,
             delete_session,

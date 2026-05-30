@@ -997,13 +997,47 @@ fn extract_long_term_memory_from_user_message(user_message: &str) -> Vec<LongTer
         });
     }
 
+    if let Some(prerequisite) =
+        extract_explicit_project_dependency_prerequisite(user_message, &lowered)
+    {
+        entries.push(LongTermMemoryRecord {
+            kind: "project_dependency.prerequisite".to_string(),
+            content: prerequisite,
+            source: "explicit_user_message".to_string(),
+            updated_at_ms,
+        });
+    }
+
+    if extract_explicit_closeout_requirement(&lowered) {
+        entries.push(LongTermMemoryRecord {
+            kind: "project_workflow.closeout_requirement".to_string(),
+            content:
+                "Summarize changed files, verification performed, and unresolved risks at closeout."
+                    .to_string(),
+            source: "explicit_user_message".to_string(),
+            updated_at_ms,
+        });
+    }
+
+    if let Some(task_boundary) = extract_explicit_task_boundary(&lowered) {
+        entries.push(LongTermMemoryRecord {
+            kind: "project_scope.task_boundary".to_string(),
+            content: task_boundary,
+            source: "explicit_user_message".to_string(),
+            updated_at_ms,
+        });
+    }
+
     entries
 }
 
 fn memory_record_identity(entry: &LongTermMemoryRecord) -> String {
     if entry.kind.starts_with("user_preference.")
+        || entry.kind.starts_with("project_dependency.")
         || entry.kind == "project_focus.active_task"
         || entry.kind == "project_workflow.acceptance_gate"
+        || entry.kind == "project_workflow.closeout_requirement"
+        || entry.kind == "project_scope.task_boundary"
     {
         entry.kind.clone()
     } else {
@@ -1113,6 +1147,102 @@ fn extract_explicit_acceptance_gate_requirement(lowered_user_message: &str) -> b
         )
 }
 
+fn extract_explicit_project_dependency_prerequisite(
+    user_message: &str,
+    lowered_user_message: &str,
+) -> Option<String> {
+    let task_ids = collect_task_like_tokens(user_message);
+    if task_ids.len() < 2 {
+        return None;
+    }
+
+    if contains_any_phrase(
+        lowered_user_message,
+        &["依赖", "depends on", "blocked on", "prerequisite"],
+    ) {
+        return Some(format!("{} depends on {}.", task_ids[0], task_ids[1]));
+    }
+
+    if contains_any_phrase(
+        lowered_user_message,
+        &["先完成", "完成前", "before starting", "before working on"],
+    ) && contains_any_phrase(
+        lowered_user_message,
+        &[
+            "再做",
+            "再推进",
+            "再处理",
+            "再开始",
+            "then start",
+            "then work on",
+        ],
+    ) {
+        return Some(format!("{} depends on {}.", task_ids[1], task_ids[0]));
+    }
+
+    None
+}
+
+fn extract_explicit_closeout_requirement(lowered_user_message: &str) -> bool {
+    contains_any_phrase(
+        lowered_user_message,
+        &[
+            "改了哪些文件",
+            "做了什么验证",
+            "未解决风险",
+            "changed files",
+            "verification performed",
+            "unresolved risks",
+        ],
+    ) && contains_any_phrase(
+        lowered_user_message,
+        &["验证", "verification", "风险", "risks"],
+    )
+}
+
+fn extract_explicit_task_boundary(lowered_user_message: &str) -> Option<String> {
+    let markers = [
+        "不要越界到",
+        "不能越界到",
+        "不要扩到",
+        "do not expand into",
+        "don't expand into",
+    ];
+
+    for marker in markers {
+        if let Some(index) = lowered_user_message.find(marker) {
+            let boundary_text = &lowered_user_message[index + marker.len()..];
+            let task_ids = collect_task_like_tokens(boundary_text);
+            if !task_ids.is_empty() {
+                return Some(format!("Do not expand scope into {}.", task_ids.join(", ")));
+            }
+        }
+    }
+
+    None
+}
+
+fn collect_task_like_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            current.push(ch);
+            continue;
+        }
+
+        let normalized = current.to_ascii_uppercase();
+        if looks_like_task_id(&normalized) && !tokens.iter().any(|existing| existing == &normalized)
+        {
+            tokens.push(normalized);
+        }
+        current.clear();
+    }
+
+    tokens
+}
+
 fn first_task_like_token(text: &str) -> Option<String> {
     let mut current = String::new();
     for ch in text.chars().chain(std::iter::once(' ')) {
@@ -1121,8 +1251,9 @@ fn first_task_like_token(text: &str) -> Option<String> {
             continue;
         }
 
-        if looks_like_task_id(&current) {
-            return Some(current);
+        let normalized = current.to_ascii_uppercase();
+        if looks_like_task_id(&normalized) {
+            return Some(normalized);
         }
         current.clear();
     }
@@ -1260,14 +1391,10 @@ fn build_title(history: &[TurnHistoryMessage]) -> String {
         .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string())
 }
 
-fn build_summary(turn_count: usize, last_referenced_file: Option<&str>) -> String {
-    match (turn_count, last_referenced_file) {
-        (0, _) => DEFAULT_SESSION_SUMMARY.to_string(),
-        (_, Some(path)) => format!(
-            "{} / 已完成 {} 轮 / 当前关注 {}",
-            DEFAULT_SESSION_SUMMARY, turn_count, path
-        ),
-        (_, None) => format!("{} / 已完成 {} 轮", DEFAULT_SESSION_SUMMARY, turn_count),
+fn build_summary(_turn_count: usize, last_referenced_file: Option<&str>) -> String {
+    match last_referenced_file {
+        Some(path) => format!("{} / 当前关注 {}", DEFAULT_SESSION_SUMMARY, path),
+        None => DEFAULT_SESSION_SUMMARY.to_string(),
     }
 }
 
@@ -2047,6 +2174,92 @@ mod tests {
         assert_eq!(
             matching_entries[0].content,
             "Establish acceptance criteria and run a closeout audit before claiming delivery."
+        );
+        assert_eq!(matching_entries[0].source, "explicit_user_message");
+    }
+
+    #[test]
+    fn append_turn_extracts_project_dependency_prerequisite_into_long_term_memory() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(
+            Some("memory-prerequisite"),
+            "先完成 PA-017，再做 PA-018。",
+            "收到，我会先确认前置任务。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("memory-prerequisite"),
+            "先完成 PA-017，再做 PA-018。",
+            "继续推进。",
+            None,
+            Vec::new(),
+        );
+
+        let snapshot = store.snapshot(Some("memory-prerequisite"), &[]);
+        let matching_entries = snapshot
+            .long_term_memory_entries
+            .iter()
+            .filter(|entry| entry.kind == "project_dependency.prerequisite")
+            .collect::<Vec<_>>();
+        assert_eq!(matching_entries.len(), 1);
+        assert_eq!(matching_entries[0].content, "PA-018 depends on PA-017.");
+        assert_eq!(matching_entries[0].source, "explicit_user_message");
+    }
+
+    #[test]
+    fn append_turn_extracts_closeout_requirement_into_long_term_memory() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(
+            Some("memory-closeout"),
+            "完成后说明改了哪些文件、做了什么验证、还有什么未解决风险。",
+            "收到，我会按这个收口口径汇报。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("memory-closeout"),
+            "完成后说明改了哪些文件、做了什么验证、还有什么未解决风险。",
+            "继续。",
+            None,
+            Vec::new(),
+        );
+
+        let snapshot = store.snapshot(Some("memory-closeout"), &[]);
+        let matching_entries = snapshot
+            .long_term_memory_entries
+            .iter()
+            .filter(|entry| entry.kind == "project_workflow.closeout_requirement")
+            .collect::<Vec<_>>();
+        assert_eq!(matching_entries.len(), 1);
+        assert_eq!(
+            matching_entries[0].content,
+            "Summarize changed files, verification performed, and unresolved risks at closeout."
+        );
+        assert_eq!(matching_entries[0].source, "explicit_user_message");
+    }
+
+    #[test]
+    fn append_turn_extracts_task_boundary_into_long_term_memory() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(
+            Some("memory-task-boundary"),
+            "目标是 PA-018，不能越界到 PA-024、PA-025。",
+            "收到，我会控制范围。",
+            None,
+            Vec::new(),
+        );
+
+        let snapshot = store.snapshot(Some("memory-task-boundary"), &[]);
+        let matching_entries = snapshot
+            .long_term_memory_entries
+            .iter()
+            .filter(|entry| entry.kind == "project_scope.task_boundary")
+            .collect::<Vec<_>>();
+        assert_eq!(matching_entries.len(), 1);
+        assert_eq!(
+            matching_entries[0].content,
+            "Do not expand scope into PA-024, PA-025."
         );
         assert_eq!(matching_entries[0].source, "explicit_user_message");
     }
