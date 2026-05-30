@@ -11,6 +11,7 @@ import {
   Settings2,
   Trash2
 } from "lucide-vue-next";
+import PonyBrandIcon from "@/components/PonyBrandIcon.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import { useRuntimeStore } from "@/stores/runtime";
 import type { ChatMessage, SessionOverview } from "@/types/runtime";
@@ -184,11 +185,12 @@ function canDeleteSession(session: SessionOverview) {
       <div class="flex w-full items-center gap-2" :class="collapsed ? 'justify-center' : 'justify-between'">
         <button
           v-if="!collapsed"
-          class="min-w-0 text-left"
+          class="flex min-w-0 items-center gap-2 text-left"
           type="button"
           data-testid="session-sidebar-brand"
           @click="navigate('home')"
         >
+          <PonyBrandIcon class-name="h-7 w-7 shrink-0 rounded-[0.65rem]" />
           <div class="truncate text-[0.95rem] font-semibold tracking-[-0.03em] text-stone-950">Pony Agent</div>
         </button>
 
@@ -208,6 +210,16 @@ function canDeleteSession(session: SessionOverview) {
         class="mt-4 flex flex-1 flex-col items-center gap-2"
         data-testid="session-sidebar-collapsed"
       >
+        <button
+          class="inline-flex h-9 w-9 items-center justify-center rounded-[0.75rem] bg-[#fbf4e8] shadow-[0_1px_0_rgba(28,25,23,0.03)]"
+          type="button"
+          title="Pony Agent"
+          data-testid="session-sidebar-brand-collapsed"
+          @click="navigate('home')"
+        >
+          <PonyBrandIcon class-name="h-7 w-7 shrink-0 rounded-[0.65rem]" />
+        </button>
+
         <button
           class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] bg-transparent text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:text-stone-300"
           type="button"
