@@ -8,6 +8,8 @@
 ## 2. 架构
 
 - [架构总览](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/overview.md)
+- [架构术语表](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/terminology.md)
+- [Context/State 子系统 V1](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)
 - [Rust 运行时设计](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/runtime.md)
 - [前端工作台架构](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/frontend-workbench.md)
 

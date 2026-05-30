@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: `In Progress`
+- Status: `Done`
 - Priority: `P1`
 - Owner: `Codex`
 
@@ -33,6 +33,9 @@
 - `ToolRouter` 所在的最小工具层已经开始承接多轮语境：当前可以结合最近用户消息回溯上一个文件，并把“第 N 行”映射到 `workspace.read_file_segment`。
 - 已明确把 provider prompt caching 作为后续抽象收敛的约束之一：工具清单、developer 指令与 history 组织方式需要尽量稳定，避免 runtime 自己把 provider cache 命中率打碎。
 - `SessionStore` 最小骨架已经落地：当前由 Rust core 维护 `sessionId -> session state`，并通过 `.pony-agent/sessions.json` 做最小持久化；Tauri command 也已切到共享 `AgentRuntime`，不再每轮重建 session。
+- `SessionBackend` 已作为可替换后端边界落地，`FileSessionBackend / MemorySessionBackend` 均已进入回归测试
+- `ProviderSelectionResolver` 已把 provider 选择逻辑从 runtime 中抽离，便于后续 provider registry / preset / env 策略继续演化
+- `ProviderRegistryStore + SecretStore` 已形成最小配置基础设施边界：普通 provider 配置留在 `providers.json`，API Key 通过统一密钥后端解析，不再让 runtime 直接面向 `env` 主存储
 - 但这些能力还主要集中在具体实现里，尚未进一步收敛为更明确的 `Provider` trait / `ToolRouter` trait / 可替换 `SessionStore backend` 边界。
 
 ## 下一步动作
@@ -45,6 +48,7 @@
 - 把当前 `SessionStore` 从“内存 + JSON 文件”继续收敛成可替换 backend，明确后续 SQLite / PostgreSQL 如何接入
 - 在抽象 `Provider` / `SessionStore` 边界时，把“哪些前缀应该稳定、哪些上下文允许频繁变化”一起设计进去
 - 把“核心 runtime”与“Tauri/HTTP 等接入层”分开思考，避免 provider 抽象继续长在 UI 交付层里
+- 把 provider 配置层与凭证层继续固定为可替换后端接口，避免未来 HTTP/SSE/CLI/桌面宿主重复实现密钥读取策略
 
 ## 当前卡点
 
@@ -64,3 +68,12 @@
 
 - 2026-05-20：`HomeSidebar.vue` 的构建阻塞已修复，`npm run build` 通过。
 - 2026-05-20：`provider / tool / session` 的抽象边界已进入可持续收口阶段，下一步继续压缩 `runtime` 的临时逻辑。
+## 2026-05-23 补充进展
+- `ToolPlan` 已从“组合工具结果里的隐式约定”继续收束为 `ToolCall.plan: Option<ToolPlan>` 一等字段，`planner / runtime / telemetry` 边界更清晰。
+- runtime 现在允许“带显式计划的 local preflight”在 native tool flow 下优先生效，避免 provider 的单文件工具决策压过明显的多路径本地计划。
+- 这让 `PA-004` 当前的抽象边界更接近“runtime 负责计划与回合协同，provider 负责模型调用，adapter 只负责事件投递”的目标。
+## 2026-05-24 补充进展
+- `config.rs` 已引入统一 `SecretStore` 抽象，并由 `ProviderRegistryStore` 持有它，provider 配置与敏感凭证的边界开始稳定。
+- 当前默认后端已具备“系统密钥存储优先，文件 fallback 兜底，env 仅兼容读取”的最小跨平台策略，这为未来独立宿主复用 provider 配置层打下了基础。
+- 本轮完成状态收口：当前以 `ProviderClient + ProviderSelectionResolver + SessionBackend + ToolExecutor` 作为可替换边界，`ToolRouter` 保持默认本地实现，不再额外复制一个同义 trait。
+- `AgentRuntime` 已通过 `Box<dyn ToolExecutor>` 消费工具执行边界；任务文档与代码语义现已对齐，可视为完成。

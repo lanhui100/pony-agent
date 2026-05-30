@@ -1,58 +1,143 @@
 # Pony Agent Dashboard
 
 ## 项目状态
+
 - 项目：`Pony Agent`
 - 类型：学习模式重构项目
-- 当前主线：在已完成的 Vue 工作台、真实 stream 主链路和原生 tools 闭环上，完成一轮 `provider / session / runtime / tool` 收口与验证闭环，接下来转向更明确的 adapter/service 边界整理
-- 当前阶段：`Phase 3 / Runtime Expansion`
+- 当前主线：`Phase 4 / Graph Runtime Mainline`
+- 当前阶段：`Mainline Stabilizing`
 - 总体状态：`In Progress`
 
+## 当前主线结论
+
+- `PA-013 / PA-014 / PA-017 / PA-019 / PA-023` 已完成并有代码落地
+- 当前下一条主线仍然是 `PA-018`
+- `PA-024` 已正式立项，但仍处于占位页阶段，不是当前主线第一优先级
+
 ## 当前重点
-1. 基于已经稳定下来的 core 边界，开始评估 `PA-007` 的 adapter 抽离前置条件
-2. 继续把 provider 能力声明真正接入 runtime 输入编排与限制逻辑
-3. 继续把工具层从“组合工具可用”推进到“多工具语义和更细粒度 telemetry 可解释”
 
-## 当前任务摘要
-- `PA-003`：实现 Rust 单轮 runtime 骨架
-- `PA-004`：定义 provider 与 tool 抽象
-- `PA-005`：把 Vue 工作台接入真实 turn 执行链路
-- `PA-006`：实现新对话与历史对话管理
-- `PA-009`：完善 provider 能力配置（思考、多模态、上下文与模型能力）
-- `PA-007`：拆分独立接入层（Tauri / HTTP-SSE adapter）
-- `PA-008`：补强工具层（多工具、并发、权限、错误恢复）
+1. `PA-018` 已正式启动
+   当前已经落地第一阶段 retrieval contract：`TurnContext / SessionContext / RunState / LongTermMemory / TranscriptContext / RetrievedContextState`
+2. `runtime` 已开始消费 retrieval 结果
+   `build_request()`、planner preflight、session summary 生成、图片召回判断与 graph handoff 已开始消费结构化 retrieval 结果
+3. `LongTermMemory` 已从占位 contract 前进到最小真实边界
+   `session.rs` 中已经有独立存储字段、显式语言/风格/文件引用/任务系统同步/变更范围偏好写入策略、显式当前任务焦点写入策略、显式 note 写入策略与最小审计字段，retrieval 会返回 `empty / available` 的真实状态
+4. `planner` 已开始消费结构化 handoff facts
+   continue 摘要已开始使用 `active_task_focus`、`last_referenced_file` 和 `long_term_memory_entry_count`，不再只复述 session summary
+5. `host inspection` 已开始暴露 retrieval 视图
+   inspection 响应现在可以直接返回 `RetrievedContextState`，宿主侧观察入口不必再自己拼 session/run 原件
+6. `host retrieval` 已有原生查询面
+   宿主层现在可以直接加载 `RetrievedContextState`，不必总是先走 inspection 复合响应
+7. 前端 `runtime store` 已开始默认加载 retrieval 视图
+   `loadSessionState()` 会默认加载 `RetrievedContextState`，并在 completed / failed / cancelled 后刷新 retrieval 状态，给后续 UI / capability 消费提供稳定入口
+8. 前端 `runtime store` 主提交流程已开始优先消费 retrieval runState
+   `submitTurn()` 在决定 `start / continue / resume_graph_run_stream` 时，会先读取 `retrievedContext.runState`；如果本地 retrieval facts 不足，会先通过宿主原生 `load_retrieved_context` 刷新一次 retrieval 视图，只有这层仍不足时才回退到 `inspect_host`
+9. 前端 `HomeSidebar` run 面板也已开始优先消费 retrieval runState
+   当前会先用 `retrievedContext.runState` 构造最小 run 视图；如果本地 retrieval facts 不足，会先刷新宿主原生 retrieval，再决定是否回退到 `inspect_host`
+10. 前端 `HomeSidebar` 已有真实 retrieval 消费点
+   当前只在右侧 observability 区做增量整合：保留原有 `状态 / Tools / Trace` 主体结构，并把 retrieval 以紧凑 summary 的形式并入 `Trace` 面板
+11. 前端左栏 / 中栏已按边界回收 retrieval 常驻表达
+   `HomeSessionSidebar` 不再承载“当前上下文”卡片，`HomeWorkspace` 也不再常驻 `Retrieved Context` 顶部条，避免导航区和对话主舞台混入 observability 信息
+12. 前端 run 视图 contract 已开始跟进 `GraphTurnHandoff.active_task_focus`
+   `HomeSidebar` 的 trace-run 组头仍可消费 `lastHandoff.activeTaskFocus`，由 retrieval 派生的最小 run 也会补上这条结构化事实
+14. 前端 graph/retrieval contract 已开始收敛到共享类型
+   `src/types/runtime.ts` 已导出 `GraphTurnHandoff / GraphRun / GraphRunCheckpoint / HostInspectionSnapshot` 等共享类型，`runtime store`、`HomeSidebar` 与 `HomeWorkspace` 已开始复用，减少局部类型漂移
+15. 前端 retrieval run-state 映射也已开始收敛到共享 helper
+   `normalizeGraphRunPhase()` 与 `deriveGraphRunFromRunState()` 已收进 `src/types/runtime.ts`，`HomeSidebar` 与 `HomeWorkspace` 不再各自手写一份最小 run 派生逻辑
+16. 前端 `HomeWorkspace` graph run 刷新仍保持原实现基线
+   本轮未再继续把 retrieval UI 扩到中栏；后续若需要让 workspace 消费 retrieval，只能在不改写对话主舞台结构的前提下做增量接入
+17. `PA-018` 已形成独立正式验收审计文档
+   当前正式审计载体为 `management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md`，后续 closeout 需要以它为主做逐项终审
+18. `PA-020 / PA-021` 继续依赖 `PA-018`
+   在 retrieval boundary 稳定前，不推进 MCP bridge 与 skills bridge 的正式接入
+19. `PA-024` 继续保留在 backlog
+   监控页已有导航和占位页，但真实 telemetry 聚合还未开始
 
-## 当前断点
-- 前端已切换到 `Vue + Pinia`
-- 工作台已有运行时状态、轨迹和工具预演面板
-- Rust runtime 已能在 `run_turn()` 中读取 provider 配置、发起真实请求，并在失败时回退到 mock
-- 实际流式入口已经从同步整包 `run_turn()` 旁边长出 `start_turn_stream()` 这条事件驱动链路
-- OpenAI 兼容协议与 Anthropic 协议都已接入真实 stream 骨架
-- `turn:started / turn:delta / turn:trace / turn:tool / turn:completed / turn:failed` 已形成最小事件模型
-- 当前 `ToolRouter / ToolCall / ToolResult` 最小闭环已经成立，并已切到 OpenAI `tool_calls` 与 Anthropic `tool_use/tool_result` 原生协议主路径
-- runtime 已补上本地 planner，能对明显的工作区请求前置命中 `workspace.*` 工具，减少无意义的远端等待
-- 这轮已修复 OpenAI 兼容 provider 的流式 SSE 解析问题，`data: ...` chunk 不再被误当成普通 JSON
-- 对话主区、Markdown 渲染、模型脚注、输入交互和 provider/model 选择器已进入可用状态
-- 前端已开始把最近几轮 history 发送给后端，最小多轮语境已能支持“文件说明 -> 继续问该文件第 N 行”这类真实工作流
-- 已明确把 prompt caching 纳入重构考量：后续 history、session summary、工具清单注入方式都要兼顾 provider 侧缓存命中
-- 当前真实会话状态已开始由 Rust `SessionStore` 持有，并落到 `.pony-agent/sessions.json` 做最小持久化
-- 当前 agent core 仍主要通过 Tauri command/event 暴露，尚未抽成独立 HTTP/SSE 服务层
-- 当前真实工具执行链已经具备单工具 roundtrip，并已有 `workspace.list_files / workspace.read_file / workspace.read_file_segment`
-- 当前已经补出最小会话 UI：左侧“对话历史”可折叠，可新建、可切换、可清除
-- 当前 provider 仍处在“最小可用”阶段，尚未系统纳入模型思考、推理强度、多模态输入、上下文窗口与模型能力矩阵
-- 2026-05-23 这一轮已完成重构收口：
-- `runtime.ts` 已统一 trace、browser-preview、失败态文案与状态流，并抽出重复 helper
-- 前端已建立固定验证闭环：`npm run verify = test:unit + build + cargo check`
-- 已补齐组件层回归测试：`HomeWorkspace` / `HomeSessionSidebar`
-- Rust `cargo check` warning 已清干净，probe-only dead_code 噪音已隔离
-- 已完成真实 `tauri dev --no-watch` 冒烟，确认桌面壳、Vite dev server 和 Rust 进程可正常拉起
+## 当前代码证据
+
+- retrieval contract 与默认实现：
+  [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/context.rs)
+- long-term memory 最小存储边界：
+  [session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+- runtime 接入：
+  [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
+- graph handoff 接入：
+  [graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs)
+- turn 规划载体：
+  [turn_flow.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/turn_flow.rs)
+- 架构边界文档：
+  [context-state-subsystem.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)
+
+## 当前验证
+
+本轮已验证：
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib context::tests -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+npm run verify
+```
+
+结果：
+
+- `context` 相关 `6` 个测试全部通过
+- Rust `lib` 全量 `109` 个测试全部通过
+- 前端 `51` 个测试、`vite build` 与 Rust `cargo check` 全部通过
+
+注意：
+
+- 本轮已经拥有 retrieval contract 的局部证据、Rust `lib` 全量证据和仓库级 `verify` 证据
+- `PA-018` 最终收口前仍需继续扩展 `LongTermMemory` 的稳定事实写入来源，以及更深层 retrieval 消费链路
+- 最新一轮前端定向验证也已再次通过：
+  - `npm exec vitest run tests/HomeSessionSidebar.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSidebar.spec.ts tests/runtime-store.spec.ts`
+  - `npm exec vue-tsc -- --noEmit`
+  - `git diff --check -- src/components/HomeWorkspace.vue tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts`
+- 最新一轮仓库级验证也已重新通过：
+  - `npm run verify`
+  - 当前结果为前端 `60` 个测试、`vite build` 与 Rust `cargo check` 全部通过
+- 最新一轮 Rust memory / retrieval 定向验证也已通过：
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib append_turn_`
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib context::tests -- --nocapture`
+- 最新一轮 graph / planner retrieval 消费验证也已通过：
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib graph::tests -- --nocapture`
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib planner::tests -- --nocapture`
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib`
+  - 当前结果为 Rust `lib` 全量 `109` 个测试全部通过
+- 最新一轮 retrieval UI active-task 消费验证也已通过：
+  - `npm exec vitest run tests/HomeSidebar.spec.ts tests/HomeSessionSidebar.spec.ts tests/HomeWorkspace.spec.ts`
+  - `npm exec vue-tsc -- --noEmit`
+  - 当前结果为这三组前端定向测试共 `26` 个测试全部通过
+- 最新一轮 run-view contract 补齐验证也已通过：
+  - `npm exec vitest run tests/HomeSidebar.spec.ts tests/HomeWorkspace.spec.ts`
+  - `npm exec vue-tsc -- --noEmit`
+  - `npm run build`
+  - `cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check`
+  - 当前结果为前端构建与 Rust `cargo check` 全部通过
+- 最新一轮共享 graph/retrieval 类型收敛验证也已通过：
+  - `npm exec vue-tsc -- --noEmit`
+  - `npm exec vitest run tests/HomeSidebar.spec.ts tests/HomeWorkspace.spec.ts tests/runtime-store.spec.ts`
+  - `npm run build`
+  - 当前结果为 `44` 条定向测试全部通过，前端构建全部通过
+- 最新一轮共享 run-state 映射收敛验证也已通过：
+  - `npm exec vue-tsc -- --noEmit`
+  - `npm exec vitest run tests/HomeSidebar.spec.ts tests/HomeWorkspace.spec.ts tests/runtime-store.spec.ts`
+  - `npm run build`
+  - 当前结果为 `44` 条定向测试全部通过，前端构建全部通过
+- 最新一轮 host retrieval 刷新后再 fallback 验证也已通过：
+  - `npm exec vitest run tests/runtime-store.spec.ts tests/HomeSidebar.spec.ts tests/HomeWorkspace.spec.ts`
+  - `npm exec vue-tsc -- --noEmit`
+  - 当前结果为 `47` 条定向测试全部通过，前端类型检查通过
 
 ## 下一步最小动作
-1. 为 `PA-007` 做一次“现在能否从 Tauri command/event 抽出独立 adapter”的边界审计
-2. 把 `supportsImageInput / contextWindowTokens / reasoning` 继续接入 runtime 的真实输入限制与提示逻辑
-3. 继续完善工具 telemetry，让 batch/gather 这类组合工具在 trace 中有更细粒度展开
-4. 在真实 provider 联调下补一轮非 mock 的长链路人工回归
+
+1. 继续把 runtime / graph 邻接边界切换到 `RetrievedContextState`
+2. 继续把 `LongTermMemory` 从“显式用户偏好”扩展到更完整但仍可审计的稳定事实来源
+3. 在 `PA-018` 边界稳定后，再推进 `PA-020 / PA-021`
 
 ## 关联入口
-- 项目记忆：`AGENT.md`
-- 文档索引：`docs/INDEX.md`
-- 任务板：`01_TASK_BOARD.md`
+
+- 任务板：[01_TASK_BOARD.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
+- 当前任务卡：[PA-018](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-018-build-context-state-subsystem-and-retrieval-boundary.md>)
+- 正式验收审计：[PA-018 Acceptance Audit](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md>)
+- 文档索引：[docs/INDEX.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/INDEX.md)
+- 会话日志目录：[99_LOGS](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/99_LOGS)

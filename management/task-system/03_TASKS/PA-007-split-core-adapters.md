@@ -1,7 +1,7 @@
 # PA-007 拆分独立接入层（Tauri / HTTP-SSE adapter）
 
 ## 状态
-- Status: `Ready`
+- Status: `Done`
 - Priority: `P1`
 - Owner: `Codex`
 
@@ -25,16 +25,34 @@
 - 当前事件模型已经包含 `turn:started / turn:delta / turn:trace / turn:tool / turn:completed / turn:failed`
 - `SessionStore`、`ProviderManager` 和 `ToolRouter` 都已经具备最小独立边界
 - 目前真正还偏“接入层耦合”的部分，主要是 Tauri command/event 与 runtime 之间的桥接方式
+- 2026-05-23 已完成一次后审计，结论是：
+- 同步 core 已能脱离 Tauri 单独复用，`direct_turn_probe.rs` / `decision_probe.rs` 已证明 `run_turn()` 和 provider 决策可在非 Tauri 探针中直接运行
+- 当前最强耦合点集中在 `start_turn_stream()`、`handle_stream_tool_turn()` 以及 `turn_flow.rs` 中对 `AppHandle` 的直接依赖
+- 现阶段适合先抽“turn event sink / adapter”边界，不适合直接落完整 HTTP/SSE 服务层，也不适合冻结 provider registry / session lifecycle / native transcript 的外部 API 语义
+- 本轮已完成最小代码重构：
+- `turn_flow.rs` 已引入通用 `TurnEventSink`
+- `runtime.rs` 与 `start_turn_stream()` 已改为面向 sink 发事件，不再直接接收 `AppHandle`
+- Tauri 侧事件投递已收束到 `src-tauri/src/tauri_adapter.rs`
+- 已新增 runtime 单测，验证空输入失败路径会通过 sink 发出 `turn:failed`
+- 本轮继续完成第二 adapter 验证：
+- 新增 `src-tauri/src/sse_adapter.rs`，把 `TurnStreamEvent` 映射成标准 SSE `event/id/data` 帧
+- 新增 `src-tauri/src/bin/sse_turn_probe.rs`，可在非 Tauri 环境下直接验证 SSE 宿主对 core 事件流的消费
+- 已补 `sse_adapter` 单测，覆盖事件格式化与 runtime 失败态输出
+
+## 本轮验证
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` 通过（41/41）
+- `npm run verify` 通过
+- `cargo run --manifest-path src-tauri/Cargo.toml --bin sse_turn_probe -- "当前文件夹中有哪些文件？"` 通过
 
 ## 下一步动作
-- 画清楚 `core runtime`、`Tauri adapter`、`future HTTP/SSE adapter` 的职责分界
-- 提炼复用同一套 turn 事件模型所需的最小接口
-- 明确哪些数据应该是 runtime 原生产物，哪些只是某个 adapter 的表现形式
-- 先从文档与边界重构入手，再决定是否落最小 HTTP/SSE demo
+- 继续梳理 provider registry、session lifecycle 与 `provider_native_transcript` 哪些仍留在桌面端语义，哪些值得进一步抽成跨宿主边界
+- 继续观察真实 provider 下“大工具结果 + provider-native follow-up”对 SSE 宿主的稳定性
 
 ## 当前卡点
-- 现在代码已经可用，重构时要避免把“未来接口想象”反向压坏当前可联调链路
-- 若过早落地完整 HTTP 服务层，容易和仍在演进的 session/history 策略互相牵扯
+- 当前最小 adapter 边界已经抽出；后续真正的难点不再是 `AppHandle`，而是哪些宿主相关语义值得继续外提、哪些应继续留在桌面端实现里
+
+## 审核记录
+- `management/task-system/02_REVIEWS/2026-05-23-pa007-adapter-boundary-audit.md`
 
 ## 断点续跑提示
 继续前先看：

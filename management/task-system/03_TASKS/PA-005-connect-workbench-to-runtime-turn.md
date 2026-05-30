@@ -1,7 +1,7 @@
 # PA-005 把 Vue 工作台接入真实 turn 执行链路
 
 ## 状态
-- Status: `In Progress`
+- Status: `Done`
 - Priority: `P1`
 - Owner: `Codex`
 
@@ -61,3 +61,4 @@
 ## 备注
 - 2026-05-20：前端侧边栏语法问题已修复，`npm run build` 通过。
 - 2026-05-20：当前主线已从“静态占位”转为“真 turn + 真 stream + 真 session”，后续继续围绕 agent core 收口。
+- 2026-05-24：真实 stream、trace、tool activity、provider/source/mode/fallback 展示与测试闭环已具备，任务完成。

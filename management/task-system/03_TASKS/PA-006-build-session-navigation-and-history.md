@@ -1,7 +1,7 @@
 # PA-006 实现新对话与历史对话管理
 
 ## 状态
-- Status: `In Progress`
+- Status: `Done`
 - Priority: `P1`
 - Owner: `Codex`
 
@@ -51,7 +51,7 @@
 - 为未来的 HTTP/SSE adapter 保持 session 接口稳定
 
 ## 当前卡点
-- 当前没有阻塞性卡点；剩余工作主要是更细的元数据策略和真实使用路径的人机回归
+- 当前没有阻塞性卡点；本任务已完成，后续若继续演进将转入新的 session / metadata 专项任务
 
 ## 断点续跑提示
 继续前先看：
@@ -61,3 +61,6 @@
 - `src/components/HomeSessionSidebar.vue`
 - `docs/architecture/runtime.md`
 - `docs/learning/0017-session-store-and-context-boundary.md`
+
+## 2026-05-24 补充进展
+- 已去掉空白新对话“发送第一条消息后保存到历史”的临时摘要文案，同时保留未保存态、禁用新建/删除保护与相关回归测试。

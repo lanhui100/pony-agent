@@ -41,6 +41,7 @@
 - [0018 对话历史侧栏与会话管理 UI 的设计取舍](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0018-session-navigation-ui-and-tradeoffs.md)
 - [0019 session 完善与模块化重构背后的设计哲学](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0019-session-and-modularization-design-philosophy.md)
 - [0020 Provider 流式 SSE 解析与 runtime 边界](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0020-provider-stream-sse-parsing-and-runtime-boundary.md)
+- [0021 宿主层、控制面、runtime、graph 与 planner 应该怎么理解](C:/Users/HUAWEI/Documents/pony-agent/docs/learning/0021-host-control-plane-graph-runtime-and-planner.md)
 
 ## 记录模板
 
