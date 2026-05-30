@@ -4,6 +4,7 @@ import { storeToRefs } from "pinia";
 import {
   AlertTriangle,
   ArrowUp,
+  Brain,
   Bot,
   Check,
   ChevronDown,
@@ -179,12 +180,20 @@ function assistantReasoning(message: ChatMessage | null) {
   return message?.reasoningContent?.trim() || "";
 }
 
+function shouldOpenToolBlock(_tools: ChatMessage[]) {
+  return false;
+}
+
 function shouldShowReasoningBlock(message: ChatMessage | null) {
   if (!message || !showReasoningContent.value) {
     return false;
   }
 
   return message.status === "pending" || assistantReasoning(message).length > 0;
+}
+
+function shouldOpenReasoningBlock(_message: ChatMessage | null) {
+  return false;
 }
 
 function reasoningPlaceholder(message: ChatMessage | null) {
@@ -424,56 +433,71 @@ watch(showReasoningContent, (value) => {
             </div>
             <div class="mt-2 h-px w-full bg-stone-200/70"></div>
 
-            <div v-if="turn.tools.length" class="mt-2 space-y-2">
-              <div v-for="tool in turn.tools" :key="tool.id" class="text-[12px] leading-5 text-stone-500">
-                <details class="group">
-                  <summary class="list-none cursor-pointer">
-                    <div class="flex items-center justify-between gap-3">
-                      <div class="flex min-w-0 items-center gap-2">
-                        <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
-                        <span class="truncate">{{ tool.toolName || "Tool" }}</span>
-                        <LoaderCircle
-                          v-if="toolStatusIcon(tool) === 'pending'"
-                          class="h-3.5 w-3.5 shrink-0 animate-spin text-stone-400"
-                        />
-                        <Check v-else-if="toolStatusIcon(tool) === 'done'" class="h-3.5 w-3.5 shrink-0 text-stone-500" />
-                        <span v-else class="text-[13px] leading-none text-rose-500">!</span>
-                      </div>
-                      <div class="flex shrink-0 items-center gap-2 text-[11px] text-stone-400">
-                        <span
-                          v-if="tool.tokenCount != null"
-                          class="inline-flex rounded-full border border-stone-200 bg-white/70 px-2 py-0.5 text-[10px] normal-case tracking-normal text-stone-500"
-                        >
-                          {{ formatTokenBadge(tool.tokenCount) }}
-                        </span>
-                        <span v-if="tool.durationSeconds != null">{{ formatToolDuration(tool.durationSeconds) }}</span>
-                        <ChevronDown class="h-3.5 w-3.5 transition group-open:rotate-180" />
-                      </div>
-                    </div>
-                  </summary>
-                  <div class="mt-1 whitespace-pre-wrap border-l border-stone-200 pl-3 text-[11px] leading-[1.3] text-stone-500">
-                    {{ tool.detail || "暂无额外详情。" }}
+            <details v-if="turn.tools.length" :open="shouldOpenToolBlock(turn.tools)" class="conversation-disclosure mt-2 group">
+              <summary class="conversation-disclosure-summary">
+                <div class="flex min-w-0 items-center gap-2">
+                  <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
+                  <span>工具调用</span>
+                </div>
+                <div class="flex shrink-0 items-center gap-2 text-[11px] text-stone-400">
+                  <span>{{ turn.tools.length }} 项</span>
+                  <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0" />
+                </div>
+              </summary>
+              <div class="mt-2 space-y-1.5">
+                <div
+                  v-for="tool in turn.tools"
+                  :key="tool.id"
+                  class="flex items-center justify-between gap-3 px-1 py-1 text-[12px] leading-5 text-stone-500"
+                >
+                  <div class="flex min-w-0 items-center gap-2">
+                    <span class="truncate">{{ tool.toolName || "Tool" }}</span>
+                    <LoaderCircle
+                      v-if="toolStatusIcon(tool) === 'pending'"
+                      class="h-3.5 w-3.5 shrink-0 animate-spin text-stone-400"
+                    />
+                    <Check v-else-if="toolStatusIcon(tool) === 'done'" class="h-3.5 w-3.5 shrink-0 text-stone-500" />
+                    <span v-else class="text-[13px] leading-none text-rose-500">!</span>
                   </div>
-                </details>
+                  <div class="flex shrink-0 items-center gap-2 text-[11px] text-stone-400">
+                    <span
+                      v-if="tool.tokenCount != null"
+                      class="inline-flex rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] normal-case tracking-normal text-stone-500"
+                    >
+                      {{ formatTokenBadge(tool.tokenCount) }}
+                    </span>
+                    <span v-if="tool.durationSeconds != null">{{ formatToolDuration(tool.durationSeconds) }}</span>
+                  </div>
+                </div>
               </div>
-            </div>
+            </details>
 
-            <div
+            <details
               v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
-              class="mt-2"
+              :open="shouldOpenReasoningBlock(turn.assistant)"
+              class="conversation-disclosure mt-2 group"
             >
-              <MarkdownRenderer
-                v-if="assistantReasoning(turn.assistant)"
-                :content="assistantReasoning(turn.assistant)"
-                wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
-              />
-              <p
-                v-else-if="reasoningPlaceholder(turn.assistant)"
-                class="assistant-reasoning"
-              >
-                {{ reasoningPlaceholder(turn.assistant) }}
-              </p>
-            </div>
+              <summary class="conversation-disclosure-summary">
+                <div class="flex min-w-0 items-center gap-2">
+                  <Brain class="h-3.5 w-3.5 shrink-0 text-stone-400" />
+                  <span>思考过程</span>
+                </div>
+                <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
+              </summary>
+              <div class="mt-2">
+                <MarkdownRenderer
+                  v-if="assistantReasoning(turn.assistant)"
+                  :content="assistantReasoning(turn.assistant)"
+                  wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
+                />
+                <p
+                  v-else-if="reasoningPlaceholder(turn.assistant)"
+                  class="assistant-reasoning"
+                >
+                  {{ reasoningPlaceholder(turn.assistant) }}
+                </p>
+              </div>
+            </details>
             <Transition name="stream-fade" mode="out-in">
               <div
                 v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
@@ -814,6 +838,34 @@ watch(showReasoningContent, (value) => {
 .stream-fade-enter-from,
 .stream-fade-leave-to {
   opacity: 0;
+}
+
+.conversation-disclosure {
+  color: rgb(120 113 108);
+}
+
+.conversation-disclosure-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgb(120 113 108);
+}
+
+.conversation-disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-disclosure-chevron {
+  transition: transform 180ms ease;
+}
+
+.conversation-disclosure[open] .conversation-disclosure-chevron {
+  transform: rotate(180deg);
 }
 
 .assistant-reasoning {
