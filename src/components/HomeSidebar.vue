@@ -11,6 +11,7 @@ import {
   Copy,
   FileText,
   Image as ImageIcon,
+  Info,
   LoaderCircle,
   Orbit,
   ScanSearch,
@@ -18,7 +19,7 @@ import {
   Wrench
 } from "lucide-vue-next";
 import { extractActiveTaskFocus } from "@/types/runtime";
-import type { TraceStep, TurnTraceRecord } from "@/types/runtime";
+import type { BuildContextObservation, ToolActivity, TraceStep, TurnTraceRecord } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 
@@ -32,6 +33,17 @@ type DetailRow = {
   tone?: DetailRowTone;
   inputKind?: InputKind;
   expandable?: boolean;
+};
+
+type TraceDetailSection = {
+  id: string;
+  label: string;
+  content: string;
+  summary?: string;
+  tone?: DetailRowTone;
+  kind?: "default" | "tool";
+  toolStatus?: ToolActivity["status"];
+  durationText?: string;
 };
 
 const runtimeStore = useRuntimeStore();
@@ -50,13 +62,13 @@ const {
   retrievedContext,
   sessionId,
   sessionSummary,
-  totalTokens,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
 const activePanel = ref<"status" | "trace" | "tools" | "">("trace");
 const activeTurnId = ref("");
 const activeTraceStepKey = ref("");
+const activeTraceDetailKey = ref("");
 const copiedKey = ref("");
 const expandedResultKeys = ref<string[]>([]);
 let copiedTimer: number | null = null;
@@ -151,17 +163,13 @@ function turnStateIcon(turn: TurnTraceRecord) {
 }
 
 function turnMeta(turn: TurnTraceRecord) {
-  const metrics = [];
-
-  if (turn.totalTokens != null) {
-    metrics.push(`${turn.totalTokens} tok`);
-  }
+  const metrics = buildTokenMetrics(turn);
 
   if (turn.firstTokenLatencyMs != null) {
-    metrics.push(`首 token ${turn.firstTokenLatencyMs} ms`);
+    metrics.push(`延时 ${turn.firstTokenLatencyMs} ms`);
   }
 
-  return metrics.join(" 路 ");
+  return metrics.join(" · ");
 }
 
 function detailText(turn: TurnTraceRecord) {
@@ -173,7 +181,7 @@ function detailText(turn: TurnTraceRecord) {
     return turn.fallbackReason;
   }
 
-  return turn.sessionSummary || "";
+  return "";
 }
 
 function rowToneClass(tone: DetailRowTone = "default") {
@@ -207,6 +215,28 @@ function pushRow(rows: DetailRow[], label: string, value?: string | number | nul
     value: normalized,
     ...options
   });
+}
+
+function buildContextRows(buildContextObservation?: BuildContextObservation | null) {
+  const rows: DetailRow[] = [];
+
+  if (!buildContextObservation) {
+    return rows;
+  }
+
+  pushRow(rows, "请求格式", buildContextObservation.requestFormat);
+  pushRow(rows, "消息数", buildContextObservation.messageCount);
+  pushRow(rows, "图片数", buildContextObservation.imageCount);
+  pushRow(rows, "工具数", buildContextObservation.toolCount);
+  pushRow(rows, "温度", buildContextObservation.temperature);
+  pushRow(rows, "最大输出", buildContextObservation.maxOutputTokens);
+
+  return rows;
+}
+
+function buildContextText(buildContextObservation: BuildContextObservation | null | undefined, key: keyof BuildContextObservation) {
+  const value = buildContextObservation?.[key];
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function turnUserMessage(turnId: string) {
@@ -278,13 +308,123 @@ function traceCopyKey(turnId: string, stepId: string) {
   return `trace:${turnId}:${stepId}`;
 }
 
+function traceDetailKey(turnId: string, stepId: string, detailId: string) {
+  return `${turnId}:${stepId}:${detailId}`;
+}
+
 function expandedResultKey(turnId: string, stepId: string, label: string) {
   return `${turnId}:${stepId}:${label}`;
 }
 
+function previewInline(text: string, maxChars = 72) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxChars)}...`;
+}
+
+function formatDurationMs(durationMs?: number | null) {
+  if (durationMs == null) {
+    return "";
+  }
+
+  return durationMs < 1000 ? `${Math.round(durationMs)} ms` : `${(durationMs / 1000).toFixed(2)} s`;
+}
+
+function readNumericValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readNestedNumericValue(source: unknown, paths: string[][]) {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+
+  for (const path of paths) {
+    let current: unknown = source;
+
+    for (const segment of path) {
+      if (!current || typeof current !== "object") {
+        current = null;
+        break;
+      }
+
+      current = (current as Record<string, unknown>)[segment];
+    }
+
+    const resolved = readNumericValue(current);
+    if (resolved != null) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+function cacheHitInputTokens(turn: TurnTraceRecord) {
+  return readNestedNumericValue(turn, [
+    ["cacheHitInputTokens"],
+    ["cache_hit_input_tokens"],
+    ["promptCacheHitTokens"],
+    ["prompt_cache_hit_tokens"],
+    ["cachedInputTokens"],
+    ["cacheReadInputTokens"],
+    ["inputCachedTokens"],
+    ["cachedTokens"],
+    ["inputTokensDetails", "cachedTokens"],
+    ["input_tokens_details", "cached_tokens"],
+    ["promptTokensDetails", "cachedTokens"],
+    ["prompt_tokens_details", "cached_tokens"],
+    ["usage", "input_tokens_details", "cached_tokens"],
+    ["usage", "prompt_tokens_details", "cached_tokens"]
+  ]);
+}
+
+function reasoningTokens(turn: TurnTraceRecord) {
+  return readNestedNumericValue(turn, [
+    ["reasoningTokens"],
+    ["completionTokensDetails", "reasoningTokens"],
+    ["completion_tokens_details", "reasoning_tokens"],
+    ["outputTokensDetails", "reasoningTokens"],
+    ["output_tokens_details", "reasoning_tokens"],
+    ["usage", "completion_tokens_details", "reasoning_tokens"],
+    ["usage", "output_tokens_details", "reasoning_tokens"]
+  ]);
+}
+
+function buildTokenMetrics(turn: TurnTraceRecord) {
+  const metrics: string[] = [];
+
+  if (turn.inputTokens != null) {
+    metrics.push(`输入 ${turn.inputTokens}`);
+  }
+
+  const cacheTokens = cacheHitInputTokens(turn);
+  if (cacheTokens != null) {
+    metrics.push(`命中缓存 ${cacheTokens}`);
+  }
+
+  const reasoning = reasoningTokens(turn);
+  if (reasoning != null) {
+    metrics.push(`思考链 ${reasoning}`);
+  }
+
+  if (turn.outputTokens != null) {
+    metrics.push(`输出 ${turn.outputTokens}`);
+  }
+
+  return metrics;
+}
+
+function turnDurationText(turn: TurnTraceRecord) {
+  return turn.turnDurationMs != null ? formatDurationMs(turn.turnDurationMs) : "";
+}
+
 function stepDurationText(turn: TurnTraceRecord, step: TraceStep) {
   if (step.id === "step-call-model" && turn.firstTokenLatencyMs != null) {
-    return `${turn.firstTokenLatencyMs} ms`;
+    return `延时 ${turn.firstTokenLatencyMs} ms`;
   }
 
   if (step.id === "step-call-tool" && turn.toolActivities.length) {
@@ -296,52 +436,69 @@ function stepDurationText(turn: TurnTraceRecord, step: TraceStep) {
 }
 
 function stepTokenStats(turn: TurnTraceRecord, step: TraceStep) {
-  const stats: string[] = [];
-
-  if ((step.id === "step-plan" || step.id === "step-call-model") && turn.inputTokens != null) {
-    stats.push(`IN:${turn.inputTokens}`);
+  if (step.id !== "step-call-model") {
+    return [];
   }
 
-  if ((step.id === "step-call-model" || step.id === "step-return") && turn.outputTokens != null) {
-    stats.push(`OUT:${turn.outputTokens}`);
-  }
-
-  return stats;
+  return buildTokenMetrics(turn);
 }
 
-function buildActualToolDetailText(turn: TurnTraceRecord) {
-  if (!turn.toolActivities.length) {
+function stepPreviewText(turn: TurnTraceRecord, step: TraceStep) {
+  if (step.id !== "step-return") {
     return "";
   }
 
-  return turn.toolActivities
-    .map((tool, index) => {
-      const lines = [`#${index + 1} ${tool.name}`];
+  const assistantMessage = turnAssistantMessage(turn.turnId);
+  if (!assistantMessage || assistantMessage.status === "pending" || !hasText(assistantMessage.content)) {
+    return "";
+  }
 
-      if (tool.summary.trim()) {
-        lines.push(`摘要: ${tool.summary.trim()}`);
-      }
+  return previewInline(assistantMessage.content.trim(), 120);
+}
 
-      if (tool.durationSeconds != null) {
-        lines.push(`耗时: ${formatDuration(tool.durationSeconds)}`);
-      }
+function displayStepLabel(step: TraceStep) {
+  return step.label.toUpperCase();
+}
 
-      if (tool.argumentsText?.trim()) {
-        lines.push(`参数: ${tool.argumentsText.trim()}`);
-      }
+function toolStatusIcon(status: ToolActivity["status"]) {
+  if (status === "done") {
+    return Check;
+  }
 
-      if (tool.resultText?.trim()) {
-        lines.push(`${tool.status === "error" ? "错误" : "结果"}: ${tool.resultText.trim()}`);
-      }
+  if (status === "running") {
+    return LoaderCircle;
+  }
 
-      return lines.join("\n");
-    })
-    .join("\n\n");
+  if (status === "error") {
+    return AlertTriangle;
+  }
+
+  return Circle;
+}
+
+function toolStatusIconClass(status: ToolActivity["status"]) {
+  if (status === "done") {
+    return "text-emerald-600";
+  }
+
+  if (status === "running") {
+    return "animate-spin text-stone-500";
+  }
+
+  if (status === "error") {
+    return "text-rose-600";
+  }
+
+  return "text-stone-300";
 }
 
 function buildPendingStepText(step: TraceStep) {
   if (step.id === "step-call-tool") {
     return "本轮未触发工具调用。";
+  }
+
+  if (step.id === "step-call-model") {
+    return "尚未开始等待模型返回。";
   }
 
   return "该步骤未进行。";
@@ -373,29 +530,148 @@ function buildStepErrorText(turn: TurnTraceRecord, step: TraceStep) {
   return turn.error?.trim() ?? "";
 }
 
-function buildStepRows(turn: TurnTraceRecord, step: TraceStep) {
+function stepPurposeText(step: TraceStep) {
+  switch (step.id) {
+    case "step-plan":
+      return "确认本轮到底收到了什么输入，以及是否带着图片或附件语义进入后续链路。";
+    case "step-context":
+      return "确认真正进入请求的内容，而不是只看 retrieval 快照，避免把上下文状态和实际请求混为一谈。";
+    case "step-call-model":
+      return "确认调用了哪一个 provider / model，以及模型何时开始产生首个可见增量。";
+    case "step-call-tool":
+      return "确认是否触发工具、用了什么参数、结果是否成功，以及工具调用的累计开销。";
+    case "step-return":
+      return "确认最终回给用户的内容、摘要和异常信号，判断这一轮是否真正完成。";
+    default:
+      return "";
+  }
+}
+
+function turnCopyKey(turnId: string) {
+  return `turn:${turnId}`;
+}
+
+function buildStepDetailSections(turn: TurnTraceRecord, step: TraceStep) {
   const userMessage = turnUserMessage(turn.turnId);
   const assistantMessage = turnAssistantMessage(turn.turnId);
-  const rows: DetailRow[] = [];
+  const sections: TraceDetailSection[] = [];
+  const buildContextObservation = turn.buildContextObservation;
+  const shouldRenderFinalReturn = assistantMessage?.status && assistantMessage.status !== "pending";
 
-  if (step.id === "step-plan") {
-    if (hasText(userMessage?.content)) {
-      pushRow(rows, "输入内容", userMessage!.content.trim(), {
-        multiline: true,
-        inputKind: detectInputKind(userMessage!.content)
+  if (step.id === "step-plan" && hasText(userMessage?.content)) {
+    sections.push({
+      id: "input-message",
+      label: "输入原文",
+      summary: previewInline(userMessage!.content.trim()),
+      content: userMessage!.content.trim()
+    });
+  }
+
+  if (step.id === "step-context" && buildContextObservation) {
+    const contextSections: Array<[string, string, string]> = [
+      ["stable", "稳定前缀", buildContextText(buildContextObservation, "stablePrefixText")],
+      ["semi", "半稳定上下文", buildContextText(buildContextObservation, "semiStableContextText")],
+      ["volatile", "本轮输入", buildContextText(buildContextObservation, "volatileInputText")],
+      ["messages", "最终请求消息", buildContextText(buildContextObservation, "requestMessagesText")],
+      ["tools", "工具定义", buildContextText(buildContextObservation, "toolDefinitionsText")]
+    ];
+
+    for (const [id, label, content] of contextSections) {
+      if (!content) {
+        continue;
+      }
+
+      sections.push({
+        id,
+        label,
+        summary: previewInline(content),
+        content
       });
     }
   }
 
+  if (step.id === "step-call-model" && hasText(turn.fallbackReason)) {
+    sections.push({
+      id: "fallback",
+      label: "降级原因",
+      summary: previewInline(turn.fallbackReason!.trim()),
+      content: turn.fallbackReason!.trim(),
+      tone: "warning"
+    });
+  }
+
+  if (step.id === "step-call-tool" && turn.toolActivities.length) {
+    turn.toolActivities.forEach((tool, index) => {
+      const lines = [];
+
+      if (tool.argumentsText?.trim()) {
+        lines.push(`参数:\n${tool.argumentsText.trim()}`);
+      }
+
+      if (tool.resultText?.trim()) {
+        lines.push(`${tool.status === "error" ? "错误" : "结果"}:\n${tool.resultText.trim()}`);
+      }
+
+      if (tool.durationSeconds != null) {
+        lines.push(`耗时: ${formatDuration(tool.durationSeconds)}`);
+      }
+
+      sections.push({
+        id: `tool-${index + 1}`,
+        label: tool.name,
+        content: lines.join("\n\n"),
+        tone: tool.status === "error" ? "danger" : "default",
+        kind: "tool",
+        toolStatus: tool.status,
+        durationText: formatDuration(tool.durationSeconds)
+      });
+    });
+  }
+
+  if (step.id === "step-return" && shouldRenderFinalReturn) {
+    if (hasText(assistantMessage?.reasoningContent)) {
+      sections.push({
+        id: "reasoning",
+        label: "思考链",
+        summary: previewInline(assistantMessage!.reasoningContent!.trim()),
+        content: assistantMessage!.reasoningContent!.trim()
+      });
+    }
+
+    if (hasText(assistantMessage?.content)) {
+      sections.push({
+        id: "assistant-output",
+        label: "最终回复",
+        summary: previewInline(assistantMessage!.content.trim()),
+        content: assistantMessage!.content.trim()
+      });
+    }
+  }
+
+  return sections;
+}
+
+function buildStepRows(turn: TurnTraceRecord, step: TraceStep) {
+  const userMessage = turnUserMessage(turn.turnId);
+  const rows: DetailRow[] = [];
+
+  if (step.id === "step-plan") {
+    pushRow(rows, "输入类型", hasText(userMessage?.content) ? detectInputKind(userMessage!.content) : null);
+    pushRow(rows, "图片输入", turn.buildContextObservation?.imageCount ?? null);
+  }
+
   if (step.id === "step-context") {
-    pushRow(rows, "Requested", turn.providerRequestedName);
-    pushRow(rows, "Provider", turn.providerName);
+    buildContextRows(turn.buildContextObservation).forEach((row) => rows.push(row));
+    pushRow(rows, "请求目标", turn.providerRequestedName);
+    pushRow(rows, "实际 provider", turn.providerName);
     pushRow(rows, "Protocol", turn.providerProtocol);
     pushRow(rows, "Model", turn.providerModel);
-    pushRow(rows, "Source", turn.providerSource);
-    pushRow(rows, "Mode", turn.providerMode);
-    pushRow(rows, "Session", turn.sessionSummary, { multiline: true });
-    pushRow(rows, "Fallback", turn.fallbackReason, { multiline: true, tone: "warning" });
+    pushRow(rows, "来源", turn.providerSource);
+    pushRow(rows, "模式", turn.providerMode);
+    pushRow(rows, "观测说明", turn.buildContextObservation ? "这里展示的是本轮真正发给模型的请求，不是 retrieval state 的替身。" : "当前还没有可展示的 request observation。", {
+      multiline: true,
+      tone: "muted"
+    });
   }
 
   if (step.id === "step-call-model") {
@@ -403,27 +679,33 @@ function buildStepRows(turn: TurnTraceRecord, step: TraceStep) {
     pushRow(rows, "来源", turn.providerSource);
     pushRow(rows, "协议", turn.providerProtocol);
     pushRow(rows, "模式", turn.providerMode);
-    pushRow(rows, "耗时", stepDurationText(turn, step));
+    pushRow(rows, "输入", turn.inputTokens);
+    pushRow(rows, "命中缓存", cacheHitInputTokens(turn));
+    pushRow(rows, "思考链", reasoningTokens(turn));
+    pushRow(rows, "输出", turn.outputTokens);
+    pushRow(rows, "延时", turn.firstTokenLatencyMs != null ? `${turn.firstTokenLatencyMs} ms` : null);
+    pushRow(
+      rows,
+      "观测口径",
+      turn.firstTokenLatencyMs != null
+        ? "按首次收到 provider 增量计算，不等于整轮完成耗时。"
+        : "当前路径没有真实流式首包事件，所以不展示首个增量统计。",
+      { multiline: true, tone: "muted" }
+    );
     pushRow(rows, "状态", step.state === "pending" ? buildPendingStepText(step) : null, { tone: "muted" });
     pushRow(rows, "错误", buildStepErrorText(turn, step), { multiline: true, tone: "danger" });
   }
 
   if (step.id === "step-call-tool") {
-    pushRow(rows, "耗时", stepDurationText(turn, step));
+    pushRow(rows, "调用次数", turn.toolActivities.length);
+    pushRow(rows, "失败次数", turn.toolActivities.filter((tool) => tool.status === "error").length);
+    pushRow(rows, "累计耗时", stepDurationText(turn, step));
     pushRow(rows, "状态", step.state === "pending" ? buildPendingStepText(step) : null, { tone: "muted" });
-    pushRow(rows, "调用详情", buildActualToolDetailText(turn), {
-      multiline: true,
-      tone: turn.toolActivities.some((tool) => tool.status === "error") ? "danger" : "default"
-    });
     pushRow(rows, "错误", buildStepErrorText(turn, step), { multiline: true, tone: "danger" });
   }
 
   if (step.id === "step-return") {
     pushRow(rows, "状态", step.state === "pending" ? buildPendingStepText(step) : null, { tone: "muted" });
-    pushRow(rows, "结果", assistantMessage?.content ?? "", {
-      multiline: true,
-      expandable: true
-    });
     pushRow(rows, "错误", buildStepErrorText(turn, step), { multiline: true, tone: "danger" });
   }
 
@@ -432,9 +714,30 @@ function buildStepRows(turn: TurnTraceRecord, step: TraceStep) {
 
 function buildCopyText(turn: TurnTraceRecord, step: TraceStep) {
   return [
-    `${turn.title} / ${step.label}`,
-    ...buildStepRows(turn, step).map((row) => `${row.label}: ${row.value}`)
+    `${turn.title} / ${displayStepLabel(step)}`,
+    ...buildStepRows(turn, step).map((row) => `${row.label}: ${row.value}`),
+    ...buildStepDetailSections(turn, step).map((section) => `${section.label}:\n${section.content}`)
   ].join("\n\n");
+}
+
+function buildTurnCopyText(turn: TurnTraceRecord) {
+  const parts = [turn.title];
+  const meta = turnMeta(turn);
+  const durationText = turnDurationText(turn);
+
+  if (meta) {
+    parts.push(`指标: ${meta}`);
+  }
+
+  if (durationText) {
+    parts.push(`耗时: ${durationText}`);
+  }
+
+  turn.traceSteps.forEach((step) => {
+    parts.push(buildCopyText(turn, step));
+  });
+
+  return parts.join("\n\n");
 }
 
 function copyText(key: string, text: string) {
@@ -467,6 +770,12 @@ function toggleTurn(turnId: string) {
 function toggleTraceStep(turnId: string, stepId: string) {
   const key = `${turnId}:${stepId}`;
   activeTraceStepKey.value = activeTraceStepKey.value === key ? "" : key;
+  activeTraceDetailKey.value = "";
+}
+
+function toggleTraceDetail(turnId: string, stepId: string, detailId: string) {
+  const key = traceDetailKey(turnId, stepId, detailId);
+  activeTraceDetailKey.value = activeTraceDetailKey.value === key ? "" : key;
 }
 
 function toggleExpandedResult(key: string) {
@@ -521,11 +830,13 @@ watch(
     if (!turnId) {
       activeTurnId.value = "";
       activeTraceStepKey.value = "";
+      activeTraceDetailKey.value = "";
       return;
     }
 
     activeTurnId.value = turnId;
     activeTraceStepKey.value = "";
+    activeTraceDetailKey.value = "";
   },
   { immediate: true }
 );
@@ -533,6 +844,7 @@ watch(
 watch(sessionId, () => {
   activeTurnId.value = "";
   activeTraceStepKey.value = "";
+  activeTraceDetailKey.value = "";
   copiedKey.value = "";
   expandedResultKeys.value = [];
 });
@@ -543,6 +855,7 @@ watch(
     if (!turns.some((turn) => turn.turnId === activeTurnId.value)) {
       activeTurnId.value = turns[turns.length - 1]?.turnId ?? "";
       activeTraceStepKey.value = "";
+      activeTraceDetailKey.value = "";
     }
   },
   { deep: true }
@@ -585,12 +898,8 @@ watch(
                   <span class="text-stone-400">模式</span>
                   <span class="text-right text-stone-800">{{ providerMode }}</span>
                 </div>
-                <div v-if="totalTokens != null" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">总 token</span>
-                  <span class="text-right text-stone-800">{{ totalTokens }}</span>
-                </div>
                 <div v-if="firstTokenLatencyMs != null" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">首 token</span>
+                  <span class="text-stone-400">延时</span>
                   <span class="text-right text-stone-800">{{ firstTokenLatencyMs }} ms</span>
                 </div>
               </div>
@@ -679,7 +988,7 @@ watch(
                 data-testid="retrieved-context-summary"
               >
                 <div class="flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.16em] text-stone-500">
-                  <span>Retrieval</span>
+                  <span>Current retrieval state</span>
                   <span v-if="retrievedSessionContext?.conversationId" class="truncate text-right">
                     {{ retrievedSessionContext?.conversationId }}
                   </span>
@@ -765,11 +1074,23 @@ watch(
                       />
                       <span class="truncate">{{ turn.title }}</span>
                     </div>
-                    <div v-if="turnMeta(turn)" class="text-[10px] leading-[1.3] text-stone-400">
+                    <div v-if="turnMeta(turn)" class="pl-[1.125rem] text-[10px] leading-[1.3] text-stone-400">
                       {{ turnMeta(turn) }}
                     </div>
                   </div>
-                  <ChevronRight class="h-3 w-3 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': activeTurnId === turn.turnId }" />
+                  <div class="flex items-center gap-1">
+                    <span v-if="turnDurationText(turn)" class="text-[10px] leading-[1.3] text-stone-400">
+                      {{ turnDurationText(turn) }}
+                    </span>
+                    <button
+                      class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                      type="button"
+                      @click.stop="copyText(turnCopyKey(turn.turnId), buildTurnCopyText(turn))"
+                    >
+                      <component :is="copiedKey === turnCopyKey(turn.turnId) ? Check : Copy" class="h-3 w-3" />
+                    </button>
+                    <ChevronRight class="h-3 w-3 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': activeTurnId === turn.turnId }" />
+                  </div>
                 </button>
 
                 <div class="collapsible-body">
@@ -787,6 +1108,7 @@ watch(
                       <button
                         class="flex w-full items-start justify-between gap-1.5 text-left"
                         type="button"
+                        :data-testid="`trace-step-button-${step.id}`"
                         @click="toggleTraceStep(turn.turnId, step.id)"
                       >
                         <div class="min-w-0 space-y-0.5">
@@ -801,9 +1123,10 @@ watch(
                                 'text-stone-300': step.state === 'pending'
                               }"
                             />
-                            <span class="truncate">{{ step.label }}</span>
+                            <span class="truncate">{{ displayStepLabel(step) }}</span>
                           </div>
-                          <div class="flex flex-wrap items-center gap-2 text-[10px] text-stone-400">
+                          <div class="pl-[1.125rem] text-[10px] text-stone-400">
+                            <div class="flex flex-wrap items-center gap-2">
                             <span
                               v-for="stat in stepTokenStats(turn, step)"
                                 :key="turn.turnId + '-' + step.id + '-' + stat"
@@ -814,6 +1137,13 @@ watch(
                             <span v-if="stepDurationText(turn, step)" class="text-stone-400">
                               {{ stepDurationText(turn, step) }}
                             </span>
+                            </div>
+                            <div
+                              v-if="stepPreviewText(turn, step) && activeTraceStepKey !== turnStepKey(turn.turnId, step.id)"
+                              class="mt-0.5 break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]"
+                            >
+                              {{ stepPreviewText(turn, step) }}
+                            </div>
                           </div>
                         </div>
 
@@ -834,39 +1164,119 @@ watch(
 
                       <div class="collapsible-body">
                         <div class="collapsible-content mt-1 pl-4">
+                          <div class="mb-2 flex items-start gap-1.5 text-[10px] font-light leading-[1.35] text-stone-400 [overflow-wrap:anywhere]">
+                            <Info class="mt-[1px] h-3 w-3 shrink-0" />
+                            <p class="min-w-0 break-words [overflow-wrap:anywhere]">
+                              {{ stepPurposeText(step) }}
+                            </p>
+                          </div>
                           <section>
                             <div class="space-y-1">
                               <div
                                 v-for="row in buildStepRows(turn, step)"
                                 :key="turn.turnId + '-' + step.id + '-' + row.label"
-                                class="space-y-0.5 text-[10px] leading-[1.35]"
+                                class="overflow-x-auto text-[10px] leading-[1.35]"
                               >
-                                <div class="flex items-center justify-between gap-3">
-                                  <span class="text-stone-400">{{ row.label }}</span>
+                                <div class="flex min-w-0 items-start gap-2">
+                                  <span class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-stone-400">
+                                    <span>{{ row.label }}</span>
+                                    <span>:</span>
+                                  </span>
                                   <component
                                     v-if="row.inputKind"
                                     :is="inputKindIcon(row.inputKind)"
                                     class="h-3 w-3 shrink-0 text-stone-400"
                                   />
+                                  <div
+                                    class="min-w-0"
+                                    :class="[rowToneClass(row.tone), row.multiline ? 'whitespace-pre-wrap text-left' : 'whitespace-nowrap text-left']"
+                                  >
+                                    <template v-if="row.expandable">
+                                      {{ isExpandedResult(expandedResultKey(turn.turnId, step.id, row.label)) ? row.value : previewResult(row.value) }}
+                                      <button
+                                        v-if="row.value.length > 240"
+                                        class="ml-2 inline-flex text-[10px] text-stone-400 transition hover:text-stone-700"
+                                        type="button"
+                                        @click.stop="toggleExpandedResult(expandedResultKey(turn.turnId, step.id, row.label))"
+                                      >
+                                        {{ isExpandedResult(expandedResultKey(turn.turnId, step.id, row.label)) ? "收起" : "显示全部" }}
+                                      </button>
+                                    </template>
+                                    <template v-else>
+                                      {{ row.value }}
+                                    </template>
+                                  </div>
                                 </div>
+                              </div>
+                            </div>
+                          </section>
+
+                          <section
+                            v-for="section in buildStepDetailSections(turn, step)"
+                            :key="traceDetailKey(turn.turnId, step.id, section.id)"
+                            class="collapsible-shell mt-2 overflow-hidden border-l border-stone-200/80 pl-2"
+                            :data-open="activeTraceDetailKey === traceDetailKey(turn.turnId, step.id, section.id)"
+                          >
+                            <button
+                              class="flex w-full items-start justify-between gap-1.5 py-0.5 text-left"
+                              type="button"
+                              :data-testid="`trace-detail-button-${step.id}-${section.id}`"
+                              @click="toggleTraceDetail(turn.turnId, step.id, section.id)"
+                            >
+                              <template v-if="section.kind === 'tool'">
+                                <div class="flex min-w-0 items-center gap-1.5">
+                                  <component
+                                    :is="toolStatusIcon(section.toolStatus ?? 'planned')"
+                                    class="h-3 w-3 shrink-0"
+                                    :class="toolStatusIconClass(section.toolStatus ?? 'planned')"
+                                  />
+                                  <div class="min-w-0 truncate text-[10px] uppercase tracking-[0.14em] text-stone-500">
+                                    {{ section.label }}
+                                  </div>
+                                </div>
+                                <div class="ml-auto flex items-center gap-1">
+                                  <span v-if="section.durationText" class="text-[10px] text-stone-400">
+                                    {{ section.durationText }}
+                                  </span>
+                                  <button
+                                    class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                                    type="button"
+                                    @click.stop="copyText(traceDetailKey(turn.turnId, step.id, section.id), section.content)"
+                                  >
+                                    <component :is="copiedKey === traceDetailKey(turn.turnId, step.id, section.id) ? Check : Copy" class="h-3 w-3" />
+                                  </button>
+                                  <ChevronRight
+                                    class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
+                                    :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, step.id, section.id) }"
+                                  />
+                                </div>
+                              </template>
+                              <template v-else>
+                                <div class="min-w-0">
+                                  <div class="text-[10px] uppercase tracking-[0.14em] text-stone-400">
+                                    {{ section.label }}
+                                  </div>
+                                  <div
+                                    v-if="section.summary && activeTraceDetailKey !== traceDetailKey(turn.turnId, step.id, section.id)"
+                                    class="mt-0.5 pl-1 break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]"
+                                  >
+                                    {{ section.summary }}
+                                  </div>
+                                </div>
+                                <ChevronRight
+                                  class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
+                                  :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, step.id, section.id) }"
+                                />
+                              </template>
+                            </button>
+
+                            <div class="collapsible-body">
+                              <div class="collapsible-content mt-1 pl-4">
                                 <div
-                                  class="min-w-0 break-words [overflow-wrap:anywhere]"
-                                  :class="[rowToneClass(row.tone), row.multiline ? 'whitespace-pre-wrap text-left' : 'text-right']"
+                                  class="min-w-0 whitespace-pre-wrap break-words text-[10px] leading-[1.4] [overflow-wrap:anywhere]"
+                                  :class="rowToneClass(section.tone)"
                                 >
-                                  <template v-if="row.expandable">
-                                    {{ isExpandedResult(expandedResultKey(turn.turnId, step.id, row.label)) ? row.value : previewResult(row.value) }}
-                                    <button
-                                      v-if="row.value.length > 240"
-                                      class="ml-2 inline-flex text-[10px] text-stone-400 transition hover:text-stone-700"
-                                      type="button"
-                                      @click.stop="toggleExpandedResult(expandedResultKey(turn.turnId, step.id, row.label))"
-                                    >
-                                      {{ isExpandedResult(expandedResultKey(turn.turnId, step.id, row.label)) ? "收起" : "显示全部" }}
-                                    </button>
-                                  </template>
-                                  <template v-else>
-                                    {{ row.value }}
-                                  </template>
+                                  {{ section.content }}
                                 </div>
                               </div>
                             </div>

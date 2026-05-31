@@ -330,6 +330,95 @@ describe("HomeWorkspace", () => {
     expect(wrapper.text()).not.toContain("OUT:456");
   });
 
+  it("renders pending assistant content as inline streaming text before final markdown", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "**正在** 输出中",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
+    expect(wrapper.find(".assistant-streaming-content").text()).toContain("**正在** 输出中");
+    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
+  });
+
+  it("switches from streaming text to final markdown when assistant completes", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "**正在** 输出中",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
+    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
+
+    runtimeStore.$patch({
+      phase: "ready",
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "**完成** 输出",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(false);
+    const markdownBlock = wrapper.get(".markdown-stub");
+    expect(markdownBlock.text()).toContain("**完成** 输出");
+    expect(markdownBlock.classes()).toContain("text-stone-800");
+  });
+
   it("opens provider menu, selects another model, and closes afterwards", async () => {
     const providerStore = useProviderStore();
     const selectModelSpy = vi.spyOn(providerStore, "selectModel");
@@ -546,8 +635,9 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
+    expect(wrapper.find(".assistant-streaming-content").classes()).toContain("text-stone-400");
+
     const markdownBlocks = wrapper.findAll(".markdown-stub");
-    expect(markdownBlocks.some((node) => node.classes().includes("text-stone-400"))).toBe(true);
     expect(markdownBlocks.some((node) => node.classes().includes("text-rose-800"))).toBe(true);
     expect(markdownBlocks.some((node) => node.classes().includes("text-stone-800"))).toBe(true);
 

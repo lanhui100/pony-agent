@@ -208,6 +208,10 @@ function assistantHasVisibleContent(message: ChatMessage | null) {
   return Boolean(message?.content?.trim());
 }
 
+function isAssistantStreaming(message: ChatMessage | null) {
+  return message?.status === "pending";
+}
+
 function userShellClass() {
   return "rounded-[0.45rem] bg-stone-900 px-3 py-2 text-stone-50 shadow-[0_1px_0_rgba(28,25,23,0.03)] sm:px-4";
 }
@@ -498,19 +502,24 @@ watch(showReasoningContent, (value) => {
                 </p>
               </div>
             </details>
-            <Transition name="stream-fade" mode="out-in">
+            <div
+              v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
+              class="mt-2"
+            >
               <div
-                v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
-                :key="`${turn.turnId}:${turn.assistant.content.length}:${turn.assistant.status}`"
-                class="mt-2"
+                v-if="isAssistantStreaming(turn.assistant)"
+                class="assistant-streaming-content text-sm"
+                :class="assistantTone(turn.assistant)"
               >
-                <MarkdownRenderer
-                  :content="turn.assistant.content"
-                  wrapper-class="assistant-markdown text-sm"
-                  :tone-class="assistantTone(turn.assistant)"
-                />
+                {{ turn.assistant.content }}
               </div>
-            </Transition>
+              <MarkdownRenderer
+                v-else
+                :content="turn.assistant.content"
+                wrapper-class="assistant-markdown text-sm"
+                :tone-class="assistantTone(turn.assistant)"
+              />
+            </div>
           </article>
         </section>
       </TransitionGroup>
@@ -830,14 +839,36 @@ watch(showReasoningContent, (value) => {
   transform: translateY(0.45rem);
 }
 
-.stream-fade-enter-active,
-.stream-fade-leave-active {
-  transition: opacity 180ms ease;
+.assistant-streaming-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+  transition: color 140ms ease;
 }
 
-.stream-fade-enter-from,
-.stream-fade-leave-to {
-  opacity: 0;
+.assistant-streaming-content::after {
+  content: "";
+  display: inline-block;
+  width: 0.45rem;
+  height: 1em;
+  margin-left: 0.18rem;
+  vertical-align: -0.14em;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.55;
+  animation: assistant-stream-caret 1s ease-in-out infinite;
+}
+
+@keyframes assistant-stream-caret {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+
+  50% {
+    opacity: 0.7;
+  }
 }
 
 .conversation-disclosure {
