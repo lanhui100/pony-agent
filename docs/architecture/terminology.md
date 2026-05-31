@@ -210,11 +210,17 @@
 
 ## 与 PA-018 的关系
 
-`PA-018` 当前的准确目标不是“造一个长期记忆系统”，而是：
+`PA-018` 完成后，应该把它理解为“retrieval boundary 收口任务”，而不是“长期记忆产品任务”：
 
 - 建立 `TurnContext / SessionContext / RunState / LongTermMemory` 的分层边界
 - 建立它们的统一 `retrieval boundary`
-- 避免 runtime、graph、planner、后续 MCP/skills 继续直接依赖拼接 history
+- 让 runtime、graph、planner 与宿主默认查询面优先消费结构化 retrieval 结果
+
+这也意味着：
+
+- `LongTermMemory` 是其中一层，不等于整个子系统
+- retrieval 观测与 trace 展示语义不再留在 `PA-018`，而是转交 `PA-024`
+- `RetrievedContextState -> prompt/request` 映射、`Build Context` 解释力与 cache-friendly prompt 边界不再留在 `PA-018`，而是转交 `PA-025`
 
 对应任务卡见：
 

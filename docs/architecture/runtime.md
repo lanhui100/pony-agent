@@ -334,13 +334,16 @@
 - 不让 adapter 承担 graph 调度逻辑
 - 不让 graph checkpoint 依赖 runtime 瞬时内部变量
 
-## 2026-05-25 更新
+## 2026-05-31 更新
 - `PA-013 / PA-014 / PA-017` 已完成并通过回归，近线 graph/runtime/attachment 拆分已经收口。
 - runtime 与 graph 的职责边界保持不变：runtime 继续只负责单 turn 执行、tool follow-up、stream 与 cooperative cancel；graph 负责 run 级 orchestrator、stop/resume/checkpoint 与 run 状态持久化。
-- graph checkpoint 现在明确建立在稳定 handoff 之上，而不是 runtime 内部瞬时变量；当前稳定输入仍是 `TurnResult + SessionSnapshot + ExecutionCheckpoint -> GraphTurnHandoff`。
+- graph checkpoint 现在明确建立在稳定 handoff 之上，而不是 runtime 内部瞬时变量；当前稳定输入已经收口为 `TurnResult + RetrievedContextState -> GraphTurnHandoff`。
 - graph 侧新增的稳定产物包括：`GraphRunStopReason`、`GraphRunCheckpoint`、`active_turn_id`、`last_completed_turn_id`、`last_handoff`、`resume_count`。
 - 附件层新增的稳定产物包括：`AttachmentLifecycleStatus`、`AttachmentAssetQuery`、`AttachmentCleanupRequest` 与显式 cleanup；生命周期状态现在至少覆盖 `active / missing_payload / reclaimable / expired`。
-- 下一阶段主线已切到 `PA-018` context/state subsystem 与 `PA-019` graph planner。
+- `PA-018` 已完成，runtime 不再默认依赖原始 `SessionSnapshot` 来构建请求、planner preflight 或 graph handoff。
+- 下一阶段与 runtime 最相关的主线转为：
+  - `PA-025`：`RetrievedContextState -> prompt/request` 映射与 cache-friendly prompt 边界
+  - `PA-024`：retrieval observability / trace 展示语义
 ## 2026-05-25 graph planner 补充
 - `PA-019` 已建立最小 graph planner / policy：`GraphPlanner / GraphPlanningContext / DefaultGraphPlanner` 不进入 turn runtime，而是由 graph run 在稳定 handoff 之后消费。
 - 当前 graph policy 仍保持保守：assistant 明确在向用户提问时输出 `wait_user`；goal 带有多轮推进信号、且本轮已稳定收口时输出 `continue`；其余情况默认 `wait_user`。

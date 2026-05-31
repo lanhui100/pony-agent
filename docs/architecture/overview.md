@@ -167,14 +167,16 @@ Pony Agent 的目标是构建一个可观察、可扩展的桌面智能体系统
 - `PA-020 / PA-021` 对应能力接入层
 - `PA-022` 对应横切生命周期机制
 
-## 2026-05-25 更新
+## 2026-05-31 更新
 - `PA-013` 已把 `GraphDecision` 接成最小 graph orchestrator：`GraphRunStore / GraphRunner / start_graph_run / continue_graph_run / inspect(include_run)` 已落地。
 - `PA-014` 已把 graph stop/resume/checkpoint 提升到 graph 层：当前有 `GraphRunStopReason`、`GraphRunCheckpoint`、run 持久化 store、`stop_graph_run / resume_graph_run / load_graph_run_checkpoint`。
 - `PA-017` 已把附件资产从“只能 recent recall”推进到“可查询、可清理、可审计”的最小产品级状态：当前具备 `active / missing_payload / reclaimable / expired` 生命周期状态、最小查询面与显式 cleanup。
-- 当前新的近线任务已经切到 `PA-018` context/state subsystem 与 `PA-019` graph planner；`PA-020 ~ PA-022` 仍保持在后续能力层。
-- 截至 `2026-05-28`，`PA-018` 已经开始第一阶段实现：runtime 已新增 `RetrievedContextState / ContextStateRetriever` 合约，`build_request()` 与 planner preflight 已开始消费结构化 retrieval 结果。详见 [Context/State 子系统 V1](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)。
+- `PA-019` 已固定 graph planner 边界。
+- `PA-018` 已完成：runtime / graph / planner / 宿主默认查询面已经建立 retrieval-first 消费链路，`LongTermMemory` 也已有独立边界与项目级稳定事实来源。详见 [Context/State 子系统](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)。
+- `PA-024` 继续承接 retrieval observability / trace 展示语义。
+- `PA-025` 继续承接 `RetrievedContextState -> prompt/request` 映射、`Build Context` 语义与 cache-friendly prompt 边界。
 - 推荐顺序：
-- 先做 `PA-018 / PA-019`
+- 先做 `PA-025 / PA-024`
 - 再做 `PA-020 / PA-021`
 - 最后做 `PA-022`
 - 范围约束：不要把 graph loop、goal/run stop、附件中心生命周期继续回填到 `PA-010 / PA-011`。

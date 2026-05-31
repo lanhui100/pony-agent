@@ -36,6 +36,7 @@
 - [任务系统入口](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/README.md)
 - [项目总控面板](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/00_DASHBOARD.md)
 - [任务板](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
+- [PA-018 验收审计](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md)
 
 ## 8. 路线图
 
