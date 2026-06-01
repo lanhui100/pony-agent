@@ -62,8 +62,29 @@ pub struct ProviderRequest {
     pub images: Vec<TurnInputImage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_messages: Vec<Value>,
+    #[serde(default)]
+    pub observation: ProviderRequestObservation,
     pub temperature: f32,
     pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRequestObservation {
+    #[serde(default)]
+    pub stable_prefix_text: String,
+    #[serde(default)]
+    pub semi_stable_context_text: String,
+    #[serde(default)]
+    pub volatile_input_text: String,
+}
+
+impl ProviderRequestObservation {
+    fn is_empty(&self) -> bool {
+        self.stable_prefix_text.is_empty()
+            && self.semi_stable_context_text.is_empty()
+            && self.volatile_input_text.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +96,12 @@ pub struct BuildContextObservation {
     pub tool_count: usize,
     pub temperature: f32,
     pub max_output_tokens: u32,
+    #[serde(default)]
+    pub stable_prefix_text: String,
+    #[serde(default)]
+    pub semi_stable_context_text: String,
+    #[serde(default)]
+    pub volatile_input_text: String,
     pub request_messages_text: String,
     pub tool_definitions_text: String,
 }
@@ -95,6 +122,11 @@ pub fn build_context_observation(
     request: &ProviderRequest,
     tools: &[ToolDefinition],
 ) -> BuildContextObservation {
+    let observation = if request.observation.is_empty() {
+        derive_request_observation(request)
+    } else {
+        request.observation.clone()
+    };
     let (request_format, request_messages_text, message_count) =
         if !request.native_messages.is_empty() {
             (
@@ -117,6 +149,9 @@ pub fn build_context_observation(
         tool_count: tools.len(),
         temperature: request.temperature,
         max_output_tokens: request.max_output_tokens,
+        stable_prefix_text: observation.stable_prefix_text,
+        semi_stable_context_text: observation.semi_stable_context_text,
+        volatile_input_text: observation.volatile_input_text,
         request_messages_text,
         tool_definitions_text: render_tool_definitions(tools),
     }
@@ -139,6 +174,7 @@ struct OpenAiStreamMessage {
     output_text: String,
     tool_call: Option<ToolCall>,
     reasoning_content: Option<String>,
+    token_usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +182,7 @@ struct OpenAiSseAccumulator {
     output_text: String,
     reasoning_content: String,
     tool_calls: BTreeMap<usize, PartialOpenAiToolCall>,
+    token_usage: Option<TokenUsage>,
     saw_data: bool,
 }
 
@@ -166,6 +203,8 @@ pub enum ProviderStreamChunk {
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
 }
@@ -514,6 +553,10 @@ impl ProviderManager {
             return Err("openai tool follow-up missing text or tool call".to_string());
         }
 
+        let token_usage = extract_openai_usage(&payload)
+            .unwrap_or_else(|| estimate_token_usage(request, &output_text));
+        provider_log_token_usage("openai followup-sync", &token_usage);
+
         Ok(ProviderResponse {
             output_text: output_text.clone(),
             tool_call,
@@ -522,10 +565,7 @@ impl ProviderManager {
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
-            token_usage: Some(
-                extract_openai_usage(&payload)
-                    .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
-            ),
+            token_usage: Some(token_usage),
         })
     }
 
@@ -562,6 +602,9 @@ impl ProviderManager {
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                },
                 "tool_choice": "auto",
                 "tools": openai_tools_payload(tools)
             }),
@@ -687,6 +730,11 @@ impl ProviderManager {
         let message =
             collect_openai_sse_message_from_response(response, Instant::now(), endpoint, on_delta)?;
         let output_text = message.output_text.clone();
+        let token_usage = message
+            .token_usage
+            .clone()
+            .unwrap_or_else(|| estimate_token_usage(request, &output_text));
+        provider_log_token_usage("openai followup-stream", &token_usage);
         let assistant_message = if let Some(tool_call) = message.tool_call.as_ref() {
             Some(provider_native_assistant_tool_call_message(
                 text_if_present(&output_text),
@@ -708,7 +756,7 @@ impl ProviderManager {
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
-            token_usage: Some(estimate_token_usage(request, &output_text)),
+            token_usage: Some(token_usage),
         })
     }
 
@@ -850,6 +898,16 @@ impl ProviderManager {
         let payload = self.post_openai_json(&endpoint, &body)?;
         let message = first_openai_message(&payload)?;
 
+        let token_usage = extract_openai_usage(&payload).unwrap_or_else(|| {
+            estimate_token_usage(
+                request,
+                extract_openai_message_text(message)
+                    .as_deref()
+                    .unwrap_or_default(),
+            )
+        });
+        provider_log_token_usage("openai decision", &token_usage);
+
         Ok(ProviderDecision {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
             tool_call: extract_openai_tool_call(message),
@@ -858,14 +916,7 @@ impl ProviderManager {
             provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
-            token_usage: Some(extract_openai_usage(&payload).unwrap_or_else(|| {
-                estimate_token_usage(
-                    request,
-                    extract_openai_message_text(message)
-                        .as_deref()
-                        .unwrap_or_default(),
-                )
-            })),
+            token_usage: Some(token_usage),
         })
     }
 
@@ -1208,6 +1259,10 @@ impl OpenAiSseAccumulator {
             )
         })?;
 
+        if let Some(token_usage) = extract_openai_usage(&value) {
+            self.token_usage = Some(token_usage);
+        }
+
         let delta = value
             .get("choices")
             .and_then(Value::as_array)
@@ -1266,6 +1321,7 @@ impl OpenAiSseAccumulator {
             } else {
                 Some(self.reasoning_content)
             },
+            token_usage: self.token_usage,
         })
     }
 }
@@ -1401,7 +1457,30 @@ where
         } else {
             Some(reasoning)
         },
+        token_usage: None,
     })
+}
+
+#[test]
+fn openai_usage_extracts_cache_hit_and_reasoning_tokens() {
+    let payload = json!({
+        "usage": {
+            "prompt_tokens": 120,
+            "prompt_cache_hit_tokens": 48,
+            "completion_tokens": 32,
+            "total_tokens": 152,
+            "completion_tokens_details": {
+                "reasoning_tokens": 12
+            }
+        }
+    });
+
+    let usage = extract_openai_usage(&payload).expect("usage should be extracted");
+    assert_eq!(usage.input_tokens, Some(120));
+    assert_eq!(usage.cache_hit_input_tokens, Some(48));
+    assert_eq!(usage.reasoning_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(32));
+    assert_eq!(usage.total_tokens, Some(152));
 }
 
 fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelection) -> Value {
@@ -2354,6 +2433,31 @@ fn extract_openai_usage(payload: &Value) -> Option<TokenUsage> {
     let usage = payload.get("usage")?;
     Some(normalize_token_usage(TokenUsage {
         input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        cache_hit_input_tokens: usage
+            .get("prompt_cache_hit_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("input_tokens_details")
+                    .and_then(|value| value.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|value| value.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            }),
+        reasoning_tokens: usage
+            .get("completion_tokens_details")
+            .and_then(|value| value.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("output_tokens_details")
+                    .and_then(|value| value.get("reasoning_tokens"))
+                    .and_then(Value::as_u64)
+            }),
         output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
     }))
@@ -2395,6 +2499,8 @@ fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
 
     Some(normalize_token_usage(TokenUsage {
         input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
     }))
@@ -2433,6 +2539,8 @@ fn estimate_token_usage(request: &ProviderRequest, output_text: &str) -> TokenUs
 
     normalize_token_usage(TokenUsage {
         input_tokens: Some(estimate_tokens_from_chars(input_chars)),
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
         output_tokens: Some(estimate_tokens_from_chars(output_chars)),
         total_tokens: None,
     })
@@ -2491,6 +2599,8 @@ fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
 
     TokenUsage {
         input_tokens: usage.input_tokens,
+        cache_hit_input_tokens: usage.cache_hit_input_tokens,
+        reasoning_tokens: usage.reasoning_tokens,
         output_tokens: usage.output_tokens,
         total_tokens,
     }
@@ -2556,8 +2666,78 @@ fn render_tool_definitions(tools: &[ToolDefinition]) -> String {
         .join("\n\n")
 }
 
+fn derive_request_observation(request: &ProviderRequest) -> ProviderRequestObservation {
+    if !request.native_messages.is_empty() {
+        derive_native_request_observation(&request.native_messages)
+    } else {
+        derive_input_request_observation(&request.input)
+    }
+}
+
+fn derive_input_request_observation(messages: &[ProviderMessage]) -> ProviderRequestObservation {
+    if messages.is_empty() {
+        return ProviderRequestObservation::default();
+    }
+
+    let stable_prefix_end = messages
+        .iter()
+        .take_while(|message| {
+            matches!(message.role, ProviderRole::System | ProviderRole::Developer)
+        })
+        .count()
+        .min(messages.len().saturating_sub(1));
+    let volatile_input_start = messages
+        .iter()
+        .rposition(|message| matches!(message.role, ProviderRole::User))
+        .unwrap_or(messages.len().saturating_sub(1));
+
+    ProviderRequestObservation {
+        stable_prefix_text: render_input_messages(&messages[..stable_prefix_end]),
+        semi_stable_context_text: render_input_messages(
+            &messages[stable_prefix_end..volatile_input_start],
+        ),
+        volatile_input_text: render_input_messages(&messages[volatile_input_start..]),
+    }
+}
+
+fn derive_native_request_observation(messages: &[Value]) -> ProviderRequestObservation {
+    if messages.is_empty() {
+        return ProviderRequestObservation::default();
+    }
+
+    let stable_prefix_end = messages
+        .iter()
+        .take_while(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .count()
+        .min(messages.len().saturating_sub(1));
+    let volatile_input_start = messages
+        .iter()
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .unwrap_or(messages.len().saturating_sub(1));
+
+    ProviderRequestObservation {
+        stable_prefix_text: render_native_messages(&messages[..stable_prefix_end]),
+        semi_stable_context_text: render_native_messages(
+            &messages[stable_prefix_end..volatile_input_start],
+        ),
+        volatile_input_text: render_native_messages(&messages[volatile_input_start..]),
+    }
+}
+
 fn provider_log(message: String) {
     eprintln!("[pony-provider] {}", message);
+}
+
+fn provider_log_token_usage(context: &str, usage: &TokenUsage) {
+    provider_log(format!(
+        "usage:{} input={:?} cache_hit_input={:?} reasoning={:?} output={:?} total={:?}",
+        context,
+        usage.input_tokens,
+        usage.cache_hit_input_tokens,
+        usage.reasoning_tokens,
+        usage.output_tokens,
+        usage.total_tokens
+    ));
 }
 
 fn preview_text(text: &str, max_chars: usize) -> String {
@@ -2599,6 +2779,7 @@ mod tests {
                 name: Some("demo.png".to_string()),
             }],
             native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
             temperature: 0.2,
             max_output_tokens: 1024,
         };
@@ -2630,6 +2811,7 @@ mod tests {
                 name: Some("demo.png".to_string()),
             }],
             native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
             temperature: 0.2,
             max_output_tokens: 1024,
         };
@@ -2652,6 +2834,78 @@ mod tests {
                 .and_then(Value::as_str),
             Some("Zm9v")
         );
+    }
+
+    #[test]
+    fn build_context_observation_exposes_layered_request_segments() {
+        let request = ProviderRequest {
+            model: "gpt-4.1-mini".to_string(),
+            input: vec![
+                ProviderMessage::system("Stable system instruction"),
+                ProviderMessage::developer("Stable capability prefix"),
+                ProviderMessage::user("Recent context summary"),
+                ProviderMessage::user("Actual volatile request"),
+            ],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+
+        let observation = build_context_observation(
+            &request,
+            &[ToolDefinition {
+                name: "workspace.read_file",
+                description: "read file",
+                input_schema: json!({ "type": "object" }),
+            }],
+        );
+
+        assert_eq!(observation.request_format, "normalized-input");
+        assert_eq!(observation.message_count, 4);
+        assert!(observation
+            .stable_prefix_text
+            .contains("Stable system instruction"));
+        assert!(observation
+            .stable_prefix_text
+            .contains("Stable capability prefix"));
+        assert!(!observation
+            .stable_prefix_text
+            .contains("Actual volatile request"));
+        assert!(observation
+            .semi_stable_context_text
+            .contains("Recent context summary"));
+        assert!(observation
+            .volatile_input_text
+            .contains("Actual volatile request"));
+        assert_eq!(observation.tool_count, 1);
+    }
+
+    #[test]
+    fn build_context_observation_prefers_explicit_layer_metadata() {
+        let request = ProviderRequest {
+            model: "gpt-5.4".to_string(),
+            input: vec![ProviderMessage::user("fallback text should not win")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation {
+                stable_prefix_text: "stable prefix".to_string(),
+                semi_stable_context_text: "semi-stable context".to_string(),
+                volatile_input_text: "actual request".to_string(),
+            },
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+
+        let observation = build_context_observation(&request, &[]);
+
+        assert_eq!(observation.stable_prefix_text, "stable prefix");
+        assert_eq!(observation.semi_stable_context_text, "semi-stable context");
+        assert_eq!(observation.volatile_input_text, "actual request");
+        assert!(!observation
+            .stable_prefix_text
+            .contains("fallback text should not win"));
     }
 
     #[test]
@@ -2783,6 +3037,7 @@ mod tests {
             )],
             images: Vec::new(),
             native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
             temperature: 0.2,
             max_output_tokens: 1024,
         };
@@ -2824,6 +3079,7 @@ mod tests {
             input: vec![ProviderMessage::user("检查 capabilities 目录")],
             images: Vec::new(),
             native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
             temperature: 0.2,
             max_output_tokens: 1024,
         };
@@ -3019,6 +3275,28 @@ mod tests {
     }
 
     #[test]
+    fn openai_sse_reader_extracts_usage_from_terminal_chunk() {
+        let raw_text = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"alpha\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"prompt_cache_hit_tokens\":48,\"completion_tokens\":32,\"total_tokens\":152}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let message = collect_openai_sse_message_from_reader(
+            std::io::Cursor::new(raw_text.as_bytes()),
+            "unit-test",
+            &mut |_delta| {},
+        )
+        .expect("stream message should parse");
+
+        let usage = message.token_usage.expect("usage should be captured");
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.cache_hit_input_tokens, Some(48));
+        assert_eq!(usage.output_tokens, Some(32));
+        assert_eq!(usage.total_tokens, Some(152));
+    }
+
+    #[test]
     fn openai_reasoning_tool_followup_stream_attempts_live_stream_before_fallback() {
         let config = ResolvedProviderSelection {
             requested_name: "ppx".to_string(),
@@ -3046,6 +3324,7 @@ mod tests {
             input: vec![ProviderMessage::user("继续总结工具结果")],
             images: Vec::new(),
             native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
             temperature: 0.2,
             max_output_tokens: 1024,
         };

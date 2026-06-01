@@ -2,6 +2,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import type {
   AttachmentAsset,
+  BuildContextObservation,
   ChatMessage,
   ExecutionCheckpoint,
   RetrievedContextState,
@@ -61,10 +62,31 @@ function createTrace(partial: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
     fallbackReason: partial.fallbackReason ?? null,
     error: partial.error ?? null,
     inputTokens: partial.inputTokens ?? null,
+    cacheHitInputTokens: partial.cacheHitInputTokens ?? null,
+    reasoningTokens: partial.reasoningTokens ?? null,
     outputTokens: partial.outputTokens ?? null,
     totalTokens: partial.totalTokens ?? null,
     firstTokenLatencyMs: partial.firstTokenLatencyMs ?? null,
+    turnDurationMs: partial.turnDurationMs ?? null,
     updatedAt: partial.updatedAt ?? 1000
+  };
+}
+
+function createBuildContextObservation(
+  partial: Partial<BuildContextObservation> = {}
+): BuildContextObservation {
+  return {
+    requestFormat: partial.requestFormat ?? "response_format=text",
+    messageCount: partial.messageCount ?? 2,
+    imageCount: partial.imageCount ?? 0,
+    toolCount: partial.toolCount ?? 1,
+    temperature: partial.temperature ?? 0,
+    maxOutputTokens: partial.maxOutputTokens ?? 4096,
+    stablePrefixText: partial.stablePrefixText ?? "system: stable system rule",
+    semiStableContextText: partial.semiStableContextText ?? "developer: retrieval summary",
+    volatileInputText: partial.volatileInputText ?? "user: stream request",
+    requestMessagesText: partial.requestMessagesText ?? "system: runtime check\nuser: stream request",
+    toolDefinitionsText: partial.toolDefinitionsText ?? "workspace.read_file(path: string)"
   };
 }
 
@@ -1704,6 +1726,14 @@ describe("runtime session resilience", () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(6060);
     const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    const startedObservation = createBuildContextObservation();
+    const completedObservation = createBuildContextObservation({
+      requestFormat: "response_format=json_schema",
+      messageCount: 4,
+      toolCount: 2,
+      requestMessagesText: "system: summarize retrieval\nuser: stream request\nassistant: partial answer",
+      toolDefinitionsText: "workspace.read_file(path: string)\nworkspace.search(query: string)"
+    });
 
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
@@ -1755,9 +1785,13 @@ describe("runtime session resilience", () => {
         providerMode: "standard",
         providerRequestedName: "OpenAI",
         inputTokens: 12,
-        traceSteps: store.traceSteps
+        traceSteps: store.traceSteps,
+        buildContextObservation: startedObservation
       }
     });
+
+    expect(store.turnTraceHistory[0]?.buildContextObservation).toEqual(startedObservation);
+    expect(store.turnTraceHistory[0]?.buildContextObservation).not.toBe(startedObservation);
 
     eventHandlers.get("turn:delta")?.({
       payload: {
@@ -1785,11 +1819,20 @@ describe("runtime session resilience", () => {
         inputTokens: 12,
         outputTokens: 34,
         totalTokens: 46,
+        cache_hit_input_tokens: 5,
+        inputTokensDetails: {
+          cachedTokens: 3
+        },
+        completionTokensDetails: {
+          reasoningTokens: 8
+        },
         firstTokenLatencyMs: 321,
+        turnDurationMs: 2800,
         traceSteps: store.traceSteps,
-        toolActivities: []
+        toolActivities: [],
+        buildContextObservation: completedObservation
       }
-    });
+    } as any);
 
     await flushMicrotasks();
 
@@ -1809,6 +1852,85 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.phase).toBe("completed");
     expect(store.turnTraceHistory[0]?.sessionSummary).toBe("Completed summary");
     expect(store.turnTraceHistory[0]?.title).toBe("stream request");
+    expect(store.turnTraceHistory[0]?.buildContextObservation).toEqual(completedObservation);
+    expect(store.turnTraceHistory[0]?.buildContextObservation).not.toBe(completedObservation);
+    expect(store.turnTraceHistory[0]?.cacheHitInputTokens).toBe(5);
+    expect(store.turnTraceHistory[0]?.reasoningTokens).toBe(8);
+    expect(store.turnTraceHistory[0]?.turnDurationMs).toBe(2800);
+
+    nowSpy.mockRestore();
+  });
+
+  it("prefers accumulated cache-hit tokens over nested cached token details on completion", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(6262);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stream-accumulated-cache" },
+          turnId: "6262"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "stream-session-accumulated-cache",
+      draftMessage: "trace accumulated cache hit",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+    expect(store.activeTurnId).toBe("6262");
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "6262",
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "provider_followup_stream",
+        providerMode: "standard",
+        providerRequestedName: "OpenAI",
+        sessionSummary: "Completed summary",
+        inputTokens: 240,
+        outputTokens: 70,
+        totalTokens: 310,
+        cacheHitInputTokens: 70,
+        inputTokensDetails: {
+          cachedTokens: 15
+        },
+        traceSteps: store.traceSteps,
+        toolActivities: [],
+        turnDurationMs: 2800
+      }
+    } as any);
+
+    await flushMicrotasks();
+
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.cacheHitInputTokens).toBe(70);
+    expect(store.turnTraceHistory[0]?.inputTokens).toBe(240);
+    expect(store.turnTraceHistory[0]?.outputTokens).toBe(70);
+    expect(store.turnTraceHistory[0]?.totalTokens).toBe(310);
 
     nowSpy.mockRestore();
   });

@@ -64,9 +64,12 @@ pub struct TurnResult {
     pub fallback_reason: Option<String>,
     pub build_context_observation: Option<BuildContextObservation>,
     pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub first_token_latency_ms: Option<u64>,
+    pub turn_duration_ms: Option<u64>,
     pub user_message: String,
     pub assistant_message: String,
     pub trace_steps: Vec<TurnTraceStep>,
@@ -92,9 +95,12 @@ pub struct TurnStreamEvent {
     pub fallback_reason: Option<String>,
     pub build_context_observation: Option<BuildContextObservation>,
     pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub first_token_latency_ms: Option<u64>,
+    pub turn_duration_ms: Option<u64>,
     pub trace_steps: Option<Vec<TurnTraceStep>>,
     pub tool_activities: Option<Vec<TurnToolActivity>>,
     pub session_summary: Option<String>,
@@ -437,11 +443,14 @@ impl AgentRuntime {
             provider_name,
             Some(provider_mode),
         );
-        let (input_tokens, output_tokens, total_tokens) = token_usage_parts(token_usage);
+        let (input_tokens, cache_hit_input_tokens, reasoning_tokens, output_tokens, total_tokens) =
+            token_usage_parts(token_usage);
 
         PersistedTurnOutcome {
             session_summary,
             input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
             output_tokens,
             total_tokens,
         }
@@ -462,9 +471,12 @@ impl AgentRuntime {
         build_context_observation: Option<BuildContextObservation>,
         fallback_reason: Option<String>,
         input_tokens: Option<u64>,
+        cache_hit_input_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
         output_tokens: Option<u64>,
         total_tokens: Option<u64>,
         first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
         session_summary: Option<String>,
         error: Option<String>,
     ) {
@@ -487,9 +499,12 @@ impl AgentRuntime {
                 fallback_reason,
                 error,
                 input_tokens,
+                cache_hit_input_tokens,
+                reasoning_tokens,
                 output_tokens,
                 total_tokens,
                 first_token_latency_ms,
+                turn_duration_ms,
                 updated_at: 0,
             },
         );
@@ -589,6 +604,7 @@ impl AgentRuntime {
         trace_steps: Vec<TurnTraceStep>,
         tool_activities: Vec<TurnToolActivity>,
         first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
         build_context_observation: Option<BuildContextObservation>,
     ) {
         let error = "stopped_by_user".to_string();
@@ -631,7 +647,10 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
+            None,
             first_token_latency_ms,
+            turn_duration_ms,
             Some(persisted.session_summary),
             Some(error.clone()),
         );
@@ -642,6 +661,7 @@ impl AgentRuntime {
             trace_steps,
             Some(tool_activities),
             first_token_latency_ms,
+            turn_duration_ms,
             build_context_observation,
             error,
         );
@@ -674,6 +694,7 @@ impl AgentRuntime {
         let mut all_tools_ok = true;
         let mut completed_hops = 0usize;
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
+        let mut accumulated_token_usage = first_decision.token_usage.clone();
         let first_token_latency = Rc::new(Cell::new(None));
 
         loop {
@@ -706,6 +727,7 @@ impl AgentRuntime {
                     trace_steps,
                     tool_activities.clone(),
                     first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(context_observation.clone()),
                 );
                 return;
@@ -723,6 +745,9 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(context_observation.clone()),
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -750,6 +775,9 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(context_observation.clone()),
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -799,6 +827,7 @@ impl AgentRuntime {
                     return_trace_steps.clone(),
                     tool_activities.clone(),
                     first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(context_observation.clone()),
                 );
                 return;
@@ -817,6 +846,9 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(context_observation.clone()),
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -843,6 +875,9 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
                 Some(return_trace_steps),
                 None,
                 None,
@@ -851,6 +886,7 @@ impl AgentRuntime {
             let delta_turn_id = turn_id.to_string();
             let first_token_latency_for_emit = Rc::clone(&first_token_latency);
             let context_observation_for_delta = context_observation.clone();
+            let followup_started_at = Instant::now();
             let response = match provider_followup_stream(
                 provider,
                 planning_request,
@@ -860,7 +896,7 @@ impl AgentRuntime {
                 &tool_result,
                 move |delta| {
                     let latency = if first_token_latency_for_emit.get().is_none() {
-                        let value = turn_started_at.elapsed().as_millis() as u64;
+                        let value = followup_started_at.elapsed().as_millis() as u64;
                         first_token_latency_for_emit.set(Some(value));
                         Some(value)
                     } else {
@@ -888,7 +924,10 @@ impl AgentRuntime {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                         latency,
+                        None,
                         None,
                         None,
                         None,
@@ -913,7 +952,10 @@ impl AgentRuntime {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                         first_token_latency.get(),
+                        Some(turn_started_at.elapsed().as_millis() as u64),
                         None,
                         Some(error.clone()),
                     );
@@ -924,6 +966,7 @@ impl AgentRuntime {
                         trace_steps,
                         Some(tool_activities),
                         first_token_latency.get(),
+                        Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
                         error,
                     );
@@ -931,6 +974,8 @@ impl AgentRuntime {
                 }
             };
             let mut response = response;
+            accumulated_token_usage =
+                merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
             accumulated_fallback_reason = merge_fallback_reason(
                 accumulated_fallback_reason,
                 response.fallback_reason.clone(),
@@ -963,6 +1008,7 @@ impl AgentRuntime {
                     return_trace_steps.clone(),
                     tool_activities.clone(),
                     first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(context_observation.clone()),
                 );
                 return;
@@ -988,7 +1034,10 @@ impl AgentRuntime {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                     first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     None,
                     Some(error.clone()),
                 );
@@ -999,6 +1048,7 @@ impl AgentRuntime {
                     trace_steps,
                     Some(tool_activities),
                     first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(context_observation.clone()),
                     error,
                 );
@@ -1031,7 +1081,10 @@ impl AgentRuntime {
                             None,
                             None,
                             None,
+                            None,
+                            None,
                             first_token_latency.get(),
+                            Some(turn_started_at.elapsed().as_millis() as u64),
                             None,
                             Some(error.clone()),
                         );
@@ -1042,6 +1095,7 @@ impl AgentRuntime {
                             trace_steps,
                             Some(tool_activities),
                             first_token_latency.get(),
+                            Some(turn_started_at.elapsed().as_millis() as u64),
                             Some(context_observation.clone()),
                             error,
                         );
@@ -1071,7 +1125,10 @@ impl AgentRuntime {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                         first_token_latency.get(),
+                        Some(turn_started_at.elapsed().as_millis() as u64),
                         None,
                         Some(error.clone()),
                     );
@@ -1082,6 +1139,7 @@ impl AgentRuntime {
                         trace_steps,
                         Some(tool_activities),
                         first_token_latency.get(),
+                        Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
                         error,
                     );
@@ -1116,7 +1174,10 @@ impl AgentRuntime {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                         first_token_latency.get(),
+                        Some(turn_started_at.elapsed().as_millis() as u64),
                         None,
                         Some(error.clone()),
                     );
@@ -1127,6 +1188,7 @@ impl AgentRuntime {
                         trace_steps,
                         Some(tool_activities),
                         first_token_latency.get(),
+                        Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
                         error,
                     );
@@ -1139,7 +1201,7 @@ impl AgentRuntime {
                 &completed_text,
                 provider.name(),
                 &completed_mode,
-                response.token_usage.as_ref(),
+                accumulated_token_usage.as_ref(),
                 native_transcript_for_tool_turn(user_message, &hop_records, &response),
                 attachments,
             );
@@ -1174,9 +1236,12 @@ impl AgentRuntime {
                 Some(context_observation.clone()),
                 accumulated_fallback_reason.clone(),
                 persisted.input_tokens,
+                persisted.cache_hit_input_tokens,
+                persisted.reasoning_tokens,
                 persisted.output_tokens,
                 persisted.total_tokens,
                 first_token_latency.get(),
+                Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(persisted.session_summary.clone()),
                 None,
             );
@@ -1195,9 +1260,12 @@ impl AgentRuntime {
                 accumulated_fallback_reason,
                 Some(context_observation.clone()),
                 persisted.input_tokens,
+                persisted.cache_hit_input_tokens,
+                persisted.reasoning_tokens,
                 persisted.output_tokens,
                 persisted.total_tokens,
                 first_token_latency.get(),
+                Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(trace_steps),
                 Some(tool_activities),
                 Some(persisted.session_summary),
@@ -1226,6 +1294,7 @@ impl AgentRuntime {
         let mut all_tools_ok = true;
         let mut completed_hops = 0usize;
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
+        let mut accumulated_token_usage = first_decision.token_usage.clone();
 
         loop {
             completed_hops += 1;
@@ -1273,6 +1342,8 @@ impl AgentRuntime {
                 }
             };
             let mut response = response;
+            accumulated_token_usage =
+                merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
             accumulated_fallback_reason = merge_fallback_reason(
                 accumulated_fallback_reason,
                 response.fallback_reason.clone(),
@@ -1340,7 +1411,7 @@ impl AgentRuntime {
                 provider_source: response.provider_source,
                 provider_mode: response.provider_mode,
                 fallback_reason: accumulated_fallback_reason,
-                token_usage: response.token_usage,
+                token_usage: accumulated_token_usage,
                 trace_steps: self
                     .telemetry_builder
                     .completed_trace_with_tool(all_tools_ok),
@@ -1350,6 +1421,7 @@ impl AgentRuntime {
     }
 
     pub fn run_turn(&mut self, input: TurnInput) -> TurnResult {
+        let turn_started_at = Instant::now();
         let prepared = match self.prepare_turn(&input, false) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1503,9 +1575,12 @@ impl AgentRuntime {
             fallback_reason,
             build_context_observation: Some(build_context_observation),
             input_tokens: persisted.input_tokens,
+            cache_hit_input_tokens: persisted.cache_hit_input_tokens,
+            reasoning_tokens: persisted.reasoning_tokens,
             output_tokens: persisted.output_tokens,
             total_tokens: persisted.total_tokens,
             first_token_latency_ms: None,
+            turn_duration_ms: Some(turn_started_at.elapsed().as_millis() as u64),
             user_message: display_message,
             assistant_message,
             trace_steps,
@@ -1533,6 +1608,7 @@ impl AgentRuntime {
         turn_id: String,
         input: TurnInput,
     ) {
+        let turn_started_at = Instant::now();
         let prepared = match self.prepare_turn(&input, true) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1549,8 +1625,6 @@ impl AgentRuntime {
                 return;
             }
         };
-        let turn_started_at = Instant::now();
-
         runtime_log(format!(
             "turn:start id={} requested={} provider={} protocol={} model={} message_preview={}",
             turn_id,
@@ -1595,6 +1669,9 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
+            None,
+            None,
             Some(start_trace_steps.clone()),
             None,
             None,
@@ -1611,6 +1688,7 @@ impl AgentRuntime {
                 start_trace_steps,
                 Vec::new(),
                 None,
+                Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(prepared.build_context_observation.clone()),
             );
             return;
@@ -1651,6 +1729,9 @@ impl AgentRuntime {
                     None,
                     None,
                     None,
+                    None,
+                    None,
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     None,
                     Some(error.clone()),
                 );
@@ -1719,6 +1800,9 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
+                None,
+                Some(turn_started_at.elapsed().as_millis() as u64),
+                None,
                 Some(error.clone()),
             );
             emit_stream_failed(
@@ -1728,6 +1812,7 @@ impl AgentRuntime {
                 trace_steps,
                 None,
                 None,
+                Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
                 error,
             );
@@ -1746,6 +1831,7 @@ impl AgentRuntime {
                 self.telemetry_builder.failed_trace_before_tool(),
                 Vec::new(),
                 None,
+                Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
             );
             return;
@@ -1787,6 +1873,9 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
+            None,
+            None,
             Some(self.telemetry_builder.trace_return_active_without_tool()),
             None,
             None,
@@ -1818,11 +1907,13 @@ impl AgentRuntime {
                 self.telemetry_builder.trace_return_active_without_tool(),
                 Vec::new(),
                 None,
+                Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
             );
             return;
         }
 
+        let simulated_stream_started_at = Instant::now();
         let first_token_latency_ms =
             if let Some(reasoning_content) = first_decision.reasoning_content.as_deref() {
                 stream_reasoning_chunks(
@@ -1830,8 +1921,9 @@ impl AgentRuntime {
                     &turn_id,
                     "calling_model",
                     reasoning_content,
-                    &turn_started_at,
+                    &simulated_stream_started_at,
                     None,
+                    false,
                 )
             } else {
                 None
@@ -1841,8 +1933,9 @@ impl AgentRuntime {
             &turn_id,
             "calling_model",
             &first_decision.output_text,
-            &turn_started_at,
+            &simulated_stream_started_at,
             first_token_latency_ms,
+            false,
         );
         let completed_text = first_decision.output_text.clone();
         let completed_mode = first_decision.provider_mode.clone();
@@ -1880,7 +1973,10 @@ impl AgentRuntime {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                     first_token_latency_ms,
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     None,
                     Some(error.clone()),
                 );
@@ -1891,6 +1987,7 @@ impl AgentRuntime {
                     trace_steps,
                     None,
                     first_token_latency_ms,
+                    Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(build_context_observation.clone()),
                     error,
                 );
@@ -1940,9 +2037,12 @@ impl AgentRuntime {
             Some(build_context_observation.clone()),
             first_decision.fallback_reason.clone(),
             persisted.input_tokens,
+            persisted.cache_hit_input_tokens,
+            persisted.reasoning_tokens,
             persisted.output_tokens,
             persisted.total_tokens,
             first_token_latency_ms,
+            Some(turn_started_at.elapsed().as_millis() as u64),
             Some(persisted.session_summary.clone()),
             None,
         );
@@ -1961,9 +2061,12 @@ impl AgentRuntime {
             first_decision.fallback_reason.clone(),
             Some(build_context_observation.clone()),
             Some(persisted.input_tokens).flatten(),
+            Some(persisted.cache_hit_input_tokens).flatten(),
+            Some(persisted.reasoning_tokens).flatten(),
             Some(persisted.output_tokens).flatten(),
             Some(persisted.total_tokens).flatten(),
             first_token_latency_ms,
+            Some(turn_started_at.elapsed().as_millis() as u64),
             Some(trace_steps),
             Some(Vec::new()),
             Some(persisted.session_summary),
@@ -2233,6 +2336,36 @@ fn merge_fallback_reason(existing: Option<String>, next: Option<String>) -> Opti
         (Some(existing), _) => Some(existing),
         (None, Some(next)) if !next.trim().is_empty() => Some(next),
         (None, _) => None,
+    }
+}
+
+fn merge_token_usage(
+    existing: Option<TokenUsage>,
+    next: Option<&TokenUsage>,
+) -> Option<TokenUsage> {
+    match (existing, next) {
+        (Some(existing), Some(next)) => Some(TokenUsage {
+            input_tokens: add_optional_u64(existing.input_tokens, next.input_tokens),
+            cache_hit_input_tokens: add_optional_u64(
+                existing.cache_hit_input_tokens,
+                next.cache_hit_input_tokens,
+            ),
+            reasoning_tokens: add_optional_u64(existing.reasoning_tokens, next.reasoning_tokens),
+            output_tokens: add_optional_u64(existing.output_tokens, next.output_tokens),
+            total_tokens: add_optional_u64(existing.total_tokens, next.total_tokens),
+        }),
+        (Some(existing), None) => Some(existing),
+        (None, Some(next)) => Some(next.clone()),
+        (None, None) => None,
+    }
+}
+
+fn add_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
     }
 }
 
@@ -2686,9 +2819,12 @@ mod tests {
             fallback_reason: None,
             build_context_observation: None,
             input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
             first_token_latency_ms: None,
+            turn_duration_ms: None,
             user_message: "请继续处理".to_string(),
             assistant_message: "当前轮已收口。".to_string(),
             trace_steps: Vec::new(),
@@ -2945,6 +3081,118 @@ mod tests {
     }
 
     #[test]
+    fn run_turn_accumulates_token_usage_across_tool_followups() {
+        let final_text = "已累计整轮 token usage。";
+        let server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "先调用 workspace_list_files。",
+                            "reasoning_content": "需要先执行 workspace_list_files。",
+                            "tool_calls": [
+                                {
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": json!({"path": ".", "limit": 40}).to_string()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "prompt_cache_hit_tokens": 30,
+                    "prompt_cache_miss_tokens": 70,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 7
+                    }
+                }
+            })),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "继续调用 workspace_read_file。",
+                            "reasoning_content": "目录已找到，继续读取文件。",
+                            "tool_calls": [
+                                {
+                                    "id": "call_workspace_read_file",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_read_file",
+                                        "arguments": json!({"path": "tauri.conf.json"}).to_string()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 80,
+                    "prompt_cache_hit_tokens": 25,
+                    "prompt_cache_miss_tokens": 55,
+                    "completion_tokens": 10,
+                    "total_tokens": 90,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 3
+                    }
+                }
+            })),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": final_text,
+                            "reasoning_content": "已经整理完最终结果。"
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 60,
+                    "prompt_cache_hit_tokens": 15,
+                    "prompt_cache_miss_tokens": 45,
+                    "completion_tokens": 40,
+                    "total_tokens": 100,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 2
+                    }
+                }
+            })),
+        ]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+
+        let result = runtime.run_turn(TurnInput {
+            message: "继续读取 tauri.conf.json 第三行".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-usage-accumulated".to_string()),
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert_eq!(result.phase, "ready");
+        assert_eq!(result.assistant_message, final_text);
+        assert_eq!(result.input_tokens, Some(240));
+        assert_eq!(result.cache_hit_input_tokens, Some(70));
+        assert_eq!(result.reasoning_tokens, Some(12));
+        assert_eq!(result.output_tokens, Some(70));
+        assert_eq!(result.total_tokens, Some(310));
+
+        let _ = server.finish();
+    }
+
+    #[test]
     fn run_turn_repairs_blank_tool_name_before_execution() {
         let final_text = "tauri.conf.json 已成功读取。";
         let server = MockHttpServer::start(vec![
@@ -3170,6 +3418,178 @@ mod tests {
         assert_eq!(request_bodies.len(), 3);
         assert!(request_bodies[1].contains("\"tool_choice\":\"auto\""));
         assert!(request_bodies[2].contains("\"tool_choice\":\"auto\""));
+    }
+
+    #[test]
+    fn start_turn_stream_accumulates_token_usage_across_tool_followups() {
+        let final_text = "流式回合已累计整轮 token usage。";
+        let server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "先调用 workspace_list_files。",
+                            "reasoning_content": "需要先执行 workspace_list_files。",
+                            "tool_calls": [
+                                {
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": json!({"path": ".", "limit": 40}).to_string()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "prompt_cache_hit_tokens": 30,
+                    "prompt_cache_miss_tokens": 70,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 7
+                    }
+                }
+            })),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "目录已找到。"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "继续读取 tauri.conf.json。"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_read_file",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_read_file",
+                                            "arguments": "{\"path\":\"tauri.conf.json\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 80,
+                        "prompt_cache_hit_tokens": 25,
+                        "prompt_cache_miss_tokens": 55,
+                        "completion_tokens": 10,
+                        "total_tokens": 90,
+                        "completion_tokens_details": {
+                            "reasoning_tokens": 3
+                        }
+                    }
+                }),
+            ]),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "已经整理完最终结果。"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": final_text
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 60,
+                        "prompt_cache_hit_tokens": 15,
+                        "prompt_cache_miss_tokens": 45,
+                        "completion_tokens": 40,
+                        "total_tokens": 100,
+                        "completion_tokens_details": {
+                            "reasoning_tokens": 2
+                        }
+                    }
+                }),
+            ]),
+        ]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-usage-accumulated".to_string(),
+            TurnInput {
+                message: "继续读取 tauri.conf.json 第三行".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-usage-accumulated".to_string()),
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let events = sink.events.borrow();
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                if name == "turn:completed" {
+                    Some(payload.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("stream completed event");
+
+        assert_eq!(completed.text.as_deref(), Some(final_text));
+        assert_eq!(completed.input_tokens, Some(240));
+        assert_eq!(completed.cache_hit_input_tokens, Some(70));
+        assert_eq!(completed.reasoning_tokens, Some(12));
+        assert_eq!(completed.output_tokens, Some(70));
+        assert_eq!(completed.total_tokens, Some(310));
+
+        let snapshot = runtime.load_session_snapshot(Some("stream-usage-accumulated"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("stream accumulated trace");
+        assert_eq!(trace.input_tokens, Some(240));
+        assert_eq!(trace.cache_hit_input_tokens, Some(70));
+        assert_eq!(trace.reasoning_tokens, Some(12));
+        assert_eq!(trace.output_tokens, Some(70));
+        assert_eq!(trace.total_tokens, Some(310));
+
+        let _ = server.finish();
     }
 
     #[test]

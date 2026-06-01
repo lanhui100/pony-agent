@@ -94,6 +94,9 @@ export type BuildContextObservation = {
   toolCount: number;
   temperature: number;
   maxOutputTokens: number;
+  stablePrefixText: string;
+  semiStableContextText: string;
+  volatileInputText: string;
   requestMessagesText: string;
   toolDefinitionsText: string;
 };
@@ -136,9 +139,12 @@ export type TurnTraceRecord = {
   fallbackReason?: string | null;
   error?: string | null;
   inputTokens?: number | null;
+  cacheHitInputTokens?: number | null;
+  reasoningTokens?: number | null;
   outputTokens?: number | null;
   totalTokens?: number | null;
   firstTokenLatencyMs?: number | null;
+  turnDurationMs?: number | null;
   updatedAt: number;
 };
 
@@ -358,9 +364,12 @@ export type TurnResult = {
   buildContextObservation?: BuildContextObservation | null;
   reasoningContent?: string | null;
   inputTokens?: number | null;
+  cacheHitInputTokens?: number | null;
+  reasoningTokens?: number | null;
   outputTokens?: number | null;
   totalTokens?: number | null;
   firstTokenLatencyMs?: number | null;
+  turnDurationMs?: number | null;
   userMessage: string;
   assistantMessage: string;
   traceSteps: TraceStep[];
@@ -384,9 +393,12 @@ export type TurnStreamEvent = {
   fallbackReason?: string | null;
   buildContextObservation?: BuildContextObservation | null;
   inputTokens?: number | null;
+  cacheHitInputTokens?: number | null;
+  reasoningTokens?: number | null;
   outputTokens?: number | null;
   totalTokens?: number | null;
   firstTokenLatencyMs?: number | null;
+  turnDurationMs?: number | null;
   traceSteps?: TraceStep[] | null;
   toolActivities?: ToolActivity[] | null;
   sessionSummary?: string | null;

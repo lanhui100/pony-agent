@@ -436,6 +436,81 @@ function buildAssistantModelLabel(providerName?: string | null, modelName?: stri
   return model || provider || null;
 }
 
+function readNumericTokenValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readNestedNumericTokenValue(source: unknown, paths: string[][]): number | null {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+
+  for (const path of paths) {
+    let current: unknown = source;
+
+    for (const segment of path) {
+      if (!current || typeof current !== "object") {
+        current = null;
+        break;
+      }
+
+      current = (current as Record<string, unknown>)[segment];
+    }
+
+    const resolved = readNumericTokenValue(current);
+    if (resolved != null) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+function resolveCacheHitInputTokens(source: unknown): number | null {
+  const direct = readNestedNumericTokenValue(source, [
+    ["cacheHitInputTokens"],
+    ["cache_hit_input_tokens"],
+    ["promptCacheHitTokens"],
+    ["prompt_cache_hit_tokens"],
+    ["cachedInputTokens"],
+    ["cacheReadInputTokens"],
+    ["inputCachedTokens"],
+    ["cachedTokens"]
+  ]);
+
+  if (direct != null) {
+    return direct;
+  }
+
+  return readNestedNumericTokenValue(source, [
+    ["inputTokensDetails", "cachedTokens"],
+    ["input_tokens_details", "cached_tokens"],
+    ["promptTokensDetails", "cachedTokens"],
+    ["prompt_tokens_details", "cached_tokens"],
+    ["usage", "input_tokens_details", "cached_tokens"],
+    ["usage", "prompt_tokens_details", "cached_tokens"]
+  ]);
+}
+
+function resolveReasoningTokens(source: unknown): number | null {
+  const direct = readNestedNumericTokenValue(source, [
+    ["reasoningTokens"]
+  ]);
+
+  if (direct != null) {
+    return direct;
+  }
+
+  return readNestedNumericTokenValue(source, [
+    ["completionTokensDetails", "reasoningTokens"],
+    ["completion_tokens_details", "reasoning_tokens"],
+    ["outputTokensDetails", "reasoningTokens"],
+    ["output_tokens_details", "reasoning_tokens"],
+    ["usage", "completion_tokens_details", "reasoning_tokens"],
+    ["usage", "output_tokens_details", "reasoning_tokens"]
+  ]);
+}
+
 function createBlankSessionRuntimeFields() {
   return {
     sessionSummary: "",
@@ -1548,6 +1623,7 @@ export const useRuntimeStore = defineStore("runtime", {
         fallbackReason: patch.fallbackReason ?? null,
         error: patch.error ?? null,
         inputTokens: patch.inputTokens ?? null,
+        cacheHitInputTokens: patch.cacheHitInputTokens ?? null,
         outputTokens: patch.outputTokens ?? null,
         totalTokens: patch.totalTokens ?? null,
         firstTokenLatencyMs: patch.firstTokenLatencyMs ?? null,
@@ -1732,6 +1808,11 @@ export const useRuntimeStore = defineStore("runtime", {
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        const reasoningTokens = resolveReasoningTokens(payload);
+        const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
+        const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
+        const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities);
@@ -1751,6 +1832,9 @@ export const useRuntimeStore = defineStore("runtime", {
           outputTokens: payload.outputTokens ?? this.outputTokens,
           totalTokens: payload.totalTokens ?? this.totalTokens,
           firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+          ...cacheHitInputTokenPatch,
+          ...reasoningTokenPatch,
+          ...turnDurationPatch,
           error: null
         });
       });
@@ -1835,6 +1919,8 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
 
+        const completedPayloadRecord = payload as Record<string, unknown>;
+
         const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,
           buildAssistantModelLabel(payload.providerName, payload.providerModel)
@@ -1865,6 +1951,11 @@ export const useRuntimeStore = defineStore("runtime", {
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        const reasoningTokens = resolveReasoningTokens(payload);
+        const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
+        const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
+        const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
         this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
         this.syncToolMessages(payload.turnId, payload.toolActivities);
         this.upsertTurnTrace(payload.turnId, {
@@ -1884,6 +1975,9 @@ export const useRuntimeStore = defineStore("runtime", {
           outputTokens: payload.outputTokens ?? this.outputTokens,
           totalTokens: payload.totalTokens ?? this.totalTokens,
           firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+          ...cacheHitInputTokenPatch,
+          ...reasoningTokenPatch,
+          ...turnDurationPatch,
           error: null
         });
         this.persistHistory();
@@ -1893,9 +1987,21 @@ export const useRuntimeStore = defineStore("runtime", {
         });
         debugLog("event:completed", {
           turnId: payload.turnId,
+          inputTokens: payload.inputTokens ?? null,
+          cacheHitInputTokensRaw:
+            payload.cacheHitInputTokens ??
+            readNestedNumericTokenValue(completedPayloadRecord, [["cache_hit_input_tokens"]]) ??
+            readNestedNumericTokenValue(completedPayloadRecord, [["promptCacheHitTokens"]]) ??
+            readNestedNumericTokenValue(completedPayloadRecord, [["prompt_cache_hit_tokens"]]) ??
+            null,
+          cacheHitInputTokensResolved: cacheHitInputTokens,
+          reasoningTokensResolved: reasoningTokens,
+          turnDurationMs: payload.turnDurationMs ?? null,
           finalTextLength: payload.text?.length ?? 0,
           messages: this.messages.length,
-          traces: this.turnTraceHistory.length
+          traces: this.turnTraceHistory.length,
+          traceCacheHitInputTokens:
+            this.turnTraceHistory.find((turn) => turn.turnId === payload.turnId)?.cacheHitInputTokens ?? null
         });
         this.isSubmitting = false;
         this.activeTurnId = null;
@@ -1931,6 +2037,11 @@ export const useRuntimeStore = defineStore("runtime", {
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        const reasoningTokens = resolveReasoningTokens(payload);
+        const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
+        const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
+        const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
         this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
         this.syncToolMessages(payload.turnId, payload.toolActivities);
         this.upsertTurnTrace(payload.turnId, {
@@ -1949,6 +2060,9 @@ export const useRuntimeStore = defineStore("runtime", {
           outputTokens: payload.outputTokens ?? this.outputTokens,
           totalTokens: payload.totalTokens ?? this.totalTokens,
           firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+          ...cacheHitInputTokenPatch,
+          ...reasoningTokenPatch,
+          ...turnDurationPatch,
           error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
         });
         this.persistHistory();
@@ -1991,6 +2105,11 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerSource = payload.providerSource ?? this.providerSource;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        const reasoningTokens = resolveReasoningTokens(payload);
+        const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
+        const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
+        const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
         this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
         this.syncToolMessages(payload.turnId, payload.toolActivities);
         this.upsertTurnTrace(payload.turnId, {
@@ -2005,6 +2124,9 @@ export const useRuntimeStore = defineStore("runtime", {
           providerMode: payload.providerMode ?? this.providerMode,
           buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
           fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+          ...cacheHitInputTokenPatch,
+          ...reasoningTokenPatch,
+          ...turnDurationPatch,
           error: payload.error ?? "stopped_by_user"
         });
         this.persistHistory();
