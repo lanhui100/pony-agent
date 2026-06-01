@@ -337,27 +337,36 @@ impl AgentRuntime {
             .planner
             .preflight_decision(&prepared.user_message, prepared.retrieved.planner_history());
 
-        let mut first_decision = if prepared.provider.requires_provider_native_tool_flow() {
-            match preflight_decision {
-                Some(decision) if planner_decision_can_override_native_tool_flow(&decision) => {
-                    decision
+        let (mut first_decision, first_token_latency_ms) =
+            if prepared.provider.requires_provider_native_tool_flow() {
+                match preflight_decision {
+                    Some(decision) if planner_decision_can_override_native_tool_flow(&decision) => {
+                        (decision, None)
+                    }
+                    _ => {
+                        let started_at = Instant::now();
+                        let decision = provider_decision(
+                            &prepared.provider,
+                            &prepared.planning_request,
+                            &prepared.tools,
+                        )?;
+                        (decision, Some(started_at.elapsed().as_millis() as u64))
+                    }
                 }
-                _ => provider_decision(
-                    &prepared.provider,
-                    &prepared.planning_request,
-                    &prepared.tools,
-                )?,
-            }
-        } else {
-            match preflight_decision {
-                Some(decision) => decision,
-                None => provider_decision(
-                    &prepared.provider,
-                    &prepared.planning_request,
-                    &prepared.tools,
-                )?,
-            }
-        };
+            } else {
+                match preflight_decision {
+                    Some(decision) => (decision, None),
+                    None => {
+                        let started_at = Instant::now();
+                        let decision = provider_decision(
+                            &prepared.provider,
+                            &prepared.planning_request,
+                            &prepared.tools,
+                        )?;
+                        (decision, Some(started_at.elapsed().as_millis() as u64))
+                    }
+                }
+            };
 
         if let Some(tool_call) = first_decision.tool_call.take() {
             let normalized = normalize_tool_directive(
@@ -387,6 +396,7 @@ impl AgentRuntime {
         Ok(PlannedTurn {
             first_decision,
             resolved_tool_call,
+            first_token_latency_ms,
         })
     }
 
@@ -682,6 +692,7 @@ impl AgentRuntime {
         planning_request: &ProviderRequest,
         first_decision: &ProviderDecision,
         tool_call: ToolCall,
+        initial_first_token_latency_ms: Option<u64>,
         turn_started_at: &Instant,
     ) {
         let context_observation = build_context_observation(planning_request, tools);
@@ -695,7 +706,7 @@ impl AgentRuntime {
         let mut completed_hops = 0usize;
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
         let mut accumulated_token_usage = first_decision.token_usage.clone();
-        let first_token_latency = Rc::new(Cell::new(None));
+        let first_token_latency = Rc::new(Cell::new(initial_first_token_latency_ms));
 
         loop {
             completed_hops += 1;
@@ -1284,6 +1295,7 @@ impl AgentRuntime {
         planning_request: &ProviderRequest,
         first_decision: &ProviderDecision,
         tool_call: ToolCall,
+        first_token_latency_ms: Option<u64>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
         let mut hop_records = Vec::new();
         let mut tool_activities = Vec::new();
@@ -1416,6 +1428,7 @@ impl AgentRuntime {
                     .telemetry_builder
                     .completed_trace_with_tool(all_tools_ok),
                 tool_activities,
+                first_token_latency_ms,
             });
         }
     }
@@ -1461,6 +1474,7 @@ impl AgentRuntime {
         let PlannedTurn {
             first_decision,
             resolved_tool_call,
+            first_token_latency_ms,
         } = planned;
         let PreparedTurn {
             user_message,
@@ -1494,6 +1508,7 @@ impl AgentRuntime {
             token_usage,
             trace_steps,
             tool_activities,
+            first_token_latency_ms,
         ) = if let Some(tool_call) = resolved_tool_call {
             match self.handle_sync_tool_turn(
                 user_message.clone(),
@@ -1504,6 +1519,7 @@ impl AgentRuntime {
                 &planning_request,
                 &first_decision,
                 tool_call,
+                first_token_latency_ms,
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,
@@ -1514,6 +1530,7 @@ impl AgentRuntime {
                     outcome.token_usage,
                     outcome.trace_steps,
                     outcome.tool_activities,
+                    outcome.first_token_latency_ms,
                 ),
                 Err(failed_result) => return failed_result,
             }
@@ -1531,6 +1548,7 @@ impl AgentRuntime {
                 first_decision.token_usage.clone(),
                 self.telemetry_builder.completed_trace_without_tool(),
                 Vec::new(),
+                first_token_latency_ms,
             )
         };
         let attachments = match self.save_input_attachments(&input) {
@@ -1579,7 +1597,7 @@ impl AgentRuntime {
             reasoning_tokens: persisted.reasoning_tokens,
             output_tokens: persisted.output_tokens,
             total_tokens: persisted.total_tokens,
-            first_token_latency_ms: None,
+            first_token_latency_ms,
             turn_duration_ms: Some(turn_started_at.elapsed().as_millis() as u64),
             user_message: display_message,
             assistant_message,
@@ -1751,6 +1769,7 @@ impl AgentRuntime {
         let PlannedTurn {
             first_decision,
             resolved_tool_call,
+            first_token_latency_ms: initial_first_token_latency_ms,
         } = planned;
         let PreparedTurn {
             user_message,
@@ -1851,6 +1870,7 @@ impl AgentRuntime {
                 &planning_request,
                 &first_decision,
                 tool_call,
+                initial_first_token_latency_ms,
                 &turn_started_at,
             );
             return;
@@ -1922,7 +1942,7 @@ impl AgentRuntime {
                     "calling_model",
                     reasoning_content,
                     &simulated_stream_started_at,
-                    None,
+                    initial_first_token_latency_ms,
                     false,
                 )
             } else {
@@ -1934,7 +1954,7 @@ impl AgentRuntime {
             "calling_model",
             &first_decision.output_text,
             &simulated_stream_started_at,
-            first_token_latency_ms,
+            first_token_latency_ms.or(initial_first_token_latency_ms),
             false,
         );
         let completed_text = first_decision.output_text.clone();
@@ -3018,6 +3038,39 @@ mod tests {
     }
 
     #[test]
+    fn run_turn_records_first_token_latency_for_reasoning_decision() {
+        let server = MockHttpServer::start(vec![json_response(json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "最终答案。",
+                        "reasoning_content": "先想一下。"
+                    }
+                }
+            ]
+        }))]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请直接回答。".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-reasoning-latency".to_string()),
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert_eq!(result.phase, "ready");
+        assert_eq!(result.assistant_message, "最终答案。");
+        assert!(result.first_token_latency_ms.is_some());
+
+        let _ = server.finish();
+    }
+
+    #[test]
     fn run_turn_completes_multi_hop_tool_followups_in_single_turn() {
         let final_text = "tauri.conf.json 的第 3 行是 `\"productName\": \"Pony Agent\",`。";
         let server = MockHttpServer::start(vec![
@@ -3418,6 +3471,69 @@ mod tests {
         assert_eq!(request_bodies.len(), 3);
         assert!(request_bodies[1].contains("\"tool_choice\":\"auto\""));
         assert!(request_bodies[2].contains("\"tool_choice\":\"auto\""));
+    }
+
+    #[test]
+    fn start_turn_stream_emits_first_token_latency_on_reasoning_delta() {
+        let server = MockHttpServer::start(vec![json_response(json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "最终答案。",
+                        "reasoning_content": "先想一下。"
+                    }
+                }
+            ]
+        }))]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-reasoning-latency".to_string(),
+            TurnInput {
+                message: "请直接回答。".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-reasoning-latency".to_string()),
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let _ = server.finish();
+        let events = sink.events.borrow();
+        let first_delta = events
+            .iter()
+            .find_map(|(name, payload)| {
+                if name == "turn:delta" {
+                    Some(payload.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("first delta event");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                if name == "turn:completed" {
+                    Some(payload.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("completed event");
+
+        assert_eq!(first_delta.reasoning_content.as_deref(), Some("先想一下。"));
+        assert_eq!(first_delta.text, None);
+        assert!(first_delta.first_token_latency_ms.is_some());
+        assert_eq!(
+            completed.first_token_latency_ms,
+            first_delta.first_token_latency_ms
+        );
     }
 
     #[test]

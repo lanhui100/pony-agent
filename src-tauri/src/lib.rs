@@ -250,8 +250,12 @@ pub fn run() {
     tauri::Builder::default()
         .manage(HostControlPlane::new())
         .setup(|app| {
-            #[cfg(debug_assertions)]
             if let Some(window) = app.get_webview_window("main") {
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    window.set_icon(icon)?;
+                }
+
+                #[cfg(debug_assertions)]
                 let _ = window.open_devtools();
             }
 

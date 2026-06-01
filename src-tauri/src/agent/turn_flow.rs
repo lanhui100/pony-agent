@@ -26,6 +26,7 @@ pub struct PreparedTurn {
 pub struct PlannedTurn {
     pub first_decision: ProviderDecision,
     pub resolved_tool_call: Option<ToolCall>,
+    pub first_token_latency_ms: Option<u64>,
 }
 
 pub struct PersistedTurnOutcome {
@@ -46,6 +47,7 @@ pub struct SyncToolTurnOutcome {
     pub token_usage: Option<TokenUsage>,
     pub trace_steps: Vec<TurnTraceStep>,
     pub tool_activities: Vec<TurnToolActivity>,
+    pub first_token_latency_ms: Option<u64>,
 }
 
 pub struct ProviderEventMeta {
@@ -360,6 +362,7 @@ fn stream_delta_chunks(
 ) -> Option<u64> {
     let source = text.or(reasoning_content).unwrap_or_default();
     let mut first_token_latency_ms = initial_latency_ms;
+    let mut latency_emitted = false;
     let chunks = source
         .as_bytes()
         .chunks(48)
@@ -367,10 +370,18 @@ fn stream_delta_chunks(
         .collect::<Vec<_>>();
 
     for (index, delta) in chunks.iter().enumerate() {
-        let latency = if measure_first_delta_latency && first_token_latency_ms.is_none() {
-            let value = started_at.elapsed().as_millis() as u64;
-            first_token_latency_ms = Some(value);
-            Some(value)
+        let latency = if !latency_emitted && index == 0 {
+            if let Some(value) = first_token_latency_ms {
+                latency_emitted = true;
+                Some(value)
+            } else if measure_first_delta_latency {
+                let value = started_at.elapsed().as_millis() as u64;
+                first_token_latency_ms = Some(value);
+                latency_emitted = true;
+                Some(value)
+            } else {
+                None
+            }
         } else {
             None
         };
