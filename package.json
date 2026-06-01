@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "openspec:init": "openspec init --tools codex --profile core --force",
+    "openspec:update": "openspec update",
+    "openspec:list": "openspec list",
     "test": "npm run test:unit",
     "test:unit": "vitest run",
     "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
@@ -14,6 +17,7 @@
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri"
   },
   "devDependencies": {
+    "@fission-ai/openspec": "^1.3.1",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/cli": "^2.8.0",
     "@vitejs/plugin-vue": "^6.0.6",

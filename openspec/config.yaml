@@ -1,0 +1,21 @@
+schema: spec-driven
+context: |
+  Project: Pony Agent
+  Tech stack: Tauri v2, Rust, Vue 3, TypeScript, Pinia, Vite.
+  Main architecture surfaces: runtime, graph orchestration, context/state retrieval, host control plane, frontend observability.
+  Existing delivery system lives in management/task-system/.
+  Complex changes must keep code, docs, tests, task cards, reviews, and logs in sync.
+  Prefer stable boundaries, small verifiable steps, and explicit acceptance evidence.
+
+rules:
+  proposal:
+    - State why the change exists now, what boundary it touches, and whether it is new capability or modified capability.
+    - If the work is complex, mention which management/task-system task card will track execution.
+  specs:
+    - Focus on externally observable behavior and durable workflow contracts, not code trivia.
+    - When touching runtime, graph, planner, host control plane, or retrieval surfaces, call out ownership boundaries explicitly.
+  design:
+    - For cross-layer changes, include boundary cuts, rollback or migration notes, observability impact, and verification strategy.
+  tasks:
+    - Include explicit verification tasks.
+    - Include task-system sync tasks whenever the change spans multiple sessions or modifies architecture, governance, or product workflow.

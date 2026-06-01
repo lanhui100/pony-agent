@@ -30,6 +30,7 @@
 
 - [工程规范与最佳实践](C:/Users/HUAWEI/Documents/pony-agent/docs/standards/engineering.md)
 - [文档维护规范](C:/Users/HUAWEI/Documents/pony-agent/docs/standards/documentation.md)
+- [OpenSpec 规范驱动开发约束](C:/Users/HUAWEI/Documents/pony-agent/docs/standards/spec-driven-development.md)
 
 ## 7. 任务系统
 
@@ -38,11 +39,16 @@
 - [任务板](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
 - [PA-018 验收审计](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md)
 
-## 8. 路线图
+## 8. OpenSpec
+
+- [OpenSpec 根目录](C:/Users/HUAWEI/Documents/pony-agent/openspec)
+- [复杂任务交付 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/spec-driven-delivery/spec.md)
+
+## 9. 路线图
 
 - [重构阶段计划](C:/Users/HUAWEI/Documents/pony-agent/docs/roadmap/phases.md)
 
-## 9. 文档使用建议
+## 10. 文档使用建议
 
 - 想快速理解项目：先看 `AGENT.md`
 - 想理解为什么这样做：看“决策记录”
@@ -51,3 +57,4 @@
 - 想沉淀学习和未来写文章素材：看“学习记录”
 - 想知道现在做到哪：看“任务系统”
 - 想保持工程质量：看“规范”
+- 想推进复杂开发任务：看“OpenSpec”

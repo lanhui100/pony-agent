@@ -36,6 +36,39 @@
 4. 审核意见写入独立审核文件
 5. 文档或代码发生关键变化时，要同步更新相关任务卡
 
+## OpenSpec 集成
+
+- OpenSpec 根目录固定为 `openspec/`
+- 任务系统负责记录和推进；OpenSpec 在复杂开发任务开始实现时按需启动
+- 复杂任务完成时，要同步维护：
+  - `openspec/changes/<name>/`
+  - `openspec/specs/`
+  - `management/task-system/03_TASKS/*.md`
+  - `management/task-system/99_LOGS/*.md`
+  - 需要时补 `management/task-system/02_REVIEWS/*.md`
+
+### 复杂任务判定
+
+满足以下任一条件，默认按 spec 开发：
+
+1. 新能力、新页面、新工作流
+2. 跨 `runtime / graph / planner / memory / host / frontend` 边界
+3. 涉及协议、数据结构、迁移、回滚、兼容性
+4. 需要跨多个 session 推进
+5. 明显需要多步骤拆解和依赖顺序
+
+轻量 bugfix、文案微调、单文件小修可以不走完整 OpenSpec 流程。
+仅处于任务收集、排期、Backlog/Ready 管理阶段的任务，也不要提前创建 OpenSpec change。
+
+### 复杂任务执行顺序
+
+1. 先用任务系统记录任务、状态和优先级
+2. 当复杂任务真正开始开发时，建立 OpenSpec change
+3. 产出 `proposal / specs / design / tasks`
+4. 创建或更新任务卡，并回填 OpenSpec 路径
+5. 按 spec 和任务卡实施
+6. 完成后同步验收证据、canonical specs 与归档状态
+
 ## 状态流
 
 - `Backlog`

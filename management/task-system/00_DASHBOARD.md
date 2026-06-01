@@ -13,6 +13,7 @@
 - `PA-018` 已完成并通过完成态验证
 - retrieval 观测与 trace 展示语义已正式拆到 `PA-024`
 - `PA-025` 已完成 `Build Context` 与 cache-friendly prompt 边界收口
+- `PA-027` 已把 OpenSpec 接入仓库与任务系统，复杂任务现在有正式 spec-first 流程
 - `PA-020 / PA-021` 现在不再被 `PA-018` 阻塞
 
 ## 当前重点
@@ -25,6 +26,8 @@
    后续 trace 中 retrieval 的观测意义、展示结构和监控面不再回到 `PA-018`。
 4. `PA-020 / PA-021` 已具备继续细化前提
    retrieval boundary 稳定后，后续 capability bridge 与 skills bridge 的读取边界已更明确。
+5. 复杂开发任务治理已升级为 OpenSpec + 任务系统双轨
+   `openspec/` 承载 proposal/spec/design/tasks，`management/task-system/` 承载状态、审计、日志与断点续跑。
 
 ## 远期扩展
 
@@ -79,7 +82,9 @@ npm run verify
 ## 关联入口
 
 - 任务板：[01_TASK_BOARD.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
+- OpenSpec 目录：[openspec](/C:/Users/HUAWEI/Documents/pony-agent/openspec)
 - 已完成任务卡：[PA-018](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-018-build-context-state-subsystem-and-retrieval-boundary.md>)
+- 已完成任务卡：[PA-027](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-027-integrate-openspec-into-task-system.md>)
 - 正式验收审计：[PA-018 Acceptance Audit](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md>)
 - 文档索引：[docs/INDEX.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/INDEX.md)
 - 会话日志目录：[99_LOGS](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/99_LOGS)

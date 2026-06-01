@@ -14,3 +14,9 @@
 8. 下一步动作
 9. 当前卡点
 10. 断点续跑提示
+
+复杂开发任务还应补充：
+
+11. `OpenSpec Change`
+12. `Canonical Spec`
+13. `Spec 状态`

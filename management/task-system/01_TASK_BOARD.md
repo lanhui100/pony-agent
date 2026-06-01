@@ -40,6 +40,8 @@
 
 ## Done
 
+- `PA-027` OpenSpec 接入任务系统
+  说明：已引入 `@fission-ai/openspec`、初始化 `openspec/` 与 Codex workflow skills，并把“复杂开发任务默认先走 OpenSpec”正式写入仓库规范与任务系统规则。
 - `PA-025` Build Context 与 cache-friendly prompt 边界
   说明：已完成 `RetrievedContextState -> prompt/request` 三层观测收口；`BuildContextObservation` 现可区分 stable prefix / semi-stable context / volatile input，前后端 trace 展示与回归测试已补齐，并已通过定向 `cargo test`、`session_regression`、前端单测与 `npm run build` 验证。
 - `PA-018` 分层 context/state subsystem 与 retrieval boundary
