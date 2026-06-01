@@ -1,7 +1,9 @@
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::graph::GraphRun;
 use crate::agent::input::TurnInputImage;
-use crate::agent::provider::{ProviderManager, ProviderMessage, ProviderRequest, ProviderRole};
+use crate::agent::provider::{
+    ProviderManager, ProviderMessage, ProviderRequest, ProviderRequestObservation, ProviderRole,
+};
 use crate::agent::session::{
     AttachmentAsset, LongTermMemoryRecord, SessionSnapshot, TurnHistoryMessage,
 };
@@ -182,6 +184,10 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
             .filter_map(to_provider_history_message)
             .collect::<Vec<_>>();
         let image_note = image_capability_note(provider, retrieved);
+        let stable_prefix_text = render_provider_messages_for_observation(&[
+            ProviderMessage::system(BASE_SYSTEM_PROMPT),
+            ProviderMessage::developer(provider_capability_note(provider)),
+        ]);
 
         let base_developer = ProviderMessage::developer(provider_context_note(
             graph_name,
@@ -198,6 +204,12 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         let (history_messages, history_truncated_count) =
             truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens);
         let history_truncation_note = truncation_note(history_truncated_count, "history messages");
+        let semi_stable_context_note = provider_semistable_context_note(
+            graph_name,
+            retrieved,
+            image_note.as_deref(),
+            history_truncation_note.as_deref(),
+        );
         let developer_message = ProviderMessage::developer(provider_context_note(
             graph_name,
             retrieved,
@@ -205,6 +217,11 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
             image_note.as_deref(),
             history_truncation_note.as_deref(),
         ));
+        let history_observation_text = render_provider_messages_for_observation(&history_messages);
+        let volatile_input_text = render_turn_input_for_observation(
+            &retrieved.turn_context.user_message,
+            &retrieved.turn_context.images,
+        );
 
         let mut messages = vec![
             ProviderMessage::system(BASE_SYSTEM_PROMPT),
@@ -213,62 +230,108 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         messages.extend(history_messages);
         messages.push(current_user_message);
 
-        let native_messages = if provider.requires_provider_native_tool_flow() {
-            let base_native_context = native_context_message(
-                graph_name,
-                retrieved,
-                provider,
-                image_note.as_deref(),
-                None,
-            );
-            let reserved_native_messages = [
-                json!({
-                    "role": "system",
-                    "content": BASE_SYSTEM_PROMPT,
-                }),
-                base_native_context,
-                json!({
-                    "role": "user",
-                    "content": retrieved.turn_context.user_message.clone()
-                }),
-            ];
-            let (native_transcript, native_truncated_count) = truncate_native_messages(
-                retrieved.transcript.provider_native_messages.clone(),
-                &reserved_native_messages,
-                input_budget_tokens,
-            );
-            let native_transcript_note = truncation_note(
-                native_truncated_count,
-                "provider-native transcript messages",
-            );
-            let mut transcript = vec![
-                json!({
-                    "role": "system",
-                    "content": BASE_SYSTEM_PROMPT,
-                }),
-                native_context_message(
+        let (native_messages, semi_stable_native_context_note) =
+            if provider.requires_provider_native_tool_flow() {
+                let base_native_context = native_context_message(
                     graph_name,
                     retrieved,
                     provider,
                     image_note.as_deref(),
+                    None,
+                );
+                let reserved_native_messages = [
+                    json!({
+                        "role": "system",
+                        "content": BASE_SYSTEM_PROMPT,
+                    }),
+                    base_native_context,
+                    json!({
+                        "role": "user",
+                        "content": retrieved.turn_context.user_message.clone()
+                    }),
+                ];
+                let (native_transcript, native_truncated_count) = truncate_native_messages(
+                    retrieved.transcript.provider_native_messages.clone(),
+                    &reserved_native_messages,
+                    input_budget_tokens,
+                );
+                let native_transcript_note = truncation_note(
+                    native_truncated_count,
+                    "provider-native transcript messages",
+                );
+                let semi_stable_native_context_note = provider_semistable_context_note(
+                    graph_name,
+                    retrieved,
+                    image_note.as_deref(),
                     native_transcript_note.as_deref(),
-                ),
-            ];
-            transcript.extend(native_transcript);
-            transcript.push(json!({
-                "role": "user",
-                "content": if retrieved.turn_context.images.is_empty() {
-                    Value::String(retrieved.turn_context.user_message.clone())
-                } else {
-                    Value::Array(openai_user_content_blocks(
-                        &retrieved.turn_context.user_message,
-                        &retrieved.turn_context.images,
-                    ))
-                }
-            }));
-            transcript
+                );
+                let mut transcript = vec![
+                    json!({
+                        "role": "system",
+                        "content": BASE_SYSTEM_PROMPT,
+                    }),
+                    native_context_message(
+                        graph_name,
+                        retrieved,
+                        provider,
+                        image_note.as_deref(),
+                        native_transcript_note.as_deref(),
+                    ),
+                ];
+                transcript.extend(native_transcript);
+                transcript.push(json!({
+                    "role": "user",
+                    "content": if retrieved.turn_context.images.is_empty() {
+                        Value::String(retrieved.turn_context.user_message.clone())
+                    } else {
+                        Value::Array(openai_user_content_blocks(
+                            &retrieved.turn_context.user_message,
+                            &retrieved.turn_context.images,
+                        ))
+                    }
+                }));
+                (transcript, semi_stable_native_context_note)
+            } else {
+                (Vec::new(), String::new())
+            };
+        let observation = if provider.requires_provider_native_tool_flow() {
+            let native_transcript_slice = native_messages
+                .iter()
+                .skip(2)
+                .take(native_messages.len().saturating_sub(3))
+                .cloned()
+                .collect::<Vec<_>>();
+            ProviderRequestObservation {
+                stable_prefix_text: render_native_messages_for_observation(&[
+                    json!({
+                        "role": "system",
+                        "content": BASE_SYSTEM_PROMPT,
+                    }),
+                    json!({
+                        "role": "system",
+                        "content": provider_capability_note(provider),
+                    }),
+                ]),
+                semi_stable_context_text: join_non_empty_sections(&[
+                    render_native_messages_for_observation(&[json!({
+                        "role": "system",
+                        "content": semi_stable_native_context_note,
+                    })]),
+                    render_native_messages_for_observation(&native_transcript_slice),
+                ]),
+                volatile_input_text,
+            }
         } else {
-            Vec::new()
+            ProviderRequestObservation {
+                stable_prefix_text,
+                semi_stable_context_text: join_non_empty_sections(&[
+                    render_provider_messages_for_observation(&[ProviderMessage::developer(
+                        semi_stable_context_note,
+                    )]),
+                    history_observation_text,
+                ]),
+                volatile_input_text,
+            }
         };
 
         ProviderRequest {
@@ -276,6 +339,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
             input: messages,
             images: retrieved.turn_context.images.clone(),
             native_messages,
+            observation,
             temperature: provider.temperature(),
             max_output_tokens: provider.max_output_tokens(),
         }
@@ -376,22 +440,33 @@ fn provider_context_note(
     image_note: Option<&str>,
     truncation_note: Option<&str>,
 ) -> String {
-    let mut notes = vec![
-        format!(
-            "Session summary: {} / graph={} / session={}",
-            retrieved.session_context.summary,
-            graph_name,
-            retrieved.session_context.conversation_id
-        ),
-        format!(
-            "Capability profile: contextWindowTokens={} / supportsImageInput={}. Only rely on the visible request context.",
-            provider
-                .context_window_tokens()
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            provider.supports_image_input()
-        ),
-    ];
+    join_non_empty_sections(&[
+        provider_capability_note(provider),
+        provider_semistable_context_note(graph_name, retrieved, image_note, truncation_note),
+    ])
+}
+
+fn provider_capability_note(provider: &ProviderManager) -> String {
+    format!(
+        "Capability profile: contextWindowTokens={} / supportsImageInput={}. Only rely on the visible request context.",
+        provider
+            .context_window_tokens()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        provider.supports_image_input()
+    )
+}
+
+fn provider_semistable_context_note(
+    graph_name: &str,
+    retrieved: &RetrievedContextState,
+    image_note: Option<&str>,
+    truncation_note: Option<&str>,
+) -> String {
+    let mut notes = vec![format!(
+        "Session summary: {} / graph={} / session={}",
+        retrieved.session_context.summary, graph_name, retrieved.session_context.conversation_id
+    )];
 
     if let Some(goal) = retrieved.run_state.goal.as_deref() {
         notes.push(format!("Run goal: {}.", goal));
@@ -480,6 +555,89 @@ fn image_capability_note(
         "supportsImageInput=false for this model. If image inspection becomes necessary, ask for OCR or textual details instead of claiming visual access."
             .to_string(),
     )
+}
+
+fn render_provider_messages_for_observation(messages: &[ProviderMessage]) -> String {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            format!(
+                "[{}] {}\n{}",
+                index,
+                match message.role {
+                    ProviderRole::System => "system",
+                    ProviderRole::Developer => "developer",
+                    ProviderRole::User => "user",
+                },
+                message.content.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_native_messages_for_observation(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let content = match message.get("content") {
+                Some(Value::String(text)) => text.trim().to_string(),
+                Some(other) => {
+                    serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())
+                }
+                None => message.to_string(),
+            };
+            format!("[{}] {}\n{}", index, role, content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn render_turn_input_for_observation(user_message: &str, images: &[TurnInputImage]) -> String {
+    let mut sections = vec![format!("[0] user\n{}", user_message.trim())];
+
+    if !images.is_empty() {
+        sections.push(format!(
+            "[images]\n{}",
+            images
+                .iter()
+                .enumerate()
+                .map(|(index, image)| {
+                    format!(
+                        "[{}] mimeType={} / name={} / dataUrlPresent={}",
+                        index,
+                        image.mime_type,
+                        image.name.as_deref().unwrap_or("unnamed"),
+                        !image.data_url.is_empty()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    sections.join("\n\n")
+}
+
+fn join_non_empty_sections(sections: &[String]) -> String {
+    sections
+        .iter()
+        .filter_map(|section| {
+            let trimmed = section.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn references_image_in_context(
@@ -1039,6 +1197,199 @@ mod tests {
             .any(
                 |entry| entry.kind == "user_preference" && entry.source == "explicit_user_message"
             ));
+    }
+
+    #[test]
+    fn build_request_records_layered_observation_for_normalized_input() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-4.1-mini",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: true,
+                supports_reasoning: false,
+            },
+        );
+        let mut session = session_snapshot(
+            vec![
+                TurnHistoryMessage {
+                    role: "user".to_string(),
+                    content: "recent history question".to_string(),
+                    attachments: Vec::new(),
+                },
+                TurnHistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "recent history answer".to_string(),
+                    attachments: Vec::new(),
+                },
+            ],
+            Vec::new(),
+            Some("artifacts/diagram.png"),
+        );
+        session.long_term_memory_entries = vec![LongTermMemoryRecord {
+            kind: "user_preference".to_string(),
+            content: "Reply in Chinese.".to_string(),
+            source: "explicit_user_message".to_string(),
+            updated_at_ms: 10,
+        }];
+
+        let retrieved = builder.retrieve_context_state(
+            "Please inspect the latest diagram screenshot",
+            &[TurnInputImage {
+                data_url: "data:image/png;base64,AAAA".to_string(),
+                mime_type: "image/png".to_string(),
+                name: Some("diagram.png".to_string()),
+            }],
+            &session,
+            Some(&sample_run()),
+            Some(&sample_checkpoint()),
+        );
+        let request = builder.build_request("graph-a", &provider, &retrieved);
+
+        assert!(request
+            .observation
+            .stable_prefix_text
+            .contains(BASE_SYSTEM_PROMPT));
+        assert!(request
+            .observation
+            .stable_prefix_text
+            .contains("Capability profile:"));
+        assert!(!request
+            .observation
+            .stable_prefix_text
+            .contains("Investigating provider behavior"));
+        assert!(!request
+            .observation
+            .stable_prefix_text
+            .contains("Please inspect the latest diagram screenshot"));
+
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Investigating provider behavior"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Run goal:"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Long-term memory status: available."));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("recent history question"));
+
+        assert!(request
+            .observation
+            .volatile_input_text
+            .contains("Please inspect the latest diagram screenshot"));
+        assert!(request
+            .observation
+            .volatile_input_text
+            .contains("name=diagram.png"));
+        assert!(!request
+            .observation
+            .volatile_input_text
+            .contains("recent history question"));
+    }
+
+    #[test]
+    fn build_request_records_layered_observation_for_native_transcript() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-5.4",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+            },
+        );
+        let session = session_snapshot(
+            Vec::new(),
+            vec![
+                json!({ "role": "user", "content": "native user context" }),
+                json!({ "role": "assistant", "content": "native assistant context" }),
+            ],
+            None,
+        );
+
+        let retrieved = builder.retrieve_context_state(
+            "current volatile request",
+            &[],
+            &session,
+            Some(&sample_run()),
+            Some(&sample_checkpoint()),
+        );
+        let request = builder.build_request("graph-a", &provider, &retrieved);
+
+        assert!(request
+            .observation
+            .stable_prefix_text
+            .contains("supportsImageInput=false"));
+        assert!(!request
+            .observation
+            .stable_prefix_text
+            .contains("current volatile request"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("native user context"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("native assistant context"));
+        assert!(request
+            .observation
+            .volatile_input_text
+            .contains("current volatile request"));
+        assert!(!request
+            .observation
+            .semi_stable_context_text
+            .contains("current volatile request"));
+    }
+
+    #[test]
+    fn build_request_native_observation_keeps_truncation_note_when_transcript_is_trimmed() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-5.4",
+            32,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(64),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+            },
+        );
+        let session = session_snapshot(
+            Vec::new(),
+            vec![
+                json!({ "role": "user", "content": "native user context ".repeat(40) }),
+                json!({ "role": "assistant", "content": "native assistant context ".repeat(40) }),
+            ],
+            None,
+        );
+
+        let retrieved =
+            builder.retrieve_context_state("current volatile request", &[], &session, None, None);
+        let request = builder.build_request("graph-a", &provider, &retrieved);
+
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("provider-native transcript messages"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Older context was truncated to fit the provider window"));
     }
 
     #[test]

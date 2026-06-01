@@ -4,7 +4,9 @@
 mod agent;
 
 use agent::config::ProviderRegistryStore;
-use agent::provider::{ProviderManager, ProviderMessage, ProviderRequest};
+use agent::provider::{
+    ProviderManager, ProviderMessage, ProviderRequest, ProviderRequestObservation,
+};
 use agent::tools::{builtin_tools, ToolCall, ToolDefinition};
 use std::env;
 
@@ -140,6 +142,7 @@ fn run_sequence(label: &str, scenario: &DecisionScenario) {
             input,
             images: Vec::new(),
             native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
             temperature: provider.temperature(),
             max_output_tokens: provider.max_output_tokens(),
         };

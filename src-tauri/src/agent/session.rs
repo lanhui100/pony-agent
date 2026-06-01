@@ -186,9 +186,12 @@ pub struct TurnTraceRecord {
     pub fallback_reason: Option<String>,
     pub error: Option<String>,
     pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub first_token_latency_ms: Option<u64>,
+    pub turn_duration_ms: Option<u64>,
     #[serde(default)]
     pub updated_at: u64,
 }
@@ -2972,9 +2975,12 @@ mod tests {
                 fallback_reason: None,
                 error: None,
                 input_tokens: Some(12),
+                cache_hit_input_tokens: Some(5),
+                reasoning_tokens: Some(3),
                 output_tokens: Some(34),
                 total_tokens: Some(46),
                 first_token_latency_ms: Some(180),
+                turn_duration_ms: Some(920),
                 updated_at: 0,
             },
         );

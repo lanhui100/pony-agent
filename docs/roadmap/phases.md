@@ -62,3 +62,12 @@
 - 子代理
 - 更丰富工具生态
 - 更强调试能力
+
+## Phase 7：行业 Workflow 扩展
+
+目标：
+
+- 在 agent harness 主线完成并稳定后，扩展用户自定义 `workflow` 模式
+- 支持面向行业场景的流程编排，而不只是不受约束的 agentic 模式
+- 允许用户定义节点、分支、审批、重试、人工介入与可调用能力边界
+- 复用既有 graph / runtime / checkpoint / trace / resume 底座，形成可审计、可恢复、可复用的流程执行能力

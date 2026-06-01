@@ -18,11 +18,11 @@
   说明：在 `PA-020` 之后，把 skills 作为可编排高层能力单元接入。
 - `PA-022` lifecycle hooks pipeline
   说明：在 graph/runtime/memory/capability 的边界稳定后，补统一 hooks 横切机制。
+- `PA-026` workflow mode 与用户自定义流程编排
+  说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
 
 ## Ready
 
-- `PA-025` Build Context 与 cache-friendly prompt 边界
-  说明：`PA-018` 已完成，后续单独收口 `RetrievedContextState -> prompt/request` 映射、`Build Context` 语义与稳定前缀边界。
 - `PA-024` 模型监控与 telemetry 聚合面
   说明：`PA-018` 已完成，后续把 retrieval 观测、trace 展示语义与监控面正式收口。
 
@@ -40,6 +40,8 @@
 
 ## Done
 
+- `PA-025` Build Context 与 cache-friendly prompt 边界
+  说明：已完成 `RetrievedContextState -> prompt/request` 三层观测收口；`BuildContextObservation` 现可区分 stable prefix / semi-stable context / volatile input，前后端 trace 展示与回归测试已补齐，并已通过定向 `cargo test`、`session_regression`、前端单测与 `npm run build` 验证。
 - `PA-018` 分层 context/state subsystem 与 retrieval boundary
   说明：已完成 retrieval boundary contract、runtime / graph / planner / 宿主默认查询面的 retrieval-first 消费链路、`LongTermMemory` 独立边界与项目级稳定事实来源，并已通过 `cargo test --lib` 与 `npm run verify` 完成态验证。
 - `PA-023` 统一 run-stream 正式入口与前端主提交链路

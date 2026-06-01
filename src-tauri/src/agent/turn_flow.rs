@@ -31,6 +31,8 @@ pub struct PlannedTurn {
 pub struct PersistedTurnOutcome {
     pub session_summary: String,
     pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
 }
@@ -79,9 +81,12 @@ pub fn build_failed_turn_result(
         fallback_reason: None,
         build_context_observation: None,
         input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
         first_token_latency_ms: None,
+        turn_duration_ms: None,
         user_message,
         assistant_message: assistant_message.clone(),
         trace_steps,
@@ -106,6 +111,7 @@ pub fn emit_stream_failed(
     trace_steps: Vec<TurnTraceStep>,
     tool_activities: Option<Vec<TurnToolActivity>>,
     first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
     build_context_observation: Option<BuildContextObservation>,
     error: String,
 ) {
@@ -128,9 +134,12 @@ pub fn emit_stream_failed(
             fallback_reason: None,
             build_context_observation,
             input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
             first_token_latency_ms,
+            turn_duration_ms,
             trace_steps: Some(trace_steps),
             tool_activities,
             session_summary: None,
@@ -146,6 +155,7 @@ pub fn emit_stream_cancelled(
     trace_steps: Vec<TurnTraceStep>,
     tool_activities: Option<Vec<TurnToolActivity>>,
     first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
     build_context_observation: Option<BuildContextObservation>,
     error: String,
 ) {
@@ -168,9 +178,12 @@ pub fn emit_stream_cancelled(
             fallback_reason: None,
             build_context_observation,
             input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
             first_token_latency_ms,
+            turn_duration_ms,
             trace_steps: Some(trace_steps),
             tool_activities,
             session_summary: None,
@@ -193,9 +206,12 @@ pub fn emit_stream_event(
     fallback_reason: Option<String>,
     build_context_observation: Option<BuildContextObservation>,
     input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
     first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
     trace_steps: Option<Vec<TurnTraceStep>>,
     tool_activities: Option<Vec<TurnToolActivity>>,
     session_summary: Option<String>,
@@ -219,9 +235,12 @@ pub fn emit_stream_event(
             fallback_reason,
             build_context_observation,
             input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
             output_tokens,
             total_tokens,
             first_token_latency_ms,
+            turn_duration_ms,
             trace_steps,
             tool_activities,
             session_summary,
@@ -263,6 +282,7 @@ pub fn emit_turn_failed(
         None,
         None,
         None,
+        None,
         error,
     );
 }
@@ -294,14 +314,22 @@ pub fn normalize_user_message(message: &str) -> String {
 
 pub fn token_usage_parts(
     token_usage: Option<&TokenUsage>,
-) -> (Option<u64>, Option<u64>, Option<u64>) {
+) -> (
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+) {
     match token_usage {
         Some(token_usage) => (
             token_usage.input_tokens,
+            token_usage.cache_hit_input_tokens,
+            token_usage.reasoning_tokens,
             token_usage.output_tokens,
             token_usage.total_tokens,
         ),
-        None => (None, None, None),
+        None => (None, None, None, None, None),
     }
 }
 
@@ -328,6 +356,7 @@ fn stream_delta_chunks(
     reasoning_content: Option<&str>,
     started_at: &std::time::Instant,
     initial_latency_ms: Option<u64>,
+    measure_first_delta_latency: bool,
 ) -> Option<u64> {
     let source = text.or(reasoning_content).unwrap_or_default();
     let mut first_token_latency_ms = initial_latency_ms;
@@ -338,7 +367,7 @@ fn stream_delta_chunks(
         .collect::<Vec<_>>();
 
     for (index, delta) in chunks.iter().enumerate() {
-        let latency = if first_token_latency_ms.is_none() {
+        let latency = if measure_first_delta_latency && first_token_latency_ms.is_none() {
             let value = started_at.elapsed().as_millis() as u64;
             first_token_latency_ms = Some(value);
             Some(value)
@@ -362,7 +391,10 @@ fn stream_delta_chunks(
             None,
             None,
             None,
+            None,
+            None,
             latency,
+            None,
             None,
             None,
             None,
@@ -383,6 +415,7 @@ pub fn stream_reasoning_chunks(
     reasoning_content: &str,
     started_at: &std::time::Instant,
     initial_latency_ms: Option<u64>,
+    measure_first_delta_latency: bool,
 ) -> Option<u64> {
     stream_delta_chunks(
         sink,
@@ -392,6 +425,7 @@ pub fn stream_reasoning_chunks(
         Some(reasoning_content),
         started_at,
         initial_latency_ms,
+        measure_first_delta_latency,
     )
 }
 
@@ -402,6 +436,7 @@ pub fn stream_text_chunks(
     text: &str,
     started_at: &std::time::Instant,
     initial_latency_ms: Option<u64>,
+    measure_first_delta_latency: bool,
 ) -> Option<u64> {
     stream_delta_chunks(
         sink,
@@ -411,6 +446,7 @@ pub fn stream_text_chunks(
         None,
         started_at,
         initial_latency_ms,
+        measure_first_delta_latency,
     )
 }
 

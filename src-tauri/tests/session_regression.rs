@@ -1,6 +1,15 @@
 mod agent {
+    #[path = "../../src/agent/config.rs"]
+    pub mod config;
+
     #[path = "../../src/agent/input.rs"]
     pub mod input;
+
+    #[path = "../../src/agent/provider.rs"]
+    pub mod provider;
+
+    #[path = "../../src/agent/secret_store.rs"]
+    pub mod secret_store;
 
     #[path = "../../src/agent/tools.rs"]
     pub mod tools;
@@ -190,6 +199,91 @@ fn legacy_session_file_backfills_attachment_catalog_and_index() {
             .expect("legacy attachment parent")
             .to_path_buf(),
     );
+}
+
+#[test]
+fn legacy_turn_trace_history_restores_build_context_observation() {
+    let path = temp_sessions_path();
+    fs::create_dir_all(path.parent().expect("trace build context parent"))
+        .expect("create trace build context parent");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&json!({
+            "sessions": {
+                "trace-build-context": {
+                    "conversationId": "trace-build-context",
+                    "title": "Trace build context",
+                    "summary": "Trace build context session",
+                    "history": [],
+                    "providerNativeTranscript": [],
+                    "turnTraceHistory": [
+                        {
+                            "turnId": "turn-1",
+                            "title": "Restore build context",
+                            "phase": "completed",
+                            "traceSteps": [],
+                            "toolActivities": [],
+                            "providerRequestedName": "ppx",
+                            "providerName": "ppx",
+                            "providerProtocol": "openai",
+                            "providerModel": "gpt-5.4",
+                            "providerSource": "provider_decision",
+                            "providerMode": "live",
+                            "buildContextObservation": {
+                                "requestFormat": "provider-native",
+                                "messageCount": 3,
+                                "imageCount": 0,
+                                "toolCount": 1,
+                                "temperature": 0.2,
+                                "maxOutputTokens": 1024,
+                                "stablePrefixText": "system: stable instruction",
+                                "semiStableContextText": "developer: session summary",
+                                "volatileInputText": "user: latest request",
+                                "requestMessagesText": "system: stable instruction\nuser: latest request",
+                                "toolDefinitionsText": "workspace.read_file(path: string)"
+                            },
+                            "sessionSummary": "Persisted trace summary",
+                            "fallbackReason": null,
+                            "error": null,
+                            "inputTokens": 12,
+                            "outputTokens": 34,
+                            "totalTokens": 46,
+                            "firstTokenLatencyMs": 180,
+                            "updatedAt": 1
+                        }
+                    ],
+                    "turnCount": 1,
+                    "lastReferencedFile": null,
+                    "updatedAtMs": 1
+                }
+            }
+        }))
+        .expect("serialize trace build context session"),
+    )
+    .expect("write trace build context session file");
+
+    let mut store = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+    let snapshot = store.snapshot(Some("trace-build-context"), &[]);
+    let build_context = snapshot.turn_trace_history[0]
+        .build_context_observation
+        .as_ref()
+        .expect("persisted build context observation");
+
+    assert_eq!(snapshot.turn_trace_history.len(), 1);
+    assert_eq!(snapshot.turn_trace_history[0].turn_id, "turn-1");
+    assert_eq!(build_context.request_format, "provider-native");
+    assert_eq!(build_context.message_count, 3);
+    assert_eq!(
+        build_context.stable_prefix_text,
+        "system: stable instruction"
+    );
+    assert_eq!(
+        build_context.semi_stable_context_text,
+        "developer: session summary"
+    );
+    assert_eq!(build_context.volatile_input_text, "user: latest request");
+
+    let _ = fs::remove_file(path);
 }
 
 #[test]
