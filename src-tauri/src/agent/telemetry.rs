@@ -1,3 +1,4 @@
+use crate::agent::provider::PrefixMutationReason;
 use crate::agent::tools::{ToolCall, ToolPlan, ToolPlanStep, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +13,21 @@ pub struct TurnTraceStep {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CapabilityInvocationRecord {
+    pub tool_name: String,
+    pub capability_id: Option<String>,
+    pub source_id: Option<String>,
+    pub source_kind: Option<String>,
+    pub capability_kind: Option<String>,
+    pub invocation_mode: Option<String>,
+    pub failure_kind: Option<String>,
+    pub requires_approval: Option<bool>,
+    pub host_mediated: Option<bool>,
+    pub permission_scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnToolActivity {
     pub id: String,
     pub name: String,
@@ -20,6 +36,33 @@ pub struct TurnToolActivity {
     pub arguments_text: Option<String>,
     pub result_text: Option<String>,
     pub duration_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_invocation: Option<CapabilityInvocationRecord>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderRequestKind {
+    #[default]
+    InitialRequest,
+    ToolFollowup,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCallCacheRecord {
+    pub request_kind: ProviderRequestKind,
+    pub provider_source: Option<String>,
+    pub provider_mode: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub cache_miss_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub first_token_latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
 }
 
 pub trait TurnTelemetryBuilder: Send {
@@ -98,7 +141,6 @@ fn start_trace_steps() -> Vec<TurnTraceStep> {
         trace_step("step-context", "Build context", "completed"),
         trace_step("step-call-model", "Call model", "active"),
         trace_step("step-call-tool", "Call tool", "pending"),
-        trace_step("step-return", "Return result", "pending"),
     ]
 }
 
@@ -108,7 +150,6 @@ fn trace_tool_active() -> Vec<TurnTraceStep> {
         trace_step("step-context", "Build context", "completed"),
         trace_step("step-call-model", "Call model", "completed"),
         trace_step("step-call-tool", "Call tool", "active"),
-        trace_step("step-return", "Return result", "pending"),
     ]
 }
 
@@ -122,7 +163,6 @@ fn trace_return_active(tool_ok: bool) -> Vec<TurnTraceStep> {
             "Call tool",
             if tool_ok { "completed" } else { "error" },
         ),
-        trace_step("step-return", "Return result", "active"),
     ]
 }
 
@@ -132,7 +172,6 @@ fn trace_return_active_without_tool() -> Vec<TurnTraceStep> {
         trace_step("step-context", "Build context", "completed"),
         trace_step("step-call-model", "Call model", "completed"),
         trace_step("step-call-tool", "Call tool", "pending"),
-        trace_step("step-return", "Return result", "active"),
     ]
 }
 
@@ -146,7 +185,6 @@ fn completed_trace_with_tool(tool_ok: bool) -> Vec<TurnTraceStep> {
             "Call tool",
             if tool_ok { "completed" } else { "error" },
         ),
-        trace_step("step-return", "Return result", "completed"),
     ]
 }
 
@@ -156,7 +194,6 @@ fn completed_trace_without_tool() -> Vec<TurnTraceStep> {
         trace_step("step-context", "Build context", "completed"),
         trace_step("step-call-model", "Call model", "completed"),
         trace_step("step-call-tool", "Call tool", "pending"),
-        trace_step("step-return", "Return result", "completed"),
     ]
 }
 
@@ -166,7 +203,6 @@ fn failed_trace_empty_input() -> Vec<TurnTraceStep> {
         trace_step("step-context", "Build context", "pending"),
         trace_step("step-call-model", "Call model", "pending"),
         trace_step("step-call-tool", "Call tool", "pending"),
-        trace_step("step-return", "Return result", "pending"),
     ]
 }
 
@@ -176,7 +212,6 @@ fn failed_trace_before_tool() -> Vec<TurnTraceStep> {
         trace_step("step-context", "Build context", "completed"),
         trace_step("step-call-model", "Call model", "error"),
         trace_step("step-call-tool", "Call tool", "pending"),
-        trace_step("step-return", "Return result", "pending"),
     ]
 }
 
@@ -190,7 +225,6 @@ fn failed_trace_after_tool(tool_ok: bool) -> Vec<TurnTraceStep> {
             "Call tool",
             if tool_ok { "completed" } else { "error" },
         ),
-        trace_step("step-return", "Return result", "error"),
     ]
 }
 
@@ -211,6 +245,7 @@ fn tool_activities_running(active_call: &ToolCall) -> Vec<TurnToolActivity> {
         arguments_text: Some(pretty_json(&active_call.arguments)),
         result_text: None,
         duration_seconds: None,
+        capability_invocation: None,
     }];
 
     activities.extend(planned_child_activities(active_call));
@@ -230,6 +265,7 @@ fn tool_activities_after_result(
         arguments_text: Some(pretty_json(&active_call.arguments)),
         result_text: Some(parent_result_text(&parsed, &result.output)),
         duration_seconds: Some(result.duration_ms as f64 / 1000.0),
+        capability_invocation: None,
     }];
 
     activities.extend(nested_child_activities(active_call, &parsed));
@@ -331,6 +367,7 @@ fn planned_child_activities(active_call: &ToolCall) -> Vec<TurnToolActivity> {
             arguments_text: Some(pretty_json(&step.arguments)),
             result_text: None,
             duration_seconds: None,
+            capability_invocation: None,
         })
         .collect()
 }
@@ -386,6 +423,7 @@ fn nested_result_to_activity(
         arguments_text: Some(pretty_json(&arguments)),
         result_text: Some(nested_result_text(&output, error_message)),
         duration_seconds,
+        capability_invocation: None,
     }
 }
 

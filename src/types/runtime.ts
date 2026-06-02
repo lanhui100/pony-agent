@@ -68,6 +68,7 @@ export type ToolActivity = {
   argumentsText?: string | null;
   resultText?: string | null;
   durationSeconds?: number | null;
+  capabilityInvocation?: CapabilityInvocationRecord | null;
 };
 
 export type AvailableTool = {
@@ -81,10 +82,127 @@ export type AvailableTool = {
   };
 };
 
+export type CapabilitySourceKind = "builtin" | "mcp";
+export type CapabilityAvailability = "available" | "degraded" | "unreachable" | "disabled";
+export type CapabilityKind = "tool" | "resource" | "prompt_template";
+export type CapabilityInvocationMode = "direct_tool_call" | "read_only_fetch" | "prompt_expansion";
+export type CapabilityFailureKind =
+  | "source_unavailable"
+  | "permission_denied"
+  | "malformed_response"
+  | "invocation_failed"
+  | "capability_not_found";
+
+export type CapabilityInvocationRecord = {
+  toolName: string;
+  capabilityId?: string | null;
+  sourceId?: string | null;
+  sourceKind?: CapabilitySourceKind | null;
+  capabilityKind?: CapabilityKind | null;
+  invocationMode?: CapabilityInvocationMode | null;
+  failureKind?: CapabilityFailureKind | null;
+  requiresApproval?: boolean | null;
+  hostMediated?: boolean | null;
+  permissionScope?: string | null;
+};
+
+export type CapabilitySourceView = {
+  sourceId: string;
+  sourceKind: CapabilitySourceKind;
+  displayName: string;
+  transportKind: string;
+  serverIdentity: string;
+  availability: CapabilityAvailability;
+  declaredCapabilities: CapabilityKind[];
+  permissionProfile: string;
+  updatedAtMs: number;
+};
+
+export type CapabilityView = {
+  capabilityId: string;
+  sourceId: string;
+  sourceKind: CapabilitySourceKind;
+  kind: CapabilityKind;
+  label: string;
+  description: string;
+  invocationMode: CapabilityInvocationMode;
+  inputSchemaSummary: string;
+  safetyClass: string;
+  visibility: string;
+  observabilityTags: string[];
+  requiresApproval: boolean;
+  hostMediated: boolean;
+  permissionScope: string;
+};
+
 export type TraceStep = {
   id: string;
   label: string;
   state: "completed" | "active" | "pending" | "error" | "cancelled";
+};
+
+export type TraceTimelineEntryKind =
+  | "input"
+  | "prepare_retrieval"
+  | "build_context"
+  | "call_model"
+  | "call_tool"
+  | "return_result"
+  | "context"
+  | "model"
+  | "tool"
+  | "return";
+
+export type TraceTimelineEntry = {
+  id: string;
+  kind: TraceTimelineEntryKind;
+  label: string;
+  state: TraceStep["state"];
+  sequence: number;
+  providerRequestedName?: string | null;
+  providerName?: string | null;
+  providerProtocol?: string | null;
+  providerModel?: string | null;
+  providerSource?: string | null;
+  providerMode?: string | null;
+  buildContextObservation?: BuildContextObservation | null;
+  toolActivities?: ToolActivity[];
+  text?: string | null;
+  reasoningContent?: string | null;
+  fallbackReason?: string | null;
+  error?: string | null;
+  inputTokens?: number | null;
+  cacheHitInputTokens?: number | null;
+  reasoningTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  firstTokenLatencyMs?: number | null;
+  turnDurationMs?: number | null;
+};
+
+export type PrefixMutationReason =
+  | "session_summary_changed"
+  | "run_goal_changed"
+  | "long_term_memory_changed"
+  | "image_note_changed"
+  | "truncation_note_changed"
+  | "history_boundary_shifted"
+  | "native_transcript_boundary_shifted";
+
+export type ProviderRequestKind = "initial_request" | "tool_followup";
+
+export type ProviderCallCacheRecord = {
+  requestKind: ProviderRequestKind;
+  providerSource?: string | null;
+  providerMode?: string | null;
+  inputTokens?: number | null;
+  cacheHitInputTokens?: number | null;
+  cacheMissInputTokens?: number | null;
+  reasoningTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  firstTokenLatencyMs?: number | null;
+  prefixMutationReasons?: PrefixMutationReason[];
 };
 
 export type BuildContextObservation = {
@@ -97,6 +215,7 @@ export type BuildContextObservation = {
   stablePrefixText: string;
   semiStableContextText: string;
   volatileInputText: string;
+  prefixMutationReasons?: PrefixMutationReason[];
   requestMessagesText: string;
   toolDefinitionsText: string;
 };
@@ -105,6 +224,84 @@ export type TurnInputImage = {
   dataUrl: string;
   mimeType: string;
   name?: string | null;
+};
+
+export type WorkspaceStateRef = {
+  kind: "none" | "git_commit" | "patch_set" | "host_snapshot";
+  locator?: string | null;
+  rollbackCapable?: boolean;
+};
+
+export type HistoryNodeKind =
+  | "turn_committed"
+  | "turn_cancelled"
+  | "run_paused"
+  | "checkpoint"
+  | "manual_snapshot";
+
+export type HistoryNode = {
+  nodeId: string;
+  sessionId: string;
+  parentNodeId?: string | null;
+  branchId: string;
+  forkedFromNodeId?: string | null;
+  kind: HistoryNodeKind;
+  transcriptRef?: string | null;
+  runRef?: string | null;
+  workspaceRef?: WorkspaceStateRef | null;
+  summary: string;
+  createdAtMs: number;
+};
+
+export type HistoryBranch = {
+  branchId: string;
+  sessionId: string;
+  baseNodeId?: string | null;
+  headNodeId?: string | null;
+  forkedFromBranchId?: string | null;
+  forkedFromNodeId?: string | null;
+  label?: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+export type HistoryCursorMode = "live" | "historical" | "historical_dirty";
+
+export type HistoryCursorState = {
+  sessionId: string;
+  visibleNodeId?: string | null;
+  activeBranchId?: string | null;
+  branchHeadNodeId?: string | null;
+  workspaceNodeId?: string | null;
+  mode: HistoryCursorMode;
+};
+
+export type HistoryCheckoutMode = "transcript_only" | "transcript_and_workspace";
+
+export type HistoryControlResult = HistoryCursorState & {
+  historyNodes?: HistoryNode[];
+  historyBranches?: HistoryBranch[];
+};
+
+export type HistoryCheckoutResult = HistoryControlResult & {
+  requestedMode: HistoryCheckoutMode;
+  appliedMode: HistoryCheckoutMode;
+  workspaceRestoreApplied: boolean;
+  degradedToTranscriptOnly: boolean;
+};
+
+export type HistoryRestoreResult = HistoryControlResult & {
+  restoredFromNodeId?: string | null;
+};
+
+export type HistoryForkResult = HistoryControlResult & {
+  forkedFromNodeId: string;
+  forkedFromBranchId?: string | null;
+  createdBranchId: string;
+};
+
+export type HistoryBranchSwitchResult = HistoryControlResult & {
+  previousBranchId?: string | null;
 };
 
 export type ChatMessage = {
@@ -127,7 +324,9 @@ export type TurnTraceRecord = {
   title: string;
   phase: RuntimePhase;
   traceSteps: TraceStep[];
+  traceTimeline?: TraceTimelineEntry[];
   toolActivities: ToolActivity[];
+  providerCallRecords?: ProviderCallCacheRecord[];
   providerRequestedName?: string | null;
   providerName?: string | null;
   providerProtocol?: string | null;
@@ -155,6 +354,7 @@ export type TurnInput = {
   modelId?: string | null;
   reasoningEffort?: ProviderReasoningEffort | null;
   sessionId?: string | null;
+  nodeId?: string | null;
   history?: TurnHistoryMessage[];
   images?: TurnInputImage[];
 };
@@ -200,6 +400,7 @@ export type SessionContext = {
   recentAttachmentAssets: AttachmentAsset[];
   turnCount: number;
   lastReferencedFile?: string | null;
+  contextWindowTokens?: number | null;
 };
 
 export type RunState = {
@@ -373,7 +574,9 @@ export type TurnResult = {
   userMessage: string;
   assistantMessage: string;
   traceSteps: TraceStep[];
+  traceTimeline?: TraceTimelineEntry[];
   toolActivities: ToolActivity[];
+  providerCallRecords?: ProviderCallCacheRecord[];
   sessionSummary: string;
 };
 
@@ -400,7 +603,9 @@ export type TurnStreamEvent = {
   firstTokenLatencyMs?: number | null;
   turnDurationMs?: number | null;
   traceSteps?: TraceStep[] | null;
+  traceTimeline?: TraceTimelineEntry[] | null;
   toolActivities?: ToolActivity[] | null;
+  providerCallRecords?: ProviderCallCacheRecord[] | null;
   sessionSummary?: string | null;
 };
 
@@ -431,6 +636,93 @@ export type SessionRuntimeView = {
   session: SessionSnapshot;
   retrieved: RetrievedContextState;
   checkpoint?: ExecutionCheckpoint | null;
+  historyNodes?: HistoryNode[];
+  historyBranches?: HistoryBranch[];
+  historyCursor?: HistoryCursorState | null;
+};
+
+export type ModelMonitorOverview = {
+  sessionCount: number;
+  requestCount: number;
+  modelCallCount: number;
+  toolCallCount: number;
+  failedRequestCount: number;
+  retrievalParticipationCount: number;
+  inputTokens: number;
+  cacheHitInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  avgFirstTokenLatencyMs?: number | null;
+  avgTurnDurationMs?: number | null;
+};
+
+export type ModelMonitorDimensionRow = {
+  key: string;
+  label: string;
+  requestCount: number;
+  modelCallCount: number;
+  failedRequestCount: number;
+  retrievalParticipationCount: number;
+  inputTokens: number;
+  cacheHitInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  avgFirstTokenLatencyMs?: number | null;
+  avgTurnDurationMs?: number | null;
+};
+
+export type ModelMonitorToolRow = {
+  key: string;
+  label: string;
+  callCount: number;
+  failedCallCount: number;
+  avgDurationMs?: number | null;
+  totalDurationMs: number;
+};
+
+export type ModelMonitorActivityRow = {
+  key: string;
+  label: string;
+  callCount: number;
+  failedCallCount: number;
+  avgDurationMs?: number | null;
+  totalDurationMs: number;
+};
+
+export type ModelMonitorSessionRow = {
+  sessionId: string;
+  title: string;
+  summary: string;
+  updatedAtMs: number;
+  requestCount: number;
+  modelCallCount: number;
+  toolCallCount: number;
+  failedRequestCount: number;
+  retrievalParticipationCount: number;
+  inputTokens: number;
+  cacheHitInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  avgFirstTokenLatencyMs?: number | null;
+  avgTurnDurationMs?: number | null;
+};
+
+export type ModelMonitorSummaryView = {
+  overview: ModelMonitorOverview;
+  providers: ModelMonitorDimensionRow[];
+  models: ModelMonitorDimensionRow[];
+  tools: ModelMonitorToolRow[];
+  capabilitySources: ModelMonitorActivityRow[];
+  capabilityInvocationModes: ModelMonitorActivityRow[];
+  capabilityFailureClasses: ModelMonitorActivityRow[];
+  sessions: ModelMonitorSessionRow[];
+  generatedAtMs: number;
+};
+
+export type ModelMonitorSessionDrilldownView = {
+  sessionId: string;
+  metrics: ModelMonitorSessionRow;
+  runtimeView: SessionRuntimeView;
 };
 
 export type HostInspectionSnapshot = {

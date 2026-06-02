@@ -5,6 +5,10 @@ import type {
   BuildContextObservation,
   ChatMessage,
   ExecutionCheckpoint,
+  HistoryBranch,
+  HistoryCursorState,
+  HistoryNode,
+  ProviderCallCacheRecord,
   RetrievedContextState,
   SessionOverview,
   SessionSnapshot,
@@ -50,7 +54,9 @@ function createTrace(partial: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
     title: partial.title ?? "test turn",
     phase: partial.phase ?? "completed",
     traceSteps: partial.traceSteps ?? [],
+    traceTimeline: partial.traceTimeline ?? [],
     toolActivities: partial.toolActivities ?? [],
+    providerCallRecords: partial.providerCallRecords ?? [],
     providerRequestedName: partial.providerRequestedName ?? null,
     providerName: partial.providerName ?? null,
     providerProtocol: partial.providerProtocol ?? null,
@@ -69,6 +75,24 @@ function createTrace(partial: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
     firstTokenLatencyMs: partial.firstTokenLatencyMs ?? null,
     turnDurationMs: partial.turnDurationMs ?? null,
     updatedAt: partial.updatedAt ?? 1000
+  };
+}
+
+function createProviderCallRecord(
+  partial: Partial<ProviderCallCacheRecord> = {}
+): ProviderCallCacheRecord {
+  return {
+    requestKind: partial.requestKind ?? "initial_request",
+    providerSource: partial.providerSource ?? "provider_decision",
+    providerMode: partial.providerMode ?? "live",
+    inputTokens: partial.inputTokens ?? 12,
+    cacheHitInputTokens: partial.cacheHitInputTokens ?? 5,
+    cacheMissInputTokens: partial.cacheMissInputTokens ?? 7,
+    reasoningTokens: partial.reasoningTokens ?? 3,
+    outputTokens: partial.outputTokens ?? 10,
+    totalTokens: partial.totalTokens ?? 22,
+    firstTokenLatencyMs: partial.firstTokenLatencyMs ?? 180,
+    prefixMutationReasons: partial.prefixMutationReasons ?? ["session_summary_changed"]
   };
 }
 
@@ -97,6 +121,7 @@ function createSnapshot(partial: Partial<SessionSnapshot> = {}): SessionSnapshot
     summary: partial.summary ?? "Session summary",
     history: partial.history ?? [],
     attachmentAssets: partial.attachmentAssets ?? [],
+    turnTraceHistory: partial.turnTraceHistory ?? [],
     turnCount: partial.turnCount ?? 0,
     lastReferencedFile: partial.lastReferencedFile ?? null,
     updatedAtMs: partial.updatedAtMs ?? 1000
@@ -162,6 +187,47 @@ function createCheckpoint(partial: Partial<ExecutionCheckpoint> = {}): Execution
   };
 }
 
+function createHistoryNode(partial: Partial<HistoryNode> = {}): HistoryNode {
+  return {
+    nodeId: partial.nodeId ?? "node-1",
+    sessionId: partial.sessionId ?? "session-1",
+    parentNodeId: partial.parentNodeId ?? null,
+    branchId: partial.branchId ?? "branch-main",
+    forkedFromNodeId: partial.forkedFromNodeId ?? null,
+    kind: partial.kind ?? "turn_committed",
+    transcriptRef: partial.transcriptRef ?? null,
+    runRef: partial.runRef ?? null,
+    workspaceRef: partial.workspaceRef ?? null,
+    summary: partial.summary ?? "History node",
+    createdAtMs: partial.createdAtMs ?? 1000
+  };
+}
+
+function createHistoryBranch(partial: Partial<HistoryBranch> = {}): HistoryBranch {
+  return {
+    branchId: partial.branchId ?? "branch-main",
+    sessionId: partial.sessionId ?? "session-1",
+    baseNodeId: partial.baseNodeId ?? "node-1",
+    headNodeId: partial.headNodeId ?? "node-2",
+    forkedFromBranchId: partial.forkedFromBranchId ?? null,
+    forkedFromNodeId: partial.forkedFromNodeId ?? null,
+    label: partial.label ?? "Main",
+    createdAtMs: partial.createdAtMs ?? 1000,
+    updatedAtMs: partial.updatedAtMs ?? 2000
+  };
+}
+
+function createHistoryCursor(partial: Partial<HistoryCursorState> = {}): HistoryCursorState {
+  return {
+    sessionId: partial.sessionId ?? "session-1",
+    visibleNodeId: partial.visibleNodeId ?? "node-2",
+    activeBranchId: partial.activeBranchId ?? "branch-main",
+    branchHeadNodeId: partial.branchHeadNodeId ?? "node-2",
+    workspaceNodeId: partial.workspaceNodeId ?? "node-2",
+    mode: partial.mode ?? "live"
+  };
+}
+
 function createSessionRuntimeView(
   session: SessionSnapshot,
   partial: Partial<SessionRuntimeView> = {}
@@ -169,7 +235,10 @@ function createSessionRuntimeView(
   return {
     session,
     retrieved: partial.retrieved ?? createRetrievedContext(session),
-    checkpoint: partial.checkpoint ?? null
+    checkpoint: partial.checkpoint ?? null,
+    historyNodes: partial.historyNodes ?? [],
+    historyBranches: partial.historyBranches ?? [],
+    historyCursor: partial.historyCursor ?? null
   };
 }
 
@@ -1018,6 +1087,122 @@ describe("runtime session resilience", () => {
     });
   });
 
+  it("loads normalized capability sources and capabilities through the unified host read-plane", async () => {
+    const store = useRuntimeStore();
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "list_capability_sources") {
+        return [
+          {
+            sourceId: "builtin-tools",
+            sourceKind: "builtin",
+            displayName: "Builtin Tools",
+            transportKind: "in_process",
+            serverIdentity: "pony-agent:builtin-tools",
+            availability: "available",
+            declaredCapabilities: ["tool"],
+            permissionProfile: "host-mediated",
+            updatedAtMs: 1234
+          }
+        ];
+      }
+      if (command === "list_capabilities") {
+        expect(payload).toEqual({
+          sourceId: "builtin-tools",
+          kind: "tool"
+        });
+        return [
+          {
+            capabilityId: "builtin:time_now",
+            sourceId: "builtin-tools",
+            sourceKind: "builtin",
+            kind: "tool",
+            label: "time_now",
+            description: "返回当前本机 UNIX 时间戳",
+            invocationMode: "direct_tool_call",
+            inputSchemaSummary: "object",
+            safetyClass: "host_tool",
+            visibility: "default",
+            observabilityTags: ["builtin", "tool"],
+            requiresApproval: false,
+            hostMediated: true,
+            permissionScope: "workspace"
+          }
+        ];
+      }
+      if (command === "inspect_capability") {
+        expect(payload).toEqual({
+          capabilityId: "builtin:time_now"
+        });
+        return {
+          capabilityId: "builtin:time_now",
+          sourceId: "builtin-tools",
+          sourceKind: "builtin",
+          kind: "tool",
+          label: "time_now",
+          description: "返回当前本机 UNIX 时间戳",
+          invocationMode: "direct_tool_call",
+          inputSchemaSummary: "object",
+          safetyClass: "host_tool",
+          visibility: "default",
+          observabilityTags: ["builtin", "tool"],
+          requiresApproval: false,
+          hostMediated: true,
+          permissionScope: "workspace"
+        };
+      }
+      if (command === "inspect_capability_source") {
+        expect(payload).toEqual({
+          sourceId: "builtin-tools"
+        });
+        return {
+          sourceId: "builtin-tools",
+          sourceKind: "builtin",
+          displayName: "Builtin Tools",
+          transportKind: "in_process",
+          serverIdentity: "pony-agent:builtin-tools",
+          availability: "available",
+          declaredCapabilities: ["tool"],
+          permissionProfile: "host-mediated",
+          updatedAtMs: 1234
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.fetchCapabilitySources();
+    await store.fetchCapabilities({
+      sourceId: "builtin-tools",
+      kind: "tool"
+    });
+    const capability = await store.inspectCapability("builtin:time_now");
+    const source = await store.inspectCapabilitySource("builtin-tools");
+
+    expect(store.capabilitySources).toHaveLength(1);
+    expect(store.capabilities.map((item) => item.capabilityId)).toEqual(["builtin:time_now"]);
+    expect(capability?.capabilityId).toBe("builtin:time_now");
+    expect(source?.sourceId).toBe("builtin-tools");
+  });
+
+  it("falls back to builtin capability defaults when capability read-plane commands fail", async () => {
+    const store = useRuntimeStore();
+
+    tauriMocks.mockSafeInvoke.mockRejectedValue(new Error("capability bridge offline"));
+
+    await store.fetchCapabilitySources();
+    await store.fetchCapabilities({
+      sourceId: "builtin-tools",
+      kind: "tool"
+    });
+    const capability = await store.inspectCapability("builtin:time_now");
+    const source = await store.inspectCapabilitySource("builtin-tools");
+
+    expect(store.capabilitySources.map((item) => item.sourceId)).toEqual(["builtin-tools"]);
+    expect(store.capabilities.some((item) => item.capabilityId === "builtin:time_now")).toBe(true);
+    expect(capability?.capabilityId).toBe("builtin:time_now");
+    expect(source?.sourceId).toBe("builtin-tools");
+  });
+
   it("creates a transient browser-preview session while keeping the previous session persisted", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(4242);
@@ -1792,6 +1977,12 @@ describe("runtime session resilience", () => {
 
     expect(store.turnTraceHistory[0]?.buildContextObservation).toEqual(startedObservation);
     expect(store.turnTraceHistory[0]?.buildContextObservation).not.toBe(startedObservation);
+    expect(store.turnTraceHistory[0]?.traceTimeline?.map((entry) => entry.kind)).toEqual([
+      "input",
+      "prepare_retrieval",
+      "build_context",
+      "call_model"
+    ]);
 
     eventHandlers.get("turn:delta")?.({
       payload: {
@@ -1803,6 +1994,9 @@ describe("runtime session resilience", () => {
     });
 
     expect(store.turnTraceHistory[0]?.firstTokenLatencyMs).toBe(321);
+    expect(
+      store.turnTraceHistory[0]?.traceTimeline?.find((entry) => entry.kind === "call_model" && entry.text)?.text
+    ).toContain("partial answer");
 
     eventHandlers.get("turn:completed")?.({
       payload: {
@@ -1857,7 +2051,286 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.cacheHitInputTokens).toBe(5);
     expect(store.turnTraceHistory[0]?.reasoningTokens).toBe(8);
     expect(store.turnTraceHistory[0]?.turnDurationMs).toBe(2800);
+    expect(store.turnTraceHistory[0]?.traceTimeline?.at(-1)?.label).toBe("CALL MODEL #1");
+    expect(store.turnTraceHistory[0]?.traceTimeline?.at(-1)?.outputTokens).toBe(34);
 
+    nowSpy.mockRestore();
+  });
+
+  it("records model and tool hops in timeline order without merging", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(7070);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stream-hops" },
+          turnId: "7070"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "stream-session",
+      draftMessage: "trace hops",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "7070",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        traceSteps: store.traceSteps,
+        buildContextObservation: createBuildContextObservation()
+      }
+    });
+
+    eventHandlers.get("turn:trace")?.({
+      payload: {
+        turnId: "7070",
+        phase: "calling_tool",
+        traceSteps: store.traceSteps
+      }
+    });
+
+    eventHandlers.get("turn:tool")?.({
+      payload: {
+        turnId: "7070",
+        phase: "calling_tool",
+        toolActivities: [
+          {
+            id: "tool-workspace-list-files",
+            name: "workspace.list_files",
+            status: "running",
+            summary: "list files running",
+            argumentsText: "{\"path\":\".\"}",
+            resultText: null,
+            durationSeconds: null
+          }
+        ]
+      }
+    });
+
+    eventHandlers.get("turn:tool")?.({
+      payload: {
+        turnId: "7070",
+        phase: "calling_model",
+        toolActivities: [
+          {
+            id: "tool-workspace-list-files",
+            name: "workspace.list_files",
+            status: "done",
+            summary: "list files done",
+            argumentsText: "{\"path\":\".\"}",
+            resultText: "{\"entries\":[\"src\"]}",
+            durationSeconds: 0.2
+          }
+        ]
+      }
+    });
+
+    eventHandlers.get("turn:trace")?.({
+      payload: {
+        turnId: "7070",
+        phase: "calling_model",
+        traceSteps: store.traceSteps
+      }
+    });
+
+    eventHandlers.get("turn:delta")?.({
+      payload: {
+        turnId: "7070",
+        text: "second model answer",
+        firstTokenLatencyMs: 123
+      }
+    });
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "7070",
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        inputTokens: 20,
+        outputTokens: 10,
+        totalTokens: 30,
+        firstTokenLatencyMs: 123,
+        turnDurationMs: 1000,
+        traceSteps: store.traceSteps,
+        toolActivities: []
+      }
+    } as any);
+
+    await flushMicrotasks();
+
+    expect(store.turnTraceHistory[0]?.traceTimeline?.map((entry) => entry.kind)).toEqual([
+      "input",
+      "build_context",
+      "call_model",
+      "call_tool",
+      "call_model"
+    ]);
+    nowSpy.mockRestore();
+  });
+
+  it("prefers backend-provided trace timeline over local timeline assembly", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(7171);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stream-backend-timeline" },
+          turnId: "7171"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "stream-session",
+      draftMessage: "backend timeline",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "7171",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        traceSteps: store.traceSteps,
+        buildContextObservation: createBuildContextObservation(),
+        traceTimeline: [
+          { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "backend timeline" },
+          { id: "retrieval-2", kind: "prepare_retrieval", label: "PREPARE RETRIEVAL", state: "completed", sequence: 2 },
+          { id: "context-3", kind: "build_context", label: "BUILD CONTEXT", state: "completed", sequence: 3 },
+          { id: "model-4", kind: "call_model", label: "CALL MODEL #1", state: "active", sequence: 4 }
+        ]
+      }
+    });
+
+    eventHandlers.get("turn:tool")?.({
+      payload: {
+        turnId: "7171",
+        phase: "calling_tool",
+        toolActivities: [
+          {
+            id: "tool-workspace-read-file",
+            name: "workspace.read_file",
+            status: "running",
+            summary: "read file running",
+            argumentsText: "{\"path\":\"src/main.ts\"}",
+            resultText: null,
+            durationSeconds: null
+          }
+        ],
+        traceTimeline: [
+          { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "backend timeline" },
+          { id: "retrieval-2", kind: "prepare_retrieval", label: "PREPARE RETRIEVAL", state: "completed", sequence: 2 },
+          { id: "context-3", kind: "build_context", label: "BUILD CONTEXT", state: "completed", sequence: 3 },
+          { id: "model-4", kind: "call_model", label: "CALL MODEL #1", state: "completed", sequence: 4 },
+          { id: "tool-5", kind: "call_tool", label: "CALL TOOL #1 · workspace.read_file", state: "active", sequence: 5, text: "read file running", toolActivities: [
+            {
+              id: "tool-workspace-read-file",
+              name: "workspace.read_file",
+              status: "running",
+              summary: "read file running",
+              argumentsText: "{\"path\":\"src/main.ts\"}",
+              resultText: null,
+              durationSeconds: null
+            }
+          ] }
+        ]
+      }
+    });
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "7171",
+        text: "backend final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        inputTokens: 11,
+        outputTokens: 7,
+        totalTokens: 18,
+        firstTokenLatencyMs: 99,
+        turnDurationMs: 900,
+        traceSteps: store.traceSteps,
+        toolActivities: [],
+        traceTimeline: [
+          { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "backend timeline" },
+          { id: "retrieval-2", kind: "prepare_retrieval", label: "PREPARE RETRIEVAL", state: "completed", sequence: 2 },
+          { id: "context-3", kind: "build_context", label: "BUILD CONTEXT", state: "completed", sequence: 3 },
+          { id: "model-4", kind: "call_model", label: "CALL MODEL #1", state: "completed", sequence: 4 },
+          { id: "tool-5", kind: "call_tool", label: "CALL TOOL #1 · workspace.read_file", state: "completed", sequence: 5, text: "read file done", toolActivities: [] },
+          { id: "model-6", kind: "call_model", label: "CALL MODEL #2", state: "completed", sequence: 6, text: "backend final answer", firstTokenLatencyMs: 99 },
+          { id: "return-7", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 7, text: "backend final answer", outputTokens: 7, totalTokens: 18, firstTokenLatencyMs: 99, turnDurationMs: 900 }
+        ]
+      }
+    } as any);
+
+    await flushMicrotasks();
+
+    expect(store.turnTraceHistory[0]?.traceTimeline?.map((entry) => entry.kind)).toEqual([
+      "input",
+      "prepare_retrieval",
+      "build_context",
+      "call_model",
+      "call_tool",
+      "call_model"
+    ]);
+    expect(store.turnTraceHistory[0]?.traceTimeline?.[5]?.text).toBe("backend final answer");
+    expect(store.turnTraceHistory[0]?.traceTimeline?.[5]?.turnDurationMs).toBe(900);
     nowSpy.mockRestore();
   });
 
@@ -1933,6 +2406,116 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.totalTokens).toBe(310);
 
     nowSpy.mockRestore();
+  });
+
+  it("stores call-level model hops with request kinds from host payload", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(6363);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+      if (command === "start_graph_run_stream") {
+        return { run: { id: "run-stream-provider-calls" }, turnId: "6363" };
+      }
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "stream-session-provider-calls",
+      draftMessage: "provider call records",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "6363",
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "provider_followup_stream",
+        providerMode: "standard",
+        providerRequestedName: "OpenAI",
+        sessionSummary: "Completed summary",
+        inputTokens: 240,
+        outputTokens: 70,
+        totalTokens: 310,
+        cacheHitInputTokens: 70,
+        traceSteps: store.traceSteps,
+        toolActivities: [],
+        providerCallRecords: [
+          createProviderCallRecord({ requestKind: "initial_request" }),
+          createProviderCallRecord({
+            requestKind: "tool_followup",
+            providerSource: "provider_followup_stream",
+            cacheHitInputTokens: 10
+          })
+        ]
+      }
+    } as any);
+
+    await flushMicrotasks();
+
+    expect(store.turnTraceHistory[0]?.providerCallRecords?.map((record) => record.requestKind)).toEqual([
+      "initial_request",
+      "tool_followup"
+    ]);
+
+    nowSpy.mockRestore();
+  });
+
+  it("preserves prefix mutation reasons on completed trace history", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "trace-session",
+      turnTraceHistory: [
+        createTrace({
+          providerCallRecords: [
+            createProviderCallRecord({
+              prefixMutationReasons: [
+                "session_summary_changed",
+                "run_goal_changed",
+                "truncation_note_changed"
+              ]
+            })
+          ]
+        })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(snapshot);
+      }
+      if (command === "load_retrieved_context") {
+        return createRetrievedContext(snapshot);
+      }
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState("trace-session");
+
+    expect(store.turnTraceHistory[0]?.providerCallRecords?.[0]?.prefixMutationReasons).toEqual([
+      "session_summary_changed",
+      "run_goal_changed",
+      "truncation_note_changed"
+    ]);
   });
 
   it("strips the leading thinking prefix from streamed reasoning content", async () => {
@@ -2155,17 +2738,292 @@ describe("runtime session resilience", () => {
       "completed",
       "completed",
       "cancelled",
-      "cancelled",
       "cancelled"
     ]);
     expect(store.turnTraceHistory[0]?.traceSteps.map((step) => step.state)).toEqual([
       "completed",
       "completed",
       "cancelled",
-      "cancelled",
       "cancelled"
     ]);
 
+    nowSpy.mockRestore();
+  });
+
+  it("passes nodeId through runtime and retrieved context requests and hydrates history cursor state", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "history-session",
+      summary: "History summary",
+      history: [
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 3000
+    });
+    const historyNodes = [
+      createHistoryNode({ nodeId: "node-root", sessionId: "history-session", createdAtMs: 1000 }),
+      createHistoryNode({
+        nodeId: "node-old",
+        sessionId: "history-session",
+        parentNodeId: "node-root",
+        createdAtMs: 2000
+      }),
+      createHistoryNode({
+        nodeId: "node-head",
+        sessionId: "history-session",
+        parentNodeId: "node-old",
+        createdAtMs: 3000
+      })
+    ];
+    const historyBranches = [
+      createHistoryBranch({
+        branchId: "branch-main",
+        sessionId: "history-session",
+        baseNodeId: "node-root",
+        headNodeId: "node-head"
+      })
+    ];
+    const historyCursor = createHistoryCursor({
+      sessionId: "history-session",
+      visibleNodeId: "node-old",
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      workspaceNodeId: "node-old",
+      mode: "historical"
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId: "history-session",
+          runId: null,
+          nodeId: "node-old"
+        });
+        return createSessionRuntimeView(snapshot, {
+          historyNodes,
+          historyBranches,
+          historyCursor
+        });
+      }
+
+      if (command === "load_retrieved_context") {
+        expect(payload).toEqual({
+          sessionId: "history-session",
+          runId: null,
+          turnId: null,
+          nodeId: "node-old"
+        });
+        return createRetrievedContext(snapshot);
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState("history-session", { nodeId: "node-old" });
+    const retrieved = await store.loadRetrievedContextState("history-session", { nodeId: "node-old" });
+
+    expect(retrieved.sessionContext.conversationId).toBe("history-session");
+    expect(store.visibleNodeId).toBe("node-old");
+    expect(store.branchHeadNodeId).toBe("node-head");
+    expect(store.activeBranchId).toBe("branch-main");
+    expect(store.historyCursorMode).toBe("historical");
+    expect(store.isHistoricalMode).toBe(true);
+    expect(store.historyNodes.map((node) => node.nodeId)).toEqual(["node-root", "node-old", "node-head"]);
+  });
+
+  it("checks out a history node with backward-compatible cursor fallback", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "checkout-session",
+      summary: "Checkout summary",
+      history: [
+        { role: "user", content: "current question" },
+        { role: "assistant", content: "current answer" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 3200
+    });
+
+    store.$patch({
+      sessionId: "checkout-session",
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-head",
+      historyCursorMode: "live",
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          sessionId: "checkout-session",
+          headNodeId: "node-head"
+        })
+      ],
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId: "checkout-session", createdAtMs: 2000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId: "checkout-session", createdAtMs: 3200 })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "checkout_history_node") {
+        expect(payload).toEqual({
+          sessionId: "checkout-session",
+          nodeId: "node-old",
+          mode: "transcript_and_workspace"
+        });
+        return {
+          sessionId: "checkout-session",
+          visibleNodeId: "node-old",
+          activeBranchId: "branch-main",
+          branchHeadNodeId: "node-head",
+          workspaceNodeId: "node-old",
+          mode: "historical",
+          requestedMode: "transcript_and_workspace",
+          appliedMode: "transcript_only",
+          workspaceRestoreApplied: false,
+          degradedToTranscriptOnly: true
+        };
+      }
+
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId: "checkout-session",
+          runId: null,
+          nodeId: "node-old"
+        });
+        return createSessionRuntimeView(snapshot);
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const result = await store.checkoutHistoryNode("node-old", "transcript_and_workspace");
+
+    expect(result?.degradedToTranscriptOnly).toBe(true);
+    expect(store.visibleNodeId).toBe("node-old");
+    expect(store.branchHeadNodeId).toBe("node-head");
+    expect(store.activeBranchId).toBe("branch-main");
+    expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("restores the branch head and exits historical mode", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "restore-session",
+      summary: "Restore summary",
+      history: [
+        { role: "user", content: "latest question" },
+        { role: "assistant", content: "latest answer" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 3600
+    });
+
+    store.$patch({
+      sessionId: "restore-session",
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-old",
+      historyCursorMode: "historical",
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          sessionId: "restore-session",
+          headNodeId: "node-head"
+        })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "restore_branch_head") {
+        expect(payload).toEqual({
+          sessionId: "restore-session",
+          branchId: "branch-main"
+        });
+        return {
+          sessionId: "restore-session",
+          visibleNodeId: "node-head",
+          activeBranchId: "branch-main",
+          branchHeadNodeId: "node-head",
+          workspaceNodeId: "node-head",
+          mode: "live",
+          restoredFromNodeId: "node-old"
+        };
+      }
+
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId: "restore-session",
+          runId: null,
+          nodeId: "node-head"
+        });
+        return createSessionRuntimeView(snapshot);
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const result = await store.restoreBranchHead();
+
+    expect(result?.restoredFromNodeId).toBe("node-old");
+    expect(store.visibleNodeId).toBe("node-head");
+    expect(store.historyCursorMode).toBe("live");
+    expect(store.isHistoricalMode).toBe(false);
+  });
+
+  it("supports local fork creation and branch switching before backend fields land", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(5151);
+    const originalIsTauriAvailable = tauriMocks.mockIsTauriAvailable;
+    originalIsTauriAvailable.mockReturnValue(false);
+
+    store.$patch({
+      sessionId: "fork-session",
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-old",
+      historyCursorMode: "historical",
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId: "fork-session", createdAtMs: 2000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId: "fork-session", createdAtMs: 3000 })
+      ],
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          sessionId: "fork-session",
+          baseNodeId: "node-old",
+          headNodeId: "node-head"
+        })
+      ],
+      messages: [
+        createMessage({ turnId: "turn-1", role: "user", content: "fork point" }),
+        createMessage({ turnId: "turn-1", role: "assistant", content: "fork answer" })
+      ]
+    });
+
+    const forkResult = await store.forkHistoryNode("node-old");
+
+    expect(forkResult?.createdBranchId).toBe("branch-5151");
+    expect(store.activeBranchId).toBe("branch-5151");
+    expect(store.branchHeadNodeId).toBe("node-old");
+    expect(store.historyCursorMode).toBe("live");
+    expect(store.historyBranches.map((branch) => branch.branchId)).toContain("branch-5151");
+
+    const switchResult = await store.switchHistoryBranch("branch-main");
+
+    expect(switchResult?.previousBranchId).toBe("branch-5151");
+    expect(store.activeBranchId).toBe("branch-main");
+    expect(store.visibleNodeId).toBe("node-head");
+    expect(store.branchHeadNodeId).toBe("node-head");
+    expect(store.historyCursorMode).toBe("live");
     nowSpy.mockRestore();
   });
 });

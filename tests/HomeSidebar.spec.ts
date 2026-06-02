@@ -10,6 +10,7 @@ import type {
   BuildContextObservation,
   RetrievedContextState,
   TraceStep,
+  TraceTimelineEntry,
   TurnTraceRecord
 } from "@/types/runtime";
 
@@ -159,12 +160,22 @@ function createTraceSteps(): TraceStep[] {
   ];
 }
 
+function createTraceTimeline(): TraceTimelineEntry[] {
+  return [
+    { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "继续推进 PA-025，不要生成摘要" },
+    { id: "context-2", kind: "context", label: "BUILD CONTEXT", state: "completed", sequence: 2 },
+    { id: "model-3", kind: "model", label: "CALL MODEL #1", state: "completed", sequence: 3, firstTokenLatencyMs: 321 },
+    { id: "return-4", kind: "return", label: "RETURN RESULT", state: "completed", sequence: 4, inputTokens: 120, cacheHitInputTokens: 80, reasoningTokens: 18, outputTokens: 40, totalTokens: 160, firstTokenLatencyMs: 321, turnDurationMs: 2800 }
+  ];
+}
+
 function createTraceRecord(overrides: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
   return {
     turnId: overrides.turnId ?? "turn-1",
     title: overrides.title ?? "测试轮次",
     phase: overrides.phase ?? "ready",
     traceSteps: overrides.traceSteps ?? createTraceSteps(),
+    traceTimeline: overrides.traceTimeline ?? createTraceTimeline(),
     toolActivities: overrides.toolActivities ?? [],
     providerRequestedName: overrides.providerRequestedName ?? null,
     providerName: overrides.providerName ?? null,
@@ -265,16 +276,10 @@ describe("HomeSidebar", () => {
     expect(wrapper.text()).toContain("Tools");
     expect(wrapper.text()).toContain("Trace");
     expect(wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
-    expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("false");
-
-    await wrapper.get('[data-testid="status-panel-toggle"]').trigger("click");
-    await nextTick();
-
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
-    expect(wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("false");
   });
 
-  it("将 build context 观测折叠进 trace step，而不是独立卡片", async () => {
+  it("将 retrieval 全局信息归并到状态面板，并清理冗余字段", async () => {
     const buildContextObservation = createBuildContextObservation();
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -329,53 +334,83 @@ describe("HomeSidebar", () => {
     const wrapper = mountSidebar();
     await flushAll();
 
-    const retrievedSummary = wrapper.get('[data-testid="retrieved-context-summary"]');
+    const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
     const tracePanelText = wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.textContent ?? "";
 
-    expect(retrievedSummary.text()).toContain("Current retrieval state");
-    expect(retrievedSummary.text()).toContain("Recent history");
-    expect(wrapper.get('[data-testid="retrieved-run-goal"]').text()).toContain("retrieval boundary");
     expect(wrapper.get('[data-testid="retrieved-active-task"]').text()).toContain("PA-018");
-    expect(wrapper.get('[data-testid="retrieved-last-file"]').text()).toContain("src-tauri/src/agent/context.rs");
     expect(wrapper.get('[data-testid="retrieved-memory-list"]').text()).toContain("Reply in Chinese.");
+    expect(statusPanelText).toContain("运行阶段");
+    expect(statusPanelText).not.toContain("Run phase");
+    expect(statusPanelText).not.toContain("Recent history");
+    expect(statusPanelText).not.toContain("Recent attachments");
+    expect(statusPanelText).not.toContain("Long-term memory");
+    expect(statusPanelText).not.toContain("Goal:");
+    expect(statusPanelText).not.toContain("Last file:");
+    expect(statusPanelText).not.toContain("legacy summary should be shadowed");
 
     expect(wrapper.find('[data-testid="turn-build-context"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="trace-step-button-step-context"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="trace-step-button-context-2"]').exists()).toBe(true);
 
-    await wrapper.get('[data-testid="trace-step-button-step-context"]').trigger("click");
+    await wrapper.get('[data-testid="trace-step-button-context-2"]').trigger("click");
     await nextTick();
 
-    const contextStepText = wrapper.get('[data-testid="trace-step-button-step-context"]').element.closest("section")?.textContent ?? "";
+    const contextStepText = wrapper.get('[data-testid="trace-step-button-context-2"]').element.closest("section")?.textContent ?? "";
     expect(contextStepText).toContain("response_format=json_schema");
     expect(contextStepText).toContain("这里展示的是本轮真正发给模型的请求，不是 retrieval state 的替身。");
     expect(contextStepText).toContain("稳定前缀");
     expect(contextStepText).toContain("最终请求消息");
     expect(contextStepText).toContain("工具定义");
 
-    await wrapper.get('[data-testid="trace-detail-button-step-context-stable"]').trigger("click");
+    await wrapper.get('[data-testid="trace-detail-button-context-2-stable"]').trigger("click");
     await nextTick();
     expect(wrapper.text()).toContain("stable capability prefix");
 
-    await wrapper.get('[data-testid="trace-detail-button-step-context-semi"]').trigger("click");
+    await wrapper.get('[data-testid="trace-detail-button-context-2-semi"]').trigger("click");
     await nextTick();
     expect(wrapper.text()).toContain("retrieval summary from host");
 
-    await wrapper.get('[data-testid="trace-detail-button-step-context-volatile"]').trigger("click");
+    await wrapper.get('[data-testid="trace-detail-button-context-2-volatile"]').trigger("click");
     await nextTick();
     expect(wrapper.text()).toContain("latest screenshot");
 
-    await wrapper.get('[data-testid="trace-detail-button-step-context-messages"]').trigger("click");
+    await wrapper.get('[data-testid="trace-detail-button-context-2-messages"]').trigger("click");
     await nextTick();
     expect(wrapper.text()).toContain("system: summarize retrieval state");
 
-    await wrapper.get('[data-testid="trace-detail-button-step-context-tools"]').trigger("click");
+    await wrapper.get('[data-testid="trace-detail-button-context-2-tools"]').trigger("click");
     await nextTick();
     expect(wrapper.text()).toContain("workspace.read_file(path: string)");
 
-    expect(retrievedSummary.text()).not.toContain("system: summarize retrieval state");
-    expect(retrievedSummary.text()).not.toContain("stable capability prefix");
-    expect(tracePanelText).toContain("Current retrieval state");
-    expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "").not.toContain("Current retrieval state");
+    expect(statusPanelText).not.toContain("system: summarize retrieval state");
+    expect(statusPanelText).not.toContain("stable capability prefix");
+    expect(tracePanelText).not.toContain("Current retrieval state");
+  });
+
+  it("状态面板中的 token 标签不显示总计字样", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-status-tokens",
+          title: "status token labels",
+          phase: "completed",
+          inputTokens: 8437,
+          cacheHitInputTokens: 4352,
+          outputTokens: 1366
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
+    expect(statusPanelText).toContain("输入");
+    expect(statusPanelText).toContain("缓存命中");
+    expect(statusPanelText).toContain("输出");
+    expect(statusPanelText).not.toContain("输入总计");
+    expect(statusPanelText).not.toContain("缓存命中总计");
+    expect(statusPanelText).not.toContain("输出总计");
   });
 
   it("只在 turn 和 call model 展示 token 指标，并在展开输入原文时隐藏重复摘要", async () => {
@@ -416,6 +451,24 @@ describe("HomeSidebar", () => {
           turnId: "turn-token",
           title: "token metrics",
           phase: "completed",
+          traceTimeline: [
+            { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "继续推进 PA-025，不要生成摘要" },
+            { id: "context-2", kind: "context", label: "BUILD CONTEXT", state: "completed", sequence: 2 },
+            {
+              id: "model-3",
+              kind: "model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 3,
+              inputTokens: 120,
+              cacheHitInputTokens: 80,
+              reasoningTokens: 18,
+              outputTokens: 40,
+              firstTokenLatencyMs: 321,
+              turnDurationMs: 2800
+            },
+            { id: "return-4", kind: "return", label: "RETURN RESULT", state: "completed", sequence: 4, turnDurationMs: 2800 }
+          ],
           inputTokens: 120,
           cacheHitInputTokens: 80,
           reasoningTokens: 18,
@@ -439,36 +492,38 @@ describe("HomeSidebar", () => {
     expect(wrapper.text()).not.toContain("总计 160");
     expect(wrapper.text()).toContain("2.80 s");
 
-    expect(wrapper.get('[data-testid="trace-step-button-step-plan"]').text()).toContain("RECEIVE INPUT");
-    expect(wrapper.get('[data-testid="trace-step-button-step-plan"]').text()).not.toContain("输入 120");
-    expect(wrapper.get('[data-testid="trace-step-button-step-return"]').text()).not.toContain("输出 40");
-    expect(wrapper.get('[data-testid="trace-step-button-step-call-model"]').text()).toContain("输入 120");
-    expect(wrapper.get('[data-testid="trace-step-button-step-call-model"]').text()).toContain("命中缓存 80");
-    expect(wrapper.get('[data-testid="trace-step-button-step-call-model"]').text()).toContain("思考链 18");
-    expect(wrapper.get('[data-testid="trace-step-button-step-call-model"]').text()).toContain("输出 40");
-    expect(wrapper.get('[data-testid="trace-step-button-step-call-model"]').text()).not.toContain("总计 160");
-    expect(wrapper.get('[data-testid="trace-step-button-step-call-model"]').text()).toContain("延时 321 ms");
+    expect(wrapper.get('[data-testid="trace-step-button-input-1"]').text()).toContain("RECEIVE INPUT");
+    expect(wrapper.get('[data-testid="trace-step-button-input-1"]').text()).not.toContain("输入 120");
+    expect(wrapper.get('[data-testid="trace-step-button-model-3"]').text()).toContain("输入 120");
+    expect(wrapper.get('[data-testid="trace-step-button-model-3"]').text()).toContain("命中缓存 80");
+    expect(wrapper.get('[data-testid="trace-step-button-model-3"]').text()).toContain("思考链 18");
+    expect(wrapper.get('[data-testid="trace-step-button-model-3"]').text()).toContain("输出 40");
+    expect(wrapper.get('[data-testid="trace-step-button-model-3"]').text()).toContain("16.1 token/s");
+    expect(wrapper.get('[data-testid="trace-step-button-model-3"]').text()).toContain("延时 321 ms");
+    expect(wrapper.find('[data-testid="trace-step-button-return-4"]').exists()).toBe(false);
 
-    await wrapper.get('[data-testid="trace-step-button-step-plan"]').trigger("click");
+    await wrapper.get('[data-testid="trace-step-button-input-1"]').trigger("click");
     await nextTick();
 
-    const inputDetailButton = wrapper.get('[data-testid="trace-detail-button-step-plan-input-message"]');
+    const inputDetailButton = wrapper.get('[data-testid="trace-detail-button-input-1-input-message"]');
     expect(inputDetailButton.text()).toContain("继续推进 PA-025，不要生成摘要");
 
     await inputDetailButton.trigger("click");
     await nextTick();
 
     expect(inputDetailButton.text()).not.toContain("继续推进 PA-025，不要生成摘要");
+    expect(wrapper.find('[data-testid="trace-detail-button-input-1-content"]').exists()).toBe(false);
 
-    await wrapper.get('[data-testid="trace-step-button-step-call-model"]').trigger("click");
+    await wrapper.get('[data-testid="trace-step-button-model-3"]').trigger("click");
     await nextTick();
 
-    const callModelSectionText = wrapper.get('[data-testid="trace-step-button-step-call-model"]').element.closest("section")?.textContent ?? "";
+    const callModelSectionText = wrapper.get('[data-testid="trace-step-button-model-3"]').element.closest("section")?.textContent ?? "";
     expect(callModelSectionText).toContain("输入");
     expect(callModelSectionText).toContain("命中缓存");
     expect(callModelSectionText).toContain("思考链");
     expect(callModelSectionText).toContain("输出");
-    expect(callModelSectionText).not.toContain("总计");
+    expect(callModelSectionText).toContain("16.1 token/s");
+    expect(callModelSectionText).toContain("总计");
   });
 
   it("仅在存在整轮耗时时显示 turn 耗时", async () => {
@@ -506,7 +561,7 @@ describe("HomeSidebar", () => {
     expect(turnButton!.text()).not.toContain("4.50 s");
   });
 
-  it("调整 call tool 和 return result 的折叠头信息", async () => {
+  it("调整 call tool 和最终 call model 的折叠头信息", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       messages: [
@@ -544,7 +599,30 @@ describe("HomeSidebar", () => {
           turnId: "turn-tool",
           title: "tool layout",
           phase: "completed",
-          traceSteps: createTraceSteps(),
+          traceTimeline: [
+            { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "读取 package.json" },
+            { id: "context-2", kind: "context", label: "BUILD CONTEXT", state: "completed", sequence: 2 },
+            { id: "model-3", kind: "model", label: "CALL MODEL #1", state: "completed", sequence: 3, reasoningContent: "先看 package.json 再判断下一步。" },
+            {
+              id: "tool-4",
+              kind: "tool",
+              label: "CALL TOOL #1 · workspace.read_file",
+              state: "completed",
+              sequence: 4,
+              toolActivities: [
+                {
+                  id: "tool-1",
+                  name: "workspace.read_file",
+                  status: "done",
+                  summary: "Tool call finished with status: ok",
+                  argumentsText: "{\"path\":\"package.json\"}",
+                  resultText: "{\"name\":\"pony-agent\"}",
+                  durationSeconds: 1.2
+                }
+              ]
+            },
+            { id: "return-5", kind: "return", label: "RETURN RESULT", state: "completed", sequence: 5, text: "已读取 package.json。", reasoningContent: "先看 package.json 再判断下一步。" }
+          ],
           toolActivities: [
             {
               id: "tool-1",
@@ -563,13 +641,14 @@ describe("HomeSidebar", () => {
     const wrapper = mountSidebar();
     await flushAll();
 
-    const returnStepButton = wrapper.get('[data-testid="trace-step-button-step-return"]');
-    expect(returnStepButton.text()).toContain("已读取 package.json。");
+    expect(wrapper.find('[data-testid="trace-step-button-return-5"]').exists()).toBe(false);
+    const finalModelStepButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
+    expect(finalModelStepButton.text()).toContain("已读取 package.json。");
 
-    await wrapper.get('[data-testid="trace-step-button-step-call-tool"]').trigger("click");
+    await wrapper.get('[data-testid="trace-step-button-tool-4"]').trigger("click");
     await nextTick();
 
-    const toolButton = wrapper.get('[data-testid="trace-detail-button-step-call-tool-tool-1"]');
+    const toolButton = wrapper.get('[data-testid="trace-detail-button-tool-4-tool-1"]');
     expect(toolButton.text()).toContain("workspace.read_file");
     expect(toolButton.text()).toContain("1.20 s");
     expect(toolButton.text()).not.toContain("第 1 次工具调用");
@@ -583,18 +662,50 @@ describe("HomeSidebar", () => {
     expect(wrapper.text()).toContain("结果:");
     expect(wrapper.text()).toContain("\"name\":\"pony-agent\"");
 
-    await wrapper.get('[data-testid="trace-step-button-step-return"]').trigger("click");
+    await wrapper.get('[data-testid="trace-step-button-model-3"]').trigger("click");
     await nextTick();
 
-    const returnSectionText = wrapper.get('[data-testid="trace-step-button-step-return"]').element.closest("section")?.textContent ?? "";
-    expect(returnSectionText).toContain("思考链");
-    expect(returnSectionText).toContain("最终回复");
-    expect(returnSectionText).not.toContain("会话摘要");
-    expect(returnSectionText.indexOf("思考链")).toBeLessThan(returnSectionText.indexOf("最终回复"));
-    expect(wrapper.get('[data-testid="trace-step-button-step-return"]').text()).not.toContain("已读取 package.json。");
+    const finalModelSectionText = wrapper.get('[data-testid="trace-step-button-model-3"]').element.closest("section")?.textContent ?? "";
+    expect(finalModelSectionText).toContain("思考链");
+    expect(finalModelSectionText).toContain("模型输出");
+    expect(finalModelSectionText).not.toContain("会话摘要");
+    expect(finalModelSectionText.indexOf("思考链")).toBeLessThan(finalModelSectionText.indexOf("模型输出"));
   });
 
-  it("assistant 仍在输出时不提前渲染 return result 详情", async () => {
+  it("按时序展示多次 call model / call tool，而不是合并为单步", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-multi-hop",
+          title: "multi hop trace",
+          traceTimeline: [
+            { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "继续推进" },
+            { id: "retrieval-2", kind: "prepare_retrieval", label: "PREPARE RETRIEVAL", state: "completed", sequence: 2 },
+            { id: "context-3", kind: "build_context", label: "BUILD CONTEXT", state: "completed", sequence: 3 },
+            { id: "model-4", kind: "call_model", label: "CALL MODEL #1", state: "completed", sequence: 4 },
+            { id: "tool-5", kind: "call_tool", label: "CALL TOOL #1 · workspace.list_files", state: "completed", sequence: 5, toolActivities: [] },
+            { id: "model-6", kind: "call_model", label: "CALL MODEL #2", state: "completed", sequence: 6 },
+            { id: "tool-7", kind: "call_tool", label: "CALL TOOL #2 · workspace.read_file", state: "completed", sequence: 7, toolActivities: [] },
+            { id: "model-8", kind: "call_model", label: "CALL MODEL #3", state: "completed", sequence: 8 },
+            { id: "return-9", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 9, outputTokens: 20, turnDurationMs: 1200 }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const traceText = wrapper.text();
+    expect(traceText).toContain("CALL MODEL #1");
+    expect(traceText).toContain("CALL TOOL #1 · workspace.list_files");
+    expect(traceText).toContain("CALL MODEL #2");
+    expect(traceText).toContain("CALL TOOL #2 · workspace.read_file");
+    expect(traceText).toContain("CALL MODEL #3");
+  });
+
+  it("assistant 仍在输出时将活跃输出归到 call model", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       messages: [
@@ -632,7 +743,18 @@ describe("HomeSidebar", () => {
           turnId: "turn-pending",
           title: "pending turn",
           phase: "running",
-          traceSteps: createTraceSteps()
+          traceTimeline: [
+            { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "继续输出" },
+            {
+              id: "return-4",
+              kind: "return",
+              label: "RETURN RESULT",
+              state: "active",
+              sequence: 4,
+              reasoningContent: "正在思考",
+              text: "正在逐步输出"
+            }
+          ]
         })
       ]
     });
@@ -640,12 +762,14 @@ describe("HomeSidebar", () => {
     const wrapper = mountSidebar();
     await flushAll();
 
-    await wrapper.get('[data-testid="trace-step-button-step-return"]').trigger("click");
+    expect(wrapper.find('[data-testid="trace-step-button-return-4"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="trace-step-button-model-4"]').trigger("click");
     await nextTick();
 
-    const returnSectionText = wrapper.get('[data-testid="trace-step-button-step-return"]').element.closest("section")?.textContent ?? "";
-    expect(returnSectionText).not.toContain("思考链");
-    expect(returnSectionText).not.toContain("最终回复");
-    expect(wrapper.find('[data-testid="trace-detail-button-step-return-assistant-output"]').exists()).toBe(false);
+    const callModelSectionText = wrapper.get('[data-testid="trace-step-button-model-4"]').element.closest("section")?.textContent ?? "";
+    expect(callModelSectionText).toContain("思考链");
+    expect(callModelSectionText).toContain("模型输出");
+    expect(wrapper.find('[data-testid="trace-detail-button-model-4-assistant-output"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="trace-detail-button-model-4-reasoning"]').exists()).toBe(true);
   });
 });

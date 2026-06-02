@@ -6,12 +6,25 @@ import type {
   AttachmentAsset,
   AttachmentAssetFilter,
   AvailableTool,
+  BuildContextObservation,
+  CapabilitySourceView,
+  CapabilityView,
   ChatMessage,
   ExecutionCheckpoint,
   GraphRun,
   GraphRunStreamStartResponse,
   HealthPayload,
+  HistoryBranch,
+  HistoryBranchSwitchResult,
+  HistoryCheckoutMode,
+  HistoryCheckoutResult,
+  HistoryCursorMode,
+  HistoryCursorState,
+  HistoryForkResult,
+  HistoryNode,
+  HistoryRestoreResult,
   RunState,
+  ProviderCallCacheRecord,
   RetrievedContextState,
   RuntimePhase,
   SessionOverview,
@@ -19,6 +32,7 @@ import type {
   SessionSnapshot,
   ToolActivity,
   TraceStep,
+  TraceTimelineEntry,
   TurnHistoryMessage,
   TurnInputImage,
   TurnInput,
@@ -52,11 +66,20 @@ type RuntimeState = {
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
   availableTools: AvailableTool[];
+  capabilitySources: CapabilitySourceView[];
+  capabilities: CapabilityView[];
   toolActivities: ToolActivity[];
   traceSteps: TraceStep[];
+  traceTimeline: TraceTimelineEntry[];
   turnTraceHistory: TurnTraceRecord[];
   activeTurnId: string | null;
   activeRunId: string | null;
+  visibleNodeId: string | null;
+  branchHeadNodeId: string | null;
+  activeBranchId: string | null;
+  historyCursorMode: HistoryCursorMode;
+  historyNodes: HistoryNode[];
+  historyBranches: HistoryBranch[];
   eventsReady: boolean;
   deferredPersistTimerId: number | null;
 };
@@ -101,10 +124,17 @@ type SessionRuntimeSnapshot = {
   isSubmitting: boolean;
   activeTurnId: string | null;
   activeRunId: string | null;
+  visibleNodeId: string | null;
+  branchHeadNodeId: string | null;
+  activeBranchId: string | null;
+  historyCursorMode: HistoryCursorMode;
+  historyNodes: HistoryNode[];
+  historyBranches: HistoryBranch[];
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
   toolActivities: ToolActivity[];
   traceSteps: TraceStep[];
+  traceTimeline: TraceTimelineEntry[];
   turnTraceHistory: TurnTraceRecord[];
 };
 
@@ -164,15 +194,249 @@ function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage[
 }
 
 function cloneTraceSteps(traceSteps?: TraceStep[] | null) {
-  return (traceSteps ?? []).map((step) => ({ ...step }));
+  return (traceSteps ?? [])
+    .filter((step) => step.id !== "step-return")
+    .map((step) => ({ ...step }));
+}
+
+function canonicalizeTraceTimelineKind(kind: TraceTimelineEntry["kind"]): TraceTimelineEntry["kind"] {
+  switch (kind) {
+    case "context":
+      return "build_context";
+    case "model":
+      return "call_model";
+    case "tool":
+      return "call_tool";
+    case "return":
+      return "return_result";
+    default:
+      return kind;
+  }
+}
+
+function cloneTraceTimeline(traceTimeline?: TraceTimelineEntry[] | null): TraceTimelineEntry[] {
+  const normalized = (traceTimeline ?? []).map((entry): TraceTimelineEntry => ({
+    ...entry,
+    kind: canonicalizeTraceTimelineKind(entry.kind),
+    buildContextObservation: cloneBuildContextObservation(entry.buildContextObservation),
+    toolActivities: cloneToolActivities(entry.toolActivities)
+  }));
+
+  const folded: TraceTimelineEntry[] = [];
+  for (const entry of normalized) {
+    if (entry.kind !== "return_result") {
+      folded.push(entry);
+      continue;
+    }
+
+    const reverseModelIndex = [...folded].reverse().findIndex((candidate) => candidate.kind === "call_model");
+    if (reverseModelIndex === -1) {
+      folded.push({
+        ...entry,
+        id: `model-${entry.sequence}`,
+        kind: "call_model",
+        label: "CALL MODEL #1"
+      });
+      continue;
+    }
+
+    const modelIndex = folded.length - 1 - reverseModelIndex;
+    const modelEntry = folded[modelIndex];
+    folded[modelIndex] = {
+      ...modelEntry,
+      state: entry.state ?? modelEntry.state,
+      text: entry.text ?? modelEntry.text ?? null,
+      reasoningContent: entry.reasoningContent ?? modelEntry.reasoningContent ?? null,
+      fallbackReason: entry.fallbackReason ?? modelEntry.fallbackReason ?? null,
+      error: entry.error ?? modelEntry.error ?? null,
+      inputTokens: entry.inputTokens ?? modelEntry.inputTokens ?? null,
+      cacheHitInputTokens: entry.cacheHitInputTokens ?? modelEntry.cacheHitInputTokens ?? null,
+      reasoningTokens: entry.reasoningTokens ?? modelEntry.reasoningTokens ?? null,
+      outputTokens: entry.outputTokens ?? modelEntry.outputTokens ?? null,
+      totalTokens: entry.totalTokens ?? modelEntry.totalTokens ?? null,
+      firstTokenLatencyMs: entry.firstTokenLatencyMs ?? modelEntry.firstTokenLatencyMs ?? null,
+      turnDurationMs: entry.turnDurationMs ?? modelEntry.turnDurationMs ?? null
+    };
+  }
+
+  return folded;
+}
+
+function cloneProviderCallRecords(
+  providerCallRecords?: ProviderCallCacheRecord[] | null
+): ProviderCallCacheRecord[] {
+  return (providerCallRecords ?? []).map((record) => ({
+    ...record,
+    prefixMutationReasons: [...(record.prefixMutationReasons ?? [])]
+  }));
 }
 
 function cloneToolActivities(toolActivities?: ToolActivity[] | null) {
-  return (toolActivities ?? []).map((tool) => ({ ...tool }));
+  return (toolActivities ?? []).map((tool) => ({
+    ...tool,
+    capabilityInvocation: tool.capabilityInvocation ? { ...tool.capabilityInvocation } : null
+  }));
 }
 
 function cloneBuildContextObservation(buildContextObservation?: TurnTraceRecord["buildContextObservation"]) {
   return buildContextObservation ? { ...buildContextObservation } : null;
+}
+
+function clonePayloadTraceTimeline(payload: { traceTimeline?: TraceTimelineEntry[] | null }) {
+  return cloneTraceTimeline(payload.traceTimeline);
+}
+
+function resolveEventTraceTimeline(
+  payload: { traceTimeline?: TraceTimelineEntry[] | null },
+  fallback: () => TraceTimelineEntry[]
+) {
+  const payloadTraceTimeline = clonePayloadTraceTimeline(payload);
+  return payloadTraceTimeline.length ? payloadTraceTimeline : fallback();
+}
+
+function buildFallbackRuntimeTraceTimeline(options: {
+  turnId: string;
+  messages: ChatMessage[];
+  phase: RuntimePhase | string | null | undefined;
+  buildContextObservation?: TurnTraceRecord["buildContextObservation"];
+  assistantMessage?: ChatMessage | null;
+  toolActivities?: ToolActivity[] | null;
+  providerPatch: Pick<
+    TraceTimelineEntry,
+    "providerName" | "providerProtocol" | "providerModel" | "providerSource" | "providerMode"
+  >;
+  terminalState?: "completed" | "error" | "cancelled" | null;
+  fallbackReason?: string | null;
+  error?: string | null;
+  inputTokens?: number | null;
+  cacheHitInputTokens?: number | null;
+  reasoningTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  firstTokenLatencyMs?: number | null;
+  turnDurationMs?: number | null;
+}) {
+  const {
+    turnId,
+    messages,
+    phase,
+    buildContextObservation,
+    assistantMessage,
+    toolActivities,
+    providerPatch,
+    terminalState,
+    fallbackReason,
+    error,
+    inputTokens,
+    cacheHitInputTokens,
+    reasoningTokens,
+    outputTokens,
+    totalTokens,
+    firstTokenLatencyMs,
+    turnDurationMs
+  } = options;
+
+  const normalizedToolActivities = toolActivities ?? [];
+  const topLevelTools = normalizedToolActivities.filter((activity) => !activity.id.includes("-child-") && !activity.id.includes("-planned-"));
+  const userInputText = messages.find((message) => message.turnId === turnId && message.role === "user")?.content ?? null;
+  const timeline: TraceTimelineEntry[] = [];
+
+  timeline.push(createTimelineEntry("input", 1, undefined, {
+    state: "completed",
+    text: userInputText
+  }));
+  let sequence = 2;
+  if (traceUsesRetrieval(buildContextObservation)) {
+    timeline.push(createTimelineEntry("prepare_retrieval", sequence, undefined, {
+      state: "completed",
+      ...providerPatch
+    }));
+    sequence += 1;
+  }
+  timeline.push(createTimelineEntry("build_context", sequence, undefined, {
+    state: "completed",
+    buildContextObservation,
+    ...providerPatch
+  }));
+  sequence += 1;
+
+  const isTerminal = terminalState != null;
+  const isCallingTool = phase === "calling_tool";
+  const modelHopCount = isTerminal || phase === "calling_model"
+    ? topLevelTools.length + 1
+    : Math.max(topLevelTools.length, 1);
+
+  for (let modelIndex = 0; modelIndex < modelHopCount; modelIndex += 1) {
+    const isLastModel = modelIndex === modelHopCount - 1;
+    let modelState: TraceTimelineEntry["state"] = "completed";
+    if (terminalState === "error" && isLastModel) {
+      modelState = "error";
+    } else if (terminalState === "cancelled" && isLastModel) {
+      modelState = "cancelled";
+    } else if (!isTerminal && phase === "calling_model" && isLastModel) {
+      modelState = "active";
+    }
+
+    timeline.push(createTimelineEntry("call_model", sequence, modelIndex + 1, {
+      state: modelState,
+      text: !isTerminal && phase === "calling_model" && isLastModel ? assistantMessage?.content ?? null : null,
+      reasoningContent: !isTerminal && phase === "calling_model" && isLastModel ? assistantMessage?.reasoningContent ?? null : null,
+      firstTokenLatencyMs: !isTerminal && phase === "calling_model" && isLastModel ? firstTokenLatencyMs ?? null : null,
+      ...providerPatch
+    }));
+    sequence += 1;
+
+    const parentTool = topLevelTools[modelIndex];
+    if (parentTool) {
+      let toolState: TraceTimelineEntry["state"] = parentTool.status === "error" ? "error" : "completed";
+      if (!isTerminal && isCallingTool && modelIndex === topLevelTools.length - 1) {
+        toolState = parentTool.status === "error" ? "error" : "active";
+      }
+      if (terminalState === "cancelled" && toolState === "active") {
+        toolState = "cancelled";
+      }
+
+      timeline.push(createTimelineEntry("call_tool", sequence, modelIndex + 1, {
+        label: `CALL TOOL #${modelIndex + 1} · ${parentTool.name}`,
+        state: toolState,
+        toolActivities: toolActivitiesForHop(normalizedToolActivities, parentTool.id),
+        text: parentTool.summary ?? null,
+        error: parentTool.status === "error" ? parentTool.summary : null
+      }));
+      sequence += 1;
+    }
+  }
+
+  if (!isTerminal && isCallingTool && topLevelTools.length === 0) {
+    timeline.push(createTimelineEntry("call_tool", sequence, 1, { state: "active" }));
+    sequence += 1;
+  }
+
+  if (terminalState) {
+    const reverseModelIndex = [...timeline].reverse().findIndex((entry) => entry.kind === "call_model");
+    if (reverseModelIndex !== -1) {
+      const modelIndex = timeline.length - 1 - reverseModelIndex;
+      const modelEntry = timeline[modelIndex];
+      timeline[modelIndex] = {
+        ...modelEntry,
+        state: terminalState,
+        text: assistantMessage?.content ?? modelEntry.text ?? null,
+        reasoningContent: assistantMessage?.reasoningContent ?? modelEntry.reasoningContent ?? null,
+        fallbackReason: fallbackReason ?? modelEntry.fallbackReason ?? null,
+        error: error ?? modelEntry.error ?? null,
+        inputTokens: inputTokens ?? modelEntry.inputTokens ?? null,
+        cacheHitInputTokens: cacheHitInputTokens ?? modelEntry.cacheHitInputTokens ?? null,
+        reasoningTokens: reasoningTokens ?? modelEntry.reasoningTokens ?? null,
+        outputTokens: outputTokens ?? modelEntry.outputTokens ?? null,
+        totalTokens: totalTokens ?? modelEntry.totalTokens ?? null,
+        firstTokenLatencyMs: firstTokenLatencyMs ?? modelEntry.firstTokenLatencyMs ?? null,
+        turnDurationMs: turnDurationMs ?? modelEntry.turnDurationMs ?? null,
+        ...providerPatch
+      };
+    }
+  }
+
+  return timeline;
 }
 
 function cloneMessages(messages?: ChatMessage[] | null) {
@@ -181,6 +445,21 @@ function cloneMessages(messages?: ChatMessage[] | null) {
 
 function cloneAttachmentAssets(assets?: AttachmentAsset[] | null) {
   return (assets ?? []).map((asset) => ({ ...asset }));
+}
+
+function cloneHistoryNodes(nodes?: HistoryNode[] | null) {
+  return (nodes ?? []).map((node) => ({
+    ...node,
+    workspaceRef: node.workspaceRef ? { ...node.workspaceRef } : node.workspaceRef ?? null
+  }));
+}
+
+function cloneHistoryBranches(branches?: HistoryBranch[] | null) {
+  return (branches ?? []).map((branch) => ({ ...branch }));
+}
+
+function cloneHistoryCursor(cursor?: HistoryCursorState | null) {
+  return cursor ? { ...cursor } : null;
 }
 
 function cloneRetrievedContext(retrievedContext?: RetrievedContextState | null) {
@@ -365,8 +644,7 @@ function createDefaultTraceSteps() {
     { key: "plan", state: "completed" },
     { key: "context", state: "active" },
     { key: "callModel", state: "pending" },
-    { key: "callTool", state: "pending" },
-    { key: "return", state: "pending" }
+    { key: "callTool", state: "pending" }
   ]);
 }
 
@@ -375,8 +653,7 @@ function createSubmitTraceSteps() {
     { key: "plan", state: "completed" },
     { key: "context", state: "completed" },
     { key: "callModel", state: "active" },
-    { key: "callTool", state: "pending" },
-    { key: "return", state: "pending" }
+    { key: "callTool", state: "pending" }
   ]);
 }
 
@@ -385,8 +662,7 @@ function createBrowserPreviewTraceSteps() {
     { key: "plan", state: "completed" },
     { key: "contextBrowser", state: "completed" },
     { key: "callModelBrowser", state: "completed" },
-    { key: "callTool", state: "pending" },
-    { key: "return", state: "completed" }
+    { key: "callTool", state: "pending" }
   ]);
 }
 
@@ -395,8 +671,7 @@ function createSubmitFailureTraceSteps() {
     { key: "plan", state: "completed" },
     { key: "context", state: "completed" },
     { key: "callModel", state: "error" },
-    { key: "callTool", state: "pending" },
-    { key: "return", state: "pending" }
+    { key: "callTool", state: "pending" }
   ]);
 }
 
@@ -413,6 +688,184 @@ function finalizeCancelledTraceSteps(traceSteps?: TraceStep[] | null): TraceStep
       state: cancelledState
     };
   });
+}
+
+function timelineLabel(kind: TraceTimelineEntry["kind"], index?: number) {
+  switch (canonicalizeTraceTimelineKind(kind)) {
+    case "input":
+      return "RECEIVE INPUT";
+    case "prepare_retrieval":
+      return "PREPARE RETRIEVAL";
+    case "build_context":
+      return "BUILD CONTEXT";
+    case "call_model":
+      return `CALL MODEL #${index ?? 1}`;
+    case "call_tool":
+      return `CALL TOOL #${index ?? 1}`;
+    case "return_result":
+      return "RETURN RESULT";
+    default:
+      return "TRACE";
+  }
+}
+
+function createTimelineEntry(
+  kind: TraceTimelineEntry["kind"],
+  sequence: number,
+  index?: number,
+  patch: Partial<TraceTimelineEntry> = {}
+): TraceTimelineEntry {
+  const canonicalKind = canonicalizeTraceTimelineKind(kind);
+  return {
+    id: patch.id ?? `${canonicalKind}-${sequence}`,
+    kind: canonicalKind,
+    label: patch.label ?? timelineLabel(canonicalKind, index),
+    state: patch.state ?? "pending",
+    sequence,
+    providerName: patch.providerName ?? null,
+    providerProtocol: patch.providerProtocol ?? null,
+    providerModel: patch.providerModel ?? null,
+    providerSource: patch.providerSource ?? null,
+    providerMode: patch.providerMode ?? null,
+    buildContextObservation: cloneBuildContextObservation(patch.buildContextObservation),
+    toolActivities: cloneToolActivities(patch.toolActivities),
+    text: patch.text ?? null,
+    reasoningContent: patch.reasoningContent ?? null,
+    fallbackReason: patch.fallbackReason ?? null,
+    error: patch.error ?? null,
+    inputTokens: patch.inputTokens ?? null,
+    cacheHitInputTokens: patch.cacheHitInputTokens ?? null,
+    reasoningTokens: patch.reasoningTokens ?? null,
+    outputTokens: patch.outputTokens ?? null,
+    totalTokens: patch.totalTokens ?? null,
+    firstTokenLatencyMs: patch.firstTokenLatencyMs ?? null,
+    turnDurationMs: patch.turnDurationMs ?? null
+  };
+}
+
+function createDefaultTraceTimeline() {
+  return [
+    createTimelineEntry("input", 1, undefined, { state: "completed" }),
+    createTimelineEntry("build_context", 2, undefined, { state: "completed" }),
+    createTimelineEntry("call_model", 3, 1, { state: "active" })
+  ];
+}
+
+function createBrowserPreviewTraceTimeline() {
+  return [
+    createTimelineEntry("input", 1, undefined, { state: "completed" }),
+    createTimelineEntry("build_context", 2, undefined, { state: "completed" }),
+    createTimelineEntry("call_model", 3, 1, { state: "completed" })
+  ];
+}
+
+function createSubmitFailureTraceTimeline() {
+  return [
+    createTimelineEntry("input", 1, undefined, { state: "completed" }),
+    createTimelineEntry("build_context", 2, undefined, { state: "completed" }),
+    createTimelineEntry("call_model", 3, 1, { state: "error" })
+  ];
+}
+
+function traceUsesRetrieval(buildContextObservation?: BuildContextObservation | null) {
+  if (!buildContextObservation) {
+    return false;
+  }
+
+  return (
+    buildContextObservation.messageCount > 2 ||
+    (buildContextObservation.prefixMutationReasons?.length ?? 0) > 0 ||
+    buildContextObservation.semiStableContextText.trim().length > 0
+  );
+}
+
+function toolActivitiesForHop(toolActivities: ToolActivity[] | null | undefined, parentId?: string | null) {
+  if (!toolActivities?.length || !parentId) {
+    return [];
+  }
+
+  return toolActivities.filter((activity) => activity.id === parentId || activity.id.startsWith(`${parentId}-`));
+}
+
+function resolveTerminalToolActivities(
+  payloadToolActivities: ToolActivity[] | null | undefined,
+  currentToolActivities: ToolActivity[] | null | undefined
+) {
+  return payloadToolActivities?.length ? payloadToolActivities : (currentToolActivities ?? []);
+}
+
+function deriveTraceTimelineFromLegacyTrace(turn: TurnTraceRecord) {
+  if (turn.traceTimeline?.length) {
+    return cloneTraceTimeline(turn.traceTimeline);
+  }
+
+  const timeline: TraceTimelineEntry[] = [];
+  let sequence = 1;
+  for (const step of turn.traceSteps ?? []) {
+    if (step.id === "step-context" && traceUsesRetrieval(turn.buildContextObservation)) {
+      timeline.push(
+        createTimelineEntry("prepare_retrieval", sequence, undefined, {
+          id: `${step.id}-prepare-retrieval`,
+          label: "PREPARE RETRIEVAL",
+          state: step.state,
+          providerName: turn.providerName,
+          providerProtocol: turn.providerProtocol,
+          providerModel: turn.providerModel,
+          providerSource: turn.providerSource,
+          providerMode: turn.providerMode,
+          fallbackReason: turn.fallbackReason,
+          error: turn.error
+        })
+      );
+      sequence += 1;
+    }
+
+    const kind: TraceTimelineEntry["kind"] =
+      step.id === "step-plan"
+        ? "input"
+        : step.id === "step-context"
+          ? "build_context"
+          : step.id === "step-call-model"
+            ? "call_model"
+            : step.id === "step-call-tool"
+              ? "call_tool"
+              : "return_result";
+    timeline.push(createTimelineEntry(kind, sequence, kind === "call_model" || kind === "call_tool" ? 1 : undefined, {
+      id: step.id,
+      label: step.label.toUpperCase(),
+      state: step.state,
+      buildContextObservation: kind === "build_context" ? turn.buildContextObservation : null,
+      toolActivities: kind === "call_tool" ? turn.toolActivities : [],
+      inputTokens: kind === "return_result" ? turn.inputTokens : null,
+      cacheHitInputTokens: kind === "return_result" ? turn.cacheHitInputTokens : null,
+      reasoningTokens: kind === "return_result" ? turn.reasoningTokens : null,
+      outputTokens: kind === "return_result" ? turn.outputTokens : null,
+      totalTokens: kind === "return_result" ? turn.totalTokens : null,
+      firstTokenLatencyMs: kind === "call_model" ? turn.firstTokenLatencyMs : null,
+      turnDurationMs: kind === "return_result" ? turn.turnDurationMs : null,
+      providerName: turn.providerName,
+      providerProtocol: turn.providerProtocol,
+      providerModel: turn.providerModel,
+      providerSource: turn.providerSource,
+      providerMode: turn.providerMode,
+      fallbackReason: turn.fallbackReason,
+      error: turn.error
+    }));
+    sequence += 1;
+  }
+
+  return timeline;
+}
+
+function normalizeTurnTraceRecord(trace: TurnTraceRecord): TurnTraceRecord {
+  return {
+    ...trace,
+    buildContextObservation: cloneBuildContextObservation(trace.buildContextObservation),
+    traceSteps: cloneTraceSteps(trace.traceSteps),
+    traceTimeline: cloneTraceTimeline(deriveTraceTimelineFromLegacyTrace(trace)),
+    toolActivities: cloneToolActivities(trace.toolActivities),
+    providerCallRecords: cloneProviderCallRecords(trace.providerCallRecords)
+  };
 }
 
 function wait(ms: number) {
@@ -528,6 +981,22 @@ function createBlankSessionRuntimeFields() {
   };
 }
 
+function normalizeHistoryCursorMode(mode?: string | null): HistoryCursorMode {
+  if (mode === "historical" || mode === "historical_dirty") {
+    return mode;
+  }
+
+  return "live";
+}
+
+function resolveHistoryBranchHeadNodeId(branchId: string | null, branches: HistoryBranch[]) {
+  if (!branchId) {
+    return null;
+  }
+
+  return branches.find((branch) => branch.branchId === branchId)?.headNodeId ?? null;
+}
+
 function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapshot {
   return {
     sessionId: state.sessionId,
@@ -551,16 +1020,18 @@ function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapsh
     isSubmitting: state.isSubmitting,
     activeTurnId: state.activeTurnId,
     activeRunId: state.activeRunId,
+    visibleNodeId: state.visibleNodeId,
+    branchHeadNodeId: state.branchHeadNodeId,
+    activeBranchId: state.activeBranchId,
+    historyCursorMode: state.historyCursorMode,
+    historyNodes: cloneHistoryNodes(state.historyNodes),
+    historyBranches: cloneHistoryBranches(state.historyBranches),
     messages: cloneMessages(state.messages),
     attachmentAssets: cloneAttachmentAssets(state.attachmentAssets),
       toolActivities: cloneToolActivities(state.toolActivities),
       traceSteps: cloneTraceSteps(state.traceSteps),
-      turnTraceHistory: state.turnTraceHistory.map((trace) => ({
-        ...trace,
-        buildContextObservation: cloneBuildContextObservation(trace.buildContextObservation),
-        traceSteps: cloneTraceSteps(trace.traceSteps),
-        toolActivities: cloneToolActivities(trace.toolActivities)
-      }))
+      traceTimeline: cloneTraceTimeline(state.traceTimeline),
+      turnTraceHistory: state.turnTraceHistory.map((trace) => normalizeTurnTraceRecord(trace))
   };
 }
 
@@ -586,16 +1057,18 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.isSubmitting = snapshot.isSubmitting;
   state.activeTurnId = snapshot.activeTurnId;
   state.activeRunId = snapshot.activeRunId;
+  state.visibleNodeId = snapshot.visibleNodeId;
+  state.branchHeadNodeId = snapshot.branchHeadNodeId;
+  state.activeBranchId = snapshot.activeBranchId;
+  state.historyCursorMode = snapshot.historyCursorMode;
+  state.historyNodes = cloneHistoryNodes(snapshot.historyNodes);
+  state.historyBranches = cloneHistoryBranches(snapshot.historyBranches);
   state.messages = cloneMessages(snapshot.messages);
   state.attachmentAssets = cloneAttachmentAssets(snapshot.attachmentAssets);
   state.toolActivities = cloneToolActivities(snapshot.toolActivities);
   state.traceSteps = cloneTraceSteps(snapshot.traceSteps);
-  state.turnTraceHistory = snapshot.turnTraceHistory.map((trace) => ({
-    ...trace,
-    buildContextObservation: cloneBuildContextObservation(trace.buildContextObservation),
-    traceSteps: cloneTraceSteps(trace.traceSteps),
-    toolActivities: cloneToolActivities(trace.toolActivities)
-  }));
+  state.traceTimeline = cloneTraceTimeline(snapshot.traceTimeline);
+  state.turnTraceHistory = snapshot.turnTraceHistory.map((trace) => normalizeTurnTraceRecord(trace));
 }
 
 const defaultAvailableTools: AvailableTool[] = [
@@ -691,6 +1164,50 @@ function createAvailableTools() {
   }));
 }
 
+const defaultCapabilitySources: CapabilitySourceView[] = [
+  {
+    sourceId: "builtin-tools",
+    sourceKind: "builtin",
+    displayName: "Builtin Tools",
+    transportKind: "in_process",
+    serverIdentity: "pony-agent:builtin-tools",
+    availability: "available",
+    declaredCapabilities: ["tool"],
+    permissionProfile: "host-mediated",
+    updatedAtMs: 0
+  }
+];
+
+function createCapabilitySources() {
+  return defaultCapabilitySources.map((source) => ({
+    ...source,
+    declaredCapabilities: [...source.declaredCapabilities]
+  }));
+}
+
+function canonicalizeBuiltinCapabilityName(toolName: string) {
+  return toolName.replace(/\./g, "_");
+}
+
+function createCapabilities() {
+  return defaultAvailableTools.map((tool): CapabilityView => ({
+    capabilityId: `builtin:${canonicalizeBuiltinCapabilityName(tool.name)}`,
+    sourceId: "builtin-tools",
+    sourceKind: "builtin",
+    kind: "tool",
+    label: canonicalizeBuiltinCapabilityName(tool.name),
+    description: tool.description,
+    invocationMode: "direct_tool_call",
+    inputSchemaSummary: tool.inputSchema.type ?? "object",
+    safetyClass: "host_tool",
+    visibility: "default",
+    observabilityTags: ["builtin", "tool"],
+    requiresApproval: false,
+    hostMediated: true,
+    permissionScope: "workspace"
+  }));
+}
+
 function buildTurnHistory(messages: ChatMessage[]): TurnHistoryMessage[] {
   return messages
     .filter(
@@ -720,12 +1237,7 @@ function createSnapshotFromRuntimeState(state: RuntimeState, sessionId: string):
     summary: retrievedSummary || state.sessionSummary || DEFAULT_BROWSER_SESSION_SUMMARY,
     history: buildTurnHistory(state.messages),
     attachmentAssets: cloneAttachmentAssets(state.attachmentAssets),
-    turnTraceHistory: state.turnTraceHistory.map((trace) => ({
-      ...trace,
-      buildContextObservation: cloneBuildContextObservation(trace.buildContextObservation),
-      traceSteps: cloneTraceSteps(trace.traceSteps),
-      toolActivities: cloneToolActivities(trace.toolActivities)
-    })),
+    turnTraceHistory: state.turnTraceHistory.map((trace) => normalizeTurnTraceRecord(trace)),
     turnCount: state.messages.filter((message) => message.role === "user").length,
     lastReferencedFile: null,
     updatedAtMs:
@@ -1067,14 +1579,23 @@ export const useRuntimeStore = defineStore("runtime", {
       isSubmitting: false,
       activeTurnId: null,
       activeRunId: null,
+      visibleNodeId: null,
+      branchHeadNodeId: null,
+      activeBranchId: null,
+      historyCursorMode: "live",
+      historyNodes: [],
+      historyBranches: [],
       eventsReady: false,
       deferredPersistTimerId: null,
       messages: persisted?.messages ?? [],
       attachmentAssets: persisted?.attachmentAssets ?? [],
       availableTools: createAvailableTools(),
+      capabilitySources: createCapabilitySources(),
+      capabilities: createCapabilities(),
       toolActivities: [],
       traceSteps: createDefaultTraceSteps(),
-      turnTraceHistory: persisted?.turnTraceHistory ?? []
+      traceTimeline: createDefaultTraceTimeline(),
+      turnTraceHistory: (persisted?.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace))
     };
   },
   getters: {
@@ -1091,6 +1612,9 @@ export const useRuntimeStore = defineStore("runtime", {
       };
 
       return labels[state.phase] ?? state.phase;
+    },
+    isHistoricalMode(state): boolean {
+      return state.historyCursorMode !== "live";
     }
   },
   actions: {
@@ -1116,10 +1640,17 @@ export const useRuntimeStore = defineStore("runtime", {
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeRunId = null;
+      this.visibleNodeId = null;
+      this.branchHeadNodeId = null;
+      this.activeBranchId = null;
+      this.historyCursorMode = "live";
+      this.historyNodes = [];
+      this.historyBranches = [];
       this.messages = [];
       this.attachmentAssets = [];
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
+      this.traceTimeline = createDefaultTraceTimeline();
       this.turnTraceHistory = [];
     },
     cancelDeferredPersist() {
@@ -1181,6 +1712,32 @@ export const useRuntimeStore = defineStore("runtime", {
     getAttachmentAssets(filter?: AttachmentAssetFilter | null) {
       return filterAttachmentAssets(this.attachmentAssets, filter);
     },
+    applyHistoryState(
+      _sessionId: string,
+      payload?:
+        | (Partial<HistoryCursorState> & {
+            historyNodes?: HistoryNode[] | null;
+            historyBranches?: HistoryBranch[] | null;
+          })
+        | null
+    ) {
+      const historyNodes = cloneHistoryNodes(payload?.historyNodes);
+      const historyBranches = cloneHistoryBranches(payload?.historyBranches);
+      const activeBranchId = payload?.activeBranchId?.trim() || null;
+      const explicitHeadNodeId = payload?.branchHeadNodeId?.trim() || null;
+      const branchHeadNodeId =
+        explicitHeadNodeId || resolveHistoryBranchHeadNodeId(activeBranchId, historyBranches);
+      const visibleNodeId = payload?.visibleNodeId?.trim() || null;
+
+      this.historyNodes = historyNodes;
+      this.historyBranches = historyBranches;
+      this.activeBranchId = activeBranchId;
+      this.branchHeadNodeId = branchHeadNodeId;
+      this.visibleNodeId = visibleNodeId;
+      this.historyCursorMode = normalizeHistoryCursorMode(
+        payload?.mode ?? (visibleNodeId && branchHeadNodeId && visibleNodeId !== branchHeadNodeId ? "historical" : "live")
+      );
+    },
     async loadSessionCatalog() {
       if (isTauriAvailable()) {
         this.sessionList = await safeInvoke<SessionOverview[]>("list_sessions");
@@ -1192,12 +1749,18 @@ export const useRuntimeStore = defineStore("runtime", {
         .map(([conversationId, state]) => buildSessionOverviewFromPersistedState(conversationId, state))
         .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
     },
-    async loadSessionRuntimeViewState(sessionId: string) {
+    async loadSessionRuntimeViewState(sessionId: string, nodeId?: string | null) {
       if (isTauriAvailable()) {
-        return await safeInvoke<SessionRuntimeView>("load_session_runtime_view", {
+        const payload: Record<string, unknown> = {
           turnId: null,
           sessionId,
           runId: null
+        };
+        if (nodeId) {
+          payload.nodeId = nodeId;
+        }
+        return await safeInvoke<SessionRuntimeView>("load_session_runtime_view", {
+          ...payload
         });
       }
 
@@ -1219,7 +1782,10 @@ export const useRuntimeStore = defineStore("runtime", {
       return {
         session: snapshot,
         retrieved: deriveRetrievedContextFromSnapshot(snapshot),
-        checkpoint: null
+        checkpoint: null,
+        historyNodes: undefined,
+        historyBranches: undefined,
+        historyCursor: null
       } satisfies SessionRuntimeView;
     },
     applyExecutionCheckpoint(
@@ -1264,9 +1830,14 @@ export const useRuntimeStore = defineStore("runtime", {
       this.fallbackReason = checkpoint.fallbackReason ?? this.fallbackReason;
       this.traceSteps = checkpoint.traceSteps.length > 0 ? checkpoint.traceSteps : this.traceSteps;
       this.toolActivities = checkpoint.toolActivities;
+      const checkpointTimeline = cloneTraceTimeline(
+        this.turnTraceHistory.find((trace) => trace.turnId === checkpoint.turnId)?.traceTimeline
+      );
+      this.traceTimeline = checkpointTimeline.length ? checkpointTimeline : createDefaultTraceTimeline();
       this.upsertTurnTrace(checkpoint.turnId, {
         phase: this.phase,
         traceSteps: this.traceSteps,
+        traceTimeline: this.traceTimeline,
         toolActivities: this.toolActivities,
         providerRequestedName: this.providerRequestedName,
         providerName: this.providerName,
@@ -1290,16 +1861,40 @@ export const useRuntimeStore = defineStore("runtime", {
         refreshCatalog?: boolean;
         executionCheckpoint?: ExecutionCheckpoint | null;
         runtimeView?: SessionRuntimeView | null;
+        nodeId?: string | null;
       }
     ) {
       const refreshCatalog = options?.refreshCatalog ?? true;
-      const runtimeView = options?.runtimeView ?? (await this.loadSessionRuntimeViewState(nextSessionId));
+      const runtimeView =
+        options?.runtimeView ?? (await this.loadSessionRuntimeViewState(nextSessionId, options?.nodeId ?? null));
       const snapshot = runtimeView.session;
       const retrieved = runtimeView.retrieved;
       const persisted = loadPersistedRuntimeState(nextSessionId);
+      const previousHistoryState = {
+        activeBranchId: this.activeBranchId,
+        branchHeadNodeId: this.branchHeadNodeId,
+        historyNodes: this.historyNodes,
+        historyBranches: this.historyBranches
+      };
       const hasCheckpointOverride =
         options != null && Object.prototype.hasOwnProperty.call(options, "executionCheckpoint");
-      this.applySessionSnapshot(nextSessionId, snapshot, retrieved);
+      this.applySessionSnapshot(nextSessionId, snapshot, retrieved, runtimeView);
+      if (
+        options?.nodeId &&
+        !runtimeView.historyCursor &&
+        !runtimeView.historyNodes?.length &&
+        !runtimeView.historyBranches?.length
+      ) {
+        this.applyHistoryState(nextSessionId, {
+          ...previousHistoryState,
+          visibleNodeId: options.nodeId,
+          mode:
+            previousHistoryState.branchHeadNodeId &&
+            previousHistoryState.branchHeadNodeId !== options.nodeId
+              ? "historical"
+              : "live"
+        });
+      }
       this.applyExecutionCheckpoint(
         hasCheckpointOverride
           ? (options?.executionCheckpoint ?? null)
@@ -1313,7 +1908,7 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     async loadRetrievedContextState(
       sessionId: string,
-      options?: { runId?: string | null; snapshot?: SessionSnapshot | null }
+      options?: { runId?: string | null; snapshot?: SessionSnapshot | null; nodeId?: string | null }
     ) {
       const fallbackSnapshot = options?.snapshot ?? createSnapshotFromRuntimeState(this, sessionId);
       if (!isTauriAvailable()) {
@@ -1321,11 +1916,15 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       try {
-        const retrieved = await safeInvoke<RetrievedContextState>("load_retrieved_context", {
+        const payload: Record<string, unknown> = {
           sessionId,
           runId: options?.runId ?? null,
           turnId: null
-        });
+        };
+        if (options?.nodeId) {
+          payload.nodeId = options.nodeId;
+        }
+        const retrieved = await safeInvoke<RetrievedContextState>("load_retrieved_context", payload);
         return cloneRetrievedContext(retrieved);
       } catch (error) {
         debugLog("retrieved-context:load:error", {
@@ -1341,6 +1940,7 @@ export const useRuntimeStore = defineStore("runtime", {
       runId?: string | null;
       preferRefresh?: boolean;
       snapshot?: SessionSnapshot | null;
+      nodeId?: string | null;
     }): Promise<GraphRun | null> {
       const targetSessionId = options?.sessionId?.trim() || this.sessionId;
       if (!targetSessionId) {
@@ -1368,14 +1968,20 @@ export const useRuntimeStore = defineStore("runtime", {
 
       const refreshedRetrieved = await this.loadRetrievedContextState(targetSessionId, {
         runId: options?.runId ?? this.activeRunId,
-        snapshot: options?.snapshot ?? createSnapshotFromRuntimeState(this, targetSessionId)
+        snapshot: options?.snapshot ?? createSnapshotFromRuntimeState(this, targetSessionId),
+        nodeId: options?.nodeId ?? this.visibleNodeId
       });
       if (this.sessionId === targetSessionId) {
         this.retrievedContext = refreshedRetrieved;
       }
       return deriveRun(refreshedRetrieved);
     },
-    applySessionSnapshot(sessionId: string, snapshot: SessionSnapshot, retrieved?: RetrievedContextState | null) {
+    applySessionSnapshot(
+      sessionId: string,
+      snapshot: SessionSnapshot,
+      retrieved?: RetrievedContextState | null,
+      runtimeView?: Pick<SessionRuntimeView, "historyNodes" | "historyBranches" | "historyCursor"> | null
+    ) {
       const persisted = loadPersistedRuntimeState(sessionId);
       const canReusePersistedState = isPersistedStateCompatible(snapshot, persisted);
       const canMergePersistedMessages = isPersistedMessageShapeCompatible(snapshot, persisted);
@@ -1399,9 +2005,11 @@ export const useRuntimeStore = defineStore("runtime", {
         canMergePersistedMessages ? persisted?.messages : null
       );
       this.attachmentAssets = snapshot.attachmentAssets ?? restoredState?.attachmentAssets ?? [];
-      this.turnTraceHistory = snapshotTurnTraceHistory.length
-        ? snapshotTurnTraceHistory
-        : restoredState?.turnTraceHistory ?? [];
+      this.turnTraceHistory = (
+        snapshotTurnTraceHistory.length
+          ? snapshotTurnTraceHistory
+          : restoredState?.turnTraceHistory ?? []
+      ).map((trace) => normalizeTurnTraceRecord(trace));
       this.providerRequestedName = restoredState?.providerRequestedName ?? blankFields.providerRequestedName;
       this.providerName = restoredState?.providerName ?? blankFields.providerName;
       this.providerProtocol = restoredState?.providerProtocol ?? blankFields.providerProtocol;
@@ -1415,8 +2023,167 @@ export const useRuntimeStore = defineStore("runtime", {
       this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? blankFields.firstTokenLatencyMs;
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
+      const restoredTraceTimeline = cloneTraceTimeline(this.turnTraceHistory[this.turnTraceHistory.length - 1]?.traceTimeline);
+      this.traceTimeline = restoredTraceTimeline.length ? restoredTraceTimeline : createDefaultTraceTimeline();
       this.phase = this.messages.length ? "ready" : "idle";
+      this.applyHistoryState(sessionId, {
+        historyNodes: runtimeView?.historyNodes,
+        historyBranches: runtimeView?.historyBranches,
+        ...(cloneHistoryCursor(runtimeView?.historyCursor) ?? {})
+      });
       this.persistHistory();
+    },
+    async checkoutHistoryNode(nodeId: string, mode: HistoryCheckoutMode = "transcript_only") {
+      const sessionId = this.sessionId;
+      if (!sessionId || !nodeId.trim()) {
+        return null;
+      }
+
+      let result: HistoryCheckoutResult;
+      if (isTauriAvailable()) {
+        result = await safeInvoke<HistoryCheckoutResult>("checkout_history_node", {
+          sessionId,
+          nodeId,
+          mode
+        });
+      } else {
+        result = {
+          sessionId,
+          visibleNodeId: nodeId,
+          activeBranchId: this.activeBranchId,
+          branchHeadNodeId: this.branchHeadNodeId,
+          workspaceNodeId: this.visibleNodeId,
+          mode:
+            this.branchHeadNodeId && this.branchHeadNodeId !== nodeId ? "historical" : "live",
+          requestedMode: mode,
+          appliedMode: "transcript_only",
+          workspaceRestoreApplied: false,
+          degradedToTranscriptOnly: mode === "transcript_and_workspace",
+          historyNodes: this.historyNodes,
+          historyBranches: this.historyBranches
+        };
+      }
+
+      await this.loadSessionState(sessionId, {
+        refreshCatalog: false,
+        nodeId
+      });
+      this.applyHistoryState(sessionId, result);
+      return result;
+    },
+    async restoreBranchHead(branchId?: string | null) {
+      const sessionId = this.sessionId;
+      const targetBranchId = branchId?.trim() || this.activeBranchId;
+      if (!sessionId) {
+        return null;
+      }
+
+      let result: HistoryRestoreResult;
+      if (isTauriAvailable()) {
+        result = await safeInvoke<HistoryRestoreResult>("restore_branch_head", {
+          sessionId,
+          branchId: targetBranchId ?? null
+        });
+      } else {
+        const branchHeadNodeId =
+          resolveHistoryBranchHeadNodeId(targetBranchId, this.historyBranches) ?? this.branchHeadNodeId;
+        result = {
+          sessionId,
+          visibleNodeId: branchHeadNodeId,
+          activeBranchId: targetBranchId,
+          branchHeadNodeId,
+          workspaceNodeId: branchHeadNodeId,
+          mode: "live",
+          restoredFromNodeId: this.visibleNodeId,
+          historyNodes: this.historyNodes,
+          historyBranches: this.historyBranches
+        };
+      }
+
+      await this.loadSessionState(sessionId, {
+        refreshCatalog: false,
+        nodeId: result.visibleNodeId ?? result.branchHeadNodeId ?? null
+      });
+      this.applyHistoryState(sessionId, result);
+      return result;
+    },
+    async forkHistoryNode(nodeId?: string | null) {
+      const sessionId = this.sessionId;
+      const targetNodeId = nodeId?.trim() || this.visibleNodeId;
+      if (!sessionId || !targetNodeId) {
+        return null;
+      }
+
+      let result: HistoryForkResult;
+      if (isTauriAvailable()) {
+        result = await safeInvoke<HistoryForkResult>("fork_from_history_node", {
+          sessionId,
+          nodeId: targetNodeId
+        });
+      } else {
+        const createdBranchId = `branch-${Date.now()}`;
+        const nextBranch: HistoryBranch = {
+          branchId: createdBranchId,
+          sessionId,
+          baseNodeId: targetNodeId,
+          headNodeId: targetNodeId,
+          forkedFromBranchId: this.activeBranchId,
+          forkedFromNodeId: targetNodeId,
+          label: null,
+          createdAtMs: Date.now(),
+          updatedAtMs: Date.now()
+        };
+        result = {
+          sessionId,
+          visibleNodeId: targetNodeId,
+          activeBranchId: createdBranchId,
+          branchHeadNodeId: targetNodeId,
+          workspaceNodeId: this.visibleNodeId,
+          mode: "live",
+          forkedFromNodeId: targetNodeId,
+          forkedFromBranchId: this.activeBranchId,
+          createdBranchId,
+          historyNodes: this.historyNodes,
+          historyBranches: [...this.historyBranches, nextBranch]
+        };
+      }
+
+      this.applyHistoryState(sessionId, result);
+      return result;
+    },
+    async switchHistoryBranch(branchId: string) {
+      const sessionId = this.sessionId;
+      if (!sessionId || !branchId.trim()) {
+        return null;
+      }
+
+      let result: HistoryBranchSwitchResult;
+      if (isTauriAvailable()) {
+        result = await safeInvoke<HistoryBranchSwitchResult>("switch_history_branch", {
+          sessionId,
+          branchId
+        });
+      } else {
+        const branchHeadNodeId = resolveHistoryBranchHeadNodeId(branchId, this.historyBranches);
+        result = {
+          sessionId,
+          visibleNodeId: branchHeadNodeId,
+          activeBranchId: branchId,
+          branchHeadNodeId,
+          workspaceNodeId: branchHeadNodeId,
+          mode: "live",
+          previousBranchId: this.activeBranchId,
+          historyNodes: this.historyNodes,
+          historyBranches: this.historyBranches
+        };
+      }
+
+      await this.loadSessionState(sessionId, {
+        refreshCatalog: false,
+        nodeId: result.visibleNodeId ?? result.branchHeadNodeId ?? null
+      });
+      this.applyHistoryState(sessionId, result);
+      return result;
     },
     async switchSession(nextSessionId: string) {
       if (this.isSubmitting || this.sessionOperation) {
@@ -1601,17 +2368,27 @@ export const useRuntimeStore = defineStore("runtime", {
         buildTurnTraceTitleFromMessages(this.messages, turnId);
 
       if (existing) {
-        Object.assign(existing, patch, { title: resolvedTitle, updatedAt });
+        Object.assign(existing, patch, {
+          title: resolvedTitle,
+          updatedAt,
+          traceTimeline: patch.traceTimeline ? cloneTraceTimeline(patch.traceTimeline) : existing.traceTimeline,
+          providerCallRecords:
+            patch.providerCallRecords != null
+              ? cloneProviderCallRecords(patch.providerCallRecords)
+              : existing.providerCallRecords
+        });
         this.persistHistory();
         return;
       }
 
-      this.turnTraceHistory.push({
+      this.turnTraceHistory.push(normalizeTurnTraceRecord({
         turnId,
         title: patch.title ?? "未命名轮次",
         phase: patch.phase ?? this.phase,
         traceSteps: cloneTraceSteps(patch.traceSteps),
+        traceTimeline: cloneTraceTimeline(patch.traceTimeline),
         toolActivities: cloneToolActivities(patch.toolActivities),
+        providerCallRecords: cloneProviderCallRecords(patch.providerCallRecords),
         providerRequestedName: patch.providerRequestedName ?? null,
         providerName: patch.providerName ?? null,
         providerProtocol: patch.providerProtocol ?? null,
@@ -1624,13 +2401,38 @@ export const useRuntimeStore = defineStore("runtime", {
         error: patch.error ?? null,
         inputTokens: patch.inputTokens ?? null,
         cacheHitInputTokens: patch.cacheHitInputTokens ?? null,
+        reasoningTokens: patch.reasoningTokens ?? null,
         outputTokens: patch.outputTokens ?? null,
         totalTokens: patch.totalTokens ?? null,
         firstTokenLatencyMs: patch.firstTokenLatencyMs ?? null,
+        turnDurationMs: patch.turnDurationMs ?? null,
         updatedAt
-      });
+      }));
       this.turnTraceHistory[this.turnTraceHistory.length - 1]!.title = resolvedTitle;
       this.persistHistory();
+    },
+    resolveTurnTraceTimeline(turnId: string) {
+      const existingTimeline = cloneTraceTimeline(
+        this.turnTraceHistory.find((trace) => trace.turnId === turnId)?.traceTimeline
+      );
+      if (existingTimeline.length) {
+        return existingTimeline;
+      }
+
+      return this.activeTurnId === turnId && this.traceTimeline.length
+        ? cloneTraceTimeline(this.traceTimeline)
+        : createDefaultTraceTimeline();
+    },
+    commitTurnTraceTimeline(
+      turnId: string,
+      traceTimeline: TraceTimelineEntry[],
+      patch: Partial<Omit<TurnTraceRecord, "turnId" | "updatedAt">> & { updatedAt?: number } = {}
+    ) {
+      this.traceTimeline = cloneTraceTimeline(traceTimeline);
+      this.upsertTurnTrace(turnId, {
+        ...patch,
+        traceTimeline: this.traceTimeline
+      });
     },
     applyTurnTokenStats(turnId: string, inputTokens?: number | null, outputTokens?: number | null) {
       const userMessage = this.messages.find((item) => item.turnId === turnId && item.role === "user");
@@ -1737,9 +2539,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.traceSteps = this.traceSteps.map((step) =>
           step.id === "step-context"
             ? { ...step, state: "completed" }
-            : step.id === "step-return"
-              ? { ...step, state: "active" }
-              : step
+            : step
         );
       } catch (error) {
         this.error = `Rust 后端连接失败：${String(error)}`;
@@ -1769,6 +2569,104 @@ export const useRuntimeStore = defineStore("runtime", {
         debugLog("tools:error", {
           error: String(error)
         });
+      }
+    },
+    async fetchCapabilitySources() {
+      try {
+        this.capabilitySources = isTauriAvailable()
+          ? await safeInvoke<CapabilitySourceView[]>("list_capability_sources")
+          : createCapabilitySources();
+        debugLog("capability-sources:ok", {
+          count: this.capabilitySources.length
+        });
+      } catch (error) {
+        this.capabilitySources = createCapabilitySources();
+        debugLog("capability-sources:error", {
+          error: String(error)
+        });
+      }
+    },
+    async fetchCapabilities(filter?: { sourceId?: string | null; kind?: string | null }) {
+      const sourceId = filter?.sourceId?.trim() || null;
+      const kind = filter?.kind?.trim() || null;
+
+      try {
+        this.capabilities = isTauriAvailable()
+          ? await safeInvoke<CapabilityView[]>("list_capabilities", {
+            sourceId,
+            kind
+          })
+          : createCapabilities().filter((capability) => {
+            if (sourceId && capability.sourceId !== sourceId) {
+              return false;
+            }
+            if (kind && capability.kind !== kind) {
+              return false;
+            }
+            return true;
+          });
+        debugLog("capabilities:ok", {
+          count: this.capabilities.length,
+          sourceId,
+          kind
+        });
+      } catch (error) {
+        this.capabilities = createCapabilities().filter((capability) => {
+          if (sourceId && capability.sourceId !== sourceId) {
+            return false;
+          }
+          if (kind && capability.kind !== kind) {
+            return false;
+          }
+          return true;
+        });
+        debugLog("capabilities:error", {
+          sourceId,
+          kind,
+          error: String(error)
+        });
+      }
+    },
+    async inspectCapability(capabilityId: string) {
+      if (!capabilityId.trim()) {
+        return null;
+      }
+
+      if (!isTauriAvailable()) {
+        return createCapabilities().find((capability) => capability.capabilityId === capabilityId) ?? null;
+      }
+
+      try {
+        return await safeInvoke<CapabilityView | null>("inspect_capability", {
+          capabilityId
+        });
+      } catch (error) {
+        debugLog("capability:inspect:error", {
+          capabilityId,
+          error: String(error)
+        });
+        return createCapabilities().find((capability) => capability.capabilityId === capabilityId) ?? null;
+      }
+    },
+    async inspectCapabilitySource(sourceId: string) {
+      if (!sourceId.trim()) {
+        return null;
+      }
+
+      if (!isTauriAvailable()) {
+        return createCapabilitySources().find((source) => source.sourceId === sourceId) ?? null;
+      }
+
+      try {
+        return await safeInvoke<CapabilitySourceView | null>("inspect_capability_source", {
+          sourceId
+        });
+      } catch (error) {
+        debugLog("capability-source:inspect:error", {
+          sourceId,
+          error: String(error)
+        });
+        return createCapabilitySources().find((source) => source.sourceId === sourceId) ?? null;
       }
     },
     async initializeTurnEvents() {
@@ -1814,9 +2712,24 @@ export const useRuntimeStore = defineStore("runtime", {
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
+        this.traceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            messages: this.messages,
+            phase: "calling_model",
+            buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
+            providerPatch: {
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              providerSource: payload.providerSource ?? this.providerSource,
+              providerMode: payload.providerMode ?? this.providerMode
+            }
+          })
+        );
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.upsertTurnTrace(payload.turnId, {
+        this.commitTurnTraceTimeline(payload.turnId, this.traceTimeline, {
           phase: "calling_model",
           traceSteps: payload.traceSteps ?? this.traceSteps,
           toolActivities: payload.toolActivities ?? this.toolActivities,
@@ -1863,7 +2776,24 @@ export const useRuntimeStore = defineStore("runtime", {
         }
 
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-        this.upsertTurnTrace(payload.turnId, {
+        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            messages: this.messages,
+            phase: "calling_model",
+            assistantMessage,
+            toolActivities: this.toolActivities,
+            providerPatch: {
+              providerName: this.providerName,
+              providerProtocol: this.providerProtocol,
+              providerModel: this.providerModel,
+              providerSource: this.providerSource,
+              providerMode: this.providerMode
+            },
+            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs
+          })
+        );
+        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
           phase: "calling_model",
           firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
           error: null
@@ -1881,9 +2811,27 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
 
+        this.phase = payload.phase === "calling_tool" ? "calling_tool" : "calling_model";
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
-        this.upsertTurnTrace(payload.turnId, {
-          phase: this.phase === "calling_tool" ? "calling_tool" : "calling_model",
+        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            messages: this.messages,
+            phase: payload.phase,
+            assistantMessage: this.messages.find((message) => message.turnId === payload.turnId && message.role === "assistant") ?? null,
+            toolActivities: this.toolActivities,
+            providerPatch: {
+              providerName: this.providerName,
+              providerProtocol: this.providerProtocol,
+              providerModel: this.providerModel,
+              providerSource: this.providerSource,
+              providerMode: this.providerMode
+            },
+            firstTokenLatencyMs: this.firstTokenLatencyMs
+          })
+        );
+        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
+          phase: this.phase,
           traceSteps: payload.traceSteps ?? this.traceSteps,
           toolActivities: this.toolActivities,
           error: null
@@ -1899,15 +2847,32 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
 
-        this.phase = "calling_tool";
+        this.phase = payload.phase === "calling_model" ? "calling_model" : "calling_tool";
         debugLog("event:tool", {
           turnId: payload.turnId,
           tools: (payload.toolActivities ?? []).length
         });
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.upsertTurnTrace(payload.turnId, {
-          phase: "calling_tool",
+        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            messages: this.messages,
+            phase: this.phase,
+            assistantMessage: this.messages.find((message) => message.turnId === payload.turnId && message.role === "assistant") ?? null,
+            toolActivities: payload.toolActivities ?? this.toolActivities,
+            providerPatch: {
+              providerName: this.providerName,
+              providerProtocol: this.providerProtocol,
+              providerModel: this.providerModel,
+              providerSource: this.providerSource,
+              providerMode: this.providerMode
+            },
+            firstTokenLatencyMs: this.firstTokenLatencyMs
+          })
+        );
+        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
+          phase: this.phase,
           traceSteps: this.traceSteps,
           toolActivities: payload.toolActivities ?? this.toolActivities,
           error: null
@@ -1938,7 +2903,8 @@ export const useRuntimeStore = defineStore("runtime", {
 
         this.phase = "ready";
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
-        this.toolActivities = payload.toolActivities ?? this.toolActivities;
+        const terminalToolActivities = resolveTerminalToolActivities(payload.toolActivities, this.toolActivities);
+        this.toolActivities = terminalToolActivities;
         this.sessionSummary = payload.sessionSummary ?? this.sessionSummary;
         this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
         this.providerName = payload.providerName ?? this.providerName;
@@ -1956,12 +2922,38 @@ export const useRuntimeStore = defineStore("runtime", {
         const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
+        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            messages: this.messages,
+            phase: "completed",
+            assistantMessage,
+            toolActivities: terminalToolActivities,
+            providerPatch: {
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              providerSource: payload.providerSource ?? this.providerSource,
+              providerMode: payload.providerMode ?? this.providerMode
+            },
+            terminalState: "completed",
+            fallbackReason: payload.fallbackReason ?? null,
+            inputTokens: payload.inputTokens ?? this.inputTokens,
+            cacheHitInputTokens,
+            reasoningTokens,
+            outputTokens: payload.outputTokens ?? this.outputTokens,
+            totalTokens: payload.totalTokens ?? this.totalTokens,
+            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+            turnDurationMs: payload.turnDurationMs ?? null
+          })
+        );
         this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
         this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.upsertTurnTrace(payload.turnId, {
+        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
           phase: "completed",
           traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
+          toolActivities: terminalToolActivities,
+          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
           providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
           providerName: payload.providerName ?? this.providerName,
           providerProtocol: payload.providerProtocol ?? this.providerProtocol,
@@ -1982,7 +2974,10 @@ export const useRuntimeStore = defineStore("runtime", {
         });
         this.persistHistory();
         void this.loadSessionCatalog();
-        void this.loadRetrievedContextState(this.sessionId, { runId: this.activeRunId }).then((retrieved) => {
+        void this.loadRetrievedContextState(this.sessionId, {
+          runId: this.activeRunId,
+          nodeId: this.visibleNodeId
+        }).then((retrieved) => {
           this.retrievedContext = retrieved;
         });
         debugLog("event:completed", {
@@ -2025,7 +3020,8 @@ export const useRuntimeStore = defineStore("runtime", {
         this.phase = "failed";
         this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
-        this.toolActivities = payload.toolActivities ?? this.toolActivities;
+        const terminalToolActivities = resolveTerminalToolActivities(payload.toolActivities, this.toolActivities);
+        this.toolActivities = terminalToolActivities;
         this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
         this.providerName = payload.providerName ?? this.providerName;
         this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
@@ -2042,12 +3038,39 @@ export const useRuntimeStore = defineStore("runtime", {
         const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
+        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            messages: this.messages,
+            phase: "failed",
+            assistantMessage,
+            toolActivities: terminalToolActivities,
+            providerPatch: {
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              providerSource: payload.providerSource ?? this.providerSource,
+              providerMode: payload.providerMode ?? this.providerMode
+            },
+            terminalState: "error",
+            fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+            error: payload.error ?? DEFAULT_FAILED_TURN_ERROR,
+            inputTokens: payload.inputTokens ?? this.inputTokens,
+            cacheHitInputTokens,
+            reasoningTokens,
+            outputTokens: payload.outputTokens ?? this.outputTokens,
+            totalTokens: payload.totalTokens ?? this.totalTokens,
+            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+            turnDurationMs: payload.turnDurationMs ?? null
+          })
+        );
         this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
         this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.upsertTurnTrace(payload.turnId, {
+        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
           phase: "failed",
           traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
+          toolActivities: terminalToolActivities,
+          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
           providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
           providerName: payload.providerName ?? this.providerName,
           providerProtocol: payload.providerProtocol ?? this.providerProtocol,
@@ -2066,7 +3089,10 @@ export const useRuntimeStore = defineStore("runtime", {
           error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
         });
         this.persistHistory();
-        void this.loadRetrievedContextState(this.sessionId, { runId: this.activeRunId }).then((retrieved) => {
+        void this.loadRetrievedContextState(this.sessionId, {
+          runId: this.activeRunId,
+          nodeId: this.visibleNodeId
+        }).then((retrieved) => {
           this.retrievedContext = retrieved;
         });
         debugLog("event:failed", {
@@ -2083,6 +3109,8 @@ export const useRuntimeStore = defineStore("runtime", {
         }
 
         const cancelledTraceSteps = finalizeCancelledTraceSteps(payload.traceSteps ?? this.traceSteps);
+        const cancelledCacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        const cancelledReasoningTokens = resolveReasoningTokens(payload);
 
         const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,
@@ -2097,7 +3125,8 @@ export const useRuntimeStore = defineStore("runtime", {
         this.phase = "cancelled";
         this.error = null;
         this.traceSteps = cancelledTraceSteps;
-        this.toolActivities = payload.toolActivities ?? this.toolActivities;
+        const terminalToolActivities = resolveTerminalToolActivities(payload.toolActivities, this.toolActivities);
+        this.toolActivities = terminalToolActivities;
         this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
         this.providerName = payload.providerName ?? this.providerName;
         this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
@@ -2105,17 +3134,42 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerSource = payload.providerSource ?? this.providerSource;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
-        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
-        const reasoningTokens = resolveReasoningTokens(payload);
-        const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
-        const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
+        const cacheHitInputTokenPatch = cancelledCacheHitInputTokens != null ? { cacheHitInputTokens: cancelledCacheHitInputTokens } : {};
+        const reasoningTokenPatch = cancelledReasoningTokens != null ? { reasoningTokens: cancelledReasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
+        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            messages: this.messages,
+            phase: "cancelled",
+            assistantMessage,
+            toolActivities: terminalToolActivities,
+            providerPatch: {
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              providerSource: payload.providerSource ?? this.providerSource,
+              providerMode: payload.providerMode ?? this.providerMode
+            },
+            terminalState: "cancelled",
+            fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+            error: payload.error ?? "stopped_by_user",
+            inputTokens: payload.inputTokens ?? null,
+            cacheHitInputTokens: cancelledCacheHitInputTokens,
+            reasoningTokens: cancelledReasoningTokens,
+            outputTokens: payload.outputTokens ?? null,
+            totalTokens: payload.totalTokens ?? null,
+            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+            turnDurationMs: payload.turnDurationMs ?? null
+          })
+        );
         this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
         this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.upsertTurnTrace(payload.turnId, {
+        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
           phase: "cancelled",
           traceSteps: cancelledTraceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
+          toolActivities: terminalToolActivities,
+          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
           providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
           providerName: payload.providerName ?? this.providerName,
           providerProtocol: payload.providerProtocol ?? this.providerProtocol,
@@ -2130,7 +3184,10 @@ export const useRuntimeStore = defineStore("runtime", {
           error: payload.error ?? "stopped_by_user"
         });
         this.persistHistory();
-        void this.loadRetrievedContextState(this.sessionId, { runId: this.activeRunId }).then((retrieved) => {
+        void this.loadRetrievedContextState(this.sessionId, {
+          runId: this.activeRunId,
+          nodeId: this.visibleNodeId
+        }).then((retrieved) => {
           this.retrievedContext = retrieved;
         });
         debugLog("event:cancelled", {
@@ -2189,8 +3246,9 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "completed";
       this.sessionSummary = BROWSER_PREVIEW_SESSION_SUMMARY;
       this.traceSteps = createBrowserPreviewTraceSteps();
+      this.traceTimeline = createBrowserPreviewTraceTimeline();
       this.toolActivities = [];
-      this.upsertTurnTrace(requestId, {
+      this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
         phase: "completed",
         traceSteps: this.traceSteps,
         toolActivities: [],
@@ -2245,6 +3303,7 @@ export const useRuntimeStore = defineStore("runtime", {
         modelId: providerStore.currentModel?.id ?? null,
         reasoningEffort: providerStore.currentReasoningEffort ?? null,
         sessionId: this.sessionId,
+        nodeId: this.visibleNodeId,
         history: buildTurnHistory(this.messages),
         images
       };
@@ -2290,8 +3349,9 @@ export const useRuntimeStore = defineStore("runtime", {
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
       this.traceSteps = createSubmitTraceSteps();
+      this.traceTimeline = createDefaultTraceTimeline();
       this.toolActivities = [];
-      this.upsertTurnTrace(requestId, {
+      this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
         phase: "calling_model",
         traceSteps: this.traceSteps,
         toolActivities: [],
@@ -2315,7 +3375,8 @@ export const useRuntimeStore = defineStore("runtime", {
           await this.resolveDerivedSessionRun({
             sessionId: this.sessionId,
             runId: this.activeRunId,
-            preferRefresh: true
+            preferRefresh: true,
+            nodeId: this.visibleNodeId
           });
           submission = resolveGraphRunSubmissionFromRunState(this.retrievedContext?.runState);
         }
@@ -2369,7 +3430,8 @@ export const useRuntimeStore = defineStore("runtime", {
         this.activeTurnId = null;
         this.activeRunId = null;
         this.traceSteps = createSubmitFailureTraceSteps();
-        this.upsertTurnTrace(requestId, {
+        this.traceTimeline = createSubmitFailureTraceTimeline();
+        this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
           phase: "failed",
           traceSteps: this.traceSteps,
           toolActivities: this.toolActivities,

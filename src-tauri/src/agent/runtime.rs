@@ -1,6 +1,10 @@
 use crate::agent::config::{
     ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
 };
+use crate::agent::capability_bridge::{
+    CapabilityFailureKind, CapabilityRegistry, CapabilityToolExecutionResult,
+    McpSourceSnapshot,
+};
 use crate::agent::context::{DefaultTurnContextBuilder, RetrievedContextState, TurnContextBuilder};
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::execution_control::ExecutionControlRegistry;
@@ -14,13 +18,17 @@ use crate::agent::provider::{
     ProviderRequest, ProviderResponse, ProviderStreamChunk, TokenUsage,
 };
 use crate::agent::session::{
-    SessionAttachment, SessionOverview, SessionSnapshot, SessionStore, TurnHistoryMessage,
+    HistoryBranch, HistoryCheckoutMode, HistoryCursor, HistoryNode, SessionAttachment,
+    SessionOverview, SessionSnapshot, SessionStore, TraceTimelineEntry, TurnHistoryMessage,
     TurnTraceRecord,
 };
 use crate::agent::telemetry::{
-    DefaultTurnTelemetryBuilder, TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
+    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderRequestKind,
+    TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
-use crate::agent::tools::{builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter};
+use crate::agent::tools::{
+    builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
+};
 use crate::agent::turn_flow::{
     build_failed_turn_result, emit_stream_cancelled, emit_stream_event, emit_stream_failed,
     emit_turn_failed, normalize_user_message, preview_text, provider_decision, provider_event_meta,
@@ -45,6 +53,7 @@ pub struct TurnInput {
     pub model_id: Option<String>,
     pub reasoning_effort: Option<ProviderReasoningEffort>,
     pub session_id: Option<String>,
+    pub node_id: Option<String>,
     #[serde(default)]
     pub history: Vec<TurnHistoryMessage>,
     #[serde(default)]
@@ -73,7 +82,9 @@ pub struct TurnResult {
     pub user_message: String,
     pub assistant_message: String,
     pub trace_steps: Vec<TurnTraceStep>,
+    pub trace_timeline: Vec<TraceTimelineEntry>,
     pub tool_activities: Vec<TurnToolActivity>,
+    pub provider_call_records: Vec<ProviderCallCacheRecord>,
     pub session_summary: String,
 }
 
@@ -102,7 +113,9 @@ pub struct TurnStreamEvent {
     pub first_token_latency_ms: Option<u64>,
     pub turn_duration_ms: Option<u64>,
     pub trace_steps: Option<Vec<TurnTraceStep>>,
+    pub trace_timeline: Option<Vec<TraceTimelineEntry>>,
     pub tool_activities: Option<Vec<TurnToolActivity>>,
+    pub provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
     pub session_summary: Option<String>,
 }
 
@@ -130,6 +143,7 @@ pub struct AgentRuntime {
     graph: GraphEngine,
     sessions: SessionStore,
     provider_resolver: Box<dyn ProviderSelectionResolver>,
+    capability_registry: CapabilityRegistry,
     tool_executor: Box<dyn ToolExecutor>,
     planner: Box<dyn TurnPlanner>,
     context_builder: Box<dyn TurnContextBuilder>,
@@ -160,6 +174,7 @@ impl AgentRuntime {
             graph: GraphEngine::new("state-machine-v1"),
             sessions,
             provider_resolver,
+            capability_registry: CapabilityRegistry::new(),
             tool_executor,
             planner,
             context_builder,
@@ -179,6 +194,31 @@ impl AgentRuntime {
         self.graph.contract_version()
     }
 
+    pub fn apply_mcp_source_snapshot(&mut self, snapshot: McpSourceSnapshot) {
+        self.capability_registry.replace_mcp_source_snapshot(snapshot);
+    }
+
+    #[cfg(test)]
+    pub fn inspect_capability(
+        &self,
+        capability_id: &str,
+    ) -> Option<crate::agent::capability_bridge::CapabilityView> {
+        self.capability_registry.inspect_capability(capability_id)
+    }
+
+    #[cfg(test)]
+    pub fn register_mcp_capability_for_test(
+        &mut self,
+        capability: crate::agent::capability_bridge::CapabilityView,
+    ) {
+        self.capability_registry.register_mcp_capability(capability);
+    }
+
+    #[cfg(test)]
+    pub fn remove_mcp_source_for_test(&mut self, source_id: &str) {
+        self.capability_registry.remove_source_for_test(source_id);
+    }
+
     #[allow(dead_code)]
     pub fn start_graph_run(
         &self,
@@ -194,7 +234,15 @@ impl AgentRuntime {
     }
 
     pub fn load_session_snapshot(&mut self, session_id: Option<&str>) -> SessionSnapshot {
-        self.sessions.snapshot(session_id, &[])
+        self.load_session_snapshot_at(session_id, None)
+    }
+
+    pub fn load_session_snapshot_at(
+        &mut self,
+        session_id: Option<&str>,
+        node_id: Option<&str>,
+    ) -> SessionSnapshot {
+        self.sessions.snapshot_at(session_id, node_id, &[])
     }
 
     pub fn inspect_retrieved_context(
@@ -203,7 +251,17 @@ impl AgentRuntime {
         run: Option<&GraphRun>,
         checkpoint: Option<&ExecutionCheckpoint>,
     ) -> RetrievedContextState {
-        let snapshot = self.load_session_snapshot(session_id);
+        self.inspect_retrieved_context_at(session_id, None, run, checkpoint)
+    }
+
+    pub fn inspect_retrieved_context_at(
+        &mut self,
+        session_id: Option<&str>,
+        node_id: Option<&str>,
+        run: Option<&GraphRun>,
+        checkpoint: Option<&ExecutionCheckpoint>,
+    ) -> RetrievedContextState {
+        let snapshot = self.load_session_snapshot_at(session_id, node_id);
         let inspection_user_message = snapshot
             .history
             .iter()
@@ -273,6 +331,51 @@ impl AgentRuntime {
         self.sessions.remove_session(session_id)
     }
 
+    pub fn load_history_graph(
+        &mut self,
+        session_id: Option<&str>,
+    ) -> (Vec<HistoryNode>, Vec<HistoryBranch>, HistoryCursor) {
+        self.sessions.load_history_graph(session_id)
+    }
+
+    pub fn load_history_cursor(&mut self, session_id: Option<&str>) -> HistoryCursor {
+        self.sessions.load_history_cursor(session_id)
+    }
+
+    pub fn checkout_history_node(
+        &mut self,
+        session_id: Option<&str>,
+        node_id: &str,
+        mode: HistoryCheckoutMode,
+    ) -> Result<SessionSnapshot, String> {
+        self.sessions
+            .checkout_history_node(session_id, node_id, mode)
+    }
+
+    pub fn restore_branch_head(
+        &mut self,
+        session_id: Option<&str>,
+        branch_id: Option<&str>,
+    ) -> Result<SessionSnapshot, String> {
+        self.sessions.restore_branch_head(session_id, branch_id)
+    }
+
+    pub fn fork_from_history_node(
+        &mut self,
+        session_id: Option<&str>,
+        node_id: &str,
+    ) -> Result<SessionSnapshot, String> {
+        self.sessions.fork_from_history_node(session_id, node_id)
+    }
+
+    pub fn switch_history_branch(
+        &mut self,
+        session_id: Option<&str>,
+        branch_id: &str,
+    ) -> Result<SessionSnapshot, String> {
+        self.sessions.switch_history_branch(session_id, branch_id)
+    }
+
     fn prepare_turn(
         &mut self,
         input: &TurnInput,
@@ -288,9 +391,11 @@ impl AgentRuntime {
             normalize_user_message(&input.message)
         };
 
-        let session = self
-            .sessions
-            .snapshot(input.session_id.as_deref(), &input.history);
+        let session = self.sessions.snapshot_at(
+            input.session_id.as_deref(),
+            input.node_id.as_deref(),
+            &input.history,
+        );
         let provider = self.resolve_provider(input);
         let preliminary_retrieved =
             self.context_builder
@@ -490,6 +595,76 @@ impl AgentRuntime {
         session_summary: Option<String>,
         error: Option<String>,
     ) {
+        self.persist_turn_trace_with_provider_calls(
+            session_id,
+            turn_id,
+            user_message,
+            phase,
+            trace_steps,
+            tool_activities,
+            Vec::new(),
+            provider_meta,
+            provider_source,
+            provider_mode,
+            build_context_observation,
+            fallback_reason,
+            input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
+            output_tokens,
+            total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+            session_summary,
+            error,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_turn_trace_with_provider_calls(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        phase: &str,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        provider_meta: Option<&ProviderEventMeta>,
+        provider_source: Option<String>,
+        provider_mode: Option<String>,
+        build_context_observation: Option<BuildContextObservation>,
+        fallback_reason: Option<String>,
+        input_tokens: Option<u64>,
+        cache_hit_input_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        session_summary: Option<String>,
+        error: Option<String>,
+    ) {
+        let trace_timeline = build_persisted_trace_timeline(
+            user_message,
+            phase,
+            provider_meta,
+            provider_source.as_deref(),
+            provider_mode.as_deref(),
+            build_context_observation.as_ref(),
+            &tool_activities,
+            None,
+            None,
+            fallback_reason.as_deref(),
+            error.as_deref(),
+            input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
+            output_tokens,
+            total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+        );
         self.sessions.record_turn_trace(
             session_id,
             TurnTraceRecord {
@@ -497,7 +672,9 @@ impl AgentRuntime {
                 title: build_turn_trace_title(user_message),
                 phase: phase.to_string(),
                 trace_steps,
+                trace_timeline,
                 tool_activities,
+                provider_call_records,
                 provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
                 provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
                 provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
@@ -672,7 +849,28 @@ impl AgentRuntime {
             Some(tool_activities),
             first_token_latency_ms,
             turn_duration_ms,
-            build_context_observation,
+            build_context_observation.clone(),
+            Some(build_persisted_trace_timeline(
+                user_message,
+                "cancelled",
+                provider_meta,
+                None,
+                None,
+                build_context_observation.as_ref(),
+                &[],
+                None,
+                None,
+                None,
+                Some(error.as_str()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                first_token_latency_ms,
+                turn_duration_ms,
+            )),
+            None,
             error,
         );
     }
@@ -694,6 +892,7 @@ impl AgentRuntime {
         tool_call: ToolCall,
         initial_first_token_latency_ms: Option<u64>,
         turn_started_at: &Instant,
+        provider_call_records: &mut Vec<ProviderCallCacheRecord>,
     ) {
         let context_observation = build_context_observation(planning_request, tools);
         let mut hop_records = Vec::new();
@@ -764,6 +963,19 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(trace_steps),
+                Some(build_stream_progress_trace_timeline(
+                    display_message,
+                    provider_meta,
+                    None,
+                    None,
+                    &context_observation,
+                    &tool_activities,
+                    Some(current_assistant_output_text.as_str()),
+                    current_assistant_reasoning.as_deref(),
+                    first_token_latency.get(),
+                    "calling_tool",
+                )),
+                None,
                 None,
                 None,
             );
@@ -794,16 +1006,45 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
+                Some(build_stream_progress_trace_timeline(
+                    display_message,
+                    provider_meta,
+                    None,
+                    None,
+                    &context_observation,
+                    &running_tool_activities,
+                    Some(current_assistant_output_text.as_str()),
+                    current_assistant_reasoning.as_deref(),
+                    first_token_latency.get(),
+                    "calling_tool",
+                )),
                 Some(running_tool_activities),
+                None,
                 None,
             );
 
-            let tool_result = self.tool_executor.execute(&current_tool_call);
+            let execution = self.execute_capability_tool_call(&current_tool_call);
+            if let Some(capability) = execution.capability.as_ref() {
+                runtime_log(format!(
+                    "turn:capability-execute capability_id={} mode={}",
+                    capability.capability_id,
+                    capability.invocation_mode.as_str()
+                ));
+            }
+            if let Some(failure_kind) = execution.failure_kind.as_ref() {
+                runtime_log(format!(
+                    "turn:capability-failure tool={} class={:?}",
+                    current_tool_call.name, failure_kind
+                ));
+            }
+            let invocation_record = execution.invocation_record();
+            let tool_result = execution.tool_result;
             all_tools_ok &= tool_result.status == "ok";
-            tool_activities.extend(
+            tool_activities.extend(annotate_capability_tool_activities(
                 self.telemetry_builder
                     .tool_activities_after_result(&current_tool_call, &tool_result),
-            );
+                invocation_record,
+            ));
             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
             self.update_execution_checkpoint(
                 control,
@@ -865,7 +1106,20 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
+                Some(build_stream_progress_trace_timeline(
+                    display_message,
+                    provider_meta,
+                    None,
+                    None,
+                    &context_observation,
+                    &tool_activities,
+                    Some(current_assistant_output_text.as_str()),
+                    current_assistant_reasoning.as_deref(),
+                    first_token_latency.get(),
+                    "calling_model",
+                )),
                 Some(tool_activities.clone()),
+                None,
                 None,
             );
 
@@ -890,6 +1144,19 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(return_trace_steps),
+                Some(build_stream_progress_trace_timeline(
+                    display_message,
+                    provider_meta,
+                    None,
+                    None,
+                    &context_observation,
+                    &tool_activities,
+                    Some(current_assistant_output_text.as_str()),
+                    current_assistant_reasoning.as_deref(),
+                    first_token_latency.get(),
+                    "calling_model",
+                )),
+                None,
                 None,
                 None,
             );
@@ -897,7 +1164,10 @@ impl AgentRuntime {
             let delta_turn_id = turn_id.to_string();
             let first_token_latency_for_emit = Rc::clone(&first_token_latency);
             let context_observation_for_delta = context_observation.clone();
-            let followup_started_at = Instant::now();
+            let tool_activities_for_delta = tool_activities.clone();
+            let display_message_for_delta = display_message.to_string();
+            let provider_meta_for_delta = provider_meta.clone();
+            let turn_started_at_for_latency = *turn_started_at;
             let response = match provider_followup_stream(
                 provider,
                 planning_request,
@@ -907,7 +1177,7 @@ impl AgentRuntime {
                 &tool_result,
                 move |delta| {
                     let latency = if first_token_latency_for_emit.get().is_none() {
-                        let value = followup_started_at.elapsed().as_millis() as u64;
+                        let value = turn_started_at_for_latency.elapsed().as_millis() as u64;
                         first_token_latency_for_emit.set(Some(value));
                         Some(value)
                     } else {
@@ -918,6 +1188,8 @@ impl AgentRuntime {
                         ProviderStreamChunk::Text(text) => (Some(text), None),
                         ProviderStreamChunk::Reasoning(reasoning) => (None, Some(reasoning)),
                     };
+                    let timeline_text = text.clone();
+                    let timeline_reasoning_content = reasoning_content.clone();
 
                     emit_stream_event(
                         sink,
@@ -925,8 +1197,8 @@ impl AgentRuntime {
                         delta_turn_id.clone(),
                         "delta",
                         Some("calling_model"),
-                        text,
-                        reasoning_content,
+                        text.clone(),
+                        reasoning_content.clone(),
                         None,
                         None,
                         None,
@@ -940,6 +1212,19 @@ impl AgentRuntime {
                         latency,
                         None,
                         None,
+                        Some(build_stream_progress_trace_timeline(
+                            display_message_for_delta.as_str(),
+                            &provider_meta_for_delta,
+                            None,
+                            None,
+                            &context_observation_for_delta,
+                            &tool_activities_for_delta,
+                            timeline_text.as_deref(),
+                            timeline_reasoning_content.as_deref(),
+                            latency.or(first_token_latency_for_emit.get()),
+                            "calling_model",
+                        )),
+                        None,
                         None,
                         None,
                     );
@@ -948,13 +1233,14 @@ impl AgentRuntime {
                 Ok(response) => response,
                 Err(error) => {
                     let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                    self.persist_turn_trace(
+                    self.persist_turn_trace_with_provider_calls(
                         input.session_id.as_deref(),
                         turn_id,
                         display_message,
                         "failed",
                         trace_steps.clone(),
                         tool_activities.clone(),
+                        provider_call_records.clone(),
                         Some(provider_meta),
                         None,
                         None,
@@ -979,12 +1265,22 @@ impl AgentRuntime {
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
+                        None,
+                        Some(provider_call_records.clone()),
                         error,
                     );
                     return;
                 }
             };
             let mut response = response;
+            provider_call_records.push(build_provider_call_cache_record(
+                ProviderRequestKind::ToolFollowup,
+                Some(response.provider_source.as_str()),
+                Some(response.provider_mode.as_str()),
+                response.token_usage.as_ref(),
+                first_token_latency.get(),
+                Some(&context_observation),
+            ));
             accumulated_token_usage =
                 merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
             accumulated_fallback_reason = merge_fallback_reason(
@@ -1030,13 +1326,14 @@ impl AgentRuntime {
                 response.fallback_reason.as_deref(),
             ) {
                 let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                self.persist_turn_trace(
+                self.persist_turn_trace_with_provider_calls(
                     input.session_id.as_deref(),
                     turn_id,
                     display_message,
                     "failed",
                     trace_steps.clone(),
                     tool_activities.clone(),
+                    provider_call_records.clone(),
                     Some(provider_meta),
                     None,
                     Some(response.provider_mode.clone()),
@@ -1061,6 +1358,8 @@ impl AgentRuntime {
                     first_token_latency.get(),
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(context_observation.clone()),
+                    None,
+                    Some(provider_call_records.clone()),
                     error,
                 );
                 return;
@@ -1077,13 +1376,14 @@ impl AgentRuntime {
                     Err(error) => {
                         let trace_steps =
                             self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                        self.persist_turn_trace(
+                        self.persist_turn_trace_with_provider_calls(
                             input.session_id.as_deref(),
                             turn_id,
                             display_message,
                             "failed",
                             trace_steps.clone(),
                             tool_activities.clone(),
+                            provider_call_records.clone(),
                             Some(provider_meta),
                             Some(response.provider_source.clone()),
                             Some(response.provider_mode.clone()),
@@ -1108,6 +1408,8 @@ impl AgentRuntime {
                             first_token_latency.get(),
                             Some(turn_started_at.elapsed().as_millis() as u64),
                             Some(context_observation.clone()),
+                            None,
+                            Some(provider_call_records.clone()),
                             error,
                         );
                         return;
@@ -1121,13 +1423,14 @@ impl AgentRuntime {
                 if completed_hops >= max_tool_hops_per_turn() {
                     let error = build_tool_hop_limit_error(max_tool_hops_per_turn());
                     let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                    self.persist_turn_trace(
+                    self.persist_turn_trace_with_provider_calls(
                         input.session_id.as_deref(),
                         turn_id,
                         display_message,
                         "failed",
                         trace_steps.clone(),
                         tool_activities.clone(),
+                        provider_call_records.clone(),
                         Some(provider_meta),
                         Some(response.provider_source.clone()),
                         Some(response.provider_mode.clone()),
@@ -1152,6 +1455,8 @@ impl AgentRuntime {
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
+                        None,
+                        Some(provider_call_records.clone()),
                         error,
                     );
                     return;
@@ -1170,13 +1475,14 @@ impl AgentRuntime {
                 Ok(attachments) => attachments,
                 Err(error) => {
                     let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                    self.persist_turn_trace(
+                    self.persist_turn_trace_with_provider_calls(
                         input.session_id.as_deref(),
                         turn_id,
                         display_message,
                         "failed",
                         trace_steps.clone(),
                         tool_activities.clone(),
+                        provider_call_records.clone(),
                         Some(provider_meta),
                         Some(response.provider_source.clone()),
                         Some(response.provider_mode.clone()),
@@ -1201,6 +1507,8 @@ impl AgentRuntime {
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
+                        None,
+                        Some(provider_call_records.clone()),
                         error,
                     );
                     return;
@@ -1234,13 +1542,14 @@ impl AgentRuntime {
                 Some("completed"),
                 None,
             );
-            self.persist_turn_trace(
+            self.persist_turn_trace_with_provider_calls(
                 input.session_id.as_deref(),
                 turn_id,
                 display_message,
                 "completed",
                 trace_steps.clone(),
                 tool_activities.clone(),
+                provider_call_records.clone(),
                 Some(provider_meta),
                 Some(response.provider_source.clone()),
                 Some(response.provider_mode.clone()),
@@ -1257,18 +1566,38 @@ impl AgentRuntime {
                 None,
             );
 
+            let completed_timeline = build_persisted_trace_timeline(
+                display_message,
+                "completed",
+                Some(provider_meta),
+                Some(response.provider_source.as_str()),
+                Some(response.provider_mode.as_str()),
+                Some(&context_observation),
+                &tool_activities,
+                Some(response.output_text.as_str()),
+                response.reasoning_content.as_deref(),
+                accumulated_fallback_reason.as_deref(),
+                None,
+                persisted.input_tokens,
+                persisted.cache_hit_input_tokens,
+                persisted.reasoning_tokens,
+                persisted.output_tokens,
+                persisted.total_tokens,
+                first_token_latency.get(),
+                Some(turn_started_at.elapsed().as_millis() as u64),
+            );
             emit_stream_event(
                 sink,
                 "turn:completed",
                 turn_id.to_string(),
                 "completed",
                 Some("ready"),
-                Some(response.output_text),
+                Some(response.output_text.clone()),
                 response.reasoning_content.clone(),
                 Some(provider_meta),
                 Some(response.provider_source.clone()),
                 Some(response.provider_mode.clone()),
-                accumulated_fallback_reason,
+                accumulated_fallback_reason.clone(),
                 Some(context_observation.clone()),
                 persisted.input_tokens,
                 persisted.cache_hit_input_tokens,
@@ -1278,7 +1607,9 @@ impl AgentRuntime {
                 first_token_latency.get(),
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(trace_steps),
+                Some(completed_timeline),
                 Some(tool_activities),
+                Some(provider_call_records.clone()),
                 Some(persisted.session_summary),
             );
             return;
@@ -1296,7 +1627,10 @@ impl AgentRuntime {
         first_decision: &ProviderDecision,
         tool_call: ToolCall,
         first_token_latency_ms: Option<u64>,
+        turn_started_at: &Instant,
+        provider_call_records: &mut Vec<ProviderCallCacheRecord>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
+        let context_observation = build_context_observation(planning_request, tools);
         let mut hop_records = Vec::new();
         let mut tool_activities = Vec::new();
         let mut current_tool_call = tool_call;
@@ -1314,7 +1648,22 @@ impl AgentRuntime {
                 "turn:tool-execute hop={} name={} args={}",
                 completed_hops, current_tool_call.name, current_tool_call.arguments
             ));
-            let tool_result = self.tool_executor.execute(&current_tool_call);
+            let execution = self.execute_capability_tool_call(&current_tool_call);
+            if let Some(capability) = execution.capability.as_ref() {
+                runtime_log(format!(
+                    "turn:capability-execute capability_id={} mode={}",
+                    capability.capability_id,
+                    capability.invocation_mode.as_str()
+                ));
+            }
+            if let Some(failure_kind) = execution.failure_kind.as_ref() {
+                runtime_log(format!(
+                    "turn:capability-failure tool={} class={:?}",
+                    current_tool_call.name, failure_kind
+                ));
+            }
+            let invocation_record = execution.invocation_record();
+            let tool_result = execution.tool_result;
             runtime_log(format!(
                 "turn:tool-result hop={} name={} status={} output_preview={}",
                 completed_hops,
@@ -1323,10 +1672,11 @@ impl AgentRuntime {
                 preview_text(&tool_result.output, 160)
             ));
             all_tools_ok &= tool_result.status == "ok";
-            tool_activities.extend(
+            tool_activities.extend(annotate_capability_tool_activities(
                 self.telemetry_builder
                     .tool_activities_after_result(&current_tool_call, &tool_result),
-            );
+                invocation_record,
+            ));
             hop_records.push(ToolTurnHopRecord {
                 assistant_output_text: current_assistant_output_text.clone(),
                 assistant_reasoning_content: current_assistant_reasoning.clone(),
@@ -1354,6 +1704,19 @@ impl AgentRuntime {
                 }
             };
             let mut response = response;
+            let first_token_latency_ms = if first_token_latency_ms.is_some() {
+                first_token_latency_ms
+            } else {
+                Some(turn_started_at.elapsed().as_millis() as u64)
+            };
+            provider_call_records.push(build_provider_call_cache_record(
+                ProviderRequestKind::ToolFollowup,
+                Some(response.provider_source.as_str()),
+                Some(response.provider_mode.as_str()),
+                response.token_usage.as_ref(),
+                first_token_latency_ms,
+                Some(&context_observation),
+            ));
             accumulated_token_usage =
                 merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
             accumulated_fallback_reason = merge_fallback_reason(
@@ -1427,6 +1790,7 @@ impl AgentRuntime {
                 trace_steps: self
                     .telemetry_builder
                     .completed_trace_with_tool(all_tools_ok),
+                trace_timeline: Vec::new(),
                 tool_activities,
                 first_token_latency_ms,
             });
@@ -1486,6 +1850,14 @@ impl AgentRuntime {
             ..
         } = prepared;
         let provider_meta = provider_event_meta(&provider);
+        let mut provider_call_records = vec![build_provider_call_cache_record(
+            ProviderRequestKind::InitialRequest,
+            Some(first_decision.provider_source.as_str()),
+            Some(first_decision.provider_mode.as_str()),
+            first_decision.token_usage.as_ref(),
+            first_token_latency_ms,
+            Some(&build_context_observation),
+        )];
 
         if let Some(error) = provider_failure_message(
             &first_decision.provider_mode,
@@ -1510,6 +1882,7 @@ impl AgentRuntime {
             tool_activities,
             first_token_latency_ms,
         ) = if let Some(tool_call) = resolved_tool_call {
+            let initial_visible_first_token_latency_ms = None;
             match self.handle_sync_tool_turn(
                 user_message.clone(),
                 display_message.clone(),
@@ -1519,7 +1892,9 @@ impl AgentRuntime {
                 &planning_request,
                 &first_decision,
                 tool_call,
-                first_token_latency_ms,
+                initial_visible_first_token_latency_ms,
+                &turn_started_at,
+                &mut provider_call_records,
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,
@@ -1562,6 +1937,34 @@ impl AgentRuntime {
                         .all(|activity| activity.status != "error");
                     self.telemetry_builder.failed_trace_after_tool(all_tools_ok)
                 };
+                let trace_turn_id = format!(
+                    "sync:{}:{}",
+                    input.session_id.as_deref().unwrap_or("local-dev-session"),
+                    turn_started_at.elapsed().as_nanos()
+                );
+                self.persist_turn_trace_with_provider_calls(
+                    input.session_id.as_deref(),
+                    &trace_turn_id,
+                    &display_message,
+                    "failed",
+                    failed_trace_steps.clone(),
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    Some(&provider_meta),
+                    None,
+                    None,
+                    Some(build_context_observation.clone()),
+                    fallback_reason.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    first_token_latency_ms,
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    None,
+                    Some(error.clone()),
+                );
                 return build_failed_turn_result(
                     Some(&provider_meta),
                     display_message,
@@ -1580,6 +1983,55 @@ impl AgentRuntime {
             token_usage.as_ref(),
             provider_native_transcript,
             attachments,
+        );
+        let trace_turn_id = format!(
+            "sync:{}:{}",
+            input.session_id.as_deref().unwrap_or("local-dev-session"),
+            turn_started_at.elapsed().as_nanos()
+        );
+        self.persist_turn_trace_with_provider_calls(
+            input.session_id.as_deref(),
+            &trace_turn_id,
+            &display_message,
+            "completed",
+            trace_steps.clone(),
+            tool_activities.clone(),
+            provider_call_records.clone(),
+            Some(&provider_meta),
+            Some(provider_source.clone()),
+            Some(provider_mode.clone()),
+            Some(build_context_observation.clone()),
+            fallback_reason.clone(),
+            persisted.input_tokens,
+            persisted.cache_hit_input_tokens,
+            persisted.reasoning_tokens,
+            persisted.output_tokens,
+            persisted.total_tokens,
+            first_token_latency_ms,
+            Some(turn_started_at.elapsed().as_millis() as u64),
+            Some(persisted.session_summary.clone()),
+            None,
+        );
+
+        let trace_timeline = build_persisted_trace_timeline(
+            display_message.as_str(),
+            "completed",
+            Some(&provider_meta),
+            Some(provider_source.as_str()),
+            Some(provider_mode.as_str()),
+            Some(&build_context_observation),
+            &tool_activities,
+            Some(assistant_message.as_str()),
+            None,
+            fallback_reason.as_deref(),
+            None,
+            persisted.input_tokens,
+            persisted.cache_hit_input_tokens,
+            persisted.reasoning_tokens,
+            persisted.output_tokens,
+            persisted.total_tokens,
+            first_token_latency_ms,
+            Some(turn_started_at.elapsed().as_millis() as u64),
         );
 
         TurnResult {
@@ -1602,7 +2054,9 @@ impl AgentRuntime {
             user_message: display_message,
             assistant_message,
             trace_steps,
+            trace_timeline,
             tool_activities,
+            provider_call_records,
             session_summary: persisted.session_summary,
         }
     }
@@ -1691,6 +2145,12 @@ impl AgentRuntime {
             None,
             None,
             Some(start_trace_steps.clone()),
+            Some(build_stream_started_trace_timeline(
+                prepared.user_message.as_str(),
+                &prepared_provider_meta,
+                &prepared.build_context_observation,
+            )),
+            None,
             None,
             None,
         );
@@ -1781,6 +2241,14 @@ impl AgentRuntime {
             ..
         } = prepared;
         let provider_meta = provider_event_meta(&provider);
+        let mut provider_call_records = vec![build_provider_call_cache_record(
+            ProviderRequestKind::InitialRequest,
+            Some(first_decision.provider_source.as_str()),
+            Some(first_decision.provider_mode.as_str()),
+            first_decision.token_usage.as_ref(),
+            initial_first_token_latency_ms,
+            Some(&build_context_observation),
+        )];
 
         if let Some(error) = provider_failure_message(
             &first_decision.provider_mode,
@@ -1802,13 +2270,14 @@ impl AgentRuntime {
                 Some("failed"),
                 Some(&error),
             );
-            self.persist_turn_trace(
+            self.persist_turn_trace_with_provider_calls(
                 input.session_id.as_deref(),
                 &turn_id,
                 &display_message,
                 "failed",
                 trace_steps.clone(),
                 Vec::new(),
+                provider_call_records.clone(),
                 Some(&provider_meta),
                 Some(first_decision.provider_source.clone()),
                 Some(first_decision.provider_mode.clone()),
@@ -1833,6 +2302,8 @@ impl AgentRuntime {
                 None,
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
+                None,
+                Some(provider_call_records.clone()),
                 error,
             );
             return;
@@ -1857,6 +2328,7 @@ impl AgentRuntime {
         }
 
         if let Some(tool_call) = resolved_tool_call {
+            let initial_visible_first_token_latency_ms = None;
             self.handle_stream_tool_turn(
                 sink,
                 control,
@@ -1870,8 +2342,9 @@ impl AgentRuntime {
                 &planning_request,
                 &first_decision,
                 tool_call,
-                initial_first_token_latency_ms,
+                initial_visible_first_token_latency_ms,
                 &turn_started_at,
+                &mut provider_call_records,
             );
             return;
         }
@@ -1897,6 +2370,19 @@ impl AgentRuntime {
             None,
             None,
             Some(self.telemetry_builder.trace_return_active_without_tool()),
+            Some(build_stream_progress_trace_timeline(
+                display_message.as_str(),
+                &provider_meta,
+                Some(first_decision.provider_source.as_str()),
+                Some(first_decision.provider_mode.as_str()),
+                &build_context_observation,
+                &[],
+                None,
+                None,
+                initial_first_token_latency_ms,
+                "calling_model",
+            )),
+            None,
             None,
             None,
         );
@@ -1933,17 +2419,16 @@ impl AgentRuntime {
             return;
         }
 
-        let simulated_stream_started_at = Instant::now();
-        let first_token_latency_ms =
+        let first_visible_first_token_latency_ms =
             if let Some(reasoning_content) = first_decision.reasoning_content.as_deref() {
                 stream_reasoning_chunks(
                     sink,
                     &turn_id,
                     "calling_model",
                     reasoning_content,
-                    &simulated_stream_started_at,
-                    initial_first_token_latency_ms,
-                    false,
+                    &turn_started_at,
+                    None,
+                    true,
                 )
             } else {
                 None
@@ -1953,9 +2438,9 @@ impl AgentRuntime {
             &turn_id,
             "calling_model",
             &first_decision.output_text,
-            &simulated_stream_started_at,
-            first_token_latency_ms.or(initial_first_token_latency_ms),
-            false,
+            &turn_started_at,
+            first_visible_first_token_latency_ms,
+            first_visible_first_token_latency_ms.is_none(),
         );
         let completed_text = first_decision.output_text.clone();
         let completed_mode = first_decision.provider_mode.clone();
@@ -1978,13 +2463,14 @@ impl AgentRuntime {
                     Some("failed"),
                     Some(&error),
                 );
-                self.persist_turn_trace(
+                self.persist_turn_trace_with_provider_calls(
                     input.session_id.as_deref(),
                     &turn_id,
                     &display_message,
                     "failed",
                     trace_steps.clone(),
                     Vec::new(),
+                    provider_call_records.clone(),
                     Some(&provider_meta),
                     Some(first_decision.provider_source.clone()),
                     Some(first_decision.provider_mode.clone()),
@@ -2009,6 +2495,8 @@ impl AgentRuntime {
                     first_token_latency_ms,
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(build_context_observation.clone()),
+                    None,
+                    Some(provider_call_records.clone()),
                     error,
                 );
                 return;
@@ -2044,13 +2532,14 @@ impl AgentRuntime {
             Some("completed"),
             None,
         );
-        self.persist_turn_trace(
+        self.persist_turn_trace_with_provider_calls(
             input.session_id.as_deref(),
             &turn_id,
             &display_message,
             "completed",
             trace_steps.clone(),
             Vec::new(),
+            provider_call_records.clone(),
             Some(&provider_meta),
             Some(first_decision.provider_source.clone()),
             Some(first_decision.provider_mode.clone()),
@@ -2067,13 +2556,33 @@ impl AgentRuntime {
             None,
         );
 
+        let completed_timeline = build_persisted_trace_timeline(
+            display_message.as_str(),
+            "completed",
+            Some(&provider_meta),
+            Some(first_decision.provider_source.as_str()),
+            Some(first_decision.provider_mode.as_str()),
+            Some(&build_context_observation),
+            &[],
+            Some(first_decision.output_text.as_str()),
+            first_decision.reasoning_content.as_deref(),
+            first_decision.fallback_reason.as_deref(),
+            None,
+            persisted.input_tokens,
+            persisted.cache_hit_input_tokens,
+            persisted.reasoning_tokens,
+            persisted.output_tokens,
+            persisted.total_tokens,
+            first_token_latency_ms,
+            Some(turn_started_at.elapsed().as_millis() as u64),
+        );
         emit_stream_event(
             sink,
             "turn:completed",
             turn_id,
             "completed",
             Some("ready"),
-            Some(first_decision.output_text),
+            Some(first_decision.output_text.clone()),
             first_decision.reasoning_content.clone(),
             Some(&provider_meta),
             Some(first_decision.provider_source.clone()),
@@ -2088,7 +2597,9 @@ impl AgentRuntime {
             first_token_latency_ms,
             Some(turn_started_at.elapsed().as_millis() as u64),
             Some(trace_steps),
+            Some(completed_timeline),
             Some(Vec::new()),
+            Some(provider_call_records),
             Some(persisted.session_summary),
         );
     }
@@ -2121,7 +2632,288 @@ impl AgentRuntime {
             provider_tool_call
         }
     }
+
+    fn execute_capability_tool_call(&self, tool_call: &ToolCall) -> CapabilityToolExecutionResult {
+        let action = match self.capability_registry.resolve_tool_call(tool_call) {
+            Ok(action) => action,
+            Err(failure_kind) => {
+                runtime_log(format!(
+                    "turn:capability-resolve-failure tool={} class={}",
+                    tool_call.name,
+                    failure_kind.as_str()
+                ));
+                return self
+                    .capability_registry
+                    .capability_failure_result(tool_call, failure_kind);
+            }
+        };
+
+        runtime_log(format!(
+            "turn:capability-resolved capability_id={} kind={} mode={}",
+            action.capability.capability_id,
+            action.capability.kind.as_str(),
+            action.capability.invocation_mode.as_str()
+        ));
+
+        let tool_result = self.tool_executor.execute(&action.tool_call);
+        let failure_kind = if tool_result.status == "ok" {
+            None
+        } else {
+            Some(CapabilityFailureKind::InvocationFailed)
+        };
+
+        CapabilityToolExecutionResult {
+            capability: Some(action.capability),
+            tool_call: action.tool_call,
+            tool_result,
+            failure_kind,
+        }
+    }
 }
+
+fn annotate_capability_tool_activities(
+    mut activities: Vec<TurnToolActivity>,
+    invocation_record: crate::agent::telemetry::CapabilityInvocationRecord,
+) -> Vec<TurnToolActivity> {
+    if let Some(parent) = activities.first_mut() {
+        parent.capability_invocation = Some(invocation_record);
+    }
+    activities
+}
+/*
+    #[cfg(any())]
+    fn start_turn_stream_uses_compat_sync_for_deepseek_tool_followup() {
+        let final_text = "deepseek 工具 follow-up 已直接成功返回。";
+        let server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "先调用工具。",
+                            "reasoning_content": "需要先读取目录再回答。",
+                            "tool_calls": [
+                                {
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": final_text,
+                            "reasoning_content": "工具结果已经足够，直接收口。"
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 60,
+                    "completion_tokens": 24,
+                    "total_tokens": 84
+                }
+            })),
+        ]);
+        let mut runtime =
+            build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-deepseek-followup-compat".to_string(),
+            TurnInput {
+                message: "先列出文件再总结".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("deepseek-followup-compat".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        let events = sink.events.borrow();
+        let first_delta = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .expect("delta event");
+        let text_delta = events
+            .iter()
+            .filter_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .find(|payload| payload.text.is_some())
+            .expect("text delta event");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
+
+        assert_eq!(requests.len(), 2);
+        let decision_request: serde_json::Value =
+            serde_json::from_str(&requests[0]).expect("decision request should be json");
+        let followup_request: serde_json::Value =
+            serde_json::from_str(&requests[1]).expect("followup request should be json");
+        assert_eq!(
+            decision_request.get("stream").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            followup_request.get("stream").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(followup_request.get("stream_options").is_none());
+        assert_eq!(
+            followup_request
+                .get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| messages.get(1))
+                .and_then(|message| message.get("reasoning_content"))
+                .and_then(Value::as_str),
+            Some("需要先读取目录再回答。")
+        );
+        assert_eq!(first_delta.text.as_deref(), Some(final_text));
+        assert_eq!(completed.phase.as_deref(), Some("completed"));
+        assert_eq!(
+            completed.provider_source.as_deref(),
+            Some("provider_followup_stream_compat_sync")
+        );
+        assert_eq!(completed.fallback_reason, None);
+    }
+
+    #[cfg(any())]
+    fn start_turn_stream_uses_compat_sync_for_deepseek_tool_followup() {
+        let final_text = "deepseek follow-up completed";
+        let server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "call a tool first",
+                            "reasoning_content": "need workspace listing before answering",
+                            "tool_calls": [
+                                {
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": final_text,
+                            "reasoning_content": "tool output is sufficient"
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 60,
+                    "completion_tokens": 24,
+                    "total_tokens": 84
+                }
+            })),
+        ]);
+        let mut runtime =
+            build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-deepseek-followup-compat".to_string(),
+            TurnInput {
+                message: "read Cargo.toml then answer".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("deepseek-followup-compat".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        let events = sink.events.borrow();
+        let first_delta = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .expect("delta event");
+        let text_delta = events
+            .iter()
+            .filter_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .find(|payload| payload.text.is_some())
+            .expect("text delta event");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
+
+        assert_eq!(requests.len(), 2);
+        let decision_request: Value =
+            serde_json::from_str(&requests[0]).expect("decision request should be json");
+        let followup_request: Value =
+            serde_json::from_str(&requests[1]).expect("followup request should be json");
+        assert_eq!(
+            decision_request.get("stream").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            followup_request.get("stream").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(followup_request.get("stream_options").is_none());
+        let replayed_assistant_message = followup_request
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages.iter().find(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                        && message
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .map(|calls| !calls.is_empty())
+                            .unwrap_or(false)
+                })
+            })
+            .expect("follow-up request should replay assistant tool call message");
+        assert_eq!(
+            replayed_assistant_message
+                .get("reasoning_content")
+                .and_then(Value::as_str),
+            Some("need workspace listing before answering")
+        );
+        assert_eq!(first_delta.text.as_deref(), Some(final_text));
+        assert_eq!(completed.phase.as_deref(), Some("completed"));
+        assert_eq!(
+            completed.provider_source.as_deref(),
+            Some("provider_followup_stream_compat_sync")
+        );
+        assert_eq!(completed.fallback_reason, None);
+    }
+}
+
+*/
 
 fn planner_decision_can_override_native_tool_flow(decision: &ProviderDecision) -> bool {
     decision
@@ -2292,6 +3084,597 @@ fn native_transcript_for_completed_turn(
     ])
 }
 
+fn top_level_tool_activities(tool_activities: &[TurnToolActivity]) -> Vec<&TurnToolActivity> {
+    tool_activities
+        .iter()
+        .filter(|activity| !activity.id.contains("-planned-") && !activity.id.contains("-child-"))
+        .collect()
+}
+
+fn tool_activities_for_parent(
+    tool_activities: &[TurnToolActivity],
+    parent: &TurnToolActivity,
+) -> Vec<TurnToolActivity> {
+    let prefix = format!("{}-", parent.id);
+    tool_activities
+        .iter()
+        .filter(|activity| activity.id == parent.id || activity.id.starts_with(&prefix))
+        .cloned()
+        .collect()
+}
+
+fn timeline_state_for_phase(phase: &str) -> String {
+    match phase {
+        "cancelled" => "cancelled".to_string(),
+        "failed" => "error".to_string(),
+        _ => "completed".to_string(),
+    }
+}
+
+fn build_context_uses_retrieval(build_context_observation: &BuildContextObservation) -> bool {
+    build_context_observation.message_count > 2
+        || !build_context_observation.prefix_mutation_reasons.is_empty()
+        || !build_context_observation
+            .semi_stable_context_text
+            .trim()
+            .is_empty()
+}
+
+fn build_stream_started_trace_timeline(
+    user_message: &str,
+    provider_meta: &ProviderEventMeta,
+    build_context_observation: &BuildContextObservation,
+) -> Vec<TraceTimelineEntry> {
+    let mut sequence = 1_u64;
+    let mut timeline = Vec::new();
+
+    timeline.push(TraceTimelineEntry {
+        id: format!("input-{}", sequence),
+        kind: "input".to_string(),
+        label: "RECEIVE INPUT".to_string(),
+        state: "completed".to_string(),
+        sequence,
+        provider_requested_name: None,
+        provider_name: None,
+        provider_protocol: None,
+        provider_model: None,
+        provider_source: None,
+        provider_mode: None,
+        build_context_observation: None,
+        tool_activities: Vec::new(),
+        text: Some(user_message.to_string()),
+        reasoning_content: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+    });
+    sequence += 1;
+
+    if build_context_uses_retrieval(build_context_observation) {
+        timeline.push(TraceTimelineEntry {
+            id: format!("retrieval-{}", sequence),
+            kind: "prepare_retrieval".to_string(),
+            label: "PREPARE RETRIEVAL".to_string(),
+            state: "completed".to_string(),
+            sequence,
+            provider_requested_name: Some(provider_meta.requested_name.clone()),
+            provider_name: Some(provider_meta.provider_name.clone()),
+            provider_protocol: Some(provider_meta.protocol.clone()),
+            provider_model: Some(provider_meta.model.clone()),
+            provider_source: None,
+            provider_mode: None,
+            build_context_observation: None,
+            tool_activities: Vec::new(),
+            text: None,
+            reasoning_content: None,
+            fallback_reason: None,
+            error: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+        });
+        sequence += 1;
+    }
+
+    timeline.push(TraceTimelineEntry {
+        id: format!("context-{}", sequence),
+        kind: "build_context".to_string(),
+        label: "BUILD CONTEXT".to_string(),
+        state: "completed".to_string(),
+        sequence,
+        provider_requested_name: Some(provider_meta.requested_name.clone()),
+        provider_name: Some(provider_meta.provider_name.clone()),
+        provider_protocol: Some(provider_meta.protocol.clone()),
+        provider_model: Some(provider_meta.model.clone()),
+        provider_source: None,
+        provider_mode: None,
+        build_context_observation: Some(build_context_observation.clone()),
+        tool_activities: Vec::new(),
+        text: None,
+        reasoning_content: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+    });
+    sequence += 1;
+
+    timeline.push(TraceTimelineEntry {
+        id: format!("model-{}", sequence),
+        kind: "call_model".to_string(),
+        label: "CALL MODEL #1".to_string(),
+        state: "active".to_string(),
+        sequence,
+        provider_requested_name: Some(provider_meta.requested_name.clone()),
+        provider_name: Some(provider_meta.provider_name.clone()),
+        provider_protocol: Some(provider_meta.protocol.clone()),
+        provider_model: Some(provider_meta.model.clone()),
+        provider_source: None,
+        provider_mode: None,
+        build_context_observation: None,
+        tool_activities: Vec::new(),
+        text: None,
+        reasoning_content: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+    });
+
+    timeline
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_stream_progress_trace_timeline(
+    user_message: &str,
+    provider_meta: &ProviderEventMeta,
+    provider_source: Option<&str>,
+    provider_mode: Option<&str>,
+    build_context_observation: &BuildContextObservation,
+    tool_activities: &[TurnToolActivity],
+    model_output_text: Option<&str>,
+    model_reasoning_content: Option<&str>,
+    first_token_latency_ms: Option<u64>,
+    phase: &str,
+) -> Vec<TraceTimelineEntry> {
+    let top_level_tools = top_level_tool_activities(tool_activities);
+    let model_hops = if phase == "calling_tool" {
+        top_level_tools.len().max(1)
+    } else {
+        top_level_tools.len() + 1
+    };
+    let mut sequence = 1_u64;
+    let mut timeline = Vec::new();
+
+    timeline.push(TraceTimelineEntry {
+        id: format!("input-{}", sequence),
+        kind: "input".to_string(),
+        label: "RECEIVE INPUT".to_string(),
+        state: "completed".to_string(),
+        sequence,
+        provider_requested_name: None,
+        provider_name: None,
+        provider_protocol: None,
+        provider_model: None,
+        provider_source: None,
+        provider_mode: None,
+        build_context_observation: None,
+        tool_activities: Vec::new(),
+        text: Some(user_message.to_string()),
+        reasoning_content: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+    });
+    sequence += 1;
+
+    if build_context_uses_retrieval(build_context_observation) {
+        timeline.push(TraceTimelineEntry {
+            id: format!("retrieval-{}", sequence),
+            kind: "prepare_retrieval".to_string(),
+            label: "PREPARE RETRIEVAL".to_string(),
+            state: "completed".to_string(),
+            sequence,
+            provider_requested_name: Some(provider_meta.requested_name.clone()),
+            provider_name: Some(provider_meta.provider_name.clone()),
+            provider_protocol: Some(provider_meta.protocol.clone()),
+            provider_model: Some(provider_meta.model.clone()),
+            provider_source: provider_source.map(str::to_string),
+            provider_mode: provider_mode.map(str::to_string),
+            build_context_observation: None,
+            tool_activities: Vec::new(),
+            text: None,
+            reasoning_content: None,
+            fallback_reason: None,
+            error: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+        });
+        sequence += 1;
+    }
+
+    timeline.push(TraceTimelineEntry {
+        id: format!("context-{}", sequence),
+        kind: "build_context".to_string(),
+        label: "BUILD CONTEXT".to_string(),
+        state: "completed".to_string(),
+        sequence,
+        provider_requested_name: Some(provider_meta.requested_name.clone()),
+        provider_name: Some(provider_meta.provider_name.clone()),
+        provider_protocol: Some(provider_meta.protocol.clone()),
+        provider_model: Some(provider_meta.model.clone()),
+        provider_source: provider_source.map(str::to_string),
+        provider_mode: provider_mode.map(str::to_string),
+        build_context_observation: Some(build_context_observation.clone()),
+        tool_activities: Vec::new(),
+        text: None,
+        reasoning_content: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+    });
+    sequence += 1;
+
+    for model_index in 0..model_hops {
+        let is_last_model = model_index + 1 == model_hops;
+        let model_state = if phase == "calling_model" && is_last_model {
+            "active"
+        } else {
+            "completed"
+        };
+        timeline.push(TraceTimelineEntry {
+            id: format!("model-{}", sequence),
+            kind: "call_model".to_string(),
+            label: format!("CALL MODEL #{}", model_index + 1),
+            state: model_state.to_string(),
+            sequence,
+            provider_requested_name: Some(provider_meta.requested_name.clone()),
+            provider_name: Some(provider_meta.provider_name.clone()),
+            provider_protocol: Some(provider_meta.protocol.clone()),
+            provider_model: Some(provider_meta.model.clone()),
+            provider_source: provider_source.map(str::to_string),
+            provider_mode: provider_mode.map(str::to_string),
+            build_context_observation: None,
+            tool_activities: Vec::new(),
+            text: if phase == "calling_model" && is_last_model {
+                model_output_text.map(str::to_string)
+            } else {
+                None
+            },
+            reasoning_content: if phase == "calling_model" && is_last_model {
+                model_reasoning_content.map(str::to_string)
+            } else {
+                None
+            },
+            fallback_reason: None,
+            error: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: if phase == "calling_model" && is_last_model {
+                first_token_latency_ms
+            } else {
+                None
+            },
+            turn_duration_ms: None,
+        });
+        sequence += 1;
+
+        if let Some(parent_tool) = top_level_tools.get(model_index) {
+            let grouped_tool_activities = tool_activities_for_parent(tool_activities, parent_tool);
+            let tool_state = if parent_tool.status == "running" {
+                "active"
+            } else if parent_tool.status == "error" {
+                "error"
+            } else {
+                "completed"
+            };
+            timeline.push(TraceTimelineEntry {
+                id: format!("tool-{}", sequence),
+                kind: "call_tool".to_string(),
+                label: format!("CALL TOOL #{} · {}", model_index + 1, parent_tool.name),
+                state: tool_state.to_string(),
+                sequence,
+                provider_requested_name: None,
+                provider_name: None,
+                provider_protocol: None,
+                provider_model: None,
+                provider_source: None,
+                provider_mode: None,
+                build_context_observation: None,
+                tool_activities: grouped_tool_activities,
+                text: Some(parent_tool.summary.clone()),
+                reasoning_content: None,
+                fallback_reason: None,
+                error: if parent_tool.status == "error" {
+                    Some(parent_tool.summary.clone())
+                } else {
+                    None
+                },
+                input_tokens: None,
+                cache_hit_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                first_token_latency_ms: None,
+                turn_duration_ms: None,
+            });
+            sequence += 1;
+        }
+    }
+
+    timeline
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_persisted_trace_timeline(
+    user_message: &str,
+    phase: &str,
+    provider_meta: Option<&ProviderEventMeta>,
+    provider_source: Option<&str>,
+    provider_mode: Option<&str>,
+    build_context_observation: Option<&BuildContextObservation>,
+    tool_activities: &[TurnToolActivity],
+    return_text: Option<&str>,
+    return_reasoning_content: Option<&str>,
+    fallback_reason: Option<&str>,
+    error: Option<&str>,
+    input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+) -> Vec<TraceTimelineEntry> {
+    let terminal_state = timeline_state_for_phase(phase);
+    let tool_hops = top_level_tool_activities(tool_activities);
+    let mut sequence = 1_u64;
+    let mut timeline = Vec::new();
+
+    timeline.push(TraceTimelineEntry {
+        id: format!("input-{}", sequence),
+        kind: "input".to_string(),
+        label: "RECEIVE INPUT".to_string(),
+        state: "completed".to_string(),
+        sequence,
+        provider_requested_name: None,
+        provider_name: None,
+        provider_protocol: None,
+        provider_model: None,
+        provider_source: None,
+        provider_mode: None,
+        build_context_observation: None,
+        tool_activities: Vec::new(),
+        text: Some(user_message.to_string()),
+        reasoning_content: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+    });
+    sequence += 1;
+
+    if let Some(observation) = build_context_observation {
+        if build_context_uses_retrieval(observation) {
+            timeline.push(TraceTimelineEntry {
+                id: format!("retrieval-{}", sequence),
+                kind: "prepare_retrieval".to_string(),
+                label: "PREPARE RETRIEVAL".to_string(),
+                state: "completed".to_string(),
+                sequence,
+                provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+                provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+                provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+                provider_model: provider_meta.map(|meta| meta.model.clone()),
+                provider_source: provider_source.map(str::to_string),
+                provider_mode: provider_mode.map(str::to_string),
+                build_context_observation: None,
+                tool_activities: Vec::new(),
+                text: None,
+                reasoning_content: None,
+                fallback_reason: None,
+                error: None,
+                input_tokens: None,
+                cache_hit_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                first_token_latency_ms: None,
+                turn_duration_ms: None,
+            });
+            sequence += 1;
+        }
+    }
+
+    timeline.push(TraceTimelineEntry {
+        id: format!("context-{}", sequence),
+        kind: "build_context".to_string(),
+        label: "BUILD CONTEXT".to_string(),
+        state: "completed".to_string(),
+        sequence,
+        provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+        provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+        provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+        provider_model: provider_meta.map(|meta| meta.model.clone()),
+        provider_source: provider_source.map(str::to_string),
+        provider_mode: provider_mode.map(str::to_string),
+        build_context_observation: build_context_observation.cloned(),
+        tool_activities: Vec::new(),
+        text: None,
+        reasoning_content: None,
+        fallback_reason: None,
+        error: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+    });
+    sequence += 1;
+
+    let model_hops = if tool_hops.is_empty() {
+        1
+    } else {
+        tool_hops.len() + 1
+    };
+
+    for model_index in 0..model_hops {
+        let state = if phase == "failed" && model_index + 1 == model_hops {
+            "error".to_string()
+        } else if phase == "cancelled" && model_index + 1 == model_hops {
+            "cancelled".to_string()
+        } else {
+            "completed".to_string()
+        };
+        timeline.push(TraceTimelineEntry {
+            id: format!("model-{}", sequence),
+            kind: "call_model".to_string(),
+            label: format!("CALL MODEL #{}", model_index + 1),
+            state,
+            sequence,
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+            provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source: provider_source.map(str::to_string),
+            provider_mode: provider_mode.map(str::to_string),
+            build_context_observation: None,
+            tool_activities: Vec::new(),
+            text: None,
+            reasoning_content: None,
+            fallback_reason: None,
+            error: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: if model_index == 0 {
+                first_token_latency_ms
+            } else {
+                None
+            },
+            turn_duration_ms: None,
+        });
+        sequence += 1;
+
+        if let Some(parent_tool) = tool_hops.get(model_index) {
+            let grouped_tool_activities = tool_activities_for_parent(tool_activities, parent_tool);
+            let tool_state = if parent_tool.status == "error" {
+                "error".to_string()
+            } else {
+                "completed".to_string()
+            };
+            timeline.push(TraceTimelineEntry {
+                id: format!("tool-{}", sequence),
+                kind: "call_tool".to_string(),
+                label: format!("CALL TOOL #{} · {}", model_index + 1, parent_tool.name),
+                state: tool_state,
+                sequence,
+                provider_requested_name: None,
+                provider_name: None,
+                provider_protocol: None,
+                provider_model: None,
+                provider_source: None,
+                provider_mode: None,
+                build_context_observation: None,
+                tool_activities: grouped_tool_activities,
+                text: Some(parent_tool.summary.clone()),
+                reasoning_content: None,
+                fallback_reason: None,
+                error: if parent_tool.status == "error" {
+                    Some(parent_tool.summary.clone())
+                } else {
+                    None
+                },
+                input_tokens: None,
+                cache_hit_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                first_token_latency_ms: None,
+                turn_duration_ms: None,
+            });
+            sequence += 1;
+        }
+    }
+
+    if let Some(last_model_entry) = timeline
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.kind == "call_model")
+    {
+        last_model_entry.state = terminal_state.to_string();
+        last_model_entry.provider_requested_name =
+            provider_meta.map(|meta| meta.requested_name.clone());
+        last_model_entry.provider_name = provider_meta.map(|meta| meta.provider_name.clone());
+        last_model_entry.provider_protocol = provider_meta.map(|meta| meta.protocol.clone());
+        last_model_entry.provider_model = provider_meta.map(|meta| meta.model.clone());
+        last_model_entry.provider_source = provider_source.map(str::to_string);
+        last_model_entry.provider_mode = provider_mode.map(str::to_string);
+        last_model_entry.text = return_text.map(str::to_string);
+        last_model_entry.reasoning_content = return_reasoning_content.map(str::to_string);
+        last_model_entry.fallback_reason = fallback_reason.map(str::to_string);
+        last_model_entry.error = error.map(str::to_string);
+        last_model_entry.input_tokens = input_tokens;
+        last_model_entry.cache_hit_input_tokens = cache_hit_input_tokens;
+        last_model_entry.reasoning_tokens = reasoning_tokens;
+        last_model_entry.output_tokens = output_tokens;
+        last_model_entry.total_tokens = total_tokens;
+        last_model_entry.first_token_latency_ms = first_token_latency_ms;
+        last_model_entry.turn_duration_ms = turn_duration_ms;
+    }
+
+    timeline
+}
+
 fn build_turn_trace_title(message: &str) -> String {
     let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.is_empty() {
@@ -2357,6 +3740,41 @@ fn merge_fallback_reason(existing: Option<String>, next: Option<String>) -> Opti
         (None, Some(next)) if !next.trim().is_empty() => Some(next),
         (None, _) => None,
     }
+}
+
+fn build_provider_call_cache_record(
+    request_kind: ProviderRequestKind,
+    provider_source: Option<&str>,
+    provider_mode: Option<&str>,
+    token_usage: Option<&TokenUsage>,
+    first_token_latency_ms: Option<u64>,
+    build_context_observation: Option<&BuildContextObservation>,
+) -> ProviderCallCacheRecord {
+    let (input_tokens, cache_hit_input_tokens, reasoning_tokens, output_tokens, total_tokens) =
+        token_usage_parts(token_usage);
+
+    ProviderCallCacheRecord {
+        request_kind,
+        provider_source: provider_source.map(str::to_string),
+        provider_mode: provider_mode.map(str::to_string),
+        input_tokens,
+        cache_hit_input_tokens,
+        cache_miss_input_tokens: derive_cache_miss_input_tokens(token_usage),
+        reasoning_tokens,
+        output_tokens,
+        total_tokens,
+        first_token_latency_ms,
+        prefix_mutation_reasons: build_context_observation
+            .map(|observation| observation.prefix_mutation_reasons.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn derive_cache_miss_input_tokens(token_usage: Option<&TokenUsage>) -> Option<u64> {
+    let usage = token_usage?;
+    let input_tokens = usage.input_tokens?;
+    let cache_hit_input_tokens = usage.cache_hit_input_tokens?;
+    Some(input_tokens.saturating_sub(cache_hit_input_tokens))
 }
 
 fn merge_token_usage(
@@ -2517,6 +3935,17 @@ mod tests {
         }
     }
 
+    struct SlowToolExecutor {
+        delay_ms: u64,
+    }
+
+    impl crate::agent::tools::ToolExecutor for SlowToolExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+            StubToolExecutor.execute(call)
+        }
+    }
+
     struct MockHttpResponse {
         content_type: &'static str,
         body: String,
@@ -2634,6 +4063,19 @@ mod tests {
         }
     }
 
+    fn json_completion(text: &str) -> MockHttpResponse {
+        json_response(json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": text
+                    }
+                }
+            ]
+        }))
+    }
+
     fn sse_response(chunks: &[serde_json::Value]) -> MockHttpResponse {
         let mut body = String::new();
         for chunk in chunks {
@@ -2672,11 +4114,48 @@ mod tests {
         }
     }
 
+    fn deepseek_provider_selection(base_url: String) -> ResolvedProviderSelection {
+        ResolvedProviderSelection {
+            requested_name: "deepseek".to_string(),
+            provider_name: "deepseek".to_string(),
+            protocol: crate::agent::provider::ProviderProtocol::OpenAi,
+            base_url,
+            api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: "deepseek-v4-flash".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+            },
+        }
+    }
+
     fn build_runtime_for_test(selection: ResolvedProviderSelection) -> AgentRuntime {
         AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
             Box::new(StubToolExecutor),
+            Box::new(PassthroughPlanner),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        )
+    }
+
+    fn build_runtime_for_test_with_tool_executor(
+        selection: ResolvedProviderSelection,
+        tool_executor: Box<dyn ToolExecutor>,
+    ) -> AgentRuntime {
+        AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            tool_executor,
             Box::new(PassthroughPlanner),
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
@@ -2695,6 +4174,303 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         )
+    }
+
+    #[test]
+    fn capability_bridge_resolves_dotted_builtin_tool_calls_before_execution() {
+        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_time".to_string()),
+            name: "time.now".to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution
+                .capability
+                .as_ref()
+                .map(|capability| capability.capability_id.as_str()),
+            Some("builtin:time_now")
+        );
+        assert_eq!(execution.tool_call.name, "time.now");
+        assert_eq!(execution.tool_result.tool_name, "time.now");
+        assert_eq!(execution.tool_result.status, "ok");
+        assert_eq!(execution.failure_kind, None);
+    }
+
+    #[test]
+    fn capability_bridge_returns_normalized_not_found_failure_for_unknown_tools() {
+        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_unknown".to_string()),
+            name: "unknown_tool".to_string(),
+            arguments: json!({ "path": "src" }),
+            plan: None,
+        });
+
+        assert!(execution.capability.is_none());
+        assert_eq!(execution.tool_result.status, "error");
+        assert_eq!(
+            execution.failure_kind,
+            Some(CapabilityFailureKind::CapabilityNotFound)
+        );
+        assert!(execution.tool_result.output.contains("capability registry"));
+    }
+
+    #[test]
+    fn capability_bridge_resolves_host_registered_mcp_tool_snapshot() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-local".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Local MCP".to_string(),
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://local".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:workspace_search".to_string(),
+                source_id: "mcp-local".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "workspace_search".to_string(),
+                description: "List files through MCP".to_string(),
+                invocation_mode:
+                    crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{\"path\":\"string\"}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_workspace_search".to_string()),
+            name: "workspace_search".to_string(),
+            arguments: json!({ "path": "." }),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution
+                .capability
+                .as_ref()
+                .map(|capability| capability.capability_id.as_str()),
+            Some("mcp:tool:workspace_search")
+        );
+        assert_eq!(execution.tool_result.status, "ok");
+        assert_eq!(execution.failure_kind, None);
+    }
+
+    #[test]
+    fn capability_bridge_keeps_mcp_as_runtime_ingress_not_planner_scheduler_state() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-local".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Local MCP".to_string(),
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://local".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:workspace_search".to_string(),
+                source_id: "mcp-local".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "workspace_search".to_string(),
+                description: "List files through MCP".to_string(),
+                invocation_mode:
+                    crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{\"query\":\"string\"}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let planner = LocalTurnPlanner;
+        let provider_tool_call = ToolCall {
+            call_id: Some("call_workspace_search".to_string()),
+            name: "workspace_search".to_string(),
+            arguments: json!({ "query": "Cargo.toml" }),
+            plan: None,
+        };
+        let planned = planner
+            .select_tool_call("搜索 Cargo.toml", &Vec::<TurnHistoryMessage>::new(), Some(provider_tool_call))
+            .expect("planner should preserve provider tool call");
+
+        assert_eq!(planned.name, "workspace_search");
+        assert_eq!(planned.arguments, json!({ "query": "Cargo.toml" }));
+        assert!(planned.arguments.get("sourceId").is_none());
+        assert!(planned.arguments.get("transport").is_none());
+        assert!(planned.arguments.get("capabilityId").is_none());
+
+        let execution = runtime.execute_capability_tool_call(&planned);
+
+        assert_eq!(
+            execution
+                .capability
+                .as_ref()
+                .map(|capability| capability.capability_id.as_str()),
+            Some("mcp:tool:workspace_search")
+        );
+        assert_eq!(execution.tool_call.name, "workspace_search");
+        assert_eq!(execution.tool_call.arguments, json!({ "query": "Cargo.toml" }));
+        assert_eq!(execution.tool_result.status, "ok");
+    }
+
+    #[test]
+    fn capability_bridge_propagates_source_unavailable_from_runtime_execution_path() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-offline".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Offline MCP".to_string(),
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://offline".to_string(),
+                availability:
+                    crate::agent::capability_bridge::CapabilityAvailability::Unreachable,
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:offline_search".to_string(),
+                source_id: "mcp-offline".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "offline_search".to_string(),
+                description: "Offline search".to_string(),
+                invocation_mode:
+                    crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_offline_search".to_string()),
+            name: "offline_search".to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution.failure_kind,
+            Some(CapabilityFailureKind::SourceUnavailable)
+        );
+        assert!(execution.tool_result.output.contains("source"));
+    }
+
+    #[test]
+    fn capability_bridge_propagates_permission_denied_from_runtime_execution_path() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-approval".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Approval MCP".to_string(),
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://approval".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "requires-approval".to_string(),
+                updated_at_ms: 1,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:guarded_search".to_string(),
+                source_id: "mcp-approval".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "guarded_search".to_string(),
+                description: "Guarded search".to_string(),
+                invocation_mode:
+                    crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: true,
+                host_mediated: false,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_guarded_search".to_string()),
+            name: "guarded_search".to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution.failure_kind,
+            Some(CapabilityFailureKind::PermissionDenied)
+        );
+        assert!(execution.tool_result.output.contains("审批"));
+    }
+
+    #[test]
+    fn capability_bridge_propagates_malformed_response_from_runtime_execution_path() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.register_mcp_capability_for_test(crate::agent::capability_bridge::CapabilityView {
+            capability_id: "mcp:tool:orphaned".to_string(),
+            source_id: "mcp-missing".to_string(),
+            source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+            kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+            label: "orphaned_tool".to_string(),
+            description: "Orphaned tool".to_string(),
+            invocation_mode:
+                crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+            input_schema_summary: "{}".to_string(),
+            safety_class: "host_tool".to_string(),
+            visibility: "default".to_string(),
+            observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+            requires_approval: false,
+            host_mediated: true,
+            permission_scope: "workspace.read".to_string(),
+        });
+        runtime.remove_mcp_source_for_test("mcp-missing");
+
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_orphaned_tool".to_string()),
+            name: "orphaned_tool".to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution.failure_kind,
+            Some(CapabilityFailureKind::MalformedResponse)
+        );
+        assert!(execution.tool_result.output.contains("registry"));
     }
 
     fn temp_marker_file_path(prefix: &str) -> PathBuf {
@@ -2768,6 +4544,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 session_id: Some("test-session".to_string()),
+                node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
             },
@@ -2803,6 +4580,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 session_id: Some("stop-session".to_string()),
+                node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
             },
@@ -2848,7 +4626,9 @@ mod tests {
             user_message: "请继续处理".to_string(),
             assistant_message: "当前轮已收口。".to_string(),
             trace_steps: Vec::new(),
+            trace_timeline: Vec::new(),
             tool_activities: Vec::new(),
+            provider_call_records: Vec::new(),
             session_summary: "summary".to_string(),
         };
         let checkpoint = ExecutionCheckpoint {
@@ -2924,6 +4704,7 @@ mod tests {
             model_id: None,
             reasoning_effort: None,
             session_id: Some("attachment-failure".to_string()),
+            node_id: None,
             history: Vec::new(),
             images: vec![TurnInputImage {
                 data_url: "data:image/png;base64,AAAA".to_string(),
@@ -2987,6 +4768,11 @@ mod tests {
             turn_count: 2,
             last_referenced_file: None,
             updated_at_ms: 0,
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: Default::default(),
+            resolved_node_id: None,
+            latest_node_id: None,
         };
 
         let retrieved =
@@ -3029,6 +4815,11 @@ mod tests {
             turn_count: 1,
             last_referenced_file: None,
             updated_at_ms: 0,
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: Default::default(),
+            resolved_node_id: None,
+            latest_node_id: None,
         };
 
         let retrieved =
@@ -3059,6 +4850,7 @@ mod tests {
             model_id: None,
             reasoning_effort: None,
             session_id: Some("sync-reasoning-latency".to_string()),
+            node_id: None,
             history: Vec::new(),
             images: Vec::new(),
         });
@@ -3066,6 +4858,53 @@ mod tests {
         assert_eq!(result.phase, "ready");
         assert_eq!(result.assistant_message, "最终答案。");
         assert!(result.first_token_latency_ms.is_some());
+
+        let _ = server.finish();
+    }
+
+    #[test]
+    fn run_turn_measures_first_token_latency_from_turn_start_across_tool_hops() {
+        let final_text = "同步工具调用后返回最终答案。";
+        let server = MockHttpServer::start(vec![
+            json_response(decision_tool_call(
+                "workspace_list_files",
+                json!({"path": ".", "limit": 40}),
+            )),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": final_text
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 40,
+                    "completion_tokens": 20,
+                    "total_tokens": 60
+                }
+            })),
+        ]);
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(SlowToolExecutor { delay_ms: 40 }),
+        );
+
+        let result = runtime.run_turn(TurnInput {
+            message: "先调用工具再同步回答".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-tool-hop-latency".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert_eq!(result.assistant_message, final_text);
+        assert!(result.first_token_latency_ms.unwrap_or_default() >= 40);
 
         let _ = server.finish();
     }
@@ -3103,6 +4942,7 @@ mod tests {
             model_id: None,
             reasoning_effort: None,
             session_id: Some("sync-multi-hop".to_string()),
+            node_id: None,
             history: Vec::new(),
             images: Vec::new(),
         });
@@ -3230,6 +5070,7 @@ mod tests {
             model_id: None,
             reasoning_effort: None,
             session_id: Some("sync-usage-accumulated".to_string()),
+            node_id: None,
             history: Vec::new(),
             images: Vec::new(),
         });
@@ -3241,6 +5082,24 @@ mod tests {
         assert_eq!(result.reasoning_tokens, Some(12));
         assert_eq!(result.output_tokens, Some(70));
         assert_eq!(result.total_tokens, Some(310));
+        let snapshot = runtime.load_session_snapshot(Some("sync-usage-accumulated"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("sync accumulated trace");
+        assert_eq!(trace.provider_call_records.len(), 3);
+        assert_eq!(
+            trace.provider_call_records[0].request_kind,
+            ProviderRequestKind::InitialRequest
+        );
+        assert_eq!(
+            trace.provider_call_records[1].request_kind,
+            ProviderRequestKind::ToolFollowup
+        );
+        assert_eq!(
+            trace.provider_call_records[2].cache_miss_input_tokens,
+            Some(45)
+        );
 
         let _ = server.finish();
     }
@@ -3277,6 +5136,7 @@ mod tests {
             model_id: None,
             reasoning_effort: None,
             session_id: Some("repair-blank-tool-sync".to_string()),
+            node_id: None,
             history: Vec::new(),
             images: Vec::new(),
         });
@@ -3431,6 +5291,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 session_id: Some("stream-multi-hop".to_string()),
+                node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
             },
@@ -3499,6 +5360,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 session_id: Some("stream-reasoning-latency".to_string()),
+                node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
             },
@@ -3534,6 +5396,189 @@ mod tests {
             completed.first_token_latency_ms,
             first_delta.first_token_latency_ms
         );
+    }
+
+    #[test]
+    fn start_turn_stream_measures_first_token_latency_from_turn_start_across_tool_hops() {
+        let final_text = "工具调用后返回最终答案。";
+        let server = MockHttpServer::start(vec![
+            json_response(decision_tool_call(
+                "workspace_list_files",
+                json!({"path": ".", "limit": 40}),
+            )),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": final_text
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 40,
+                        "completion_tokens": 20,
+                        "total_tokens": 60
+                    }
+                }),
+            ]),
+        ]);
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(SlowToolExecutor { delay_ms: 40 }),
+        );
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-tool-hop-latency".to_string(),
+            TurnInput {
+                message: "先调用工具再回答".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-tool-hop-latency".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let _ = server.finish();
+        let events = sink.events.borrow();
+        let first_delta = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .expect("first delta event");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
+
+        assert!(first_delta.first_token_latency_ms.unwrap_or_default() >= 40);
+        assert_eq!(
+            completed.first_token_latency_ms,
+            first_delta.first_token_latency_ms
+        );
+    }
+
+    #[test]
+    fn start_turn_stream_uses_compat_sync_for_deepseek_tool_followup() {
+        let final_text = "deepseek follow-up completed";
+        let server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "call a tool first",
+                            "reasoning_content": "need workspace listing before answering",
+                            "tool_calls": [
+                                {
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": final_text,
+                            "reasoning_content": "tool output is sufficient"
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 60,
+                    "completion_tokens": 24,
+                    "total_tokens": 84
+                }
+            })),
+        ]);
+        let mut runtime = build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-deepseek-followup-compat".to_string(),
+            TurnInput {
+                message: "read Cargo.toml then answer".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("deepseek-followup-compat".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        let events = sink.events.borrow();
+        let first_delta = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .expect("delta event");
+        let text_delta = events
+            .iter()
+            .filter_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .find(|payload| payload.text.is_some())
+            .expect("text delta event");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
+
+        assert_eq!(requests.len(), 2);
+        let decision_request: Value =
+            serde_json::from_str(&requests[0]).expect("decision request should be json");
+        let followup_request: Value =
+            serde_json::from_str(&requests[1]).expect("followup request should be json");
+        assert_eq!(decision_request.get("stream").and_then(Value::as_bool), Some(false));
+        assert_eq!(followup_request.get("stream").and_then(Value::as_bool), Some(false));
+        assert!(followup_request.get("stream_options").is_none());
+        let replayed_assistant_message = followup_request
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages.iter().find(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                        && message
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .map(|calls| !calls.is_empty())
+                            .unwrap_or(false)
+                })
+            })
+            .expect("follow-up request should replay assistant tool call message");
+        assert_eq!(
+            replayed_assistant_message
+                .get("reasoning_content")
+                .and_then(Value::as_str),
+            Some("need workspace listing before answering")
+        );
+        assert_eq!(first_delta.reasoning_content.as_deref(), Some("tool output is sufficient"));
+        assert_eq!(text_delta.text.as_deref(), Some(final_text));
+        assert_eq!(completed.phase.as_deref(), Some("ready"));
+        assert_eq!(
+            completed.provider_source.as_deref(),
+            Some("provider_followup_stream_compat_sync")
+        );
+        assert_eq!(completed.fallback_reason, None);
     }
 
     #[test]
@@ -3670,6 +5715,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 session_id: Some("stream-usage-accumulated".to_string()),
+                node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
             },
@@ -3704,6 +5750,19 @@ mod tests {
         assert_eq!(trace.reasoning_tokens, Some(12));
         assert_eq!(trace.output_tokens, Some(70));
         assert_eq!(trace.total_tokens, Some(310));
+        assert_eq!(trace.provider_call_records.len(), 3);
+        assert_eq!(
+            trace.provider_call_records[0].request_kind,
+            ProviderRequestKind::InitialRequest
+        );
+        assert_eq!(
+            trace.provider_call_records[1].request_kind,
+            ProviderRequestKind::ToolFollowup
+        );
+        assert_eq!(
+            trace.provider_call_records[2].cache_miss_input_tokens,
+            Some(45)
+        );
 
         let _ = server.finish();
     }
@@ -3769,6 +5828,7 @@ mod tests {
                 model_id: None,
                 reasoning_effort: None,
                 session_id: Some("repair-blank-tool-stream".to_string()),
+                node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
             },
@@ -3801,5 +5861,248 @@ mod tests {
                     .unwrap_or(false)
         }));
         assert_eq!(request_bodies.len(), 3);
+    }
+
+    #[test]
+    fn runtime_can_rebuild_session_snapshot_and_retrieved_context_from_history_node() {
+        let server =
+            MockHttpServer::start(vec![json_completion("第一答"), json_completion("第二答")]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+
+        let first = runtime.run_turn(TurnInput {
+            message: "第一问".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("runtime-history".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+        let second = runtime.run_turn(TurnInput {
+            message: "第二问".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("runtime-history".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+        assert_eq!(first.assistant_message, "第一答");
+        assert_eq!(second.assistant_message, "第二答");
+
+        let (history_nodes, _, _) = runtime.load_history_graph(Some("runtime-history"));
+        let historical_node_id = history_nodes
+            .first()
+            .map(|node| node.node_id.clone())
+            .expect("historical node should exist");
+
+        let snapshot = runtime
+            .load_session_snapshot_at(Some("runtime-history"), Some(historical_node_id.as_str()));
+        assert_eq!(
+            snapshot.resolved_node_id.as_deref(),
+            Some(historical_node_id.as_str())
+        );
+        assert_eq!(snapshot.history.len(), 2);
+        assert_eq!(snapshot.history[0].content, "第一问");
+        assert_eq!(
+            snapshot.history_cursor.mode,
+            crate::agent::session::HistoryCursorMode::Historical
+        );
+
+        let retrieved = runtime.inspect_retrieved_context_at(
+            Some("runtime-history"),
+            Some(historical_node_id.as_str()),
+            None,
+            None,
+        );
+        assert_eq!(retrieved.session_context.turn_count, 1);
+        assert_eq!(retrieved.session_context.recent_history.len(), 2);
+
+        let _ = server.finish();
+    }
+
+    #[test]
+    fn persisted_trace_timeline_uses_canonical_monitor_semantics() {
+        let provider_meta = ProviderEventMeta {
+            requested_name: "OpenAI".to_string(),
+            provider_name: "OpenAI".to_string(),
+            protocol: "openai".to_string(),
+            model: "gpt-5".to_string(),
+        };
+        let build_context_observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 4,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.0,
+            max_output_tokens: 1024,
+            stable_prefix_text: "system: stable".to_string(),
+            semi_stable_context_text: "developer: retrieval summary".to_string(),
+            volatile_input_text: "user: request".to_string(),
+            prefix_mutation_reasons: vec![
+                crate::agent::provider::PrefixMutationReason::HistoryBoundaryShifted,
+            ],
+            request_messages_text: "system: stable\nuser: request".to_string(),
+            tool_definitions_text: "workspace.read_file(path)".to_string(),
+        };
+        let tool_activities = vec![crate::agent::telemetry::TurnToolActivity {
+            id: "tool-read-file".to_string(),
+            name: "workspace.read_file".to_string(),
+            status: "done".to_string(),
+            summary: "read file done".to_string(),
+            arguments_text: Some("{\"path\":\"src/main.ts\"}".to_string()),
+            result_text: Some("{\"content\":\"ok\"}".to_string()),
+            duration_seconds: Some(0.2),
+            capability_invocation: None,
+        }];
+
+        let timeline = build_persisted_trace_timeline(
+            "读取文件",
+            "completed",
+            Some(&provider_meta),
+            Some("primary"),
+            Some("standard"),
+            Some(&build_context_observation),
+            &tool_activities,
+            Some("final answer"),
+            None,
+            None,
+            None,
+            Some(11),
+            Some(3),
+            Some(0),
+            Some(7),
+            Some(18),
+            Some(99),
+            Some(900),
+        );
+
+        let kinds = timeline
+            .iter()
+            .map(|entry| entry.kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "input",
+                "prepare_retrieval",
+                "build_context",
+                "call_model",
+                "call_tool",
+                "call_model",
+            ]
+        );
+        assert_eq!(timeline[1].label, "PREPARE RETRIEVAL");
+        assert_eq!(timeline[4].label, "CALL TOOL #1 · workspace.read_file");
+        assert_eq!(timeline[5].label, "CALL MODEL #2");
+    }
+
+    #[test]
+    fn deepseek_tool_followup_compat_sync_avoids_stream_fallback() {
+        let final_text = "deepseek follow-up completed";
+        let server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "call a tool first",
+                            "reasoning_content": "need workspace listing before answering",
+                            "tool_calls": [
+                                {
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": final_text,
+                            "reasoning_content": "tool output is sufficient"
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 60,
+                    "completion_tokens": 24,
+                    "total_tokens": 84
+                }
+            })),
+        ]);
+        let mut runtime =
+            build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-deepseek-followup-compat".to_string(),
+            TurnInput {
+                message: "read Cargo.toml then answer".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("deepseek-followup-compat".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        let events = sink.events.borrow();
+        let first_delta = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .expect("delta event");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
+
+        assert_eq!(requests.len(), 2);
+        let decision_request: Value =
+            serde_json::from_str(&requests[0]).expect("decision request should be json");
+        let followup_request: Value =
+            serde_json::from_str(&requests[1]).expect("followup request should be json");
+        assert_eq!(
+            decision_request.get("stream").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            followup_request.get("stream").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(followup_request.get("stream_options").is_none());
+        assert_eq!(
+            followup_request
+                .get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| messages.get(1))
+                .and_then(|message| message.get("reasoning_content"))
+                .and_then(Value::as_str),
+            Some("need workspace listing before answering")
+        );
+        assert_eq!(first_delta.text.as_deref(), Some(final_text));
+        assert_eq!(completed.phase.as_deref(), Some("completed"));
+        assert_eq!(
+            completed.provider_source.as_deref(),
+            Some("provider_followup_stream_compat_sync")
+        );
+        assert_eq!(completed.fallback_reason, None);
     }
 }

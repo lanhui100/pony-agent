@@ -19,8 +19,9 @@ import {
   Wrench
 } from "lucide-vue-next";
 import { extractActiveTaskFocus } from "@/types/runtime";
-import type { BuildContextObservation, ToolActivity, TraceStep, TurnTraceRecord } from "@/types/runtime";
+import type { BuildContextObservation, ToolActivity, TraceStep, TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useProviderStore } from "@/stores/providers";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 
 type DetailRowTone = "default" | "muted" | "warning" | "danger";
@@ -46,13 +47,15 @@ type TraceDetailSection = {
   durationText?: string;
 };
 
+type TimelineDetailRow = DetailRow;
+
 const runtimeStore = useRuntimeStore();
+const providerStore = useProviderStore();
 
 const {
   availableTools,
   error,
   fallbackReason,
-  firstTokenLatencyMs,
   messages,
   phaseLabel,
   providerMode,
@@ -61,11 +64,10 @@ const {
   providerProtocol,
   retrievedContext,
   sessionId,
-  sessionSummary,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"status" | "trace" | "tools" | "">("trace");
+const activePanel = ref<"trace" | "tools" | "">("trace");
 const activeTurnId = ref("");
 const activeTraceStepKey = ref("");
 const activeTraceDetailKey = ref("");
@@ -87,12 +89,6 @@ const displayModel = computed(() => {
 const retrievedSessionContext = computed(() => retrievedContext.value?.sessionContext ?? null);
 const retrievedRunState = computed(() => retrievedContext.value?.runState ?? null);
 const retrievedLongTermMemory = computed(() => retrievedContext.value?.longTermMemory ?? null);
-const retrievedRecentHistoryCount = computed(() => retrievedSessionContext.value?.recentHistory?.length ?? 0);
-const retrievedRecentAttachmentCount = computed(
-  () => retrievedSessionContext.value?.recentAttachmentAssets?.length ?? 0
-);
-const retrievedLastReferencedFile = computed(() => retrievedSessionContext.value?.lastReferencedFile?.trim() ?? "");
-const retrievedRunGoal = computed(() => retrievedRunState.value?.goal?.trim() ?? "");
 const retrievedRunPhase = computed(
   () =>
     retrievedRunState.value?.phase?.trim() ||
@@ -103,24 +99,42 @@ const retrievedRunPhase = computed(
 const longTermMemoryEntries = computed(() => retrievedLongTermMemory.value?.entries ?? []);
 const longTermMemoryPreviewEntries = computed(() => longTermMemoryEntries.value.slice(0, 3));
 const retrievedActiveTaskFocus = computed(() => extractActiveTaskFocus(longTermMemoryEntries.value)?.trim() ?? "");
-const longTermMemoryStatusLabel = computed(() => {
-  const status = retrievedLongTermMemory.value?.status?.trim().toLowerCase() ?? "";
-  if (status === "available") {
-    return `${longTermMemoryEntries.value.length} 条`;
-  }
-  if (status === "empty") {
-    return "空";
-  }
-
-  return status || "";
-});
 
 const orderedTurnTraces = computed(() => [...turnTraceHistory.value]);
+const latestTurn = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1] ?? null);
 const latestTurnId = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1]?.turnId ?? "");
+const currentContextWindowTokens = computed(
+  () => retrievedSessionContext.value?.contextWindowTokens ?? providerStore.currentModel?.capabilities?.contextWindowTokens ?? null
+);
+const sessionTurnCount = computed(() => orderedTurnTraces.value.length);
+const sessionModelCallCount = computed(() =>
+  orderedTurnTraces.value.reduce(
+    (sum, turn) => sum + turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model").length,
+    0
+  )
+);
+const sessionToolCallCount = computed(() =>
+  orderedTurnTraces.value.reduce(
+    (sum, turn) => sum + turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_tool").length,
+    0
+  )
+);
+const sessionInputTokensTotal = computed(() =>
+  orderedTurnTraces.value.reduce((sum, turn) => sum + (turn.inputTokens ?? 0), 0)
+);
+const sessionCacheHitTokensTotal = computed(() =>
+  orderedTurnTraces.value.reduce((sum, turn) => sum + (cacheHitInputTokens(turn) ?? 0), 0)
+);
+const sessionOutputTokensTotal = computed(() =>
+  orderedTurnTraces.value.reduce((sum, turn) => sum + (turn.outputTokens ?? 0), 0)
+);
+const sessionCacheHitRatio = computed(() => {
+  if (sessionInputTokensTotal.value <= 0) {
+    return "";
+  }
 
-function hasText(value?: string | null) {
-  return Boolean(value?.trim());
-}
+  return `${((sessionCacheHitTokensTotal.value / sessionInputTokensTotal.value) * 100).toFixed(1)}%`;
+});
 
 function formatDuration(durationSeconds?: number | null) {
   if (durationSeconds == null) {
@@ -144,6 +158,52 @@ function traceStateIcon(state: TraceStep["state"]) {
   }
 
   return Circle;
+}
+
+function turnTimeline(turn: TurnTraceRecord) {
+  if (turn.traceTimeline?.length) {
+    const normalized: TraceTimelineEntry[] = [];
+    for (const entry of turn.traceTimeline) {
+      const kind = canonicalTraceTimelineKind(entry.kind);
+      if (kind !== "return_result") {
+        normalized.push({ ...entry, kind });
+        continue;
+      }
+
+      const reverseModelIndex = [...normalized].reverse().findIndex((candidate) => candidate.kind === "call_model");
+      if (reverseModelIndex === -1) {
+        normalized.push({
+          ...entry,
+          id: `model-${entry.sequence}`,
+          kind: "call_model",
+          label: "CALL MODEL #1"
+        });
+        continue;
+      }
+
+      const modelIndex = normalized.length - 1 - reverseModelIndex;
+      const modelEntry = normalized[modelIndex];
+      normalized[modelIndex] = {
+        ...modelEntry,
+        kind: "call_model",
+        state: entry.state ?? modelEntry.state,
+        text: entry.text ?? modelEntry.text ?? null,
+        reasoningContent: entry.reasoningContent ?? modelEntry.reasoningContent ?? null,
+        fallbackReason: entry.fallbackReason ?? modelEntry.fallbackReason ?? null,
+        error: entry.error ?? modelEntry.error ?? null,
+        inputTokens: entry.inputTokens ?? modelEntry.inputTokens ?? null,
+        cacheHitInputTokens: entry.cacheHitInputTokens ?? modelEntry.cacheHitInputTokens ?? null,
+        reasoningTokens: entry.reasoningTokens ?? modelEntry.reasoningTokens ?? null,
+        outputTokens: entry.outputTokens ?? modelEntry.outputTokens ?? null,
+        totalTokens: entry.totalTokens ?? modelEntry.totalTokens ?? null,
+        firstTokenLatencyMs: entry.firstTokenLatencyMs ?? modelEntry.firstTokenLatencyMs ?? null,
+        turnDurationMs: entry.turnDurationMs ?? modelEntry.turnDurationMs ?? null
+      };
+    }
+    return normalized;
+  }
+
+  return [];
 }
 
 function turnStateIcon(turn: TurnTraceRecord) {
@@ -247,28 +307,6 @@ function turnAssistantMessage(turnId: string) {
   return messages.value.find((message) => message.turnId === turnId && message.role === "assistant") ?? null;
 }
 
-function detectInputKind(content: string): InputKind {
-  const normalized = content.trim().toLowerCase();
-
-  if (
-    normalized.includes("data:image") ||
-    normalized.includes("![") ||
-    /\.(png|jpe?g|gif|webp|bmp|svg)(\?.*)?$/.test(normalized)
-  ) {
-    return "image";
-  }
-
-  if (/\.(mp4|mov|avi|webm|mkv)(\?.*)?$/.test(normalized)) {
-    return "video";
-  }
-
-  if (/\.(mp3|wav|m4a|aac|ogg|flac)(\?.*)?$/.test(normalized)) {
-    return "audio";
-  }
-
-  return "text";
-}
-
 function inputKindIcon(kind: InputKind) {
   if (kind === "image") {
     return ImageIcon;
@@ -283,17 +321,6 @@ function inputKindIcon(kind: InputKind) {
   }
 
   return FileText;
-}
-
-function providerModelLabel(turn: TurnTraceRecord) {
-  const provider = turn.providerName?.trim();
-  const model = turn.providerModel?.trim();
-
-  if (provider && model) {
-    return `${provider}/${model}`;
-  }
-
-  return model || provider || "";
 }
 
 function toolPanelKey(name: string) {
@@ -331,6 +358,31 @@ function formatDurationMs(durationMs?: number | null) {
   }
 
   return durationMs < 1000 ? `${Math.round(durationMs)} ms` : `${(durationMs / 1000).toFixed(2)} s`;
+}
+
+function formatCompactDurationMs(durationMs?: number | null) {
+  if (durationMs == null) {
+    return "";
+  }
+
+  return durationMs < 1000 ? `${Math.round(durationMs)} ms` : `${(durationMs / 1000).toFixed(1)} s`;
+}
+
+function formatInteger(value?: number | null) {
+  return value == null ? "" : value.toLocaleString("zh-CN");
+}
+
+function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: number | null) {
+  if (inputTokens == null) {
+    return "";
+  }
+
+  const used = formatInteger(inputTokens);
+  if (contextWindowTokens == null || contextWindowTokens <= 0) {
+    return used;
+  }
+
+  return `${used} / ${formatInteger(contextWindowTokens)} (${((inputTokens / contextWindowTokens) * 100).toFixed(1)}%)`;
 }
 
 function readNumericValue(value: unknown) {
@@ -394,6 +446,366 @@ function reasoningTokens(turn: TurnTraceRecord) {
   ]);
 }
 
+function tokenSpeed(turn: TurnTraceRecord) {
+  if (turn.outputTokens == null || turn.turnDurationMs == null) {
+    return null;
+  }
+
+  const activeGenerationMs = turn.firstTokenLatencyMs != null
+    ? Math.max(turn.turnDurationMs - turn.firstTokenLatencyMs, 1)
+    : Math.max(turn.turnDurationMs, 1);
+
+  const tokensPerSecond = turn.outputTokens / (activeGenerationMs / 1000);
+  return Number.isFinite(tokensPerSecond) ? tokensPerSecond : null;
+}
+
+function formatTokenSpeed(turn: TurnTraceRecord) {
+  const value = tokenSpeed(turn);
+  return value != null ? `${value.toFixed(1)} token/s` : "";
+}
+
+function formatEntryTokenSpeed(entry: TraceTimelineEntry) {
+  if (entry.outputTokens == null || entry.turnDurationMs == null) {
+    return "";
+  }
+
+  const activeGenerationMs = entry.firstTokenLatencyMs != null
+    ? Math.max(entry.turnDurationMs - entry.firstTokenLatencyMs, 1)
+    : Math.max(entry.turnDurationMs, 1);
+  const value = entry.outputTokens / (activeGenerationMs / 1000);
+  return Number.isFinite(value) ? `${value.toFixed(1)} token/s` : "";
+}
+
+function timelineCallModelIndex(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  return turnTimeline(turn)
+    .filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model")
+    .findIndex((candidate) => candidate.id === entry.id);
+}
+
+function timelineProviderCallRecord(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+    return null;
+  }
+
+  const index = timelineCallModelIndex(turn, entry);
+  return index >= 0 ? turn.providerCallRecords?.[index] ?? null : null;
+}
+
+function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry): TraceTimelineEntry {
+  const record = timelineProviderCallRecord(turn, entry);
+  const callModelEntries = turnTimeline(turn).filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model");
+  const isFinalCallModel = callModelEntries[callModelEntries.length - 1]?.id === entry.id;
+
+  return {
+    ...entry,
+    inputTokens: entry.inputTokens ?? record?.inputTokens ?? (isFinalCallModel ? turn.inputTokens ?? null : null),
+    cacheHitInputTokens:
+      entry.cacheHitInputTokens ?? record?.cacheHitInputTokens ?? (isFinalCallModel ? cacheHitInputTokens(turn) ?? null : null),
+    reasoningTokens:
+      entry.reasoningTokens ?? record?.reasoningTokens ?? (isFinalCallModel ? reasoningTokens(turn) ?? null : null),
+    outputTokens: entry.outputTokens ?? record?.outputTokens ?? (isFinalCallModel ? turn.outputTokens ?? null : null),
+    totalTokens: entry.totalTokens ?? record?.totalTokens ?? (isFinalCallModel ? turn.totalTokens ?? null : null),
+    firstTokenLatencyMs:
+      entry.firstTokenLatencyMs ?? record?.firstTokenLatencyMs ?? (isFinalCallModel ? turn.firstTokenLatencyMs ?? null : null),
+    turnDurationMs: entry.turnDurationMs ?? (isFinalCallModel ? turn.turnDurationMs ?? null : null)
+  };
+}
+
+function canonicalTraceTimelineKind(kind: TraceTimelineEntry["kind"]) {
+  switch (kind) {
+    case "context":
+      return "build_context";
+    case "model":
+      return "call_model";
+    case "tool":
+      return "call_tool";
+    case "return":
+      return "return_result";
+    default:
+      return kind;
+  }
+}
+
+function timelineEntryStats(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+    return [];
+  }
+
+  const metricEntry = timelineMetricEntry(turn, entry);
+  const stats: string[] = [];
+  if (metricEntry.inputTokens != null) {
+    stats.push(`输入 ${metricEntry.inputTokens}`);
+  }
+  if (metricEntry.cacheHitInputTokens != null) {
+    stats.push(`命中缓存 ${metricEntry.cacheHitInputTokens}`);
+  }
+  if (metricEntry.reasoningTokens != null) {
+    stats.push(`思考链 ${metricEntry.reasoningTokens}`);
+  }
+  if (metricEntry.outputTokens != null) {
+    stats.push(`输出 ${metricEntry.outputTokens}`);
+  }
+  const tokenSpeed = formatEntryTokenSpeed(metricEntry);
+  if (tokenSpeed) {
+    stats.push(tokenSpeed);
+  }
+  return stats;
+}
+
+function timelineDurationText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  const kind = canonicalTraceTimelineKind(entry.kind);
+  if (kind === "call_tool") {
+    const totalSeconds = (entry.toolActivities ?? []).reduce((sum, tool) => sum + (tool.durationSeconds ?? 0), 0);
+    return totalSeconds > 0 ? formatDuration(totalSeconds) : "";
+  }
+
+  if (kind === "call_model") {
+    const metricEntry = timelineMetricEntry(turn, entry);
+    if (metricEntry.turnDurationMs != null) {
+      const tokenSpeed = formatEntryTokenSpeed(metricEntry);
+      const latencyText =
+        metricEntry.firstTokenLatencyMs != null ? `延时 ${metricEntry.firstTokenLatencyMs} ms` : "";
+      return [latencyText, metricEntry.turnDurationMs != null ? `耗时 ${formatDurationMs(metricEntry.turnDurationMs)}` : "", tokenSpeed]
+        .filter(Boolean)
+        .join(" · ");
+    }
+    if (metricEntry.firstTokenLatencyMs != null) {
+      return `延时 ${metricEntry.firstTokenLatencyMs} ms`;
+    }
+  }
+
+  return "";
+}
+
+function timelinePreviewText(entry: TraceTimelineEntry) {
+  const kind = canonicalTraceTimelineKind(entry.kind);
+  if (kind === "call_tool") {
+    return entry.toolActivities?.[0]?.summary ?? "";
+  }
+
+  if (entry.text?.trim()) {
+    return entry.text.trim();
+  }
+
+  if (entry.reasoningContent?.trim()) {
+    return entry.reasoningContent.trim();
+  }
+
+  if (entry.fallbackReason?.trim()) {
+    return entry.fallbackReason.trim();
+  }
+
+  if (entry.error?.trim()) {
+    return entry.error.trim();
+  }
+
+  return "";
+}
+
+function timelinePurposeText(entry: TraceTimelineEntry) {
+  switch (canonicalTraceTimelineKind(entry.kind)) {
+    case "input":
+      return "记录本轮进入 agent 的用户输入。";
+    case "prepare_retrieval":
+      return "记录 retrieval 参与请求准备的阶段信号。";
+    case "build_context":
+      return "记录本轮真正发送给模型前的上下文组织结果。";
+    case "call_model":
+      return "对应一次独立的模型调用，不与其他 hop 合并。";
+    case "call_tool":
+      return "对应一次独立的工具调用，不与其他 hop 合并。";
+    default:
+      return "";
+  }
+}
+
+function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  const rows: TimelineDetailRow[] = [];
+  const kind = canonicalTraceTimelineKind(entry.kind);
+
+  if (kind === "input") {
+    pushRow(rows, "标题", turn.title);
+    pushRow(rows, "输入", timelinePreviewText(entry), { multiline: true });
+    return rows;
+  }
+
+  if (kind === "prepare_retrieval") {
+    pushRow(rows, "阶段", "prepare_retrieval");
+    pushRow(
+      rows,
+      "观测说明",
+      "这一阶段表示 retrieval 已参与本轮请求准备，后续 build_context 会展示真正发给模型的上下文摘要。",
+      { multiline: true, tone: "muted" }
+    );
+    return rows;
+  }
+
+  if (kind === "build_context") {
+    buildContextRows(entry.buildContextObservation ?? turn.buildContextObservation).forEach((row) => rows.push(row));
+    pushRow(rows, "请求目标", entry.providerRequestedName ?? turn.providerRequestedName);
+    pushRow(rows, "Provider", entry.providerName);
+    pushRow(rows, "Protocol", entry.providerProtocol);
+    pushRow(rows, "Model", entry.providerModel);
+    pushRow(rows, "模式", entry.providerMode);
+    pushRow(
+      rows,
+      "观测说明",
+      entry.buildContextObservation ?? turn.buildContextObservation
+        ? "这里展示的是本轮真正发给模型的请求，不是 retrieval state 的替身。"
+        : "当前还没有可展示的 request observation。",
+      { multiline: true, tone: "muted" }
+    );
+    return rows;
+  }
+
+  if (kind === "call_model") {
+    const metricEntry = timelineMetricEntry(turn, entry);
+    pushRow(rows, "Provider", entry.providerName);
+    pushRow(rows, "Protocol", entry.providerProtocol);
+    pushRow(rows, "Model", entry.providerModel);
+    pushRow(rows, "来源", entry.providerSource);
+    pushRow(rows, "模式", entry.providerMode);
+    pushRow(rows, "输入", metricEntry.inputTokens);
+    pushRow(rows, "命中缓存", metricEntry.cacheHitInputTokens);
+    pushRow(rows, "思考链", metricEntry.reasoningTokens);
+    pushRow(rows, "输出", metricEntry.outputTokens);
+    pushRow(rows, "总计", metricEntry.totalTokens);
+    pushRow(rows, "首 token", metricEntry.firstTokenLatencyMs != null ? `${metricEntry.firstTokenLatencyMs} ms` : null);
+    pushRow(rows, "耗时", metricEntry.turnDurationMs != null ? formatDurationMs(metricEntry.turnDurationMs) : null);
+    pushRow(rows, "速率", formatEntryTokenSpeed(metricEntry) || null);
+    pushRow(rows, "输出预览", timelinePreviewText(entry), { multiline: true, expandable: true });
+    pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
+    return rows;
+  }
+
+  if (kind === "call_tool") {
+    const parentTool = entry.toolActivities?.[0];
+    pushRow(rows, "工具", parentTool?.name);
+    pushRow(rows, "状态", parentTool?.status);
+    pushRow(rows, "摘要", parentTool?.summary, { multiline: true });
+    pushRow(rows, "耗时", timelineDurationText(turn, entry));
+    pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
+    return rows;
+  }
+
+  return rows;
+}
+
+function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  const userMessage = turnUserMessage(turn.turnId);
+  const assistantMessage = turnAssistantMessage(turn.turnId);
+  const sections: TraceDetailSection[] = [];
+  const kind = canonicalTraceTimelineKind(entry.kind);
+
+  if (kind === "input") {
+    const inputText = entry.text?.trim() || userMessage?.content?.trim() || "";
+    if (inputText) {
+      sections.push({
+        id: "input-message",
+        label: "输入原文",
+        content: inputText,
+        summary: previewInline(inputText)
+      });
+    }
+    return sections;
+  }
+
+  if (kind === "build_context") {
+    const buildContextObservation = entry.buildContextObservation ?? turn.buildContextObservation;
+    const contextSections: Array<[string, string, string]> = [
+      ["stable", "稳定前缀", buildContextText(buildContextObservation, "stablePrefixText")],
+      ["semi", "半稳定上下文", buildContextText(buildContextObservation, "semiStableContextText")],
+      ["volatile", "本轮输入", buildContextText(buildContextObservation, "volatileInputText")],
+      ["messages", "最终请求消息", buildContextText(buildContextObservation, "requestMessagesText")],
+      ["tools", "工具定义", buildContextText(buildContextObservation, "toolDefinitionsText")]
+    ];
+
+    for (const [id, label, content] of contextSections) {
+      if (!content) {
+        continue;
+      }
+
+      sections.push({
+        id,
+        label,
+        content,
+        summary: previewInline(content)
+      });
+    }
+
+    return sections;
+  }
+
+  if (kind === "call_tool") {
+    for (const activity of entry.toolActivities ?? []) {
+      sections.push({
+        id: activity.id,
+        label: activity.name,
+        content: buildToolMessageDetail(activity),
+        summary: activity.summary,
+        kind: "tool",
+        toolStatus: activity.status,
+        durationText: formatDuration(activity.durationSeconds)
+      });
+    }
+    return sections;
+  }
+
+  const reasoningContent = entry.reasoningContent?.trim() || assistantMessage?.reasoningContent?.trim() || "";
+  if (reasoningContent) {
+    sections.push({
+      id: "reasoning",
+      label: "思考链",
+      content: reasoningContent,
+      summary: previewResult(reasoningContent)
+    });
+  }
+
+  const outputContent = entry.text?.trim() || assistantMessage?.content?.trim() || "";
+  if (outputContent) {
+    sections.push({
+      id: "assistant-output",
+      label: "模型输出",
+      content: outputContent,
+      summary: previewResult(outputContent)
+    });
+  }
+
+  return sections;
+}
+
+function buildToolMessageDetail(activity: ToolActivity) {
+  const lines: string[] = [];
+
+  if (activity.argumentsText?.trim()) {
+    lines.push(`参数:\n${activity.argumentsText.trim()}`);
+  }
+
+  if (activity.resultText?.trim()) {
+    lines.push(`${activity.status === "error" ? "错误" : "结果"}:\n${activity.resultText.trim()}`);
+  } else if (activity.summary.trim()) {
+    lines.push(`摘要:\n${activity.summary.trim()}`);
+  }
+
+  if (activity.durationSeconds != null) {
+    lines.push(`耗时: ${formatDuration(activity.durationSeconds)}`);
+  }
+
+  return lines.join("\n\n");
+}
+
+function buildTimelineCopyText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  const lines = [`${entry.label}`, `状态: ${entry.state}`];
+  const preview = timelinePreviewText(entry);
+  if (preview) {
+    lines.push("", preview);
+  }
+  buildTimelineRows(turn, entry).forEach((row) => {
+    lines.push(`${row.label}: ${row.value}`);
+  });
+  return lines.join("\n");
+}
+
 function buildTokenMetrics(turn: TurnTraceRecord) {
   const metrics: string[] = [];
 
@@ -415,49 +827,16 @@ function buildTokenMetrics(turn: TurnTraceRecord) {
     metrics.push(`输出 ${turn.outputTokens}`);
   }
 
+  const throughput = formatTokenSpeed(turn);
+  if (throughput) {
+    metrics.push(throughput);
+  }
+
   return metrics;
 }
 
 function turnDurationText(turn: TurnTraceRecord) {
-  return turn.turnDurationMs != null ? formatDurationMs(turn.turnDurationMs) : "";
-}
-
-function stepDurationText(turn: TurnTraceRecord, step: TraceStep) {
-  if (step.id === "step-call-model" && turn.firstTokenLatencyMs != null) {
-    return `延时 ${turn.firstTokenLatencyMs} ms`;
-  }
-
-  if (step.id === "step-call-tool" && turn.toolActivities.length) {
-    const totalSeconds = turn.toolActivities.reduce((sum, tool) => sum + (tool.durationSeconds ?? 0), 0);
-    return totalSeconds > 0 ? formatDuration(totalSeconds) : "";
-  }
-
-  return "";
-}
-
-function stepTokenStats(turn: TurnTraceRecord, step: TraceStep) {
-  if (step.id !== "step-call-model") {
-    return [];
-  }
-
-  return buildTokenMetrics(turn);
-}
-
-function stepPreviewText(turn: TurnTraceRecord, step: TraceStep) {
-  if (step.id !== "step-return") {
-    return "";
-  }
-
-  const assistantMessage = turnAssistantMessage(turn.turnId);
-  if (!assistantMessage || assistantMessage.status === "pending" || !hasText(assistantMessage.content)) {
-    return "";
-  }
-
-  return previewInline(assistantMessage.content.trim(), 120);
-}
-
-function displayStepLabel(step: TraceStep) {
-  return step.label.toUpperCase();
+  return turn.turnDurationMs != null ? formatCompactDurationMs(turn.turnDurationMs) : "";
 }
 
 function toolStatusIcon(status: ToolActivity["status"]) {
@@ -492,233 +871,10 @@ function toolStatusIconClass(status: ToolActivity["status"]) {
   return "text-stone-300";
 }
 
-function buildPendingStepText(step: TraceStep) {
-  if (step.id === "step-call-tool") {
-    return "本轮未触发工具调用。";
-  }
-
-  if (step.id === "step-call-model") {
-    return "尚未开始等待模型返回。";
-  }
-
-  return "该步骤未进行。";
-}
-
-function buildStepErrorText(turn: TurnTraceRecord, step: TraceStep) {
-  if (step.state !== "error") {
-    return "";
-  }
-
-  if (step.id === "step-call-tool") {
-    const erroredTools = turn.toolActivities.filter((tool) => tool.status === "error");
-    if (erroredTools.length) {
-      return erroredTools
-        .map((tool) => {
-          const parts = [tool.name];
-          if (tool.resultText?.trim()) {
-            parts.push(tool.resultText.trim());
-          } else if (tool.summary.trim()) {
-            parts.push(tool.summary.trim());
-          }
-
-          return parts.join(": ");
-        })
-        .join("\n\n");
-    }
-  }
-
-  return turn.error?.trim() ?? "";
-}
-
-function stepPurposeText(step: TraceStep) {
-  switch (step.id) {
-    case "step-plan":
-      return "确认本轮到底收到了什么输入，以及是否带着图片或附件语义进入后续链路。";
-    case "step-context":
-      return "确认真正进入请求的内容，而不是只看 retrieval 快照，避免把上下文状态和实际请求混为一谈。";
-    case "step-call-model":
-      return "确认调用了哪一个 provider / model，以及模型何时开始产生首个可见增量。";
-    case "step-call-tool":
-      return "确认是否触发工具、用了什么参数、结果是否成功，以及工具调用的累计开销。";
-    case "step-return":
-      return "确认最终回给用户的内容、摘要和异常信号，判断这一轮是否真正完成。";
-    default:
-      return "";
-  }
-}
-
 function turnCopyKey(turnId: string) {
   return `turn:${turnId}`;
 }
 
-function buildStepDetailSections(turn: TurnTraceRecord, step: TraceStep) {
-  const userMessage = turnUserMessage(turn.turnId);
-  const assistantMessage = turnAssistantMessage(turn.turnId);
-  const sections: TraceDetailSection[] = [];
-  const buildContextObservation = turn.buildContextObservation;
-  const shouldRenderFinalReturn = assistantMessage?.status && assistantMessage.status !== "pending";
-
-  if (step.id === "step-plan" && hasText(userMessage?.content)) {
-    sections.push({
-      id: "input-message",
-      label: "输入原文",
-      summary: previewInline(userMessage!.content.trim()),
-      content: userMessage!.content.trim()
-    });
-  }
-
-  if (step.id === "step-context" && buildContextObservation) {
-    const contextSections: Array<[string, string, string]> = [
-      ["stable", "稳定前缀", buildContextText(buildContextObservation, "stablePrefixText")],
-      ["semi", "半稳定上下文", buildContextText(buildContextObservation, "semiStableContextText")],
-      ["volatile", "本轮输入", buildContextText(buildContextObservation, "volatileInputText")],
-      ["messages", "最终请求消息", buildContextText(buildContextObservation, "requestMessagesText")],
-      ["tools", "工具定义", buildContextText(buildContextObservation, "toolDefinitionsText")]
-    ];
-
-    for (const [id, label, content] of contextSections) {
-      if (!content) {
-        continue;
-      }
-
-      sections.push({
-        id,
-        label,
-        summary: previewInline(content),
-        content
-      });
-    }
-  }
-
-  if (step.id === "step-call-model" && hasText(turn.fallbackReason)) {
-    sections.push({
-      id: "fallback",
-      label: "降级原因",
-      summary: previewInline(turn.fallbackReason!.trim()),
-      content: turn.fallbackReason!.trim(),
-      tone: "warning"
-    });
-  }
-
-  if (step.id === "step-call-tool" && turn.toolActivities.length) {
-    turn.toolActivities.forEach((tool, index) => {
-      const lines = [];
-
-      if (tool.argumentsText?.trim()) {
-        lines.push(`参数:\n${tool.argumentsText.trim()}`);
-      }
-
-      if (tool.resultText?.trim()) {
-        lines.push(`${tool.status === "error" ? "错误" : "结果"}:\n${tool.resultText.trim()}`);
-      }
-
-      if (tool.durationSeconds != null) {
-        lines.push(`耗时: ${formatDuration(tool.durationSeconds)}`);
-      }
-
-      sections.push({
-        id: `tool-${index + 1}`,
-        label: tool.name,
-        content: lines.join("\n\n"),
-        tone: tool.status === "error" ? "danger" : "default",
-        kind: "tool",
-        toolStatus: tool.status,
-        durationText: formatDuration(tool.durationSeconds)
-      });
-    });
-  }
-
-  if (step.id === "step-return" && shouldRenderFinalReturn) {
-    if (hasText(assistantMessage?.reasoningContent)) {
-      sections.push({
-        id: "reasoning",
-        label: "思考链",
-        summary: previewInline(assistantMessage!.reasoningContent!.trim()),
-        content: assistantMessage!.reasoningContent!.trim()
-      });
-    }
-
-    if (hasText(assistantMessage?.content)) {
-      sections.push({
-        id: "assistant-output",
-        label: "最终回复",
-        summary: previewInline(assistantMessage!.content.trim()),
-        content: assistantMessage!.content.trim()
-      });
-    }
-  }
-
-  return sections;
-}
-
-function buildStepRows(turn: TurnTraceRecord, step: TraceStep) {
-  const userMessage = turnUserMessage(turn.turnId);
-  const rows: DetailRow[] = [];
-
-  if (step.id === "step-plan") {
-    pushRow(rows, "输入类型", hasText(userMessage?.content) ? detectInputKind(userMessage!.content) : null);
-    pushRow(rows, "图片输入", turn.buildContextObservation?.imageCount ?? null);
-  }
-
-  if (step.id === "step-context") {
-    buildContextRows(turn.buildContextObservation).forEach((row) => rows.push(row));
-    pushRow(rows, "请求目标", turn.providerRequestedName);
-    pushRow(rows, "实际 provider", turn.providerName);
-    pushRow(rows, "Protocol", turn.providerProtocol);
-    pushRow(rows, "Model", turn.providerModel);
-    pushRow(rows, "来源", turn.providerSource);
-    pushRow(rows, "模式", turn.providerMode);
-    pushRow(rows, "观测说明", turn.buildContextObservation ? "这里展示的是本轮真正发给模型的请求，不是 retrieval state 的替身。" : "当前还没有可展示的 request observation。", {
-      multiline: true,
-      tone: "muted"
-    });
-  }
-
-  if (step.id === "step-call-model") {
-    pushRow(rows, "模型", providerModelLabel(turn));
-    pushRow(rows, "来源", turn.providerSource);
-    pushRow(rows, "协议", turn.providerProtocol);
-    pushRow(rows, "模式", turn.providerMode);
-    pushRow(rows, "输入", turn.inputTokens);
-    pushRow(rows, "命中缓存", cacheHitInputTokens(turn));
-    pushRow(rows, "思考链", reasoningTokens(turn));
-    pushRow(rows, "输出", turn.outputTokens);
-    pushRow(rows, "延时", turn.firstTokenLatencyMs != null ? `${turn.firstTokenLatencyMs} ms` : null);
-    pushRow(
-      rows,
-      "观测口径",
-      turn.firstTokenLatencyMs != null
-        ? "按首次收到 provider 增量计算，不等于整轮完成耗时。"
-        : "当前路径没有真实流式首包事件，所以不展示首个增量统计。",
-      { multiline: true, tone: "muted" }
-    );
-    pushRow(rows, "状态", step.state === "pending" ? buildPendingStepText(step) : null, { tone: "muted" });
-    pushRow(rows, "错误", buildStepErrorText(turn, step), { multiline: true, tone: "danger" });
-  }
-
-  if (step.id === "step-call-tool") {
-    pushRow(rows, "调用次数", turn.toolActivities.length);
-    pushRow(rows, "失败次数", turn.toolActivities.filter((tool) => tool.status === "error").length);
-    pushRow(rows, "累计耗时", stepDurationText(turn, step));
-    pushRow(rows, "状态", step.state === "pending" ? buildPendingStepText(step) : null, { tone: "muted" });
-    pushRow(rows, "错误", buildStepErrorText(turn, step), { multiline: true, tone: "danger" });
-  }
-
-  if (step.id === "step-return") {
-    pushRow(rows, "状态", step.state === "pending" ? buildPendingStepText(step) : null, { tone: "muted" });
-    pushRow(rows, "错误", buildStepErrorText(turn, step), { multiline: true, tone: "danger" });
-  }
-
-  return rows;
-}
-
-function buildCopyText(turn: TurnTraceRecord, step: TraceStep) {
-  return [
-    `${turn.title} / ${displayStepLabel(step)}`,
-    ...buildStepRows(turn, step).map((row) => `${row.label}: ${row.value}`),
-    ...buildStepDetailSections(turn, step).map((section) => `${section.label}:\n${section.content}`)
-  ].join("\n\n");
-}
 
 function buildTurnCopyText(turn: TurnTraceRecord) {
   const parts = [turn.title];
@@ -733,8 +889,8 @@ function buildTurnCopyText(turn: TurnTraceRecord) {
     parts.push(`耗时: ${durationText}`);
   }
 
-  turn.traceSteps.forEach((step) => {
-    parts.push(buildCopyText(turn, step));
+  turnTimeline(turn).forEach((entry) => {
+    parts.push(buildTimelineCopyText(turn, entry));
   });
 
   return parts.join("\n\n");
@@ -758,7 +914,7 @@ function copyText(key: string, text: string) {
   }, 1400);
 }
 
-function togglePanel(panel: "status" | "trace" | "tools") {
+function togglePanel(panel: "trace" | "tools") {
   activePanel.value = activePanel.value === panel ? "" : panel;
 }
 
@@ -866,18 +1022,16 @@ watch(
   <aside class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/62">
     <ScrollArea class="min-h-0 flex-1" viewport-class="px-4 py-4">
       <div class="flex min-h-full flex-col gap-3">
-        <section class="collapsible-shell border-b border-stone-200/70 pb-4" :data-open="activePanel === 'status'">
-          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="status-panel-toggle" @click="togglePanel('status')">
+        <section class="border-b border-stone-200/70 pb-4" data-open="true">
+          <div class="flex w-full items-center justify-between gap-3 text-left" data-testid="status-panel-toggle">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <ScanSearch class="h-3.5 w-3.5" />
               <span>状态</span>
             </div>
-            <ChevronRight class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': activePanel === 'status' }" />
-          </button>
+          </div>
 
-          <div class="collapsible-body">
-            <section class="collapsible-content mt-3 space-y-3">
-              <div class="grid gap-2 text-[13px] leading-5 text-stone-600">
+          <section class="mt-2 space-y-2">
+              <div class="grid gap-1.5 text-[12px] leading-4 text-stone-600">
                 <div class="flex items-start justify-between gap-3">
                   <span class="text-stone-400">ID</span>
                   <span class="break-words text-right text-stone-800 [overflow-wrap:anywhere]">{{ sessionId }}</span>
@@ -898,23 +1052,78 @@ watch(
                   <span class="text-stone-400">模式</span>
                   <span class="text-right text-stone-800">{{ providerMode }}</span>
                 </div>
-                <div v-if="firstTokenLatencyMs != null" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">延时</span>
-                  <span class="text-right text-stone-800">{{ firstTokenLatencyMs }} ms</span>
+                <div v-if="latestTurn" class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">上下文</span>
+                  <span class="text-right text-stone-800">
+                    {{ formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || "未知" }}
+                  </span>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">输入</span>
+                  <span class="text-right text-stone-800">{{ formatInteger(sessionInputTokensTotal) || "0" }}</span>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">缓存命中</span>
+                  <span class="text-right text-stone-800">
+                    {{ formatInteger(sessionCacheHitTokensTotal) || "0" }}
+                    <span v-if="sessionCacheHitRatio" class="text-stone-400">· {{ sessionCacheHitRatio }}</span>
+                  </span>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">输出</span>
+                  <span class="text-right text-stone-800">{{ formatInteger(sessionOutputTokensTotal) || "0" }}</span>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">轮次</span>
+                  <span class="text-right text-stone-800">{{ sessionTurnCount }}</span>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">模型调用</span>
+                  <span class="text-right text-stone-800">{{ sessionModelCallCount }}</span>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">工具调用</span>
+                  <span class="text-right text-stone-800">{{ sessionToolCallCount }}</span>
+                </div>
+                <div v-if="retrievedRunPhase" class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">运行阶段</span>
+                  <span class="text-right text-stone-800">{{ retrievedRunPhase }}</span>
                 </div>
               </div>
 
-              <p v-if="sessionSummary" class="break-words text-[12px] leading-5 text-stone-600 [overflow-wrap:anywhere]">
-                {{ sessionSummary }}
+              <p
+                v-if="retrievedActiveTaskFocus"
+                class="break-words text-[11px] leading-4 text-stone-600 [overflow-wrap:anywhere]"
+                data-testid="retrieved-active-task"
+              >
+                Active task: {{ retrievedActiveTaskFocus }}
               </p>
-              <p v-if="fallbackReason" class="break-words text-[12px] leading-5 text-amber-800 [overflow-wrap:anywhere]">
+              <div
+                v-if="longTermMemoryPreviewEntries.length"
+                class="space-y-1 border-t border-stone-200/80 pt-2"
+                data-testid="retrieved-memory-list"
+              >
+                <div class="text-[10px] uppercase tracking-[0.14em] text-stone-400">Memory entries</div>
+                <div
+                  v-for="entry in longTermMemoryPreviewEntries"
+                  :key="`${entry.kind}:${entry.content}`"
+                  class="rounded-[0.4rem] border border-stone-200/80 bg-white/80 px-2 py-1"
+                >
+                  <div class="break-words text-[11px] leading-4 text-stone-700 [overflow-wrap:anywhere]">
+                    {{ entry.content }}
+                  </div>
+                  <div class="mt-0.5 text-[10px] leading-4 text-stone-400">
+                    {{ entry.kind }}
+                  </div>
+                </div>
+              </div>
+              <p v-if="fallbackReason" class="break-words text-[11px] leading-4 text-amber-800 [overflow-wrap:anywhere]">
                 {{ fallbackReason }}
               </p>
-              <p v-if="error" class="break-words text-[12px] leading-5 text-rose-700 [overflow-wrap:anywhere]">
+              <p v-if="error" class="break-words text-[11px] leading-4 text-rose-700 [overflow-wrap:anywhere]">
                 {{ error }}
               </p>
-            </section>
-          </div>
+          </section>
         </section>
 
         <section class="collapsible-shell border-b border-stone-200/60 pb-4" :data-open="activePanel === 'tools'">
@@ -982,77 +1191,6 @@ watch(
 
           <div class="collapsible-body">
             <section class="collapsible-content mt-2 space-y-1">
-              <div
-                v-if="retrievedSessionContext || retrievedRunState || retrievedLongTermMemory"
-                class="mb-2 rounded-[0.5rem] border border-stone-200/80 bg-stone-50/75 px-3 py-2"
-                data-testid="retrieved-context-summary"
-              >
-                <div class="flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.16em] text-stone-500">
-                  <span>Current retrieval state</span>
-                  <span v-if="retrievedSessionContext?.conversationId" class="truncate text-right">
-                    {{ retrievedSessionContext?.conversationId }}
-                  </span>
-                </div>
-                <div class="mt-2 grid gap-2 text-[12px] leading-5 text-stone-600">
-                  <div class="flex items-start justify-between gap-3">
-                    <span class="text-stone-400">Recent history</span>
-                    <span class="text-right text-stone-800">{{ retrievedRecentHistoryCount }}</span>
-                  </div>
-                  <div class="flex items-start justify-between gap-3">
-                    <span class="text-stone-400">Recent attachments</span>
-                    <span class="text-right text-stone-800">{{ retrievedRecentAttachmentCount }}</span>
-                  </div>
-                  <div v-if="longTermMemoryStatusLabel" class="flex items-start justify-between gap-3">
-                    <span class="text-stone-400">Long-term memory</span>
-                    <span class="text-right text-stone-800">{{ longTermMemoryStatusLabel }}</span>
-                  </div>
-                  <div v-if="retrievedRunPhase" class="flex items-start justify-between gap-3">
-                    <span class="text-stone-400">Run phase</span>
-                    <span class="text-right text-stone-800">{{ retrievedRunPhase }}</span>
-                  </div>
-                </div>
-                <p
-                  v-if="retrievedRunGoal"
-                  class="mt-2 break-words text-[11px] leading-5 text-stone-600 [overflow-wrap:anywhere]"
-                  data-testid="retrieved-run-goal"
-                >
-                  Goal: {{ retrievedRunGoal }}
-                </p>
-                <p
-                  v-if="retrievedActiveTaskFocus"
-                  class="mt-2 break-words text-[11px] leading-5 text-stone-600 [overflow-wrap:anywhere]"
-                  data-testid="retrieved-active-task"
-                >
-                  Active task: {{ retrievedActiveTaskFocus }}
-                </p>
-                <p
-                  v-if="retrievedLastReferencedFile"
-                  class="mt-2 break-words text-[11px] leading-5 text-stone-600 [overflow-wrap:anywhere]"
-                  data-testid="retrieved-last-file"
-                >
-                  Last file: {{ retrievedLastReferencedFile }}
-                </p>
-                <div
-                  v-if="longTermMemoryPreviewEntries.length"
-                  class="mt-2 space-y-1 border-t border-stone-200/80 pt-2"
-                  data-testid="retrieved-memory-list"
-                >
-                  <div class="text-[10px] uppercase tracking-[0.14em] text-stone-400">Memory entries</div>
-                  <div
-                    v-for="entry in longTermMemoryPreviewEntries"
-                    :key="`${entry.kind}:${entry.content}`"
-                    class="rounded-[0.4rem] border border-stone-200/80 bg-white/80 px-2 py-1"
-                  >
-                    <div class="break-words text-[11px] leading-4 text-stone-700 [overflow-wrap:anywhere]">
-                      {{ entry.content }}
-                    </div>
-                    <div class="mt-0.5 text-[10px] leading-4 text-stone-400">
-                      {{ entry.kind }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
               <section
                 v-for="turn in orderedTurnTraces"
                 :key="turn.turnId"
@@ -1100,49 +1238,49 @@ watch(
                     </p>
 
                     <section
-                      v-for="step in turn.traceSteps"
-                      :key="step.id"
+                      v-for="entry in turnTimeline(turn)"
+                      :key="entry.id"
                       class="collapsible-shell overflow-hidden py-0.5"
-                      :data-open="activeTraceStepKey === turnStepKey(turn.turnId, step.id)"
+                      :data-open="activeTraceStepKey === turnStepKey(turn.turnId, entry.id)"
                     >
                       <button
                         class="flex w-full items-start justify-between gap-1.5 text-left"
                         type="button"
-                        :data-testid="`trace-step-button-${step.id}`"
-                        @click="toggleTraceStep(turn.turnId, step.id)"
+                        :data-testid="`trace-step-button-${entry.id}`"
+                        @click="toggleTraceStep(turn.turnId, entry.id)"
                       >
                         <div class="min-w-0 space-y-0.5">
                           <div class="flex min-w-0 items-center gap-1.5 text-[11px] leading-[1.3] text-stone-700">
                             <component
-                              :is="traceStateIcon(step.state)"
+                              :is="traceStateIcon(entry.state)"
                               class="h-3 w-3 shrink-0"
                               :class="{
-                                'text-stone-500': step.state === 'completed',
-                                'animate-spin text-stone-500': step.state === 'active',
-                                'text-rose-600': step.state === 'error',
-                                'text-stone-300': step.state === 'pending'
+                                'text-stone-500': entry.state === 'completed',
+                                'animate-spin text-stone-500': entry.state === 'active',
+                                'text-rose-600': entry.state === 'error',
+                                'text-stone-300': entry.state === 'pending'
                               }"
                             />
-                            <span class="truncate">{{ displayStepLabel(step) }}</span>
+                            <span class="truncate">{{ entry.label }}</span>
                           </div>
                           <div class="pl-[1.125rem] text-[10px] text-stone-400">
                             <div class="flex flex-wrap items-center gap-2">
                             <span
-                              v-for="stat in stepTokenStats(turn, step)"
-                                :key="turn.turnId + '-' + step.id + '-' + stat"
+                              v-for="stat in timelineEntryStats(turn, entry)"
+                                :key="turn.turnId + '-' + entry.id + '-' + stat"
                               class="text-stone-400"
                             >
                               {{ stat }}
                             </span>
-                            <span v-if="stepDurationText(turn, step)" class="text-stone-400">
-                              {{ stepDurationText(turn, step) }}
+                            <span v-if="timelineDurationText(turn, entry)" class="text-stone-400">
+                              {{ timelineDurationText(turn, entry) }}
                             </span>
                             </div>
                             <div
-                              v-if="stepPreviewText(turn, step) && activeTraceStepKey !== turnStepKey(turn.turnId, step.id)"
+                              v-if="timelinePreviewText(entry) && activeTraceStepKey !== turnStepKey(turn.turnId, entry.id)"
                               class="mt-0.5 break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]"
                             >
-                              {{ stepPreviewText(turn, step) }}
+                              {{ timelinePreviewText(entry) }}
                             </div>
                           </div>
                         </div>
@@ -1151,13 +1289,13 @@ watch(
                           <button
                             class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                             type="button"
-                            @click.stop="copyText(traceCopyKey(turn.turnId, step.id), buildCopyText(turn, step))"
+                            @click.stop="copyText(traceCopyKey(turn.turnId, entry.id), buildTimelineCopyText(turn, entry))"
                           >
-                            <component :is="copiedKey === traceCopyKey(turn.turnId, step.id) ? Check : Copy" class="h-3 w-3" />
+                            <component :is="copiedKey === traceCopyKey(turn.turnId, entry.id) ? Check : Copy" class="h-3 w-3" />
                           </button>
                           <ChevronRight
                             class="h-3 w-3 shrink-0 text-stone-300 transition duration-200"
-                            :class="{ 'rotate-90': activeTraceStepKey === turnStepKey(turn.turnId, step.id) }"
+                            :class="{ 'rotate-90': activeTraceStepKey === turnStepKey(turn.turnId, entry.id) }"
                           />
                         </div>
                       </button>
@@ -1167,14 +1305,14 @@ watch(
                           <div class="mb-2 flex items-start gap-1.5 text-[10px] font-light leading-[1.35] text-stone-400 [overflow-wrap:anywhere]">
                             <Info class="mt-[1px] h-3 w-3 shrink-0" />
                             <p class="min-w-0 break-words [overflow-wrap:anywhere]">
-                              {{ stepPurposeText(step) }}
+                              {{ timelinePurposeText(entry) }}
                             </p>
                           </div>
                           <section>
                             <div class="space-y-1">
                               <div
-                                v-for="row in buildStepRows(turn, step)"
-                                :key="turn.turnId + '-' + step.id + '-' + row.label"
+                                v-for="row in buildTimelineRows(turn, entry)"
+                                :key="turn.turnId + '-' + entry.id + '-' + row.label"
                                 class="overflow-x-auto text-[10px] leading-[1.35]"
                               >
                                 <div class="flex min-w-0 items-start gap-2">
@@ -1192,14 +1330,14 @@ watch(
                                     :class="[rowToneClass(row.tone), row.multiline ? 'whitespace-pre-wrap text-left' : 'whitespace-nowrap text-left']"
                                   >
                                     <template v-if="row.expandable">
-                                      {{ isExpandedResult(expandedResultKey(turn.turnId, step.id, row.label)) ? row.value : previewResult(row.value) }}
+                                      {{ isExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label)) ? row.value : previewResult(row.value) }}
                                       <button
                                         v-if="row.value.length > 240"
                                         class="ml-2 inline-flex text-[10px] text-stone-400 transition hover:text-stone-700"
                                         type="button"
-                                        @click.stop="toggleExpandedResult(expandedResultKey(turn.turnId, step.id, row.label))"
+                                        @click.stop="toggleExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label))"
                                       >
-                                        {{ isExpandedResult(expandedResultKey(turn.turnId, step.id, row.label)) ? "收起" : "显示全部" }}
+                                        {{ isExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label)) ? "收起" : "显示全部" }}
                                       </button>
                                     </template>
                                     <template v-else>
@@ -1212,16 +1350,16 @@ watch(
                           </section>
 
                           <section
-                            v-for="section in buildStepDetailSections(turn, step)"
-                            :key="traceDetailKey(turn.turnId, step.id, section.id)"
+                            v-for="section in buildTimelineDetailSections(turn, entry)"
+                            :key="traceDetailKey(turn.turnId, entry.id, section.id)"
                             class="collapsible-shell mt-2 overflow-hidden border-l border-stone-200/80 pl-2"
-                            :data-open="activeTraceDetailKey === traceDetailKey(turn.turnId, step.id, section.id)"
+                            :data-open="activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id)"
                           >
                             <button
                               class="flex w-full items-start justify-between gap-1.5 py-0.5 text-left"
                               type="button"
-                              :data-testid="`trace-detail-button-${step.id}-${section.id}`"
-                              @click="toggleTraceDetail(turn.turnId, step.id, section.id)"
+                              :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
+                              @click="toggleTraceDetail(turn.turnId, entry.id, section.id)"
                             >
                               <template v-if="section.kind === 'tool'">
                                 <div class="flex min-w-0 items-center gap-1.5">
@@ -1241,13 +1379,13 @@ watch(
                                   <button
                                     class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                                     type="button"
-                                    @click.stop="copyText(traceDetailKey(turn.turnId, step.id, section.id), section.content)"
+                                    @click.stop="copyText(traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
                                   >
-                                    <component :is="copiedKey === traceDetailKey(turn.turnId, step.id, section.id) ? Check : Copy" class="h-3 w-3" />
+                                    <component :is="copiedKey === traceDetailKey(turn.turnId, entry.id, section.id) ? Check : Copy" class="h-3 w-3" />
                                   </button>
                                   <ChevronRight
                                     class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
-                                    :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, step.id, section.id) }"
+                                    :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id) }"
                                   />
                                 </div>
                               </template>
@@ -1257,7 +1395,7 @@ watch(
                                     {{ section.label }}
                                   </div>
                                   <div
-                                    v-if="section.summary && activeTraceDetailKey !== traceDetailKey(turn.turnId, step.id, section.id)"
+                                    v-if="section.summary && activeTraceDetailKey !== traceDetailKey(turn.turnId, entry.id, section.id)"
                                     class="mt-0.5 pl-1 break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]"
                                   >
                                     {{ section.summary }}
@@ -1265,7 +1403,7 @@ watch(
                                 </div>
                                 <ChevronRight
                                   class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
-                                  :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, step.id, section.id) }"
+                                  :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id) }"
                                 />
                               </template>
                             </button>
