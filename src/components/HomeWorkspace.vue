@@ -19,7 +19,6 @@ import { useRuntimeStore } from "@/stores/runtime";
 import Button from "@/components/ui/Button.vue";
 import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
-import Switch from "@/components/ui/Switch.vue";
 
 type TurnBucket = {
   turnId: string;
@@ -63,6 +62,18 @@ const providerLabel = computed(() => {
   }
 
   return "选择 provider/model";
+});
+
+const reasoningTriggerTitle = computed(() => {
+  if (!currentModel.value) {
+    return "当前未选择模型";
+  }
+
+  if (!currentModelSupportsReasoning.value) {
+    return "当前模型不支持思考强度，可继续设置是否显示思考";
+  }
+
+  return "选择思考强度与思考显示方式";
 });
 
 const reasoningLabel = computed(() => {
@@ -180,10 +191,6 @@ function assistantReasoning(message: ChatMessage | null) {
   return message?.reasoningContent?.trim() || "";
 }
 
-function shouldOpenToolBlock(_tools: ChatMessage[]) {
-  return false;
-}
-
 function shouldShowReasoningBlock(message: ChatMessage | null) {
   if (!message || !showReasoningContent.value) {
     return false;
@@ -270,7 +277,7 @@ function toggleProviderMenu() {
 }
 
 function toggleReasoningMenu() {
-  if (!currentModelSupportsReasoning.value) {
+  if (!currentModel.value) {
     return;
   }
 
@@ -289,6 +296,11 @@ function selectModel(providerId: string, modelId: string) {
 
 function selectReasoningEffort(value: ProviderReasoningEffort | null) {
   providerStore.setCurrentReasoningEffort(value);
+  reasoningMenuOpen.value = false;
+}
+
+function toggleReasoningVisibility() {
+  showReasoningContent.value = !showReasoningContent.value;
   reasoningMenuOpen.value = false;
 }
 
@@ -437,22 +449,21 @@ watch(showReasoningContent, (value) => {
             </div>
             <div class="mt-2 h-px w-full bg-stone-200/70"></div>
 
-            <details v-if="turn.tools.length" :open="shouldOpenToolBlock(turn.tools)" class="conversation-disclosure mt-2 group">
-              <summary class="conversation-disclosure-summary">
+            <div v-if="turn.tools.length" class="mt-2">
+              <div class="flex items-center justify-between gap-3 text-[12px] leading-[1.4] text-stone-500">
                 <div class="flex min-w-0 items-center gap-2">
                   <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
                   <span>工具调用</span>
                 </div>
                 <div class="flex shrink-0 items-center gap-2 text-[11px] text-stone-400">
                   <span>{{ turn.tools.length }} 项</span>
-                  <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0" />
                 </div>
-              </summary>
-              <div class="mt-2 space-y-1.5">
+              </div>
+              <div class="conversation-tool-list mt-1 space-y-0.5">
                 <div
                   v-for="tool in turn.tools"
                   :key="tool.id"
-                  class="flex items-center justify-between gap-3 px-1 py-1 text-[12px] leading-5 text-stone-500"
+                  class="flex items-center justify-between gap-3 px-1 py-0.5 text-[12px] leading-5 text-stone-500"
                 >
                   <div class="flex min-w-0 items-center gap-2">
                     <span class="truncate">{{ tool.toolName || "Tool" }}</span>
@@ -474,7 +485,7 @@ watch(showReasoningContent, (value) => {
                   </div>
                 </div>
               </div>
-            </details>
+            </div>
 
             <details
               v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
@@ -602,8 +613,8 @@ watch(showReasoningContent, (value) => {
             <button
               class="composer-select-trigger"
               type="button"
-              :disabled="!currentModelSupportsReasoning"
-              :title="currentModelSupportsReasoning ? '选择思考强度' : '当前模型不支持思考强度'"
+              :disabled="!currentModel"
+              :title="reasoningTriggerTitle"
               @click.stop="toggleReasoningMenu"
             >
               <span class="truncate">{{ reasoningLabel }}</span>
@@ -611,31 +622,51 @@ watch(showReasoningContent, (value) => {
             </button>
 
             <div
-              v-if="currentModelSupportsReasoning && reasoningMenuOpen"
+              v-if="currentModel && reasoningMenuOpen"
               class="composer-menu-panel absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[10rem]"
             >
               <div class="composer-menu-caption">思考强度</div>
               <div class="composer-menu-divider"></div>
-              <button
-                v-for="option in reasoningOptions"
-                :key="option.label"
-                class="composer-menu-item"
-                type="button"
-                @click="selectReasoningEffort(option.value)"
+              <template v-if="currentModelSupportsReasoning">
+                <button
+                  v-for="option in reasoningOptions"
+                  :key="option.label"
+                  class="composer-menu-item"
+                  type="button"
+                  @click="selectReasoningEffort(option.value)"
+                >
+                  <span>{{ option.label }}</span>
+                  <Check
+                    v-if="(providerStore.currentReasoningEffort ?? null) === option.value"
+                    class="h-3.5 w-3.5 text-stone-700"
+                  />
+                </button>
+              </template>
+              <div
+                v-else
+                class="composer-menu-note px-3 py-2 text-[11px] leading-5 text-stone-400"
+                data-testid="reasoning-unsupported-note"
               >
-                <span>{{ option.label }}</span>
-                <Check
-                  v-if="(providerStore.currentReasoningEffort ?? null) === option.value"
-                  class="h-3.5 w-3.5 text-stone-700"
-                />
+                当前模型不支持思考强度
+              </div>
+              <div class="composer-menu-divider"></div>
+              <div class="composer-menu-caption">显示设置</div>
+              <button
+                class="composer-menu-item"
+                data-testid="reasoning-visibility-toggle"
+                type="button"
+                @click="toggleReasoningVisibility"
+              >
+                <div class="flex min-w-0 flex-col">
+                  <span>显示思考</span>
+                  <span class="composer-menu-item-hint">
+                    {{ showReasoningContent ? "已开启" : "已关闭" }}
+                  </span>
+                </div>
+                <Check v-if="showReasoningContent" class="h-3.5 w-3.5 text-stone-700" />
               </button>
             </div>
           </div>
-
-          <label class="composer-switch-row" title="切换是否显示模型思考过程">
-            <Switch v-model="showReasoningContent" />
-            <span class="composer-switch-label">显示思考</span>
-          </label>
         </div>
 
         <Button
@@ -964,15 +995,6 @@ watch(showReasoningContent, (value) => {
   box-shadow: 0 0 0 2px rgba(231, 229, 228, 0.95);
 }
 
-.composer-toggle-trigger {
-  display: none;
-}
-
-.composer-toggle-trigger:focus-visible {
-  border-radius: 0.2rem;
-  box-shadow: 0 0 0 2px rgba(252, 211, 77, 0.35);
-}
-
 .composer-menu-panel {
   border: 1px solid rgba(231, 229, 228, 0.95);
   border-radius: 0.7rem;
@@ -1013,21 +1035,10 @@ watch(showReasoningContent, (value) => {
   background: rgba(245, 245, 244, 0.9);
 }
 
-.composer-switch-row {
-  display: inline-flex;
-  min-height: 1.75rem;
-  align-items: center;
-  gap: 0.45rem;
-  border: 1px solid rgba(214, 211, 209, 0.85);
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.7);
-  padding: 0 0.7rem 0 0.35rem;
-  color: rgb(87 83 78);
-}
-
-.composer-switch-label {
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
+.composer-menu-item-hint {
+  margin-top: 0.12rem;
+  font-size: 10px;
+  line-height: 1.2;
+  color: rgb(168 162 158);
 }
 </style>

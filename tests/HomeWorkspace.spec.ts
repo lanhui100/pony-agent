@@ -54,18 +54,6 @@ const ButtonStub = defineComponent({
     '<button class="button-stub" type="button" :disabled="disabled" @click="$emit(\'click\')"><slot /></button>'
 });
 
-const SwitchStub = defineComponent({
-  props: {
-    modelValue: {
-      type: Boolean,
-      default: false
-    }
-  },
-  emits: ["update:modelValue"],
-  template:
-    '<input class="switch-stub" type="checkbox" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />'
-});
-
 function createProviderRegistry(options?: {
   supportsReasoning?: boolean;
   selectedProviderId?: string;
@@ -176,7 +164,6 @@ function mountWorkspace(options?: {
         ScrollArea: ScrollAreaStub,
         MarkdownRenderer: MarkdownRendererStub,
         Button: ButtonStub,
-        Switch: SwitchStub,
         Transition: false,
         TransitionGroup: false
       }
@@ -475,7 +462,7 @@ describe("HomeWorkspace", () => {
     expect(wrapper.findAll("div.absolute")).toHaveLength(0);
   });
 
-  it("syncs reasoning menu selection and toggle persistence", async () => {
+  it("syncs reasoning menu selection and visibility toggle persistence", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 
     const providerStore = useProviderStore();
@@ -483,9 +470,6 @@ describe("HomeWorkspace", () => {
 
     const wrapper = mountWorkspace();
     await nextTick();
-
-    const switchInput = wrapper.get("input.switch-stub");
-    expect((switchInput.element as HTMLInputElement).checked).toBe(true);
 
     const [, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
     await reasoningTrigger.trigger("click");
@@ -501,24 +485,31 @@ describe("HomeWorkspace", () => {
     expect(providerStore.currentReasoningEffort).toBe("high");
     expect(wrapper.text()).not.toContain("minimal");
 
-    await switchInput.setValue(false);
+    await reasoningTrigger.trigger("click");
+    await nextTick();
+
+    const visibilityToggle = wrapper.get('[data-testid="reasoning-visibility-toggle"]');
+    expect(visibilityToggle.text()).toContain("显示思考");
+    expect(visibilityToggle.text()).toContain("已开启");
+
+    await visibilityToggle.trigger("click");
     expect(window.localStorage.getItem("pony-agent.ui.show-reasoning-content")).toBe("false");
   });
 
-  it("disables reasoning controls for models without reasoning support", async () => {
+  it("keeps reasoning menu available for visibility toggle even when effort is unsupported", async () => {
     const wrapper = mountWorkspace({
       registry: createProviderRegistry({ supportsReasoning: false })
     });
     await nextTick();
 
     const [, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
-    expect(reasoningTrigger.attributes("disabled")).toBeDefined();
+    expect(reasoningTrigger.attributes("disabled")).toBeUndefined();
 
     await reasoningTrigger.trigger("click");
     await nextTick();
 
-    expect(wrapper.text()).not.toContain("minimal");
-    expect(wrapper.text()).not.toContain("medium");
+    expect(wrapper.get('[data-testid="reasoning-unsupported-note"]').text()).toContain("当前模型不支持思考强度");
+    expect(wrapper.get('[data-testid="reasoning-visibility-toggle"]').text()).toContain("显示思考");
   });
 
   it("submits on Enter but not on Shift+Enter or while submitting", async () => {
@@ -657,7 +648,7 @@ describe("HomeWorkspace", () => {
     expect(wrapper.html()).toContain("animate-spin");
   });
 
-  it("keeps tool calls and reasoning disclosures collapsed by default with semantic headings", async () => {
+  it("keeps reasoning disclosure collapsed while tool calls stay expanded with semantic headings", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 
     const runtimeStore = useRuntimeStore();
@@ -693,16 +684,18 @@ describe("HomeWorkspace", () => {
     await nextTick();
 
     const disclosures = wrapper.findAll("details");
-    expect(disclosures).toHaveLength(2);
+    expect(disclosures).toHaveLength(1);
     expect(disclosures.every((node) => node.attributes("open") === undefined)).toBe(true);
 
+    const toolList = wrapper.get(".conversation-tool-list");
+    expect(toolList.text()).toContain("Search");
+    expect(wrapper.text()).toContain("工具调用");
+    expect(wrapper.text()).toContain("1 项");
+
     const summaries = wrapper.findAll("summary");
-    expect(summaries).toHaveLength(2);
-    expect(summaries[0].text()).toContain("工具调用");
-    expect(summaries[0].text()).toContain("1 项");
-    expect(summaries[0].html()).toContain("lucide-wrench");
-    expect(summaries[1].text()).toContain("思考过程");
-    expect(summaries[1].html()).toContain("lucide-brain");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].text()).toContain("思考过程");
+    expect(summaries[0].html()).toContain("lucide-brain");
   });
 
   it("shows reasoning placeholder for pending assistant with empty reasoning", async () => {
