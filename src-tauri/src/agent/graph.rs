@@ -846,7 +846,9 @@ mod tests {
             user_message: "继续完成任务".to_string(),
             assistant_message: "当前轮已完成。".to_string(),
             trace_steps: Vec::new(),
+            trace_timeline: Vec::new(),
             tool_activities: Vec::new(),
+            provider_call_records: Vec::new(),
             session_summary: "session summary".to_string(),
         }
     }

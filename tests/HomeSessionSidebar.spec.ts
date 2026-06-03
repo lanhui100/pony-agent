@@ -4,7 +4,7 @@ import { defineComponent, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import { useRuntimeStore } from "@/stores/runtime";
-import type { ChatMessage, SessionOverview } from "@/types/runtime";
+import type { ChatMessage, HistoryBranch, HistoryNode, SessionOverview } from "@/types/runtime";
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -46,6 +46,36 @@ function createSession(partial: Partial<SessionOverview> = {}): SessionOverview 
     turnCount: partial.turnCount ?? 1,
     lastReferencedFile: partial.lastReferencedFile ?? null,
     updatedAtMs: partial.updatedAtMs ?? 1000
+  };
+}
+
+function createHistoryNode(partial: Partial<HistoryNode> = {}): HistoryNode {
+  return {
+    nodeId: partial.nodeId ?? "node-1",
+    sessionId: partial.sessionId ?? "session-current",
+    branchId: partial.branchId ?? "branch-main",
+    kind: partial.kind ?? "turn_committed",
+    summary: partial.summary ?? "summary",
+    createdAtMs: partial.createdAtMs ?? 1000,
+    parentNodeId: partial.parentNodeId ?? null,
+    forkedFromNodeId: partial.forkedFromNodeId ?? null,
+    transcriptRef: partial.transcriptRef ?? null,
+    runRef: partial.runRef ?? null,
+    workspaceRef: partial.workspaceRef ?? { kind: "none", rollbackCapable: false }
+  };
+}
+
+function createHistoryBranch(partial: Partial<HistoryBranch> = {}): HistoryBranch {
+  return {
+    branchId: partial.branchId ?? "branch-main",
+    sessionId: partial.sessionId ?? "session-current",
+    baseNodeId: partial.baseNodeId ?? "node-1",
+    headNodeId: partial.headNodeId ?? "node-2",
+    forkedFromBranchId: partial.forkedFromBranchId ?? null,
+    forkedFromNodeId: partial.forkedFromNodeId ?? null,
+    label: partial.label ?? "main",
+    createdAtMs: partial.createdAtMs ?? 1000,
+    updatedAtMs: partial.updatedAtMs ?? 2000
   };
 }
 
@@ -397,5 +427,100 @@ describe("HomeSessionSidebar", () => {
 
     expect(createSessionSpy).toHaveBeenCalledTimes(1);
     expect(deleteSessionSpy).toHaveBeenCalledWith("session-other");
+  });
+
+  it("renders history graph actions and status for historical mode", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-head",
+      activeBranchId: "branch-main",
+      historyCursorMode: "historical",
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", summary: "旧节点", createdAtMs: 1000 }),
+        createHistoryNode({
+          nodeId: "node-head",
+          summary: "最新节点",
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          headNodeId: "node-head",
+          label: "main"
+        }),
+        createHistoryBranch({
+          branchId: "branch-fork",
+          baseNodeId: "node-old",
+          headNodeId: "node-old",
+          label: "fork-1",
+          updatedAtMs: 3000
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="session-sidebar-history-graph"]').text()).toContain("历史浏览中");
+    expect(wrapper.get('[data-testid="session-sidebar-history-restore"]').text()).toContain("恢复到分支头");
+    expect(wrapper.get('[data-testid="session-sidebar-history-fork"]').text()).toContain("从当前节点分叉");
+    expect(wrapper.get('[data-testid="session-sidebar-history-node-node-old"]').text()).toContain("旧节点");
+    expect(wrapper.get('[data-testid="session-sidebar-history-branch-branch-fork"]').text()).toContain("fork-1");
+  });
+
+  it("forwards history node, restore, fork, and branch-switch actions to the runtime store", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-head",
+      activeBranchId: "branch-main",
+      historyCursorMode: "historical",
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", summary: "旧节点", createdAtMs: 1000 }),
+        createHistoryNode({
+          nodeId: "node-head",
+          summary: "最新节点",
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          headNodeId: "node-head",
+          label: "main"
+        }),
+        createHistoryBranch({
+          branchId: "branch-fork",
+          baseNodeId: "node-old",
+          headNodeId: "node-old",
+          label: "fork-1",
+          updatedAtMs: 3000
+        })
+      ]
+    });
+
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    const restoreSpy = vi.spyOn(runtimeStore, "restoreBranchHead").mockResolvedValue(null);
+    const forkSpy = vi.spyOn(runtimeStore, "forkHistoryNode").mockResolvedValue(null);
+    const switchSpy = vi.spyOn(runtimeStore, "switchHistoryBranch").mockResolvedValue(null);
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-history-node-node-old"]').trigger("click");
+    await wrapper.get('[data-testid="session-sidebar-history-restore"]').trigger("click");
+    await wrapper.get('[data-testid="session-sidebar-history-fork"]').trigger("click");
+    await wrapper.get('[data-testid="session-sidebar-history-branch-branch-fork"]').trigger("click");
+
+    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_and_workspace");
+    expect(restoreSpy).toHaveBeenCalledWith("branch-main");
+    expect(forkSpy).toHaveBeenCalledWith("node-old");
+    expect(switchSpy).toHaveBeenCalledWith("branch-fork");
   });
 });

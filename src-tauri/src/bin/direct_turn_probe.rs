@@ -184,6 +184,7 @@ fn run_direct_scenario(runtime: &mut AgentRuntime, scenario: &DirectScenario) {
             model_id: None,
             reasoning_effort: None,
             session_id: Some(scenario.session_id.to_string()),
+            node_id: None,
             history: vec![],
             images: Vec::new(),
         });

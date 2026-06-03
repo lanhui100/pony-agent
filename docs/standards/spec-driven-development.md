@@ -38,7 +38,7 @@
 3. 在 `openspec/changes/<name>/` 下补齐 `proposal.md`、`specs/`、`design.md`、`tasks.md`。
 4. 为该 change 创建或更新 `management/task-system/03_TASKS/*.md` 任务卡，并回填 OpenSpec 链接。
 5. 实施时按 `tasks.md` 推进，过程中同步更新任务卡当前进展、下一步动作和卡点。
-6. 验证完成后，把完成证据写回任务卡、日志和需要的 review 文件。
+6. 验证完成后，按 `docs/standards/engineering.md` 的 5 个质量门整理完成证据，再写回任务卡、日志和需要的 review 文件。
 7. 需要沉淀为长期规范时，同步 `openspec/specs/`。
 8. change 完成后执行归档，保持 `openspec/changes/archive/` 与任务系统结论一致。
 
@@ -59,6 +59,18 @@
 - `OpenSpec Change`：对应的 `openspec/changes/<name>/`，如果尚未进入开发可先写 `待启动`
 - `Canonical Spec`：相关 `openspec/specs/<capability>/spec.md`
 - `Spec 状态`：如 `未开始`、`proposal ready`、`design ready`、`tasks in progress`、`archived`
+
+## 复杂任务的验证口径
+
+复杂任务默认不应只用“测试通过”作为完成依据，而应按 5 个质量门给出证据：
+
+1. `Gate 1 / 生成前约束`：spec 是否已经明确目标、边界、非目标和验收标准。
+2. `Gate 2 / 静态质量门`：是否完成编译、类型、lint、基础 contract 检查。
+3. `Gate 3 / 行为质量门`：是否有对应该变更面的测试或最小主链验证。
+4. `Gate 4 / 系统质量门`：是否覆盖兼容性、可观测性、性能、恢复或跨端风险。
+5. `Gate 5 / 发布质量门`：是否说明迁移、回滚、监控点和已知风险。
+
+如果某一层当前不适用，任务卡和 review 文档里必须显式写明跳过原因，而不是默认省略。
 
 ## 本仓库当前默认实践
 

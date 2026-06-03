@@ -406,6 +406,7 @@ impl LocalTurnPlanner {
             ),
             tool_call: Some(tool_call),
             reasoning_content: None,
+            reasoning_content_value: None,
             assistant_message: None,
             provider_source: "local_planner".to_string(),
             provider_mode: "tool-first".to_string(),

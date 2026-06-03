@@ -2,6 +2,8 @@ node_modules/
 dist/
 hermes/
 claude-code-sourcemap/
+codex-openai/
+reasonix-esengine/
 
 src-tauri/target/
 src-tauri/gen/
@@ -18,3 +20,7 @@ desktop.ini
 src-tauri/target-check/
 src-tauri/.pony-agent/
 tmp-dev-*.png
+target/
+target-check/
+target-check-tests*/
+target-check-tests-*/

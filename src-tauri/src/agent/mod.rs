@@ -1,3 +1,4 @@
+pub mod capability_bridge;
 pub mod config;
 pub mod context;
 pub mod control_plane;

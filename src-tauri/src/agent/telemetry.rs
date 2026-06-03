@@ -49,6 +49,15 @@ pub enum ProviderRequestKind {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderLatencyKind {
+    ProviderStream,
+    BufferedResponse,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCallCacheRecord {
     pub request_kind: ProviderRequestKind,
@@ -61,6 +70,9 @@ pub struct ProviderCallCacheRecord {
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub first_token_latency_ms: Option<u64>,
+    pub turn_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub latency_kind: ProviderLatencyKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
 }

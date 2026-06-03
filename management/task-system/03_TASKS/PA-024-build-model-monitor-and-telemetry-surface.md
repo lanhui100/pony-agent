@@ -1,55 +1,59 @@
 # PA-024 构建模型监控面与 telemetry 聚合边界
 
 ## 状态
-- Status: `Backlog`
+- Status: `Done`
 - Priority: `P2`
 - Owner: `Codex`
 
+## OpenSpec Change
+- [openspec/changes/archive/2026-06-01-add-model-monitor-telemetry-observability](/C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-01-add-model-monitor-telemetry-observability)
+
+## Canonical Spec
+- [model-monitor-telemetry/spec.md](/C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/model-monitor-telemetry/spec.md)
+
+## Spec 状态
+- `proposal ready`
+- `spec ready`
+- `design ready`
+- `tasks completed`
+
 ## 目标
-把当前已经出现在导航与页面层的 `ModelMonitorPage` 从占位骨架升级为正式能力面，建立最小可扩展的 telemetry 聚合边界，让 provider / model / tool 协同的运行指标能够被稳定读取、展示与后续审计；同时正式承接 `PA-018` 拆分出来的 retrieval 可观测性语义与展示边界。
+将现有占位态 `ModelMonitorPage` 升级为真实监控读面，形成围绕 provider / model / tool / session 的最小 telemetry 聚合能力，并把 retrieval / build-context / trace 证据以稳定 contract 暴露给前端消费。
 
-## 输出
-- telemetry 聚合读面第一版：明确哪些指标来自 turn trace、哪些来自 provider、哪些来自 run/session 聚合
-- 模型监控页第一版真实数据面：至少覆盖调用量、成功率、首 token 延迟或总耗时、失败类型/降级信息
-- provider / model 维度的最小筛选与摘要卡片
-- retrieval 可观测性第一版：明确哪些字段表达“当前统一上下文状态”，哪些字段表达“本轮实际取用的上下文事实”
-- retrieval / trace / status 的分层说明，避免把 retrieval 继续混成 turn trace 或 session status
-- 模型监控与 `HostControlPlane` / inspection / telemetry 的边界说明
-- 对应前端与 Rust 测试补齐
+## 本卡输出
+- `HostControlPlane` summary 聚合读面：overview / provider / model / tool / session
+- `HostControlPlane` session drill-down 读面：session metrics + runtime view
+- Tauri command 暴露：`load_model_monitor_summary`、`load_model_monitor_session_drilldown`
+- 前端 `ModelMonitorPage` 真实化：overview 卡片、聚合区、session 下钻、trace timeline、build-context 摘要
+- Rust 与前端定向测试补齐
 
-## 验收标准
-- `ModelMonitorPage` 不再只是占位文案，而是能展示真实指标
-- UI 读取的是稳定聚合结果，而不是直接拼接 runtime 内部瞬时状态
-- 指标边界清晰区分 `turn trace`、`graph run`、`provider health` 与未来长期趋势
-- retrieval 观测边界清晰区分：
-  - 当前统一上下文状态
-  - 每轮实际上下文取用
-  - 纯 turn 执行 trace
-- 前端导航、数据读取与回归测试保持可用
-- 文档明确本卡第一版不要求完整告警系统、预算管理或跨设备汇总平台
-
-## 当前进展
-- `src/App.vue` 已把 `model-monitor` 纳入页面路由分支
-- `src/components/HomeSessionSidebar.vue` 已暴露“模型监控”导航入口
-- `src/components/ModelMonitorPage.vue` 已有页面骨架与扩展方向文案
-- `tests/HomeSessionSidebar.spec.ts` 已覆盖导航切换行为
-- 当前 telemetry 仍主要停留在 turn trace、tool activity、provider 回执和本地 inspection 层，尚未形成专门聚合面
-- 本轮已明确：`PA-018` 中关于 retrieval 观测语义、trace 中 retrieval 的展示意义与后续监控面，不再继续留在 `PA-018`，后续归到本卡处理
-
-## 下一步动作
-- 先定义最小监控指标集合与聚合来源
-- 先定义 retrieval 观测最小字段集，明确“当前上下文状态”和“本轮实际取用上下文”的区别
-- 再决定是扩展 `inspect_host`，还是新增独立 telemetry 读取命令
-- 最后把页面骨架接入真实数据，并补齐前后端回归测试
-
-## 当前卡点
-- 如果在 `PA-018` 的 context/state retrieval 边界未稳定前直接扩写监控面，容易把 telemetry、session summary、run state 与 planner 审计字段再次耦合
-- 当前 `Trace` 里 retrieval 总览与每轮 `Build Context` 的语义边界不清；本卡需要先把观测语义定义清楚，再决定 UI 承载形态
-
-## 断点续跑提示
-继续前先看：
-- `src/components/ModelMonitorPage.vue`
-- `src/components/HomeSessionSidebar.vue`
-- `src/stores/runtime.ts`
+## 完成情况
 - `src-tauri/src/agent/control_plane.rs`
-- `src-tauri/src/agent/telemetry.rs`
+  已新增 monitor summary / drill-down contract、聚合 helper、排序逻辑与定向测试。
+- `src-tauri/src/lib.rs`
+  已新增并注册 monitor 相关 Tauri commands。
+- `src/types/runtime.ts`
+  已补齐 monitor overview / dimension / tool / session / drill-down 类型。
+- `src/components/ModelMonitorPage.vue`
+  已从占位页升级为真实监控页，不依赖 runtime store 重算聚合。
+- `src-tauri/src/agent/runtime.rs` / `src-tauri/src/agent/session.rs`
+  已将 trace timeline `kind` 收敛为 `prepare_retrieval / build_context / call_model / call_tool / return_result`，并兼容历史旧值归一化。
+- `src/stores/runtime.ts` / `src/components/HomeSidebar.vue`
+  已统一消费 canonical trace semantics，避免 monitor drill-down 与主 trace UI 的语义口径继续漂移。
+- `tests/ModelMonitorPage.spec.ts`
+  已覆盖摘要加载、自动下钻、切换 session、错误态、非 Tauri 态。
+
+## 依赖边界
+- `PA-025` 继续提供 build-context / retrieval explanation 输入。
+- `PA-029` 继续提供 cache telemetry 与 request-kind 输入。
+- `PA-024` 只消费这些输入并形成 monitor read-plane，不重写 runtime / provider 执行逻辑。
+
+## 验证
+- 前端：
+  `cmd /c npm run test:unit -- tests/ModelMonitorPage.spec.ts tests/HomeSidebar.spec.ts tests/HomeSessionSidebar.spec.ts tests/runtime-store.spec.ts`
+- Rust：
+  `cargo test load_model_monitor --manifest-path src-tauri/Cargo.toml`
+  `cargo test persisted_trace_timeline_uses_canonical_monitor_semantics --manifest-path src-tauri/Cargo.toml`
+
+## 后续
+- 无。后续若扩展过滤器、趋势图、告警或跨会话分析，应另开增量任务卡。

@@ -67,7 +67,17 @@
 3. 产出 `proposal / specs / design / tasks`
 4. 创建或更新任务卡，并回填 OpenSpec 路径
 5. 按 spec 和任务卡实施
-6. 完成后同步验收证据、canonical specs 与归档状态
+6. 完成后按 `docs/standards/engineering.md` 的 5 个质量门同步验收证据、canonical specs 与归档状态
+
+### 验收证据组织
+
+- 任务卡、review 和 session log 中的“验证”部分，默认按以下口径组织：
+  - `Gate 1 / 生成前约束`：本轮范围、非目标、接口边界、验收口径
+  - `Gate 2 / 静态质量门`：format、lint、type check、build、cargo check 等
+  - `Gate 3 / 行为质量门`：单测、集成、回归、E2E、最小主流程
+  - `Gate 4 / 系统质量门`：性能、兼容性、可观测性、安全性、恢复链路等
+  - `Gate 5 / 发布质量门`：迁移、回滚、监控、已知风险、上线约束
+- 轻量任务不要求机械性补齐所有 gate，但要写清楚本次实际覆盖范围与跳过原因。
 
 ## 状态流
 

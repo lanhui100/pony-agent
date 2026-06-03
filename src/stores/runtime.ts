@@ -379,7 +379,7 @@ function buildFallbackRuntimeTraceTimeline(options: {
 
     timeline.push(createTimelineEntry("call_model", sequence, modelIndex + 1, {
       state: modelState,
-      text: !isTerminal && phase === "calling_model" && isLastModel ? assistantMessage?.content ?? null : null,
+      text: null,
       reasoningContent: !isTerminal && phase === "calling_model" && isLastModel ? assistantMessage?.reasoningContent ?? null : null,
       firstTokenLatencyMs: !isTerminal && phase === "calling_model" && isLastModel ? firstTokenLatencyMs ?? null : null,
       ...providerPatch

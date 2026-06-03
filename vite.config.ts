@@ -14,6 +14,26 @@ export default defineConfig({
   server: {
     host: process.env.TAURI_DEV_HOST || "127.0.0.1",
     port: 4174,
-    strictPort: true
+    strictPort: true,
+    watch: {
+      ignored: [
+        "**/.codex/**",
+        "**/.codex-logs/**",
+        "**/.devlogs/**",
+        "**/claude-code-sourcemap/**",
+        "**/codex-openai/**",
+        "**/coverage/**",
+        "**/dist/**",
+        "**/docs/**",
+        "**/hermes/**",
+        "**/management/**",
+        "**/reasonix-esengine/**",
+        "**/src-tauri/gen/**",
+        "**/src-tauri/target/**",
+        "**/src-tauri/target-check/**",
+        "**/target-check*/**",
+        "**/target*/**"
+      ]
+    }
   }
 });

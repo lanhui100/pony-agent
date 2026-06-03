@@ -203,6 +203,7 @@ fn stream_turn(
             model_id: None,
             reasoning_effort: None,
             session_id: Some(session_id.to_string()),
+            node_id: None,
             history: Vec::new(),
             images: Vec::new(),
         },

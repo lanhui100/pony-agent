@@ -87,7 +87,9 @@ mod tests {
             first_token_latency_ms: Some(18),
             turn_duration_ms: None,
             trace_steps: None,
+            trace_timeline: None,
             tool_activities: None,
+            provider_call_records: None,
             session_summary: None,
         };
 
@@ -113,6 +115,7 @@ mod tests {
                     model_id: None,
                     reasoning_effort: None,
                     session_id: Some("sse-test".to_string()),
+                    node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
                 },

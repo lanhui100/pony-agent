@@ -190,6 +190,7 @@ export type PrefixMutationReason =
   | "native_transcript_boundary_shifted";
 
 export type ProviderRequestKind = "initial_request" | "tool_followup";
+export type ProviderLatencyKind = "provider_stream" | "buffered_response" | "unknown";
 
 export type ProviderCallCacheRecord = {
   requestKind: ProviderRequestKind;
@@ -202,6 +203,8 @@ export type ProviderCallCacheRecord = {
   outputTokens?: number | null;
   totalTokens?: number | null;
   firstTokenLatencyMs?: number | null;
+  turnDurationMs?: number | null;
+  latencyKind?: ProviderLatencyKind | null;
   prefixMutationReasons?: PrefixMutationReason[];
 };
 

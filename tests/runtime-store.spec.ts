@@ -92,6 +92,8 @@ function createProviderCallRecord(
     outputTokens: partial.outputTokens ?? 10,
     totalTokens: partial.totalTokens ?? 22,
     firstTokenLatencyMs: partial.firstTokenLatencyMs ?? 180,
+    turnDurationMs: partial.turnDurationMs ?? 420,
+    latencyKind: partial.latencyKind ?? "provider_stream",
     prefixMutationReasons: partial.prefixMutationReasons ?? ["session_summary_changed"]
   };
 }
@@ -1996,7 +1998,7 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.firstTokenLatencyMs).toBe(321);
     expect(
       store.turnTraceHistory[0]?.traceTimeline?.find((entry) => entry.kind === "call_model" && entry.text)?.text
-    ).toContain("partial answer");
+    ).toBeUndefined();
 
     eventHandlers.get("turn:completed")?.({
       payload: {
@@ -2301,6 +2303,7 @@ describe("runtime session resilience", () => {
         providerSource: "primary",
         providerMode: "standard",
         inputTokens: 11,
+        cacheHitInputTokens: 5,
         outputTokens: 7,
         totalTokens: 18,
         firstTokenLatencyMs: 99,
@@ -2314,7 +2317,7 @@ describe("runtime session resilience", () => {
           { id: "model-4", kind: "call_model", label: "CALL MODEL #1", state: "completed", sequence: 4 },
           { id: "tool-5", kind: "call_tool", label: "CALL TOOL #1 · workspace.read_file", state: "completed", sequence: 5, text: "read file done", toolActivities: [] },
           { id: "model-6", kind: "call_model", label: "CALL MODEL #2", state: "completed", sequence: 6, text: "backend final answer", firstTokenLatencyMs: 99 },
-          { id: "return-7", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 7, text: "backend final answer", outputTokens: 7, totalTokens: 18, firstTokenLatencyMs: 99, turnDurationMs: 900 }
+          { id: "return-7", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 7, text: "backend final answer", cacheHitInputTokens: 5, outputTokens: 7, totalTokens: 18, firstTokenLatencyMs: 99, turnDurationMs: 900 }
         ]
       }
     } as any);
@@ -2329,7 +2332,10 @@ describe("runtime session resilience", () => {
       "call_tool",
       "call_model"
     ]);
+    expect(store.turnTraceHistory[0]?.traceTimeline?.[3]?.text).toBeUndefined();
+    expect(store.turnTraceHistory[0]?.traceTimeline?.[4]?.label).toContain("workspace.read_file");
     expect(store.turnTraceHistory[0]?.traceTimeline?.[5]?.text).toBe("backend final answer");
+    expect(store.turnTraceHistory[0]?.traceTimeline?.[5]?.cacheHitInputTokens).toBe(5);
     expect(store.turnTraceHistory[0]?.traceTimeline?.[5]?.turnDurationMs).toBe(900);
     nowSpy.mockRestore();
   });
@@ -2473,6 +2479,8 @@ describe("runtime session resilience", () => {
       "initial_request",
       "tool_followup"
     ]);
+    expect(store.turnTraceHistory[0]?.providerCallRecords?.[0]?.turnDurationMs).toBe(420);
+    expect(store.turnTraceHistory[0]?.providerCallRecords?.[1]?.turnDurationMs).toBe(420);
 
     nowSpy.mockRestore();
   });

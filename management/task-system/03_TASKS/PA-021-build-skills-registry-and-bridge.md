@@ -1,9 +1,21 @@
 # PA-021 建立 skills registry 与 bridge
 
 ## 状态
-- Status: `Backlog`
+- Status: `In Progress`
 - Priority: `P3`
 - Owner: `Codex`
+
+## OpenSpec Change
+- [add-skills-registry-bridge](/C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/add-skills-registry-bridge)
+
+## Delta Spec
+- [skills-registry-bridge/spec.md](/C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/add-skills-registry-bridge/specs/skills-registry-bridge/spec.md)
+
+## Spec 状态
+- Proposal: `ready`
+- Spec: `ready`
+- Design: `ready`
+- Tasks: `ready`
 
 ## 目标
 在 planner、memory 与 MCP capability bridge 具备最小稳定边界后，引入 skills 体系作为可组合的能力封装层，让 skills 成为 planner 可选择、graph 可审计、runtime 可执行的高层能力单元，而不是零散 prompt 模板或宿主私有脚本。
@@ -26,6 +38,7 @@
 - 当前项目已经有“skills”概念来源，但 Pony Agent 本体还没有正式的 skills registry
 - `PA-020` 预计先把 MCP 能力接入层抽象出来
 - `PA-019` 预计先建立 planner 的上层决策消费面
+- 已补 `add-skills-registry-bridge` 的 OpenSpec `proposal / design / tasks / delta spec`，当前进入 spec-first 收口与实现拆分阶段
 
 ## 下一步动作
 - 先决定 skill 在 capability registry 中的表示

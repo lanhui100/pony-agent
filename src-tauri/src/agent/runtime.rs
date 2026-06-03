@@ -13,7 +13,10 @@ use crate::agent::input::TurnInputImage;
 use crate::agent::planner::{GraphPlanner, LocalTurnPlanner, TurnPlanner};
 use crate::agent::provider::{
     build_context_observation, provider_native_assistant_message_with_reasoning,
-    provider_native_assistant_tool_call_message, provider_native_tool_result_message,
+    provider_native_assistant_message_with_reasoning_value,
+    provider_native_assistant_tool_call_message,
+    provider_native_assistant_tool_call_message_with_reasoning_value,
+    provider_native_tool_result_message,
     provider_native_user_message, BuildContextObservation, ProviderDecision, ProviderManager,
     ProviderRequest, ProviderResponse, ProviderStreamChunk, TokenUsage,
 };
@@ -23,16 +26,17 @@ use crate::agent::session::{
     TurnTraceRecord,
 };
 use crate::agent::telemetry::{
-    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderRequestKind,
-    TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
+    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind,
+    ProviderRequestKind, TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
 use crate::agent::tools::{
     builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
 };
 use crate::agent::turn_flow::{
     build_failed_turn_result, emit_stream_cancelled, emit_stream_event, emit_stream_failed,
-    emit_turn_failed, normalize_user_message, preview_text, provider_decision, provider_event_meta,
-    provider_failure_message, provider_followup, provider_followup_stream, runtime_log,
+    emit_turn_failed, normalize_user_message, preview_text, provider_decision,
+    provider_decision_stream, provider_event_meta, provider_failure_message, provider_followup,
+    provider_followup_stream, runtime_log,
     stream_reasoning_chunks, stream_text_chunks, token_usage_parts, PersistedTurnOutcome,
     PlannedTurn, PreparedTurn, ProviderEventMeta, SyncToolTurnOutcome, TurnEventSink,
 };
@@ -130,6 +134,7 @@ const CANCELLED_TURN_MESSAGE: &str = "This turn was cancelled.";
 struct ToolTurnHopRecord {
     assistant_output_text: String,
     assistant_reasoning_content: Option<String>,
+    assistant_reasoning_content_value: Option<Value>,
     tool_call: ToolCall,
     tool_result: crate::agent::tools::ToolResult,
 }
@@ -442,7 +447,7 @@ impl AgentRuntime {
             .planner
             .preflight_decision(&prepared.user_message, prepared.retrieved.planner_history());
 
-        let (mut first_decision, first_token_latency_ms) =
+        let (mut first_decision, initial_decision_duration_ms) =
             if prepared.provider.requires_provider_native_tool_flow() {
                 match preflight_decision {
                     Some(decision) if planner_decision_can_override_native_tool_flow(&decision) => {
@@ -479,6 +484,7 @@ impl AgentRuntime {
                 first_decision.assistant_message.take(),
                 &first_decision.output_text,
                 first_decision.reasoning_content.as_deref(),
+                first_decision.reasoning_content_value.as_ref(),
             )?;
             first_decision.tool_call = Some(normalized.tool_call);
             first_decision.assistant_message = normalized.assistant_message;
@@ -501,7 +507,7 @@ impl AgentRuntime {
         Ok(PlannedTurn {
             first_decision,
             resolved_tool_call,
-            first_token_latency_ms,
+            initial_decision_duration_ms,
         })
     }
 
@@ -584,6 +590,8 @@ impl AgentRuntime {
         provider_source: Option<String>,
         provider_mode: Option<String>,
         build_context_observation: Option<BuildContextObservation>,
+        return_text: Option<String>,
+        return_reasoning_content: Option<String>,
         fallback_reason: Option<String>,
         input_tokens: Option<u64>,
         cache_hit_input_tokens: Option<u64>,
@@ -607,6 +615,8 @@ impl AgentRuntime {
             provider_source,
             provider_mode,
             build_context_observation,
+            return_text,
+            return_reasoning_content,
             fallback_reason,
             input_tokens,
             cache_hit_input_tokens,
@@ -634,6 +644,8 @@ impl AgentRuntime {
         provider_source: Option<String>,
         provider_mode: Option<String>,
         build_context_observation: Option<BuildContextObservation>,
+        return_text: Option<String>,
+        return_reasoning_content: Option<String>,
         fallback_reason: Option<String>,
         input_tokens: Option<u64>,
         cache_hit_input_tokens: Option<u64>,
@@ -653,8 +665,8 @@ impl AgentRuntime {
             provider_mode.as_deref(),
             build_context_observation.as_ref(),
             &tool_activities,
-            None,
-            None,
+            return_text.as_deref(),
+            return_reasoning_content.as_deref(),
             fallback_reason.as_deref(),
             error.as_deref(),
             input_tokens,
@@ -836,6 +848,8 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
+            None,
             first_token_latency_ms,
             turn_duration_ms,
             Some(persisted.session_summary),
@@ -890,7 +904,7 @@ impl AgentRuntime {
         planning_request: &ProviderRequest,
         first_decision: &ProviderDecision,
         tool_call: ToolCall,
-        initial_first_token_latency_ms: Option<u64>,
+        initial_turn_first_token_latency_ms: Option<u64>,
         turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
     ) {
@@ -901,11 +915,12 @@ impl AgentRuntime {
         let mut current_assistant_message = first_decision.assistant_message.clone();
         let mut current_assistant_output_text = first_decision.output_text.clone();
         let mut current_assistant_reasoning = first_decision.reasoning_content.clone();
+        let mut current_assistant_reasoning_value = first_decision.reasoning_content_value.clone();
         let mut all_tools_ok = true;
         let mut completed_hops = 0usize;
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
         let mut accumulated_token_usage = first_decision.token_usage.clone();
-        let first_token_latency = Rc::new(Cell::new(initial_first_token_latency_ms));
+        let first_token_latency = Rc::new(Cell::new(initial_turn_first_token_latency_ms));
 
         loop {
             completed_hops += 1;
@@ -1064,6 +1079,7 @@ impl AgentRuntime {
             hop_records.push(ToolTurnHopRecord {
                 assistant_output_text: current_assistant_output_text.clone(),
                 assistant_reasoning_content: current_assistant_reasoning.clone(),
+                assistant_reasoning_content_value: current_assistant_reasoning_value.clone(),
                 tool_call: current_tool_call.clone(),
                 tool_result: tool_result.clone(),
             });
@@ -1168,6 +1184,11 @@ impl AgentRuntime {
             let display_message_for_delta = display_message.to_string();
             let provider_meta_for_delta = provider_meta.clone();
             let turn_started_at_for_latency = *turn_started_at;
+            let supports_true_streaming_followup = provider.supports_true_streaming_followup();
+            let provider_call_started_at = Instant::now();
+            let provider_call_first_token_latency = Rc::new(Cell::new(None));
+            let provider_call_first_token_latency_for_emit =
+                Rc::clone(&provider_call_first_token_latency);
             let response = match provider_followup_stream(
                 provider,
                 planning_request,
@@ -1176,7 +1197,18 @@ impl AgentRuntime {
                 &current_tool_call,
                 &tool_result,
                 move |delta| {
-                    let latency = if first_token_latency_for_emit.get().is_none() {
+                    let call_latency = if supports_true_streaming_followup
+                        && provider_call_first_token_latency_for_emit.get().is_none()
+                    {
+                        let value = provider_call_started_at.elapsed().as_millis() as u64;
+                        provider_call_first_token_latency_for_emit.set(Some(value));
+                        Some(value)
+                    } else {
+                        None
+                    };
+                    let latency = if supports_true_streaming_followup
+                        && first_token_latency_for_emit.get().is_none()
+                    {
                         let value = turn_started_at_for_latency.elapsed().as_millis() as u64;
                         first_token_latency_for_emit.set(Some(value));
                         Some(value)
@@ -1188,7 +1220,6 @@ impl AgentRuntime {
                         ProviderStreamChunk::Text(text) => (Some(text), None),
                         ProviderStreamChunk::Reasoning(reasoning) => (None, Some(reasoning)),
                     };
-                    let timeline_text = text.clone();
                     let timeline_reasoning_content = reasoning_content.clone();
 
                     emit_stream_event(
@@ -1219,9 +1250,9 @@ impl AgentRuntime {
                             None,
                             &context_observation_for_delta,
                             &tool_activities_for_delta,
-                            timeline_text.as_deref(),
+                            None,
                             timeline_reasoning_content.as_deref(),
-                            latency.or(first_token_latency_for_emit.get()),
+                            call_latency.or(provider_call_first_token_latency_for_emit.get()),
                             "calling_model",
                         )),
                         None,
@@ -1245,6 +1276,8 @@ impl AgentRuntime {
                         None,
                         None,
                         Some(context_observation.clone()),
+                        None,
+                        None,
                         accumulated_fallback_reason.clone(),
                         None,
                         None,
@@ -1273,12 +1306,25 @@ impl AgentRuntime {
                 }
             };
             let mut response = response;
+            let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
+            let provider_call_used_true_stream =
+                response.provider_source == "provider_followup_stream";
             provider_call_records.push(build_provider_call_cache_record(
                 ProviderRequestKind::ToolFollowup,
                 Some(response.provider_source.as_str()),
                 Some(response.provider_mode.as_str()),
                 response.token_usage.as_ref(),
-                first_token_latency.get(),
+                if provider_call_used_true_stream {
+                    provider_call_first_token_latency.get()
+                } else {
+                    None
+                },
+                Some(provider_call_duration_ms),
+                if provider_call_used_true_stream {
+                    ProviderLatencyKind::ProviderStream
+                } else {
+                    ProviderLatencyKind::BufferedResponse
+                },
                 Some(&context_observation),
             ));
             accumulated_token_usage =
@@ -1338,6 +1384,8 @@ impl AgentRuntime {
                     None,
                     Some(response.provider_mode.clone()),
                     Some(context_observation.clone()),
+                    None,
+                    None,
                     accumulated_fallback_reason.clone(),
                     None,
                     None,
@@ -1371,6 +1419,7 @@ impl AgentRuntime {
                     response.assistant_message.take(),
                     &response.output_text,
                     response.reasoning_content.as_deref(),
+                    response.reasoning_content_value.as_ref(),
                 ) {
                     Ok(normalized) => normalized,
                     Err(error) => {
@@ -1388,6 +1437,8 @@ impl AgentRuntime {
                             Some(response.provider_source.clone()),
                             Some(response.provider_mode.clone()),
                             Some(context_observation.clone()),
+                            None,
+                            None,
                             accumulated_fallback_reason.clone(),
                             None,
                             None,
@@ -1435,6 +1486,8 @@ impl AgentRuntime {
                         Some(response.provider_source.clone()),
                         Some(response.provider_mode.clone()),
                         Some(context_observation.clone()),
+                        None,
+                        None,
                         accumulated_fallback_reason.clone(),
                         None,
                         None,
@@ -1465,6 +1518,7 @@ impl AgentRuntime {
                 current_assistant_message = response.assistant_message.clone();
                 current_assistant_output_text = response.output_text.clone();
                 current_assistant_reasoning = response.reasoning_content.clone();
+                current_assistant_reasoning_value = response.reasoning_content_value.clone();
                 current_tool_call = next_tool_call;
                 continue;
             }
@@ -1487,6 +1541,8 @@ impl AgentRuntime {
                         Some(response.provider_source.clone()),
                         Some(response.provider_mode.clone()),
                         Some(context_observation.clone()),
+                        None,
+                        None,
                         accumulated_fallback_reason.clone(),
                         None,
                         None,
@@ -1554,6 +1610,8 @@ impl AgentRuntime {
                 Some(response.provider_source.clone()),
                 Some(response.provider_mode.clone()),
                 Some(context_observation.clone()),
+                Some(response.output_text.clone()),
+                response.reasoning_content.clone(),
                 accumulated_fallback_reason.clone(),
                 persisted.input_tokens,
                 persisted.cache_hit_input_tokens,
@@ -1627,7 +1685,7 @@ impl AgentRuntime {
         first_decision: &ProviderDecision,
         tool_call: ToolCall,
         first_token_latency_ms: Option<u64>,
-        turn_started_at: &Instant,
+        _turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
         let context_observation = build_context_observation(planning_request, tools);
@@ -1637,6 +1695,7 @@ impl AgentRuntime {
         let mut current_assistant_message = first_decision.assistant_message.clone();
         let mut current_assistant_output_text = first_decision.output_text.clone();
         let mut current_assistant_reasoning = first_decision.reasoning_content.clone();
+        let mut current_assistant_reasoning_value = first_decision.reasoning_content_value.clone();
         let mut all_tools_ok = true;
         let mut completed_hops = 0usize;
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
@@ -1680,10 +1739,12 @@ impl AgentRuntime {
             hop_records.push(ToolTurnHopRecord {
                 assistant_output_text: current_assistant_output_text.clone(),
                 assistant_reasoning_content: current_assistant_reasoning.clone(),
+                assistant_reasoning_content_value: current_assistant_reasoning_value.clone(),
                 tool_call: current_tool_call.clone(),
                 tool_result: tool_result.clone(),
             });
 
+            let provider_call_started_at = Instant::now();
             let response = match provider_followup(
                 provider,
                 planning_request,
@@ -1704,17 +1765,15 @@ impl AgentRuntime {
                 }
             };
             let mut response = response;
-            let first_token_latency_ms = if first_token_latency_ms.is_some() {
-                first_token_latency_ms
-            } else {
-                Some(turn_started_at.elapsed().as_millis() as u64)
-            };
+            let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
             provider_call_records.push(build_provider_call_cache_record(
                 ProviderRequestKind::ToolFollowup,
                 Some(response.provider_source.as_str()),
                 Some(response.provider_mode.as_str()),
                 response.token_usage.as_ref(),
-                first_token_latency_ms,
+                None,
+                Some(provider_call_duration_ms),
+                ProviderLatencyKind::BufferedResponse,
                 Some(&context_observation),
             ));
             accumulated_token_usage =
@@ -1743,6 +1802,7 @@ impl AgentRuntime {
                     response.assistant_message.take(),
                     &response.output_text,
                     response.reasoning_content.as_deref(),
+                    response.reasoning_content_value.as_ref(),
                 ) {
                     Ok(normalized) => normalized,
                     Err(error) => {
@@ -1772,6 +1832,7 @@ impl AgentRuntime {
                 current_assistant_message = response.assistant_message.clone();
                 current_assistant_output_text = response.output_text.clone();
                 current_assistant_reasoning = response.reasoning_content.clone();
+                current_assistant_reasoning_value = response.reasoning_content_value.clone();
                 current_tool_call = next_tool_call;
                 continue;
             }
@@ -1838,7 +1899,7 @@ impl AgentRuntime {
         let PlannedTurn {
             first_decision,
             resolved_tool_call,
-            first_token_latency_ms,
+            initial_decision_duration_ms,
         } = planned;
         let PreparedTurn {
             user_message,
@@ -1855,7 +1916,9 @@ impl AgentRuntime {
             Some(first_decision.provider_source.as_str()),
             Some(first_decision.provider_mode.as_str()),
             first_decision.token_usage.as_ref(),
-            first_token_latency_ms,
+            None,
+            initial_decision_duration_ms,
+            ProviderLatencyKind::BufferedResponse,
             Some(&build_context_observation),
         )];
 
@@ -1923,7 +1986,7 @@ impl AgentRuntime {
                 first_decision.token_usage.clone(),
                 self.telemetry_builder.completed_trace_without_tool(),
                 Vec::new(),
-                first_token_latency_ms,
+                None,
             )
         };
         let attachments = match self.save_input_attachments(&input) {
@@ -1954,6 +2017,8 @@ impl AgentRuntime {
                     None,
                     None,
                     Some(build_context_observation.clone()),
+                    None,
+                    None,
                     fallback_reason.clone(),
                     None,
                     None,
@@ -2001,6 +2066,8 @@ impl AgentRuntime {
             Some(provider_source.clone()),
             Some(provider_mode.clone()),
             Some(build_context_observation.clone()),
+            Some(assistant_message.clone()),
+            None,
             fallback_reason.clone(),
             persisted.input_tokens,
             persisted.cache_hit_input_tokens,
@@ -2172,65 +2239,301 @@ impl AgentRuntime {
             return;
         }
 
-        let planned = match self.plan_turn(&prepared) {
-            Ok(planned) => planned,
-            Err(error) => {
-                let trace_steps = self.telemetry_builder.failed_trace_before_tool();
-                self.update_execution_checkpoint(
-                    control,
-                    &turn_id,
-                    "failed",
-                    Some(&prepared_provider_meta),
-                    0,
-                    None,
-                    &trace_steps,
-                    &[],
-                    None,
-                    None,
-                    None,
-                    Some("failed"),
-                    Some(&error),
-                );
-                self.persist_turn_trace(
-                    input.session_id.as_deref(),
-                    &turn_id,
-                    &prepared.display_message,
-                    "failed",
-                    trace_steps.clone(),
-                    Vec::new(),
-                    Some(&prepared_provider_meta),
-                    None,
-                    None,
-                    Some(prepared.build_context_observation.clone()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(turn_started_at.elapsed().as_millis() as u64),
-                    None,
-                    Some(error.clone()),
-                );
-                emit_turn_failed(
-                    sink,
-                    turn_id,
-                    Some(prepared.provider.requested_name().to_string()),
-                    Some(prepared.provider.name().to_string()),
-                    Some(prepared.provider.protocol_label().to_string()),
-                    Some(prepared.provider.model().to_string()),
-                    trace_steps,
-                    error,
-                );
-                return;
-            }
+        let preflight_decision = self
+            .planner
+            .preflight_decision(&prepared.user_message, prepared.retrieved.planner_history());
+        let supports_true_streaming_decision = prepared.provider.supports_true_streaming_decision();
+        let turn_id_for_stream = turn_id.clone();
+        let stream_initial_decision = || -> Result<
+            (
+                ProviderDecision,
+                Option<u64>,
+                Option<u64>,
+                Option<u64>,
+                ProviderLatencyKind,
+            ),
+            String,
+        > {
+            let initial_decision_started_at = Instant::now();
+            let initial_turn_first_token_latency = Rc::new(Cell::new(None));
+            let initial_call_first_token_latency = Rc::new(Cell::new(None));
+            let initial_turn_first_token_latency_for_emit =
+                Rc::clone(&initial_turn_first_token_latency);
+            let initial_call_first_token_latency_for_emit =
+                Rc::clone(&initial_call_first_token_latency);
+            let display_message_for_delta = prepared.display_message.clone();
+            let provider_meta_for_delta = prepared_provider_meta.clone();
+            let build_context_for_delta = prepared.build_context_observation.clone();
+
+            let decision = provider_decision_stream(
+                &prepared.provider,
+                &prepared.planning_request,
+                &prepared.tools,
+                move |delta| {
+                    let call_latency =
+                        if initial_call_first_token_latency_for_emit.get().is_none() {
+                            let value = initial_decision_started_at.elapsed().as_millis() as u64;
+                            initial_call_first_token_latency_for_emit.set(Some(value));
+                            Some(value)
+                        } else {
+                            None
+                        };
+                    let turn_latency =
+                        if initial_turn_first_token_latency_for_emit.get().is_none() {
+                            let value = turn_started_at.elapsed().as_millis() as u64;
+                            initial_turn_first_token_latency_for_emit.set(Some(value));
+                            Some(value)
+                        } else {
+                            None
+                        };
+                    let (text, reasoning_content) = match delta {
+                        ProviderStreamChunk::Text(text) => (Some(text), None),
+                        ProviderStreamChunk::Reasoning(reasoning) => (None, Some(reasoning)),
+                    };
+                    let timeline_reasoning_content = reasoning_content.clone();
+
+                    emit_stream_event(
+                        sink,
+                        "turn:delta",
+                        turn_id_for_stream.clone(),
+                        "delta",
+                        Some("calling_model"),
+                        text,
+                        reasoning_content,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(build_context_for_delta.clone()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        turn_latency,
+                        None,
+                        None,
+                        Some(build_stream_progress_trace_timeline(
+                            display_message_for_delta.as_str(),
+                            &provider_meta_for_delta,
+                            None,
+                            None,
+                            &build_context_for_delta,
+                            &[],
+                            None,
+                            timeline_reasoning_content.as_deref(),
+                            call_latency.or(initial_call_first_token_latency_for_emit.get()),
+                            "calling_model",
+                        )),
+                        None,
+                        None,
+                        None,
+                    );
+                },
+            )?;
+            Ok((
+                decision,
+                Some(initial_decision_started_at.elapsed().as_millis() as u64),
+                initial_turn_first_token_latency.get(),
+                initial_call_first_token_latency.get(),
+                ProviderLatencyKind::ProviderStream,
+            ))
         };
-        let PlannedTurn {
-            first_decision,
-            resolved_tool_call,
-            first_token_latency_ms: initial_first_token_latency_ms,
-        } = planned;
+        let decide_sync = || -> Result<
+            (
+                ProviderDecision,
+                Option<u64>,
+                Option<u64>,
+                Option<u64>,
+                ProviderLatencyKind,
+            ),
+            String,
+        > {
+            let started_at = Instant::now();
+            let decision = provider_decision(
+                &prepared.provider,
+                &prepared.planning_request,
+                &prepared.tools,
+            )?;
+            Ok((
+                decision,
+                Some(started_at.elapsed().as_millis() as u64),
+                None,
+                None,
+                ProviderLatencyKind::BufferedResponse,
+            ))
+        };
+        let planned = (|| -> Result<
+            (
+                ProviderDecision,
+                Option<u64>,
+                Option<u64>,
+                Option<u64>,
+                ProviderLatencyKind,
+            ),
+            String,
+        > {
+            if prepared.provider.requires_provider_native_tool_flow() {
+                return match preflight_decision {
+                    Some(decision) if planner_decision_can_override_native_tool_flow(&decision) => {
+                        Ok((decision, None, None, None, ProviderLatencyKind::Unknown))
+                    }
+                    _ => {
+                        if supports_true_streaming_decision {
+                            stream_initial_decision().or_else(|_| decide_sync())
+                        } else {
+                            decide_sync()
+                        }
+                    }
+                };
+            }
+
+            match preflight_decision {
+                Some(decision) => Ok((decision, None, None, None, ProviderLatencyKind::Unknown)),
+                None => {
+                    if supports_true_streaming_decision {
+                        stream_initial_decision().or_else(|_| decide_sync())
+                    } else {
+                        decide_sync()
+                    }
+                }
+            }
+        })();
+        let (
+            mut first_decision,
+            initial_decision_duration_ms,
+            initial_turn_first_token_latency_ms,
+            initial_call_first_token_latency_ms,
+            initial_latency_kind,
+        ) =
+            match planned {
+                Ok(result) => result,
+                Err(error) => {
+                    let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+                    self.update_execution_checkpoint(
+                        control,
+                        &turn_id,
+                        "failed",
+                        Some(&prepared_provider_meta),
+                        0,
+                        None,
+                        &trace_steps,
+                        &[],
+                        None,
+                        None,
+                        None,
+                        Some("failed"),
+                        Some(&error),
+                    );
+                    self.persist_turn_trace(
+                        input.session_id.as_deref(),
+                        &turn_id,
+                        &prepared.display_message,
+                        "failed",
+                        trace_steps.clone(),
+                        Vec::new(),
+                        Some(&prepared_provider_meta),
+                        None,
+                        None,
+                        Some(prepared.build_context_observation.clone()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(turn_started_at.elapsed().as_millis() as u64),
+                        None,
+                        Some(error.clone()),
+                    );
+                    emit_turn_failed(
+                        sink,
+                        turn_id,
+                        Some(prepared.provider.requested_name().to_string()),
+                        Some(prepared.provider.name().to_string()),
+                        Some(prepared.provider.protocol_label().to_string()),
+                        Some(prepared.provider.model().to_string()),
+                        trace_steps,
+                        error,
+                    );
+                    return;
+                }
+            };
+        if let Some(tool_call) = first_decision.tool_call.take() {
+            let normalized = match normalize_tool_directive(
+                tool_call,
+                first_decision.assistant_message.take(),
+                &first_decision.output_text,
+                first_decision.reasoning_content.as_deref(),
+                first_decision.reasoning_content_value.as_ref(),
+            ) {
+                Ok(normalized) => normalized,
+                Err(error) => {
+                    let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+                    self.update_execution_checkpoint(
+                        control,
+                        &turn_id,
+                        "failed",
+                        Some(&prepared_provider_meta),
+                        0,
+                        None,
+                        &trace_steps,
+                        &[],
+                        None,
+                        None,
+                        None,
+                        Some("failed"),
+                        Some(&error),
+                    );
+                    self.persist_turn_trace(
+                        input.session_id.as_deref(),
+                        &turn_id,
+                        &prepared.display_message,
+                        "failed",
+                        trace_steps.clone(),
+                        Vec::new(),
+                        Some(&prepared_provider_meta),
+                        None,
+                        None,
+                        Some(prepared.build_context_observation.clone()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        initial_turn_first_token_latency_ms,
+                        Some(turn_started_at.elapsed().as_millis() as u64),
+                        None,
+                        Some(error.clone()),
+                    );
+                    emit_turn_failed(
+                        sink,
+                        turn_id,
+                        Some(prepared.provider.requested_name().to_string()),
+                        Some(prepared.provider.name().to_string()),
+                        Some(prepared.provider.protocol_label().to_string()),
+                        Some(prepared.provider.model().to_string()),
+                        trace_steps,
+                        error,
+                    );
+                    return;
+                }
+            };
+            first_decision.tool_call = Some(normalized.tool_call);
+            first_decision.assistant_message = normalized.assistant_message;
+        }
+        let resolved_tool_call = self.resolve_tool_call(
+            &prepared.user_message,
+            prepared.retrieved.planner_history(),
+            first_decision.tool_call.clone(),
+            !prepared.provider.requires_provider_native_tool_flow(),
+        );
         let PreparedTurn {
             user_message,
             display_message,
@@ -2246,7 +2549,13 @@ impl AgentRuntime {
             Some(first_decision.provider_source.as_str()),
             Some(first_decision.provider_mode.as_str()),
             first_decision.token_usage.as_ref(),
-            initial_first_token_latency_ms,
+            if initial_latency_kind == ProviderLatencyKind::ProviderStream {
+                initial_call_first_token_latency_ms
+            } else {
+                None
+            },
+            initial_decision_duration_ms,
+            initial_latency_kind.clone(),
             Some(&build_context_observation),
         )];
 
@@ -2282,6 +2591,8 @@ impl AgentRuntime {
                 Some(first_decision.provider_source.clone()),
                 Some(first_decision.provider_mode.clone()),
                 Some(build_context_observation.clone()),
+                None,
+                None,
                 first_decision.fallback_reason.clone(),
                 None,
                 None,
@@ -2328,7 +2639,6 @@ impl AgentRuntime {
         }
 
         if let Some(tool_call) = resolved_tool_call {
-            let initial_visible_first_token_latency_ms = None;
             self.handle_stream_tool_turn(
                 sink,
                 control,
@@ -2342,7 +2652,7 @@ impl AgentRuntime {
                 &planning_request,
                 &first_decision,
                 tool_call,
-                initial_visible_first_token_latency_ms,
+                initial_turn_first_token_latency_ms,
                 &turn_started_at,
                 &mut provider_call_records,
             );
@@ -2379,7 +2689,11 @@ impl AgentRuntime {
                 &[],
                 None,
                 None,
-                initial_first_token_latency_ms,
+                if initial_latency_kind == ProviderLatencyKind::ProviderStream {
+                    initial_call_first_token_latency_ms
+                } else {
+                    None
+                },
                 "calling_model",
             )),
             None,
@@ -2419,29 +2733,33 @@ impl AgentRuntime {
             return;
         }
 
-        let first_visible_first_token_latency_ms =
-            if let Some(reasoning_content) = first_decision.reasoning_content.as_deref() {
-                stream_reasoning_chunks(
-                    sink,
-                    &turn_id,
-                    "calling_model",
-                    reasoning_content,
-                    &turn_started_at,
-                    None,
-                    true,
-                )
-            } else {
-                None
-            };
-        let first_token_latency_ms = stream_text_chunks(
-            sink,
-            &turn_id,
-            "calling_model",
-            &first_decision.output_text,
-            &turn_started_at,
-            first_visible_first_token_latency_ms,
-            first_visible_first_token_latency_ms.is_none(),
-        );
+        let first_token_latency_ms = if initial_latency_kind == ProviderLatencyKind::ProviderStream {
+            initial_turn_first_token_latency_ms
+        } else {
+            let first_visible_first_token_latency_ms =
+                if let Some(reasoning_content) = first_decision.reasoning_content.as_deref() {
+                    stream_reasoning_chunks(
+                        sink,
+                        &turn_id,
+                        "calling_model",
+                        reasoning_content,
+                        &turn_started_at,
+                        None,
+                        false,
+                    )
+                } else {
+                    None
+                };
+            stream_text_chunks(
+                sink,
+                &turn_id,
+                "calling_model",
+                &first_decision.output_text,
+                &turn_started_at,
+                first_visible_first_token_latency_ms,
+                false,
+            )
+        };
         let completed_text = first_decision.output_text.clone();
         let completed_mode = first_decision.provider_mode.clone();
         let attachments = match self.save_input_attachments(&input) {
@@ -2475,6 +2793,8 @@ impl AgentRuntime {
                     Some(first_decision.provider_source.clone()),
                     Some(first_decision.provider_mode.clone()),
                     Some(build_context_observation.clone()),
+                    None,
+                    None,
                     first_decision.fallback_reason.clone(),
                     None,
                     None,
@@ -2544,6 +2864,8 @@ impl AgentRuntime {
             Some(first_decision.provider_source.clone()),
             Some(first_decision.provider_mode.clone()),
             Some(build_context_observation.clone()),
+            Some(first_decision.output_text.clone()),
+            first_decision.reasoning_content.clone(),
             first_decision.fallback_reason.clone(),
             persisted.input_tokens,
             persisted.cache_hit_input_tokens,
@@ -2783,7 +3105,7 @@ fn annotate_capability_tool_activities(
             Some("需要先读取目录再回答。")
         );
         assert_eq!(first_delta.text.as_deref(), Some(final_text));
-        assert_eq!(completed.phase.as_deref(), Some("completed"));
+        assert_eq!(completed.phase.as_deref(), Some("ready"));
         assert_eq!(
             completed.provider_source.as_deref(),
             Some("provider_followup_stream_compat_sync")
@@ -2792,46 +3114,76 @@ fn annotate_capability_tool_activities(
     }
 
     #[cfg(any())]
-    fn start_turn_stream_uses_compat_sync_for_deepseek_tool_followup() {
+    fn start_turn_stream_uses_live_stream_for_deepseek_tool_followup() {
         let final_text = "deepseek follow-up completed";
         let server = MockHttpServer::start(vec![
-            json_response(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "call a tool first",
-                            "reasoning_content": "need workspace listing before answering",
-                            "tool_calls": [
-                                {
-                                    "id": "call_workspace_list_files",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "workspace_list_files",
-                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "need workspace listing before answering"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "call a tool first",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_list_files",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_list_files",
+                                            "arguments": "{\"path\":\".\",\"limit\":40}"
+                                        }
                                     }
-                                }
-                            ]
+                                ]
+                            }
                         }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 60,
+                        "completion_tokens": 12,
+                        "total_tokens": 72
                     }
-                ]
-            })),
-            json_response(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": final_text,
-                            "reasoning_content": "tool output is sufficient"
+                }),
+            ]),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "tool output is sufficient"
+                            }
                         }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": final_text
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 60,
+                        "completion_tokens": 24,
+                        "total_tokens": 84
                     }
-                ],
-                "usage": {
-                    "prompt_tokens": 60,
-                    "completion_tokens": 24,
-                    "total_tokens": 84
-                }
-            })),
+                }),
+            ]),
         ]);
         let mut runtime =
             build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
@@ -2855,14 +3207,10 @@ fn annotate_capability_tool_activities(
 
         let requests = server.finish();
         let events = sink.events.borrow();
-        let first_delta = events
-            .iter()
-            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
-            .expect("delta event");
         let text_delta = events
             .iter()
             .filter_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
-            .find(|payload| payload.text.is_some())
+            .find(|payload| payload.text.as_deref() == Some(final_text))
             .expect("text delta event");
         let completed = events
             .iter()
@@ -2904,7 +3252,7 @@ fn annotate_capability_tool_activities(
             Some("need workspace listing before answering")
         );
         assert_eq!(first_delta.text.as_deref(), Some(final_text));
-        assert_eq!(completed.phase.as_deref(), Some("completed"));
+        assert_eq!(completed.phase.as_deref(), Some("ready"));
         assert_eq!(
             completed.provider_source.as_deref(),
             Some("provider_followup_stream_compat_sync")
@@ -2978,6 +3326,7 @@ fn normalize_tool_directive(
     assistant_message: Option<Value>,
     output_text: &str,
     reasoning_content: Option<&str>,
+    reasoning_content_value: Option<&Value>,
 ) -> Result<NormalizedToolDirective, String> {
     if !tool_call.name.trim().is_empty() {
         return Ok(NormalizedToolDirective {
@@ -2998,12 +3347,21 @@ fn normalize_tool_directive(
     ));
     tool_call.name = repaired_name;
 
-    Ok(NormalizedToolDirective {
-        assistant_message: Some(provider_native_assistant_tool_call_message(
+    let rebuilt_message = match reasoning_content_value {
+        Some(raw_reasoning) => provider_native_assistant_tool_call_message_with_reasoning_value(
+            non_empty_text(output_text),
+            Some(raw_reasoning),
+            &tool_call,
+        ),
+        None => provider_native_assistant_tool_call_message(
             non_empty_text(output_text),
             reasoning_content,
             &tool_call,
-        )),
+        ),
+    };
+
+    Ok(NormalizedToolDirective {
+        assistant_message: Some(rebuilt_message),
         tool_call,
     })
 }
@@ -3072,10 +3430,16 @@ fn native_transcript_for_completed_turn(
     }
 
     let assistant_message = decision.assistant_message.clone().unwrap_or_else(|| {
-        provider_native_assistant_message_with_reasoning(
-            &decision.output_text,
-            decision.reasoning_content.as_deref(),
-        )
+        match decision.reasoning_content_value.as_ref() {
+            Some(raw_reasoning) => provider_native_assistant_message_with_reasoning_value(
+                &decision.output_text,
+                Some(raw_reasoning),
+            ),
+            None => provider_native_assistant_message_with_reasoning(
+                &decision.output_text,
+                decision.reasoning_content.as_deref(),
+            ),
+        }
     });
 
     Some(vec![
@@ -3707,19 +4071,32 @@ fn native_transcript_for_tool_turn(
 }
 
 fn tool_request_assistant_message(hop: &ToolTurnHopRecord) -> Value {
-    provider_native_assistant_tool_call_message(
-        text_if_present(&hop.assistant_output_text),
-        hop.assistant_reasoning_content.as_deref(),
-        &hop.tool_call,
-    )
+    match hop.assistant_reasoning_content_value.as_ref() {
+        Some(raw_reasoning) => provider_native_assistant_tool_call_message_with_reasoning_value(
+            text_if_present(&hop.assistant_output_text),
+            Some(raw_reasoning),
+            &hop.tool_call,
+        ),
+        None => provider_native_assistant_tool_call_message(
+            text_if_present(&hop.assistant_output_text),
+            hop.assistant_reasoning_content.as_deref(),
+            &hop.tool_call,
+        ),
+    }
 }
 
 fn final_assistant_message(response: &ProviderResponse) -> Value {
     response.assistant_message.clone().unwrap_or_else(|| {
-        provider_native_assistant_message_with_reasoning(
-            &response.output_text,
-            response.reasoning_content.as_deref(),
-        )
+        match response.reasoning_content_value.as_ref() {
+            Some(raw_reasoning) => provider_native_assistant_message_with_reasoning_value(
+                &response.output_text,
+                Some(raw_reasoning),
+            ),
+            None => provider_native_assistant_message_with_reasoning(
+                &response.output_text,
+                response.reasoning_content.as_deref(),
+            ),
+        }
     })
 }
 
@@ -3748,6 +4125,8 @@ fn build_provider_call_cache_record(
     provider_mode: Option<&str>,
     token_usage: Option<&TokenUsage>,
     first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    latency_kind: ProviderLatencyKind,
     build_context_observation: Option<&BuildContextObservation>,
 ) -> ProviderCallCacheRecord {
     let (input_tokens, cache_hit_input_tokens, reasoning_tokens, output_tokens, total_tokens) =
@@ -3764,6 +4143,8 @@ fn build_provider_call_cache_record(
         output_tokens,
         total_tokens,
         first_token_latency_ms,
+        turn_duration_ms,
+        latency_kind,
         prefix_mutation_reasons: build_context_observation
             .map(|observation| observation.prefix_mutation_reasons.clone())
             .unwrap_or_default(),
@@ -3899,6 +4280,30 @@ mod tests {
             _user_message: &str,
             _history: &[TurnHistoryMessage],
         ) -> Option<ProviderDecision> {
+            None
+        }
+
+        fn select_tool_call(
+            &self,
+            _user_message: &str,
+            _history: &[TurnHistoryMessage],
+            provider_tool_call: Option<ToolCall>,
+        ) -> Option<ToolCall> {
+            provider_tool_call
+        }
+    }
+
+    struct SlowPassthroughPlanner {
+        delay_ms: u64,
+    }
+
+    impl TurnPlanner for SlowPassthroughPlanner {
+        fn preflight_decision(
+            &self,
+            _user_message: &str,
+            _history: &[TurnHistoryMessage],
+        ) -> Option<ProviderDecision> {
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
             None
         }
 
@@ -5278,7 +5683,16 @@ mod tests {
                 }),
             ]),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver {
+                selection: test_provider_selection(server.base_url.clone()),
+            }),
+            Box::new(StubToolExecutor),
+            Box::new(SlowPassthroughPlanner { delay_ms: 40 }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -5336,17 +5750,34 @@ mod tests {
 
     #[test]
     fn start_turn_stream_emits_first_token_latency_on_reasoning_delta() {
-        let server = MockHttpServer::start(vec![json_response(json!({
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": "最终答案。",
-                        "reasoning_content": "先想一下。"
+        let server = MockHttpServer::start(vec![sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "先想一下。"
+                        }
                     }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "最终答案。"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 6,
+                    "total_tokens": 26
                 }
-            ]
-        }))]);
+            }),
+        ])]);
         let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
@@ -5366,7 +5797,7 @@ mod tests {
             },
         );
 
-        let _ = server.finish();
+        let requests = server.finish();
         let events = sink.events.borrow();
         let first_delta = events
             .iter()
@@ -5396,16 +5827,133 @@ mod tests {
             completed.first_token_latency_ms,
             first_delta.first_token_latency_ms
         );
+        let decision_request: Value =
+            serde_json::from_str(&requests[0]).expect("decision request should be json");
+        assert_eq!(decision_request.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            completed.provider_source.as_deref(),
+            Some("provider_decision_stream")
+        );
+        let provider_call = completed
+            .provider_call_records
+            .as_ref()
+            .and_then(|records| records.first())
+            .expect("initial provider call record");
+        assert_eq!(provider_call.latency_kind, ProviderLatencyKind::ProviderStream);
+        assert!(provider_call.first_token_latency_ms.is_some());
+        assert!(provider_call.turn_duration_ms.is_some());
+        assert!(
+            provider_call.first_token_latency_ms.unwrap()
+                <= provider_call.turn_duration_ms.unwrap()
+        );
+        assert!(
+            completed.first_token_latency_ms.unwrap()
+                > provider_call.first_token_latency_ms.unwrap()
+        );
+    }
+
+    #[test]
+    fn start_turn_stream_sync_fallback_for_initial_decision_does_not_emit_fake_ttft() {
+        let server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "最终答案。",
+                            "reasoning_content": "先想一下。"
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "最终答案。",
+                            "reasoning_content": "先想一下。"
+                        }
+                    }
+                ]
+            })),
+        ]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-sync-fallback-no-fake-ttft".to_string(),
+            TurnInput {
+                message: "请直接回答。".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-sync-fallback-no-fake-ttft".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        let events = sink.events.borrow();
+        let first_delta = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .expect("first delta event");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
+
+        assert_eq!(first_delta.first_token_latency_ms, None);
+        assert_eq!(completed.first_token_latency_ms, None);
+        let streamed_decision_request: Value =
+            serde_json::from_str(&requests[0]).expect("decision request should be json");
+        let fallback_decision_request: Value =
+            serde_json::from_str(&requests[1]).expect("fallback decision request should be json");
+        assert_eq!(
+            streamed_decision_request
+                .get("stream")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            fallback_decision_request
+                .get("stream")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(completed.provider_source.as_deref(), Some("provider_decision"));
     }
 
     #[test]
     fn start_turn_stream_measures_first_token_latency_from_turn_start_across_tool_hops() {
         let final_text = "工具调用后返回最终答案。";
         let server = MockHttpServer::start(vec![
-            json_response(decision_tool_call(
-                "workspace_list_files",
-                json!({"path": ".", "limit": 40}),
-            )),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_list_files",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_list_files",
+                                            "arguments": "{\"path\":\".\",\"limit\":40}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+            ]),
             sse_response(&[
                 json!({
                     "choices": [
@@ -5467,46 +6015,68 @@ mod tests {
     }
 
     #[test]
-    fn start_turn_stream_uses_compat_sync_for_deepseek_tool_followup() {
+    fn start_turn_stream_uses_live_stream_for_deepseek_tool_followup() {
         let final_text = "deepseek follow-up completed";
         let server = MockHttpServer::start(vec![
-            json_response(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "call a tool first",
-                            "reasoning_content": "need workspace listing before answering",
-                            "tool_calls": [
-                                {
-                                    "id": "call_workspace_list_files",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "workspace_list_files",
-                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "need workspace listing before answering"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "call a tool first",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_list_files",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_list_files",
+                                            "arguments": "{\"path\":\".\",\"limit\":40}"
+                                        }
                                     }
-                                }
-                            ]
+                                ]
+                            }
                         }
-                    }
-                ]
-            })),
-            json_response(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": final_text,
-                            "reasoning_content": "tool output is sufficient"
+                    ]
+                }),
+            ]),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "tool output is sufficient"
+                            }
                         }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": final_text
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 60,
+                        "completion_tokens": 24,
+                        "total_tokens": 84
                     }
-                ],
-                "usage": {
-                    "prompt_tokens": 60,
-                    "completion_tokens": 24,
-                    "total_tokens": 84
-                }
-            })),
+                }),
+            ]),
         ]);
         let mut runtime = build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
@@ -5529,14 +6099,10 @@ mod tests {
 
         let requests = server.finish();
         let events = sink.events.borrow();
-        let first_delta = events
-            .iter()
-            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
-            .expect("delta event");
         let text_delta = events
             .iter()
             .filter_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
-            .find(|payload| payload.text.is_some())
+            .find(|payload| payload.text.as_deref() == Some(final_text))
             .expect("text delta event");
         let completed = events
             .iter()
@@ -5548,9 +6114,9 @@ mod tests {
             serde_json::from_str(&requests[0]).expect("decision request should be json");
         let followup_request: Value =
             serde_json::from_str(&requests[1]).expect("followup request should be json");
-        assert_eq!(decision_request.get("stream").and_then(Value::as_bool), Some(false));
-        assert_eq!(followup_request.get("stream").and_then(Value::as_bool), Some(false));
-        assert!(followup_request.get("stream_options").is_none());
+        assert_eq!(decision_request.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(followup_request.get("stream").and_then(Value::as_bool), Some(true));
+        assert!(followup_request.get("stream_options").is_some());
         let replayed_assistant_message = followup_request
             .get("messages")
             .and_then(Value::as_array)
@@ -5571,14 +6137,24 @@ mod tests {
                 .and_then(Value::as_str),
             Some("need workspace listing before answering")
         );
-        assert_eq!(first_delta.reasoning_content.as_deref(), Some("tool output is sufficient"));
         assert_eq!(text_delta.text.as_deref(), Some(final_text));
         assert_eq!(completed.phase.as_deref(), Some("ready"));
         assert_eq!(
             completed.provider_source.as_deref(),
-            Some("provider_followup_stream_compat_sync")
+            Some("provider_followup_stream")
         );
         assert_eq!(completed.fallback_reason, None);
+        let provider_calls = completed
+            .provider_call_records
+            .as_ref()
+            .expect("provider call records");
+        assert_eq!(provider_calls.len(), 2);
+        assert!(provider_calls
+            .iter()
+            .all(|record| record.latency_kind == ProviderLatencyKind::ProviderStream));
+        assert!(provider_calls
+            .iter()
+            .all(|record| record.first_token_latency_ms.is_some()));
     }
 
     #[test]
@@ -6002,46 +6578,68 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_tool_followup_compat_sync_avoids_stream_fallback() {
+    fn deepseek_tool_followup_uses_live_stream() {
         let final_text = "deepseek follow-up completed";
         let server = MockHttpServer::start(vec![
-            json_response(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "call a tool first",
-                            "reasoning_content": "need workspace listing before answering",
-                            "tool_calls": [
-                                {
-                                    "id": "call_workspace_list_files",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "workspace_list_files",
-                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "need workspace listing before answering"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "call a tool first",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_list_files",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_list_files",
+                                            "arguments": "{\"path\":\".\",\"limit\":40}"
+                                        }
                                     }
-                                }
-                            ]
+                                ]
+                            }
                         }
-                    }
-                ]
-            })),
-            json_response(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": final_text,
-                            "reasoning_content": "tool output is sufficient"
+                    ]
+                }),
+            ]),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "tool output is sufficient"
+                            }
                         }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": final_text
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 60,
+                        "completion_tokens": 24,
+                        "total_tokens": 84
                     }
-                ],
-                "usage": {
-                    "prompt_tokens": 60,
-                    "completion_tokens": 24,
-                    "total_tokens": 84
-                }
-            })),
+                }),
+            ]),
         ]);
         let mut runtime =
             build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
@@ -6065,10 +6663,11 @@ mod tests {
 
         let requests = server.finish();
         let events = sink.events.borrow();
-        let first_delta = events
+        let text_delta = events
             .iter()
-            .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
-            .expect("delta event");
+            .filter_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .find(|payload| payload.text.as_deref() == Some(final_text))
+            .expect("text delta event");
         let completed = events
             .iter()
             .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
@@ -6081,28 +6680,219 @@ mod tests {
             serde_json::from_str(&requests[1]).expect("followup request should be json");
         assert_eq!(
             decision_request.get("stream").and_then(Value::as_bool),
-            Some(false)
+            Some(true)
         );
         assert_eq!(
             followup_request.get("stream").and_then(Value::as_bool),
-            Some(false)
+            Some(true)
         );
-        assert!(followup_request.get("stream_options").is_none());
+        assert!(followup_request.get("stream_options").is_some());
+        let replayed_assistant_message = followup_request
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages.iter().find(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                        && message
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .map(|calls| !calls.is_empty())
+                            .unwrap_or(false)
+                })
+            })
+            .expect("follow-up request should replay assistant tool call message");
         assert_eq!(
-            followup_request
-                .get("messages")
-                .and_then(Value::as_array)
-                .and_then(|messages| messages.get(1))
-                .and_then(|message| message.get("reasoning_content"))
+            replayed_assistant_message
+                .get("reasoning_content")
                 .and_then(Value::as_str),
             Some("need workspace listing before answering")
         );
-        assert_eq!(first_delta.text.as_deref(), Some(final_text));
-        assert_eq!(completed.phase.as_deref(), Some("completed"));
+        assert_eq!(text_delta.text.as_deref(), Some(final_text));
+        assert_eq!(completed.phase.as_deref(), Some("ready"));
         assert_eq!(
             completed.provider_source.as_deref(),
-            Some("provider_followup_stream_compat_sync")
+            Some("provider_followup_stream")
         );
         assert_eq!(completed.fallback_reason, None);
+        let provider_calls = completed
+            .provider_call_records
+            .as_ref()
+            .expect("provider call records");
+        assert_eq!(provider_calls.len(), 2);
+        assert!(provider_calls
+            .iter()
+            .all(|record| record.first_token_latency_ms.is_some()));
+    }
+
+    #[test]
+    fn deepseek_multi_hop_followup_preserves_structured_reasoning_content() {
+        let final_text = "deepseek structured follow-up completed";
+        let first_reasoning = json!([
+            { "type": "reasoning", "text": "need workspace listing before answering" }
+        ]);
+        let second_reasoning = json!([
+            { "type": "reasoning", "text": "need Cargo.toml content before answering" }
+        ]);
+        let final_reasoning = json!([
+            { "type": "reasoning", "text": "tool output is sufficient" }
+        ]);
+        let server = MockHttpServer::start(vec![
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": first_reasoning.clone()
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "call a tool first",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_list_files",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_list_files",
+                                            "arguments": "{\"path\":\".\",\"limit\":40}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+            ]),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": second_reasoning.clone()
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "read Cargo.toml next",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_read_file",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_read_file",
+                                            "arguments": "{\"path\":\"Cargo.toml\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+            ]),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": final_reasoning.clone()
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": final_text
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 120,
+                        "completion_tokens": 36,
+                        "total_tokens": 156
+                    }
+                }),
+            ]),
+        ]);
+        let mut runtime =
+            build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-deepseek-structured-followup".to_string(),
+            TurnInput {
+                message: "inspect workspace then read Cargo.toml".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("deepseek-structured-followup".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        let first_followup: Value =
+            serde_json::from_str(&requests[1]).expect("first followup request should be json");
+        let second_followup: Value =
+            serde_json::from_str(&requests[2]).expect("second followup request should be json");
+
+        let first_replayed = first_followup
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages.iter().find(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                        && message
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .map(|calls| !calls.is_empty())
+                            .unwrap_or(false)
+                })
+            })
+            .and_then(|message| message.get("reasoning_content"))
+            .cloned()
+            .expect("first followup should replay structured reasoning");
+        let second_replayed = second_followup
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| messages.iter().rev().find(|message| {
+                message.get("role").and_then(Value::as_str) == Some("assistant")
+                    && message
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .map(|calls| !calls.is_empty())
+                        .unwrap_or(false)
+            }))
+            .and_then(|message| message.get("reasoning_content"))
+            .cloned()
+            .expect("second followup should replay structured reasoning");
+
+        assert_eq!(
+            first_replayed,
+            json!([{ "type": "reasoning", "text": "need workspace listing before answering" }])
+        );
+        assert_eq!(
+            second_replayed,
+            json!([{ "type": "reasoning", "text": "need Cargo.toml content before answering" }])
+        );
     }
 }

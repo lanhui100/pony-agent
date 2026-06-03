@@ -2,7 +2,8 @@ use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::graph::GraphRun;
 use crate::agent::input::TurnInputImage;
 use crate::agent::provider::{
-    ProviderManager, ProviderMessage, ProviderRequest, ProviderRequestObservation, ProviderRole,
+    PrefixMutationReason, ProviderManager, ProviderMessage, ProviderRequest,
+    ProviderRequestObservation, ProviderRole,
 };
 use crate::agent::session::{
     AttachmentAsset, LongTermMemoryRecord, SessionSnapshot, TurnHistoryMessage,
@@ -150,6 +151,11 @@ pub trait TurnContextBuilder: Send {
 
 pub struct DefaultTurnContextBuilder;
 
+struct SemistableContextSection {
+    note: String,
+    prefix_mutation_reasons: Vec<PrefixMutationReason>,
+}
+
 impl TurnContextBuilder for DefaultTurnContextBuilder {
     fn retrieve_context_state(
         &self,
@@ -184,39 +190,34 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
             .filter_map(to_provider_history_message)
             .collect::<Vec<_>>();
         let image_note = image_capability_note(provider, retrieved);
+        let capability_note = provider_capability_note(provider);
         let stable_prefix_text = render_provider_messages_for_observation(&[
             ProviderMessage::system(BASE_SYSTEM_PROMPT),
-            ProviderMessage::developer(provider_capability_note(provider)),
+            ProviderMessage::developer(capability_note.clone()),
         ]);
-
-        let base_developer = ProviderMessage::developer(provider_context_note(
+        let base_semistable_context = provider_semistable_context_note(
             graph_name,
             retrieved,
-            provider,
             image_note.as_deref(),
             None,
-        ));
+            None,
+        );
         let reserved_messages = [
             ProviderMessage::system(BASE_SYSTEM_PROMPT),
-            base_developer,
+            ProviderMessage::developer(capability_note.clone()),
+            ProviderMessage::developer(base_semistable_context.note.clone()),
             current_user_message.clone(),
         ];
         let (history_messages, history_truncated_count) =
             truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens);
         let history_truncation_note = truncation_note(history_truncated_count, "history messages");
-        let semi_stable_context_note = provider_semistable_context_note(
+        let semi_stable_context = provider_semistable_context_note(
             graph_name,
             retrieved,
             image_note.as_deref(),
             history_truncation_note.as_deref(),
+            Some(PrefixMutationReason::HistoryBoundaryShifted),
         );
-        let developer_message = ProviderMessage::developer(provider_context_note(
-            graph_name,
-            retrieved,
-            provider,
-            image_note.as_deref(),
-            history_truncation_note.as_deref(),
-        ));
         let history_observation_text = render_provider_messages_for_observation(&history_messages);
         let volatile_input_text = render_turn_input_for_observation(
             &retrieved.turn_context.user_message,
@@ -225,18 +226,19 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
 
         let mut messages = vec![
             ProviderMessage::system(BASE_SYSTEM_PROMPT),
-            developer_message,
+            ProviderMessage::developer(capability_note.clone()),
+            ProviderMessage::developer(semi_stable_context.note.clone()),
         ];
         messages.extend(history_messages);
         messages.push(current_user_message);
 
         let (native_messages, semi_stable_native_context_note) =
             if provider.requires_provider_native_tool_flow() {
-                let base_native_context = native_context_message(
+                let base_native_context = provider_semistable_context_note(
                     graph_name,
                     retrieved,
-                    provider,
                     image_note.as_deref(),
+                    None,
                     None,
                 );
                 let reserved_native_messages = [
@@ -244,7 +246,14 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
                         "role": "system",
                         "content": BASE_SYSTEM_PROMPT,
                     }),
-                    base_native_context,
+                    json!({
+                        "role": "system",
+                        "content": capability_note.clone(),
+                    }),
+                    json!({
+                        "role": "system",
+                        "content": base_native_context.note,
+                    }),
                     json!({
                         "role": "user",
                         "content": retrieved.turn_context.user_message.clone()
@@ -264,19 +273,21 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
                     retrieved,
                     image_note.as_deref(),
                     native_transcript_note.as_deref(),
+                    Some(PrefixMutationReason::NativeTranscriptBoundaryShifted),
                 );
                 let mut transcript = vec![
                     json!({
                         "role": "system",
                         "content": BASE_SYSTEM_PROMPT,
                     }),
-                    native_context_message(
-                        graph_name,
-                        retrieved,
-                        provider,
-                        image_note.as_deref(),
-                        native_transcript_note.as_deref(),
-                    ),
+                    json!({
+                        "role": "system",
+                        "content": capability_note.clone(),
+                    }),
+                    json!({
+                        "role": "system",
+                        "content": semi_stable_native_context_note.note.clone(),
+                    }),
                 ];
                 transcript.extend(native_transcript);
                 transcript.push(json!({
@@ -292,13 +303,19 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
                 }));
                 (transcript, semi_stable_native_context_note)
             } else {
-                (Vec::new(), String::new())
+                (
+                    Vec::new(),
+                    SemistableContextSection {
+                        note: String::new(),
+                        prefix_mutation_reasons: Vec::new(),
+                    },
+                )
             };
         let observation = if provider.requires_provider_native_tool_flow() {
             let native_transcript_slice = native_messages
                 .iter()
-                .skip(2)
-                .take(native_messages.len().saturating_sub(3))
+                .skip(3)
+                .take(native_messages.len().saturating_sub(4))
                 .cloned()
                 .collect::<Vec<_>>();
             ProviderRequestObservation {
@@ -309,28 +326,30 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
                     }),
                     json!({
                         "role": "system",
-                        "content": provider_capability_note(provider),
+                        "content": capability_note.clone(),
                     }),
                 ]),
                 semi_stable_context_text: join_non_empty_sections(&[
                     render_native_messages_for_observation(&[json!({
                         "role": "system",
-                        "content": semi_stable_native_context_note,
+                        "content": semi_stable_native_context_note.note,
                     })]),
                     render_native_messages_for_observation(&native_transcript_slice),
                 ]),
                 volatile_input_text,
+                prefix_mutation_reasons: semi_stable_native_context_note.prefix_mutation_reasons,
             }
         } else {
             ProviderRequestObservation {
                 stable_prefix_text,
                 semi_stable_context_text: join_non_empty_sections(&[
                     render_provider_messages_for_observation(&[ProviderMessage::developer(
-                        semi_stable_context_note,
+                        semi_stable_context.note,
                     )]),
                     history_observation_text,
                 ]),
                 volatile_input_text,
+                prefix_mutation_reasons: semi_stable_context.prefix_mutation_reasons,
             }
         };
 
@@ -433,19 +452,6 @@ fn openai_user_content_blocks(user_message: &str, images: &[TurnInputImage]) -> 
     blocks
 }
 
-fn provider_context_note(
-    graph_name: &str,
-    retrieved: &RetrievedContextState,
-    provider: &ProviderManager,
-    image_note: Option<&str>,
-    truncation_note: Option<&str>,
-) -> String {
-    join_non_empty_sections(&[
-        provider_capability_note(provider),
-        provider_semistable_context_note(graph_name, retrieved, image_note, truncation_note),
-    ])
-}
-
 fn provider_capability_note(provider: &ProviderManager) -> String {
     format!(
         "Capability profile: contextWindowTokens={} / supportsImageInput={}. Only rely on the visible request context.",
@@ -462,14 +468,17 @@ fn provider_semistable_context_note(
     retrieved: &RetrievedContextState,
     image_note: Option<&str>,
     truncation_note: Option<&str>,
-) -> String {
+    boundary_reason: Option<PrefixMutationReason>,
+) -> SemistableContextSection {
     let mut notes = vec![format!(
         "Session summary: {} / graph={} / session={}",
         retrieved.session_context.summary, graph_name, retrieved.session_context.conversation_id
     )];
+    let mut reasons = vec![PrefixMutationReason::SessionSummaryChanged];
 
     if let Some(goal) = retrieved.run_state.goal.as_deref() {
         notes.push(format!("Run goal: {}.", goal));
+        reasons.push(PrefixMutationReason::RunGoalChanged);
     }
 
     if !retrieved.long_term_memory.entries.is_empty() {
@@ -482,36 +491,36 @@ fn provider_semistable_context_note(
             "Long-term memory status: {}. {}",
             retrieved.long_term_memory.status, summary
         ));
+        reasons.push(PrefixMutationReason::LongTermMemoryChanged);
     }
 
     if let Some(note) = image_note {
         notes.push(note.to_string());
+        reasons.push(PrefixMutationReason::ImageNoteChanged);
     }
 
     if let Some(note) = truncation_note {
         notes.push(note.to_string());
+        reasons.push(PrefixMutationReason::TruncationNoteChanged);
+        if let Some(boundary_reason) = boundary_reason {
+            reasons.push(boundary_reason);
+        }
     }
 
-    notes.join(" ")
+    SemistableContextSection {
+        note: notes.join(" "),
+        prefix_mutation_reasons: dedupe_prefix_mutation_reasons(reasons),
+    }
 }
 
-fn native_context_message(
-    graph_name: &str,
-    retrieved: &RetrievedContextState,
-    provider: &ProviderManager,
-    image_note: Option<&str>,
-    truncation_note: Option<&str>,
-) -> Value {
-    json!({
-        "role": "system",
-        "content": provider_context_note(
-            graph_name,
-            retrieved,
-            provider,
-            image_note,
-            truncation_note,
-        )
-    })
+fn dedupe_prefix_mutation_reasons(reasons: Vec<PrefixMutationReason>) -> Vec<PrefixMutationReason> {
+    let mut deduped = Vec::new();
+    for reason in reasons {
+        if !deduped.contains(&reason) {
+            deduped.push(reason);
+        }
+    }
+    deduped
 }
 
 fn image_capability_note(
@@ -1061,6 +1070,11 @@ mod tests {
             turn_count: 3,
             last_referenced_file: last_referenced_file.map(str::to_string),
             updated_at_ms: 0,
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: Default::default(),
+            resolved_node_id: None,
+            latest_node_id: None,
         }
     }
 
@@ -1282,6 +1296,15 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("recent history question"));
+        assert_eq!(
+            request.observation.prefix_mutation_reasons,
+            vec![
+                PrefixMutationReason::SessionSummaryChanged,
+                PrefixMutationReason::RunGoalChanged,
+                PrefixMutationReason::LongTermMemoryChanged,
+                PrefixMutationReason::ImageNoteChanged,
+            ]
+        );
 
         assert!(request
             .observation
@@ -1353,6 +1376,14 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("current volatile request"));
+        assert_eq!(
+            request.observation.prefix_mutation_reasons,
+            vec![
+                PrefixMutationReason::SessionSummaryChanged,
+                PrefixMutationReason::RunGoalChanged,
+                PrefixMutationReason::ImageNoteChanged,
+            ]
+        );
     }
 
     #[test]
@@ -1390,6 +1421,84 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("Older context was truncated to fit the provider window"));
+        assert!(request
+            .observation
+            .prefix_mutation_reasons
+            .contains(&PrefixMutationReason::TruncationNoteChanged));
+        assert!(request
+            .observation
+            .prefix_mutation_reasons
+            .contains(&PrefixMutationReason::NativeTranscriptBoundaryShifted));
+    }
+
+    #[test]
+    fn build_request_keeps_image_and_truncation_notes_out_of_stable_prefix() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-4.1-mini",
+            32,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(260),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: false,
+            },
+        );
+        let session = session_snapshot(
+            vec![
+                TurnHistoryMessage {
+                    role: "user".to_string(),
+                    content: "old turn ".repeat(60),
+                    attachments: Vec::new(),
+                },
+                TurnHistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "old assistant ".repeat(60),
+                    attachments: Vec::new(),
+                },
+            ],
+            Vec::new(),
+            Some("artifacts/screenshot.png"),
+        );
+
+        let retrieved = builder.retrieve_context_state(
+            "Please inspect this screenshot",
+            &[],
+            &session,
+            None,
+            None,
+        );
+        let request = builder.build_request("graph-a", &provider, &retrieved);
+
+        assert!(!request
+            .observation
+            .stable_prefix_text
+            .contains("Do not pretend to inspect screenshots"));
+        assert!(!request
+            .observation
+            .stable_prefix_text
+            .contains("Older context was truncated to fit the provider window"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Do not pretend to inspect screenshots"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Older context was truncated to fit the provider window"));
+        assert!(request
+            .observation
+            .prefix_mutation_reasons
+            .contains(&PrefixMutationReason::ImageNoteChanged));
+        assert!(request
+            .observation
+            .prefix_mutation_reasons
+            .contains(&PrefixMutationReason::TruncationNoteChanged));
+        assert!(request
+            .observation
+            .prefix_mutation_reasons
+            .contains(&PrefixMutationReason::HistoryBoundaryShifted));
     }
 
     #[test]
@@ -1479,7 +1588,10 @@ mod tests {
             .expect("developer message should exist");
 
         assert!(developer_text.contains("supportsImageInput=false"));
-        assert!(developer_text.contains("Do not pretend to inspect screenshots"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Do not pretend to inspect screenshots"));
     }
 
     #[test]

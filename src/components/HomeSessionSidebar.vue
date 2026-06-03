@@ -37,7 +37,19 @@ const emit = defineEmits<{
 }>();
 
 const runtimeStore = useRuntimeStore();
-const { isSubmitting, messages, sessionId, sessionList, sessionOperation } = storeToRefs(runtimeStore);
+const {
+  activeBranchId,
+  branchHeadNodeId,
+  historyBranches,
+  historyCursorMode,
+  historyNodes,
+  isSubmitting,
+  messages,
+  sessionId,
+  sessionList,
+  sessionOperation,
+  visibleNodeId
+} = storeToRefs(runtimeStore);
 
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
 const historyOpen = ref(loadStoredBoolean(HISTORY_OPEN_STORAGE_KEY, true));
@@ -73,6 +85,22 @@ const visibleSessions = computed<SessionOverview[]>(() => {
     ...sessionList.value.filter((session) => session.conversationId !== sessionId.value)
   ];
 });
+
+const sortedHistoryNodes = computed(() =>
+  [...historyNodes.value].sort((left, right) => right.createdAtMs - left.createdAtMs).slice(0, 8)
+);
+
+const sortedHistoryBranches = computed(() =>
+  [...historyBranches.value].sort((left, right) => right.updatedAtMs - left.updatedAtMs)
+);
+
+const canManageHistory = computed(
+  () => !isSubmitting.value && !sessionOperation.value && historyNodes.value.length > 0
+);
+
+const hasHistoryNodes = computed(() => historyNodes.value.length > 0);
+
+const isHistoricalMode = computed(() => historyCursorMode.value !== "live");
 
 const asideClass = computed(() =>
   collapsed.value
@@ -170,6 +198,62 @@ function isTransientSession(session: SessionOverview) {
 
 function canDeleteSession(session: SessionOverview) {
   return !isSubmitting.value && !sessionOperation.value && !isTransientSession(session);
+}
+
+function formatHistoryNodeTime(createdAtMs?: number | null) {
+  if (!createdAtMs) {
+    return "刚刚";
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(createdAtMs);
+}
+
+function formatHistoryNodeKind(kind: string) {
+  switch (kind) {
+    case "turn_cancelled":
+      return "已中止";
+    case "run_paused":
+      return "暂停";
+    case "checkpoint":
+      return "检查点";
+    case "manual_snapshot":
+      return "手动快照";
+    default:
+      return "已提交";
+  }
+}
+
+async function handleCheckoutHistoryNode(nodeId: string) {
+  if (!canManageHistory.value) {
+    return;
+  }
+  await runtimeStore.checkoutHistoryNode(nodeId, "transcript_and_workspace");
+}
+
+async function handleRestoreBranchHead() {
+  if (!canManageHistory.value) {
+    return;
+  }
+  await runtimeStore.restoreBranchHead(activeBranchId.value);
+}
+
+async function handleForkFromVisibleNode() {
+  if (!canManageHistory.value || !visibleNodeId.value) {
+    return;
+  }
+  await runtimeStore.forkHistoryNode(visibleNodeId.value);
+}
+
+async function handleSwitchBranch(branchId: string) {
+  if (!canManageHistory.value) {
+    return;
+  }
+  await runtimeStore.switchHistoryBranch(branchId);
 }
 </script>
 
@@ -316,6 +400,103 @@ function canDeleteSession(session: SessionOverview) {
               data-testid="session-sidebar-history"
             >
               <div class="space-y-1.5 py-1">
+                <div
+                  class="rounded-[0.45rem] border border-stone-200/80 bg-[#fcf7ef] px-2 py-2"
+                  data-testid="session-sidebar-history-graph"
+                >
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="text-[11px] font-medium text-stone-800">
+                        {{ isHistoricalMode ? "历史浏览中" : "当前在最新节点" }}
+                      </div>
+                      <div class="mt-0.5 truncate text-[10px] text-stone-500">
+                        分支 {{ activeBranchId || "main" }} · 可见 {{ visibleNodeId || "latest" }}
+                      </div>
+                    </div>
+                    <span
+                      class="rounded-full px-2 py-0.5 text-[10px]"
+                      :class="
+                        isHistoricalMode
+                          ? 'bg-amber-100 text-amber-700'
+                          : 'bg-emerald-100 text-emerald-700'
+                      "
+                    >
+                      {{ historyCursorMode }}
+                    </span>
+                  </div>
+
+                  <div class="mt-2 flex flex-wrap gap-1.5">
+                    <button
+                      class="rounded-[0.35rem] border border-stone-200 bg-white px-2 py-1 text-[10px] text-stone-700 transition hover:border-stone-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:text-stone-300"
+                      type="button"
+                      :disabled="!canManageHistory || !isHistoricalMode"
+                      data-testid="session-sidebar-history-restore"
+                      @click="handleRestoreBranchHead"
+                    >
+                      恢复到分支头
+                    </button>
+                    <button
+                      class="rounded-[0.35rem] border border-stone-200 bg-white px-2 py-1 text-[10px] text-stone-700 transition hover:border-stone-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:text-stone-300"
+                      type="button"
+                      :disabled="!canManageHistory || !visibleNodeId"
+                      data-testid="session-sidebar-history-fork"
+                      @click="handleForkFromVisibleNode"
+                    >
+                      从当前节点分叉
+                    </button>
+                  </div>
+
+                  <div v-if="sortedHistoryBranches.length" class="mt-2 flex flex-wrap gap-1.5">
+                    <button
+                      v-for="branch in sortedHistoryBranches"
+                      :key="branch.branchId"
+                      class="rounded-full border px-2 py-0.5 text-[10px] transition"
+                      :class="
+                        branch.branchId === activeBranchId
+                          ? 'border-[#d8a15d] bg-[#f3c98d] text-stone-900'
+                          : 'border-stone-200 bg-white text-stone-500 hover:border-stone-300 hover:text-stone-800'
+                      "
+                      type="button"
+                      :disabled="!canManageHistory"
+                      :data-testid="`session-sidebar-history-branch-${branch.branchId}`"
+                      @click="handleSwitchBranch(branch.branchId)"
+                    >
+                      {{ branch.label || branch.branchId }}
+                    </button>
+                  </div>
+
+                  <div v-if="hasHistoryNodes" class="mt-2 space-y-1">
+                    <button
+                      v-for="node in sortedHistoryNodes"
+                      :key="node.nodeId"
+                      class="w-full rounded-[0.35rem] border px-2 py-1.5 text-left transition"
+                      :class="
+                        node.nodeId === visibleNodeId
+                          ? 'border-[#d8a15d] bg-white text-stone-900'
+                          : 'border-transparent bg-white/70 text-stone-600 hover:border-stone-200 hover:text-stone-900'
+                      "
+                      type="button"
+                      :disabled="!canManageHistory"
+                      :data-testid="`session-sidebar-history-node-${node.nodeId}`"
+                      @click="handleCheckoutHistoryNode(node.nodeId)"
+                    >
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="truncate text-[11px] font-medium">
+                          {{ node.summary || node.nodeId }}
+                        </span>
+                        <span class="text-[10px] text-stone-400">{{ formatHistoryNodeTime(node.createdAtMs) }}</span>
+                      </div>
+                      <div class="mt-0.5 flex items-center gap-2 text-[10px] text-stone-400">
+                        <span>{{ formatHistoryNodeKind(node.kind) }}</span>
+                        <span>{{ node.branchId }}</span>
+                        <span v-if="node.nodeId === branchHeadNodeId">branch head</span>
+                      </div>
+                    </button>
+                  </div>
+
+                  <div v-else class="mt-2 text-[10px] text-stone-400">当前会话还没有可回退的历史节点。</div>
+                </div>
+
                 <div
                   v-for="session in visibleSessions"
                   :key="session.conversationId"

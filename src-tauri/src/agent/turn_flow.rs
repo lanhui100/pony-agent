@@ -2,7 +2,8 @@ use crate::agent::provider::{
     BuildContextObservation, ProviderClient, ProviderDecision, ProviderManager, ProviderRequest,
     ProviderStreamChunk, TokenUsage,
 };
-use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
+use crate::agent::session::TraceTimelineEntry;
+use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use serde_json::Value;
 
@@ -26,7 +27,7 @@ pub struct PreparedTurn {
 pub struct PlannedTurn {
     pub first_decision: ProviderDecision,
     pub resolved_tool_call: Option<ToolCall>,
-    pub first_token_latency_ms: Option<u64>,
+    pub initial_decision_duration_ms: Option<u64>,
 }
 
 pub struct PersistedTurnOutcome {
@@ -46,10 +47,12 @@ pub struct SyncToolTurnOutcome {
     pub fallback_reason: Option<String>,
     pub token_usage: Option<TokenUsage>,
     pub trace_steps: Vec<TurnTraceStep>,
+    pub trace_timeline: Vec<TraceTimelineEntry>,
     pub tool_activities: Vec<TurnToolActivity>,
     pub first_token_latency_ms: Option<u64>,
 }
 
+#[derive(Clone)]
 pub struct ProviderEventMeta {
     pub requested_name: String,
     pub provider_name: String,
@@ -92,7 +95,9 @@ pub fn build_failed_turn_result(
         user_message,
         assistant_message: assistant_message.clone(),
         trace_steps,
+        trace_timeline: Vec::new(),
         tool_activities,
+        provider_call_records: Vec::new(),
         session_summary: assistant_message,
     }
 }
@@ -115,6 +120,8 @@ pub fn emit_stream_failed(
     first_token_latency_ms: Option<u64>,
     turn_duration_ms: Option<u64>,
     build_context_observation: Option<BuildContextObservation>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
     error: String,
 ) {
     emit_event(
@@ -143,7 +150,9 @@ pub fn emit_stream_failed(
             first_token_latency_ms,
             turn_duration_ms,
             trace_steps: Some(trace_steps),
+            trace_timeline,
             tool_activities,
+            provider_call_records,
             session_summary: None,
         },
     );
@@ -159,6 +168,8 @@ pub fn emit_stream_cancelled(
     first_token_latency_ms: Option<u64>,
     turn_duration_ms: Option<u64>,
     build_context_observation: Option<BuildContextObservation>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
     error: String,
 ) {
     emit_event(
@@ -187,7 +198,9 @@ pub fn emit_stream_cancelled(
             first_token_latency_ms,
             turn_duration_ms,
             trace_steps: Some(trace_steps),
+            trace_timeline,
             tool_activities,
+            provider_call_records,
             session_summary: None,
         },
     );
@@ -215,7 +228,9 @@ pub fn emit_stream_event(
     first_token_latency_ms: Option<u64>,
     turn_duration_ms: Option<u64>,
     trace_steps: Option<Vec<TurnTraceStep>>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
     tool_activities: Option<Vec<TurnToolActivity>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
     session_summary: Option<String>,
 ) {
     emit_event(
@@ -244,7 +259,9 @@ pub fn emit_stream_event(
             first_token_latency_ms,
             turn_duration_ms,
             trace_steps,
+            trace_timeline,
             tool_activities,
+            provider_call_records,
             session_summary,
         },
     );
@@ -281,6 +298,8 @@ pub fn emit_turn_failed(
         turn_id,
         provider_meta.as_ref(),
         trace_steps,
+        None,
+        None,
         None,
         None,
         None,
@@ -409,6 +428,8 @@ fn stream_delta_chunks(
             None,
             None,
             None,
+            None,
+            None,
         );
 
         if index + 1 < chunks.len() {
@@ -482,6 +503,19 @@ pub fn provider_decision<P: ProviderClient>(
     tools: &[ToolDefinition],
 ) -> Result<ProviderDecision, String> {
     provider.decide_with_tools(request, tools)
+}
+
+pub fn provider_decision_stream<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    on_delta: F,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    provider.decide_with_tools_stream(request, tools, on_delta)
 }
 
 pub fn provider_followup<P: ProviderClient>(

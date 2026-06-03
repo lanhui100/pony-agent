@@ -148,3 +148,12 @@ OpenSpec 入口见：
 - 主技术栈
 - 目录结构
 - 关键原则
+
+## Tauri Dev 注意
+
+- `tauri dev` 出现 `rustc` 属于正常现象；Tauri 会通过 `cargo` 调用 Rust 编译器进行开发构建。
+- 开发时优先使用 `npm run dev:tauri:cool`，通过限制 `CARGO_BUILD_JOBS=2` 降低 CPU 峰值。
+- 停止时优先使用 `Ctrl+C` 正常退出，不要直接关闭终端窗口。
+- 必须强杀时，使用 `taskkill /T /F /PID <pid>` 杀整个进程树，避免只杀父进程后留下子进程。
+- 排查高 CPU 时，不要默认都是 `tauri dev` 残留；也要检查编辑器中的 `rust-analyzer` 或后台 `cargo check`。
+- 清理残留时只处理当前项目相关的 `rustc`、`cargo`、`pony-agent` 进程，不要全局杀所有 Rust 进程。

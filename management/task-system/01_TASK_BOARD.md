@@ -12,10 +12,6 @@
 
 ## Backlog
 
-- `PA-020` MCP capability bridge
-  说明：在 retrieval boundary 与 planner 消费边界稳定后，把 MCP 以 capability registry 的方式接入。
-- `PA-021` skills registry 与 bridge
-  说明：在 `PA-020` 之后，把 skills 作为可编排高层能力单元接入。
 - `PA-022` lifecycle hooks pipeline
   说明：在 graph/runtime/memory/capability 的边界稳定后，补统一 hooks 横切机制。
 - `PA-026` workflow mode 与用户自定义流程编排
@@ -23,12 +19,12 @@
 
 ## Ready
 
-- `PA-024` 模型监控与 telemetry 聚合面
-  说明：`PA-018` 已完成，后续把 retrieval 观测、trace 展示语义与监控面正式收口。
+- 暂无
 
 ## In Progress
 
-- 暂无
+- `PA-021` skills registry 与 bridge
+  说明：已启动 OpenSpec change `add-skills-registry-bridge`，当前聚焦 skill manifest / registry / invocation boundary，以及和 `PA-020` capability bridge、`PA-022` hooks、planner/runtime 的清晰分界。
 
 ## Review
 
@@ -40,6 +36,17 @@
 
 ## Done
 
+- `PA-020` MCP capability bridge
+  说明：已完成 capability registry 统一读面、runtime capability bridge、MCP source snapshot 写面、permission/failure 归一化、capability telemetry summary/drilldown，以及 `tool / resource / prompt_template` 的规范化合同与定向验证。
+
+- `PA-024` 模型监控与 telemetry 聚合面
+  说明：已完成 monitor summary / session drill-down 的 Tauri 聚合读面、`ModelMonitorPage` 真实数据页、trace / build-context 下钻展示与前后端定向测试。
+- `PA-029` 缓存命中 telemetry 与第一版前缀稳定化
+  说明：已完成 call-level cache telemetry、`initial_request / tool_followup` request kind、`PrefixMutationReason` 与第一版 stable prefix 收窄；后端持久化、前端 store 保真与定向测试均已完成，当前可作为 `PA-024` 的底层监控输入。
+- `PA-030` trace 面板 call model 可观测性补强
+  说明：已完成 `call_model` 的 cache hit / TTFT 展示补齐、工具调用与消息输出保真、多 hop 归因修正，以及完整前端测试与构建验证。
+- `PA-028` 历史节点管理、撤销恢复与分支化运行
+  说明：已完成 core 历史图、checkout/restore/fork/switch branch、`nodeId` 历史读面与 Tauri 前端历史管理交互，并通过 Rust 与前端定向测试验证。
 - `PA-027` OpenSpec 接入任务系统
   说明：已引入 `@fission-ai/openspec`、初始化 `openspec/` 与 Codex workflow skills，并把“复杂开发任务默认先走 OpenSpec”正式写入仓库规范与任务系统规则。
 - `PA-025` Build Context 与 cache-friendly prompt 边界

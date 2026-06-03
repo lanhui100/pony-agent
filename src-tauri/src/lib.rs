@@ -3,15 +3,23 @@ pub mod sse_adapter;
 mod tauri_adapter;
 
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
+use agent::capability_bridge::{CapabilitySourceView, CapabilityView};
 use agent::context::RetrievedContextState;
 use agent::control_plane::{
-    ContinueGraphRunCommand, ContinueGraphRunStreamCommand, DeleteSessionCommand,
-    ExecutionCheckpointQuery, GraphRunCheckpointQuery, GraphRunControlResponse,
-    GraphRunStreamStartResponse, GraphRunTurnResponse, HostControlPlane, HostHealthSnapshot,
-    HostInspectionQuery, HostInspectionSnapshot, ResumeGraphRunCommand,
-    ResumeGraphRunStreamCommand, RetrievedContextQuery, RunTurnCommand, SessionRuntimeView,
-    SessionRuntimeViewQuery, StartGraphRunCommand, StartGraphRunStreamCommand,
-    StartTurnStreamCommand, StopGraphRunCommand, StopTurnCommand,
+    CapabilityInspectionQuery, CapabilityListQuery, CapabilitySourceInspectionQuery,
+    CheckoutHistoryNodeCommand, ContinueGraphRunCommand, ContinueGraphRunStreamCommand,
+    DeleteSessionCommand, ExecutionCheckpointQuery, ForkFromHistoryNodeCommand,
+    ForkFromHistoryNodeResponse, GraphRunCheckpointQuery, GraphRunControlResponse,
+    GraphRunStreamStartResponse, GraphRunTurnResponse, HistoryCheckoutMode,
+    HistoryCheckoutResponse, HistoryCursorQuery, HistoryCursorState, HistoryGraphQuery,
+    HistoryGraphView, HostControlPlane, HostHealthSnapshot, HostInspectionQuery,
+    HostInspectionSnapshot, ModelMonitorSessionDrilldownQuery, ModelMonitorSessionDrilldownView,
+    ModelMonitorSummaryQuery, ModelMonitorSummaryView, RestoreBranchHeadCommand,
+    RestoreBranchHeadResponse, ResumeGraphRunCommand, ResumeGraphRunStreamCommand,
+    RetrievedContextQuery, RunTurnCommand, SessionRuntimeView, SessionRuntimeViewQuery,
+    StartGraphRunCommand, StartGraphRunStreamCommand, StartTurnStreamCommand,
+    StopGraphRunCommand, StopTurnCommand, SwitchHistoryBranchCommand,
+    SwitchHistoryBranchResponse,
 };
 use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
 use agent::graph::GraphRunCheckpoint;
@@ -210,11 +218,13 @@ fn load_session_runtime_view(
     control_plane: State<'_, HostControlPlane>,
     turn_id: Option<String>,
     session_id: Option<String>,
+    node_id: Option<String>,
     run_id: Option<String>,
 ) -> SessionRuntimeView {
     control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
         turn_id,
         session_id,
+        node_id,
         run_id,
     })
 }
@@ -224,12 +234,97 @@ fn load_retrieved_context(
     control_plane: State<'_, HostControlPlane>,
     turn_id: Option<String>,
     session_id: Option<String>,
+    node_id: Option<String>,
     run_id: Option<String>,
 ) -> RetrievedContextState {
     control_plane.load_retrieved_context(RetrievedContextQuery {
         turn_id,
         session_id,
+        node_id,
         run_id,
+    })
+}
+
+#[tauri::command]
+fn load_history_graph(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+) -> HistoryGraphView {
+    control_plane.load_history_graph(HistoryGraphQuery { session_id })
+}
+
+#[tauri::command]
+fn load_model_monitor_summary(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+) -> ModelMonitorSummaryView {
+    control_plane.load_model_monitor_summary(ModelMonitorSummaryQuery { session_id })
+}
+
+#[tauri::command]
+fn load_model_monitor_session_drilldown(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+) -> ModelMonitorSessionDrilldownView {
+    control_plane
+        .load_model_monitor_session_drilldown(ModelMonitorSessionDrilldownQuery { session_id })
+}
+
+#[tauri::command]
+fn load_history_cursor(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+) -> HistoryCursorState {
+    control_plane.load_history_cursor(HistoryCursorQuery { session_id })
+}
+
+#[tauri::command]
+fn checkout_history_node(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+    node_id: String,
+    mode: HistoryCheckoutMode,
+) -> Result<HistoryCheckoutResponse, String> {
+    control_plane.checkout_history_node(CheckoutHistoryNodeCommand {
+        session_id,
+        node_id,
+        mode,
+    })
+}
+
+#[tauri::command]
+fn restore_branch_head(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+    branch_id: Option<String>,
+) -> Result<RestoreBranchHeadResponse, String> {
+    control_plane.restore_branch_head(RestoreBranchHeadCommand {
+        session_id,
+        branch_id,
+    })
+}
+
+#[tauri::command]
+fn fork_from_history_node(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+    node_id: String,
+) -> Result<ForkFromHistoryNodeResponse, String> {
+    control_plane.fork_from_history_node(ForkFromHistoryNodeCommand {
+        session_id,
+        node_id,
+    })
+}
+
+#[tauri::command]
+fn switch_history_branch(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+    branch_id: String,
+) -> Result<SwitchHistoryBranchResponse, String> {
+    control_plane.switch_history_branch(SwitchHistoryBranchCommand {
+        session_id,
+        branch_id,
     })
 }
 
@@ -246,6 +341,36 @@ fn list_available_tools() -> Vec<ToolDefinition> {
     agent::tools::builtin_tools()
 }
 
+#[tauri::command]
+fn list_capability_sources(control_plane: State<'_, HostControlPlane>) -> Vec<CapabilitySourceView> {
+    control_plane.list_capability_sources()
+}
+
+#[tauri::command]
+fn list_capabilities(
+    source_id: Option<String>,
+    kind: Option<String>,
+    control_plane: State<'_, HostControlPlane>,
+) -> Vec<CapabilityView> {
+    control_plane.list_capabilities(CapabilityListQuery { source_id, kind })
+}
+
+#[tauri::command]
+fn inspect_capability(
+    capability_id: String,
+    control_plane: State<'_, HostControlPlane>,
+) -> Option<CapabilityView> {
+    control_plane.inspect_capability(CapabilityInspectionQuery { capability_id })
+}
+
+#[tauri::command]
+fn inspect_capability_source(
+    source_id: String,
+    control_plane: State<'_, HostControlPlane>,
+) -> Option<CapabilitySourceView> {
+    control_plane.inspect_capability_source(CapabilitySourceInspectionQuery { source_id })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(HostControlPlane::new())
@@ -255,8 +380,6 @@ pub fn run() {
                     window.set_icon(icon)?;
                 }
 
-                #[cfg(debug_assertions)]
-                let _ = window.open_devtools();
             }
 
             Ok(())
@@ -264,10 +387,22 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_check,
             list_sessions,
+            load_model_monitor_summary,
+            load_model_monitor_session_drilldown,
+            load_history_graph,
+            load_history_cursor,
             load_session_runtime_view,
             load_retrieved_context,
+            checkout_history_node,
+            restore_branch_head,
+            fork_from_history_node,
+            switch_history_branch,
             delete_session,
             list_available_tools,
+            list_capability_sources,
+            list_capabilities,
+            inspect_capability,
+            inspect_capability_source,
             load_provider_registry,
             run_turn,
             start_graph_run,

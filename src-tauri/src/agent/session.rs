@@ -1,6 +1,6 @@
 use crate::agent::input::TurnInputImage;
 use crate::agent::provider::BuildContextObservation;
-use crate::agent::telemetry::{TurnToolActivity, TurnTraceStep};
+use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -13,10 +13,132 @@ const DEFAULT_HISTORY_LIMIT: usize = 24;
 const DEFAULT_SESSION_TITLE: &str = "\u{65B0}\u{5BF9}\u{8BDD}";
 const TITLE_MAX_CHARS: usize = 28;
 const DEFAULT_ATTACHMENT_RECLAIM_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_HISTORY_BRANCH_ID: &str = "branch-main";
 
 type SessionMap = HashMap<String, SessionState>;
 type AttachmentAssetMap = HashMap<String, AttachmentAsset>;
 type SessionAttachmentIndex = HashMap<String, Vec<String>>;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryNodeKind {
+    #[default]
+    TurnCommitted,
+    TurnCancelled,
+    RunPaused,
+    Checkpoint,
+    ManualSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCursorMode {
+    #[default]
+    Live,
+    Historical,
+    HistoricalDirty,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceRefKind {
+    #[default]
+    None,
+    GitCommit,
+    PatchSet,
+    HostSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCheckoutMode {
+    #[default]
+    TranscriptOnly,
+    TranscriptAndWorkspace,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCheckoutStatus {
+    #[default]
+    NotRequested,
+    Applied,
+    DegradedToTranscriptOnly,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRef {
+    #[serde(default)]
+    pub kind: WorkspaceRefKind,
+    pub locator: Option<String>,
+    #[serde(default)]
+    pub rollback_capable: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryNode {
+    pub node_id: String,
+    pub session_id: String,
+    pub parent_node_id: Option<String>,
+    pub branch_id: String,
+    pub forked_from_node_id: Option<String>,
+    #[serde(default)]
+    pub kind: HistoryNodeKind,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub workspace_ref: WorkspaceRef,
+    pub summary: String,
+    pub title: String,
+    #[serde(default)]
+    pub history: Vec<TurnHistoryMessage>,
+    #[serde(default)]
+    pub provider_native_transcript: Vec<Value>,
+    #[serde(default)]
+    pub turn_trace_history: Vec<TurnTraceRecord>,
+    #[serde(default)]
+    pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
+    #[serde(default)]
+    pub turn_count: usize,
+    pub last_referenced_file: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryBranch {
+    pub branch_id: String,
+    pub session_id: String,
+    pub base_node_id: Option<String>,
+    pub head_node_id: Option<String>,
+    pub forked_from_branch_id: Option<String>,
+    pub forked_from_node_id: Option<String>,
+    pub label: String,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryCursor {
+    #[serde(default)]
+    pub session_id: String,
+    pub visible_node_id: Option<String>,
+    pub active_branch_id: Option<String>,
+    pub branch_head_node_id: Option<String>,
+    pub workspace_node_id: Option<String>,
+    #[serde(default)]
+    pub mode: HistoryCursorMode,
+    #[serde(default)]
+    pub checkout_mode: HistoryCheckoutMode,
+    #[serde(default)]
+    pub checkout_status: HistoryCheckoutStatus,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +254,12 @@ pub struct SessionState {
     pub last_referenced_file: Option<String>,
     #[serde(default)]
     pub updated_at_ms: u64,
+    #[serde(default)]
+    pub history_nodes: Vec<HistoryNode>,
+    #[serde(default)]
+    pub history_branches: Vec<HistoryBranch>,
+    #[serde(default)]
+    pub history_cursor: HistoryCursor,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +280,14 @@ pub struct SessionSnapshot {
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_nodes: Vec<HistoryNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_branches: Vec<HistoryBranch>,
+    #[serde(default)]
+    pub history_cursor: HistoryCursor,
+    pub resolved_node_id: Option<String>,
+    pub latest_node_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -167,6 +303,36 @@ pub struct SessionOverview {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TraceTimelineEntry {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub state: String,
+    pub sequence: u64,
+    pub provider_requested_name: Option<String>,
+    pub provider_name: Option<String>,
+    pub provider_protocol: Option<String>,
+    pub provider_model: Option<String>,
+    pub provider_source: Option<String>,
+    pub provider_mode: Option<String>,
+    pub build_context_observation: Option<BuildContextObservation>,
+    #[serde(default)]
+    pub tool_activities: Vec<TurnToolActivity>,
+    pub text: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub fallback_reason: Option<String>,
+    pub error: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub first_token_latency_ms: Option<u64>,
+    pub turn_duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnTraceRecord {
     pub turn_id: String,
     pub title: String,
@@ -174,7 +340,11 @@ pub struct TurnTraceRecord {
     #[serde(default)]
     pub trace_steps: Vec<TurnTraceStep>,
     #[serde(default)]
+    pub trace_timeline: Vec<TraceTimelineEntry>,
+    #[serde(default)]
     pub tool_activities: Vec<TurnToolActivity>,
+    #[serde(default)]
+    pub provider_call_records: Vec<ProviderCallCacheRecord>,
     pub provider_requested_name: Option<String>,
     pub provider_name: Option<String>,
     pub provider_protocol: Option<String>,
@@ -290,9 +460,19 @@ impl SessionStore {
         store
     }
 
+    #[allow(dead_code)]
     pub fn snapshot(
         &mut self,
         session_id: Option<&str>,
+        fallback_history: &[TurnHistoryMessage],
+    ) -> SessionSnapshot {
+        self.snapshot_at(session_id, None, fallback_history)
+    }
+
+    pub fn snapshot_at(
+        &mut self,
+        session_id: Option<&str>,
+        node_id: Option<&str>,
         fallback_history: &[TurnHistoryMessage],
     ) -> SessionSnapshot {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
@@ -309,11 +489,14 @@ impl SessionStore {
                 should_save = true;
                 should_refresh_catalog = true;
             }
+            if ensure_history_graph(session) {
+                should_save = true;
+            }
         }
         if should_refresh_catalog {
             self.refresh_attachment_catalog();
         }
-        let snapshot = self.snapshot_for_session(session_key);
+        let snapshot = self.snapshot_for_session_at(session_key, node_id);
 
         if should_save {
             self.save_to_backend();
@@ -333,6 +516,8 @@ impl SessionStore {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         {
             let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
+            prepare_session_for_new_turn(session);
             session.history.push(TurnHistoryMessage {
                 role: "user".to_string(),
                 content: user_message.to_string(),
@@ -355,6 +540,11 @@ impl SessionStore {
 
             update_long_term_memory_from_user_message(session, user_message);
             refresh_session_metadata(session, true);
+            commit_history_node_from_live_state(
+                session,
+                classify_turn_node_kind(assistant_message),
+                None,
+            );
         }
         self.refresh_attachment_catalog();
         let snapshot = self.snapshot_for_session(&session_key);
@@ -371,6 +561,7 @@ impl SessionStore {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         {
             let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
             trace.updated_at = now_timestamp_ms();
 
             if let Some(existing) = session
@@ -378,9 +569,9 @@ impl SessionStore {
                 .iter_mut()
                 .find(|item| item.turn_id == trace.turn_id)
             {
-                *existing = trace;
+                *existing = trace.clone();
             } else {
-                session.turn_trace_history.push(trace);
+                session.turn_trace_history.push(trace.clone());
             }
 
             if session.turn_trace_history.len() > DEFAULT_HISTORY_LIMIT {
@@ -389,6 +580,7 @@ impl SessionStore {
             }
 
             refresh_session_metadata(session, true);
+            sync_latest_history_node(session, Some(trace.turn_id.clone()));
         }
         let snapshot = self.snapshot_for_session(&session_key);
 
@@ -405,13 +597,215 @@ impl SessionStore {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         {
             let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
             session.long_term_memory_entries = entries;
             refresh_session_metadata(session, true);
+            sync_latest_history_node(session, None);
         }
         let snapshot = self.snapshot_for_session(&session_key);
 
         self.save_to_backend();
         snapshot
+    }
+
+    #[allow(dead_code)]
+    pub fn checkout_history_node(
+        &mut self,
+        session_id: Option<&str>,
+        node_id: &str,
+        mode: HistoryCheckoutMode,
+    ) -> Result<SessionSnapshot, String> {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        {
+            let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
+            let Some(node) = history_node(session, node_id).cloned() else {
+                return Err(format!("unknown history node: {node_id}"));
+            };
+            hydrate_session_from_node(session, &node);
+            let branch_head_node_id = session
+                .history_branches
+                .iter()
+                .find(|branch| branch.branch_id == node.branch_id)
+                .and_then(|branch| branch.head_node_id.clone());
+            session.history_cursor.visible_node_id = Some(node.node_id.clone());
+            session.history_cursor.active_branch_id = Some(node.branch_id.clone());
+            session.history_cursor.branch_head_node_id = branch_head_node_id;
+            session.history_cursor.workspace_node_id = Some(node.node_id.clone());
+            session.history_cursor.mode = if session.history_cursor.branch_head_node_id.as_deref()
+                == Some(node.node_id.as_str())
+            {
+                HistoryCursorMode::Live
+            } else {
+                HistoryCursorMode::Historical
+            };
+            session.history_cursor.checkout_mode = mode.clone();
+            session.history_cursor.checkout_status = match mode {
+                HistoryCheckoutMode::TranscriptOnly => HistoryCheckoutStatus::Applied,
+                HistoryCheckoutMode::TranscriptAndWorkspace => {
+                    if node.workspace_ref.rollback_capable {
+                        HistoryCheckoutStatus::Applied
+                    } else {
+                        HistoryCheckoutStatus::DegradedToTranscriptOnly
+                    }
+                }
+            };
+            refresh_session_metadata(session, true);
+        }
+        let snapshot = self.snapshot_for_session(&session_key);
+        self.save_to_backend();
+        Ok(snapshot)
+    }
+
+    pub fn load_history_graph(
+        &mut self,
+        session_id: Option<&str>,
+    ) -> (Vec<HistoryNode>, Vec<HistoryBranch>, HistoryCursor) {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let mut should_save = false;
+        let graph = {
+            let session = self.ensure_session(&session_key);
+            if ensure_history_graph(session) {
+                should_save = true;
+            }
+            (
+                session.history_nodes.clone(),
+                session.history_branches.clone(),
+                session.history_cursor.clone(),
+            )
+        };
+        if should_save {
+            self.save_to_backend();
+        }
+        graph
+    }
+
+    pub fn load_history_cursor(&mut self, session_id: Option<&str>) -> HistoryCursor {
+        self.load_history_graph(session_id).2
+    }
+
+    pub fn restore_branch_head(
+        &mut self,
+        session_id: Option<&str>,
+        branch_id: Option<&str>,
+    ) -> Result<SessionSnapshot, String> {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let restored_node_id = {
+            let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
+            let target_branch_id = branch_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| session.history_cursor.active_branch_id.clone())
+                .unwrap_or_else(|| DEFAULT_HISTORY_BRANCH_ID.to_string());
+            let branch = session
+                .history_branches
+                .iter()
+                .find(|item| item.branch_id == target_branch_id)
+                .cloned()
+                .ok_or_else(|| format!("unknown history branch: {target_branch_id}"))?;
+            let node_id = branch
+                .head_node_id
+                .clone()
+                .ok_or_else(|| format!("history branch has no head node: {target_branch_id}"))?;
+            let node = history_node(session, &node_id)
+                .cloned()
+                .ok_or_else(|| format!("unknown history node: {node_id}"))?;
+            hydrate_session_from_node(session, &node);
+            session.history_cursor.visible_node_id = Some(node.node_id.clone());
+            session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
+            session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
+            session.history_cursor.workspace_node_id = Some(node.node_id.clone());
+            session.history_cursor.mode = HistoryCursorMode::Live;
+            session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+            session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+            refresh_session_metadata(session, true);
+            node.node_id
+        };
+        let snapshot = self.snapshot_for_session_at(&session_key, Some(restored_node_id.as_str()));
+        self.save_to_backend();
+        Ok(snapshot)
+    }
+
+    pub fn fork_from_history_node(
+        &mut self,
+        session_id: Option<&str>,
+        node_id: &str,
+    ) -> Result<SessionSnapshot, String> {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        {
+            let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
+            let source_node = history_node(session, node_id)
+                .cloned()
+                .ok_or_else(|| format!("unknown history node: {node_id}"))?;
+            let source_branch_id = source_node.branch_id.clone();
+            let created_at_ms = now_timestamp_ms();
+            let label_index = session.history_branches.len() + 1;
+            let new_branch_id = new_history_branch_id(session, label_index);
+            session.history_branches.push(HistoryBranch {
+                branch_id: new_branch_id.clone(),
+                session_id: session.conversation_id.clone(),
+                base_node_id: Some(source_node.node_id.clone()),
+                head_node_id: Some(source_node.node_id.clone()),
+                forked_from_branch_id: Some(source_branch_id),
+                forked_from_node_id: Some(source_node.node_id.clone()),
+                label: format!("fork-{label_index}"),
+                created_at_ms,
+                updated_at_ms: created_at_ms,
+            });
+            hydrate_session_from_node(session, &source_node);
+            session.history_cursor.visible_node_id = Some(source_node.node_id.clone());
+            session.history_cursor.active_branch_id = Some(new_branch_id);
+            session.history_cursor.branch_head_node_id = Some(source_node.node_id.clone());
+            session.history_cursor.workspace_node_id = Some(source_node.node_id);
+            session.history_cursor.mode = HistoryCursorMode::Live;
+            session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+            session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+            refresh_session_metadata(session, true);
+        }
+        let snapshot = self.snapshot_for_session(&session_key);
+        self.save_to_backend();
+        Ok(snapshot)
+    }
+
+    pub fn switch_history_branch(
+        &mut self,
+        session_id: Option<&str>,
+        branch_id: &str,
+    ) -> Result<SessionSnapshot, String> {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let target_node_id = {
+            let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
+            let branch = session
+                .history_branches
+                .iter()
+                .find(|item| item.branch_id == branch_id)
+                .cloned()
+                .ok_or_else(|| format!("unknown history branch: {branch_id}"))?;
+            let node_id = branch
+                .head_node_id
+                .clone()
+                .ok_or_else(|| format!("history branch has no head node: {branch_id}"))?;
+            let node = history_node(session, &node_id)
+                .cloned()
+                .ok_or_else(|| format!("unknown history node: {node_id}"))?;
+            hydrate_session_from_node(session, &node);
+            session.history_cursor.visible_node_id = Some(node.node_id.clone());
+            session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
+            session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
+            session.history_cursor.workspace_node_id = Some(node.node_id.clone());
+            session.history_cursor.mode = HistoryCursorMode::Live;
+            session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+            session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+            refresh_session_metadata(session, true);
+            node.node_id
+        };
+        let snapshot = self.snapshot_for_session_at(&session_key, Some(target_node_id.as_str()));
+        self.save_to_backend();
+        Ok(snapshot)
     }
 
     pub fn list_sessions(&self) -> Vec<SessionOverview> {
@@ -658,6 +1052,12 @@ impl SessionStore {
                 turn_count: 0,
                 last_referenced_file: None,
                 updated_at_ms: now_timestamp_ms(),
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor {
+                    session_id: session_id.to_string(),
+                    ..HistoryCursor::default()
+                },
             })
     }
 
@@ -675,24 +1075,26 @@ impl SessionStore {
     }
 
     fn snapshot_for_session(&self, session_id: &str) -> SessionSnapshot {
+        self.snapshot_for_session_at(session_id, None)
+    }
+
+    fn snapshot_for_session_at(&self, session_id: &str, node_id: Option<&str>) -> SessionSnapshot {
         let session = self
             .sessions
             .get(session_id)
             .expect("session must exist before snapshot");
-        snapshot_from_state(
-            session,
-            attachment_assets_for_query(
-                &self.sessions,
-                &self.attachment_assets,
-                &self.session_attachment_index,
-                &self.attachment_root,
-                &AttachmentAssetQuery {
-                    session_id: Some(session_id.to_string()),
-                    ..AttachmentAssetQuery::default()
-                },
-                now_timestamp_ms(),
-            ),
-        )
+        let attachment_assets = attachment_assets_for_query(
+            &self.sessions,
+            &self.attachment_assets,
+            &self.session_attachment_index,
+            &self.attachment_root,
+            &AttachmentAssetQuery {
+                session_id: Some(session_id.to_string()),
+                ..AttachmentAssetQuery::default()
+            },
+            now_timestamp_ms(),
+        );
+        snapshot_from_state(session, attachment_assets, node_id)
     }
 
     fn refresh_attachment_catalog(&mut self) {
@@ -768,7 +1170,76 @@ impl Drop for MemorySessionBackend {
 fn snapshot_from_state(
     session: &SessionState,
     attachment_assets: Vec<AttachmentAsset>,
+    node_id: Option<&str>,
 ) -> SessionSnapshot {
+    let latest_node_id = session
+        .history_branches
+        .iter()
+        .find(|branch| {
+            session
+                .history_cursor
+                .active_branch_id
+                .as_deref()
+                .map(|active| active == branch.branch_id)
+                .unwrap_or(branch.branch_id == DEFAULT_HISTORY_BRANCH_ID)
+        })
+        .and_then(|branch| branch.head_node_id.clone())
+        .or_else(|| {
+            session
+                .history_nodes
+                .last()
+                .map(|node| node.node_id.clone())
+        });
+
+    if let Some(selected_node) = node_id.and_then(|id| history_node(session, id)) {
+        let branch_head_node_id = session
+            .history_branches
+            .iter()
+            .find(|branch| branch.branch_id == selected_node.branch_id)
+            .and_then(|branch| branch.head_node_id.clone());
+        let checkout_status = if matches!(
+            session.history_cursor.checkout_status,
+            HistoryCheckoutStatus::DegradedToTranscriptOnly
+        ) && session.history_cursor.visible_node_id.as_deref()
+            == Some(selected_node.node_id.as_str())
+        {
+            HistoryCheckoutStatus::DegradedToTranscriptOnly
+        } else {
+            HistoryCheckoutStatus::NotRequested
+        };
+        return SessionSnapshot {
+            conversation_id: session.conversation_id.clone(),
+            title: selected_node.title.clone(),
+            summary: selected_node.summary.clone(),
+            history: selected_node.history.clone(),
+            attachment_assets,
+            provider_native_transcript: selected_node.provider_native_transcript.clone(),
+            turn_trace_history: selected_node.turn_trace_history.clone(),
+            long_term_memory_entries: selected_node.long_term_memory_entries.clone(),
+            turn_count: selected_node.turn_count,
+            last_referenced_file: selected_node.last_referenced_file.clone(),
+            updated_at_ms: session.updated_at_ms,
+            history_nodes: session.history_nodes.clone(),
+            history_branches: session.history_branches.clone(),
+            history_cursor: HistoryCursor {
+                session_id: session.conversation_id.clone(),
+                visible_node_id: Some(selected_node.node_id.clone()),
+                active_branch_id: Some(selected_node.branch_id.clone()),
+                branch_head_node_id: branch_head_node_id.clone(),
+                workspace_node_id: Some(selected_node.node_id.clone()),
+                mode: if branch_head_node_id.as_deref() == Some(selected_node.node_id.as_str()) {
+                    HistoryCursorMode::Live
+                } else {
+                    HistoryCursorMode::Historical
+                },
+                checkout_mode: HistoryCheckoutMode::TranscriptOnly,
+                checkout_status,
+            },
+            resolved_node_id: Some(selected_node.node_id.clone()),
+            latest_node_id,
+        };
+    }
+
     SessionSnapshot {
         conversation_id: session.conversation_id.clone(),
         title: session.title.clone(),
@@ -781,10 +1252,365 @@ fn snapshot_from_state(
         turn_count: session.turn_count,
         last_referenced_file: session.last_referenced_file.clone(),
         updated_at_ms: session.updated_at_ms,
+        history_nodes: session.history_nodes.clone(),
+        history_branches: session.history_branches.clone(),
+        history_cursor: session.history_cursor.clone(),
+        resolved_node_id: session.history_cursor.visible_node_id.clone(),
+        latest_node_id,
     }
 }
 
+fn ensure_history_graph(session: &mut SessionState) -> bool {
+    let mut changed = false;
+    if session.history_cursor.session_id.is_empty() {
+        session.history_cursor.session_id = session.conversation_id.clone();
+        changed = true;
+    }
+    if session.history_branches.is_empty() {
+        session.history_branches.push(HistoryBranch {
+            branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+            session_id: session.conversation_id.clone(),
+            base_node_id: None,
+            head_node_id: None,
+            forked_from_branch_id: None,
+            forked_from_node_id: None,
+            label: "main".to_string(),
+            created_at_ms: session.updated_at_ms,
+            updated_at_ms: session.updated_at_ms,
+        });
+        changed = true;
+    }
+    if session.history_nodes.is_empty() && !session.history.is_empty() {
+        let user_indexes = session
+            .history
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| (message.role == "user").then_some(index))
+            .collect::<Vec<_>>();
+        for (turn_index, _start) in user_indexes.iter().enumerate() {
+            let end = user_indexes
+                .get(turn_index + 1)
+                .copied()
+                .unwrap_or(session.history.len());
+            let history = session.history[..end].to_vec();
+            let mut materialized = SessionState {
+                conversation_id: session.conversation_id.clone(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history,
+                provider_native_transcript: if turn_index + 1 == user_indexes.len() {
+                    session.provider_native_transcript.clone()
+                } else {
+                    Vec::new()
+                },
+                turn_trace_history: session
+                    .turn_trace_history
+                    .iter()
+                    .take((turn_index + 1).min(session.turn_trace_history.len()))
+                    .cloned()
+                    .collect(),
+                long_term_memory_entries: replay_long_term_memory(&session.history[..end]),
+                turn_count: 0,
+                last_referenced_file: None,
+                updated_at_ms: session.updated_at_ms,
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor::default(),
+            };
+            refresh_session_metadata(&mut materialized, false);
+            session.history_nodes.push(HistoryNode {
+                node_id: legacy_history_node_id(session, turn_index + 1),
+                session_id: session.conversation_id.clone(),
+                parent_node_id: session
+                    .history_nodes
+                    .last()
+                    .map(|node| node.node_id.clone()),
+                branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                forked_from_node_id: None,
+                kind: HistoryNodeKind::TurnCommitted,
+                run_id: materialized
+                    .turn_trace_history
+                    .last()
+                    .map(|trace| trace.turn_id.clone()),
+                workspace_ref: WorkspaceRef::default(),
+                summary: materialized.summary.clone(),
+                title: materialized.title.clone(),
+                history: materialized.history.clone(),
+                provider_native_transcript: materialized.provider_native_transcript.clone(),
+                turn_trace_history: materialized.turn_trace_history.clone(),
+                long_term_memory_entries: materialized.long_term_memory_entries.clone(),
+                turn_count: materialized.turn_count,
+                last_referenced_file: materialized.last_referenced_file.clone(),
+                created_at_ms: session.updated_at_ms.saturating_add(turn_index as u64),
+            });
+        }
+        changed = true;
+    }
+
+    let latest_node_id = session
+        .history_nodes
+        .last()
+        .map(|node| node.node_id.clone());
+    let main_branch_head_node_id = session
+        .history_nodes
+        .iter()
+        .rev()
+        .find(|node| node.branch_id == DEFAULT_HISTORY_BRANCH_ID)
+        .map(|node| node.node_id.clone());
+    let first_node_id = session
+        .history_nodes
+        .first()
+        .map(|node| node.node_id.clone());
+    let updated_at_ms = session.updated_at_ms;
+    if let Some(main_branch) = history_branch_mut(session, DEFAULT_HISTORY_BRANCH_ID) {
+        if main_branch.base_node_id.is_none() {
+            main_branch.base_node_id = first_node_id;
+            changed = true;
+        }
+        if main_branch.head_node_id != main_branch_head_node_id {
+            main_branch.head_node_id = main_branch_head_node_id.clone();
+            main_branch.updated_at_ms = updated_at_ms;
+            changed = true;
+        }
+    }
+
+    if session.history_cursor.active_branch_id.is_none() {
+        session.history_cursor.active_branch_id = Some(DEFAULT_HISTORY_BRANCH_ID.to_string());
+        changed = true;
+    }
+    let active_branch_head_node_id =
+        session
+            .history_cursor
+            .active_branch_id
+            .as_deref()
+            .and_then(|branch_id| {
+                session
+                    .history_branches
+                    .iter()
+                    .find(|branch| branch.branch_id == branch_id)
+                    .and_then(|branch| branch.head_node_id.clone())
+            });
+    if session.history_cursor.branch_head_node_id != active_branch_head_node_id {
+        session.history_cursor.branch_head_node_id = active_branch_head_node_id.clone();
+        changed = true;
+    }
+    if session.history_cursor.visible_node_id.is_none() {
+        session.history_cursor.visible_node_id = active_branch_head_node_id.clone();
+        changed = true;
+    }
+    if session.history_cursor.workspace_node_id.is_none() {
+        session.history_cursor.workspace_node_id = active_branch_head_node_id.or(latest_node_id);
+        changed = true;
+    }
+
+    changed
+}
+
+fn prepare_session_for_new_turn(session: &mut SessionState) {
+    let Some(visible_node_id) = session.history_cursor.visible_node_id.clone() else {
+        return;
+    };
+    let Some(branch_head_node_id) = session.history_cursor.branch_head_node_id.clone() else {
+        return;
+    };
+    if visible_node_id == branch_head_node_id {
+        return;
+    }
+
+    let Some(visible_node) = history_node(session, &visible_node_id).cloned() else {
+        return;
+    };
+    hydrate_session_from_node(session, &visible_node);
+    let previous_branch_id = session
+        .history_cursor
+        .active_branch_id
+        .clone()
+        .unwrap_or_else(|| DEFAULT_HISTORY_BRANCH_ID.to_string());
+    let new_branch_id = new_history_branch_id(session, session.history_branches.len() + 1);
+    let created_at_ms = now_timestamp_ms();
+    session.history_branches.push(HistoryBranch {
+        branch_id: new_branch_id.clone(),
+        session_id: session.conversation_id.clone(),
+        base_node_id: Some(visible_node_id.clone()),
+        head_node_id: Some(visible_node_id.clone()),
+        forked_from_branch_id: Some(previous_branch_id),
+        forked_from_node_id: Some(visible_node_id.clone()),
+        label: format!("fork-{}", session.history_branches.len() + 1),
+        created_at_ms,
+        updated_at_ms: created_at_ms,
+    });
+    session.history_cursor.visible_node_id = Some(visible_node_id.clone());
+    session.history_cursor.active_branch_id = Some(new_branch_id.clone());
+    session.history_cursor.branch_head_node_id = Some(visible_node_id.clone());
+    session.history_cursor.workspace_node_id = Some(visible_node_id);
+    session.history_cursor.mode = HistoryCursorMode::HistoricalDirty;
+}
+
+fn commit_history_node_from_live_state(
+    session: &mut SessionState,
+    kind: HistoryNodeKind,
+    run_id: Option<String>,
+) {
+    let created_at_ms = now_timestamp_ms();
+    let parent_node_id = session.history_cursor.visible_node_id.clone();
+    let branch_id = session
+        .history_cursor
+        .active_branch_id
+        .clone()
+        .unwrap_or_else(|| DEFAULT_HISTORY_BRANCH_ID.to_string());
+    let forked_from_node_id = session
+        .history_branches
+        .iter()
+        .find(|branch| branch.branch_id == branch_id)
+        .and_then(|branch| {
+            if branch.head_node_id == parent_node_id {
+                None
+            } else {
+                branch.forked_from_node_id.clone()
+            }
+        });
+    let node_id = new_history_node_id(session, session.history_nodes.len() + 1, created_at_ms);
+    session.history_nodes.push(HistoryNode {
+        node_id: node_id.clone(),
+        session_id: session.conversation_id.clone(),
+        parent_node_id,
+        branch_id: branch_id.clone(),
+        forked_from_node_id,
+        kind,
+        run_id,
+        workspace_ref: WorkspaceRef::default(),
+        summary: session.summary.clone(),
+        title: session.title.clone(),
+        history: session.history.clone(),
+        provider_native_transcript: session.provider_native_transcript.clone(),
+        turn_trace_history: session.turn_trace_history.clone(),
+        long_term_memory_entries: session.long_term_memory_entries.clone(),
+        turn_count: session.turn_count,
+        last_referenced_file: session.last_referenced_file.clone(),
+        created_at_ms,
+    });
+    if let Some(branch) = history_branch_mut(session, &branch_id) {
+        if branch.base_node_id.is_none() {
+            branch.base_node_id = Some(node_id.clone());
+        }
+        branch.head_node_id = Some(node_id.clone());
+        branch.updated_at_ms = created_at_ms;
+    }
+    session.history_cursor.visible_node_id = Some(node_id.clone());
+    session.history_cursor.branch_head_node_id = Some(node_id.clone());
+    session.history_cursor.workspace_node_id = Some(node_id);
+    session.history_cursor.mode = HistoryCursorMode::Live;
+    session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+    session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+}
+
+fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) {
+    let Some(latest_node_id) = session.history_cursor.branch_head_node_id.clone() else {
+        return;
+    };
+    let summary = session.summary.clone();
+    let title = session.title.clone();
+    let history = session.history.clone();
+    let provider_native_transcript = session.provider_native_transcript.clone();
+    let turn_trace_history = session.turn_trace_history.clone();
+    let long_term_memory_entries = session.long_term_memory_entries.clone();
+    let turn_count = session.turn_count;
+    let last_referenced_file = session.last_referenced_file.clone();
+    let Some(node) = history_node_mut(session, &latest_node_id) else {
+        return;
+    };
+    node.summary = summary;
+    node.title = title;
+    node.history = history;
+    node.provider_native_transcript = provider_native_transcript;
+    node.turn_trace_history = turn_trace_history;
+    node.long_term_memory_entries = long_term_memory_entries;
+    node.turn_count = turn_count;
+    node.last_referenced_file = last_referenced_file;
+    if run_id.is_some() {
+        node.run_id = run_id;
+    }
+}
+
+fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
+    session.title = node.title.clone();
+    session.summary = node.summary.clone();
+    session.history = node.history.clone();
+    session.provider_native_transcript = node.provider_native_transcript.clone();
+    session.turn_trace_history = node.turn_trace_history.clone();
+    session.long_term_memory_entries = node.long_term_memory_entries.clone();
+    session.turn_count = node.turn_count;
+    session.last_referenced_file = node.last_referenced_file.clone();
+}
+
+fn replay_long_term_memory(history: &[TurnHistoryMessage]) -> Vec<LongTermMemoryRecord> {
+    let mut entries = Vec::new();
+    for message in history.iter().filter(|message| message.role == "user") {
+        for entry in extract_long_term_memory_from_user_message(&message.content) {
+            match entries
+                .iter_mut()
+                .find(|existing| memory_record_identity(existing) == memory_record_identity(&entry))
+            {
+                Some(existing) => *existing = entry,
+                None => entries.push(entry),
+            }
+        }
+    }
+    entries
+}
+
+fn classify_turn_node_kind(assistant_message: &str) -> HistoryNodeKind {
+    if assistant_message.trim() == "This turn was cancelled." {
+        HistoryNodeKind::TurnCancelled
+    } else {
+        HistoryNodeKind::TurnCommitted
+    }
+}
+
+fn history_node<'a>(session: &'a SessionState, node_id: &str) -> Option<&'a HistoryNode> {
+    session
+        .history_nodes
+        .iter()
+        .find(|node| node.node_id == node_id)
+}
+
+fn history_node_mut<'a>(
+    session: &'a mut SessionState,
+    node_id: &str,
+) -> Option<&'a mut HistoryNode> {
+    session
+        .history_nodes
+        .iter_mut()
+        .find(|node| node.node_id == node_id)
+}
+
+fn history_branch_mut<'a>(
+    session: &'a mut SessionState,
+    branch_id: &str,
+) -> Option<&'a mut HistoryBranch> {
+    session
+        .history_branches
+        .iter_mut()
+        .find(|branch| branch.branch_id == branch_id)
+}
+
+fn legacy_history_node_id(session: &SessionState, turn_count: usize) -> String {
+    format!("{}-legacy-node-{}", session.conversation_id, turn_count)
+}
+
+fn new_history_node_id(session: &SessionState, ordinal: usize, created_at_ms: u64) -> String {
+    format!(
+        "{}-node-{}-{}",
+        session.conversation_id, created_at_ms, ordinal
+    )
+}
+
+fn new_history_branch_id(session: &SessionState, ordinal: usize) -> String {
+    format!("{}-branch-{}", session.conversation_id, ordinal)
+}
+
 fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) {
+    normalize_trace_timeline_entries(&mut session.turn_trace_history);
     session.turn_count = session
         .history
         .iter()
@@ -812,6 +1638,24 @@ fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) 
     }
     if touch_updated_at {
         session.updated_at_ms = now_timestamp_ms();
+    }
+}
+
+fn canonical_trace_timeline_kind(kind: &str) -> &str {
+    match kind {
+        "context" => "build_context",
+        "model" => "call_model",
+        "tool" => "call_tool",
+        "return" => "return_result",
+        other => other,
+    }
+}
+
+fn normalize_trace_timeline_entries(turn_trace_history: &mut [TurnTraceRecord]) {
+    for trace in turn_trace_history {
+        for entry in &mut trace.trace_timeline {
+            entry.kind = canonical_trace_timeline_kind(&entry.kind).to_string();
+        }
     }
 }
 
@@ -1316,8 +2160,7 @@ fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
                     .unwrap_or(false);
                 let missing_reasoning = message
                     .get("reasoning_content")
-                    .and_then(Value::as_str)
-                    .map(|value| value.trim().is_empty())
+                    .map(reasoning_content_missing)
                     .unwrap_or(true);
 
                 if (has_tool_calls || awaiting_tool_turn_reasoning) && missing_reasoning {
@@ -1333,6 +2176,16 @@ fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
     }
 
     false
+}
+
+fn reasoning_content_missing(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
 }
 
 fn has_incomplete_tool_roundtrip(transcript: &[Value]) -> bool {
@@ -1516,6 +2369,9 @@ fn default_sessions() -> SessionMap {
             turn_count: 0,
             last_referenced_file: None,
             updated_at_ms: now_timestamp_ms(),
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: HistoryCursor::default(),
         },
     );
     sessions
@@ -2775,6 +3631,9 @@ mod tests {
                 turn_count: 1,
                 last_referenced_file: None,
                 updated_at_ms: now_timestamp_ms(),
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor::default(),
             },
         );
 
@@ -2831,6 +3690,9 @@ mod tests {
                 turn_count: 1,
                 last_referenced_file: Some("src-tauri/tauri.conf.json".to_string()),
                 updated_at_ms: now_timestamp_ms(),
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor::default(),
             },
         );
 
@@ -2906,11 +3768,78 @@ mod tests {
                 turn_count: 1,
                 last_referenced_file: Some("tauri.conf.json".to_string()),
                 updated_at_ms: now_timestamp_ms(),
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor::default(),
             },
         );
 
         let snapshot = store.snapshot(Some(session_id), &[]);
         assert!(snapshot.provider_native_transcript.is_empty());
+    }
+
+    #[test]
+    fn snapshot_keeps_structured_reasoning_content_in_native_transcript() {
+        let session_id = "structured-reasoning";
+        let mut store = SessionStore::memory_only();
+        store.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history: vec![TurnHistoryMessage {
+                    role: "user".to_string(),
+                    attachments: Vec::new(),
+                    content: "继续".to_string(),
+                }],
+                provider_native_transcript: vec![
+                    serde_json::json!({
+                        "role": "user",
+                        "content": "读取 tauri.conf.json"
+                    }),
+                    serde_json::json!({
+                        "role": "assistant",
+                        "reasoning_content": [
+                            { "type": "reasoning", "text": "先读取文件。" }
+                        ],
+                        "tool_calls": [
+                            {
+                                "id": "call_tool",
+                                "type": "function",
+                                "function": {
+                                    "name": "workspace_read_file",
+                                    "arguments": "{\"path\":\"src-tauri/tauri.conf.json\"}"
+                                }
+                            }
+                        ]
+                    }),
+                    serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": "call_tool",
+                        "content": "{...}"
+                    }),
+                    serde_json::json!({
+                        "role": "assistant",
+                        "reasoning_content": [
+                            { "type": "reasoning", "text": "已读取并总结。" }
+                        ],
+                        "content": "这是 Tauri 配置文件。"
+                    }),
+                ],
+                turn_trace_history: Vec::new(),
+                long_term_memory_entries: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: Some("src-tauri/tauri.conf.json".to_string()),
+                updated_at_ms: now_timestamp_ms(),
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor::default(),
+            },
+        );
+
+        let snapshot = store.snapshot(Some(session_id), &[]);
+        assert_eq!(snapshot.provider_native_transcript.len(), 4);
     }
 
     fn temp_sessions_path() -> PathBuf {
@@ -2934,7 +3863,7 @@ mod tests {
         assert_eq!(snapshot.turn_count, 0);
 
         let persisted = load_store_from_path(&path);
-        assert!(persisted.is_none());
+        assert!(persisted.is_some());
 
         let _ = fs::remove_file(path);
     }
@@ -2955,6 +3884,32 @@ mod tests {
                     label: "Return result".to_string(),
                     state: "completed".to_string(),
                 }],
+                trace_timeline: vec![TraceTimelineEntry {
+                    id: "return-1".to_string(),
+                    kind: "return".to_string(),
+                    label: "RETURN RESULT".to_string(),
+                    state: "completed".to_string(),
+                    sequence: 1,
+                    provider_requested_name: Some("ppx".to_string()),
+                    provider_name: Some("ppx".to_string()),
+                    provider_protocol: Some("openai".to_string()),
+                    provider_model: Some("gpt-5.4".to_string()),
+                    provider_source: Some("provider_decision".to_string()),
+                    provider_mode: Some("live".to_string()),
+                    build_context_observation: None,
+                    tool_activities: Vec::new(),
+                    text: Some("ok".to_string()),
+                    reasoning_content: None,
+                    fallback_reason: None,
+                    error: None,
+                    input_tokens: Some(12),
+                    cache_hit_input_tokens: Some(5),
+                    reasoning_tokens: Some(3),
+                    output_tokens: Some(34),
+                    total_tokens: Some(46),
+                    first_token_latency_ms: Some(180),
+                    turn_duration_ms: Some(920),
+                }],
                 tool_activities: vec![TurnToolActivity {
                     id: "tool-1".to_string(),
                     name: "workspace.read_file".to_string(),
@@ -2963,6 +3918,33 @@ mod tests {
                     arguments_text: Some("{\"path\":\"src/main.ts\"}".to_string()),
                     result_text: Some("ok".to_string()),
                     duration_seconds: Some(0.12),
+                    capability_invocation: Some(crate::agent::telemetry::CapabilityInvocationRecord {
+                        tool_name: "workspace.read_file".to_string(),
+                        capability_id: Some("mcp:tool:workspace.read_file".to_string()),
+                        source_id: Some("mcp-local".to_string()),
+                        source_kind: Some("mcp".to_string()),
+                        capability_kind: Some("tool".to_string()),
+                        invocation_mode: Some("direct_tool_call".to_string()),
+                        failure_kind: None,
+                        requires_approval: Some(false),
+                        host_mediated: Some(true),
+                        permission_scope: Some("workspace.read".to_string()),
+                    }),
+                }],
+                provider_call_records: vec![ProviderCallCacheRecord {
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                    provider_source: Some("provider_decision".to_string()),
+                    provider_mode: Some("live".to_string()),
+                    input_tokens: Some(12),
+                    cache_hit_input_tokens: Some(5),
+                    cache_miss_input_tokens: Some(7),
+                    reasoning_tokens: Some(3),
+                    output_tokens: Some(34),
+                    total_tokens: Some(46),
+                    first_token_latency_ms: Some(180),
+                    turn_duration_ms: Some(920),
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                    prefix_mutation_reasons: Vec::new(),
                 }],
                 provider_requested_name: Some("ppx".to_string()),
                 provider_name: Some("ppx".to_string()),
@@ -2995,7 +3977,186 @@ mod tests {
             snapshot.turn_trace_history[0].provider_model.as_deref(),
             Some("gpt-5.4")
         );
+        assert_eq!(
+            snapshot.turn_trace_history[0].provider_call_records.len(),
+            1
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].provider_call_records[0].cache_miss_input_tokens,
+            Some(7)
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].tool_activities[0]
+                .capability_invocation
+                .as_ref()
+                .and_then(|record| record.source_id.as_deref()),
+            Some("mcp-local")
+        );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_checkout_can_rehydrate_older_node_and_degrade_workspace_restore() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(
+            Some("history-session"),
+            "第一问",
+            "第一答",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-session"),
+            "第二问",
+            "第二答",
+            None,
+            Vec::new(),
+        );
+
+        let (nodes, branches, _) = store.load_history_graph(Some("history-session"));
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(branches.len(), 1);
+
+        let snapshot = store
+            .checkout_history_node(
+                Some("history-session"),
+                &nodes[0].node_id,
+                HistoryCheckoutMode::TranscriptAndWorkspace,
+            )
+            .expect("history checkout should succeed");
+
+        assert_eq!(
+            snapshot.resolved_node_id.as_deref(),
+            Some(nodes[0].node_id.as_str())
+        );
+        assert_eq!(snapshot.history.len(), 2);
+        assert_eq!(snapshot.history[0].content, "第一问");
+        assert_eq!(snapshot.history[1].content, "第一答");
+        assert_eq!(
+            snapshot.latest_node_id.as_deref(),
+            Some(nodes[1].node_id.as_str())
+        );
+        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Historical);
+        assert_eq!(
+            snapshot.history_cursor.checkout_status,
+            HistoryCheckoutStatus::DegradedToTranscriptOnly
+        );
+    }
+
+    #[test]
+    fn appending_from_historical_node_creates_a_fork_and_preserves_main_branch_head() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(Some("fork-session"), "第一问", "第一答", None, Vec::new());
+        store.append_turn(Some("fork-session"), "第二问", "第二答", None, Vec::new());
+
+        let (nodes_before, branches_before, _) = store.load_history_graph(Some("fork-session"));
+        let main_head_before = branches_before[0].head_node_id.clone();
+        let fork_base = nodes_before[0].node_id.clone();
+
+        store
+            .checkout_history_node(
+                Some("fork-session"),
+                fork_base.as_str(),
+                HistoryCheckoutMode::TranscriptOnly,
+            )
+            .expect("checkout should succeed");
+
+        let fork_snapshot = store.append_turn(
+            Some("fork-session"),
+            "历史节点上继续追问",
+            "分叉后的回答",
+            None,
+            Vec::new(),
+        );
+
+        let (nodes_after, branches_after, cursor_after) =
+            store.load_history_graph(Some("fork-session"));
+        assert_eq!(nodes_after.len(), 3);
+        assert_eq!(branches_after.len(), 2);
+        assert_eq!(cursor_after.mode, HistoryCursorMode::Live);
+
+        let main_branch = branches_after
+            .iter()
+            .find(|branch| branch.branch_id == DEFAULT_HISTORY_BRANCH_ID)
+            .expect("main branch should exist");
+        assert_eq!(main_branch.head_node_id, main_head_before);
+
+        let fork_branch = branches_after
+            .iter()
+            .find(|branch| branch.branch_id != DEFAULT_HISTORY_BRANCH_ID)
+            .expect("fork branch should be created");
+        assert_eq!(
+            fork_branch.base_node_id.as_deref(),
+            Some(fork_base.as_str())
+        );
+        assert_eq!(
+            fork_branch.forked_from_node_id.as_deref(),
+            Some(fork_base.as_str())
+        );
+        assert_eq!(
+            fork_snapshot.history_cursor.active_branch_id.as_deref(),
+            Some(fork_branch.branch_id.as_str())
+        );
+
+        let fork_head = nodes_after
+            .iter()
+            .find(|node| node.branch_id == fork_branch.branch_id)
+            .expect("fork branch head node should exist");
+        assert_eq!(
+            fork_head.parent_node_id.as_deref(),
+            Some(fork_base.as_str())
+        );
+    }
+
+    #[test]
+    fn restore_and_switch_history_branch_move_cursor_between_branch_heads() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(Some("switch-session"), "第一问", "第一答", None, Vec::new());
+        store.append_turn(Some("switch-session"), "第二问", "第二答", None, Vec::new());
+
+        let (nodes_before, _, _) = store.load_history_graph(Some("switch-session"));
+        let first_node_id = nodes_before[0].node_id.clone();
+        let second_node_id = nodes_before[1].node_id.clone();
+
+        store
+            .fork_from_history_node(Some("switch-session"), first_node_id.as_str())
+            .expect("fork should succeed");
+        store.append_turn(
+            Some("switch-session"),
+            "在分叉上继续",
+            "分叉回答",
+            None,
+            Vec::new(),
+        );
+
+        let (_, branches_after_fork, _) = store.load_history_graph(Some("switch-session"));
+        let fork_branch_id = branches_after_fork
+            .iter()
+            .find(|branch| branch.branch_id != DEFAULT_HISTORY_BRANCH_ID)
+            .map(|branch| branch.branch_id.clone())
+            .expect("fork branch should exist");
+
+        let switched = store
+            .switch_history_branch(Some("switch-session"), DEFAULT_HISTORY_BRANCH_ID)
+            .expect("switch to main branch should succeed");
+        assert_eq!(
+            switched.resolved_node_id.as_deref(),
+            Some(second_node_id.as_str())
+        );
+        assert_eq!(switched.history_cursor.mode, HistoryCursorMode::Live);
+
+        let restored = store
+            .restore_branch_head(Some("switch-session"), Some(fork_branch_id.as_str()))
+            .expect("restore fork branch head should succeed");
+        assert_eq!(
+            restored.history_cursor.active_branch_id.as_deref(),
+            Some(fork_branch_id.as_str())
+        );
+        assert_eq!(restored.history_cursor.mode, HistoryCursorMode::Live);
+        assert_ne!(
+            restored.resolved_node_id.as_deref(),
+            Some(second_node_id.as_str())
+        );
     }
 }

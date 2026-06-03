@@ -77,6 +77,8 @@ pub struct ProviderRequestObservation {
     pub semi_stable_context_text: String,
     #[serde(default)]
     pub volatile_input_text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
 }
 
 impl ProviderRequestObservation {
@@ -84,6 +86,7 @@ impl ProviderRequestObservation {
         self.stable_prefix_text.is_empty()
             && self.semi_stable_context_text.is_empty()
             && self.volatile_input_text.is_empty()
+            && self.prefix_mutation_reasons.is_empty()
     }
 }
 
@@ -102,8 +105,22 @@ pub struct BuildContextObservation {
     pub semi_stable_context_text: String,
     #[serde(default)]
     pub volatile_input_text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
     pub request_messages_text: String,
     pub tool_definitions_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefixMutationReason {
+    SessionSummaryChanged,
+    RunGoalChanged,
+    LongTermMemoryChanged,
+    ImageNoteChanged,
+    TruncationNoteChanged,
+    HistoryBoundaryShifted,
+    NativeTranscriptBoundaryShifted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +128,7 @@ pub struct ProviderResponse {
     pub output_text: String,
     pub tool_call: Option<ToolCall>,
     pub reasoning_content: Option<String>,
+    pub reasoning_content_value: Option<Value>,
     pub assistant_message: Option<Value>,
     pub provider_source: String,
     pub provider_mode: String,
@@ -152,6 +170,7 @@ pub fn build_context_observation(
         stable_prefix_text: observation.stable_prefix_text,
         semi_stable_context_text: observation.semi_stable_context_text,
         volatile_input_text: observation.volatile_input_text,
+        prefix_mutation_reasons: observation.prefix_mutation_reasons,
         request_messages_text,
         tool_definitions_text: render_tool_definitions(tools),
     }
@@ -162,6 +181,7 @@ pub struct ProviderDecision {
     pub output_text: String,
     pub tool_call: Option<ToolCall>,
     pub reasoning_content: Option<String>,
+    pub reasoning_content_value: Option<Value>,
     pub assistant_message: Option<Value>,
     pub provider_source: String,
     pub provider_mode: String,
@@ -174,6 +194,7 @@ struct OpenAiStreamMessage {
     output_text: String,
     tool_call: Option<ToolCall>,
     reasoning_content: Option<String>,
+    reasoning_content_value: Option<Value>,
     token_usage: Option<TokenUsage>,
 }
 
@@ -181,6 +202,7 @@ struct OpenAiStreamMessage {
 struct OpenAiSseAccumulator {
     output_text: String,
     reasoning_content: String,
+    reasoning_content_value: Option<Value>,
     tool_calls: BTreeMap<usize, PartialOpenAiToolCall>,
     token_usage: Option<TokenUsage>,
     saw_data: bool,
@@ -222,6 +244,14 @@ pub trait ProviderClient {
         request: &ProviderRequest,
         tools: &[ToolDefinition],
     ) -> Result<ProviderDecision, String>;
+    fn decide_with_tools_stream<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        on_delta: F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk);
     fn continue_with_tool_result(
         &self,
         request: &ProviderRequest,
@@ -279,6 +309,19 @@ impl ProviderManager {
         self.config.max_output_tokens
     }
 
+    pub fn supports_true_streaming_followup(&self) -> bool {
+        if !self.config.capabilities.supports_streaming {
+            return false;
+        }
+
+        matches!(self.config.protocol, ProviderProtocol::OpenAi)
+    }
+
+    pub fn supports_true_streaming_decision(&self) -> bool {
+        self.config.capabilities.supports_streaming
+            && matches!(self.config.protocol, ProviderProtocol::OpenAi)
+    }
+
     pub fn context_window_tokens(&self) -> Option<u32> {
         self.config.capabilities.context_window_tokens
     }
@@ -320,6 +363,61 @@ impl ProviderManager {
             ProviderProtocol::Anthropic => {
                 self.send_anthropic_tool_decision_request(request, tools)
             }
+        };
+
+        match result {
+            Ok(decision) => {
+                provider_log(format!(
+                    "decision:success mode={} tool_call={} output_preview={} ",
+                    decision.provider_mode,
+                    decision
+                        .tool_call
+                        .as_ref()
+                        .map(|call| call.name.as_str())
+                        .unwrap_or("none"),
+                    preview_text(&decision.output_text, 120)
+                ));
+                Ok(decision)
+            }
+            Err(error) => {
+                provider_log(format!("decision:error {}", error));
+                Err(error)
+            }
+        }
+    }
+
+    pub fn decide_with_tools_stream<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        mut on_delta: F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        provider_log(format!(
+            "decision:start mode=stream requested={} provider={} protocol={} model={} tools={} api_key_present={} ",
+            self.config.requested_name,
+            self.config.provider_name,
+            self.protocol_label(),
+            request.model,
+            tools.len(),
+            self.config.api_key.is_some()
+        ));
+        if self.config.api_key.is_none() {
+            let error = format!(
+                "provider {} missing API key; please save a key in the model config page (field: {}).",
+                self.config.provider_name, self.config.api_key_env_var
+            );
+            provider_log(format!("decision:error {}", error));
+            return Err(error);
+        }
+
+        let result = match self.config.protocol {
+            ProviderProtocol::OpenAi => {
+                self.send_openai_tool_decision_stream_request(request, tools, &mut on_delta)
+            }
+            ProviderProtocol::Anthropic => self.send_anthropic_tool_decision_request(request, tools),
         };
 
         match result {
@@ -483,10 +581,6 @@ impl ProviderManager {
                             )
                         }
                     };
-                    if let Some(reasoning_content) = response.reasoning_content.clone() {
-                        on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
-                    }
-                    on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
                     response.provider_source = "provider_followup_stream_sync_fallback".to_string();
                     response.fallback_reason = Some(match response.fallback_reason.take() {
                         Some(existing) => format!(
@@ -561,6 +655,7 @@ impl ProviderManager {
             output_text: output_text.clone(),
             tool_call,
             reasoning_content: extract_openai_message_reasoning_content(message),
+            reasoning_content_value: extract_openai_message_reasoning_value(message),
             assistant_message: Some(normalize_openai_assistant_message(message)),
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
@@ -668,6 +763,7 @@ impl ProviderManager {
             output_text: output_text.clone(),
             tool_call,
             reasoning_content: None,
+            reasoning_content_value: None,
             assistant_message,
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
@@ -736,15 +832,15 @@ impl ProviderManager {
             .unwrap_or_else(|| estimate_token_usage(request, &output_text));
         provider_log_token_usage("openai followup-stream", &token_usage);
         let assistant_message = if let Some(tool_call) = message.tool_call.as_ref() {
-            Some(provider_native_assistant_tool_call_message(
+            Some(provider_native_assistant_tool_call_message_with_reasoning_value(
                 text_if_present(&output_text),
-                message.reasoning_content.as_deref(),
+                message.reasoning_content_value.as_ref(),
                 tool_call,
             ))
         } else {
-            Some(provider_native_assistant_message_with_reasoning(
+            Some(provider_native_assistant_message_with_reasoning_value(
                 &output_text,
-                message.reasoning_content.as_deref(),
+                message.reasoning_content_value.as_ref(),
             ))
         };
 
@@ -752,6 +848,7 @@ impl ProviderManager {
             output_text: output_text.clone(),
             tool_call: message.tool_call,
             reasoning_content: message.reasoning_content.clone(),
+            reasoning_content_value: message.reasoning_content_value.clone(),
             assistant_message,
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
@@ -840,6 +937,7 @@ impl ProviderManager {
             output_text: output_text.clone(),
             tool_call,
             reasoning_content: None,
+            reasoning_content_value: None,
             assistant_message,
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
@@ -912,8 +1010,101 @@ impl ProviderManager {
             output_text: extract_openai_message_text(message).unwrap_or_default(),
             tool_call: extract_openai_tool_call(message),
             reasoning_content: extract_openai_message_reasoning_content(message),
+            reasoning_content_value: extract_openai_message_reasoning_value(message),
             assistant_message: Some(normalize_openai_assistant_message(message)),
             provider_source: "provider_decision".to_string(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(token_usage),
+        })
+    }
+
+    fn send_openai_tool_decision_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        on_delta: &mut F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        let endpoint = format!(
+            "{}/chat/completions",
+            self.config.base_url.trim_end_matches('/')
+        );
+        provider_log(format!(
+            "request:openai decision-stream endpoint={} model={} safe_tools={}",
+            endpoint,
+            request.model,
+            tools
+                .iter()
+                .map(|tool| openai_safe_tool_name(tool.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        let messages = normalize_openai_messages(openai_request_messages(request));
+        let body = with_openai_request_options(
+            json!({
+                "model": request.model,
+                "messages": messages,
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                },
+                "tool_choice": "auto",
+                "tools": openai_tools_payload(tools)
+            }),
+            &self.config,
+        );
+        let body = apply_openai_tool_capability(body, tools, &self.config);
+        provider_log(format!(
+            "request:openai decision-stream messages={} body_chars={} body_preview={}",
+            request
+                .input
+                .iter()
+                .map(|message| format!("{:?}:{}", message.role, preview_text(&message.content, 48)))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            body.to_string().chars().count(),
+            preview_json(&body, 900)
+        ));
+
+        let response = self.post_openai_stream_response(&endpoint, &body)?;
+        let message =
+            collect_openai_sse_message_from_response(response, Instant::now(), &endpoint, on_delta)?;
+        let output_text = message.output_text.clone();
+        let tool_call = message.tool_call.clone();
+        if output_text.trim().is_empty() && tool_call.is_none() {
+            return Err("openai streamed decision missing text or tool call".to_string());
+        }
+        let token_usage = message
+            .token_usage
+            .clone()
+            .unwrap_or_else(|| estimate_token_usage(request, &output_text));
+        provider_log_token_usage("openai decision-stream", &token_usage);
+
+        let assistant_message = if let Some(tool_call) = tool_call.as_ref() {
+            Some(provider_native_assistant_tool_call_message_with_reasoning_value(
+                text_if_present(&output_text),
+                message.reasoning_content_value.as_ref(),
+                tool_call,
+            ))
+        } else {
+            Some(provider_native_assistant_message_with_reasoning_value(
+                &output_text,
+                message.reasoning_content_value.as_ref(),
+            ))
+        };
+
+        Ok(ProviderDecision {
+            output_text,
+            tool_call,
+            reasoning_content: message.reasoning_content,
+            reasoning_content_value: message.reasoning_content_value,
+            assistant_message,
+            provider_source: "provider_decision_stream".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(token_usage),
@@ -974,6 +1165,7 @@ impl ProviderManager {
             output_text: output_text.clone(),
             tool_call: extract_anthropic_tool_call(content),
             reasoning_content: None,
+            reasoning_content_value: None,
             assistant_message: None,
             provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
@@ -1103,6 +1295,18 @@ impl ProviderClient for ProviderManager {
         tools: &[ToolDefinition],
     ) -> Result<ProviderDecision, String> {
         ProviderManager::decide_with_tools(self, request, tools)
+    }
+
+    fn decide_with_tools_stream<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        on_delta: F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        ProviderManager::decide_with_tools_stream(self, request, tools, on_delta)
     }
 
     fn continue_with_tool_result(
@@ -1272,6 +1476,7 @@ impl OpenAiSseAccumulator {
         let delta_text = delta
             .and_then(extract_openai_delta_content_text)
             .unwrap_or_default();
+        let delta_reasoning_value = delta.and_then(extract_openai_delta_reasoning_value);
         let delta_reasoning = delta
             .and_then(extract_openai_delta_reasoning_content)
             .unwrap_or_default();
@@ -1288,25 +1493,35 @@ impl OpenAiSseAccumulator {
             self.reasoning_content.push_str(&delta_reasoning);
             on_delta(ProviderStreamChunk::Reasoning(delta_reasoning));
         }
+        if self.reasoning_content_value.is_none() && delta_reasoning_value.is_some() {
+            self.reasoning_content_value = delta_reasoning_value;
+        }
 
         Ok(false)
     }
 
     fn finish(self, response_preview: &str) -> Result<OpenAiStreamMessage, String> {
-        if !self.saw_data {
+        let OpenAiSseAccumulator {
+            output_text,
+            reasoning_content,
+            reasoning_content_value,
+            tool_calls,
+            token_usage,
+            saw_data,
+        } = self;
+        if !saw_data {
             return Err(format!(
                 "provider 流式返回中未找到 SSE data 事件；响应预览: {}",
                 response_preview
             ));
         }
 
-        let tool_call = self
-            .tool_calls
+        let tool_call = tool_calls
             .into_iter()
             .next()
             .and_then(|(_, partial)| partial_openai_tool_call_to_tool_call(partial));
 
-        if self.output_text.is_empty() && tool_call.is_none() {
+        if output_text.is_empty() && tool_call.is_none() {
             return Err(format!(
                 "provider 流式返回中未提取到文本内容；响应预览: {}",
                 response_preview
@@ -1314,14 +1529,18 @@ impl OpenAiSseAccumulator {
         }
 
         Ok(OpenAiStreamMessage {
-            output_text: self.output_text,
+            output_text,
             tool_call,
-            reasoning_content: if self.reasoning_content.trim().is_empty() {
+            reasoning_content: if reasoning_content.trim().is_empty() {
                 None
             } else {
-                Some(self.reasoning_content)
+                Some(reasoning_content.clone())
             },
-            token_usage: self.token_usage,
+            reasoning_content_value: reasoning_content_value.or_else(|| {
+                (!reasoning_content.trim().is_empty())
+                    .then(|| Value::String(reasoning_content))
+            }),
+            token_usage,
         })
     }
 }
@@ -1386,6 +1605,7 @@ where
 {
     let mut combined = String::new();
     let mut reasoning = String::new();
+    let mut reasoning_value = None;
     let mut saw_data = false;
 
     for line in raw_text.lines() {
@@ -1420,6 +1640,7 @@ where
         let delta_text = delta
             .and_then(extract_openai_delta_content_text)
             .unwrap_or_default();
+        let delta_reasoning_value = delta.and_then(extract_openai_delta_reasoning_value);
         let delta_reasoning = delta
             .and_then(extract_openai_delta_reasoning_content)
             .unwrap_or_default();
@@ -1432,6 +1653,9 @@ where
         if !delta_reasoning.is_empty() {
             reasoning.push_str(&delta_reasoning);
             on_delta(ProviderStreamChunk::Reasoning(delta_reasoning));
+        }
+        if reasoning_value.is_none() && delta_reasoning_value.is_some() {
+            reasoning_value = delta_reasoning_value;
         }
     }
 
@@ -1455,8 +1679,11 @@ where
         reasoning_content: if reasoning.trim().is_empty() {
             None
         } else {
-            Some(reasoning)
+            Some(reasoning.clone())
         },
+        reasoning_content_value: reasoning_value.or_else(|| {
+            (!reasoning.trim().is_empty()).then(|| Value::String(reasoning))
+        }),
         token_usage: None,
     })
 }
@@ -1668,11 +1895,7 @@ fn normalize_openai_assistant_message(message: &Value) -> Value {
         Some(other) => other.clone(),
     };
 
-    let reasoning_value = message
-        .get("reasoning_content")
-        .cloned()
-        .or_else(|| extract_openai_message_reasoning_content(message).map(Value::String))
-        .unwrap_or(Value::Null);
+    let reasoning_value = extract_openai_message_reasoning_value(message).unwrap_or(Value::Null);
 
     let mut normalized = json!({
         "role": "assistant",
@@ -1913,9 +2136,9 @@ fn openai_assistant_message_for_tool_result(
         .unwrap_or_default();
 
     if filtered_tool_calls.is_empty() {
-        return provider_native_assistant_tool_call_message(
+        return provider_native_assistant_tool_call_message_with_reasoning_value(
             normalized.get("content").and_then(Value::as_str),
-            normalized.get("reasoning_content").and_then(Value::as_str),
+            normalized.get("reasoning_content"),
             tool_call,
         );
     }
@@ -2051,6 +2274,16 @@ pub fn provider_native_assistant_message_with_reasoning(
     content: &str,
     reasoning_content: Option<&str>,
 ) -> Value {
+    provider_native_assistant_message_with_reasoning_value(
+        content,
+        reasoning_content.map(|value| Value::String(value.to_string())).as_ref(),
+    )
+}
+
+pub fn provider_native_assistant_message_with_reasoning_value(
+    content: &str,
+    reasoning_content: Option<&Value>,
+) -> Value {
     json!({
         "role": "assistant",
         "content": content,
@@ -2061,6 +2294,18 @@ pub fn provider_native_assistant_message_with_reasoning(
 pub fn provider_native_assistant_tool_call_message(
     content: Option<&str>,
     reasoning_content: Option<&str>,
+    tool_call: &ToolCall,
+) -> Value {
+    provider_native_assistant_tool_call_message_with_reasoning_value(
+        content,
+        reasoning_content.map(|value| Value::String(value.to_string())).as_ref(),
+        tool_call,
+    )
+}
+
+pub fn provider_native_assistant_tool_call_message_with_reasoning_value(
+    content: Option<&str>,
+    reasoning_content: Option<&Value>,
     tool_call: &ToolCall,
 ) -> Value {
     json!({
@@ -2168,6 +2413,7 @@ fn local_tool_followup_fallback_response(
         output_text: output_text.clone(),
         tool_call: None,
         reasoning_content: None,
+        reasoning_content_value: None,
         assistant_message: Some(provider_native_assistant_message(&output_text)),
         provider_source: "provider_followup_local_fallback".to_string(),
         provider_mode: "fallback".to_string(),
@@ -2334,10 +2580,13 @@ fn extract_chat_output_text(payload: &Value) -> Option<String> {
 }
 
 fn extract_openai_message_reasoning_content(message: &Value) -> Option<String> {
-    message
-        .get("reasoning_content")
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    extract_openai_message_reasoning_value(message)
+        .as_ref()
+        .and_then(extract_reasoning_text_from_value)
+}
+
+fn extract_openai_message_reasoning_value(message: &Value) -> Option<Value> {
+    message.get("reasoning_content").cloned()
 }
 
 fn extract_openai_delta_content_text(delta: &Value) -> Option<String> {
@@ -2368,7 +2617,17 @@ fn extract_openai_delta_content_text(delta: &Value) -> Option<String> {
 }
 
 fn extract_openai_delta_reasoning_content(delta: &Value) -> Option<String> {
-    match delta.get("reasoning_content")? {
+    extract_openai_delta_reasoning_value(delta)
+        .as_ref()
+        .and_then(extract_reasoning_text_from_value)
+}
+
+fn extract_openai_delta_reasoning_value(delta: &Value) -> Option<Value> {
+    delta.get("reasoning_content").cloned()
+}
+
+fn extract_reasoning_text_from_value(value: &Value) -> Option<String> {
+    match value {
         Value::String(text) => Some(text.to_string()),
         Value::Array(items) => {
             let parts = items
@@ -2378,7 +2637,7 @@ fn extract_openai_delta_reasoning_content(delta: &Value) -> Option<String> {
                         return Some(text.to_string());
                     }
                     item.get("text")
-                        .and_then(|value| value.get("value"))
+                        .and_then(|nested| nested.get("value"))
                         .and_then(Value::as_str)
                         .map(str::to_string)
                 })
@@ -2681,9 +2940,8 @@ fn derive_input_request_observation(messages: &[ProviderMessage]) -> ProviderReq
 
     let stable_prefix_end = messages
         .iter()
-        .take_while(|message| {
-            matches!(message.role, ProviderRole::System | ProviderRole::Developer)
-        })
+        .enumerate()
+        .take_while(|(index, message)| is_stable_input_prefix_message(*index, message))
         .count()
         .min(messages.len().saturating_sub(1));
     let volatile_input_start = messages
@@ -2697,6 +2955,7 @@ fn derive_input_request_observation(messages: &[ProviderMessage]) -> ProviderReq
             &messages[stable_prefix_end..volatile_input_start],
         ),
         volatile_input_text: render_input_messages(&messages[volatile_input_start..]),
+        prefix_mutation_reasons: Vec::new(),
     }
 }
 
@@ -2707,7 +2966,8 @@ fn derive_native_request_observation(messages: &[Value]) -> ProviderRequestObser
 
     let stable_prefix_end = messages
         .iter()
-        .take_while(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .enumerate()
+        .take_while(|(index, message)| is_stable_native_prefix_message(*index, message))
         .count()
         .min(messages.len().saturating_sub(1));
     let volatile_input_start = messages
@@ -2721,7 +2981,49 @@ fn derive_native_request_observation(messages: &[Value]) -> ProviderRequestObser
             &messages[stable_prefix_end..volatile_input_start],
         ),
         volatile_input_text: render_native_messages(&messages[volatile_input_start..]),
+        prefix_mutation_reasons: Vec::new(),
     }
+}
+
+fn is_stable_input_prefix_message(index: usize, message: &ProviderMessage) -> bool {
+    match message.role {
+        ProviderRole::System => index == 0 || !looks_like_dynamic_prefix_content(&message.content),
+        ProviderRole::Developer => !looks_like_dynamic_prefix_content(&message.content),
+        ProviderRole::User => false,
+    }
+}
+
+fn is_stable_native_prefix_message(index: usize, message: &Value) -> bool {
+    if message.get("role").and_then(Value::as_str) != Some("system") {
+        return false;
+    }
+
+    let content = match message.get("content") {
+        Some(Value::String(text)) => text,
+        _ => return index == 0,
+    };
+
+    index == 0 || !looks_like_dynamic_prefix_content(content)
+}
+
+fn looks_like_dynamic_prefix_content(content: &str) -> bool {
+    if content.starts_with("Capability profile:") {
+        return false;
+    }
+
+    [
+        "Session summary:",
+        "Run goal:",
+        "Long-term memory status:",
+        "Older context was truncated",
+        "supportsImageInput=false for this model.",
+        "This model is marked as image-capable.",
+        "The user appears to reference image content",
+        "graph=",
+        "session=",
+    ]
+    .iter()
+    .any(|marker| content.contains(marker))
 }
 
 fn provider_log(message: String) {
@@ -2893,6 +3195,7 @@ mod tests {
                 stable_prefix_text: "stable prefix".to_string(),
                 semi_stable_context_text: "semi-stable context".to_string(),
                 volatile_input_text: "actual request".to_string(),
+                prefix_mutation_reasons: vec![PrefixMutationReason::SessionSummaryChanged],
             },
             temperature: 0.2,
             max_output_tokens: 1024,
@@ -2906,6 +3209,48 @@ mod tests {
         assert!(!observation
             .stable_prefix_text
             .contains("fallback text should not win"));
+        assert_eq!(
+            observation.prefix_mutation_reasons,
+            vec![PrefixMutationReason::SessionSummaryChanged]
+        );
+    }
+
+    #[test]
+    fn build_context_observation_fallback_keeps_dynamic_system_and_developer_text_out_of_stable_prefix(
+    ) {
+        let request = ProviderRequest {
+            model: "gpt-5.4".to_string(),
+            input: vec![
+                ProviderMessage::system("Stable system instruction"),
+                ProviderMessage::developer(
+                    "Capability profile: contextWindowTokens=128000 / supportsImageInput=true.",
+                ),
+                ProviderMessage::developer(
+                    "Session summary: volatile summary / graph=graph-a / session=session-1",
+                ),
+                ProviderMessage::user("actual request"),
+            ],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+
+        let observation = build_context_observation(&request, &[]);
+
+        assert!(observation
+            .stable_prefix_text
+            .contains("Stable system instruction"));
+        assert!(observation
+            .stable_prefix_text
+            .contains("Capability profile:"));
+        assert!(!observation
+            .stable_prefix_text
+            .contains("Session summary: volatile summary"));
+        assert!(observation
+            .semi_stable_context_text
+            .contains("Session summary: volatile summary"));
     }
 
     #[test]
@@ -3073,6 +3418,60 @@ mod tests {
     }
 
     #[test]
+    fn openai_tool_followup_preserves_structured_reasoning_content() {
+        let request = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            input: vec![ProviderMessage::user("继续处理工具结果")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+        };
+        let tool_call = ToolCall {
+            call_id: Some("call_structured".to_string()),
+            name: "workspace.read_file".to_string(),
+            arguments: json!({ "path": "src-tauri/src/agent/provider.rs" }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace.read_file".to_string(),
+            status: "ok".to_string(),
+            output: "file content".to_string(),
+            duration_ms: 12,
+        };
+        let structured_reasoning = json!([
+            { "type": "reasoning", "text": "先确认工具结果。" },
+            { "type": "reasoning", "text": "再决定下一步。" }
+        ]);
+        let assistant_message = json!({
+            "role": "assistant",
+            "content": "先读取文件，再给出结论。",
+            "reasoning_content": structured_reasoning.clone(),
+            "tool_calls": [
+                {
+                    "id": "call_structured",
+                    "type": "function",
+                    "function": {
+                        "name": "workspace_read_file",
+                        "arguments": "{\"path\":\"src-tauri/src/agent/provider.rs\"}"
+                    }
+                }
+            ]
+        });
+
+        let messages = openai_messages_with_tool_result(
+            &request,
+            Some(&assistant_message),
+            &tool_call,
+            &tool_result,
+        );
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].get("reasoning_content"), Some(&structured_reasoning));
+    }
+
+    #[test]
     fn openai_tool_followup_filters_unexecuted_parallel_tool_calls() {
         let request = ProviderRequest {
             model: "gpt-5.4".to_string(),
@@ -3142,6 +3541,48 @@ mod tests {
         assert!(!serde_json::to_string(&messages)
             .expect("messages serialize")
             .contains("call_list_files"));
+    }
+
+    #[test]
+    fn openai_tool_followup_fallback_rebuild_keeps_structured_reasoning_content() {
+        let tool_call = ToolCall {
+            call_id: Some("call_repaired".to_string()),
+            name: "workspace_read_file".to_string(),
+            arguments: json!({ "path": "Cargo.toml" }),
+            plan: None,
+        };
+        let structured_reasoning = json!([
+            { "type": "reasoning", "text": "先修正工具调用，再继续。" }
+        ]);
+        let assistant_message = json!({
+            "role": "assistant",
+            "content": "继续读取文件",
+            "reasoning_content": structured_reasoning.clone(),
+            "tool_calls": [
+                {
+                    "id": "call_other",
+                    "type": "function",
+                    "function": {
+                        "name": "workspace_list_files",
+                        "arguments": "{\"path\":\".\"}"
+                    }
+                }
+            ]
+        });
+
+        let rebuilt = openai_assistant_message_for_tool_result(Some(&assistant_message), &tool_call);
+
+        assert_eq!(rebuilt.get("reasoning_content"), Some(&structured_reasoning));
+        assert_eq!(
+            rebuilt
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .and_then(|calls| calls.first())
+                .and_then(|call| call.get("function"))
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str),
+            Some("workspace_read_file")
+        );
     }
 
     #[test]
@@ -3372,12 +3813,6 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("provider_followup_failed"));
-        assert_eq!(deltas.len(), 1);
-        match &deltas[0] {
-            ProviderStreamChunk::Text(text) => {
-                assert!(text.contains("工具 `workspace.gather_context` 已执行完成"));
-            }
-            ProviderStreamChunk::Reasoning(_) => panic!("unexpected reasoning delta"),
-        }
+        assert!(deltas.is_empty());
     }
 }

@@ -11,7 +11,6 @@ import {
   Copy,
   FileText,
   Image as ImageIcon,
-  Info,
   LoaderCircle,
   Orbit,
   ScanSearch,
@@ -19,7 +18,14 @@ import {
   Wrench
 } from "lucide-vue-next";
 import { extractActiveTaskFocus } from "@/types/runtime";
-import type { BuildContextObservation, ToolActivity, TraceStep, TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
+import type {
+  BuildContextObservation,
+  ProviderCallCacheRecord,
+  ToolActivity,
+  TraceStep,
+  TraceTimelineEntry,
+  TurnTraceRecord
+} from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useProviderStore } from "@/stores/providers";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
@@ -42,7 +48,7 @@ type TraceDetailSection = {
   content: string;
   summary?: string;
   tone?: DetailRowTone;
-  kind?: "default" | "tool";
+  kind?: "default" | "tool" | "model";
   toolStatus?: ToolActivity["status"];
   durationText?: string;
 };
@@ -56,7 +62,6 @@ const {
   availableTools,
   error,
   fallbackReason,
-  messages,
   phaseLabel,
   providerMode,
   providerModel,
@@ -165,6 +170,9 @@ function turnTimeline(turn: TurnTraceRecord) {
     const normalized: TraceTimelineEntry[] = [];
     for (const entry of turn.traceTimeline) {
       const kind = canonicalTraceTimelineKind(entry.kind);
+      if (kind === "prepare_retrieval") {
+        continue;
+      }
       if (kind !== "return_result") {
         normalized.push({ ...entry, kind });
         continue;
@@ -176,7 +184,8 @@ function turnTimeline(turn: TurnTraceRecord) {
           ...entry,
           id: `model-${entry.sequence}`,
           kind: "call_model",
-          label: "CALL MODEL #1"
+          label: "CALL MODEL #1",
+          text: entry.state === "completed" ? entry.text ?? null : null
         });
         continue;
       }
@@ -187,7 +196,7 @@ function turnTimeline(turn: TurnTraceRecord) {
         ...modelEntry,
         kind: "call_model",
         state: entry.state ?? modelEntry.state,
-        text: entry.text ?? modelEntry.text ?? null,
+        text: entry.state === "completed" ? entry.text ?? modelEntry.text ?? null : modelEntry.text ?? null,
         reasoningContent: entry.reasoningContent ?? modelEntry.reasoningContent ?? null,
         fallbackReason: entry.fallbackReason ?? modelEntry.fallbackReason ?? null,
         error: entry.error ?? modelEntry.error ?? null,
@@ -223,13 +232,7 @@ function turnStateIcon(turn: TurnTraceRecord) {
 }
 
 function turnMeta(turn: TurnTraceRecord) {
-  const metrics = buildTokenMetrics(turn);
-
-  if (turn.firstTokenLatencyMs != null) {
-    metrics.push(`延时 ${turn.firstTokenLatencyMs} ms`);
-  }
-
-  return metrics.join(" · ");
+  return buildTurnAggregateMetrics(turn).join(" · ");
 }
 
 function detailText(turn: TurnTraceRecord) {
@@ -242,6 +245,10 @@ function detailText(turn: TurnTraceRecord) {
   }
 
   return "";
+}
+
+function shouldShowTurnDetailText(turn: TurnTraceRecord) {
+  return !turnMeta(turn) && !!detailText(turn);
 }
 
 function rowToneClass(tone: DetailRowTone = "default") {
@@ -299,14 +306,6 @@ function buildContextText(buildContextObservation: BuildContextObservation | nul
   return typeof value === "string" ? value.trim() : "";
 }
 
-function turnUserMessage(turnId: string) {
-  return messages.value.find((message) => message.turnId === turnId && message.role === "user") ?? null;
-}
-
-function turnAssistantMessage(turnId: string) {
-  return messages.value.find((message) => message.turnId === turnId && message.role === "assistant") ?? null;
-}
-
 function inputKindIcon(kind: InputKind) {
   if (kind === "image") {
     return ImageIcon;
@@ -360,12 +359,12 @@ function formatDurationMs(durationMs?: number | null) {
   return durationMs < 1000 ? `${Math.round(durationMs)} ms` : `${(durationMs / 1000).toFixed(2)} s`;
 }
 
-function formatCompactDurationMs(durationMs?: number | null) {
+function formatTightCompactDurationMs(durationMs?: number | null) {
   if (durationMs == null) {
     return "";
   }
 
-  return durationMs < 1000 ? `${Math.round(durationMs)} ms` : `${(durationMs / 1000).toFixed(1)} s`;
+  return durationMs < 1000 ? `${Math.round(durationMs)}ms` : `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 function formatInteger(value?: number | null) {
@@ -451,29 +450,70 @@ function tokenSpeed(turn: TurnTraceRecord) {
     return null;
   }
 
-  const activeGenerationMs = turn.firstTokenLatencyMs != null
-    ? Math.max(turn.turnDurationMs - turn.firstTokenLatencyMs, 1)
-    : Math.max(turn.turnDurationMs, 1);
+  const activeGenerationMs = Math.max(turn.turnDurationMs, 1);
 
   const tokensPerSecond = turn.outputTokens / (activeGenerationMs / 1000);
   return Number.isFinite(tokensPerSecond) ? tokensPerSecond : null;
 }
 
-function formatTokenSpeed(turn: TurnTraceRecord) {
-  const value = tokenSpeed(turn);
-  return value != null ? `${value.toFixed(1)} token/s` : "";
+function hasTrueFirstTokenLatency(record: ProviderCallCacheRecord | null | undefined, entry: TraceTimelineEntry) {
+  if (record) {
+    return record.latencyKind === "provider_stream";
+  }
+
+  return entry.firstTokenLatencyMs != null;
 }
 
-function formatEntryTokenSpeed(entry: TraceTimelineEntry) {
+function effectiveFirstTokenLatencyMs(entry: TraceTimelineEntry, record: ProviderCallCacheRecord | null | undefined) {
+  if (!hasTrueFirstTokenLatency(record, entry)) {
+    return null;
+  }
+
+  const latency = record?.firstTokenLatencyMs ?? entry.firstTokenLatencyMs ?? null;
+  if (latency == null) {
+    return null;
+  }
+
+  if (entry.turnDurationMs != null && latency >= entry.turnDurationMs) {
+    return null;
+  }
+
+  return latency;
+}
+
+function activeGenerationDurationMs(entry: TraceTimelineEntry, record: ProviderCallCacheRecord | null | undefined) {
+  if (entry.turnDurationMs == null) {
+    return null;
+  }
+
+  const latency = effectiveFirstTokenLatencyMs(entry, record);
+  if (latency != null) {
+    return Math.max(entry.turnDurationMs - latency, 1);
+  }
+
+  return Math.max(entry.turnDurationMs, 1);
+}
+
+function formatEntryTokenSpeed(entry: TraceTimelineEntry, record?: ProviderCallCacheRecord | null) {
   if (entry.outputTokens == null || entry.turnDurationMs == null) {
     return "";
   }
 
-  const activeGenerationMs = entry.firstTokenLatencyMs != null
-    ? Math.max(entry.turnDurationMs - entry.firstTokenLatencyMs, 1)
-    : Math.max(entry.turnDurationMs, 1);
+  const activeGenerationMs = activeGenerationDurationMs(entry, record);
+  if (activeGenerationMs == null) {
+    return "";
+  }
   const value = entry.outputTokens / (activeGenerationMs / 1000);
   return Number.isFinite(value) ? `${value.toFixed(1)} token/s` : "";
+}
+
+function average(values: number[]) {
+  if (!values.length) {
+    return null;
+  }
+
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return total / values.length;
 }
 
 function timelineCallModelIndex(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
@@ -491,10 +531,11 @@ function timelineProviderCallRecord(turn: TurnTraceRecord, entry: TraceTimelineE
   return index >= 0 ? turn.providerCallRecords?.[index] ?? null : null;
 }
 
-function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry): TraceTimelineEntry {
+function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry, options: { allowTurnFallback?: boolean } = {}): TraceTimelineEntry {
   const record = timelineProviderCallRecord(turn, entry);
+  const allowTurnFallback = options.allowTurnFallback ?? true;
   const callModelEntries = turnTimeline(turn).filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model");
-  const isFinalCallModel = callModelEntries[callModelEntries.length - 1]?.id === entry.id;
+  const isFinalCallModel = allowTurnFallback && callModelEntries[callModelEntries.length - 1]?.id === entry.id;
 
   return {
     ...entry,
@@ -505,10 +546,90 @@ function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry): 
       entry.reasoningTokens ?? record?.reasoningTokens ?? (isFinalCallModel ? reasoningTokens(turn) ?? null : null),
     outputTokens: entry.outputTokens ?? record?.outputTokens ?? (isFinalCallModel ? turn.outputTokens ?? null : null),
     totalTokens: entry.totalTokens ?? record?.totalTokens ?? (isFinalCallModel ? turn.totalTokens ?? null : null),
-    firstTokenLatencyMs:
-      entry.firstTokenLatencyMs ?? record?.firstTokenLatencyMs ?? (isFinalCallModel ? turn.firstTokenLatencyMs ?? null : null),
-    turnDurationMs: entry.turnDurationMs ?? (isFinalCallModel ? turn.turnDurationMs ?? null : null)
+    firstTokenLatencyMs: effectiveFirstTokenLatencyMs(
+      {
+        ...entry,
+        firstTokenLatencyMs: record?.firstTokenLatencyMs ?? entry.firstTokenLatencyMs ?? (isFinalCallModel ? turn.firstTokenLatencyMs ?? null : null),
+        turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (isFinalCallModel ? turn.turnDurationMs ?? null : null)
+      },
+      record
+    ),
+    turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (isFinalCallModel ? turn.turnDurationMs ?? null : null)
   };
+}
+
+function traceStateLabel(state: TraceTimelineEntry["state"]) {
+  switch (state) {
+    case "completed":
+      return "已完成";
+    case "active":
+      return "进行中";
+    case "error":
+      return "失败";
+    case "pending":
+      return "待执行";
+    default:
+      return "";
+  }
+}
+
+function formatProviderModel(providerName?: string | null, providerModel?: string | null) {
+  const provider = providerName?.trim();
+  const model = providerModel?.trim();
+  if (provider && model) {
+    return `${provider}/${model}`;
+  }
+
+  return provider || model || "";
+}
+
+function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
+  const callModelEntries = turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model");
+  const perCallMetrics = callModelEntries.map((entry) => timelineMetricEntry(turn, entry, { allowTurnFallback: false }));
+  const hasPerCallMetrics = perCallMetrics.some((entry) =>
+    entry.inputTokens != null
+    || entry.cacheHitInputTokens != null
+    || entry.outputTokens != null
+    || entry.firstTokenLatencyMs != null
+    || entry.turnDurationMs != null
+  );
+
+  const inputs = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.inputTokens).filter((value): value is number => value != null) : [];
+  const caches = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.cacheHitInputTokens).filter((value): value is number => value != null) : [];
+  const outputs = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.outputTokens).filter((value): value is number => value != null) : [];
+  const latencies = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.firstTokenLatencyMs).filter((value): value is number => value != null) : [];
+  const generationDurations = hasPerCallMetrics
+    ? callModelEntries
+      .map((entry, index) => activeGenerationDurationMs(perCallMetrics[index]!, timelineProviderCallRecord(turn, entry)))
+      .filter((value): value is number => value != null)
+    : [];
+
+  const metrics: string[] = [];
+  const inputTotal = inputs.length ? inputs.reduce((sum, value) => sum + value, 0) : turn.inputTokens ?? null;
+  const cacheTotal = caches.length ? caches.reduce((sum, value) => sum + value, 0) : cacheHitInputTokens(turn);
+  const outputTotal = outputs.length ? outputs.reduce((sum, value) => sum + value, 0) : turn.outputTokens ?? null;
+  const speedAverage = outputTotal != null && generationDurations.length
+    ? outputTotal / (generationDurations.reduce((sum, value) => sum + value, 0) / 1000)
+    : tokenSpeed(turn);
+  const latencyAverage = latencies.length ? average(latencies) : turn.firstTokenLatencyMs ?? null;
+
+  if (inputTotal != null) {
+    metrics.push(`输入 ${formatInteger(inputTotal)}`);
+  }
+  if (cacheTotal != null) {
+    metrics.push(`缓存 ${formatInteger(cacheTotal)}`);
+  }
+  if (outputTotal != null) {
+    metrics.push(`输出 ${formatInteger(outputTotal)}`);
+  }
+  if (speedAverage != null) {
+    metrics.push(`速度 ${speedAverage.toFixed(1)} token/s`);
+  }
+  if (latencyAverage != null) {
+    metrics.push(`延时 ${Math.round(latencyAverage)} ms`);
+  }
+
+  return metrics;
 }
 
 function canonicalTraceTimelineKind(kind: TraceTimelineEntry["kind"]) {
@@ -534,20 +655,20 @@ function timelineEntryStats(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const metricEntry = timelineMetricEntry(turn, entry);
   const stats: string[] = [];
   if (metricEntry.inputTokens != null) {
-    stats.push(`输入 ${metricEntry.inputTokens}`);
+    stats.push(`输入 ${formatInteger(metricEntry.inputTokens)}`);
   }
   if (metricEntry.cacheHitInputTokens != null) {
-    stats.push(`命中缓存 ${metricEntry.cacheHitInputTokens}`);
-  }
-  if (metricEntry.reasoningTokens != null) {
-    stats.push(`思考链 ${metricEntry.reasoningTokens}`);
+    stats.push(`缓存 ${formatInteger(metricEntry.cacheHitInputTokens)}`);
   }
   if (metricEntry.outputTokens != null) {
-    stats.push(`输出 ${metricEntry.outputTokens}`);
+    stats.push(`输出 ${formatInteger(metricEntry.outputTokens)}`);
   }
   const tokenSpeed = formatEntryTokenSpeed(metricEntry);
   if (tokenSpeed) {
-    stats.push(tokenSpeed);
+    stats.push(`速度 ${tokenSpeed}`);
+  }
+  if (metricEntry.firstTokenLatencyMs != null) {
+    stats.push(`延时 ${metricEntry.firstTokenLatencyMs} ms`);
   }
   return stats;
 }
@@ -562,25 +683,71 @@ function timelineDurationText(turn: TurnTraceRecord, entry: TraceTimelineEntry) 
   if (kind === "call_model") {
     const metricEntry = timelineMetricEntry(turn, entry);
     if (metricEntry.turnDurationMs != null) {
-      const tokenSpeed = formatEntryTokenSpeed(metricEntry);
-      const latencyText =
-        metricEntry.firstTokenLatencyMs != null ? `延时 ${metricEntry.firstTokenLatencyMs} ms` : "";
-      return [latencyText, metricEntry.turnDurationMs != null ? `耗时 ${formatDurationMs(metricEntry.turnDurationMs)}` : "", tokenSpeed]
-        .filter(Boolean)
-        .join(" · ");
-    }
-    if (metricEntry.firstTokenLatencyMs != null) {
-      return `延时 ${metricEntry.firstTokenLatencyMs} ms`;
+      return formatDurationMs(metricEntry.turnDurationMs);
     }
   }
 
   return "";
 }
 
-function timelinePreviewText(entry: TraceTimelineEntry) {
+function timelineEntryIndex(turn: TurnTraceRecord, entryId: string) {
+  return turnTimeline(turn).findIndex((candidate) => candidate.id === entryId);
+}
+
+function callModelOutputToolEntries(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+    return [];
+  }
+
+  const timeline = turnTimeline(turn);
+  const entryIndex = timelineEntryIndex(turn, entry.id);
+  if (entryIndex === -1) {
+    return [];
+  }
+
+  const outputEntries: TraceTimelineEntry[] = [];
+  for (let index = entryIndex + 1; index < timeline.length; index += 1) {
+    const candidate = timeline[index]!;
+    const kind = canonicalTraceTimelineKind(candidate.kind);
+    if (kind === "call_model") {
+      break;
+    }
+    if (kind === "call_tool") {
+      outputEntries.push(candidate);
+    }
+  }
+
+  return outputEntries;
+}
+
+function callModelToolOutputSummary(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  const toolNames = callModelOutputToolEntries(turn, entry)
+    .flatMap((toolEntry) => toolEntry.toolActivities ?? [])
+    .map((activity) => activity.name?.trim() ?? "")
+    .filter(Boolean);
+
+  if (!toolNames.length) {
+    return "";
+  }
+
+  return `工具调用: ${toolNames.join(" · ")}`;
+}
+
+function timelinePreviewText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const kind = canonicalTraceTimelineKind(entry.kind);
   if (kind === "call_tool") {
-    return entry.toolActivities?.[0]?.summary ?? "";
+    return "";
+  }
+
+  if (kind === "call_model") {
+    return (
+      entry.error?.trim()
+      || entry.fallbackReason?.trim()
+      || entry.text?.trim()
+      || callModelToolOutputSummary(turn, entry)
+      || entry.reasoningContent?.trim()
+      || ""
+    );
   }
 
   if (entry.text?.trim()) {
@@ -602,41 +769,12 @@ function timelinePreviewText(entry: TraceTimelineEntry) {
   return "";
 }
 
-function timelinePurposeText(entry: TraceTimelineEntry) {
-  switch (canonicalTraceTimelineKind(entry.kind)) {
-    case "input":
-      return "记录本轮进入 agent 的用户输入。";
-    case "prepare_retrieval":
-      return "记录 retrieval 参与请求准备的阶段信号。";
-    case "build_context":
-      return "记录本轮真正发送给模型前的上下文组织结果。";
-    case "call_model":
-      return "对应一次独立的模型调用，不与其他 hop 合并。";
-    case "call_tool":
-      return "对应一次独立的工具调用，不与其他 hop 合并。";
-    default:
-      return "";
-  }
-}
-
 function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const rows: TimelineDetailRow[] = [];
   const kind = canonicalTraceTimelineKind(entry.kind);
 
   if (kind === "input") {
-    pushRow(rows, "标题", turn.title);
-    pushRow(rows, "输入", timelinePreviewText(entry), { multiline: true });
-    return rows;
-  }
-
-  if (kind === "prepare_retrieval") {
-    pushRow(rows, "阶段", "prepare_retrieval");
-    pushRow(
-      rows,
-      "观测说明",
-      "这一阶段表示 retrieval 已参与本轮请求准备，后续 build_context 会展示真正发给模型的上下文摘要。",
-      { multiline: true, tone: "muted" }
-    );
+    pushRow(rows, "输入", timelinePreviewText(turn, entry), { multiline: true });
     return rows;
   }
 
@@ -660,29 +798,19 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
 
   if (kind === "call_model") {
     const metricEntry = timelineMetricEntry(turn, entry);
-    pushRow(rows, "Provider", entry.providerName);
-    pushRow(rows, "Protocol", entry.providerProtocol);
-    pushRow(rows, "Model", entry.providerModel);
-    pushRow(rows, "来源", entry.providerSource);
-    pushRow(rows, "模式", entry.providerMode);
+    pushRow(rows, "阶段", traceStateLabel(entry.state));
+    pushRow(rows, "模型", formatProviderModel(entry.providerName, entry.providerModel));
     pushRow(rows, "输入", metricEntry.inputTokens);
-    pushRow(rows, "命中缓存", metricEntry.cacheHitInputTokens);
-    pushRow(rows, "思考链", metricEntry.reasoningTokens);
+    pushRow(rows, "缓存", metricEntry.cacheHitInputTokens);
     pushRow(rows, "输出", metricEntry.outputTokens);
-    pushRow(rows, "总计", metricEntry.totalTokens);
-    pushRow(rows, "首 token", metricEntry.firstTokenLatencyMs != null ? `${metricEntry.firstTokenLatencyMs} ms` : null);
+    pushRow(rows, "速度", formatEntryTokenSpeed(metricEntry) || null);
+    pushRow(rows, "延时", metricEntry.firstTokenLatencyMs != null ? `${metricEntry.firstTokenLatencyMs} ms` : null);
     pushRow(rows, "耗时", metricEntry.turnDurationMs != null ? formatDurationMs(metricEntry.turnDurationMs) : null);
-    pushRow(rows, "速率", formatEntryTokenSpeed(metricEntry) || null);
-    pushRow(rows, "输出预览", timelinePreviewText(entry), { multiline: true, expandable: true });
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
   }
 
   if (kind === "call_tool") {
-    const parentTool = entry.toolActivities?.[0];
-    pushRow(rows, "工具", parentTool?.name);
-    pushRow(rows, "状态", parentTool?.status);
-    pushRow(rows, "摘要", parentTool?.summary, { multiline: true });
     pushRow(rows, "耗时", timelineDurationText(turn, entry));
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
@@ -692,21 +820,10 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
 }
 
 function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
-  const userMessage = turnUserMessage(turn.turnId);
-  const assistantMessage = turnAssistantMessage(turn.turnId);
   const sections: TraceDetailSection[] = [];
   const kind = canonicalTraceTimelineKind(entry.kind);
 
   if (kind === "input") {
-    const inputText = entry.text?.trim() || userMessage?.content?.trim() || "";
-    if (inputText) {
-      sections.push({
-        id: "input-message",
-        label: "输入原文",
-        content: inputText,
-        summary: previewInline(inputText)
-      });
-    }
     return sections;
   }
 
@@ -751,23 +868,55 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
     return sections;
   }
 
-  const reasoningContent = entry.reasoningContent?.trim() || assistantMessage?.reasoningContent?.trim() || "";
+  for (const [toolEntryIndex, toolEntry] of callModelOutputToolEntries(turn, entry).entries()) {
+    const activities = toolEntry.toolActivities ?? [];
+    if (!activities.length) {
+      const fallbackContent = [toolEntry.text?.trim(), toolEntry.error?.trim()].filter(Boolean).join("\n\n");
+      if (fallbackContent) {
+        sections.push({
+          id: `tool-output-${toolEntry.id}`,
+          label: `工具调用输出 #${toolEntryIndex + 1}`,
+          content: fallbackContent,
+          summary: previewResult(fallbackContent),
+          kind: "tool",
+          toolStatus: "planned"
+        });
+      }
+      continue;
+    }
+
+    for (const activity of activities) {
+      sections.push({
+        id: `tool-output-${toolEntry.id}-${activity.id}`,
+        label: `工具调用输出 · ${activity.name}`,
+        content: buildToolMessageDetail(activity),
+        summary: activity.summary,
+        kind: "tool",
+        toolStatus: activity.status,
+        durationText: formatDuration(activity.durationSeconds)
+      });
+    }
+  }
+
+  const reasoningContent = entry.reasoningContent?.trim() || "";
   if (reasoningContent) {
     sections.push({
       id: "reasoning",
       label: "思考链",
       content: reasoningContent,
-      summary: previewResult(reasoningContent)
+      summary: previewResult(reasoningContent),
+      kind: "model"
     });
   }
 
-  const outputContent = entry.text?.trim() || assistantMessage?.content?.trim() || "";
+  const outputContent = entry.text?.trim() || "";
   if (outputContent) {
     sections.push({
       id: "assistant-output",
       label: "模型输出",
       content: outputContent,
-      summary: previewResult(outputContent)
+      summary: previewResult(outputContent),
+      kind: "model"
     });
   }
 
@@ -796,7 +945,7 @@ function buildToolMessageDetail(activity: ToolActivity) {
 
 function buildTimelineCopyText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const lines = [`${entry.label}`, `状态: ${entry.state}`];
-  const preview = timelinePreviewText(entry);
+  const preview = timelinePreviewText(turn, entry);
   if (preview) {
     lines.push("", preview);
   }
@@ -806,37 +955,8 @@ function buildTimelineCopyText(turn: TurnTraceRecord, entry: TraceTimelineEntry)
   return lines.join("\n");
 }
 
-function buildTokenMetrics(turn: TurnTraceRecord) {
-  const metrics: string[] = [];
-
-  if (turn.inputTokens != null) {
-    metrics.push(`输入 ${turn.inputTokens}`);
-  }
-
-  const cacheTokens = cacheHitInputTokens(turn);
-  if (cacheTokens != null) {
-    metrics.push(`命中缓存 ${cacheTokens}`);
-  }
-
-  const reasoning = reasoningTokens(turn);
-  if (reasoning != null) {
-    metrics.push(`思考链 ${reasoning}`);
-  }
-
-  if (turn.outputTokens != null) {
-    metrics.push(`输出 ${turn.outputTokens}`);
-  }
-
-  const throughput = formatTokenSpeed(turn);
-  if (throughput) {
-    metrics.push(throughput);
-  }
-
-  return metrics;
-}
-
 function turnDurationText(turn: TurnTraceRecord) {
-  return turn.turnDurationMs != null ? formatCompactDurationMs(turn.turnDurationMs) : "";
+  return turn.turnDurationMs != null ? formatTightCompactDurationMs(turn.turnDurationMs) : "";
 }
 
 function toolStatusIcon(status: ToolActivity["status"]) {
@@ -1212,12 +1332,12 @@ watch(
                       />
                       <span class="truncate">{{ turn.title }}</span>
                     </div>
-                    <div v-if="turnMeta(turn)" class="pl-[1.125rem] text-[10px] leading-[1.3] text-stone-400">
+                    <div v-if="turnMeta(turn)" class="pl-[1.125rem] text-[10px] leading-[1.15] text-stone-400">
                       {{ turnMeta(turn) }}
                     </div>
                   </div>
                   <div class="flex items-center gap-1">
-                    <span v-if="turnDurationText(turn)" class="text-[10px] leading-[1.3] text-stone-400">
+                    <span v-if="turnDurationText(turn)" class="shrink-0 whitespace-nowrap text-[10px] leading-[1.3] text-stone-400">
                       {{ turnDurationText(turn) }}
                     </span>
                     <button
@@ -1233,7 +1353,7 @@ watch(
 
                 <div class="collapsible-body">
                   <div class="collapsible-content mt-1 space-y-1 pl-4">
-                    <p v-if="detailText(turn)" class="break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]">
+                    <p v-if="shouldShowTurnDetailText(turn)" class="break-words text-[10px] leading-[1.2] text-stone-500 [overflow-wrap:anywhere]">
                       {{ detailText(turn) }}
                     </p>
 
@@ -1263,29 +1383,29 @@ watch(
                             />
                             <span class="truncate">{{ entry.label }}</span>
                           </div>
-                          <div class="pl-[1.125rem] text-[10px] text-stone-400">
-                            <div class="flex flex-wrap items-center gap-2">
-                            <span
-                              v-for="stat in timelineEntryStats(turn, entry)"
+                          <div class="pl-[1.125rem] text-[10px] leading-[1.1] text-stone-400">
+                            <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                              <span
+                                v-for="stat in timelineEntryStats(turn, entry)"
                                 :key="turn.turnId + '-' + entry.id + '-' + stat"
-                              class="text-stone-400"
-                            >
-                              {{ stat }}
-                            </span>
-                            <span v-if="timelineDurationText(turn, entry)" class="text-stone-400">
-                              {{ timelineDurationText(turn, entry) }}
-                            </span>
+                                class="text-stone-400"
+                              >
+                                {{ stat }}
+                              </span>
                             </div>
                             <div
-                              v-if="timelinePreviewText(entry) && activeTraceStepKey !== turnStepKey(turn.turnId, entry.id)"
-                              class="mt-0.5 break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]"
+                              v-if="timelinePreviewText(turn, entry) && activeTraceStepKey !== turnStepKey(turn.turnId, entry.id)"
+                              class="mt-0.5 break-words text-[10px] leading-[1.2] text-stone-500 [overflow-wrap:anywhere]"
                             >
-                              {{ timelinePreviewText(entry) }}
+                              {{ timelinePreviewText(turn, entry) }}
                             </div>
                           </div>
                         </div>
 
                         <div class="flex items-center gap-1">
+                          <span v-if="timelineDurationText(turn, entry)" class="shrink-0 whitespace-nowrap text-[10px] leading-[1.3] text-stone-400">
+                            {{ timelineDurationText(turn, entry) }}
+                          </span>
                           <button
                             class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                             type="button"
@@ -1302,12 +1422,6 @@ watch(
 
                       <div class="collapsible-body">
                         <div class="collapsible-content mt-1 pl-4">
-                          <div class="mb-2 flex items-start gap-1.5 text-[10px] font-light leading-[1.35] text-stone-400 [overflow-wrap:anywhere]">
-                            <Info class="mt-[1px] h-3 w-3 shrink-0" />
-                            <p class="min-w-0 break-words [overflow-wrap:anywhere]">
-                              {{ timelinePurposeText(entry) }}
-                            </p>
-                          </div>
                           <section>
                             <div class="space-y-1">
                               <div
@@ -1349,76 +1463,102 @@ watch(
                             </div>
                           </section>
 
-                          <section
-                            v-for="section in buildTimelineDetailSections(turn, entry)"
-                            :key="traceDetailKey(turn.turnId, entry.id, section.id)"
-                            class="collapsible-shell mt-2 overflow-hidden border-l border-stone-200/80 pl-2"
-                            :data-open="activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id)"
-                          >
-                            <button
-                              class="flex w-full items-start justify-between gap-1.5 py-0.5 text-left"
-                              type="button"
-                              :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
-                              @click="toggleTraceDetail(turn.turnId, entry.id, section.id)"
+                          <template v-for="section in buildTimelineDetailSections(turn, entry)" :key="traceDetailKey(turn.turnId, entry.id, section.id)">
+                            <section
+                              v-if="section.kind === 'model'"
+                              class="mt-2 border-l border-stone-200/80 pl-2"
                             >
-                              <template v-if="section.kind === 'tool'">
-                                <div class="flex min-w-0 items-center gap-1.5">
-                                  <component
-                                    :is="toolStatusIcon(section.toolStatus ?? 'planned')"
-                                    class="h-3 w-3 shrink-0"
-                                    :class="toolStatusIconClass(section.toolStatus ?? 'planned')"
-                                  />
-                                  <div class="min-w-0 truncate text-[10px] uppercase tracking-[0.14em] text-stone-500">
-                                    {{ section.label }}
-                                  </div>
+                              <div class="flex items-start justify-between gap-1.5 py-0.5">
+                                <div class="min-w-0 text-[10px] uppercase tracking-[0.14em] text-stone-400">
+                                  {{ section.label }}
                                 </div>
-                                <div class="ml-auto flex items-center gap-1">
-                                  <span v-if="section.durationText" class="text-[10px] text-stone-400">
-                                    {{ section.durationText }}
-                                  </span>
-                                  <button
-                                    class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
-                                    type="button"
-                                    @click.stop="copyText(traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
-                                  >
-                                    <component :is="copiedKey === traceDetailKey(turn.turnId, entry.id, section.id) ? Check : Copy" class="h-3 w-3" />
-                                  </button>
+                                <button
+                                  class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                                  type="button"
+                                  :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
+                                  @click.stop="copyText(traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
+                                >
+                                  <component :is="copiedKey === traceDetailKey(turn.turnId, entry.id, section.id) ? Check : Copy" class="h-3 w-3" />
+                                </button>
+                              </div>
+                              <div
+                                class="mt-1 min-w-0 whitespace-pre-wrap break-words pl-4 text-[10px] leading-[1.25] [overflow-wrap:anywhere]"
+                                :class="rowToneClass(section.tone)"
+                              >
+                                {{ section.content }}
+                              </div>
+                            </section>
+
+                            <section
+                              v-else
+                              class="collapsible-shell mt-2 overflow-hidden border-l border-stone-200/80 pl-2"
+                              :data-open="activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id)"
+                            >
+                              <button
+                                class="flex w-full items-start justify-between gap-1.5 py-0.5 text-left"
+                                type="button"
+                                :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
+                                @click="toggleTraceDetail(turn.turnId, entry.id, section.id)"
+                              >
+                                <template v-if="section.kind === 'tool'">
+                                  <div class="flex min-w-0 items-center gap-1.5">
+                                    <component
+                                      :is="toolStatusIcon(section.toolStatus ?? 'planned')"
+                                      class="h-3 w-3 shrink-0"
+                                      :class="toolStatusIconClass(section.toolStatus ?? 'planned')"
+                                    />
+                                    <div class="min-w-0 truncate text-[10px] uppercase tracking-[0.14em] text-stone-500">
+                                      {{ section.label }}
+                                    </div>
+                                  </div>
+                                  <div class="ml-auto flex items-center gap-1">
+                                    <span v-if="section.durationText" class="text-[10px] text-stone-400">
+                                      {{ section.durationText }}
+                                    </span>
+                                    <button
+                                      class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                                      type="button"
+                                      @click.stop="copyText(traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
+                                    >
+                                      <component :is="copiedKey === traceDetailKey(turn.turnId, entry.id, section.id) ? Check : Copy" class="h-3 w-3" />
+                                    </button>
+                                    <ChevronRight
+                                      class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
+                                      :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id) }"
+                                    />
+                                  </div>
+                                </template>
+                                <template v-else>
+                                  <div class="min-w-0">
+                                    <div class="text-[10px] uppercase tracking-[0.14em] text-stone-400">
+                                      {{ section.label }}
+                                    </div>
+                                    <div
+                                      v-if="section.summary && activeTraceDetailKey !== traceDetailKey(turn.turnId, entry.id, section.id)"
+                                      class="mt-0.5 pl-1 break-words text-[10px] leading-[1.2] text-stone-500 [overflow-wrap:anywhere]"
+                                    >
+                                      {{ section.summary }}
+                                    </div>
+                                  </div>
                                   <ChevronRight
                                     class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
                                     :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id) }"
                                   />
-                                </div>
-                              </template>
-                              <template v-else>
-                                <div class="min-w-0">
-                                  <div class="text-[10px] uppercase tracking-[0.14em] text-stone-400">
-                                    {{ section.label }}
-                                  </div>
-                                  <div
-                                    v-if="section.summary && activeTraceDetailKey !== traceDetailKey(turn.turnId, entry.id, section.id)"
-                                    class="mt-0.5 pl-1 break-words text-[10px] leading-[1.35] text-stone-500 [overflow-wrap:anywhere]"
-                                  >
-                                    {{ section.summary }}
-                                  </div>
-                                </div>
-                                <ChevronRight
-                                  class="mt-0.5 h-3 w-3 shrink-0 text-stone-300 transition duration-200"
-                                  :class="{ 'rotate-90': activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id) }"
-                                />
-                              </template>
-                            </button>
+                                </template>
+                              </button>
 
-                            <div class="collapsible-body">
-                              <div class="collapsible-content mt-1 pl-4">
-                                <div
-                                  class="min-w-0 whitespace-pre-wrap break-words text-[10px] leading-[1.4] [overflow-wrap:anywhere]"
-                                  :class="rowToneClass(section.tone)"
-                                >
-                                  {{ section.content }}
+                              <div class="collapsible-body">
+                                <div class="collapsible-content mt-1 pl-4">
+                                  <div
+                                    class="min-w-0 whitespace-pre-wrap break-words text-[10px] leading-[1.25] [overflow-wrap:anywhere]"
+                                    :class="rowToneClass(section.tone)"
+                                  >
+                                    {{ section.content }}
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          </section>
+                            </section>
+                          </template>
                         </div>
                       </div>
                     </section>
