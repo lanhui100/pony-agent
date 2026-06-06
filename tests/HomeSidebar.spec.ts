@@ -304,6 +304,78 @@ describe("HomeSidebar", () => {
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
   }, 10000);
 
+  it("默认展开最新一条 turn，而不是停留在旧 failed turn", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-old-failed",
+          title: "旧失败轮次",
+          phase: "failed",
+          error: "old failure",
+          updatedAt: 1000,
+          traceTimeline: [
+            {
+              id: "model-old",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "error",
+              sequence: 3,
+              error: "old failure"
+            }
+          ]
+        }),
+        createTraceRecord({
+          turnId: "turn-new-completed",
+          title: "新成功轮次",
+          phase: "completed",
+          updatedAt: 2000,
+          buildContextObservation: createBuildContextObservation(),
+          traceTimeline: [
+            {
+              id: "input-new",
+              kind: "input",
+              label: "RECEIVE INPUT",
+              state: "completed",
+              sequence: 1,
+              text: "src/agent中是怎么组织的？"
+            },
+            {
+              id: "context-new",
+              kind: "build_context",
+              label: "BUILD CONTEXT",
+              state: "completed",
+              sequence: 2,
+              buildContextObservation: createBuildContextObservation()
+            },
+            {
+              id: "model-new",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 3,
+              text: "这是最新成功轮次"
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const latestTurnButton = wrapper.findAll("button").find((button) => button.text().includes("新成功轮次"));
+    const oldTurnButton = wrapper.findAll("button").find((button) => button.text().includes("旧失败轮次"));
+
+    const latestTurnSection = latestTurnButton?.element.closest('section[data-open]');
+    const oldTurnSection = oldTurnButton?.element.closest('section[data-open]');
+
+    expect(latestTurnSection?.getAttribute("data-open")).toBe("true");
+    expect(oldTurnSection?.getAttribute("data-open")).not.toBe("true");
+    expect(latestTurnSection?.textContent ?? "").toContain("这是最新成功轮次");
+    expect(latestTurnSection?.textContent ?? "").not.toContain("old failure");
+  });
+
   it("将 retrieval 全局信息归并到状态面板，并清理冗余字段", async () => {
     const buildContextObservation = createBuildContextObservation();
     const runtimeStore = useRuntimeStore();

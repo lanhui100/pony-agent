@@ -22,7 +22,8 @@ const MAX_FULL_READ_BYTES: u64 = 120_000;
 const MAX_SEARCH_FILE_BYTES: u64 = 1_000_000;
 const MAX_SEARCH_FILES: usize = 800;
 const MAX_PATH_REPAIR_SEARCH_FILES: usize = 2_000;
-const MAX_BATCH_CALLS: usize = 6;
+const MAX_WORKSPACE_BATCH_CALLS: usize = 24;
+const MAX_GATHER_CONTEXT_PATHS: usize = 6;
 const MAX_SEGMENT_LINES: usize = 400;
 const DEFAULT_SEGMENT_LINES: usize = 80;
 const DEFAULT_LIST_LIMIT: usize = 40;
@@ -630,13 +631,13 @@ impl ToolRouter {
             }
         };
 
-        if calls.len() > MAX_BATCH_CALLS {
+        if calls.len() > MAX_WORKSPACE_BATCH_CALLS {
             return error_result(
                 TOOL_WORKSPACE_BATCH,
                 "too_many_calls",
                 format!(
                     "单次 workspace_batch 最多允许 {} 个子调用，当前收到 {} 个。",
-                    MAX_BATCH_CALLS,
+                    MAX_WORKSPACE_BATCH_CALLS,
                     calls.len()
                 ),
                 Some("请把批量请求拆小后重试。".to_string()),
@@ -803,13 +804,13 @@ impl ToolRouter {
         let paths = unique_paths(paths);
 
         if !paths.is_empty() {
-            if paths.len() > MAX_BATCH_CALLS {
+            if paths.len() > MAX_GATHER_CONTEXT_PATHS {
                 return error_result(
                     TOOL_WORKSPACE_GATHER_CONTEXT,
                     "too_many_paths",
                     format!(
                         "单次 workspace_gather_context 最多允许 {} 个路径，当前收到 {} 个。",
-                        MAX_BATCH_CALLS,
+                        MAX_GATHER_CONTEXT_PATHS,
                         paths.len()
                     ),
                     Some("请缩小本次聚合范围，或拆成多个 gather/batch 调用。".to_string()),
@@ -2181,12 +2182,12 @@ mod tests {
     #[test]
     fn gather_context_rejects_too_many_paths() {
         let workspace = temp_workspace();
-        for index in 0..=MAX_BATCH_CALLS {
+        for index in 0..=MAX_GATHER_CONTEXT_PATHS {
             fs::write(workspace.join(format!("demo-{index}.rs")), "fn demo() {}\n")
                 .expect("write demo");
         }
         let router = ToolRouter::with_workspace_root(workspace.clone());
-        let paths = (0..=MAX_BATCH_CALLS)
+        let paths = (0..=MAX_GATHER_CONTEXT_PATHS)
             .map(|index| Value::String(format!("demo-{index}.rs")))
             .collect::<Vec<_>>();
 
@@ -2209,6 +2210,43 @@ mod tests {
                 .and_then(Value::as_str),
             Some("too_many_paths")
         );
+    }
+
+    #[test]
+    fn workspace_batch_accepts_seventeen_subcalls_for_repo_exploration() {
+        let workspace = temp_workspace();
+        for index in 0..17 {
+            fs::write(
+                workspace.join(format!("demo-{index}.txt")),
+                format!("file {index}\n"),
+            )
+            .expect("write demo");
+        }
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+        let calls = (0..17)
+            .map(|index| {
+                json!({
+                    "name": TOOL_WORKSPACE_PATH_INFO,
+                    "arguments": { "path": format!("demo-{index}.txt") }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({
+                "parallel": true,
+                "continueOnError": true,
+                "calls": calls
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        assert_eq!(payload.get("successCount").and_then(Value::as_u64), Some(17));
+        assert_eq!(payload.get("status").and_then(Value::as_str), Some("ok"));
     }
 
     #[test]

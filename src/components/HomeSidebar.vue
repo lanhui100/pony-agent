@@ -105,7 +105,24 @@ const longTermMemoryEntries = computed(() => retrievedLongTermMemory.value?.entr
 const longTermMemoryPreviewEntries = computed(() => longTermMemoryEntries.value.slice(0, 3));
 const retrievedActiveTaskFocus = computed(() => extractActiveTaskFocus(longTermMemoryEntries.value)?.trim() ?? "");
 
-const orderedTurnTraces = computed(() => [...turnTraceHistory.value]);
+function turnTraceSortKey(turn: TurnTraceRecord) {
+  return turn.updatedAt
+    ?? turn.emittedAtMs
+    ?? turn.sequence
+    ?? 0;
+}
+
+function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
+  const leftKey = turnTraceSortKey(left);
+  const rightKey = turnTraceSortKey(right);
+  if (leftKey !== rightKey) {
+    return leftKey - rightKey;
+  }
+
+  return left.turnId.localeCompare(right.turnId);
+}
+
+const orderedTurnTraces = computed(() => [...turnTraceHistory.value].sort(compareTurnTraceOrder));
 const latestTurn = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1] ?? null);
 const latestTurnId = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1]?.turnId ?? "");
 const currentContextWindowTokens = computed(
