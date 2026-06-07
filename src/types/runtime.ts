@@ -18,6 +18,34 @@ export type RuntimePhase =
   | "calling_tool"
   | "failed";
 
+export type TurnLifecyclePhase =
+  | "created"
+  | "preparing"
+  | "building_context"
+  | "calling_model"
+  | "streaming_response"
+  | "executing_tool"
+  | "tool_result_integrating"
+  | "checkpointing"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type TurnLifecycleEventType =
+  | "turn.created"
+  | "turn.phase_changed"
+  | "turn.context_built"
+  | "turn.model_call_started"
+  | "turn.first_token"
+  | "turn.output_delta"
+  | "turn.tool_call_started"
+  | "turn.tool_call_completed"
+  | "turn.trace_updated"
+  | "turn.checkpoint_persisted"
+  | "turn.completed"
+  | "turn.failed"
+  | "turn.cancelled";
+
 export type AttachmentReference = {
   id: string;
   assetId?: string | null;
@@ -92,6 +120,21 @@ export type CapabilityFailureKind =
   | "malformed_response"
   | "invocation_failed"
   | "capability_not_found";
+export type SkillSourceKind = "host" | "mcp";
+export type SkillFailureLayer =
+  | "skill_resolution"
+  | "source_unavailable"
+  | "permission_denied"
+  | "malformed_composition"
+  | "unsupported_composition"
+  | "underlying_capability_execution";
+
+export type SourceIngressObservation = {
+  boundary: string;
+  summary: string;
+  candidateIds: string[];
+  observedAtMs: number;
+};
 
 export type CapabilityInvocationRecord = {
   toolName: string;
@@ -104,6 +147,11 @@ export type CapabilityInvocationRecord = {
   requiresApproval?: boolean | null;
   hostMediated?: boolean | null;
   permissionScope?: string | null;
+  skillId?: string | null;
+  skillSourceId?: string | null;
+  composedCapabilityRefs?: string[] | null;
+  composedCapabilityKinds?: CapabilityKind[] | null;
+  failureLayer?: SkillFailureLayer | null;
 };
 
 export type CapabilitySourceView = {
@@ -116,6 +164,7 @@ export type CapabilitySourceView = {
   declaredCapabilities: CapabilityKind[];
   permissionProfile: string;
   updatedAtMs: number;
+  lastIngressObservation?: SourceIngressObservation | null;
 };
 
 export type CapabilityView = {
@@ -133,6 +182,35 @@ export type CapabilityView = {
   requiresApproval: boolean;
   hostMediated: boolean;
   permissionScope: string;
+};
+
+export type SkillSourceView = {
+  sourceId: string;
+  sourceKind: SkillSourceKind;
+  displayName: string;
+  availability: CapabilityAvailability;
+  transportKind: string;
+  serverIdentity: string;
+  updatedAtMs: number;
+  lastIngressObservation?: SourceIngressObservation | null;
+};
+
+export type SkillDescriptor = {
+  skillId: string;
+  sourceId: string;
+  sourceKind: SkillSourceKind;
+  label: string;
+  description: string;
+  inputSchemaSummary: string;
+  safetyClass: string;
+  visibility: string;
+  observabilityTags: string[];
+  requiresApproval: boolean;
+  hostMediated: boolean;
+  permissionScope: string;
+  composedCapabilityRefs: string[];
+  composedCapabilityKinds: CapabilityKind[];
+  executableInV1: boolean;
 };
 
 export type TraceStep = {
@@ -184,6 +262,7 @@ export type PrefixMutationReason =
   | "session_summary_changed"
   | "run_goal_changed"
   | "long_term_memory_changed"
+  | "planner_skills_changed"
   | "image_note_changed"
   | "truncation_note_changed"
   | "history_boundary_shifted"
@@ -284,26 +363,53 @@ export type HistoryCheckoutMode = "transcript_only" | "transcript_and_workspace"
 export type HistoryControlResult = HistoryCursorState & {
   historyNodes?: HistoryNode[];
   historyBranches?: HistoryBranch[];
+  historyStateEvidence?: HistoryStateHookEvidence[] | null;
+  historyStateAuditSummary?: HistoryStateAuditSummary | null;
 };
 
 export type HistoryCheckoutResult = HistoryControlResult & {
+  sessionId: string;
+  nodeId: string;
   requestedMode: HistoryCheckoutMode;
   appliedMode: HistoryCheckoutMode;
-  workspaceRestoreApplied: boolean;
-  degradedToTranscriptOnly: boolean;
+  transcriptRestoreApplied: boolean;
+  workspaceRollbackCapable: boolean;
+  workspaceRollbackApplied: boolean;
+  degraded: boolean;
+  workspaceRestoreCapable?: boolean;
+  workspaceRestoreApplied?: boolean;
+  degradedToTranscriptOnly?: boolean;
+  degradationReason?: string | null;
 };
 
 export type HistoryRestoreResult = HistoryControlResult & {
+  sessionId: string;
+  branchId?: string | null;
+  restoredNodeId?: string | null;
+  transcriptRestoreApplied: boolean;
+  workspaceRollbackCapable: boolean;
+  workspaceRollbackApplied: boolean;
+  degraded: boolean;
   restoredFromNodeId?: string | null;
+  workspaceRestoreCapable?: boolean;
+  workspaceRestoreApplied?: boolean;
+  degradedToTranscriptOnly?: boolean;
+  degradationReason?: string | null;
 };
 
 export type HistoryForkResult = HistoryControlResult & {
-  forkedFromNodeId: string;
+  sessionId: string;
+  nodeId: string;
+  branch: HistoryBranch;
+  forkedFromNodeId?: string;
   forkedFromBranchId?: string | null;
-  createdBranchId: string;
+  createdBranchId?: string;
 };
 
 export type HistoryBranchSwitchResult = HistoryControlResult & {
+  sessionId: string;
+  branchId: string;
+  nodeId?: string | null;
   previousBranchId?: string | null;
 };
 
@@ -322,14 +428,206 @@ export type ChatMessage = {
   durationSeconds?: number | null;
 };
 
+export type HookClass = "observe" | "guard" | "transform" | "side_effect";
+
+export type TurnHookPoint =
+  | "turn_prepare_start"
+  | "turn_prepare_end"
+  | "context_build_start"
+  | "context_build_end"
+  | "model_call_start"
+  | "model_response_end"
+  | "tool_call_start"
+  | "tool_call_end"
+  | "checkpoint_persist_start"
+  | "checkpoint_persist_end"
+  | "turn_finalize_start"
+  | "turn_finalize_end"
+  | "planner_turn_preflight"
+  | "planner_tool_selection"
+  | "planner_graph_decision"
+  | "capability_resolve"
+  | "skill_tool_actions_resolve";
+
+export type HookResultKind = "observe" | "allow" | "deny" | "patch" | "side_effect_request";
+
+export type HookPatchTarget =
+  | "turn_input"
+  | "context_payload"
+  | "model_request"
+  | "memory_write_intent"
+  | "planner_facts"
+  | "capability_mediation"
+  | "tool_arguments"
+  | "tool_result"
+  | "checkpoint_metadata"
+  | "turn_output";
+
+export type HookPatchOperationKind = "set" | "merge" | "remove";
+
+export type HookPatchOperation = {
+  target: HookPatchTarget;
+  path: string;
+  operation: HookPatchOperationKind;
+  valueSummary?: string | null;
+  valueText?: string | null;
+};
+
+export type HookDenyDecision = {
+  reasonCode: string;
+  message: string;
+};
+
+export type HookSideEffectRequest = {
+  requestKind: string;
+  summary: string;
+  requiresPersistenceEvidence: boolean;
+};
+
+export type PersistedEffectEvidence = {
+  evidenceId: string;
+  effectKind: string;
+  boundary: string;
+  targetSessionId?: string | null;
+  sourceHistoryNodeId?: string | null;
+  targetSummary: string;
+  persistenceRef: string;
+  replayDecisionBasis: string;
+  persistedAtMs: number;
+  replayRequiredIfMissing: boolean;
+};
+
+export type HistoryStateHookEvidence = {
+  evidenceId: string;
+  sessionId: string;
+  boundary: string;
+  commandKind: string;
+  resultKind: string;
+  summary: string;
+  elapsedMs: number;
+  blocked: boolean;
+  degraded: boolean;
+  requestedNodeId?: string | null;
+  requestedBranchId?: string | null;
+  resolvedNodeId?: string | null;
+  resolvedBranchId?: string | null;
+  recordedAtMs: number;
+};
+
+export type HistoryStateAuditActionSummary = {
+  status: "available" | "missing" | string;
+  sourceFamily: "history_state" | string;
+  commandKind?: string | null;
+  boundary?: string | null;
+  resultKind?: string | null;
+  summary: string;
+  elapsedMs?: number | null;
+  blocked: boolean;
+  degraded: boolean;
+  evidenceId?: string | null;
+  observedAtMs?: number | null;
+  requestedNodeId?: string | null;
+  requestedBranchId?: string | null;
+  resolvedNodeId?: string | null;
+  resolvedBranchId?: string | null;
+};
+
+export type HistoryStateAuditCurrentContext = {
+  mode: HistoryCursorMode | string;
+  visibleNodeId?: string | null;
+  activeBranchId?: string | null;
+  branchHeadNodeId?: string | null;
+  workspaceNodeId?: string | null;
+};
+
+export type HistoryStateAuditSummary = {
+  action: HistoryStateAuditActionSummary;
+  currentContext: HistoryStateAuditCurrentContext;
+};
+
+export type RunControlAuditActionSummary = {
+  status: "available" | "missing" | string;
+  sourceFamily: "run_control" | string;
+  commandKind?: string | null;
+  boundary?: string | null;
+  resultKind?: string | null;
+  summary: string;
+  targetSummary: string;
+  elapsedMs?: number | null;
+  blocked: boolean;
+  degraded: boolean;
+  evidenceId?: string | null;
+  observedAtMs?: number | null;
+  runId?: string | null;
+  turnId?: string | null;
+  checkpointTurnId?: string | null;
+  checkpointKind?: string | null;
+  recoveryMode?: string | null;
+  projectedCommand?: string | null;
+  degradationReason?: string | null;
+  requestSummary?: string | null;
+  startReason?: "initial_turn" | "replay_from_checkpoint" | "restart_from_checkpoint" | string | null;
+};
+
+export type RunControlAuditCurrentContext = {
+  phase: string;
+  checkpointStatus: string;
+  activeRunId?: string | null;
+  checkpointKind?: string | null;
+  checkpointRecoveryMode?: string | null;
+  submissionPlanCommand?: string | null;
+};
+
+export type RunControlAuditSummary = {
+  actionEvidenceSummary: RunControlAuditActionSummary;
+  currentContextProjection: RunControlAuditCurrentContext;
+};
+
+export type HookStructuredResult =
+  | { resultKind: "observe"; payload: { summary: string } }
+  | { resultKind: "allow"; payload: { summary: string } }
+  | { resultKind: "deny"; payload: HookDenyDecision }
+  | { resultKind: "patch"; payload: { operations: HookPatchOperation[] } }
+  | { resultKind: "side_effect_request"; payload: HookSideEffectRequest };
+
+export type HookTraceRecord = {
+  hookName: string;
+  hookClass: HookClass;
+  hookPoint: TurnHookPoint;
+  hookOrder: number;
+  resultKind: HookResultKind;
+  structuredResult: HookStructuredResult;
+  blocked: boolean;
+  elapsedMs: number;
+  inputSummary?: string | null;
+  persistenceEvidenceRef?: string | null;
+  summary: string;
+};
+
+export type MemoryWriteIntentRecord = {
+  key: string;
+  kind: string;
+  content: string;
+  contentSummary: string;
+  source: string;
+  operation: "insert" | "update" | "noop" | string;
+};
+
 export type TurnTraceRecord = {
   turnId: string;
+  sessionId?: string | null;
+  eventId?: string | null;
+  eventType?: string | null;
+  eventVersion?: string | null;
+  sequence?: number | null;
+  emittedAtMs?: number | null;
   title: string;
   phase: RuntimePhase;
   traceSteps: TraceStep[];
   traceTimeline?: TraceTimelineEntry[];
   toolActivities: ToolActivity[];
   providerCallRecords?: ProviderCallCacheRecord[];
+  hookTraceRecords?: HookTraceRecord[];
   providerRequestedName?: string | null;
   providerName?: string | null;
   providerProtocol?: string | null;
@@ -384,6 +682,11 @@ export type SessionSnapshot = {
   history: TurnHistoryMessage[];
   attachmentAssets?: AttachmentAsset[];
   turnTraceHistory?: TurnTraceRecord[];
+  longTermMemoryEntries?: LongTermMemoryEntry[];
+  memoryWriteEvidence?: PersistedEffectEvidence[];
+  historyStateEvidence?: HistoryStateHookEvidence[];
+  historyStateAuditSummary?: HistoryStateAuditSummary | null;
+  runControlAuditSummary?: RunControlAuditSummary | null;
   turnCount: number;
   lastReferencedFile?: string | null;
   updatedAtMs: number;
@@ -507,8 +810,18 @@ export type GraphRun = {
   lastHandoff?: GraphTurnHandoff | null;
   resumeCount: number;
   lastDecision?: GraphDecision | null;
+  controlBoundaryEvidence: GraphRunControlBoundaryEvidence[];
   createdAtMs: number;
   updatedAtMs: number;
+};
+
+export type GraphRunControlBoundaryEvidence = {
+  hookPoint: string;
+  canonicalEventType: string;
+  canonicalPhase: string;
+  summary: string;
+  hookEnvelope: RunControlHookEnvelope;
+  createdAtMs: number;
 };
 
 export type GraphRunCheckpoint = {
@@ -524,6 +837,7 @@ export type GraphRunCheckpoint = {
   lastDecision?: GraphDecision | null;
   lastHandoff?: GraphTurnHandoff | null;
   resumeCount: number;
+  controlBoundaryEvidence: GraphRunControlBoundaryEvidence[];
   resumable: boolean;
   createdAtMs: number;
   updatedAtMs: number;
@@ -536,6 +850,9 @@ export type GraphRunEvent = {
   summary: string;
   stepCount: number;
   updatedAtMs: number;
+  hookPoint?: string | null;
+  canonicalEventType?: string | null;
+  canonicalPhase?: string | null;
 };
 
 export type GraphRunTurnResponse = {
@@ -548,15 +865,24 @@ export type GraphRunTurnResponse = {
 export type GraphRunControlResponse = {
   run: GraphRun;
   event: GraphRunEvent;
+  controlBoundaryEvidence?: GraphRunControlBoundaryEvidence | null;
+  runControlAuditSummary?: RunControlAuditSummary | null;
 };
 
 export type GraphRunStreamStartResponse = {
   run: GraphRun;
   event: GraphRunEvent;
+  controlBoundaryEvidence?: GraphRunControlBoundaryEvidence | null;
+  runControlAuditSummary?: RunControlAuditSummary | null;
   turnId: string;
 };
 
 export type TurnResult = {
+  eventId?: string | null;
+  eventType?: string | null;
+  eventVersion?: string | null;
+  sequence?: number | null;
+  emittedAtMs?: number | null;
   phase: RuntimePhase;
   providerRequestedName: string;
   providerName: string;
@@ -580,12 +906,19 @@ export type TurnResult = {
   traceTimeline?: TraceTimelineEntry[];
   toolActivities: ToolActivity[];
   providerCallRecords?: ProviderCallCacheRecord[];
+  hookTraceRecords?: HookTraceRecord[];
   sessionSummary: string;
 };
 
 export type TurnStreamEvent = {
+  eventId?: string | null;
+  sessionId?: string | null;
   turnId: string;
   kind: "started" | "delta" | "trace" | "tool" | "completed" | "failed" | "cancelled";
+  eventType?: TurnLifecycleEventType | string | null;
+  eventVersion?: string | null;
+  sequence?: number | null;
+  emittedAtMs?: number | null;
   phase?: RuntimePhase | string | null;
   text?: string | null;
   reasoningContent?: string | null;
@@ -609,12 +942,26 @@ export type TurnStreamEvent = {
   traceTimeline?: TraceTimelineEntry[] | null;
   toolActivities?: ToolActivity[] | null;
   providerCallRecords?: ProviderCallCacheRecord[] | null;
+  hookTraceRecords?: HookTraceRecord[] | null;
   sessionSummary?: string | null;
 };
 
 export type ExecutionCheckpoint = {
+  contractVersion?: string | null;
   turnId: string;
   sessionId?: string | null;
+  runId?: string | null;
+  checkpointKind: "runtime_control" | "recovery" | string;
+  recoveryMode?: "replay_required" | "persisted_effect" | string | null;
+  projectedRuntimePhase?: RuntimePhase | string | null;
+  submissionCommand?:
+    | "start_graph_run_stream"
+    | "resume_graph_run_stream"
+    | "continue_graph_run_stream"
+    | string
+    | null;
+  resumable: boolean;
+  replayable: boolean;
   status: string;
   phase: string;
   providerRequestedName?: string | null;
@@ -629,6 +976,7 @@ export type ExecutionCheckpoint = {
   activeToolName?: string | null;
   traceSteps: TraceStep[];
   toolActivities: ToolActivity[];
+  persistedEffectEvidence?: PersistedEffectEvidence[];
   error?: string | null;
   startedAtMs: number;
   updatedAtMs: number;
@@ -637,11 +985,38 @@ export type ExecutionCheckpoint = {
 
 export type SessionRuntimeView = {
   session: SessionSnapshot;
+  historyStateEvidence?: HistoryStateHookEvidence[] | null;
+  historyStateAuditSummary?: HistoryStateAuditSummary | null;
+  runControlAuditSummary?: RunControlAuditSummary | null;
   retrieved: RetrievedContextState;
   checkpoint?: ExecutionCheckpoint | null;
+  submissionPlan?: GraphRunSubmissionPlan | null;
+  controlBoundaryEvidence?: GraphRunControlBoundaryEvidence[] | null;
   historyNodes?: HistoryNode[];
   historyBranches?: HistoryBranch[];
   historyCursor?: HistoryCursorState | null;
+};
+
+export type GraphRunSubmissionPlan = {
+  command: "start_graph_run_stream" | "resume_graph_run_stream" | "continue_graph_run_stream" | string;
+  runId?: string | null;
+  source?: "checkpoint" | "graph_run" | "default" | string | null;
+  hookPoint?: "submission_plan_resolved" | string;
+  canonicalEventType?: "graph_run.submission_plan_resolved" | string;
+  canonicalPhase?: "ready" | "waiting_user" | "paused" | string;
+  hookEnvelope?: RunControlHookEnvelope | null;
+};
+
+export type RunControlHookEnvelope = {
+  sessionId?: string | null;
+  runId?: string | null;
+  phase: string;
+  command: "start_graph_run_stream" | "continue_graph_run_stream" | "resume_graph_run_stream" | "stop_graph_run" | string;
+  source: string;
+  checkpointKind?: string | null;
+  recoveryMode?: string | null;
+  resumable: boolean;
+  replayable: boolean;
 };
 
 export type ModelMonitorOverview = {
@@ -649,6 +1024,8 @@ export type ModelMonitorOverview = {
   requestCount: number;
   modelCallCount: number;
   toolCallCount: number;
+  hookCallCount: number;
+  blockedHookCount: number;
   failedRequestCount: number;
   retrievalParticipationCount: number;
   inputTokens: number;
@@ -657,6 +1034,8 @@ export type ModelMonitorOverview = {
   totalTokens: number;
   avgFirstTokenLatencyMs?: number | null;
   avgTurnDurationMs?: number | null;
+  avgHookDurationMs?: number | null;
+  totalHookDurationMs: number;
 };
 
 export type ModelMonitorDimensionRow = {
@@ -692,6 +1071,15 @@ export type ModelMonitorActivityRow = {
   totalDurationMs: number;
 };
 
+export type ModelMonitorHookRow = {
+  key: string;
+  label: string;
+  callCount: number;
+  blockedCallCount: number;
+  avgDurationMs?: number | null;
+  totalDurationMs: number;
+};
+
 export type ModelMonitorSessionRow = {
   sessionId: string;
   title: string;
@@ -700,6 +1088,8 @@ export type ModelMonitorSessionRow = {
   requestCount: number;
   modelCallCount: number;
   toolCallCount: number;
+  hookCallCount: number;
+  blockedHookCount: number;
   failedRequestCount: number;
   retrievalParticipationCount: number;
   inputTokens: number;
@@ -708,6 +1098,8 @@ export type ModelMonitorSessionRow = {
   totalTokens: number;
   avgFirstTokenLatencyMs?: number | null;
   avgTurnDurationMs?: number | null;
+  avgHookDurationMs?: number | null;
+  totalHookDurationMs: number;
 };
 
 export type ModelMonitorSummaryView = {
@@ -715,9 +1107,14 @@ export type ModelMonitorSummaryView = {
   providers: ModelMonitorDimensionRow[];
   models: ModelMonitorDimensionRow[];
   tools: ModelMonitorToolRow[];
+  hookClasses: ModelMonitorHookRow[];
+  hooks: ModelMonitorHookRow[];
   capabilitySources: ModelMonitorActivityRow[];
   capabilityInvocationModes: ModelMonitorActivityRow[];
   capabilityFailureClasses: ModelMonitorActivityRow[];
+  skillSelections: ModelMonitorActivityRow[];
+  skillSources: ModelMonitorActivityRow[];
+  skillFailureLayers: ModelMonitorActivityRow[];
   sessions: ModelMonitorSessionRow[];
   generatedAtMs: number;
 };
@@ -825,6 +1222,7 @@ export function deriveGraphRunFromRunState(
           targetPhase: phase
         }
       : null,
+    controlBoundaryEvidence: [],
     createdAtMs: updatedAtMs,
     updatedAtMs
   };

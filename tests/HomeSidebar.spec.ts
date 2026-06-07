@@ -304,6 +304,39 @@ describe("HomeSidebar", () => {
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
   }, 10000);
 
+  it("将会话和控制状态收敛到右侧状态栏", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: "switching",
+      latestRunControlAuditSummary: {
+        actionEvidenceSummary: {
+          status: "available",
+          sourceFamily: "run_control",
+          commandKind: "resume_graph_run_stream",
+          boundary: "resume_requested",
+          resultKind: "observe",
+          summary: "检测到暂停中的运行；点击后会恢复该 run 并继续执行。",
+          targetSummary: "恢复 run-alpha",
+          blocked: false,
+          degraded: false
+        },
+        currentContextProjection: {
+          phase: "paused",
+          checkpointStatus: "ready",
+          activeRunId: "run-alpha",
+          submissionPlanCommand: "resume_graph_run_stream"
+        }
+      }
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
+    expect(wrapper.get('[data-testid="status-control-summary"]').text()).toContain("检测到暂停中的运行");
+    expect(wrapper.get('[data-testid="status-control-summary"]').text()).toContain("resume_graph_run_stream");
+  });
+
   it("默认展开最新一条 turn，而不是停留在旧 failed turn", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -943,6 +976,7 @@ describe("HomeSidebar", () => {
     expect(wrapper.text()).toContain("\"path\":\"package.json\"");
     expect(wrapper.text()).toContain("结果:");
     expect(wrapper.text()).toContain("\"name\":\"pony-agent\"");
+    expect(wrapper.text()).not.toContain("摘要:");
   });
 
   it("多 hop 时前一个 CALL MODEL 只展示该 hop 自身输出，不回退最终 assistant 回答", async () => {
@@ -1039,12 +1073,11 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const firstModelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
-    expect(firstModelButton.text()).toContain("workspace_list_files");
+    expect(firstModelButton.text()).not.toContain("workspace_list_files");
     await firstModelButton.trigger("click");
     await nextTick();
 
     const firstModelSectionText = firstModelButton.element.closest("section")?.textContent ?? "";
-    expect(firstModelSectionText).toContain("工具调用输出");
     expect(firstModelSectionText).toContain("workspace_list_files");
     expect(firstModelSectionText).toContain("参数:");
     expect(firstModelSectionText).toContain("\"path\":\".\"");
@@ -1068,7 +1101,7 @@ describe("HomeSidebar", () => {
     expect(wrapper.get('[data-testid="trace-detail-button-model-5-reasoning"]').exists()).toBe(true);
   });
 
-  it("assistant 仍在输出时仅将活跃思考归到 call model，模型输出完成后再展示", async () => {
+  it("assistant 仍在输出时，trace 中不提前展示活跃思考和模型输出", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       messages: [
@@ -1127,13 +1160,57 @@ describe("HomeSidebar", () => {
 
     expect(wrapper.find('[data-testid="trace-step-button-return-4"]').exists()).toBe(false);
 
-    await wrapper.get('[data-testid="trace-step-button-model-4"]').trigger("click");
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-4"]');
+    expect(modelButton.text()).not.toContain("正在思考");
+
+    await modelButton.trigger("click");
     await nextTick();
 
-    const callModelSectionText = wrapper.get('[data-testid="trace-step-button-model-4"]').element.closest("section")?.textContent ?? "";
-    expect(callModelSectionText).toContain("思考链");
+    const callModelSectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(callModelSectionText).not.toContain("思考链");
     expect(callModelSectionText).not.toContain("模型输出");
     expect(wrapper.find('[data-testid="trace-detail-button-model-4-assistant-output"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="trace-detail-button-model-4-reasoning"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="trace-detail-button-model-4-reasoning"]').exists()).toBe(false);
+  });
+
+  it("CALL MODEL 在活跃阶段即使带有增量文本和思考，也不在 trace 中提前展示", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-active-call-model",
+          title: "active call model",
+          phase: "calling_model",
+          traceTimeline: [
+            {
+              id: "model-3",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "active",
+              sequence: 3,
+              text: "这是一段流式增量正文",
+              reasoningContent: "先组织回答结构。"
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
+    expect(modelButton.text()).not.toContain("这是一段流式增量正文");
+    expect(modelButton.text()).not.toContain("先组织回答结构。");
+
+    await modelButton.trigger("click");
+    await nextTick();
+
+    const sectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(sectionText).not.toContain("思考链");
+    expect(sectionText).not.toContain("模型输出");
+    expect(sectionText).not.toContain("这是一段流式增量正文");
+    expect(wrapper.find('[data-testid="trace-detail-button-model-3-assistant-output"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="trace-detail-button-model-3-reasoning"]').exists()).toBe(false);
   });
 });

@@ -21,6 +21,7 @@ import { extractActiveTaskFocus } from "@/types/runtime";
 import type {
   BuildContextObservation,
   ProviderCallCacheRecord,
+  RunControlAuditSummary,
   ToolActivity,
   TraceStep,
   TraceTimelineEntry,
@@ -62,13 +63,17 @@ const {
   availableTools,
   error,
   fallbackReason,
+  isSubmitting,
+  latestRunControlAuditSummary,
   phaseLabel,
   providerMode,
   providerModel,
   providerName,
   providerProtocol,
   retrievedContext,
+  sessionError,
   sessionId,
+  sessionOperation,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
@@ -104,6 +109,34 @@ const retrievedRunPhase = computed(
 const longTermMemoryEntries = computed(() => retrievedLongTermMemory.value?.entries ?? []);
 const longTermMemoryPreviewEntries = computed(() => longTermMemoryEntries.value.slice(0, 3));
 const retrievedActiveTaskFocus = computed(() => extractActiveTaskFocus(longTermMemoryEntries.value)?.trim() ?? "");
+const controlStatusSummary = computed(() => buildControlStatusSummary(latestRunControlAuditSummary.value));
+const sessionStatusSummary = computed(() => {
+  if (sessionOperation.value === "initializing") {
+    return "正在加载最近对话…";
+  }
+
+  if (sessionOperation.value === "switching") {
+    return "正在切换对话…";
+  }
+
+  if (sessionOperation.value === "deleting") {
+    return "正在删除对话并刷新会话状态…";
+  }
+
+  if (sessionError.value?.trim()) {
+    return sessionError.value.trim();
+  }
+
+  if (error.value?.trim()) {
+    return phaseLabel.value === "失败" ? error.value.trim() : `最近错误：${error.value.trim()}`;
+  }
+
+  if (isSubmitting.value) {
+    return "当前轮次正在执行。";
+  }
+
+  return "";
+});
 
 function turnTraceSortKey(turn: TurnTraceRecord) {
   return turn.updatedAt
@@ -164,6 +197,19 @@ function formatDuration(durationSeconds?: number | null) {
   }
 
   return durationSeconds < 1 ? `${Math.round(durationSeconds * 1000)} ms` : `${durationSeconds.toFixed(2)} s`;
+}
+
+function buildControlStatusSummary(summary: RunControlAuditSummary | null) {
+  const actionSummary = summary?.actionEvidenceSummary ?? null;
+  if (!actionSummary?.summary?.trim()) {
+    return "";
+  }
+
+  const details = [actionSummary.commandKind, actionSummary.boundary, actionSummary.resultKind]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim());
+  const suffix = details.length ? ` · ${details.join(" / ")}` : "";
+  return `${actionSummary.summary.trim()}${suffix}`;
 }
 
 function traceStateIcon(state: TraceStep["state"]) {
@@ -737,17 +783,16 @@ function callModelOutputToolEntries(turn: TurnTraceRecord, entry: TraceTimelineE
   return outputEntries;
 }
 
-function callModelToolOutputSummary(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
-  const toolNames = callModelOutputToolEntries(turn, entry)
-    .flatMap((toolEntry) => toolEntry.toolActivities ?? [])
-    .map((activity) => activity.name?.trim() ?? "")
-    .filter(Boolean);
+function hasCallModelToolOutputs(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  return callModelOutputToolEntries(turn, entry).length > 0;
+}
 
-  if (!toolNames.length) {
-    return "";
-  }
+function shouldShowCallModelOutput(entry: TraceTimelineEntry) {
+  return canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.state !== "active" && entry.state !== "pending";
+}
 
-  return `工具调用: ${toolNames.join(" · ")}`;
+function shouldShowCallModelReasoning(entry: TraceTimelineEntry) {
+  return canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.state !== "active" && entry.state !== "pending";
 }
 
 function timelinePreviewText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
@@ -757,12 +802,15 @@ function timelinePreviewText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   }
 
   if (kind === "call_model") {
+    if (hasCallModelToolOutputs(turn, entry)) {
+      return "";
+    }
+
     return (
       entry.error?.trim()
       || entry.fallbackReason?.trim()
-      || entry.text?.trim()
-      || callModelToolOutputSummary(turn, entry)
-      || entry.reasoningContent?.trim()
+      || (shouldShowCallModelOutput(entry) ? entry.text?.trim() : "")
+      || (shouldShowCallModelReasoning(entry) ? entry.reasoningContent?.trim() : "")
       || ""
     );
   }
@@ -905,7 +953,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
     for (const activity of activities) {
       sections.push({
         id: `tool-output-${toolEntry.id}-${activity.id}`,
-        label: `工具调用输出 · ${activity.name}`,
+        label: activity.name,
         content: buildToolMessageDetail(activity),
         summary: activity.summary,
         kind: "tool",
@@ -915,7 +963,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
     }
   }
 
-  const reasoningContent = entry.reasoningContent?.trim() || "";
+  const reasoningContent = shouldShowCallModelReasoning(entry) ? entry.reasoningContent?.trim() || "" : "";
   if (reasoningContent) {
     sections.push({
       id: "reasoning",
@@ -926,7 +974,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
     });
   }
 
-  const outputContent = entry.text?.trim() || "";
+  const outputContent = shouldShowCallModelOutput(entry) ? entry.text?.trim() || "" : "";
   if (outputContent) {
     sections.push({
       id: "assistant-output",
@@ -949,8 +997,6 @@ function buildToolMessageDetail(activity: ToolActivity) {
 
   if (activity.resultText?.trim()) {
     lines.push(`${activity.status === "error" ? "错误" : "结果"}:\n${activity.resultText.trim()}`);
-  } else if (activity.summary.trim()) {
-    lines.push(`摘要:\n${activity.summary.trim()}`);
   }
 
   if (activity.durationSeconds != null) {
@@ -1176,6 +1222,24 @@ watch(
                 <div class="flex items-start justify-between gap-3">
                   <span class="text-stone-400">阶段</span>
                   <span class="text-right text-stone-800">{{ phaseLabel }}</span>
+                </div>
+                <div v-if="sessionStatusSummary" class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">会话状态</span>
+                  <span
+                    class="break-words text-right text-stone-800 [overflow-wrap:anywhere]"
+                    data-testid="status-session-summary"
+                  >
+                    {{ sessionStatusSummary }}
+                  </span>
+                </div>
+                <div v-if="controlStatusSummary" class="flex items-start justify-between gap-3">
+                  <span class="text-stone-400">控制状态</span>
+                  <span
+                    class="break-words text-right text-stone-800 [overflow-wrap:anywhere]"
+                    data-testid="status-control-summary"
+                  >
+                    {{ controlStatusSummary }}
+                  </span>
                 </div>
                 <div v-if="displayModel" class="flex items-start justify-between gap-3">
                   <span class="text-stone-400">模型</span>
@@ -1508,28 +1572,29 @@ watch(
 
                             <section
                               v-else
-                              class="collapsible-shell mt-2 overflow-hidden border-l border-stone-200/80 pl-2"
+                              class="collapsible-shell overflow-hidden"
+                              :class="section.kind === 'tool' ? 'mt-0.5' : 'mt-2'"
                               :data-open="activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id)"
                             >
                               <button
-                                class="flex w-full items-start justify-between gap-1.5 py-0.5 text-left"
+                                class="flex w-full items-start justify-between gap-1 py-0 text-left"
                                 type="button"
                                 :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
                                 @click="toggleTraceDetail(turn.turnId, entry.id, section.id)"
                               >
                                 <template v-if="section.kind === 'tool'">
-                                  <div class="flex min-w-0 items-center gap-1.5">
+                                  <div class="flex min-w-0 flex-1 items-center gap-1">
                                     <component
                                       :is="toolStatusIcon(section.toolStatus ?? 'planned')"
                                       class="h-3 w-3 shrink-0"
                                       :class="toolStatusIconClass(section.toolStatus ?? 'planned')"
                                     />
-                                    <div class="min-w-0 truncate text-[10px] uppercase tracking-[0.14em] text-stone-500">
+                                    <div class="min-w-0 truncate text-[10px] text-stone-500">
                                       {{ section.label }}
                                     </div>
                                   </div>
                                   <div class="ml-auto flex items-center gap-1">
-                                    <span v-if="section.durationText" class="text-[10px] text-stone-400">
+                                    <span v-if="section.durationText" class="shrink-0 whitespace-nowrap text-[10px] text-stone-400">
                                       {{ section.durationText }}
                                     </span>
                                     <button
@@ -1565,7 +1630,7 @@ watch(
                               </button>
 
                               <div class="collapsible-body">
-                                <div class="collapsible-content mt-1 pl-4">
+                                <div class="collapsible-content mt-0">
                                   <div
                                     class="min-w-0 whitespace-pre-wrap break-words text-[10px] leading-[1.25] [overflow-wrap:anywhere]"
                                     :class="rowToneClass(section.tone)"

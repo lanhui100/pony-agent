@@ -4,6 +4,7 @@ import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 import type {
   CapabilitySourceView,
   CapabilityView,
+  HookTraceRecord,
   ModelMonitorSessionDrilldownView,
   ModelMonitorSessionRow,
   ModelMonitorSummaryView,
@@ -55,6 +56,12 @@ const overviewCards = computed(() => {
       detail: `平均总耗时 ${formatDurationMs(overview.avgTurnDurationMs)}`
     },
     {
+      key: "hooks",
+      label: "Hooks 活动",
+      value: formatInteger(overview.hookCallCount),
+      detail: `阻断 ${formatInteger(overview.blockedHookCount)} · 均值 ${formatDurationMs(overview.avgHookDurationMs)}`
+    },
+    {
       key: "retrieval",
       label: "检索参与",
       value: formatInteger(overview.retrievalParticipationCount),
@@ -80,8 +87,30 @@ const selectedTimeline = computed<TraceTimelineEntry[]>(() => {
   return selectedTrace.value?.traceTimeline ?? [];
 });
 
+const selectedTraceHasCanonicalTerminalEnvelope = computed(() => {
+  const trace = selectedTrace.value;
+  if (!trace) {
+    return false;
+  }
+
+  const eventId = trace.eventId?.trim();
+  const eventVersion = trace.eventVersion?.trim();
+  const eventType = trace.eventType?.trim();
+  return Boolean(
+    eventId
+      && eventVersion
+      && trace.sequence != null
+      && trace.emittedAtMs != null
+      && (eventType === "turn.completed" || eventType === "turn.failed" || eventType === "turn.cancelled")
+  );
+});
+
 const selectedCapabilityActivities = computed(() => {
   return (selectedTrace.value?.toolActivities ?? []).filter((activity) => activity.capabilityInvocation);
+});
+
+const selectedHookTraceRecords = computed<HookTraceRecord[]>(() => {
+  return selectedTrace.value?.hookTraceRecords ?? [];
 });
 
 const selectedSessionMetrics = computed<ModelMonitorSessionRow | null>(() => {
@@ -96,6 +125,14 @@ const selectedCapabilitySource = computed<CapabilitySourceView | null>(() => {
 
   return capabilitySources.value.find((source) => source.sourceId === sourceId) ?? null;
 });
+
+const selectedCapabilityIngress = computed(() => {
+  return selectedCapabilitySource.value?.lastIngressObservation ?? null;
+});
+
+const summarySkillSelections = computed(() => summary.value?.skillSelections ?? []);
+const summarySkillSources = computed(() => summary.value?.skillSources ?? []);
+const summarySkillFailureLayers = computed(() => summary.value?.skillFailureLayers ?? []);
 
 async function loadSummary() {
   if (!isTauriAvailable()) {
@@ -308,6 +345,15 @@ function timelineSummary(entry: TraceTimelineEntry) {
   return parts.join(" · ");
 }
 
+function hookResultSummary(record: HookTraceRecord) {
+  const parts: string[] = [record.hookClass, record.resultKind];
+  if (record.blocked) {
+    parts.push("blocked");
+  }
+  parts.push(formatDurationMs(record.elapsedMs));
+  return parts.join(" · ");
+}
+
 function toErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
@@ -351,7 +397,7 @@ onMounted(() => {
     </div>
 
     <div v-else-if="summary" class="flex min-h-0 flex-1 flex-col">
-      <div class="mt-5 grid gap-4 lg:grid-cols-4" data-testid="model-monitor-overview">
+      <div class="mt-5 grid gap-4 lg:grid-cols-5" data-testid="model-monitor-overview">
         <section
           v-for="card in overviewCards"
           :key="card.key"
@@ -412,8 +458,44 @@ onMounted(() => {
                 <span class="rounded-full bg-stone-100 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-stone-500">{{ source.availability }}</span>
               </div>
               <div class="text-[12px] text-stone-500">{{ source.sourceId }}</div>
-              <div class="text-[11px] text-stone-400">{{ source.declaredCapabilities.join(" / ") }}</div>
+              <div class="text-[11px] text-stone-400">
+                {{ source.declaredCapabilities.join(" / ") }}
+                <span v-if="source.lastIngressObservation">
+                  · ingress {{ formatInteger(source.lastIngressObservation.candidateIds.length) }}
+                </span>
+              </div>
             </button>
+          </div>
+
+          <div
+            v-if="selectedCapabilitySource"
+            class="border-t border-stone-200/70 bg-[#faf6ef] px-4 py-4"
+            data-testid="model-monitor-capability-source-detail"
+          >
+            <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Source Inspect</div>
+            <div class="mt-2 text-sm font-semibold text-stone-900">{{ selectedCapabilitySource.sourceId }}</div>
+            <div class="mt-2 grid gap-2 text-[12px] text-stone-500 sm:grid-cols-2">
+              <div>transport: {{ selectedCapabilitySource.transportKind }}</div>
+              <div>permission: {{ selectedCapabilitySource.permissionProfile }}</div>
+              <div>availability: {{ selectedCapabilitySource.availability }}</div>
+              <div>updated: {{ formatTimestamp(selectedCapabilitySource.updatedAtMs) }}</div>
+            </div>
+            <div v-if="selectedCapabilityIngress" class="mt-3 rounded-[0.7rem] border border-stone-200 bg-white px-3 py-3">
+              <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Last Ingress</div>
+              <div class="mt-2 text-[12px] leading-6 text-stone-600">
+                {{ selectedCapabilityIngress.summary }}
+              </div>
+              <div class="mt-2 grid gap-2 text-[12px] text-stone-500 sm:grid-cols-2">
+                <div>boundary: {{ selectedCapabilityIngress.boundary }}</div>
+                <div>observed: {{ formatTimestamp(selectedCapabilityIngress.observedAtMs) }}</div>
+              </div>
+              <div class="mt-2 text-[11px] text-stone-400">
+                candidates: {{ selectedCapabilityIngress.candidateIds.join(", ") || "--" }}
+              </div>
+            </div>
+            <div v-else class="mt-3 text-[12px] text-stone-400">
+              当前 source 还没有 ingress observation。
+            </div>
           </div>
         </section>
 
@@ -478,7 +560,7 @@ onMounted(() => {
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div class="text-sm font-semibold text-stone-900">聚合视图</div>
-                <p class="mt-1 text-[12px] text-stone-500">Provider / Model / Tool / Session 维度读面</p>
+                <p class="mt-1 text-[12px] text-stone-500">Provider / Model / Tool / Hook / Session 维度读面</p>
               </div>
               <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">
                 生成于 {{ formatTimestamp(summary.generatedAtMs) }}
@@ -538,6 +620,26 @@ onMounted(() => {
                       permission: {{ activity.capabilityInvocation?.permissionScope || "--" }} · approval:
                       {{ activity.capabilityInvocation?.requiresApproval ? "required" : "no" }}
                     </div>
+                    <div
+                      v-if="activity.capabilityInvocation?.skillId"
+                      class="mt-2 rounded-[0.65rem] border border-amber-200/30 bg-amber-100/10 px-3 py-2 text-[11px] text-amber-100"
+                    >
+                      <div class="font-medium">
+                        skill: {{ activity.capabilityInvocation?.skillId }}
+                        <span class="text-amber-200/80">
+                          · {{ activity.capabilityInvocation?.skillSourceId || "unknown-skill-source" }}
+                        </span>
+                      </div>
+                      <div class="mt-1">
+                        kinds: {{ activity.capabilityInvocation?.composedCapabilityKinds?.join(", ") || "--" }}
+                      </div>
+                      <div class="mt-1">
+                        refs: {{ activity.capabilityInvocation?.composedCapabilityRefs?.join(", ") || "--" }}
+                      </div>
+                      <div class="mt-1">
+                        failure layer: {{ activity.capabilityInvocation?.failureLayer || "ok" }}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -582,6 +684,48 @@ onMounted(() => {
                   </div>
                 </div>
                 <div v-if="summary.tools.length === 0" class="text-[12px] text-stone-400">暂无 tool 聚合数据。</div>
+              </div>
+            </section>
+
+            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-hook-classes-summary">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Hook Classes</div>
+              <div class="mt-3 space-y-2">
+                <div v-for="row in summary.hookClasses" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium text-stone-900">{{ row.label }}</div>
+                      <div class="mt-1 text-[12px] text-stone-500">
+                        调用 {{ formatInteger(row.callCount) }} · 阻断 {{ formatInteger(row.blockedCallCount) }}
+                      </div>
+                    </div>
+                    <div class="text-right text-[12px] text-stone-500">
+                      <div>均值 {{ formatDurationMs(row.avgDurationMs) }}</div>
+                      <div class="mt-1">总计 {{ formatDurationMs(row.totalDurationMs) }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="summary.hookClasses.length === 0" class="text-[12px] text-stone-400">暂无 hook class 聚合数据。</div>
+              </div>
+            </section>
+
+            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-hooks-summary">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Hooks</div>
+              <div class="mt-3 space-y-2">
+                <div v-for="row in summary.hooks" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium text-stone-900">{{ row.label }}</div>
+                      <div class="mt-1 text-[12px] text-stone-500">
+                        调用 {{ formatInteger(row.callCount) }} · 阻断 {{ formatInteger(row.blockedCallCount) }}
+                      </div>
+                    </div>
+                    <div class="text-right text-[12px] text-stone-500">
+                      <div>均值 {{ formatDurationMs(row.avgDurationMs) }}</div>
+                      <div class="mt-1">总计 {{ formatDurationMs(row.totalDurationMs) }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="summary.hooks.length === 0" class="text-[12px] text-stone-400">暂无 hook 聚合数据。</div>
               </div>
             </section>
 
@@ -648,6 +792,69 @@ onMounted(() => {
               </div>
             </section>
 
+            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-skill-selections-summary">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Skill Selections</div>
+              <div class="mt-3 space-y-2">
+                <div v-for="row in summarySkillSelections" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium text-stone-900">{{ row.label }}</div>
+                      <div class="mt-1 text-[12px] text-stone-500">
+                        调用 {{ formatInteger(row.callCount) }} · 失败 {{ formatInteger(row.failedCallCount) }}
+                      </div>
+                    </div>
+                    <div class="text-right text-[12px] text-stone-500">
+                      <div>均值 {{ formatDurationMs(row.avgDurationMs) }}</div>
+                      <div class="mt-1">总计 {{ formatDurationMs(row.totalDurationMs) }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="summarySkillSelections.length === 0" class="text-[12px] text-stone-400">暂无 skill selection 聚合数据。</div>
+              </div>
+            </section>
+
+            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-skill-sources-summary">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Skill Sources</div>
+              <div class="mt-3 space-y-2">
+                <div v-for="row in summarySkillSources" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium text-stone-900">{{ row.label }}</div>
+                      <div class="mt-1 text-[12px] text-stone-500">
+                        调用 {{ formatInteger(row.callCount) }} · 失败 {{ formatInteger(row.failedCallCount) }}
+                      </div>
+                    </div>
+                    <div class="text-right text-[12px] text-stone-500">
+                      <div>均值 {{ formatDurationMs(row.avgDurationMs) }}</div>
+                      <div class="mt-1">总计 {{ formatDurationMs(row.totalDurationMs) }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="summarySkillSources.length === 0" class="text-[12px] text-stone-400">暂无 skill source 聚合数据。</div>
+              </div>
+            </section>
+
+            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-skill-failure-layers-summary">
+              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Skill Failure Layers</div>
+              <div class="mt-3 space-y-2">
+                <div v-for="row in summarySkillFailureLayers" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium text-stone-900">{{ row.label }}</div>
+                      <div class="mt-1 text-[12px] text-stone-500">
+                        调用 {{ formatInteger(row.callCount) }} · 失败 {{ formatInteger(row.failedCallCount) }}
+                      </div>
+                    </div>
+                    <div class="text-right text-[12px] text-stone-500">
+                      <div>均值 {{ formatDurationMs(row.avgDurationMs) }}</div>
+                      <div class="mt-1">总计 {{ formatDurationMs(row.totalDurationMs) }}</div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="summarySkillFailureLayers.length === 0" class="text-[12px] text-stone-400">暂无 skill failure layer 聚合数据。</div>
+              </div>
+            </section>
+
             <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-sessions">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Sessions</div>
               <div class="mt-3 space-y-2">
@@ -669,6 +876,7 @@ onMounted(() => {
                     </div>
                     <div class="shrink-0 text-right text-[12px]" :class="selectedSessionId === row.sessionId ? 'text-stone-300' : 'text-stone-500'">
                       <div>{{ formatInteger(row.totalTokens) }} tokens</div>
+                      <div class="mt-1">hooks {{ formatInteger(row.hookCallCount) }} / blocked {{ formatInteger(row.blockedHookCount) }}</div>
                       <div class="mt-1">{{ formatTimestamp(row.updatedAtMs) }}</div>
                     </div>
                   </div>
@@ -699,7 +907,7 @@ onMounted(() => {
           </div>
 
           <div v-else-if="drilldown && selectedSessionMetrics" class="grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4">
-            <section class="grid gap-3 sm:grid-cols-2" data-testid="model-monitor-drilldown-metrics">
+            <section class="grid gap-3 sm:grid-cols-3" data-testid="model-monitor-drilldown-metrics">
               <div class="rounded-[0.75rem] bg-white/5 px-3 py-3">
                 <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">成本与负载</div>
                 <div class="mt-2 text-sm text-white">
@@ -716,6 +924,15 @@ onMounted(() => {
                 </div>
                 <div class="mt-1 text-[12px] text-stone-300">
                   检索参与 {{ formatInteger(selectedSessionMetrics.retrievalParticipationCount) }} · 失败 {{ formatInteger(selectedSessionMetrics.failedRequestCount) }}
+                </div>
+              </div>
+              <div class="rounded-[0.75rem] bg-white/5 px-3 py-3">
+                <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Hooks 与阻断</div>
+                <div class="mt-2 text-sm text-white">
+                  {{ formatInteger(selectedSessionMetrics.hookCallCount) }} calls
+                </div>
+                <div class="mt-1 text-[12px] text-stone-300">
+                  阻断 {{ formatInteger(selectedSessionMetrics.blockedHookCount) }} · 均值 {{ formatDurationMs(selectedSessionMetrics.avgHookDurationMs) }}
                 </div>
               </div>
             </section>
@@ -751,6 +968,14 @@ onMounted(() => {
                   <div>{{ selectedTrace.providerName || selectedTrace.providerRequestedName || "unknown-provider" }}</div>
                   <div class="mt-1">{{ selectedTrace.providerModel || "unknown-model" }}</div>
                 </div>
+              </div>
+
+              <div
+                v-if="!selectedTraceHasCanonicalTerminalEnvelope"
+                class="mt-3 rounded-[0.7rem] border border-amber-400/30 bg-amber-300/10 px-3 py-3 text-[12px] leading-6 text-amber-100"
+                data-testid="model-monitor-raw-trace-warning"
+              >
+                当前 trace 缺少 canonical terminal envelope，下面只展示原始 trace 证据，不计入 canonical metrics。
               </div>
 
               <div class="mt-3 grid gap-3 md:grid-cols-2">
@@ -795,6 +1020,26 @@ onMounted(() => {
                   </div>
                 </div>
                 <div v-if="selectedTimeline.length === 0" class="text-[12px] text-stone-400">当前 trace 没有 timeline 明细。</div>
+              </div>
+
+              <div v-if="selectedHookTraceRecords.length > 0" class="mt-3 space-y-2" data-testid="model-monitor-hook-trace">
+                <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Hook Trace</div>
+                <div
+                  v-for="record in selectedHookTraceRecords"
+                  :key="`${record.hookName}-${record.hookOrder}`"
+                  class="rounded-[0.7rem] border border-white/10 bg-black/10 px-3 py-3"
+                >
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium text-white">{{ record.hookName }}</div>
+                      <div class="mt-1 text-[12px] text-stone-300">{{ hookResultSummary(record) }}</div>
+                    </div>
+                    <div class="text-right text-[11px] uppercase tracking-[0.12em] text-stone-400">
+                      <div>{{ record.hookPoint }}</div>
+                    </div>
+                  </div>
+                  <div class="mt-2 text-[12px] leading-6 text-stone-300">{{ record.summary }}</div>
+                </div>
               </div>
             </section>
           </div>

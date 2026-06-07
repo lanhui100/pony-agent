@@ -6,7 +6,13 @@ import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import type { ProviderReasoningEffort, ProviderRegistry } from "@/types/provider";
-import type { ChatMessage } from "@/types/runtime";
+import type {
+  ChatMessage,
+  ExecutionCheckpoint,
+  GraphRunControlBoundaryEvidence,
+  GraphRunSubmissionPlan,
+  RunControlAuditSummary
+} from "@/types/runtime";
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -47,11 +53,15 @@ const ButtonStub = defineComponent({
     disabled: {
       type: Boolean,
       default: false
+    },
+    title: {
+      type: String,
+      default: ""
     }
   },
   emits: ["click"],
   template:
-    '<button class="button-stub" type="button" :disabled="disabled" @click="$emit(\'click\')"><slot /></button>'
+    '<button class="button-stub" type="button" :disabled="disabled" :title="title" @click="$emit(\'click\')"><slot /></button>'
 });
 
 function createProviderRegistry(options?: {
@@ -148,6 +158,113 @@ function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
   };
 }
 
+function createCheckpoint(partial: Partial<ExecutionCheckpoint> = {}): ExecutionCheckpoint {
+  return {
+    turnId: partial.turnId ?? "turn-1",
+    sessionId: partial.sessionId ?? "session-current",
+    runId: partial.runId ?? "run-1",
+    checkpointKind: partial.checkpointKind ?? "recovery",
+    recoveryMode: partial.recoveryMode ?? "persisted_effect",
+    projectedRuntimePhase: partial.projectedRuntimePhase ?? "ready",
+    submissionCommand: partial.submissionCommand ?? "resume_graph_run_stream",
+    resumable: partial.resumable ?? true,
+    replayable: partial.replayable ?? true,
+    status: partial.status ?? "ready",
+    phase: partial.phase ?? "paused",
+    providerRequestedName: partial.providerRequestedName ?? "OpenAI",
+    providerName: partial.providerName ?? "OpenAI",
+    providerProtocol: partial.providerProtocol ?? "openai",
+    providerModel: partial.providerModel ?? "gpt-5",
+    providerSource: partial.providerSource ?? "graph_checkpoint",
+    providerMode: partial.providerMode ?? "recovery",
+    fallbackReason: partial.fallbackReason ?? null,
+    completedHops: partial.completedHops ?? 0,
+    maxHops: partial.maxHops ?? 0,
+    activeToolName: partial.activeToolName ?? null,
+    traceSteps: partial.traceSteps ?? [],
+    toolActivities: partial.toolActivities ?? [],
+    error: partial.error ?? null,
+    startedAtMs: partial.startedAtMs ?? 1000,
+    updatedAtMs: partial.updatedAtMs ?? 1200,
+    stopRequestedAtMs: partial.stopRequestedAtMs ?? null
+  };
+}
+
+function createSubmissionPlan(
+  partial: Partial<GraphRunSubmissionPlan> = {}
+): GraphRunSubmissionPlan {
+  return {
+    command: partial.command ?? "start_graph_run_stream",
+    runId: partial.runId ?? null,
+    source: partial.source ?? "default"
+  };
+}
+
+function createBoundaryEvidence(
+  partial: Partial<GraphRunControlBoundaryEvidence> = {}
+): GraphRunControlBoundaryEvidence {
+  return {
+    hookPoint: partial.hookPoint ?? "turn.completed",
+    canonicalEventType: partial.canonicalEventType ?? "turn.completed",
+    canonicalPhase: partial.canonicalPhase ?? "completed",
+    summary: partial.summary ?? "在 turn.completed 安全边界暂停",
+    hookEnvelope: partial.hookEnvelope ?? {
+      sessionId: "session-current",
+      runId: "run-1",
+      turnId: "turn-1",
+      sequence: 1,
+      hookPoint: "turn.completed",
+      canonicalEventType: "turn.completed",
+      canonicalPhase: "completed",
+      payloadJson: "{}",
+      createdAtMs: 1000
+    },
+    createdAtMs: partial.createdAtMs ?? 1000
+  };
+}
+
+function createRunControlAuditSummary(
+  partial: {
+    action?: Partial<RunControlAuditSummary["actionEvidenceSummary"]>;
+    currentContext?: Partial<RunControlAuditSummary["currentContextProjection"]>;
+  } = {}
+): RunControlAuditSummary {
+  return {
+    actionEvidenceSummary: {
+      status: partial.action?.status ?? "available",
+      sourceFamily: partial.action?.sourceFamily ?? "run_control",
+      commandKind: partial.action?.commandKind ?? "resume_graph_run_stream",
+      boundary: partial.action?.boundary ?? "run_resume",
+      resultKind: partial.action?.resultKind ?? "observe",
+      summary: partial.action?.summary ?? "检测到暂停中的运行；点击后会恢复该 run 并继续执行。",
+      targetSummary: partial.action?.targetSummary ?? "恢复 run-1",
+      elapsedMs: partial.action?.elapsedMs ?? 8,
+      blocked: partial.action?.blocked ?? false,
+      degraded: partial.action?.degraded ?? false,
+      evidenceId: partial.action?.evidenceId ?? "run-control-evidence-1",
+      observedAtMs: partial.action?.observedAtMs ?? 1000,
+      runId: partial.action?.runId ?? "run-1",
+      turnId: partial.action?.turnId ?? "turn-1",
+      checkpointTurnId: partial.action?.checkpointTurnId ?? "turn-1",
+      checkpointKind: partial.action?.checkpointKind ?? "recovery",
+      recoveryMode: partial.action?.recoveryMode ?? "persisted_effect",
+      projectedCommand: partial.action?.projectedCommand ?? "resume_graph_run_stream",
+      degradationReason: partial.action?.degradationReason ?? null,
+      requestSummary: partial.action?.requestSummary ?? "resume run-1",
+      startReason: partial.action?.startReason ?? null
+    },
+    currentContextProjection: {
+      phase: partial.currentContext?.phase ?? "paused",
+      checkpointStatus: partial.currentContext?.checkpointStatus ?? "ready",
+      activeRunId: partial.currentContext?.activeRunId ?? "run-1",
+      checkpointKind: partial.currentContext?.checkpointKind ?? "recovery",
+      checkpointRecoveryMode: partial.currentContext?.checkpointRecoveryMode ?? "persisted_effect",
+      submissionPlanCommand:
+        partial.currentContext?.submissionPlanCommand ?? "resume_graph_run_stream"
+    }
+  };
+}
+
 function mountWorkspace(options?: {
   registry?: ProviderRegistry | null;
   selectedReasoningEffort?: ProviderReasoningEffort | null;
@@ -228,8 +345,178 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.text()).toContain("tool chain exploded");
+    expect(wrapper.text()).not.toContain("tool chain exploded");
     expect((wrapper.get("textarea").element as HTMLTextAreaElement).disabled).toBe(false);
+  });
+
+  it("shows a welcome empty state for a brand-new session", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "idle",
+      error: null,
+      messages: []
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="workspace-empty-state"]').text()).toContain("需要我帮你做什么？");
+  });
+
+  it("shows a resume CTA when the next submission will resume a paused run", async () => {
+    const runtimeStore = useRuntimeStore();
+    const submitSpy = vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
+    runtimeStore.$patch({
+      draftMessage: "继续这个 run",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [],
+      latestExecutionCheckpoint: createCheckpoint({
+        runId: "run-paused",
+        submissionCommand: "resume_graph_run_stream",
+        phase: "paused",
+        status: "ready"
+      }),
+      latestGraphRunSubmissionPlan: createSubmissionPlan({
+        command: "resume_graph_run_stream",
+        runId: "run-paused",
+        source: "checkpoint"
+      }),
+      latestRunControlAuditSummary: createRunControlAuditSummary({
+        action: {
+          summary: "检测到暂停中的运行；点击后会恢复该 run 并继续执行。",
+          runId: "run-paused",
+          projectedCommand: "resume_graph_run_stream"
+        },
+        currentContext: {
+          activeRunId: "run-paused"
+        }
+      })
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="workspace-submit-action"]').text()).toContain("恢复");
+    expect(wrapper.text()).not.toContain("恢复该 run");
+
+    await wrapper.get('[data-testid="workspace-submit-action"]').trigger("click");
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a restart CTA when only replay is available", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      draftMessage: "重新跑一次",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [],
+      latestExecutionCheckpoint: createCheckpoint({
+        checkpointKind: "lifecycle_boundary",
+        recoveryMode: "replay_required",
+        submissionCommand: "start_graph_run_stream",
+        resumable: false,
+        replayable: false,
+        phase: "checkpointing",
+        status: "completed"
+      }),
+      latestGraphRunSubmissionPlan: createSubmissionPlan({
+        command: "start_graph_run_stream",
+        runId: null,
+        source: "checkpoint"
+      }),
+      latestRunControlAuditSummary: createRunControlAuditSummary({
+        action: {
+          commandKind: "start_graph_run_stream",
+          projectedCommand: "start_graph_run_stream",
+          startReason: "replay_from_checkpoint",
+          degraded: true,
+          checkpointKind: "lifecycle_boundary",
+          recoveryMode: "replay_required",
+          summary: "当前恢复点只保留持久化事实；点击后会重新开始新的执行。"
+        },
+        currentContext: {
+          phase: "checkpointing",
+          checkpointKind: "lifecycle_boundary",
+          checkpointRecoveryMode: "replay_required",
+          submissionPlanCommand: "start_graph_run_stream"
+        }
+      })
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="workspace-submit-action"]').text()).toContain("重新开始");
+    expect(wrapper.text()).not.toContain("重新开始新的执行");
+  });
+
+  it("keeps control boundary evidence out of the workspace header area", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      draftMessage: "继续这个 run",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [],
+      latestGraphRunControlBoundaryEvidence: [
+        createBoundaryEvidence({
+          summary: "hook turn.completed 已确认可安全暂停"
+        })
+      ],
+      latestRunControlAuditSummary: createRunControlAuditSummary({
+        action: {
+          commandKind: "stop_graph_run",
+          boundary: "stop_requested",
+          resultKind: "observe",
+          summary: "已请求停止当前运行，等待 agent 在安全边界暂停。"
+        },
+        currentContext: {
+          phase: "running",
+          submissionPlanCommand: "resume_graph_run_stream"
+        }
+      })
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.text()).not.toContain("控制摘要：已请求停止当前运行，等待 agent 在安全边界暂停。");
+  });
+
+  it("shows an explicit stop CTA while a turn is running", async () => {
+    const runtimeStore = useRuntimeStore();
+    const stopSpy = vi.spyOn(runtimeStore, "stopTurn").mockResolvedValue(true);
+    runtimeStore.$patch({
+      draftMessage: "",
+      sessionOperation: null,
+      phase: "running",
+      error: null,
+      isSubmitting: true,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const stopButton = wrapper.get('[data-testid="workspace-stop-turn"]');
+    expect(stopButton.attributes("title")).toBe("请求在安全边界停止当前运行。");
+
+    await stopButton.trigger("click");
+    await nextTick();
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).not.toContain("已请求停止当前运行");
   });
 
   it("keeps the open workspace shell and rounded white composer", async () => {
@@ -626,7 +913,7 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.find(".assistant-streaming-content").classes()).toContain("text-stone-400");
+    expect(wrapper.find(".assistant-streaming-content").classes()).toContain("text-stone-800");
 
     const markdownBlocks = wrapper.findAll(".markdown-stub");
     expect(markdownBlocks.some((node) => node.classes().includes("text-rose-800"))).toBe(true);

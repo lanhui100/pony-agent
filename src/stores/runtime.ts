@@ -144,9 +144,11 @@ type RuntimeState = {
   historyBranches: HistoryBranch[];
   eventsReady: boolean;
   deferredPersistTimerId: number | null;
+  browserPreviewRunToken: number;
 };
 
 type PersistedRuntimeState = {
+  phase: RuntimePhase;
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
   turnTraceHistory: TurnTraceRecord[];
@@ -1801,6 +1803,38 @@ function restorePhaseFromTurnHistory(
   }
 }
 
+function createBrowserPreviewTerminalEnvelope(
+  turnId: string,
+  eventType: "turn.completed" | "turn.cancelled",
+  sequence: number,
+  emittedAtMs: number
+) {
+  return {
+    eventId: `${turnId}:${eventType}:${sequence}`,
+    eventType,
+    eventVersion: "turn-event-v1",
+    sequence,
+    emittedAtMs
+  };
+}
+
+function resolveRestoredPersistedPhase(
+  persistedPhase: RuntimePhase | null | undefined,
+  messages: ChatMessage[],
+  turnTraceHistory: TurnTraceRecord[]
+): RuntimePhase {
+  const restoredPhase = restorePhaseFromTurnHistory(messages, turnTraceHistory);
+  if (restoredPhase !== "ready") {
+    return restoredPhase;
+  }
+
+  if (persistedPhase === "cancelled" || persistedPhase === "failed") {
+    return persistedPhase;
+  }
+
+  return restoredPhase;
+}
+
 function resolveGraphRunSubmissionFromRunState(runState?: RunState | null) {
   if (!runState) {
     return null;
@@ -2018,6 +2052,17 @@ function hasPersistableMessages(messages: ChatMessage[]) {
   );
 }
 
+function createTransientSessionOverview(sessionId: string): SessionOverview {
+  return {
+    conversationId: sessionId,
+    title: "新对话",
+    summary: "发送第一条消息后保存到历史",
+    turnCount: 0,
+    lastReferencedFile: null,
+    updatedAtMs: 0
+  };
+}
+
 function buildSessionOverviewFromPersistedState(
   conversationId: string,
   state: PersistedRuntimeState
@@ -2087,15 +2132,115 @@ function isPersistedMessageShapeCompatible(
   return persistedHistory.every((message, index) => message.role === snapshot.history[index]?.role);
 }
 
+function traceReasoningContent(trace?: TurnTraceRecord | null) {
+  if (!trace?.traceTimeline?.length) {
+    return null;
+  }
+
+  for (const entry of [...trace.traceTimeline].reverse()) {
+    if (canonicalizeTraceTimelineKind(entry.kind) !== "call_model") {
+      continue;
+    }
+
+    const reasoningContent = normalizeReasoningContent(entry.reasoningContent ?? null);
+    if (reasoningContent) {
+      return reasoningContent;
+    }
+  }
+
+  return null;
+}
+
+function traceModelLabel(trace?: TurnTraceRecord | null) {
+  const topLevelLabel = buildAssistantModelLabel(trace?.providerName, trace?.providerModel);
+  if (topLevelLabel) {
+    return topLevelLabel;
+  }
+
+  if (!trace?.traceTimeline?.length) {
+    return null;
+  }
+
+  for (const entry of [...trace.traceTimeline].reverse()) {
+    if (canonicalizeTraceTimelineKind(entry.kind) !== "call_model") {
+      continue;
+    }
+
+    const modelLabel = buildAssistantModelLabel(entry.providerName, entry.providerModel);
+    if (modelLabel) {
+      return modelLabel;
+    }
+  }
+
+  return null;
+}
+
+function traceToolActivities(trace?: TurnTraceRecord | null) {
+  if (!trace) {
+    return [];
+  }
+
+  const activities = trace.toolActivities.filter((tool) => tool.status !== "planned");
+  if (activities.length) {
+    return activities;
+  }
+
+  const deduped = new Map<string, ToolActivity>();
+  for (const entry of trace.traceTimeline ?? []) {
+    if (canonicalizeTraceTimelineKind(entry.kind) !== "call_tool") {
+      continue;
+    }
+
+    for (const activity of entry.toolActivities ?? []) {
+      if (activity.status === "planned") {
+        continue;
+      }
+      deduped.set(activity.id, { ...activity });
+    }
+  }
+
+  return [...deduped.values()];
+}
+
+function buildToolMessagesFromTrace(trace: TurnTraceRecord | null | undefined, turnId: string): ChatMessage[] {
+  const activities = traceToolActivities(trace);
+  if (!activities.length) {
+    return [];
+  }
+
+  return activities.map((tool) => ({
+    id: `tool-${turnId}-${tool.id}`,
+    turnId,
+    role: "tool",
+    content: tool.resultText ?? "",
+    status: toolStatusToMessageStatus(tool.status),
+    toolName: tool.name,
+    detail: buildToolMessageDetail(tool),
+    durationSeconds: tool.durationSeconds ?? null
+  }));
+}
+
 function hydrateMessagesFromHistory(
   history: TurnHistoryMessage[],
-  persistedMessages?: ChatMessage[] | null
+  persistedMessages?: ChatMessage[] | null,
+  turnTraceHistory?: TurnTraceRecord[] | null
 ): ChatMessage[] {
   const messages: ChatMessage[] = [];
   const restoredHistoryMessages = collectPersistedHistoryMessages(persistedMessages);
   const toolMessagesByTurnId = new Map<string, ChatMessage[]>();
+  const orderedTurnTraceHistory = [...(turnTraceHistory ?? [])].sort((left, right) => {
+    const updatedAtDiff = (left.updatedAt ?? 0) - (right.updatedAt ?? 0);
+    if (updatedAtDiff !== 0) {
+      return updatedAtDiff;
+    }
+
+    return left.turnId.localeCompare(right.turnId);
+  });
   let currentTurnId: string | null = null;
+  let currentTrace: TurnTraceRecord | null = null;
+  let traceIndex = 0;
   let turnIndex = 0;
+  let restoredHistoryIndex = 0;
 
   for (const message of persistedMessages ?? []) {
     if (message.role !== "tool") {
@@ -2107,26 +2252,29 @@ function hydrateMessagesFromHistory(
     toolMessagesByTurnId.set(message.turnId, turnMessages);
   }
 
-  const appendToolMessagesForTurn = (turnId: string | null) => {
+  const appendToolMessagesForTurn = (turnId: string | null, trace?: TurnTraceRecord | null) => {
     if (!turnId) {
       return;
     }
 
     const toolMessages = toolMessagesByTurnId.get(turnId);
-    if (!toolMessages?.length) {
+    if (toolMessages?.length) {
+      messages.push(...toolMessages.map((message) => ({ ...message })));
+      toolMessagesByTurnId.delete(turnId);
       return;
     }
 
-    messages.push(...toolMessages.map((message) => ({ ...message })));
-    toolMessagesByTurnId.delete(turnId);
+    messages.push(...buildToolMessagesFromTrace(trace, turnId));
   };
 
   for (const item of history) {
-    const restoredMessage = restoredHistoryMessages[messages.filter((message) => message.role !== "tool").length];
+    const restoredMessage = restoredHistoryMessages[restoredHistoryIndex];
 
     if (item.role === "user") {
-      currentTurnId = restoredMessage?.turnId ?? createHistoryTurnId(turnIndex);
+      currentTrace = orderedTurnTraceHistory[traceIndex] ?? null;
+      currentTurnId = restoredMessage?.turnId ?? currentTrace?.turnId ?? createHistoryTurnId(turnIndex);
       turnIndex += 1;
+      restoredHistoryIndex += 1;
       messages.push({
         id: restoredMessage?.id ?? `history-user-${turnIndex}`,
         turnId: currentTurnId,
@@ -2139,11 +2287,13 @@ function hydrateMessagesFromHistory(
       continue;
     }
 
+    currentTrace = currentTrace ?? orderedTurnTraceHistory[traceIndex] ?? null;
     if (!currentTurnId) {
-      currentTurnId = restoredMessage?.turnId ?? createHistoryTurnId(turnIndex);
+      currentTurnId = restoredMessage?.turnId ?? currentTrace?.turnId ?? createHistoryTurnId(turnIndex);
       turnIndex += 1;
     }
 
+    restoredHistoryIndex += 1;
     messages.push({
       id: restoredMessage?.id ?? `history-assistant-${turnIndex}`,
       turnId: currentTurnId,
@@ -2151,15 +2301,17 @@ function hydrateMessagesFromHistory(
       content: item.content,
       attachments: [],
       status: "done",
-      reasoningContent: restoredMessage?.reasoningContent ?? null,
-      tokenCount: restoredMessage?.tokenCount ?? null,
-      modelName: restoredMessage?.modelName ?? null
+      reasoningContent: restoredMessage?.reasoningContent ?? traceReasoningContent(currentTrace),
+      tokenCount: restoredMessage?.tokenCount ?? currentTrace?.outputTokens ?? null,
+      modelName: restoredMessage?.modelName ?? traceModelLabel(currentTrace)
     });
-    appendToolMessagesForTurn(currentTurnId);
+    appendToolMessagesForTurn(currentTurnId, currentTrace);
     currentTurnId = null;
+    currentTrace = null;
+    traceIndex += 1;
   }
 
-  appendToolMessagesForTurn(currentTurnId);
+  appendToolMessagesForTurn(currentTurnId, currentTrace);
   return messages;
 }
 
@@ -2172,7 +2324,8 @@ export const useRuntimeStore = defineStore("runtime", {
       sessionList: [],
       sessionOperation: null,
       sessionError: null,
-      phase: restorePhaseFromTurnHistory(
+      phase: resolveRestoredPersistedPhase(
+        persisted?.phase,
         persisted?.messages ?? [],
         (persisted?.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace))
       ),
@@ -2208,6 +2361,7 @@ export const useRuntimeStore = defineStore("runtime", {
       historyBranches: [],
       eventsReady: false,
       deferredPersistTimerId: null,
+      browserPreviewRunToken: 0,
       messages: persisted?.messages ?? [],
       attachmentAssets: persisted?.attachmentAssets ?? [],
       availableTools: createAvailableTools(),
@@ -2280,6 +2434,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.traceTimeline = createDefaultTraceTimeline();
       this.turnTraceHistory = [];
       this.eventCursorByTurnId = {};
+      this.browserPreviewRunToken = 0;
     },
     cancelDeferredPersist() {
       if (this.deferredPersistTimerId == null) {
@@ -2288,6 +2443,77 @@ export const useRuntimeStore = defineStore("runtime", {
 
       window.clearTimeout(this.deferredPersistTimerId);
       this.deferredPersistTimerId = null;
+    },
+    cancelBrowserPreviewTurn(turnId: string) {
+      if (this.activeTurnId !== turnId) {
+        return false;
+      }
+
+      this.browserPreviewRunToken += 1;
+      const cancelledTraceSteps = finalizeCancelledTraceSteps(this.traceSteps);
+      const assistantMessage = this.ensureAssistantMessage(
+        turnId,
+        buildAssistantModelLabel(this.providerName, this.providerModel)
+      );
+      assistantMessage.content = "本轮已停止。";
+      assistantMessage.reasoningContent = null;
+      assistantMessage.status = "done";
+
+      const traceTimeline: TraceTimelineEntry[] = createBrowserPreviewTraceTimeline().map((entry) =>
+        entry.kind === "call_model"
+          ? {
+              ...entry,
+              state: "cancelled" as const,
+              text: assistantMessage.content,
+              fallbackReason: this.fallbackReason
+            }
+          : entry
+      );
+
+      this.phase = "cancelled";
+      this.error = null;
+      this.traceSteps = cancelledTraceSteps;
+      this.traceTimeline = traceTimeline;
+      this.toolActivities = [];
+      const terminalSequence = traceTimeline[traceTimeline.length - 1]?.sequence ?? cancelledTraceSteps.length;
+      const terminalEnvelope = createBrowserPreviewTerminalEnvelope(
+        turnId,
+        "turn.cancelled",
+        terminalSequence,
+        Date.now()
+      );
+      this.commitTurnEventCursor({
+        turnId,
+        eventId: terminalEnvelope.eventId,
+        sequence: terminalEnvelope.sequence,
+        emittedAtMs: terminalEnvelope.emittedAtMs
+      });
+      this.commitTurnTraceTimeline(turnId, traceTimeline, {
+        eventId: terminalEnvelope.eventId,
+        eventType: terminalEnvelope.eventType,
+        eventVersion: terminalEnvelope.eventVersion,
+        sequence: terminalEnvelope.sequence,
+        emittedAtMs: terminalEnvelope.emittedAtMs,
+        phase: "cancelled",
+        traceSteps: cancelledTraceSteps,
+        toolActivities: [],
+        sessionSummary: this.sessionSummary,
+        fallbackReason: this.fallbackReason,
+        title:
+          this.messages.find((item) => item.turnId === turnId && item.role === "user")?.content
+            ? buildTurnTitle(this.messages.find((item) => item.turnId === turnId && item.role === "user")?.content ?? "")
+            : BROWSER_PREVIEW_TRACE_TITLE,
+        error: "stopped_by_user"
+      });
+      this.persistHistory();
+      void this.loadSessionCatalog();
+      this.isSubmitting = false;
+      this.activeTurnId = null;
+      this.activeRunId = null;
+      debugLog("browser-preview:cancelled", {
+        turnId
+      });
+      return true;
     },
     scheduleDeferredPersist(delay = 140) {
       this.cancelDeferredPersist();
@@ -2307,6 +2533,7 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       const payload: PersistedRuntimeState = {
+        phase: this.phase,
         messages: this.messages,
         attachmentAssets: this.attachmentAssets,
         turnTraceHistory: this.turnTraceHistory,
@@ -2660,6 +2887,11 @@ export const useRuntimeStore = defineStore("runtime", {
       const snapshotSummary = snapshot.history.length > 0 ? snapshot.summary : "";
       const sessionSummary = retrievedSummary || restoredState?.sessionSummary || snapshotSummary;
       const snapshotTurnTraceHistory = snapshot.turnTraceHistory ?? [];
+      const effectiveTurnTraceHistory = (
+        snapshotTurnTraceHistory.length
+          ? snapshotTurnTraceHistory
+          : restoredState?.turnTraceHistory ?? []
+      ).map((trace) => normalizeTurnTraceRecord(trace));
 
       this.sessionId = sessionId;
       this.error = null;
@@ -2680,14 +2912,11 @@ export const useRuntimeStore = defineStore("runtime", {
       this.retrievedContext = cloneRetrievedContext(retrieved ?? deriveRetrievedContextFromSnapshot(snapshot));
       this.messages = hydrateMessagesFromHistory(
         snapshot.history,
-        canMergePersistedMessages ? persisted?.messages : null
+        canMergePersistedMessages ? persisted?.messages : null,
+        effectiveTurnTraceHistory
       );
       this.attachmentAssets = snapshot.attachmentAssets ?? restoredState?.attachmentAssets ?? [];
-      this.turnTraceHistory = (
-        snapshotTurnTraceHistory.length
-          ? snapshotTurnTraceHistory
-          : restoredState?.turnTraceHistory ?? []
-      ).map((trace) => normalizeTurnTraceRecord(trace));
+      this.turnTraceHistory = effectiveTurnTraceHistory;
       this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
       this.providerRequestedName = restoredState?.providerRequestedName ?? blankFields.providerRequestedName;
       this.providerName = restoredState?.providerName ?? blankFields.providerName;
@@ -2704,7 +2933,11 @@ export const useRuntimeStore = defineStore("runtime", {
       this.traceSteps = createDefaultTraceSteps();
       const restoredTraceTimeline = cloneTraceTimeline(this.turnTraceHistory[this.turnTraceHistory.length - 1]?.traceTimeline);
       this.traceTimeline = restoredTraceTimeline.length ? restoredTraceTimeline : createDefaultTraceTimeline();
-      this.phase = restorePhaseFromTurnHistory(this.messages, this.turnTraceHistory);
+      this.phase = resolveRestoredPersistedPhase(
+        restoredState?.phase ?? null,
+        this.messages,
+        this.turnTraceHistory
+      );
       const hydratedRunId = runtimeView?.submissionPlan?.runId?.trim() || null;
       if (!this.activeRunId && hydratedRunId) {
         this.activeRunId = hydratedRunId;
@@ -2956,7 +3189,20 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       const nextSessionId = `session-${Date.now()}`;
-      await this.switchSession(nextSessionId);
+      this.persistHistory();
+      await this.loadSessionCatalog();
+      this.resetSessionRuntimeState();
+      this.sessionId = nextSessionId;
+      this.phase = "idle";
+      this.sessionError = null;
+      this.sessionList = [
+        createTransientSessionOverview(nextSessionId),
+        ...this.sessionList.filter((session) => session.conversationId !== nextSessionId)
+      ];
+      debugLog("session:create:transient", {
+        from: this.sessionList[1]?.conversationId ?? null,
+        to: nextSessionId
+      });
     },
     async deleteSession(targetSessionId: string) {
       if (this.isSubmitting || this.sessionOperation) {
@@ -3092,7 +3338,8 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     upsertTurnTrace(
       turnId: string,
-      patch: Partial<Omit<TurnTraceRecord, "turnId" | "updatedAt">> & { updatedAt?: number }
+      patch: Partial<Omit<TurnTraceRecord, "turnId" | "updatedAt">> & { updatedAt?: number },
+      persist = true
     ) {
       const existing = this.turnTraceHistory.find((item) => item.turnId === turnId);
       const updatedAt = patch.updatedAt ?? Date.now();
@@ -3116,7 +3363,9 @@ export const useRuntimeStore = defineStore("runtime", {
               ? cloneHookTraceRecords(patch.hookTraceRecords)
               : existing.hookTraceRecords
         });
-        this.persistHistory();
+        if (persist) {
+          this.persistHistory();
+        }
         return;
       }
 
@@ -3149,7 +3398,9 @@ export const useRuntimeStore = defineStore("runtime", {
         updatedAt
       }));
       this.turnTraceHistory[this.turnTraceHistory.length - 1]!.title = resolvedTitle;
-      this.persistHistory();
+      if (persist) {
+        this.persistHistory();
+      }
     },
     shouldProcessTurnEvent(payload: Pick<TurnStreamEvent, "turnId" | "eventId" | "sequence" | "emittedAtMs">) {
       return shouldAcceptTurnEvent(this.eventCursorByTurnId[payload.turnId], payload);
@@ -3179,15 +3430,16 @@ export const useRuntimeStore = defineStore("runtime", {
     commitTurnTraceTimeline(
       turnId: string,
       traceTimeline: TraceTimelineEntry[],
-      patch: Partial<Omit<TurnTraceRecord, "turnId" | "updatedAt">> & { updatedAt?: number } = {}
+      patch: Partial<Omit<TurnTraceRecord, "turnId" | "updatedAt">> & { updatedAt?: number } = {},
+      persist = true
     ) {
       this.traceTimeline = cloneTraceTimeline(traceTimeline);
       this.upsertTurnTrace(turnId, {
         ...patch,
         traceTimeline: this.traceTimeline
-      });
+      }, persist);
     },
-    applyTurnTokenStats(turnId: string, inputTokens?: number | null, outputTokens?: number | null) {
+    applyTurnTokenStats(turnId: string, inputTokens?: number | null, outputTokens?: number | null, persist = true) {
       const userMessage = this.messages.find((item) => item.turnId === turnId && item.role === "user");
       const assistantMessage = this.messages.find((item) => item.turnId === turnId && item.role === "assistant");
 
@@ -3199,7 +3451,9 @@ export const useRuntimeStore = defineStore("runtime", {
         assistantMessage.tokenCount = outputTokens;
       }
 
-      this.persistHistory();
+      if (persist) {
+        this.persistHistory();
+      }
     },
     ensureAssistantMessage(turnId: string, modelName?: string | null) {
       const messageId = `assistant-${turnId}`;
@@ -3225,9 +3479,9 @@ export const useRuntimeStore = defineStore("runtime", {
 
       this.messages.push(assistantMessage);
       this.persistHistory();
-      return assistantMessage;
+      return this.messages.find((item) => item.id === messageId && item.role === "assistant") ?? assistantMessage;
     },
-    syncToolMessages(turnId: string, toolActivities?: ToolActivity[] | null) {
+    syncToolMessages(turnId: string, toolActivities?: ToolActivity[] | null, persist = true) {
       if (!toolActivities) {
         return;
       }
@@ -3245,7 +3499,9 @@ export const useRuntimeStore = defineStore("runtime", {
           existingMessage.toolName = tool.name;
           existingMessage.detail = nextDetail;
           existingMessage.durationSeconds = tool.durationSeconds ?? null;
-          this.persistHistory();
+          if (persist) {
+            this.persistHistory();
+          }
           continue;
         }
 
@@ -3259,7 +3515,9 @@ export const useRuntimeStore = defineStore("runtime", {
           detail: nextDetail,
           durationSeconds: tool.durationSeconds ?? null
         });
-        this.persistHistory();
+        if (persist) {
+          this.persistHistory();
+        }
       }
     },
     setDraftMessage(message: string) {
@@ -3486,7 +3744,7 @@ export const useRuntimeStore = defineStore("runtime", {
           })
         );
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
-        this.syncToolMessages(payload.turnId, payload.toolActivities);
+        this.syncToolMessages(payload.turnId, payload.toolActivities, false);
         this.commitTurnTraceTimeline(payload.turnId, this.traceTimeline, {
           eventId: payload.eventId ?? null,
           eventType: payload.eventType ?? null,
@@ -3513,7 +3771,8 @@ export const useRuntimeStore = defineStore("runtime", {
           ...reasoningTokenPatch,
           ...turnDurationPatch,
           error: null
-        });
+        }, false);
+        this.scheduleDeferredPersist();
       });
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
@@ -3573,7 +3832,7 @@ export const useRuntimeStore = defineStore("runtime", {
           firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
           hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
           error: null
-        });
+        }, false);
         this.scheduleDeferredPersist();
         debugLog("event:delta", {
           turnId: payload.turnId,
@@ -3622,7 +3881,8 @@ export const useRuntimeStore = defineStore("runtime", {
           toolActivities: this.toolActivities,
           hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
           error: null
-        });
+        }, false);
+        this.scheduleDeferredPersist();
         debugLog("event:trace", {
           turnId: payload.turnId,
           steps: this.traceSteps.length
@@ -3669,7 +3929,8 @@ export const useRuntimeStore = defineStore("runtime", {
           toolActivities: payload.toolActivities ?? this.toolActivities,
           hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
           error: null
-        });
+        }, false);
+        this.scheduleDeferredPersist();
       });
 
       const checkpointPersistedUnlisten = await safeListen<TurnStreamEvent>("turn:checkpoint_persisted", ({ payload }) => {
@@ -3712,7 +3973,8 @@ export const useRuntimeStore = defineStore("runtime", {
           toolActivities: payload.toolActivities ?? this.toolActivities,
           hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
           error: null
-        });
+        }, false);
+        this.scheduleDeferredPersist();
       });
 
       const toolUnlisten = await safeListen<TurnStreamEvent>("turn:tool", ({ payload }) => {
@@ -3730,7 +3992,7 @@ export const useRuntimeStore = defineStore("runtime", {
           tools: (payload.toolActivities ?? []).length
         });
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
-        this.syncToolMessages(payload.turnId, payload.toolActivities);
+        this.syncToolMessages(payload.turnId, payload.toolActivities, false);
         const traceTimeline = resolveEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
             turnId: payload.turnId,
@@ -3760,7 +4022,8 @@ export const useRuntimeStore = defineStore("runtime", {
           toolActivities: payload.toolActivities ?? this.toolActivities,
           hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
           error: null
-        });
+        }, false);
+        this.scheduleDeferredPersist();
       });
 
       const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
@@ -4130,6 +4393,8 @@ export const useRuntimeStore = defineStore("runtime", {
       const providerStore = useProviderStore();
       const provider = providerStore.currentProvider;
       const model = providerStore.currentModel;
+      this.browserPreviewRunToken += 1;
+      const runToken = this.browserPreviewRunToken;
       const previewProviderName = provider?.name ?? BROWSER_PREVIEW_PROVIDER_NAME;
       const previewModelName = model?.model ?? model?.name ?? BROWSER_PREVIEW_MODEL_NAME;
       const assistantModelLabel = buildAssistantModelLabel(previewProviderName, previewModelName);
@@ -4150,11 +4415,17 @@ export const useRuntimeStore = defineStore("runtime", {
       this.fallbackReason = BROWSER_PREVIEW_FALLBACK_REASON;
 
       await wait(120);
+      if (runToken !== this.browserPreviewRunToken || this.activeTurnId !== requestId) {
+        return;
+      }
       const assistantMessage = this.ensureAssistantMessage(requestId, assistantModelLabel);
       assistantMessage.content = "";
 
       for (const chunk of BROWSER_PREVIEW_CHUNKS) {
         await wait(80);
+        if (runToken !== this.browserPreviewRunToken || this.activeTurnId !== requestId) {
+          return;
+        }
         assistantMessage.content += chunk;
         this.scheduleDeferredPersist();
       }
@@ -4168,7 +4439,25 @@ export const useRuntimeStore = defineStore("runtime", {
       this.traceSteps = createBrowserPreviewTraceSteps();
       this.traceTimeline = createBrowserPreviewTraceTimeline();
       this.toolActivities = [];
+      const terminalSequence = this.traceTimeline[this.traceTimeline.length - 1]?.sequence ?? this.traceSteps.length;
+      const terminalEnvelope = createBrowserPreviewTerminalEnvelope(
+        requestId,
+        "turn.completed",
+        terminalSequence,
+        Date.now()
+      );
+      this.commitTurnEventCursor({
+        turnId: requestId,
+        eventId: terminalEnvelope.eventId,
+        sequence: terminalEnvelope.sequence,
+        emittedAtMs: terminalEnvelope.emittedAtMs
+      });
       this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
+        eventId: terminalEnvelope.eventId,
+        eventType: terminalEnvelope.eventType,
+        eventVersion: terminalEnvelope.eventVersion,
+        sequence: terminalEnvelope.sequence,
+        emittedAtMs: terminalEnvelope.emittedAtMs,
         phase: "completed",
         traceSteps: this.traceSteps,
         toolActivities: [],
@@ -4187,10 +4476,15 @@ export const useRuntimeStore = defineStore("runtime", {
       });
       this.isSubmitting = false;
       this.activeTurnId = null;
+      this.activeRunId = null;
     },
     async stopTurn() {
-      if (!this.activeTurnId || !this.isSubmitting || !isTauriAvailable()) {
+      if (!this.activeTurnId || !this.isSubmitting) {
         return false;
+      }
+
+      if (!isTauriAvailable()) {
+        return this.cancelBrowserPreviewTurn(this.activeTurnId);
       }
 
       try {

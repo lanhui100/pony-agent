@@ -2,13 +2,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
-  AlertTriangle,
   ArrowUp,
   Brain,
   Bot,
   Check,
   ChevronDown,
   LoaderCircle,
+  Square,
   UserRound,
   Wrench
 } from "lucide-vue-next";
@@ -27,10 +27,20 @@ type TurnBucket = {
   tools: ChatMessage[];
 };
 
+type ComposerActionKind = "submit" | "resume" | "continue" | "restart";
+
 const runtimeStore = useRuntimeStore();
 const providerStore = useProviderStore();
 
-const { draftMessage, error, isSubmitting, messages, phase, sessionError, sessionOperation } = storeToRefs(runtimeStore);
+const {
+  draftMessage,
+  isSubmitting,
+  latestExecutionCheckpoint,
+  latestGraphRunSubmissionPlan,
+  latestRunControlAuditSummary,
+  messages,
+  sessionOperation
+} = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
 
 const providerMenuOpen = ref(false);
@@ -42,6 +52,7 @@ const reasoningMenuRef = ref<HTMLElement | null>(null);
 const timelineScrollAreaRef = ref<{ scrollToBottom: (behavior?: ScrollBehavior) => void } | null>(null);
 const bottomAnchorRef = ref<HTMLElement | null>(null);
 const scrollFrameId = ref<number | null>(null);
+const stopRequested = ref(false);
 let lastMessageSignature = "";
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 
@@ -98,45 +109,72 @@ const reasoningOptions: Array<{ label: string; value: ProviderReasoningEffort | 
   { label: "high", value: "high" }
 ];
 
-const sessionBanner = computed<{ tone: "info" | "danger"; text: string } | null>(() => {
-  if (sessionOperation.value === "initializing") {
+const composerAction = computed<{
+  kind: ComposerActionKind;
+  label: string;
+  hint: string;
+}>(() => {
+  const actionSummary = latestRunControlAuditSummary.value?.actionEvidenceSummary ?? null;
+  const planCommand = latestGraphRunSubmissionPlan.value?.command?.trim().toLowerCase() || null;
+  const checkpointCommand = latestExecutionCheckpoint.value?.submissionCommand?.trim().toLowerCase() || null;
+  const projectedCommand = actionSummary?.projectedCommand?.trim().toLowerCase() || null;
+  const command = projectedCommand || planCommand || checkpointCommand;
+  const checkpoint = latestExecutionCheckpoint.value;
+
+  if (actionSummary?.commandKind === "stop_graph_run" && actionSummary.summary.trim()) {
     return {
-      tone: "info",
-      text: "正在加载最近对话…"
+      kind: "resume",
+      label: "恢复",
+      hint: actionSummary.summary.trim()
     };
   }
 
-  if (sessionOperation.value === "switching") {
+  if (command === "resume_graph_run_stream") {
     return {
-      tone: "info",
-      text: "正在切换对话…"
+      kind: "resume",
+      label: "恢复",
+      hint: actionSummary?.summary?.trim() || "检测到暂停中的运行；点击后会恢复该 run 并继续执行。"
     };
   }
 
-  if (sessionOperation.value === "deleting") {
+  if (command === "continue_graph_run_stream") {
     return {
-      tone: "info",
-      text: "正在删除对话并刷新会话状态…"
+      kind: "continue",
+      label: "继续",
+      hint: actionSummary?.summary?.trim() || "检测到可继续的 graph run；点击后会接着当前运行推进。"
     };
   }
 
-  if (sessionError.value?.trim()) {
+  if (
+    actionSummary?.startReason === "replay_from_checkpoint" ||
+    actionSummary?.startReason === "restart_from_checkpoint" ||
+    actionSummary?.degraded ||
+    checkpoint?.recoveryMode === "replay_required" ||
+    checkpoint?.checkpointKind === "lifecycle_boundary" ||
+    (command === "start_graph_run_stream" &&
+      latestGraphRunSubmissionPlan.value?.source?.trim().toLowerCase() === "checkpoint")
+  ) {
     return {
-      tone: "danger",
-      text: sessionError.value.trim()
+      kind: "restart",
+      label: "重新开始",
+      hint: actionSummary?.summary?.trim() || "当前恢复点只保留持久化事实；点击后会重新开始新的执行。"
     };
   }
 
-  return null;
+  return {
+    kind: "submit",
+    label: "发送",
+    hint: "输入消息后开始新一轮执行。"
+  };
 });
 
-const runtimeErrorBanner = computed(() => {
-  if (phase.value !== "failed") {
-    return "";
-  }
+const primaryActionDisabled = computed(
+  () => Boolean(sessionOperation.value) || (!isSubmitting.value && draftMessage.value.trim().length === 0)
+);
 
-  return error.value?.trim() || "当前回合执行失败。";
-});
+const primaryActionTitle = computed(() =>
+  isSubmitting.value ? "请求在安全边界停止当前运行。" : composerAction.value.hint
+);
 
 const turns = computed<TurnBucket[]>(() => {
   const buckets = new Map<string, TurnBucket>();
@@ -161,6 +199,23 @@ const turns = computed<TurnBucket[]>(() => {
   }
 
   return Array.from(buckets.values());
+});
+
+const isEmptyWorkspace = computed(() => turns.value.length === 0);
+
+const latestTurnSignature = computed(() => {
+  const latestTurnId = messages.value[messages.value.length - 1]?.turnId ?? "";
+  if (!latestTurnId) {
+    return "";
+  }
+
+  return messages.value
+    .filter((message) => message.turnId === latestTurnId)
+    .map(
+      (message) =>
+        `${message.id}:${message.content.length}:${message.reasoningContent?.length ?? ""}:${message.status ?? ""}:${message.tokenCount ?? ""}`
+    )
+    .join("|");
 });
 
 function formatAssistantModelLabel(modelName?: string | null) {
@@ -233,7 +288,7 @@ function assistantTone(message: ChatMessage | null) {
   }
 
   if (message.status === "pending") {
-    return "text-stone-400";
+    return "text-stone-800";
   }
 
   if (message.status === "error") {
@@ -262,6 +317,19 @@ function handleComposerKeydown(event: KeyboardEvent) {
       runtimeStore.submitTurn();
     }
   }
+}
+
+async function handlePrimaryAction() {
+  if (isSubmitting.value) {
+    const stopped = await runtimeStore.stopTurn();
+    if (stopped) {
+      stopRequested.value = true;
+    }
+    return;
+  }
+
+  stopRequested.value = false;
+  await runtimeStore.submitTurn();
 }
 
 function toggleProviderMenu() {
@@ -356,29 +424,25 @@ onBeforeUnmount(() => {
   }
 });
 
-watch(
-  () =>
-    messages.value
-      .map(
-        (message) =>
-          `${message.id}:${message.content.length}:${message.reasoningContent?.length ?? ""}:${message.status ?? ""}:${message.tokenCount ?? ""}`
-      )
-      .join("|"),
-  (signature) => {
-    const behavior: ScrollBehavior =
-      signature.startsWith(lastMessageSignature) && lastMessageSignature.length > 0
-        ? "auto"
-        : "smooth";
+watch(latestTurnSignature, (signature) => {
+  const behavior: ScrollBehavior =
+    signature.startsWith(lastMessageSignature) && lastMessageSignature.length > 0
+      ? "auto"
+      : "smooth";
 
-    lastMessageSignature = signature;
-    queueScrollToLatestTurn(behavior);
-  },
-  { flush: "post" }
-);
+  lastMessageSignature = signature;
+  queueScrollToLatestTurn(behavior);
+}, { flush: "post" });
 
 watch(showReasoningContent, (value) => {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(SHOW_REASONING_STORAGE_KEY, value ? "true" : "false");
+  }
+});
+
+watch(isSubmitting, (submitting) => {
+  if (!submitting) {
+    stopRequested.value = false;
   }
 });
 </script>
@@ -391,33 +455,17 @@ watch(showReasoningContent, (value) => {
       viewport-class="px-4 py-4 sm:px-5"
     >
       <div class="mx-auto w-full max-w-[58rem]" data-testid="workspace-content-column">
-      <div v-if="sessionBanner || runtimeErrorBanner" class="mb-4 space-y-2">
-        <div
-          v-if="sessionBanner"
-          :class="
-            sessionBanner.tone === 'danger'
-              ? 'border-rose-200/80 bg-rose-50 text-rose-800'
-              : 'border-stone-200/80 bg-white/92 text-stone-700'
-          "
-          class="flex items-start gap-2 rounded-[0.55rem] border px-3 py-2 text-[12px] leading-5"
-        >
-          <LoaderCircle
-            v-if="sessionBanner.tone === 'info'"
-            class="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-stone-400"
-          />
-          <AlertTriangle v-else class="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-500" />
-          <span>{{ sessionBanner.text }}</span>
-        </div>
-        <div
-          v-if="runtimeErrorBanner"
-          class="flex items-start gap-2 rounded-[0.55rem] border border-rose-200/80 bg-rose-50 px-3 py-2 text-[12px] leading-5 text-rose-800"
-        >
-          <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-500" />
-          <span>{{ runtimeErrorBanner }}</span>
-        </div>
-      </div>
-
       <TransitionGroup name="turn-flow" tag="div" class="space-y-5">
+        <section
+          v-if="isEmptyWorkspace"
+          key="workspace-empty-state"
+          class="flex min-h-[46vh] items-center justify-center px-5 py-10 text-center"
+          data-testid="workspace-empty-state"
+        >
+          <h2 class="text-[28px] font-medium tracking-[-0.04em] text-stone-500">
+            需要我帮你做什么？
+          </h2>
+        </section>
         <section v-for="turn in turns" :key="turn.turnId" class="space-y-3">
           <article v-if="turn.user" class="ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
             <div class="flex flex-col items-end">
@@ -519,6 +567,7 @@ watch(showReasoningContent, (value) => {
             >
               <div
                 v-if="isAssistantStreaming(turn.assistant)"
+                data-testid="workspace-assistant-streaming"
                 class="assistant-streaming-content text-sm"
                 :class="assistantTone(turn.assistant)"
               >
@@ -546,6 +595,7 @@ watch(showReasoningContent, (value) => {
       <textarea
         :value="draftMessage"
         :disabled="Boolean(sessionOperation)"
+        data-testid="workspace-composer-input"
         class="min-h-[82px] w-full resize-none bg-transparent px-0 py-0 text-[13px] leading-[1.55] text-stone-800 outline-none placeholder:text-[12px] placeholder:font-normal placeholder:tracking-[0.01em] placeholder:text-stone-400/70"
         placeholder="输入消息，按 Enter 发送，Shift+Enter 换行。"
         @input="runtimeStore.setDraftMessage(($event.target as HTMLTextAreaElement).value)"
@@ -672,10 +722,14 @@ watch(showReasoningContent, (value) => {
         <Button
           class="h-8 w-8 rounded-full p-0"
           size="sm"
-          :disabled="isSubmitting || Boolean(sessionOperation)"
-          @click="runtimeStore.submitTurn()"
+          :disabled="primaryActionDisabled"
+          :title="primaryActionTitle"
+          :data-testid="isSubmitting ? 'workspace-stop-turn' : 'workspace-submit-action'"
+          @click="handlePrimaryAction"
         >
-          <ArrowUp class="h-3.5 w-3.5" />
+          <Square v-if="isSubmitting" class="h-3.5 w-3.5 fill-current" />
+          <ArrowUp v-if="!isSubmitting" class="h-3.5 w-3.5" />
+          <span class="sr-only">{{ isSubmitting ? "停止" : composerAction.label }}</span>
         </Button>
         </div>
       </div>

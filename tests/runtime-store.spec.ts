@@ -923,6 +923,65 @@ describe("runtime session resilience", () => {
     expect(persisted.messages[1]?.content).toBe("# 新标题\n> 新引用\n**已修复**");
   });
 
+  it("hydrates reasoning, model label, and tool history from trace when persisted cache is unavailable", () => {
+    const store = useRuntimeStore();
+
+    store.applySessionSnapshot(
+      "session-trace-recovery",
+      createSnapshot({
+        conversationId: "session-trace-recovery",
+        summary: "trace recovery summary",
+        history: [
+          { role: "user", content: "请检查入口文件" },
+          { role: "assistant", content: "我已经检查了入口文件，并整理了结果。" }
+        ],
+        turnTraceHistory: [
+          createTrace({
+            turnId: "turn-trace-recovery",
+            providerName: "OpenAI",
+            providerModel: "gpt-5",
+            outputTokens: 64,
+            updatedAt: 5000,
+            toolActivities: [
+              {
+                id: "tool-read-entry",
+                name: "workspace.read_file",
+                status: "done",
+                summary: "已读取 src/main.ts",
+                argumentsText: "{\"path\":\"src/main.ts\"}",
+                resultText: "import { createApp } from 'vue';",
+                durationSeconds: 2
+              }
+            ],
+            traceTimeline: [
+              {
+                id: "model-trace-recovery",
+                kind: "call_model",
+                label: "CALL MODEL #1",
+                state: "completed",
+                sequence: 3,
+                reasoningContent: "先读取入口文件，再总结关键初始化流程。"
+              }
+            ]
+          })
+        ],
+        turnCount: 1
+      })
+    );
+
+    expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+      "user:请检查入口文件",
+      "assistant:我已经检查了入口文件，并整理了结果。",
+      "tool:import { createApp } from 'vue';"
+    ]);
+    expect(store.messages[1]?.reasoningContent).toBe("先读取入口文件，再总结关键初始化流程。");
+    expect(store.messages[1]?.modelName).toBe("OpenAI/gpt-5");
+    expect(store.messages[1]?.tokenCount).toBe(64);
+    expect(store.messages[2]?.toolName).toBe("workspace.read_file");
+    expect(store.messages[2]?.detail).toContain("参数");
+    expect(store.messages[2]?.detail).toContain("结果");
+  });
+
   it("prefers backend snapshot trace history over stale persisted runtime trace cache", () => {
     const store = useRuntimeStore();
     const staleTrace = createTrace({
@@ -1867,6 +1926,14 @@ describe("runtime session resilience", () => {
     expect(store.messages).toEqual([]);
     expect(store.sessionList).toEqual([
       {
+        conversationId: "session-4242",
+        title: "新对话",
+        summary: "发送第一条消息后保存到历史",
+        turnCount: 0,
+        lastReferencedFile: null,
+        updatedAtMs: 0
+      },
+      {
         conversationId: "browser-current",
         title: "browser message",
         summary: "Browser summary",
@@ -1876,6 +1943,58 @@ describe("runtime session resilience", () => {
       }
     ]);
     expect(Object.keys(readPersistedSessions().sessions)).toEqual(["browser-current"]);
+
+    nowSpy.mockRestore();
+  });
+
+  it("creates a transient tauri session without loading the runtime view", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(5151);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "list_sessions") {
+        return [
+          {
+            conversationId: "session-existing",
+            title: "Existing session",
+            summary: "Existing summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 1000
+          }
+        ] satisfies SessionOverview[];
+      }
+
+      if (command === "load_session_runtime_view") {
+        throw new Error("should not load runtime view");
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "session-existing",
+      phase: "ready",
+      sessionSummary: "Existing summary",
+      messages: [
+        createMessage({ id: "existing-user", turnId: "turn-existing", role: "user", content: "existing message" })
+      ],
+      turnTraceHistory: [createTrace({ turnId: "turn-existing", sessionSummary: "Existing summary", updatedAt: 1000 })]
+    });
+
+    await store.createSession();
+
+    expect(store.sessionId).toBe("session-5151");
+    expect(store.phase).toBe("idle");
+    expect(store.messages).toEqual([]);
+    expect(store.sessionOperation).toBeNull();
+    expect(store.sessionList.map((session) => session.conversationId)).toEqual([
+      "session-5151",
+      "session-existing"
+    ]);
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("list_sessions");
 
     nowSpy.mockRestore();
   });
@@ -2099,7 +2218,44 @@ describe("runtime session resilience", () => {
     expect(store.sessionSummary.length).toBeGreaterThan(0);
     expect(store.turnTraceHistory).toHaveLength(1);
     expect(store.turnTraceHistory[0]?.phase).toBe("completed");
+    expect(store.turnTraceHistory[0]?.eventType).toBe("turn.completed");
+    expect(store.turnTraceHistory[0]?.eventVersion).toBe("turn-event-v1");
     expect(store.turnTraceHistory[0]?.fallbackReason).toContain("npm run dev");
+
+    nowSpy.mockRestore();
+  });
+
+  it("restores a cancelled browser-preview turn from persisted canonical terminal evidence", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9090);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+    store.$patch({
+      sessionId: "browser-cancelled-session",
+      draftMessage: "please stop this preview turn",
+      phase: "idle",
+      messages: []
+    });
+
+    const submitPromise = store.submitTurn();
+    await flushMicrotasks();
+    await store.stopTurn();
+    await submitPromise;
+
+    expect(store.phase).toBe("cancelled");
+    expect(store.messages[1]?.content).toBe("本轮已停止。");
+    expect(store.turnTraceHistory[0]?.eventType).toBe("turn.cancelled");
+    expect(store.turnTraceHistory[0]?.eventVersion).toBe("turn-event-v1");
+
+    setActivePinia(createPinia());
+    const restoredStore = useRuntimeStore();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+
+    await restoredStore.initializeSessions();
+
+    expect(restoredStore.sessionId).toBe("browser-cancelled-session");
+    expect(restoredStore.phase).toBe("cancelled");
+    expect(restoredStore.messages[1]?.content).toBe("本轮已停止。");
 
     nowSpy.mockRestore();
   });
@@ -3290,6 +3446,98 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("defers persistence for delta stream updates instead of flushing every chunk immediately", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(7070);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stream" },
+          turnId: "7070"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "stream-session-deferred-persist",
+      draftMessage: "stream request",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "7070",
+        eventId: "event-turn-started-7070",
+        eventType: "turn.model_call_started",
+        eventVersion: "1.0",
+        sequence: 1,
+        emittedAtMs: 1000,
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        providerRequestedName: "OpenAI",
+        traceSteps: store.traceSteps
+      }
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 180));
+
+    let persisted = readPersistedSessions().sessions["stream-session-deferred-persist"] as {
+      messages: ChatMessage[];
+    };
+    expect(persisted.messages.find((message) => message.role === "assistant")?.content).toBe("");
+
+    eventHandlers.get("turn:delta")?.({
+      payload: {
+        turnId: "7070",
+        eventId: "event-turn-delta-7070",
+        eventType: "turn.first_token",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 1200,
+        text: "partial answer",
+        reasoningContent: "thinking"
+      }
+    });
+
+    persisted = readPersistedSessions().sessions["stream-session-deferred-persist"] as {
+      messages: ChatMessage[];
+    };
+    expect(persisted.messages.find((message) => message.role === "assistant")?.content).toBe("");
+
+    await new Promise((resolve) => setTimeout(resolve, 180));
+
+    persisted = readPersistedSessions().sessions["stream-session-deferred-persist"] as {
+      messages: ChatMessage[];
+    };
+    expect(persisted.messages.find((message) => message.role === "assistant")?.content).toBe("partial answer");
+    expect(persisted.messages.find((message) => message.role === "assistant")?.reasoningContent).toBe("thinking");
+
+    nowSpy.mockRestore();
+  }, 10000);
+
   it("prefers canonical event metadata over legacy phase guessing while streaming", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(7272);
@@ -3395,6 +3643,15 @@ describe("runtime session resilience", () => {
     expect(store.traceTimeline.at(-1)?.state).toBe("active");
 
     nowSpy.mockRestore();
+  });
+
+  it("returns the reactive assistant message instance for browser-preview updates", () => {
+    const store = useRuntimeStore();
+
+    const assistantMessage = store.ensureAssistantMessage("turn-reactive", "ppx/gpt-5.4");
+
+    expect(store.messages).toHaveLength(1);
+    expect(assistantMessage).toBe(store.messages[0]);
   });
 
   it("ignores duplicate or older-sequence stream events once a newer canonical event was accepted", async () => {

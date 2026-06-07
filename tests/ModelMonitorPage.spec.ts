@@ -4,6 +4,7 @@ import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
 import type {
   CapabilitySourceView,
   CapabilityView,
+  HookTraceRecord,
   ModelMonitorSessionDrilldownView,
   ModelMonitorSummaryView,
   SessionRuntimeView,
@@ -53,11 +54,17 @@ function createTimelineEntry(partial: Partial<TraceTimelineEntry> = {}): TraceTi
 function createTrace(partial: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
   return {
     turnId: partial.turnId ?? "turn-1",
+    eventId: partial.eventId !== undefined ? partial.eventId : "turn-1:4",
+    eventType: partial.eventType !== undefined ? partial.eventType : "turn.completed",
+    eventVersion: partial.eventVersion !== undefined ? partial.eventVersion : "turn-event-v1",
+    sequence: partial.sequence !== undefined ? partial.sequence : 4,
+    emittedAtMs: partial.emittedAtMs !== undefined ? partial.emittedAtMs : 4004,
     title: partial.title ?? "首轮分析",
     phase: partial.phase ?? "completed",
     traceSteps: partial.traceSteps ?? [],
     traceTimeline: partial.traceTimeline ?? [createTimelineEntry()],
     toolActivities: partial.toolActivities ?? [],
+    hookTraceRecords: partial.hookTraceRecords ?? [],
     providerRequestedName: partial.providerRequestedName ?? "test-openai",
     providerName: partial.providerName ?? "test-openai",
     providerProtocol: partial.providerProtocol ?? "openai",
@@ -88,6 +95,28 @@ function createTrace(partial: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
     totalTokens: partial.totalTokens ?? 34,
     firstTokenLatencyMs: partial.firstTokenLatencyMs ?? 220,
     turnDurationMs: partial.turnDurationMs ?? 850
+  };
+}
+
+function createHookTraceRecord(partial: Partial<HookTraceRecord> = {}): HookTraceRecord {
+  return {
+    hookName: partial.hookName ?? "audit.observe",
+    hookClass: partial.hookClass ?? "observe",
+    hookPoint: partial.hookPoint ?? "model_call_start",
+    hookOrder: partial.hookOrder ?? 1,
+    resultKind: partial.resultKind ?? "observe",
+    structuredResult:
+      partial.structuredResult ?? {
+        resultKind: "observe",
+        payload: {
+          summary: "hook observed lifecycle boundary without mutation"
+        }
+      },
+    blocked: partial.blocked ?? false,
+    elapsedMs: partial.elapsedMs ?? 12,
+    inputSummary: partial.inputSummary ?? "monitor",
+    persistenceEvidenceRef: partial.persistenceEvidenceRef ?? null,
+    summary: partial.summary ?? "observe hook summary"
   };
 }
 
@@ -174,6 +203,8 @@ function createSummaryView(): ModelMonitorSummaryView {
       requestCount: 5,
       modelCallCount: 6,
       toolCallCount: 2,
+      hookCallCount: 4,
+      blockedHookCount: 1,
       failedRequestCount: 1,
       retrievalParticipationCount: 3,
       inputTokens: 111,
@@ -181,7 +212,9 @@ function createSummaryView(): ModelMonitorSummaryView {
       outputTokens: 77,
       totalTokens: 188,
       avgFirstTokenLatencyMs: 240,
-      avgTurnDurationMs: 980
+      avgTurnDurationMs: 980,
+      avgHookDurationMs: 18,
+      totalHookDurationMs: 72
     },
     providers: [
       {
@@ -223,6 +256,42 @@ function createSummaryView(): ModelMonitorSummaryView {
         failedCallCount: 0,
         avgDurationMs: 600,
         totalDurationMs: 1200
+      }
+    ],
+    hookClasses: [
+      {
+        key: "observe",
+        label: "observe",
+        callCount: 3,
+        blockedCallCount: 0,
+        avgDurationMs: 11,
+        totalDurationMs: 33
+      },
+      {
+        key: "guard",
+        label: "guard",
+        callCount: 1,
+        blockedCallCount: 1,
+        avgDurationMs: 39,
+        totalDurationMs: 39
+      }
+    ],
+    hooks: [
+      {
+        key: "audit.observe",
+        label: "audit.observe",
+        callCount: 3,
+        blockedCallCount: 0,
+        avgDurationMs: 11,
+        totalDurationMs: 33
+      },
+      {
+        key: "guard.input",
+        label: "guard.input",
+        callCount: 1,
+        blockedCallCount: 1,
+        avgDurationMs: 39,
+        totalDurationMs: 39
       }
     ],
     capabilitySources: [
@@ -280,6 +349,8 @@ function createSummaryView(): ModelMonitorSummaryView {
         requestCount: 3,
         modelCallCount: 3,
         toolCallCount: 1,
+        hookCallCount: 3,
+        blockedHookCount: 1,
         failedRequestCount: 0,
         retrievalParticipationCount: 2,
         inputTokens: 66,
@@ -287,7 +358,9 @@ function createSummaryView(): ModelMonitorSummaryView {
         outputTokens: 45,
         totalTokens: 111,
         avgFirstTokenLatencyMs: 220,
-        avgTurnDurationMs: 900
+        avgTurnDurationMs: 900,
+        avgHookDurationMs: 20,
+        totalHookDurationMs: 60
       },
       {
         sessionId: "session-beta",
@@ -297,6 +370,8 @@ function createSummaryView(): ModelMonitorSummaryView {
         requestCount: 2,
         modelCallCount: 3,
         toolCallCount: 1,
+        hookCallCount: 1,
+        blockedHookCount: 0,
         failedRequestCount: 1,
         retrievalParticipationCount: 1,
         inputTokens: 45,
@@ -304,7 +379,9 @@ function createSummaryView(): ModelMonitorSummaryView {
         outputTokens: 32,
         totalTokens: 77,
         avgFirstTokenLatencyMs: 270,
-        avgTurnDurationMs: 1060
+        avgTurnDurationMs: 1060,
+        avgHookDurationMs: 12,
+        totalHookDurationMs: 12
       }
     ],
     generatedAtMs: 3000
@@ -318,6 +395,27 @@ function createDrilldownView(sessionId = "session-alpha", title = "Alpha Session
       title: "第二轮分析",
       totalTokens: 55,
       turnDurationMs: 1100,
+      hookTraceRecords: [
+        createHookTraceRecord(),
+        createHookTraceRecord({
+          hookName: "guard.input",
+          hookClass: "guard",
+          hookPoint: "context_build_start",
+          hookOrder: 2,
+          resultKind: "deny",
+          structuredResult: {
+            resultKind: "deny",
+            payload: {
+              reasonCode: "unsafe_input",
+              message: "guard denied the input"
+            }
+          },
+          blocked: true,
+          elapsedMs: 39,
+          inputSummary: "monitor-guard",
+          summary: "guard hook blocked the turn"
+        })
+      ],
       traceTimeline: [
         createTimelineEntry({ id: "timeline-1", label: "Prepare retrieval", kind: "prepare_retrieval", text: null }),
         createTimelineEntry({ id: "timeline-2", label: "Return result", kind: "return_result" })
@@ -339,6 +437,8 @@ function createDrilldownView(sessionId = "session-alpha", title = "Alpha Session
       requestCount: 2,
       modelCallCount: 2,
       toolCallCount: 1,
+      hookCallCount: 3,
+      blockedHookCount: 1,
       failedRequestCount: 0,
       retrievalParticipationCount: 2,
       inputTokens: 66,
@@ -346,7 +446,9 @@ function createDrilldownView(sessionId = "session-alpha", title = "Alpha Session
       outputTokens: 45,
       totalTokens: 111,
       avgFirstTokenLatencyMs: 220,
-      avgTurnDurationMs: 900
+      avgTurnDurationMs: 900,
+      avgHookDurationMs: 20,
+      totalHookDurationMs: 60
     },
     runtimeView: {
       ...createRuntimeView(traces),
@@ -394,7 +496,13 @@ function createCapabilitySources(): CapabilitySourceView[] {
       availability: "available",
       declaredCapabilities: ["tool"],
       permissionProfile: "host-mediated",
-      updatedAtMs: 3000
+      updatedAtMs: 3000,
+      lastIngressObservation: {
+        boundary: "control_plane.apply_mcp_source_snapshot",
+        summary: "builtin source ingress registered `builtin-tools` with 1 capability candidates",
+        candidateIds: ["builtin:time_now"],
+        observedAtMs: 3100
+      }
     }
   ];
 }
@@ -471,14 +579,28 @@ describe("ModelMonitorPage", () => {
 
     expect(tauriMocks.mockSafeInvoke).toHaveBeenNthCalledWith(1, "load_model_monitor_summary");
     expect(wrapper.get('[data-testid="model-monitor-overview"]').text()).toContain("请求总数");
+    expect(wrapper.get('[data-testid="model-monitor-overview"]').text()).toContain("Hooks 活动");
+    expect(wrapper.get('[data-testid="model-monitor-overview"]').text()).toContain("阻断 1");
     expect(wrapper.get('[data-testid="model-monitor-providers"]').text()).toContain("test-openai");
     expect(wrapper.get('[data-testid="model-monitor-tools"]').text()).toContain("search_docs");
+    expect(wrapper.get('[data-testid="model-monitor-hook-classes-summary"]').text()).toContain("observe");
+    expect(wrapper.get('[data-testid="model-monitor-hook-classes-summary"]').text()).toContain("guard");
+    expect(wrapper.get('[data-testid="model-monitor-hooks-summary"]').text()).toContain("audit.observe");
+    expect(wrapper.get('[data-testid="model-monitor-hooks-summary"]').text()).toContain("guard.input");
     expect(wrapper.get('[data-testid="model-monitor-capability-sources-summary"]').text()).toContain("mcp-local");
     expect(wrapper.get('[data-testid="model-monitor-capability-invocation-modes-summary"]').text()).toContain("direct_tool_call");
     expect(wrapper.get('[data-testid="model-monitor-capability-failure-classes-summary"]').text()).toContain("permission_denied");
     expect(wrapper.text()).toContain("Alpha Session");
+    expect(wrapper.get('[data-testid="model-monitor-capability-source-detail"]').text()).toContain("Last Ingress");
+    expect(wrapper.get('[data-testid="model-monitor-capability-source-detail"]').text()).toContain("builtin:time_now");
+    expect(wrapper.get('[data-testid="model-monitor-sessions"]').text()).toContain("hooks 3 / blocked 1");
+    expect(wrapper.get('[data-testid="model-monitor-drilldown-metrics"]').text()).toContain("Hooks 与阻断");
+    expect(wrapper.get('[data-testid="model-monitor-drilldown-metrics"]').text()).toContain("3 calls");
     expect(wrapper.get('[data-testid="model-monitor-trace-timeline"]').text()).toContain("Return result");
     expect(wrapper.get('[data-testid="model-monitor-trace-timeline"]').text()).toContain("prepare_retrieval");
+    expect(wrapper.get('[data-testid="model-monitor-hook-trace"]').text()).toContain("audit.observe");
+    expect(wrapper.get('[data-testid="model-monitor-hook-trace"]').text()).toContain("guard.input");
+    expect(wrapper.get('[data-testid="model-monitor-hook-trace"]').text()).toContain("blocked");
     wrapper.unmount();
   });
 
@@ -659,6 +781,46 @@ describe("ModelMonitorPage", () => {
     expect(capabilityActivity).toContain("mcp:tool:workspace_search");
     expect(capabilityActivity).toContain("mcp-local");
     expect(capabilityActivity).toContain("direct_tool_call");
+    wrapper.unmount();
+  });
+
+  it("marks traces without terminal envelope as raw evidence only", async () => {
+    const drilldown = createDrilldownView();
+    drilldown.runtimeView.session.turnTraceHistory = [
+      createTrace({
+        turnId: "turn-raw",
+        eventId: null,
+        eventType: null,
+        eventVersion: null,
+        sequence: null,
+        emittedAtMs: null,
+        title: "Raw Trace"
+      })
+    ];
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      const capabilityPayload = mockCapabilityCommand(command, args);
+      if (capabilityPayload !== undefined) {
+        return capabilityPayload;
+      }
+
+      if (command === "load_model_monitor_summary") {
+        return createSummaryView();
+      }
+
+      if (command === "load_model_monitor_session_drilldown") {
+        return drilldown;
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(ModelMonitorPage);
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="model-monitor-raw-trace-warning"]').text()).toContain(
+      "缺少 canonical terminal envelope"
+    );
     wrapper.unmount();
   });
 });
