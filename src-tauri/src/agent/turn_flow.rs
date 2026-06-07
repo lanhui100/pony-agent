@@ -1,3 +1,5 @@
+use crate::agent::capability_bridge::SkillDescriptor;
+use crate::agent::hooks::HookTraceRecord;
 use crate::agent::provider::{
     BuildContextObservation, ProviderClient, ProviderDecision, ProviderManager, ProviderRequest,
     ProviderStreamChunk, TokenUsage,
@@ -6,6 +8,9 @@ use crate::agent::session::TraceTimelineEntry;
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::context::RetrievedContextState;
 use super::runtime::{TurnResult, TurnStreamEvent};
@@ -20,6 +25,7 @@ pub struct PreparedTurn {
     pub retrieved: RetrievedContextState,
     pub provider: ProviderManager,
     pub tools: Vec<ToolDefinition>,
+    pub planner_skills: Vec<SkillDescriptor>,
     pub planning_request: ProviderRequest,
     pub build_context_observation: BuildContextObservation,
 }
@@ -28,6 +34,7 @@ pub struct PlannedTurn {
     pub first_decision: ProviderDecision,
     pub resolved_tool_call: Option<ToolCall>,
     pub initial_decision_duration_ms: Option<u64>,
+    pub planner_hook_trace_records: Vec<HookTraceRecord>,
 }
 
 pub struct PersistedTurnOutcome {
@@ -39,6 +46,15 @@ pub struct PersistedTurnOutcome {
     pub total_tokens: Option<u64>,
 }
 
+#[derive(Clone)]
+pub struct TurnEventEnvelope {
+    pub event_id: String,
+    pub event_type: String,
+    pub event_version: String,
+    pub sequence: u64,
+    pub emitted_at_ms: u64,
+}
+
 pub struct SyncToolTurnOutcome {
     pub assistant_message: String,
     pub provider_native_transcript: Option<Vec<Value>>,
@@ -47,8 +63,8 @@ pub struct SyncToolTurnOutcome {
     pub fallback_reason: Option<String>,
     pub token_usage: Option<TokenUsage>,
     pub trace_steps: Vec<TurnTraceStep>,
-    pub trace_timeline: Vec<TraceTimelineEntry>,
     pub tool_activities: Vec<TurnToolActivity>,
+    pub hook_trace_records: Vec<HookTraceRecord>,
     pub first_token_latency_ms: Option<u64>,
 }
 
@@ -67,7 +83,30 @@ pub fn build_failed_turn_result(
     trace_steps: Vec<TurnTraceStep>,
     tool_activities: Vec<TurnToolActivity>,
 ) -> TurnResult {
+    build_failed_turn_result_with_hooks(
+        provider_meta,
+        user_message,
+        assistant_message,
+        trace_steps,
+        tool_activities,
+        Vec::new(),
+    )
+}
+
+pub fn build_failed_turn_result_with_hooks(
+    provider_meta: Option<&ProviderEventMeta>,
+    user_message: String,
+    assistant_message: String,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Vec<TurnToolActivity>,
+    hook_trace_records: Vec<HookTraceRecord>,
+) -> TurnResult {
     TurnResult {
+        event_id: None,
+        event_type: None,
+        event_version: None,
+        sequence: None,
+        emitted_at_ms: None,
         phase: "failed".to_string(),
         provider_requested_name: provider_meta
             .map(|meta| meta.requested_name.clone())
@@ -98,6 +137,7 @@ pub fn build_failed_turn_result(
         trace_timeline: Vec::new(),
         tool_activities,
         provider_call_records: Vec::new(),
+        hook_trace_records,
         session_summary: assistant_message,
     }
 }
@@ -122,14 +162,22 @@ pub fn emit_stream_failed(
     build_context_observation: Option<BuildContextObservation>,
     trace_timeline: Option<Vec<TraceTimelineEntry>>,
     provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
     error: String,
+    session_id: Option<String>,
 ) {
     emit_event(
         sink,
         "turn:failed",
         TurnStreamEvent {
+            event_id: None,
+            session_id,
             turn_id,
             kind: "failed".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
             phase: Some("failed".to_string()),
             text: Some("This turn failed.".to_string()),
             reasoning_content: None,
@@ -153,6 +201,7 @@ pub fn emit_stream_failed(
             trace_timeline,
             tool_activities,
             provider_call_records,
+            hook_trace_records,
             session_summary: None,
         },
     );
@@ -171,13 +220,20 @@ pub fn emit_stream_cancelled(
     trace_timeline: Option<Vec<TraceTimelineEntry>>,
     provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
     error: String,
+    session_id: Option<String>,
 ) {
     emit_event(
         sink,
         "turn:cancelled",
         TurnStreamEvent {
+            event_id: None,
+            session_id,
             turn_id,
             kind: "cancelled".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
             phase: Some("cancelled".to_string()),
             text: Some("This turn was cancelled.".to_string()),
             reasoning_content: None,
@@ -201,6 +257,7 @@ pub fn emit_stream_cancelled(
             trace_timeline,
             tool_activities,
             provider_call_records,
+            hook_trace_records: None,
             session_summary: None,
         },
     );
@@ -231,14 +288,22 @@ pub fn emit_stream_event(
     trace_timeline: Option<Vec<TraceTimelineEntry>>,
     tool_activities: Option<Vec<TurnToolActivity>>,
     provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
     session_summary: Option<String>,
+    session_id: Option<String>,
 ) {
     emit_event(
         sink,
         name,
         TurnStreamEvent {
+            event_id: None,
+            session_id,
             turn_id,
             kind: kind.to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
             phase: phase.map(|value| value.to_string()),
             text,
             reasoning_content,
@@ -262,9 +327,105 @@ pub fn emit_stream_event(
             trace_timeline,
             tool_activities,
             provider_call_records,
+            hook_trace_records,
             session_summary,
         },
     );
+}
+
+fn resolve_canonical_event_type(
+    name: &str,
+    phase: Option<&str>,
+    build_context_observation: Option<&BuildContextObservation>,
+    tool_activities: Option<&[TurnToolActivity]>,
+) -> String {
+    match name {
+        "turn:started" => "turn.created".to_string(),
+        "turn:delta" => "turn.output_delta".to_string(),
+        "turn:completed" => "turn.completed".to_string(),
+        "turn:failed" => "turn.failed".to_string(),
+        "turn:cancelled" => "turn.cancelled".to_string(),
+        "turn:trace" => {
+            if build_context_observation.is_some() && matches!(phase, Some("building_context")) {
+                "turn.context_built".to_string()
+            } else {
+                match phase {
+                    Some("calling_model") => "turn.model_call_started".to_string(),
+                    _ => "turn.trace_updated".to_string(),
+                }
+            }
+        }
+        "turn:tool" => {
+            if tool_activities
+                .unwrap_or(&[])
+                .iter()
+                .any(|activity| activity.status == "running")
+            {
+                "turn.tool_call_started".to_string()
+            } else {
+                "turn.tool_call_completed".to_string()
+            }
+        }
+        _ => name.replace(':', "."),
+    }
+}
+
+fn turn_event_version() -> &'static str {
+    "turn-event-v1"
+}
+
+fn now_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn next_turn_event_sequence(turn_id: &str) -> u64 {
+    let registry = turn_event_sequence_registry();
+    let mut state = registry.lock().expect("turn event sequence lock poisoned");
+    let next = state.get(turn_id).copied().unwrap_or(0).saturating_add(1);
+    state.insert(turn_id.to_string(), next);
+    next
+}
+
+fn clear_turn_event_sequence(turn_id: &str) {
+    let registry = turn_event_sequence_registry();
+    let mut state = registry.lock().expect("turn event sequence lock poisoned");
+    state.remove(turn_id);
+}
+
+fn turn_event_sequence_registry() -> &'static Mutex<HashMap<String, u64>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn build_terminal_turn_event_envelope(
+    turn_id: &str,
+    name: &str,
+    phase: Option<&str>,
+    build_context_observation: Option<&BuildContextObservation>,
+    tool_activities: Option<&[TurnToolActivity]>,
+) -> TurnEventEnvelope {
+    let sequence = next_turn_event_sequence(turn_id);
+    let envelope = TurnEventEnvelope {
+        event_id: format!("{}:{}", turn_id, sequence),
+        event_type: resolve_canonical_event_type(
+            name,
+            phase,
+            build_context_observation,
+            tool_activities,
+        ),
+        event_version: turn_event_version().to_string(),
+        sequence,
+        emitted_at_ms: now_timestamp_ms(),
+    };
+
+    if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+        clear_turn_event_sequence(turn_id);
+    }
+
+    envelope
 }
 
 pub fn emit_turn_failed(
@@ -276,6 +437,7 @@ pub fn emit_turn_failed(
     provider_model: Option<String>,
     trace_steps: Vec<TurnTraceStep>,
     error: String,
+    session_id: Option<String>,
 ) {
     let provider_meta = match (
         provider_requested_name,
@@ -304,15 +466,33 @@ pub fn emit_turn_failed(
         None,
         None,
         None,
+        None,
         error,
+        session_id,
     );
 }
 
 pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEvent) {
-    eprintln!(
-        "[pony-agent][runtime] emit {} turn={} phase={:?} text_len={} tools={}",
+    let mut payload = payload;
+    let terminal_turn_id = payload.turn_id.clone();
+    let next_sequence = next_turn_event_sequence(&payload.turn_id);
+    payload.event_id = Some(format!("{}:{}", payload.turn_id, next_sequence));
+    payload.event_type = Some(resolve_canonical_event_type(
         name,
+        payload.phase.as_deref(),
+        payload.build_context_observation.as_ref(),
+        payload.tool_activities.as_deref(),
+    ));
+    payload.event_version = Some(turn_event_version().to_string());
+    payload.sequence = Some(next_sequence);
+    payload.emitted_at_ms = Some(now_timestamp_ms());
+
+    eprintln!(
+        "[pony-agent][runtime] emit {} event_type={} turn={} seq={:?} phase={:?} text_len={} tools={}",
+        name,
+        payload.event_type.as_deref().unwrap_or("unknown"),
         payload.turn_id,
+        payload.sequence,
         payload.phase,
         payload.text.as_ref().map(|text| text.len()).unwrap_or(0),
         payload
@@ -322,6 +502,9 @@ pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEven
             .unwrap_or(0)
     );
     sink.emit(name, payload);
+    if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+        clear_turn_event_sequence(&terminal_turn_id);
+    }
 }
 
 pub fn normalize_user_message(message: &str) -> String {
@@ -430,6 +613,8 @@ fn stream_delta_chunks(
             None,
             None,
             None,
+            None,
+            None,
         );
 
         if index + 1 < chunks.len() {
@@ -484,6 +669,196 @@ pub fn stream_text_chunks(
 
 pub fn runtime_log(message: String) {
     eprintln!("[pony-runtime] {}", message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_trace_event_aligns_with_context_build_end_hook_point() {
+        let observation = BuildContextObservation {
+            request_format: "chat".to_string(),
+            message_count: 3,
+            image_count: 0,
+            tool_count: 0,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: String::new(),
+        };
+
+        let event_type = resolve_canonical_event_type(
+            "turn:trace",
+            Some("building_context"),
+            Some(&observation),
+            None,
+        );
+
+        assert_eq!(event_type, "turn.context_built");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ContextBuildEnd,
+            &event_type,
+            "building_context"
+        ));
+    }
+
+    #[test]
+    fn canonical_trace_event_aligns_with_model_call_start_hook_point() {
+        let event_type =
+            resolve_canonical_event_type("turn:trace", Some("calling_model"), None, None);
+
+        assert_eq!(event_type, "turn.model_call_started");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ModelCallStart,
+            &event_type,
+            "calling_model"
+        ));
+    }
+
+    #[test]
+    fn canonical_trace_event_prefers_model_call_started_over_context_built_outside_building_context(
+    ) {
+        let observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 4,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: "tools".to_string(),
+        };
+
+        let event_type = resolve_canonical_event_type(
+            "turn:trace",
+            Some("calling_model"),
+            Some(&observation),
+            None,
+        );
+
+        assert_eq!(event_type, "turn.model_call_started");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ModelCallStart,
+            &event_type,
+            "calling_model"
+        ));
+    }
+
+    #[test]
+    fn delta_event_aligns_with_model_response_end_hook_point() {
+        let event_type =
+            resolve_canonical_event_type("turn:delta", Some("streaming_response"), None, None);
+
+        assert_eq!(event_type, "turn.output_delta");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ModelResponseEnd,
+            &event_type,
+            "streaming_response"
+        ));
+    }
+
+    #[test]
+    fn trace_event_with_observation_outside_building_context_falls_back_to_trace_updated() {
+        let observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 4,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: "tools".to_string(),
+        };
+
+        let event_type = resolve_canonical_event_type(
+            "turn:trace",
+            Some("tool_result_integrating"),
+            Some(&observation),
+            None,
+        );
+
+        assert_eq!(event_type, "turn.trace_updated");
+    }
+
+    #[test]
+    fn tool_event_aligns_with_tool_call_start_hook_point() {
+        let tool_activities = vec![TurnToolActivity {
+            id: "tool-1".to_string(),
+            name: "workspace.read_file".to_string(),
+            status: "running".to_string(),
+            summary: "running".to_string(),
+            arguments_text: None,
+            result_text: None,
+            duration_seconds: None,
+            capability_invocation: None,
+        }];
+        let event_type = resolve_canonical_event_type(
+            "turn:tool",
+            Some("executing_tool"),
+            None,
+            Some(&tool_activities),
+        );
+
+        assert_eq!(event_type, "turn.tool_call_started");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ToolCallStart,
+            &event_type,
+            "executing_tool"
+        ));
+    }
+
+    #[test]
+    fn tool_event_aligns_with_tool_call_end_hook_point() {
+        let tool_activities = vec![TurnToolActivity {
+            id: "tool-1".to_string(),
+            name: "workspace.read_file".to_string(),
+            status: "done".to_string(),
+            summary: "ok".to_string(),
+            arguments_text: None,
+            result_text: None,
+            duration_seconds: Some(0.1),
+            capability_invocation: None,
+        }];
+        let event_type = resolve_canonical_event_type(
+            "turn:tool",
+            Some("executing_tool"),
+            None,
+            Some(&tool_activities),
+        );
+
+        assert_eq!(event_type, "turn.tool_call_completed");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ToolCallEnd,
+            &event_type,
+            "tool_result_integrating"
+        ));
+    }
+
+    #[test]
+    fn terminal_event_aligns_with_turn_finalize_end_hook_point() {
+        let event_type =
+            resolve_canonical_event_type("turn:completed", Some("completed"), None, None);
+
+        assert_eq!(event_type, "turn.completed");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::TurnFinalizeEnd,
+            &event_type,
+            "completed"
+        ));
+    }
 }
 
 pub fn preview_text(text: &str, max_chars: usize) -> String {

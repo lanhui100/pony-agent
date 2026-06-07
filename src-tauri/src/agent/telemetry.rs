@@ -24,6 +24,16 @@ pub struct CapabilityInvocationRecord {
     pub requires_approval: Option<bool>,
     pub host_mediated: Option<bool>,
     pub permission_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composed_capability_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composed_capability_kinds: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_layer: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

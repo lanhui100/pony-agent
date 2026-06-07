@@ -37,7 +37,12 @@ pub fn format_sse_event(name: &str, payload: &TurnStreamEvent) -> String {
     frame.push_str(name);
     frame.push('\n');
     frame.push_str("id: ");
-    frame.push_str(&payload.turn_id);
+    frame.push_str(
+        payload
+            .event_id
+            .as_deref()
+            .unwrap_or(payload.turn_id.as_str()),
+    );
     frame.push('\n');
     for line in data.lines() {
         frame.push_str("data: ");
@@ -65,8 +70,14 @@ mod tests {
     #[test]
     fn format_sse_event_uses_standard_event_id_and_data_lines() {
         let payload = TurnStreamEvent {
+            event_id: Some("turn-123:1".to_string()),
+            session_id: Some("sse-test".to_string()),
             turn_id: "turn-123".to_string(),
             kind: "delta".to_string(),
+            event_type: Some("turn.delta".to_string()),
+            event_version: Some("turn-event-v1".to_string()),
+            sequence: Some(1),
+            emitted_at_ms: Some(123),
             phase: Some("calling_model".to_string()),
             text: Some("hello".to_string()),
             reasoning_content: None,
@@ -90,13 +101,20 @@ mod tests {
             trace_timeline: None,
             tool_activities: None,
             provider_call_records: None,
+            hook_trace_records: None,
             session_summary: None,
         };
 
         let frame = format_sse_event("turn:delta", &payload);
 
-        assert!(frame.starts_with("event: turn:delta\nid: turn-123\n"));
-        assert!(frame.contains("data: {\"turnId\":\"turn-123\""));
+        assert!(frame.starts_with("event: turn:delta\nid: turn-123:1\n"));
+        assert!(frame.contains(
+            "data: {\"eventId\":\"turn-123:1\",\"sessionId\":\"sse-test\",\"turnId\":\"turn-123\""
+        ));
+        assert!(frame.contains("\"eventType\":\"turn.delta\""));
+        assert!(frame.contains("\"eventVersion\":\"turn-event-v1\""));
+        assert!(frame.contains("\"sequence\":1"));
+        assert!(frame.contains("\"emittedAtMs\":123"));
         assert!(frame.ends_with("\n\n"));
     }
 

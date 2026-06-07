@@ -2,24 +2,24 @@ mod agent;
 pub mod sse_adapter;
 mod tauri_adapter;
 
+use agent::capability_bridge::{CapabilitySourceView, CapabilityView, SkillDescriptor};
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
-use agent::capability_bridge::{CapabilitySourceView, CapabilityView};
 use agent::context::RetrievedContextState;
 use agent::control_plane::{
     CapabilityInspectionQuery, CapabilityListQuery, CapabilitySourceInspectionQuery,
     CheckoutHistoryNodeCommand, ContinueGraphRunCommand, ContinueGraphRunStreamCommand,
     DeleteSessionCommand, ExecutionCheckpointQuery, ForkFromHistoryNodeCommand,
     ForkFromHistoryNodeResponse, GraphRunCheckpointQuery, GraphRunControlResponse,
-    GraphRunStreamStartResponse, GraphRunTurnResponse, HistoryCheckoutMode,
-    HistoryCheckoutResponse, HistoryCursorQuery, HistoryCursorState, HistoryGraphQuery,
-    HistoryGraphView, HostControlPlane, HostHealthSnapshot, HostInspectionQuery,
-    HostInspectionSnapshot, ModelMonitorSessionDrilldownQuery, ModelMonitorSessionDrilldownView,
-    ModelMonitorSummaryQuery, ModelMonitorSummaryView, RestoreBranchHeadCommand,
-    RestoreBranchHeadResponse, ResumeGraphRunCommand, ResumeGraphRunStreamCommand,
-    RetrievedContextQuery, RunTurnCommand, SessionRuntimeView, SessionRuntimeViewQuery,
-    StartGraphRunCommand, StartGraphRunStreamCommand, StartTurnStreamCommand,
-    StopGraphRunCommand, StopTurnCommand, SwitchHistoryBranchCommand,
-    SwitchHistoryBranchResponse,
+    GraphRunStreamStartResponse, GraphRunSubmissionPlan, GraphRunSubmissionPlanQuery,
+    GraphRunTurnResponse, HistoryCheckoutMode, HistoryCheckoutResponse, HistoryCursorQuery,
+    HistoryCursorState, HistoryGraphQuery, HistoryGraphView, HostControlPlane, HostHealthSnapshot,
+    HostInspectionQuery, HostInspectionSnapshot, ModelMonitorSessionDrilldownQuery,
+    ModelMonitorSessionDrilldownView, ModelMonitorSummaryQuery, ModelMonitorSummaryView,
+    RestoreBranchHeadCommand, RestoreBranchHeadResponse, ResumeGraphRunCommand,
+    ResumeGraphRunStreamCommand, RetrievedContextQuery, RunTurnCommand, SessionRuntimeView,
+    SessionRuntimeViewQuery, SkillInspectionQuery, SkillListQuery, StartGraphRunCommand,
+    StartGraphRunStreamCommand, StartTurnStreamCommand, StopGraphRunCommand, StopTurnCommand,
+    SwitchHistoryBranchCommand, SwitchHistoryBranchResponse,
 };
 use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
 use agent::graph::GraphRunCheckpoint;
@@ -230,6 +230,20 @@ fn load_session_runtime_view(
 }
 
 #[tauri::command]
+fn resolve_graph_run_submission_plan(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+    node_id: Option<String>,
+    run_id: Option<String>,
+) -> GraphRunSubmissionPlan {
+    control_plane.resolve_graph_run_submission_plan(GraphRunSubmissionPlanQuery {
+        session_id,
+        node_id,
+        run_id,
+    })
+}
+
+#[tauri::command]
 fn load_retrieved_context(
     control_plane: State<'_, HostControlPlane>,
     turn_id: Option<String>,
@@ -342,7 +356,9 @@ fn list_available_tools() -> Vec<ToolDefinition> {
 }
 
 #[tauri::command]
-fn list_capability_sources(control_plane: State<'_, HostControlPlane>) -> Vec<CapabilitySourceView> {
+fn list_capability_sources(
+    control_plane: State<'_, HostControlPlane>,
+) -> Vec<CapabilitySourceView> {
     control_plane.list_capability_sources()
 }
 
@@ -371,6 +387,22 @@ fn inspect_capability_source(
     control_plane.inspect_capability_source(CapabilitySourceInspectionQuery { source_id })
 }
 
+#[tauri::command]
+fn list_skills(
+    source_id: Option<String>,
+    control_plane: State<'_, HostControlPlane>,
+) -> Vec<SkillDescriptor> {
+    control_plane.list_skills(SkillListQuery { source_id })
+}
+
+#[tauri::command]
+fn inspect_skill(
+    skill_id: String,
+    control_plane: State<'_, HostControlPlane>,
+) -> Option<SkillDescriptor> {
+    control_plane.inspect_skill(SkillInspectionQuery { skill_id })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(HostControlPlane::new())
@@ -379,7 +411,6 @@ pub fn run() {
                 if let Some(icon) = app.default_window_icon().cloned() {
                     window.set_icon(icon)?;
                 }
-
             }
 
             Ok(())
@@ -392,6 +423,7 @@ pub fn run() {
             load_history_graph,
             load_history_cursor,
             load_session_runtime_view,
+            resolve_graph_run_submission_plan,
             load_retrieved_context,
             checkout_history_node,
             restore_branch_head,
@@ -403,6 +435,8 @@ pub fn run() {
             list_capabilities,
             inspect_capability,
             inspect_capability_source,
+            list_skills,
+            inspect_skill,
             load_provider_registry,
             run_turn,
             start_graph_run,

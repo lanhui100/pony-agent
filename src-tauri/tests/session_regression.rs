@@ -11,6 +11,12 @@ mod agent {
     #[path = "../../src/agent/secret_store.rs"]
     pub mod secret_store;
 
+    #[path = "../../src/agent/hooks.rs"]
+    pub mod hooks;
+
+    #[path = "../../src/agent/capability_bridge.rs"]
+    pub mod capability_bridge;
+
     #[path = "../../src/agent/tools.rs"]
     pub mod tools;
 

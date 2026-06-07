@@ -1,14 +1,25 @@
+use crate::agent::capability_bridge::{
+    enrich_mcp_source_snapshot, enrich_skill_source_snapshot, CapabilityFailureKind,
+    CapabilityRegistry, CapabilityToolExecutionResult, McpSourceSnapshot, SkillFailureLayer,
+    SkillInvocationRequest, SkillSourceSnapshot, SkillToolExecutionResult,
+};
 use crate::agent::config::{
     ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
-};
-use crate::agent::capability_bridge::{
-    CapabilityFailureKind, CapabilityRegistry, CapabilityToolExecutionResult,
-    McpSourceSnapshot,
 };
 use crate::agent::context::{DefaultTurnContextBuilder, RetrievedContextState, TurnContextBuilder};
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::execution_control::ExecutionControlRegistry;
-use crate::agent::graph::{GraphDecision, GraphEngine, GraphRun, GraphTurnHandoff};
+use crate::agent::graph::{
+    GraphDecision, GraphDecisionKind, GraphEngine, GraphRun, GraphTurnHandoff,
+};
+use crate::agent::hooks::{
+    build_observe_hook_trace_record, turn_hook_point_for_capability_mediation_hook_point,
+    turn_hook_point_for_planner_hook_point, AgentHookDescriptor, AgentHookExecutor,
+    AgentHookRegistry, CapabilityMediationEnvelope, CapabilityMediationHookPoint,
+    HookFailurePolicy, HookPatchConflictPolicy, HookPatchOperation, HookPatchOperationKind,
+    HookStructuredResult, HookTraceRecord, NoopHookExecutor, PlannerFactsEnvelope,
+    PlannerHookPoint, TurnHookPoint,
+};
 use crate::agent::input::TurnInputImage;
 use crate::agent::planner::{GraphPlanner, LocalTurnPlanner, TurnPlanner};
 use crate::agent::provider::{
@@ -16,9 +27,9 @@ use crate::agent::provider::{
     provider_native_assistant_message_with_reasoning_value,
     provider_native_assistant_tool_call_message,
     provider_native_assistant_tool_call_message_with_reasoning_value,
-    provider_native_tool_result_message,
-    provider_native_user_message, BuildContextObservation, ProviderDecision, ProviderManager,
-    ProviderRequest, ProviderResponse, ProviderStreamChunk, TokenUsage,
+    provider_native_tool_result_message, provider_native_user_message, BuildContextObservation,
+    ProviderDecision, ProviderManager, ProviderRequest, ProviderResponse, ProviderStreamChunk,
+    TokenUsage,
 };
 use crate::agent::session::{
     HistoryBranch, HistoryCheckoutMode, HistoryCursor, HistoryNode, SessionAttachment,
@@ -26,25 +37,26 @@ use crate::agent::session::{
     TurnTraceRecord,
 };
 use crate::agent::telemetry::{
-    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind,
-    ProviderRequestKind, TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
+    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
+    TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
-use crate::agent::tools::{
-    builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
-};
+use crate::agent::tools::{builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter};
 use crate::agent::turn_flow::{
-    build_failed_turn_result, emit_stream_cancelled, emit_stream_event, emit_stream_failed,
-    emit_turn_failed, normalize_user_message, preview_text, provider_decision,
+    build_failed_turn_result, build_failed_turn_result_with_hooks,
+    build_terminal_turn_event_envelope, emit_stream_cancelled, emit_stream_event,
+    emit_stream_failed, emit_turn_failed, normalize_user_message, preview_text, provider_decision,
     provider_decision_stream, provider_event_meta, provider_failure_message, provider_followup,
-    provider_followup_stream, runtime_log,
-    stream_reasoning_chunks, stream_text_chunks, token_usage_parts, PersistedTurnOutcome,
-    PlannedTurn, PreparedTurn, ProviderEventMeta, SyncToolTurnOutcome, TurnEventSink,
+    provider_followup_stream, runtime_log, stream_reasoning_chunks, stream_text_chunks,
+    token_usage_parts, PersistedTurnOutcome, PlannedTurn, PreparedTurn, ProviderEventMeta,
+    SyncToolTurnOutcome, TurnEventEnvelope, TurnEventSink,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::cell::Cell;
+use serde_json::{Map, Value};
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -67,6 +79,11 @@ pub struct TurnInput {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnResult {
+    pub event_id: Option<String>,
+    pub event_type: Option<String>,
+    pub event_version: Option<String>,
+    pub sequence: Option<u64>,
+    pub emitted_at_ms: Option<u64>,
     pub phase: String,
     pub provider_requested_name: String,
     pub provider_name: String,
@@ -89,14 +106,21 @@ pub struct TurnResult {
     pub trace_timeline: Vec<TraceTimelineEntry>,
     pub tool_activities: Vec<TurnToolActivity>,
     pub provider_call_records: Vec<ProviderCallCacheRecord>,
+    pub hook_trace_records: Vec<HookTraceRecord>,
     pub session_summary: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStreamEvent {
+    pub event_id: Option<String>,
+    pub session_id: Option<String>,
     pub turn_id: String,
     pub kind: String,
+    pub event_type: Option<String>,
+    pub event_version: Option<String>,
+    pub sequence: Option<u64>,
+    pub emitted_at_ms: Option<u64>,
     pub phase: Option<String>,
     pub text: Option<String>,
     pub reasoning_content: Option<String>,
@@ -120,6 +144,7 @@ pub struct TurnStreamEvent {
     pub trace_timeline: Option<Vec<TraceTimelineEntry>>,
     pub tool_activities: Option<Vec<TurnToolActivity>>,
     pub provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    pub hook_trace_records: Option<Vec<HookTraceRecord>>,
     pub session_summary: Option<String>,
 }
 
@@ -129,6 +154,7 @@ const MAX_TOOL_HOPS_ENV: &str = "PONY_AGENT_MAX_TOOL_HOPS_PER_TURN";
 const MAX_TURN_IMAGES: usize = 3;
 const MAX_TURN_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 const CANCELLED_TURN_MESSAGE: &str = "This turn was cancelled.";
+const HOOK_FAILTURN_HANDLED_SENTINEL: &str = "__hook_failturn_handled__";
 
 #[derive(Clone)]
 struct ToolTurnHopRecord {
@@ -137,6 +163,38 @@ struct ToolTurnHopRecord {
     assistant_reasoning_content_value: Option<Value>,
     tool_call: ToolCall,
     tool_result: crate::agent::tools::ToolResult,
+}
+
+struct HookDispatchOutcome {
+    trace_records: Vec<HookTraceRecord>,
+    fail_turn_error: Option<String>,
+}
+
+struct CapabilityMediationDispatchOutcome {
+    arguments: Value,
+    trace_records: Vec<HookTraceRecord>,
+    blocked_error: Option<String>,
+    fail_turn_error: Option<String>,
+}
+
+struct PlannerDispatchOutcome {
+    decision: Option<ProviderDecision>,
+    selected_tool_call: Option<ToolCall>,
+    trace_records: Vec<HookTraceRecord>,
+    blocked_error: Option<String>,
+    fail_turn_error: Option<String>,
+}
+
+pub struct PlannerGraphDecisionDispatchOutcome {
+    pub decision: GraphDecision,
+    pub trace_records: Vec<HookTraceRecord>,
+}
+
+struct GraphDecisionDispatchOutcome {
+    decision: GraphDecision,
+    trace_records: Vec<HookTraceRecord>,
+    blocked_error: Option<String>,
+    fail_turn_error: Option<String>,
 }
 
 struct NormalizedToolDirective {
@@ -149,6 +207,8 @@ pub struct AgentRuntime {
     sessions: SessionStore,
     provider_resolver: Box<dyn ProviderSelectionResolver>,
     capability_registry: CapabilityRegistry,
+    hook_registry: AgentHookRegistry,
+    hook_executor: Box<dyn AgentHookExecutor>,
     tool_executor: Box<dyn ToolExecutor>,
     planner: Box<dyn TurnPlanner>,
     context_builder: Box<dyn TurnContextBuilder>,
@@ -175,16 +235,61 @@ impl AgentRuntime {
         context_builder: Box<dyn TurnContextBuilder>,
         telemetry_builder: Box<dyn TurnTelemetryBuilder>,
     ) -> Self {
+        let persisted_mcp_snapshots = sessions.list_persisted_mcp_source_snapshots();
+        let persisted_skill_snapshots = sessions.list_persisted_skill_source_snapshots();
+        let mut capability_registry = CapabilityRegistry::new();
+        for snapshot in persisted_mcp_snapshots {
+            capability_registry.replace_mcp_source_snapshot(snapshot);
+        }
+        for snapshot in persisted_skill_snapshots {
+            let _ = capability_registry.replace_skill_source_snapshot(snapshot);
+        }
         Self {
             graph: GraphEngine::new("state-machine-v1"),
             sessions,
             provider_resolver,
-            capability_registry: CapabilityRegistry::new(),
+            capability_registry,
+            hook_registry: AgentHookRegistry::new(),
+            hook_executor: Box::new(NoopHookExecutor),
             tool_executor,
             planner,
             context_builder,
             telemetry_builder,
         }
+    }
+
+    pub fn annotate_turn_trace_terminal_event(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        event_id: Option<String>,
+        event_type: Option<String>,
+        event_version: Option<String>,
+        sequence: Option<u64>,
+        emitted_at_ms: Option<u64>,
+    ) -> bool {
+        self.sessions
+            .annotate_turn_trace_terminal_event(
+                session_id,
+                turn_id,
+                event_id,
+                event_type,
+                event_version,
+                sequence,
+                emitted_at_ms,
+            )
+            .is_some()
+    }
+
+    pub fn append_turn_trace_hook_records(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        hook_trace_records: Vec<HookTraceRecord>,
+    ) -> bool {
+        self.sessions
+            .append_turn_trace_hook_records(session_id, turn_id, hook_trace_records)
+            .is_some()
     }
 
     pub fn name(&self) -> &'static str {
@@ -200,7 +305,392 @@ impl AgentRuntime {
     }
 
     pub fn apply_mcp_source_snapshot(&mut self, snapshot: McpSourceSnapshot) {
+        let snapshot = enrich_mcp_source_snapshot(snapshot);
+        self.sessions.persist_mcp_source_snapshot(snapshot.clone());
         self.capability_registry.replace_mcp_source_snapshot(snapshot);
+    }
+
+    pub fn dispatch_mcp_source_ingress_hooks(
+        &self,
+        snapshot: &McpSourceSnapshot,
+    ) -> Result<Vec<HookTraceRecord>, String> {
+        let mut dispatch = self.dispatch_capability_mediation_hooks(
+            CapabilityMediationHookPoint::McpSourceIngress,
+            &self.build_mcp_source_ingress_envelope(snapshot),
+        );
+        if let Some(error) = dispatch.fail_turn_error.take() {
+            return Err(error);
+        }
+        if let Some(error) = dispatch.blocked_error.take() {
+            return Err(error);
+        }
+        Ok(dispatch.trace_records)
+    }
+
+    pub fn apply_skill_source_snapshot(
+        &mut self,
+        snapshot: SkillSourceSnapshot,
+    ) -> Result<(), String> {
+        let snapshot = enrich_skill_source_snapshot(snapshot);
+        self.sessions.persist_skill_source_snapshot(snapshot.clone());
+        self.capability_registry.replace_skill_source_snapshot(snapshot)
+    }
+
+    pub fn dispatch_skill_source_ingress_hooks(
+        &self,
+        snapshot: &SkillSourceSnapshot,
+    ) -> Result<Vec<HookTraceRecord>, String> {
+        let mut dispatch = self.dispatch_capability_mediation_hooks(
+            CapabilityMediationHookPoint::SkillSourceIngress,
+            &self.build_skill_source_ingress_envelope(snapshot),
+        );
+        if let Some(error) = dispatch.fail_turn_error.take() {
+            return Err(error);
+        }
+        if let Some(error) = dispatch.blocked_error.take() {
+            return Err(error);
+        }
+        Ok(dispatch.trace_records)
+    }
+
+    pub fn capability_registry_snapshot(&self) -> CapabilityRegistry {
+        self.capability_registry.clone()
+    }
+
+    pub fn register_hook_descriptor(
+        &mut self,
+        descriptor: AgentHookDescriptor,
+    ) -> Result<(), String> {
+        self.hook_registry.register(descriptor)
+    }
+
+    #[cfg(test)]
+    pub fn set_hook_executor_for_test(&mut self, hook_executor: Box<dyn AgentHookExecutor>) {
+        self.hook_executor = hook_executor;
+    }
+
+    #[cfg(test)]
+    pub fn set_history_state_hook_executor_for_test(
+        &mut self,
+        hook_executor: Box<dyn crate::agent::hooks::HistoryStateHookExecutor>,
+    ) {
+        self.sessions
+            .set_history_state_hook_executor_for_test(hook_executor);
+    }
+
+    #[cfg(test)]
+    pub fn record_turn_trace_for_test(&mut self, session_id: Option<&str>, trace: TurnTraceRecord) {
+        self.sessions.record_turn_trace(session_id, trace);
+    }
+
+    fn dispatch_hook_trace_records(&self, hook_point: TurnHookPoint) -> HookDispatchOutcome {
+        let descriptors = self.hook_registry.list_for_hook_point(&hook_point);
+        let mut records = Vec::with_capacity(descriptors.len());
+        let mut fail_turn_error = None;
+
+        for (index, descriptor) in descriptors.into_iter().enumerate() {
+            match self.hook_executor.execute(descriptor, hook_point.clone()) {
+                Ok(mut result) => {
+                    result.hook_order = (index + 1) as u32;
+                    records.push(result.to_trace_record());
+                }
+                Err(error) => {
+                    let (result_kind, structured_result) =
+                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
+                    records.push(HookTraceRecord {
+                        hook_name: descriptor.name.clone(),
+                        hook_class: descriptor.class.clone(),
+                        hook_point: hook_point.clone(),
+                        hook_order: (index + 1) as u32,
+                        result_kind,
+                        structured_result,
+                        blocked: matches!(
+                            descriptor.default_failure_policy,
+                            HookFailurePolicy::FailTurn
+                        ),
+                        elapsed_ms: 0,
+                        input_summary: Some(format!("hook executor failed: {error}")),
+                        persistence_evidence_ref: None,
+                        summary: format!(
+                            "hook execution failed under {:?}: {error}",
+                            descriptor.default_failure_policy
+                        ),
+                    });
+                    if matches!(
+                        descriptor.default_failure_policy,
+                        HookFailurePolicy::FailTurn
+                    ) {
+                        fail_turn_error = Some(format!(
+                            "hook `{}` forced turn failure at `{:?}`: {error}",
+                            descriptor.name, hook_point
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        HookDispatchOutcome {
+            trace_records: records,
+            fail_turn_error,
+        }
+    }
+
+    fn dispatch_capability_mediation_hooks(
+        &self,
+        hook_point: CapabilityMediationHookPoint,
+        envelope: &CapabilityMediationEnvelope,
+    ) -> CapabilityMediationDispatchOutcome {
+        let turn_hook_point = turn_hook_point_for_capability_mediation_hook_point(&hook_point);
+        let descriptors = self.hook_registry.list_for_hook_point(&turn_hook_point);
+        let mut records = Vec::with_capacity(descriptors.len());
+        let mut execution_results = Vec::new();
+        let mut fail_turn_error = None;
+        let mut blocked_error = None;
+
+        for (index, descriptor) in descriptors.into_iter().enumerate() {
+            match self.hook_executor.execute_capability_mediation(
+                descriptor,
+                hook_point.clone(),
+                envelope,
+            ) {
+                Ok(mut result) => {
+                    result.hook_order = (index + 1) as u32;
+                    if let HookStructuredResult::Deny(deny) = &result.structured_result {
+                        blocked_error = Some(format!(
+                            "hook `{}` blocked capability mediation: {}",
+                            descriptor.name, deny.message
+                        ));
+                    }
+                    records.push(result.to_trace_record());
+                    execution_results.push(result);
+                    if blocked_error.is_some() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let (result_kind, structured_result) =
+                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
+                    records.push(HookTraceRecord {
+                        hook_name: descriptor.name.clone(),
+                        hook_class: descriptor.class.clone(),
+                        hook_point: turn_hook_point.clone(),
+                        hook_order: (index + 1) as u32,
+                        result_kind,
+                        structured_result,
+                        blocked: matches!(
+                            descriptor.default_failure_policy,
+                            HookFailurePolicy::FailTurn
+                        ),
+                        elapsed_ms: 0,
+                        input_summary: Some(format!("hook executor failed: {error}")),
+                        persistence_evidence_ref: None,
+                        summary: format!(
+                            "hook execution failed under {:?}: {error}",
+                            descriptor.default_failure_policy
+                        ),
+                    });
+                    if matches!(
+                        descriptor.default_failure_policy,
+                        HookFailurePolicy::FailTurn
+                    ) {
+                        fail_turn_error = Some(format!(
+                            "hook `{}` forced turn failure at `{:?}`: {error}",
+                            descriptor.name, turn_hook_point
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let arguments = if fail_turn_error.is_none() && blocked_error.is_none() {
+            apply_capability_argument_patches(&hook_point, &envelope.argument_summary, &execution_results)
+                .unwrap_or_else(|error| {
+                    fail_turn_error = Some(error);
+                    normalized_arguments_from_summary(&envelope.argument_summary)
+                })
+        } else {
+            normalized_arguments_from_summary(&envelope.argument_summary)
+        };
+
+        CapabilityMediationDispatchOutcome {
+            arguments,
+            trace_records: records,
+            blocked_error,
+            fail_turn_error,
+        }
+    }
+
+    fn dispatch_planner_hooks(
+        &self,
+        hook_point: PlannerHookPoint,
+        envelope: &PlannerFactsEnvelope,
+        decision: Option<ProviderDecision>,
+        selected_tool_call: Option<ToolCall>,
+    ) -> PlannerDispatchOutcome {
+        let turn_hook_point = turn_hook_point_for_planner_hook_point(&hook_point);
+        let descriptors = self.hook_registry.list_for_hook_point(&turn_hook_point);
+        let mut records = Vec::with_capacity(descriptors.len());
+        let mut execution_results = Vec::new();
+        let mut fail_turn_error = None;
+        let mut blocked_error = None;
+
+        for (index, descriptor) in descriptors.into_iter().enumerate() {
+            match self
+                .hook_executor
+                .execute_planner(descriptor, hook_point.clone(), envelope)
+            {
+                Ok(mut result) => {
+                    result.hook_order = (index + 1) as u32;
+                    if let HookStructuredResult::Deny(deny) = &result.structured_result {
+                        blocked_error = Some(format!(
+                            "hook `{}` blocked planner mediation: {}",
+                            descriptor.name, deny.message
+                        ));
+                    }
+                    records.push(result.to_trace_record());
+                    execution_results.push(result);
+                    if blocked_error.is_some() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let (result_kind, structured_result) =
+                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
+                    records.push(HookTraceRecord {
+                        hook_name: descriptor.name.clone(),
+                        hook_class: descriptor.class.clone(),
+                        hook_point: turn_hook_point.clone(),
+                        hook_order: (index + 1) as u32,
+                        result_kind,
+                        structured_result,
+                        blocked: matches!(
+                            descriptor.default_failure_policy,
+                            HookFailurePolicy::FailTurn
+                        ),
+                        elapsed_ms: 0,
+                        input_summary: Some(format!("hook executor failed: {error}")),
+                        persistence_evidence_ref: None,
+                        summary: format!(
+                            "hook execution failed under {:?}: {error}",
+                            descriptor.default_failure_policy
+                        ),
+                    });
+                    if matches!(
+                        descriptor.default_failure_policy,
+                        HookFailurePolicy::FailTurn
+                    ) {
+                        fail_turn_error = Some(format!(
+                            "hook `{}` forced turn failure at `{:?}`: {error}",
+                            descriptor.name, turn_hook_point
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let (decision, selected_tool_call) =
+            if fail_turn_error.is_none() && blocked_error.is_none() {
+                apply_planner_patches(&hook_point, decision, selected_tool_call, &execution_results)
+                    .unwrap_or_else(|error| {
+                        fail_turn_error = Some(error);
+                        (None, None)
+                    })
+            } else {
+                (decision, selected_tool_call)
+            };
+
+        PlannerDispatchOutcome {
+            decision,
+            selected_tool_call,
+            trace_records: records,
+            blocked_error,
+            fail_turn_error,
+        }
+    }
+
+    fn dispatch_graph_decision_hooks(
+        &self,
+        envelope: &PlannerFactsEnvelope,
+        mut decision: GraphDecision,
+    ) -> GraphDecisionDispatchOutcome {
+        let hook_point = PlannerHookPoint::GraphDecision;
+        let turn_hook_point = turn_hook_point_for_planner_hook_point(&hook_point);
+        let descriptors = self.hook_registry.list_for_hook_point(&turn_hook_point);
+        let mut records = Vec::with_capacity(descriptors.len());
+        let mut execution_results = Vec::new();
+        let mut fail_turn_error = None;
+        let mut blocked_error = None;
+
+        for (index, descriptor) in descriptors.into_iter().enumerate() {
+            match self
+                .hook_executor
+                .execute_planner(descriptor, hook_point.clone(), envelope)
+            {
+                Ok(mut result) => {
+                    result.hook_order = (index + 1) as u32;
+                    if let HookStructuredResult::Deny(deny) = &result.structured_result {
+                        blocked_error = Some(format!(
+                            "hook `{}` blocked planner graph decision: {}",
+                            descriptor.name, deny.message
+                        ));
+                    }
+                    records.push(result.to_trace_record());
+                    execution_results.push(result);
+                    if blocked_error.is_some() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let (result_kind, structured_result) =
+                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
+                    records.push(HookTraceRecord {
+                        hook_name: descriptor.name.clone(),
+                        hook_class: descriptor.class.clone(),
+                        hook_point: turn_hook_point.clone(),
+                        hook_order: (index + 1) as u32,
+                        result_kind,
+                        structured_result,
+                        blocked: matches!(
+                            descriptor.default_failure_policy,
+                            HookFailurePolicy::FailTurn
+                        ),
+                        elapsed_ms: 0,
+                        input_summary: Some(format!("hook executor failed: {error}")),
+                        persistence_evidence_ref: None,
+                        summary: format!(
+                            "hook execution failed under {:?}: {error}",
+                            descriptor.default_failure_policy
+                        ),
+                    });
+                    if matches!(
+                        descriptor.default_failure_policy,
+                        HookFailurePolicy::FailTurn
+                    ) {
+                        fail_turn_error = Some(format!(
+                            "hook `{}` forced turn failure at `{:?}`: {error}",
+                            descriptor.name, turn_hook_point
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if fail_turn_error.is_none() && blocked_error.is_none() {
+            if let Err(error) = apply_graph_decision_patches(&mut decision, &execution_results) {
+                fail_turn_error = Some(error);
+            }
+        }
+
+        GraphDecisionDispatchOutcome {
+            decision,
+            trace_records: records,
+            blocked_error,
+            fail_turn_error,
+        }
     }
 
     #[cfg(test)]
@@ -209,6 +699,30 @@ impl AgentRuntime {
         capability_id: &str,
     ) -> Option<crate::agent::capability_bridge::CapabilityView> {
         self.capability_registry.inspect_capability(capability_id)
+    }
+
+    #[cfg(test)]
+    pub fn inspect_capability_source(
+        &self,
+        source_id: &str,
+    ) -> Option<crate::agent::capability_bridge::CapabilitySourceView> {
+        self.capability_registry.inspect_source(source_id)
+    }
+
+    #[cfg(test)]
+    pub fn inspect_skill(
+        &self,
+        skill_id: &str,
+    ) -> Option<crate::agent::capability_bridge::SkillDescriptor> {
+        self.capability_registry.inspect_skill(skill_id)
+    }
+
+    #[cfg(test)]
+    pub fn inspect_skill_source(
+        &self,
+        source_id: &str,
+    ) -> Option<crate::agent::capability_bridge::SkillSourceView> {
+        self.capability_registry.inspect_skill_source(source_id)
     }
 
     #[cfg(test)]
@@ -325,11 +839,26 @@ impl AgentRuntime {
         result: &TurnResult,
         checkpoint: Option<&ExecutionCheckpoint>,
         planner: &dyn GraphPlanner,
-    ) -> GraphDecision {
+    ) -> Result<PlannerGraphDecisionDispatchOutcome, String> {
         let handoff =
             self.build_graph_turn_handoff(Some(run), turn_id, session_id, result, checkpoint);
-        self.graph
-            .decide_after_turn_with_planner(run, &handoff, planner)
+        let decision = self
+            .graph
+            .decide_after_turn_with_planner(run, &handoff, planner);
+        let mut dispatch = self.dispatch_graph_decision_hooks(
+            &self.build_planner_graph_decision_envelope(run, &decision),
+            decision,
+        );
+        if let Some(error) = dispatch.fail_turn_error.take() {
+            return Err(error);
+        }
+        if let Some(error) = dispatch.blocked_error.take() {
+            return Err(error);
+        }
+        Ok(PlannerGraphDecisionDispatchOutcome {
+            decision: dispatch.decision,
+            trace_records: dispatch.trace_records,
+        })
     }
 
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {
@@ -408,6 +937,7 @@ impl AgentRuntime {
         let effective_images =
             self.resolve_turn_images(input, &preliminary_retrieved, &provider)?;
         let tools = builtin_tools();
+        let planner_skills = self.capability_registry.list_skills_for_planner();
         let retrieved = if effective_images.is_empty() {
             preliminary_retrieved
         } else {
@@ -419,9 +949,12 @@ impl AgentRuntime {
                 None,
             )
         };
-        let planning_request =
-            self.context_builder
-                .build_request(self.graph.name(), &provider, &retrieved);
+        let planning_request = self.context_builder.build_request(
+            self.graph.name(),
+            &provider,
+            &retrieved,
+            &planner_skills,
+        );
         let build_context_observation = build_context_observation(&planning_request, &tools);
         let display_message = input
             .display_message
@@ -437,15 +970,42 @@ impl AgentRuntime {
             retrieved,
             provider,
             tools,
+            planner_skills,
             planning_request,
             build_context_observation,
         })
     }
 
     fn plan_turn(&self, prepared: &PreparedTurn) -> Result<PlannedTurn, String> {
-        let preflight_decision = self
-            .planner
-            .preflight_decision(&prepared.user_message, prepared.retrieved.planner_history());
+        let preflight_decision = self.planner.preflight_decision(
+            &prepared.user_message,
+            prepared.retrieved.planner_history(),
+            &prepared.planner_skills,
+        );
+        let mut preflight_dispatch = self.dispatch_planner_hooks(
+            PlannerHookPoint::TurnPreflight,
+            &self.build_planner_preflight_envelope(
+                &prepared.user_message,
+                prepared.retrieved.planner_history(),
+                &prepared.planner_skills,
+                preflight_decision.as_ref(),
+            ),
+            preflight_decision,
+            None,
+        );
+        if let Some(error) = preflight_dispatch.fail_turn_error.take() {
+            return Err(error);
+        }
+        if let Some(error) = preflight_dispatch.blocked_error.take() {
+            return Err(error);
+        }
+        let preflight_decision = preflight_dispatch.decision;
+        let mut planner_hook_trace_records = preflight_dispatch.trace_records;
+        planner_hook_trace_records.push(self.build_planner_preflight_trace_record(
+            &prepared.user_message,
+            &prepared.planner_skills,
+            preflight_decision.as_ref(),
+        ));
 
         let (mut first_decision, initial_decision_duration_ms) =
             if prepared.provider.requires_provider_native_tool_flow() {
@@ -500,15 +1060,400 @@ impl AgentRuntime {
         let resolved_tool_call = self.resolve_tool_call(
             &prepared.user_message,
             prepared.retrieved.planner_history(),
+            &prepared.planner_skills,
             first_decision.tool_call.clone(),
             !prepared.provider.requires_provider_native_tool_flow(),
         );
+        let mut tool_selection_dispatch = self.dispatch_planner_hooks(
+            PlannerHookPoint::ToolSelection,
+            &self.build_planner_tool_selection_envelope(
+                &prepared.user_message,
+                prepared.retrieved.planner_history(),
+                &prepared.planner_skills,
+                first_decision.tool_call.as_ref(),
+                resolved_tool_call.as_ref(),
+            ),
+            None,
+            resolved_tool_call,
+        );
+        if let Some(error) = tool_selection_dispatch.fail_turn_error.take() {
+            return Err(error);
+        }
+        if let Some(error) = tool_selection_dispatch.blocked_error.take() {
+            return Err(error);
+        }
+        let resolved_tool_call = tool_selection_dispatch.selected_tool_call;
+        planner_hook_trace_records.extend(tool_selection_dispatch.trace_records);
+        planner_hook_trace_records.push(self.build_planner_tool_selection_trace_record(
+            &prepared.user_message,
+            first_decision.tool_call.as_ref(),
+            resolved_tool_call.as_ref(),
+        ));
 
         Ok(PlannedTurn {
             first_decision,
             resolved_tool_call,
             initial_decision_duration_ms,
+            planner_hook_trace_records,
         })
+    }
+
+    fn build_planner_preflight_trace_record(
+        &self,
+        user_message: &str,
+        planner_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+        decision: Option<&ProviderDecision>,
+    ) -> HookTraceRecord {
+        let summary = match decision.and_then(|decision| decision.tool_call.as_ref()) {
+            Some(tool_call) => format!(
+                "planner preflight produced normalized provider decision with tool `{}`",
+                tool_call.name
+            ),
+            None if decision.is_some() => {
+                "planner preflight produced normalized provider decision without tool call"
+                    .to_string()
+            }
+            None => "planner preflight deferred first decision to provider resolution".to_string(),
+        };
+        build_observe_hook_trace_record(
+            "planner.preflight.observe",
+            TurnHookPoint::PlannerTurnPreflight,
+            1,
+            summary,
+            Some(format!(
+                "message={} skills={}",
+                preview_text(user_message, 64),
+                planner_skills.len()
+            )),
+        )
+    }
+
+    fn build_planner_tool_selection_trace_record(
+        &self,
+        user_message: &str,
+        provider_tool_call: Option<&ToolCall>,
+        resolved_tool_call: Option<&ToolCall>,
+    ) -> HookTraceRecord {
+        let provider_tool = provider_tool_call
+            .map(|tool_call| tool_call.name.as_str())
+            .unwrap_or("none");
+        let resolved_tool = resolved_tool_call
+            .map(|tool_call| tool_call.name.as_str())
+            .unwrap_or("none");
+        let summary = if provider_tool == resolved_tool {
+            format!(
+                "planner tool selection kept normalized tool path `{}`",
+                resolved_tool
+            )
+        } else {
+            format!(
+                "planner tool selection rewrote normalized tool path from `{}` to `{}`",
+                provider_tool, resolved_tool
+            )
+        };
+        build_observe_hook_trace_record(
+            "planner.tool_selection.observe",
+            TurnHookPoint::PlannerToolSelection,
+            1,
+            summary,
+            Some(format!("message={}", preview_text(user_message, 64))),
+        )
+    }
+
+    fn build_planner_preflight_envelope(
+        &self,
+        user_message: &str,
+        history: &[TurnHistoryMessage],
+        available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+        decision: Option<&ProviderDecision>,
+    ) -> PlannerFactsEnvelope {
+        PlannerFactsEnvelope {
+            session_id: None,
+            run_id: None,
+            hook_point: PlannerHookPoint::TurnPreflight,
+            source_boundary: "runtime.plan_turn.preflight".to_string(),
+            planner_source: "turn_planner.preflight_decision".to_string(),
+            user_message_summary: Some(preview_text(user_message, 64)),
+            history_turn_count: history.len(),
+            available_skill_ids: available_skills
+                .iter()
+                .map(|skill| skill.skill_id.clone())
+                .collect(),
+            provider_decision_summary: decision.map(summarize_provider_decision),
+            provider_tool_call_name: decision
+                .and_then(|decision| decision.tool_call.as_ref())
+                .map(|tool_call| tool_call.name.clone()),
+            graph_goal_summary: None,
+            graph_step_count: None,
+            current_decision_summary: decision.map(summarize_provider_decision),
+        }
+    }
+
+    fn build_planner_tool_selection_envelope(
+        &self,
+        user_message: &str,
+        history: &[TurnHistoryMessage],
+        available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+        provider_tool_call: Option<&ToolCall>,
+        selected_tool_call: Option<&ToolCall>,
+    ) -> PlannerFactsEnvelope {
+        PlannerFactsEnvelope {
+            session_id: None,
+            run_id: None,
+            hook_point: PlannerHookPoint::ToolSelection,
+            source_boundary: "runtime.plan_turn.tool_selection".to_string(),
+            planner_source: "turn_planner.select_tool_call".to_string(),
+            user_message_summary: Some(preview_text(user_message, 64)),
+            history_turn_count: history.len(),
+            available_skill_ids: available_skills
+                .iter()
+                .map(|skill| skill.skill_id.clone())
+                .collect(),
+            provider_decision_summary: provider_tool_call
+                .map(|tool_call| format!("provider suggested `{}`", tool_call.name)),
+            provider_tool_call_name: provider_tool_call.map(|tool_call| tool_call.name.clone()),
+            graph_goal_summary: None,
+            graph_step_count: None,
+            current_decision_summary: selected_tool_call
+                .map(|tool_call| format!("selected `{}`", tool_call.name)),
+        }
+    }
+
+    fn build_planner_graph_decision_trace_record(
+        &self,
+        run: &GraphRun,
+        decision: &GraphDecision,
+    ) -> HookTraceRecord {
+        build_observe_hook_trace_record(
+            "planner.graph_decision.observe",
+            TurnHookPoint::PlannerGraphDecision,
+            1,
+            format!(
+                "planner graph decision produced `{}` for run `{}`",
+                graph_decision_kind_label(&decision.kind),
+                run.id
+            ),
+            Some(format!(
+                "run_phase={:?} target_phase={:?} reason={:?}",
+                run.phase, decision.target_phase, decision.reason
+            )),
+        )
+    }
+
+    fn build_planner_graph_decision_envelope(
+        &self,
+        run: &GraphRun,
+        decision: &GraphDecision,
+    ) -> PlannerFactsEnvelope {
+        PlannerFactsEnvelope {
+            session_id: run.session_id.clone(),
+            run_id: Some(run.id.clone()),
+            hook_point: PlannerHookPoint::GraphDecision,
+            source_boundary: "runtime.decide_graph_after_turn_with_planner".to_string(),
+            planner_source: "graph_planner.decide_after_turn".to_string(),
+            user_message_summary: None,
+            history_turn_count: run.steps.len(),
+            available_skill_ids: Vec::new(),
+            provider_decision_summary: None,
+            provider_tool_call_name: None,
+            graph_goal_summary: Some(preview_text(&run.goal, 96)),
+            graph_step_count: Some(run.steps.len()),
+            current_decision_summary: Some(decision.summary.clone()),
+        }
+    }
+
+    pub fn record_planner_graph_decision_trace(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        run: &GraphRun,
+        decision: &GraphDecision,
+    ) -> Option<HookTraceRecord> {
+        let record = self.build_planner_graph_decision_trace_record(run, decision);
+        if self.append_turn_trace_hook_records(session_id, turn_id, vec![record.clone()]) {
+            Some(record)
+        } else {
+            None
+        }
+    }
+
+    fn build_capability_resolution_trace_record(
+        &self,
+        tool_call: &ToolCall,
+        execution: &CapabilityToolExecutionResult,
+    ) -> HookTraceRecord {
+        let summary = match (
+            execution.capability.as_ref(),
+            execution.failure_kind.as_ref(),
+        ) {
+            (Some(capability), None) => format!(
+                "capability mediation resolved `{}` to `{}`",
+                tool_call.name, capability.capability_id
+            ),
+            (Some(capability), Some(failure)) => format!(
+                "capability mediation resolved `{}` to `{}` but execution failed with `{}`",
+                tool_call.name,
+                capability.capability_id,
+                failure.as_str()
+            ),
+            (None, Some(failure)) => format!(
+                "capability mediation failed to resolve `{}`: {}",
+                tool_call.name,
+                failure.as_str()
+            ),
+            (None, None) => {
+                format!(
+                    "capability mediation observed `{}` without resolution details",
+                    tool_call.name
+                )
+            }
+        };
+        build_observe_hook_trace_record(
+            "capability.resolve.observe",
+            TurnHookPoint::CapabilityResolve,
+            1,
+            summary,
+            Some(format!("tool={}", tool_call.name)),
+        )
+    }
+
+    fn build_skill_resolution_trace_record(
+        &self,
+        request: &SkillInvocationRequest,
+        execution: &SkillToolExecutionResult,
+    ) -> HookTraceRecord {
+        let summary = match (execution.skill.as_ref(), execution.failure_layer.as_ref()) {
+            (Some(skill), None) => format!(
+                "skill mediation resolved `{}` with {} composed capability actions",
+                skill.skill_id,
+                execution.capability_executions.len()
+            ),
+            (Some(skill), Some(layer)) => format!(
+                "skill mediation resolved `{}` but failed at `{}`",
+                skill.skill_id,
+                layer.as_str()
+            ),
+            (None, Some(layer)) => format!(
+                "skill mediation failed to resolve `{}` at `{}`",
+                request.skill_id,
+                layer.as_str()
+            ),
+            (None, None) => {
+                format!(
+                    "skill mediation observed `{}` without resolution details",
+                    request.skill_id
+                )
+            }
+        };
+        build_observe_hook_trace_record(
+            "skill.tool_actions.observe",
+            TurnHookPoint::SkillToolActionsResolve,
+            1,
+            summary,
+            Some(format!("skill_id={}", request.skill_id)),
+        )
+    }
+
+    fn build_capability_mediation_envelope(
+        &self,
+        tool_call: &ToolCall,
+    ) -> CapabilityMediationEnvelope {
+        let candidate_ids = candidate_capability_ids_for_tool_name(&self.capability_registry, &tool_call.name);
+        let resolved_capability = candidate_ids
+            .first()
+            .and_then(|capability_id| self.capability_registry.inspect_capability(capability_id));
+        CapabilityMediationEnvelope {
+            session_id: None,
+            run_id: None,
+            hook_point: CapabilityMediationHookPoint::CapabilityResolve,
+            source_boundary: "runtime.execute_registered_tool_call".to_string(),
+            mediation_source: "capability_registry.resolve_tool_call".to_string(),
+            requested_capability_id: resolved_capability
+                .as_ref()
+                .map(|capability| capability.capability_id.clone()),
+            requested_skill_id: None,
+            capability_kind: resolved_capability
+                .as_ref()
+                .map(|capability| capability.kind.as_str().to_string()),
+            candidate_ids,
+            argument_summary: tool_call.arguments.to_string(),
+            source_id: resolved_capability
+                .as_ref()
+                .map(|capability| capability.source_id.clone()),
+            source_kind: resolved_capability
+                .as_ref()
+                .map(|capability| capability.source_kind.as_str().to_string()),
+        }
+    }
+
+    fn build_skill_mediation_envelope(
+        &self,
+        tool_call: &ToolCall,
+        skill: &crate::agent::capability_bridge::SkillDescriptor,
+    ) -> CapabilityMediationEnvelope {
+        let source = self.capability_registry.inspect_skill_source(&skill.source_id);
+        CapabilityMediationEnvelope {
+            session_id: None,
+            run_id: None,
+            hook_point: CapabilityMediationHookPoint::SkillToolActionsResolve,
+            source_boundary: "runtime.execute_registered_tool_call".to_string(),
+            mediation_source: "capability_registry.resolve_skill_tool_actions".to_string(),
+            requested_capability_id: None,
+            requested_skill_id: Some(skill.skill_id.clone()),
+            capability_kind: None,
+            candidate_ids: skill.composed_capability_refs.clone(),
+            argument_summary: tool_call.arguments.to_string(),
+            source_id: Some(skill.source_id.clone()),
+            source_kind: source.map(|source| source.source_kind.as_str().to_string()),
+        }
+    }
+
+    fn build_mcp_source_ingress_envelope(
+        &self,
+        snapshot: &McpSourceSnapshot,
+    ) -> CapabilityMediationEnvelope {
+        CapabilityMediationEnvelope {
+            session_id: None,
+            run_id: None,
+            hook_point: CapabilityMediationHookPoint::McpSourceIngress,
+            source_boundary: "control_plane.apply_mcp_source_snapshot".to_string(),
+            mediation_source: "capability_registry.replace_mcp_source_snapshot".to_string(),
+            requested_capability_id: None,
+            requested_skill_id: None,
+            capability_kind: None,
+            candidate_ids: snapshot
+                .capabilities
+                .iter()
+                .map(|capability| capability.capability_id.clone())
+                .collect(),
+            argument_summary: "{}".to_string(),
+            source_id: Some(snapshot.source.source_id.clone()),
+            source_kind: Some(snapshot.source.source_kind.as_str().to_string()),
+        }
+    }
+
+    fn build_skill_source_ingress_envelope(
+        &self,
+        snapshot: &SkillSourceSnapshot,
+    ) -> CapabilityMediationEnvelope {
+        CapabilityMediationEnvelope {
+            session_id: None,
+            run_id: None,
+            hook_point: CapabilityMediationHookPoint::SkillSourceIngress,
+            source_boundary: "control_plane.apply_skill_source_snapshot".to_string(),
+            mediation_source: "capability_registry.replace_skill_source_snapshot".to_string(),
+            requested_capability_id: None,
+            requested_skill_id: None,
+            capability_kind: None,
+            candidate_ids: snapshot
+                .skills
+                .iter()
+                .map(|skill| skill.skill_id.clone())
+                .collect(),
+            argument_summary: "{}".to_string(),
+            source_id: Some(snapshot.source.source_id.clone()),
+            source_kind: Some(snapshot.source.source_kind.as_str().to_string()),
+        }
     }
 
     fn resolve_turn_images(
@@ -631,7 +1576,7 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn persist_turn_trace_with_provider_calls(
+    fn persist_turn_trace_with_provider_calls_and_hooks(
         &mut self,
         session_id: Option<&str>,
         turn_id: &str,
@@ -640,6 +1585,7 @@ impl AgentRuntime {
         trace_steps: Vec<TurnTraceStep>,
         tool_activities: Vec<TurnToolActivity>,
         provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
         provider_meta: Option<&ProviderEventMeta>,
         provider_source: Option<String>,
         provider_mode: Option<String>,
@@ -681,12 +1627,19 @@ impl AgentRuntime {
             session_id,
             TurnTraceRecord {
                 turn_id: turn_id.to_string(),
+                session_id: session_id.map(str::to_string),
+                event_id: None,
+                event_type: None,
+                event_version: None,
+                sequence: None,
+                emitted_at_ms: None,
                 title: build_turn_trace_title(user_message),
                 phase: phase.to_string(),
                 trace_steps,
                 trace_timeline,
                 tool_activities,
                 provider_call_records,
+                hook_trace_records,
                 provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
                 provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
                 provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
@@ -706,6 +1659,138 @@ impl AgentRuntime {
                 turn_duration_ms,
                 updated_at: 0,
             },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_turn_trace_with_provider_calls(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        phase: &str,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        provider_meta: Option<&ProviderEventMeta>,
+        provider_source: Option<String>,
+        provider_mode: Option<String>,
+        build_context_observation: Option<BuildContextObservation>,
+        return_text: Option<String>,
+        return_reasoning_content: Option<String>,
+        fallback_reason: Option<String>,
+        input_tokens: Option<u64>,
+        cache_hit_input_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        session_summary: Option<String>,
+        error: Option<String>,
+    ) {
+        self.persist_turn_trace_with_provider_calls_and_hooks(
+            session_id,
+            turn_id,
+            user_message,
+            phase,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            Vec::new(),
+            provider_meta,
+            provider_source,
+            provider_mode,
+            build_context_observation,
+            return_text,
+            return_reasoning_content,
+            fallback_reason,
+            input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
+            output_tokens,
+            total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+            session_summary,
+            error,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fail_stream_turn_with_hook_dispatch(
+        &mut self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+    ) {
+        self.update_execution_checkpoint(
+            control,
+            turn_id,
+            "failed",
+            provider_meta,
+            completed_hops,
+            None,
+            &trace_steps,
+            &tool_activities,
+            None,
+            None,
+            None,
+            Some("failed"),
+            Some(&error),
+        );
+        self.persist_turn_trace_with_provider_calls_and_hooks(
+            session_id,
+            turn_id,
+            user_message,
+            "failed",
+            trace_steps.clone(),
+            tool_activities.clone(),
+            provider_call_records.clone(),
+            hook_trace_records.clone(),
+            provider_meta,
+            None,
+            None,
+            build_context_observation.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            turn_duration_ms,
+            None,
+            Some(error.clone()),
+        );
+        emit_stream_failed(
+            sink,
+            turn_id.to_string(),
+            provider_meta,
+            trace_steps,
+            Some(tool_activities),
+            first_token_latency_ms,
+            turn_duration_ms,
+            build_context_observation,
+            None,
+            Some(provider_call_records),
+            Some(hook_trace_records),
+            error,
+            session_id.map(str::to_string),
         );
     }
 
@@ -746,6 +1831,114 @@ impl AgentRuntime {
             None,
             attachments,
         )
+    }
+
+    fn fail_sync_turn_result(
+        &self,
+        provider_meta: Option<&ProviderEventMeta>,
+        user_message: String,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        error: String,
+    ) -> TurnResult {
+        build_failed_turn_result_with_hooks(
+            provider_meta,
+            user_message,
+            error,
+            trace_steps,
+            tool_activities,
+            hook_trace_records,
+        )
+    }
+
+    fn failed_trace_steps_for_tool_activities(
+        &self,
+        tool_activities: &[TurnToolActivity],
+    ) -> Vec<TurnTraceStep> {
+        if tool_activities.is_empty() {
+            return self.telemetry_builder.failed_trace_before_tool();
+        }
+        let all_tools_ok = tool_activities
+            .iter()
+            .all(|activity| activity.status != "error");
+        self.telemetry_builder.failed_trace_after_tool(all_tools_ok)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_failed_sync_turn_trace_with_hooks(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        provider_source: Option<String>,
+        provider_mode: Option<String>,
+        build_context_observation: Option<BuildContextObservation>,
+        fallback_reason: Option<String>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        error: String,
+    ) {
+        self.persist_turn_trace_with_provider_calls_and_hooks(
+            session_id,
+            turn_id,
+            user_message,
+            "failed",
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            provider_meta,
+            provider_source,
+            provider_mode,
+            build_context_observation,
+            None,
+            None,
+            fallback_reason,
+            None,
+            None,
+            None,
+            None,
+            None,
+            first_token_latency_ms,
+            turn_duration_ms,
+            None,
+            Some(error),
+        );
+    }
+
+    fn annotate_sync_terminal_trace_with_envelope(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        envelope: &TurnEventEnvelope,
+    ) {
+        let _ = self.annotate_turn_trace_terminal_event(
+            session_id,
+            turn_id,
+            Some(envelope.event_id.clone()),
+            Some(envelope.event_type.clone()),
+            Some(envelope.event_version.clone()),
+            Some(envelope.sequence),
+            Some(envelope.emitted_at_ms),
+        );
+    }
+
+    fn apply_terminal_envelope_to_turn_result(
+        &self,
+        result: &mut TurnResult,
+        envelope: &TurnEventEnvelope,
+    ) {
+        result.event_id = Some(envelope.event_id.clone());
+        result.event_type = Some(envelope.event_type.clone());
+        result.event_version = Some(envelope.event_version.clone());
+        result.sequence = Some(envelope.sequence);
+        result.emitted_at_ms = Some(envelope.emitted_at_ms);
     }
 
     fn update_execution_checkpoint(
@@ -886,6 +2079,7 @@ impl AgentRuntime {
             )),
             None,
             error,
+            None,
         );
     }
 
@@ -904,6 +2098,7 @@ impl AgentRuntime {
         planning_request: &ProviderRequest,
         first_decision: &ProviderDecision,
         tool_call: ToolCall,
+        initial_hook_trace_records: Vec<HookTraceRecord>,
         initial_turn_first_token_latency_ms: Option<u64>,
         turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
@@ -921,6 +2116,7 @@ impl AgentRuntime {
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
         let mut accumulated_token_usage = first_decision.token_usage.clone();
         let first_token_latency = Rc::new(Cell::new(initial_turn_first_token_latency_ms));
+        let mut hook_trace_records = initial_hook_trace_records;
 
         loop {
             completed_hops += 1;
@@ -962,7 +2158,7 @@ impl AgentRuntime {
                 "turn:trace",
                 turn_id.to_string(),
                 "trace",
-                Some("calling_tool"),
+                Some("executing_tool"),
                 None,
                 None,
                 None,
@@ -993,6 +2189,8 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
+                None,
+                None,
             );
 
             let running_tool_activities = running_tool_activities_with_history(
@@ -1000,12 +2198,16 @@ impl AgentRuntime {
                 self.telemetry_builder
                     .tool_activities_running(&current_tool_call),
             );
+            let tool_start_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::ToolCallStart);
+            let tool_start_hook_trace_records = tool_start_hook_outcome.trace_records.clone();
+            hook_trace_records.extend(tool_start_hook_trace_records.clone());
             emit_stream_event(
                 sink,
                 "turn:tool",
                 turn_id.to_string(),
                 "tool",
-                Some("calling_tool"),
+                Some("executing_tool"),
                 None,
                 None,
                 None,
@@ -1035,25 +2237,39 @@ impl AgentRuntime {
                 )),
                 Some(running_tool_activities),
                 None,
+                Some(tool_start_hook_trace_records),
                 None,
+                input.session_id.clone(),
             );
+            if let Some(error) = tool_start_hook_outcome.fail_turn_error {
+                let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    trace_steps,
+                    running_tool_activities_with_history(
+                        &tool_activities,
+                        self.telemetry_builder
+                            .tool_activities_running(&current_tool_call),
+                    ),
+                    provider_call_records.clone(),
+                    tool_start_hook_outcome.trace_records,
+                    first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    completed_hops,
+                    error,
+                );
+                return;
+            }
 
-            let execution = self.execute_capability_tool_call(&current_tool_call);
-            if let Some(capability) = execution.capability.as_ref() {
-                runtime_log(format!(
-                    "turn:capability-execute capability_id={} mode={}",
-                    capability.capability_id,
-                    capability.invocation_mode.as_str()
-                ));
-            }
-            if let Some(failure_kind) = execution.failure_kind.as_ref() {
-                runtime_log(format!(
-                    "turn:capability-failure tool={} class={:?}",
-                    current_tool_call.name, failure_kind
-                ));
-            }
-            let invocation_record = execution.invocation_record();
-            let tool_result = execution.tool_result;
+            let (tool_result, invocation_record, capability_hook_trace_records) =
+                self.execute_registered_tool_call(&current_tool_call);
+            hook_trace_records.extend(capability_hook_trace_records);
             all_tools_ok &= tool_result.status == "ok";
             tool_activities.extend(annotate_capability_tool_activities(
                 self.telemetry_builder
@@ -1101,12 +2317,16 @@ impl AgentRuntime {
                 return;
             }
 
+            let tool_end_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::ToolCallEnd);
+            let tool_end_hook_trace_records = tool_end_hook_outcome.trace_records.clone();
+            hook_trace_records.extend(tool_end_hook_trace_records.clone());
             emit_stream_event(
                 sink,
                 "turn:tool",
                 turn_id.to_string(),
                 "tool",
-                Some("calling_model"),
+                Some("tool_result_integrating"),
                 None,
                 None,
                 None,
@@ -1136,15 +2356,38 @@ impl AgentRuntime {
                 )),
                 Some(tool_activities.clone()),
                 None,
+                Some(tool_end_hook_trace_records),
                 None,
+                input.session_id.clone(),
             );
+            if let Some(error) = tool_end_hook_outcome.fail_turn_error {
+                let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    trace_steps,
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    tool_end_hook_outcome.trace_records,
+                    first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    completed_hops,
+                    error,
+                );
+                return;
+            }
 
             emit_stream_event(
                 sink,
                 "turn:trace",
                 turn_id.to_string(),
                 "trace",
-                Some("calling_model"),
+                Some("tool_result_integrating"),
                 None,
                 None,
                 None,
@@ -1175,6 +2418,76 @@ impl AgentRuntime {
                 None,
                 None,
                 None,
+                None,
+                None,
+            );
+
+            if tool_result.status != "ok" {
+                let error = build_tool_execution_error(
+                    &current_tool_call.name,
+                    tool_result.output.as_str(),
+                );
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    self.telemetry_builder.failed_trace_after_tool(false),
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    hook_trace_records.clone(),
+                    first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    completed_hops,
+                    error,
+                );
+                return;
+            }
+
+            let followup_model_hook_trace_records = self
+                .dispatch_hook_trace_records(TurnHookPoint::ModelCallStart)
+                .trace_records;
+            emit_stream_event(
+                sink,
+                "turn:trace",
+                turn_id.to_string(),
+                "trace",
+                Some("calling_model"),
+                None,
+                None,
+                Some(provider_meta),
+                None,
+                None,
+                None,
+                Some(context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(self.telemetry_builder.trace_return_active(all_tools_ok)),
+                Some(build_stream_progress_trace_timeline(
+                    display_message,
+                    provider_meta,
+                    None,
+                    None,
+                    &context_observation,
+                    &tool_activities,
+                    Some(current_assistant_output_text.as_str()),
+                    current_assistant_reasoning.as_deref(),
+                    first_token_latency.get(),
+                    "calling_model",
+                )),
+                Some(tool_activities.clone()),
+                None,
+                Some(followup_model_hook_trace_records),
+                None,
+                input.session_id.clone(),
             );
 
             let delta_turn_id = turn_id.to_string();
@@ -1258,48 +2571,28 @@ impl AgentRuntime {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                     );
                 },
             ) {
                 Ok(response) => response,
                 Err(error) => {
-                    let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                    self.persist_turn_trace_with_provider_calls(
+                    self.fail_stream_turn_with_hook_dispatch(
+                        sink,
+                        control,
                         input.session_id.as_deref(),
                         turn_id,
                         display_message,
-                        "failed",
-                        trace_steps.clone(),
+                        Some(provider_meta),
+                        Some(context_observation.clone()),
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                         tool_activities.clone(),
                         provider_call_records.clone(),
-                        Some(provider_meta),
-                        None,
-                        None,
-                        Some(context_observation.clone()),
-                        None,
-                        None,
-                        accumulated_fallback_reason.clone(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        hook_trace_records.clone(),
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
-                        None,
-                        Some(error.clone()),
-                    );
-                    emit_stream_failed(
-                        sink,
-                        turn_id.to_string(),
-                        Some(provider_meta),
-                        trace_steps,
-                        Some(tool_activities),
-                        first_token_latency.get(),
-                        Some(turn_started_at.elapsed().as_millis() as u64),
-                        Some(context_observation.clone()),
-                        None,
-                        Some(provider_call_records.clone()),
+                        completed_hops,
                         error,
                     );
                     return;
@@ -1371,43 +2664,21 @@ impl AgentRuntime {
                 &response.provider_mode,
                 response.fallback_reason.as_deref(),
             ) {
-                let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                self.persist_turn_trace_with_provider_calls(
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
                     input.session_id.as_deref(),
                     turn_id,
                     display_message,
-                    "failed",
-                    trace_steps.clone(),
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                     tool_activities.clone(),
                     provider_call_records.clone(),
-                    Some(provider_meta),
-                    None,
-                    Some(response.provider_mode.clone()),
-                    Some(context_observation.clone()),
-                    None,
-                    None,
-                    accumulated_fallback_reason.clone(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    hook_trace_records.clone(),
                     first_token_latency.get(),
                     Some(turn_started_at.elapsed().as_millis() as u64),
-                    None,
-                    Some(error.clone()),
-                );
-                emit_stream_failed(
-                    sink,
-                    turn_id.to_string(),
-                    Some(provider_meta),
-                    trace_steps,
-                    Some(tool_activities),
-                    first_token_latency.get(),
-                    Some(turn_started_at.elapsed().as_millis() as u64),
-                    Some(context_observation.clone()),
-                    None,
-                    Some(provider_call_records.clone()),
+                    completed_hops,
                     error,
                 );
                 return;
@@ -1423,44 +2694,21 @@ impl AgentRuntime {
                 ) {
                     Ok(normalized) => normalized,
                     Err(error) => {
-                        let trace_steps =
-                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                        self.persist_turn_trace_with_provider_calls(
+                        self.fail_stream_turn_with_hook_dispatch(
+                            sink,
+                            control,
                             input.session_id.as_deref(),
                             turn_id,
                             display_message,
-                            "failed",
-                            trace_steps.clone(),
+                            Some(provider_meta),
+                            Some(context_observation.clone()),
+                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                             tool_activities.clone(),
                             provider_call_records.clone(),
-                            Some(provider_meta),
-                            Some(response.provider_source.clone()),
-                            Some(response.provider_mode.clone()),
-                            Some(context_observation.clone()),
-                            None,
-                            None,
-                            accumulated_fallback_reason.clone(),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
+                            hook_trace_records.clone(),
                             first_token_latency.get(),
                             Some(turn_started_at.elapsed().as_millis() as u64),
-                            None,
-                            Some(error.clone()),
-                        );
-                        emit_stream_failed(
-                            sink,
-                            turn_id.to_string(),
-                            Some(provider_meta),
-                            trace_steps,
-                            Some(tool_activities),
-                            first_token_latency.get(),
-                            Some(turn_started_at.elapsed().as_millis() as u64),
-                            Some(context_observation.clone()),
-                            None,
-                            Some(provider_call_records.clone()),
+                            completed_hops,
                             error,
                         );
                         return;
@@ -1472,45 +2720,22 @@ impl AgentRuntime {
 
             if let Some(next_tool_call) = response.tool_call.clone() {
                 if completed_hops >= max_tool_hops_per_turn() {
-                    let error = build_tool_hop_limit_error(max_tool_hops_per_turn());
-                    let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                    self.persist_turn_trace_with_provider_calls(
+                    self.fail_stream_turn_with_hook_dispatch(
+                        sink,
+                        control,
                         input.session_id.as_deref(),
                         turn_id,
                         display_message,
-                        "failed",
-                        trace_steps.clone(),
+                        Some(provider_meta),
+                        Some(context_observation.clone()),
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                         tool_activities.clone(),
                         provider_call_records.clone(),
-                        Some(provider_meta),
-                        Some(response.provider_source.clone()),
-                        Some(response.provider_mode.clone()),
-                        Some(context_observation.clone()),
-                        None,
-                        None,
-                        accumulated_fallback_reason.clone(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        hook_trace_records.clone(),
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
-                        None,
-                        Some(error.clone()),
-                    );
-                    emit_stream_failed(
-                        sink,
-                        turn_id.to_string(),
-                        Some(provider_meta),
-                        trace_steps,
-                        Some(tool_activities),
-                        first_token_latency.get(),
-                        Some(turn_started_at.elapsed().as_millis() as u64),
-                        Some(context_observation.clone()),
-                        None,
-                        Some(provider_call_records.clone()),
-                        error,
+                        completed_hops,
+                        build_tool_hop_limit_error(max_tool_hops_per_turn()),
                     );
                     return;
                 }
@@ -1528,43 +2753,21 @@ impl AgentRuntime {
             let attachments = match self.save_input_attachments(input) {
                 Ok(attachments) => attachments,
                 Err(error) => {
-                    let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
-                    self.persist_turn_trace_with_provider_calls(
+                    self.fail_stream_turn_with_hook_dispatch(
+                        sink,
+                        control,
                         input.session_id.as_deref(),
                         turn_id,
                         display_message,
-                        "failed",
-                        trace_steps.clone(),
+                        Some(provider_meta),
+                        Some(context_observation.clone()),
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                         tool_activities.clone(),
                         provider_call_records.clone(),
-                        Some(provider_meta),
-                        Some(response.provider_source.clone()),
-                        Some(response.provider_mode.clone()),
-                        Some(context_observation.clone()),
-                        None,
-                        None,
-                        accumulated_fallback_reason.clone(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        hook_trace_records.clone(),
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
-                        None,
-                        Some(error.clone()),
-                    );
-                    emit_stream_failed(
-                        sink,
-                        turn_id.to_string(),
-                        Some(provider_meta),
-                        trace_steps,
-                        Some(tool_activities),
-                        first_token_latency.get(),
-                        Some(turn_started_at.elapsed().as_millis() as u64),
-                        Some(context_observation.clone()),
-                        None,
-                        Some(provider_call_records.clone()),
+                        completed_hops,
                         error,
                     );
                     return;
@@ -1583,6 +2786,130 @@ impl AgentRuntime {
             let trace_steps = self
                 .telemetry_builder
                 .completed_trace_with_tool(all_tools_ok);
+            let turn_duration_ms = Some(turn_started_at.elapsed().as_millis() as u64);
+            self.update_execution_checkpoint(
+                control,
+                turn_id,
+                "checkpointing",
+                Some(provider_meta),
+                completed_hops,
+                None,
+                &trace_steps,
+                &tool_activities,
+                Some(response.provider_source.as_str()),
+                Some(response.provider_mode.as_str()),
+                accumulated_fallback_reason.as_deref(),
+                Some("running"),
+                None,
+            );
+            emit_stream_event(
+                sink,
+                "turn:phase_changed",
+                turn_id.to_string(),
+                "phase",
+                Some("checkpointing"),
+                None,
+                None,
+                Some(provider_meta),
+                Some(response.provider_source.clone()),
+                Some(response.provider_mode.clone()),
+                accumulated_fallback_reason.clone(),
+                Some(context_observation.clone()),
+                persisted.input_tokens,
+                persisted.cache_hit_input_tokens,
+                persisted.reasoning_tokens,
+                persisted.output_tokens,
+                persisted.total_tokens,
+                first_token_latency.get(),
+                turn_duration_ms,
+                Some(trace_steps.clone()),
+                None,
+                Some(tool_activities.clone()),
+                Some(provider_call_records.clone()),
+                None,
+                None,
+                input.session_id.clone(),
+            );
+            let checkpoint_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::CheckpointPersistEnd);
+            let checkpoint_hook_trace_records = checkpoint_hook_outcome.trace_records.clone();
+            emit_stream_event(
+                sink,
+                "turn:checkpoint_persisted",
+                turn_id.to_string(),
+                "checkpoint",
+                Some("checkpointing"),
+                None,
+                None,
+                Some(provider_meta),
+                Some(response.provider_source.clone()),
+                Some(response.provider_mode.clone()),
+                accumulated_fallback_reason.clone(),
+                Some(context_observation.clone()),
+                persisted.input_tokens,
+                persisted.cache_hit_input_tokens,
+                persisted.reasoning_tokens,
+                persisted.output_tokens,
+                persisted.total_tokens,
+                first_token_latency.get(),
+                turn_duration_ms,
+                Some(trace_steps.clone()),
+                None,
+                Some(tool_activities.clone()),
+                Some(provider_call_records.clone()),
+                Some(checkpoint_hook_trace_records.clone()),
+                Some(persisted.session_summary.clone()),
+                input.session_id.clone(),
+            );
+            if let Some(error) = checkpoint_hook_outcome.fail_turn_error {
+                let mut checkpoint_terminal_hook_trace_records = hook_trace_records.clone();
+                checkpoint_terminal_hook_trace_records
+                    .extend(checkpoint_hook_trace_records.clone());
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    checkpoint_terminal_hook_trace_records,
+                    first_token_latency.get(),
+                    turn_duration_ms,
+                    completed_hops,
+                    error,
+                );
+                return;
+            }
+            let finalize_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::TurnFinalizeEnd);
+            let finalize_hook_trace_records = finalize_hook_outcome.trace_records.clone();
+            let mut terminal_hook_trace_records = hook_trace_records.clone();
+            terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());
+            terminal_hook_trace_records.extend(finalize_hook_trace_records.clone());
+            if let Some(error) = finalize_hook_outcome.fail_turn_error {
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    terminal_hook_trace_records,
+                    first_token_latency.get(),
+                    turn_duration_ms,
+                    completed_hops,
+                    error,
+                );
+                return;
+            }
             self.update_execution_checkpoint(
                 control,
                 turn_id,
@@ -1598,7 +2925,7 @@ impl AgentRuntime {
                 Some("completed"),
                 None,
             );
-            self.persist_turn_trace_with_provider_calls(
+            self.persist_turn_trace_with_provider_calls_and_hooks(
                 input.session_id.as_deref(),
                 turn_id,
                 display_message,
@@ -1606,6 +2933,7 @@ impl AgentRuntime {
                 trace_steps.clone(),
                 tool_activities.clone(),
                 provider_call_records.clone(),
+                terminal_hook_trace_records.clone(),
                 Some(provider_meta),
                 Some(response.provider_source.clone()),
                 Some(response.provider_mode.clone()),
@@ -1619,7 +2947,7 @@ impl AgentRuntime {
                 persisted.output_tokens,
                 persisted.total_tokens,
                 first_token_latency.get(),
-                Some(turn_started_at.elapsed().as_millis() as u64),
+                turn_duration_ms,
                 Some(persisted.session_summary.clone()),
                 None,
             );
@@ -1642,14 +2970,14 @@ impl AgentRuntime {
                 persisted.output_tokens,
                 persisted.total_tokens,
                 first_token_latency.get(),
-                Some(turn_started_at.elapsed().as_millis() as u64),
+                turn_duration_ms,
             );
             emit_stream_event(
                 sink,
                 "turn:completed",
                 turn_id.to_string(),
                 "completed",
-                Some("ready"),
+                Some("completed"),
                 Some(response.output_text.clone()),
                 response.reasoning_content.clone(),
                 Some(provider_meta),
@@ -1663,12 +2991,14 @@ impl AgentRuntime {
                 persisted.output_tokens,
                 persisted.total_tokens,
                 first_token_latency.get(),
-                Some(turn_started_at.elapsed().as_millis() as u64),
+                turn_duration_ms,
                 Some(trace_steps),
                 Some(completed_timeline),
                 Some(tool_activities),
                 Some(provider_call_records.clone()),
+                Some(terminal_hook_trace_records),
                 Some(persisted.session_summary),
+                input.session_id.clone(),
             );
             return;
         }
@@ -1684,6 +3014,7 @@ impl AgentRuntime {
         planning_request: &ProviderRequest,
         first_decision: &ProviderDecision,
         tool_call: ToolCall,
+        initial_model_hook_trace_records: Vec<HookTraceRecord>,
         first_token_latency_ms: Option<u64>,
         _turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
@@ -1700,6 +3031,7 @@ impl AgentRuntime {
         let mut completed_hops = 0usize;
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
         let mut accumulated_token_usage = first_decision.token_usage.clone();
+        let mut hook_trace_records = initial_model_hook_trace_records;
 
         loop {
             completed_hops += 1;
@@ -1707,22 +3039,24 @@ impl AgentRuntime {
                 "turn:tool-execute hop={} name={} args={}",
                 completed_hops, current_tool_call.name, current_tool_call.arguments
             ));
-            let execution = self.execute_capability_tool_call(&current_tool_call);
-            if let Some(capability) = execution.capability.as_ref() {
-                runtime_log(format!(
-                    "turn:capability-execute capability_id={} mode={}",
-                    capability.capability_id,
-                    capability.invocation_mode.as_str()
+            let tool_start_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::ToolCallStart);
+            hook_trace_records.extend(tool_start_hook_outcome.trace_records.clone());
+            if let Some(error) = tool_start_hook_outcome.fail_turn_error {
+                return Err(self.fail_sync_turn_result(
+                    Some(provider_meta),
+                    display_message,
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                    self.telemetry_builder
+                        .tool_activities_running(&current_tool_call),
+                    hook_trace_records,
+                    error,
                 ));
             }
-            if let Some(failure_kind) = execution.failure_kind.as_ref() {
-                runtime_log(format!(
-                    "turn:capability-failure tool={} class={:?}",
-                    current_tool_call.name, failure_kind
-                ));
-            }
-            let invocation_record = execution.invocation_record();
-            let tool_result = execution.tool_result;
+
+            let (tool_result, invocation_record, capability_hook_trace_records) =
+                self.execute_registered_tool_call(&current_tool_call);
+            hook_trace_records.extend(capability_hook_trace_records);
             runtime_log(format!(
                 "turn:tool-result hop={} name={} status={} output_preview={}",
                 completed_hops,
@@ -1743,6 +3077,34 @@ impl AgentRuntime {
                 tool_call: current_tool_call.clone(),
                 tool_result: tool_result.clone(),
             });
+
+            if tool_result.status != "ok" {
+                return Err(self.fail_sync_turn_result(
+                    Some(provider_meta),
+                    display_message,
+                    self.telemetry_builder.failed_trace_after_tool(false),
+                    tool_activities,
+                    hook_trace_records,
+                    build_tool_execution_error(
+                        &current_tool_call.name,
+                        tool_result.output.as_str(),
+                    ),
+                ));
+            }
+
+            let tool_end_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::ToolCallEnd);
+            hook_trace_records.extend(tool_end_hook_outcome.trace_records.clone());
+            if let Some(error) = tool_end_hook_outcome.fail_turn_error {
+                return Err(self.fail_sync_turn_result(
+                    Some(provider_meta),
+                    display_message,
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                    tool_activities,
+                    hook_trace_records,
+                    error,
+                ));
+            }
 
             let provider_call_started_at = Instant::now();
             let response = match provider_followup(
@@ -1787,12 +3149,13 @@ impl AgentRuntime {
                 &response.provider_mode,
                 response.fallback_reason.as_deref(),
             ) {
-                return Err(build_failed_turn_result(
+                return Err(self.fail_sync_turn_result(
                     Some(provider_meta),
                     display_message,
-                    error,
                     self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                     tool_activities,
+                    hook_trace_records,
+                    error,
                 ));
             }
 
@@ -1806,12 +3169,13 @@ impl AgentRuntime {
                 ) {
                     Ok(normalized) => normalized,
                     Err(error) => {
-                        return Err(build_failed_turn_result(
+                        return Err(self.fail_sync_turn_result(
                             Some(provider_meta),
                             display_message,
-                            error,
                             self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                             tool_activities,
+                            hook_trace_records,
+                            error,
                         ));
                     }
                 };
@@ -1821,12 +3185,13 @@ impl AgentRuntime {
 
             if let Some(next_tool_call) = response.tool_call.clone() {
                 if completed_hops >= max_tool_hops_per_turn() {
-                    return Err(build_failed_turn_result(
+                    return Err(self.fail_sync_turn_result(
                         Some(provider_meta),
                         display_message,
-                        build_tool_hop_limit_error(max_tool_hops_per_turn()),
                         self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                         tool_activities,
+                        hook_trace_records,
+                        build_tool_hop_limit_error(max_tool_hops_per_turn()),
                     ));
                 }
                 current_assistant_message = response.assistant_message.clone();
@@ -1851,8 +3216,8 @@ impl AgentRuntime {
                 trace_steps: self
                     .telemetry_builder
                     .completed_trace_with_tool(all_tools_ok),
-                trace_timeline: Vec::new(),
                 tool_activities,
+                hook_trace_records,
                 first_token_latency_ms,
             });
         }
@@ -1881,17 +3246,31 @@ impl AgentRuntime {
             prepared.provider.model(),
             preview_text(&prepared.user_message, 120)
         ));
+        let provider_meta = provider_event_meta(&prepared.provider);
+        let model_call_hook_outcome =
+            self.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
+        let initial_model_hook_trace_records = model_call_hook_outcome.trace_records.clone();
+        if let Some(error) = model_call_hook_outcome.fail_turn_error {
+            return self.fail_sync_turn_result(
+                Some(&provider_meta),
+                prepared.display_message,
+                self.telemetry_builder.failed_trace_before_tool(),
+                Vec::new(),
+                model_call_hook_outcome.trace_records,
+                error,
+            );
+        }
 
         let planned = match self.plan_turn(&prepared) {
             Ok(planned) => planned,
             Err(error) => {
-                let provider_meta = provider_event_meta(&prepared.provider);
-                return build_failed_turn_result(
+                return self.fail_sync_turn_result(
                     Some(&provider_meta),
                     prepared.display_message,
-                    error,
                     self.telemetry_builder.failed_trace_before_tool(),
                     Vec::new(),
+                    initial_model_hook_trace_records.clone(),
+                    error,
                 );
             }
         };
@@ -1900,6 +3279,7 @@ impl AgentRuntime {
             first_decision,
             resolved_tool_call,
             initial_decision_duration_ms,
+            planner_hook_trace_records,
         } = planned;
         let PreparedTurn {
             user_message,
@@ -1910,7 +3290,6 @@ impl AgentRuntime {
             build_context_observation,
             ..
         } = prepared;
-        let provider_meta = provider_event_meta(&provider);
         let mut provider_call_records = vec![build_provider_call_cache_record(
             ProviderRequestKind::InitialRequest,
             Some(first_decision.provider_source.as_str()),
@@ -1926,14 +3305,19 @@ impl AgentRuntime {
             &first_decision.provider_mode,
             first_decision.fallback_reason.as_deref(),
         ) {
-            return build_failed_turn_result(
+            let mut planning_hook_trace_records = initial_model_hook_trace_records.clone();
+            planning_hook_trace_records.extend(planner_hook_trace_records.clone());
+            return self.fail_sync_turn_result(
                 Some(&provider_meta),
                 display_message,
-                error,
                 self.telemetry_builder.failed_trace_before_tool(),
                 Vec::new(),
+                planning_hook_trace_records,
+                error,
             );
         }
+        let mut planning_hook_trace_records = initial_model_hook_trace_records.clone();
+        planning_hook_trace_records.extend(planner_hook_trace_records.clone());
         let (
             assistant_message,
             provider_native_transcript,
@@ -1943,6 +3327,7 @@ impl AgentRuntime {
             token_usage,
             trace_steps,
             tool_activities,
+            mut hook_trace_records,
             first_token_latency_ms,
         ) = if let Some(tool_call) = resolved_tool_call {
             let initial_visible_first_token_latency_ms = None;
@@ -1955,6 +3340,7 @@ impl AgentRuntime {
                 &planning_request,
                 &first_decision,
                 tool_call,
+                planning_hook_trace_records.clone(),
                 initial_visible_first_token_latency_ms,
                 &turn_started_at,
                 &mut provider_call_records,
@@ -1968,6 +3354,7 @@ impl AgentRuntime {
                     outcome.token_usage,
                     outcome.trace_steps,
                     outcome.tool_activities,
+                    outcome.hook_trace_records,
                     outcome.first_token_latency_ms,
                 ),
                 Err(failed_result) => return failed_result,
@@ -1986,57 +3373,59 @@ impl AgentRuntime {
                 first_decision.token_usage.clone(),
                 self.telemetry_builder.completed_trace_without_tool(),
                 Vec::new(),
+                planning_hook_trace_records.clone(),
                 None,
             )
         };
         let attachments = match self.save_input_attachments(&input) {
             Ok(attachments) => attachments,
             Err(error) => {
-                let failed_trace_steps = if tool_activities.is_empty() {
-                    self.telemetry_builder.failed_trace_before_tool()
-                } else {
-                    let all_tools_ok = tool_activities
-                        .iter()
-                        .all(|activity| activity.status != "error");
-                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok)
-                };
+                let failed_trace_steps =
+                    self.failed_trace_steps_for_tool_activities(&tool_activities);
                 let trace_turn_id = format!(
                     "sync:{}:{}",
                     input.session_id.as_deref().unwrap_or("local-dev-session"),
                     turn_started_at.elapsed().as_nanos()
                 );
-                self.persist_turn_trace_with_provider_calls(
+                self.persist_failed_sync_turn_trace_with_hooks(
                     input.session_id.as_deref(),
                     &trace_turn_id,
                     &display_message,
-                    "failed",
+                    Some(&provider_meta),
                     failed_trace_steps.clone(),
                     tool_activities.clone(),
                     provider_call_records.clone(),
-                    Some(&provider_meta),
-                    None,
-                    None,
+                    hook_trace_records.clone(),
+                    Some(provider_source.clone()),
+                    Some(provider_mode.clone()),
                     Some(build_context_observation.clone()),
-                    None,
-                    None,
                     fallback_reason.clone(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
                     first_token_latency_ms,
                     Some(turn_started_at.elapsed().as_millis() as u64),
-                    None,
-                    Some(error.clone()),
+                    error.clone(),
                 );
-                return build_failed_turn_result(
+                let envelope = build_terminal_turn_event_envelope(
+                    &trace_turn_id,
+                    "turn:failed",
+                    Some("failed"),
+                    Some(&build_context_observation),
+                    Some(&tool_activities),
+                );
+                self.annotate_sync_terminal_trace_with_envelope(
+                    input.session_id.as_deref(),
+                    &trace_turn_id,
+                    &envelope,
+                );
+                let mut result = build_failed_turn_result_with_hooks(
                     Some(&provider_meta),
                     display_message,
                     error,
                     failed_trace_steps,
                     tool_activities,
+                    hook_trace_records,
                 );
+                self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+                return result;
             }
         };
         let persisted = self.persist_turn_outcome(
@@ -2049,12 +3438,113 @@ impl AgentRuntime {
             provider_native_transcript,
             attachments,
         );
+        let turn_duration_ms = Some(turn_started_at.elapsed().as_millis() as u64);
+        let checkpoint_hook_outcome =
+            self.dispatch_hook_trace_records(TurnHookPoint::CheckpointPersistEnd);
+        hook_trace_records.extend(checkpoint_hook_outcome.trace_records.clone());
+        if let Some(error) = checkpoint_hook_outcome.fail_turn_error {
+            let failed_trace_steps = self.failed_trace_steps_for_tool_activities(&tool_activities);
+            let trace_turn_id = format!(
+                "sync:{}:{}",
+                input.session_id.as_deref().unwrap_or("local-dev-session"),
+                turn_started_at.elapsed().as_nanos()
+            );
+            self.persist_failed_sync_turn_trace_with_hooks(
+                input.session_id.as_deref(),
+                &trace_turn_id,
+                &display_message,
+                Some(&provider_meta),
+                failed_trace_steps.clone(),
+                tool_activities.clone(),
+                provider_call_records.clone(),
+                hook_trace_records.clone(),
+                Some(provider_source.clone()),
+                Some(provider_mode.clone()),
+                Some(build_context_observation.clone()),
+                fallback_reason.clone(),
+                first_token_latency_ms,
+                turn_duration_ms,
+                error.clone(),
+            );
+            let envelope = build_terminal_turn_event_envelope(
+                &trace_turn_id,
+                "turn:failed",
+                Some("failed"),
+                Some(&build_context_observation),
+                Some(&tool_activities),
+            );
+            self.annotate_sync_terminal_trace_with_envelope(
+                input.session_id.as_deref(),
+                &trace_turn_id,
+                &envelope,
+            );
+            let mut result = self.fail_sync_turn_result(
+                Some(&provider_meta),
+                display_message,
+                failed_trace_steps,
+                tool_activities,
+                hook_trace_records,
+                error,
+            );
+            self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            return result;
+        }
+        let finalize_hook_outcome =
+            self.dispatch_hook_trace_records(TurnHookPoint::TurnFinalizeEnd);
+        hook_trace_records.extend(finalize_hook_outcome.trace_records.clone());
+        if let Some(error) = finalize_hook_outcome.fail_turn_error {
+            let failed_trace_steps = self.failed_trace_steps_for_tool_activities(&tool_activities);
+            let trace_turn_id = format!(
+                "sync:{}:{}",
+                input.session_id.as_deref().unwrap_or("local-dev-session"),
+                turn_started_at.elapsed().as_nanos()
+            );
+            self.persist_failed_sync_turn_trace_with_hooks(
+                input.session_id.as_deref(),
+                &trace_turn_id,
+                &display_message,
+                Some(&provider_meta),
+                failed_trace_steps.clone(),
+                tool_activities.clone(),
+                provider_call_records.clone(),
+                hook_trace_records.clone(),
+                Some(provider_source.clone()),
+                Some(provider_mode.clone()),
+                Some(build_context_observation.clone()),
+                fallback_reason.clone(),
+                first_token_latency_ms,
+                turn_duration_ms,
+                error.clone(),
+            );
+            let envelope = build_terminal_turn_event_envelope(
+                &trace_turn_id,
+                "turn:failed",
+                Some("failed"),
+                Some(&build_context_observation),
+                Some(&tool_activities),
+            );
+            self.annotate_sync_terminal_trace_with_envelope(
+                input.session_id.as_deref(),
+                &trace_turn_id,
+                &envelope,
+            );
+            let mut result = self.fail_sync_turn_result(
+                Some(&provider_meta),
+                display_message,
+                failed_trace_steps,
+                tool_activities,
+                hook_trace_records,
+                error,
+            );
+            self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            return result;
+        }
         let trace_turn_id = format!(
             "sync:{}:{}",
             input.session_id.as_deref().unwrap_or("local-dev-session"),
             turn_started_at.elapsed().as_nanos()
         );
-        self.persist_turn_trace_with_provider_calls(
+        self.persist_turn_trace_with_provider_calls_and_hooks(
             input.session_id.as_deref(),
             &trace_turn_id,
             &display_message,
@@ -2062,6 +3552,7 @@ impl AgentRuntime {
             trace_steps.clone(),
             tool_activities.clone(),
             provider_call_records.clone(),
+            hook_trace_records.clone(),
             Some(&provider_meta),
             Some(provider_source.clone()),
             Some(provider_mode.clone()),
@@ -2075,9 +3566,21 @@ impl AgentRuntime {
             persisted.output_tokens,
             persisted.total_tokens,
             first_token_latency_ms,
-            Some(turn_started_at.elapsed().as_millis() as u64),
+            turn_duration_ms,
             Some(persisted.session_summary.clone()),
             None,
+        );
+        let terminal_envelope = build_terminal_turn_event_envelope(
+            &trace_turn_id,
+            "turn:completed",
+            Some("completed"),
+            Some(&build_context_observation),
+            Some(&tool_activities),
+        );
+        self.annotate_sync_terminal_trace_with_envelope(
+            input.session_id.as_deref(),
+            &trace_turn_id,
+            &terminal_envelope,
         );
 
         let trace_timeline = build_persisted_trace_timeline(
@@ -2098,10 +3601,15 @@ impl AgentRuntime {
             persisted.output_tokens,
             persisted.total_tokens,
             first_token_latency_ms,
-            Some(turn_started_at.elapsed().as_millis() as u64),
+            turn_duration_ms,
         );
 
-        TurnResult {
+        let mut result = TurnResult {
+            event_id: None,
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
             phase: "ready".to_string(),
             provider_requested_name: provider.requested_name().to_string(),
             provider_name: provider.name().to_string(),
@@ -2124,8 +3632,11 @@ impl AgentRuntime {
             trace_timeline,
             tool_activities,
             provider_call_records,
+            hook_trace_records,
             session_summary: persisted.session_summary,
-        }
+        };
+        self.apply_terminal_envelope_to_turn_result(&mut result, &terminal_envelope);
+        result
     }
 
     #[allow(dead_code)]
@@ -2136,7 +3647,7 @@ impl AgentRuntime {
         input: TurnInput,
     ) {
         let control = ExecutionControlRegistry::new();
-        control.register_turn(&turn_id, input.session_id.as_deref());
+        control.register_turn(&turn_id, input.session_id.as_deref(), None);
         self.start_turn_stream_with_control(sink, &control, turn_id, input);
     }
 
@@ -2160,6 +3671,7 @@ impl AgentRuntime {
                     None,
                     self.telemetry_builder.failed_trace_empty_input(),
                     error,
+                    input.session_id.clone(),
                 );
                 return;
             }
@@ -2220,6 +3732,8 @@ impl AgentRuntime {
             None,
             None,
             None,
+            None,
+            input.session_id.clone(),
         );
         if self.should_cancel_turn(control, &turn_id) {
             self.cancel_stream_turn(
@@ -2239,11 +3753,147 @@ impl AgentRuntime {
             return;
         }
 
-        let preflight_decision = self
-            .planner
-            .preflight_decision(&prepared.user_message, prepared.retrieved.planner_history());
+        let preflight_decision = self.planner.preflight_decision(
+            &prepared.user_message,
+            prepared.retrieved.planner_history(),
+            &prepared.planner_skills,
+        );
+        let mut preflight_dispatch = self.dispatch_planner_hooks(
+            PlannerHookPoint::TurnPreflight,
+            &self.build_planner_preflight_envelope(
+                &prepared.user_message,
+                prepared.retrieved.planner_history(),
+                &prepared.planner_skills,
+                preflight_decision.as_ref(),
+            ),
+            preflight_decision,
+            None,
+        );
+        if let Some(error) = preflight_dispatch.fail_turn_error.take() {
+            let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+            self.update_execution_checkpoint(
+                control,
+                &turn_id,
+                "failed",
+                Some(&prepared_provider_meta),
+                0,
+                None,
+                &trace_steps,
+                &[],
+                None,
+                None,
+                None,
+                Some("failed"),
+                Some(&error),
+            );
+            self.persist_turn_trace_with_provider_calls_and_hooks(
+                input.session_id.as_deref(),
+                &turn_id,
+                &prepared.display_message,
+                "failed",
+                trace_steps.clone(),
+                Vec::new(),
+                Vec::new(),
+                preflight_dispatch.trace_records,
+                Some(&prepared_provider_meta),
+                None,
+                None,
+                Some(prepared.build_context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(turn_started_at.elapsed().as_millis() as u64),
+                None,
+                None,
+                Some(error.clone()),
+            );
+            emit_turn_failed(
+                sink,
+                turn_id,
+                Some(prepared.provider.requested_name().to_string()),
+                Some(prepared.provider.name().to_string()),
+                Some(prepared.provider.protocol_label().to_string()),
+                Some(prepared.provider.model().to_string()),
+                trace_steps,
+                error,
+                input.session_id.clone(),
+            );
+            return;
+        }
+        if let Some(error) = preflight_dispatch.blocked_error.take() {
+            let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+            self.update_execution_checkpoint(
+                control,
+                &turn_id,
+                "failed",
+                Some(&prepared_provider_meta),
+                0,
+                None,
+                &trace_steps,
+                &[],
+                None,
+                None,
+                None,
+                Some("failed"),
+                Some(&error),
+            );
+            self.persist_turn_trace_with_provider_calls_and_hooks(
+                input.session_id.as_deref(),
+                &turn_id,
+                &prepared.display_message,
+                "failed",
+                trace_steps.clone(),
+                Vec::new(),
+                Vec::new(),
+                preflight_dispatch.trace_records,
+                Some(&prepared_provider_meta),
+                None,
+                None,
+                Some(prepared.build_context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(turn_started_at.elapsed().as_millis() as u64),
+                None,
+                None,
+                Some(error.clone()),
+            );
+            emit_turn_failed(
+                sink,
+                turn_id,
+                Some(prepared.provider.requested_name().to_string()),
+                Some(prepared.provider.name().to_string()),
+                Some(prepared.provider.protocol_label().to_string()),
+                Some(prepared.provider.model().to_string()),
+                trace_steps,
+                error,
+                input.session_id.clone(),
+            );
+            return;
+        }
+        let preflight_decision = preflight_dispatch.decision;
+        let mut planner_hook_trace_records = preflight_dispatch.trace_records;
+        planner_hook_trace_records.push(self.build_planner_preflight_trace_record(
+            &prepared.user_message,
+            &prepared.planner_skills,
+            preflight_decision.as_ref(),
+        ));
         let supports_true_streaming_decision = prepared.provider.supports_true_streaming_decision();
         let turn_id_for_stream = turn_id.clone();
+        let stream_session_id = input.session_id.clone();
+        let pending_model_call_fail_turn =
+            Rc::new(RefCell::new(None::<(Vec<HookTraceRecord>, String)>));
+        let pending_model_call_fail_turn_for_stream = Rc::clone(&pending_model_call_fail_turn);
         let stream_initial_decision = || -> Result<
             (
                 ProviderDecision,
@@ -2254,6 +3904,53 @@ impl AgentRuntime {
             ),
             String,
         > {
+            let model_call_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
+            let model_call_hook_trace_records = model_call_hook_outcome.trace_records.clone();
+            emit_stream_event(
+                sink,
+                "turn:trace",
+                turn_id.clone(),
+                "trace",
+                Some("calling_model"),
+                None,
+                None,
+                Some(&prepared_provider_meta),
+                None,
+                None,
+                None,
+                Some(prepared.build_context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(start_trace_steps.clone()),
+                Some(build_stream_progress_trace_timeline(
+                    prepared.display_message.as_str(),
+                    &prepared_provider_meta,
+                    None,
+                    None,
+                    &prepared.build_context_observation,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    "calling_model",
+                )),
+                None,
+                None,
+                Some(model_call_hook_trace_records),
+                None,
+                input.session_id.clone(),
+            );
+            if let Some(error) = model_call_hook_outcome.fail_turn_error {
+                *pending_model_call_fail_turn_for_stream.borrow_mut() =
+                    Some((model_call_hook_outcome.trace_records, error));
+                return Err(HOOK_FAILTURN_HANDLED_SENTINEL.to_string());
+            }
             let initial_decision_started_at = Instant::now();
             let initial_turn_first_token_latency = Rc::new(Cell::new(None));
             let initial_call_first_token_latency = Rc::new(Cell::new(None));
@@ -2328,6 +4025,8 @@ impl AgentRuntime {
                         None,
                         None,
                         None,
+                        None,
+                        stream_session_id.clone(),
                     );
                 },
             )?;
@@ -2339,6 +4038,7 @@ impl AgentRuntime {
                 ProviderLatencyKind::ProviderStream,
             ))
         };
+        let pending_model_call_fail_turn_for_sync = Rc::clone(&pending_model_call_fail_turn);
         let decide_sync = || -> Result<
             (
                 ProviderDecision,
@@ -2349,6 +4049,53 @@ impl AgentRuntime {
             ),
             String,
         > {
+            let model_call_hook_outcome =
+                self.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
+            let model_call_hook_trace_records = model_call_hook_outcome.trace_records.clone();
+            emit_stream_event(
+                sink,
+                "turn:trace",
+                turn_id.clone(),
+                "trace",
+                Some("calling_model"),
+                None,
+                None,
+                Some(&prepared_provider_meta),
+                None,
+                None,
+                None,
+                Some(prepared.build_context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(start_trace_steps.clone()),
+                Some(build_stream_progress_trace_timeline(
+                    prepared.display_message.as_str(),
+                    &prepared_provider_meta,
+                    None,
+                    None,
+                    &prepared.build_context_observation,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    "calling_model",
+                )),
+                None,
+                None,
+                Some(model_call_hook_trace_records),
+                None,
+                input.session_id.clone(),
+            );
+            if let Some(error) = model_call_hook_outcome.fail_turn_error {
+                *pending_model_call_fail_turn_for_sync.borrow_mut() =
+                    Some((model_call_hook_outcome.trace_records, error));
+                return Err(HOOK_FAILTURN_HANDLED_SENTINEL.to_string());
+            }
             let started_at = Instant::now();
             let decision = provider_decision(
                 &prepared.provider,
@@ -2405,63 +4152,88 @@ impl AgentRuntime {
             initial_turn_first_token_latency_ms,
             initial_call_first_token_latency_ms,
             initial_latency_kind,
-        ) =
-            match planned {
-                Ok(result) => result,
-                Err(error) => {
-                    let trace_steps = self.telemetry_builder.failed_trace_before_tool();
-                    self.update_execution_checkpoint(
-                        control,
-                        &turn_id,
-                        "failed",
-                        Some(&prepared_provider_meta),
-                        0,
-                        None,
-                        &trace_steps,
-                        &[],
-                        None,
-                        None,
-                        None,
-                        Some("failed"),
-                        Some(&error),
-                    );
-                    self.persist_turn_trace(
-                        input.session_id.as_deref(),
-                        &turn_id,
-                        &prepared.display_message,
-                        "failed",
-                        trace_steps.clone(),
-                        Vec::new(),
-                        Some(&prepared_provider_meta),
-                        None,
-                        None,
-                        Some(prepared.build_context_observation.clone()),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(turn_started_at.elapsed().as_millis() as u64),
-                        None,
-                        Some(error.clone()),
-                    );
-                    emit_turn_failed(
-                        sink,
-                        turn_id,
-                        Some(prepared.provider.requested_name().to_string()),
-                        Some(prepared.provider.name().to_string()),
-                        Some(prepared.provider.protocol_label().to_string()),
-                        Some(prepared.provider.model().to_string()),
-                        trace_steps,
-                        error,
-                    );
+        ) = match planned {
+            Ok(result) => result,
+            Err(error) => {
+                if error == HOOK_FAILTURN_HANDLED_SENTINEL {
+                    if let Some((hook_trace_records, hook_error)) =
+                        pending_model_call_fail_turn.borrow_mut().take()
+                    {
+                        let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+                        self.fail_stream_turn_with_hook_dispatch(
+                            sink,
+                            control,
+                            input.session_id.as_deref(),
+                            &turn_id,
+                            &prepared.display_message,
+                            Some(&prepared_provider_meta),
+                            Some(prepared.build_context_observation.clone()),
+                            trace_steps,
+                            Vec::new(),
+                            Vec::new(),
+                            hook_trace_records,
+                            None,
+                            Some(turn_started_at.elapsed().as_millis() as u64),
+                            0,
+                            hook_error,
+                        );
+                    }
                     return;
                 }
-            };
+                let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+                self.update_execution_checkpoint(
+                    control,
+                    &turn_id,
+                    "failed",
+                    Some(&prepared_provider_meta),
+                    0,
+                    None,
+                    &trace_steps,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    Some("failed"),
+                    Some(&error),
+                );
+                self.persist_turn_trace(
+                    input.session_id.as_deref(),
+                    &turn_id,
+                    &prepared.display_message,
+                    "failed",
+                    trace_steps.clone(),
+                    Vec::new(),
+                    Some(&prepared_provider_meta),
+                    None,
+                    None,
+                    Some(prepared.build_context_observation.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    None,
+                    Some(error.clone()),
+                );
+                emit_turn_failed(
+                    sink,
+                    turn_id,
+                    Some(prepared.provider.requested_name().to_string()),
+                    Some(prepared.provider.name().to_string()),
+                    Some(prepared.provider.protocol_label().to_string()),
+                    Some(prepared.provider.model().to_string()),
+                    trace_steps,
+                    error,
+                    input.session_id.clone(),
+                );
+                return;
+            }
+        };
         if let Some(tool_call) = first_decision.tool_call.take() {
             let normalized = match normalize_tool_directive(
                 tool_call,
@@ -2521,6 +4293,7 @@ impl AgentRuntime {
                         Some(prepared.provider.model().to_string()),
                         trace_steps,
                         error,
+                        input.session_id.clone(),
                     );
                     return;
                 }
@@ -2531,9 +4304,149 @@ impl AgentRuntime {
         let resolved_tool_call = self.resolve_tool_call(
             &prepared.user_message,
             prepared.retrieved.planner_history(),
+            &prepared.planner_skills,
             first_decision.tool_call.clone(),
             !prepared.provider.requires_provider_native_tool_flow(),
         );
+        let mut tool_selection_dispatch = self.dispatch_planner_hooks(
+            PlannerHookPoint::ToolSelection,
+            &self.build_planner_tool_selection_envelope(
+                &prepared.user_message,
+                prepared.retrieved.planner_history(),
+                &prepared.planner_skills,
+                first_decision.tool_call.as_ref(),
+                resolved_tool_call.as_ref(),
+            ),
+            None,
+            resolved_tool_call,
+        );
+        if let Some(error) = tool_selection_dispatch.fail_turn_error.take() {
+            let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+            self.update_execution_checkpoint(
+                control,
+                &turn_id,
+                "failed",
+                Some(&prepared_provider_meta),
+                0,
+                None,
+                &trace_steps,
+                &[],
+                None,
+                None,
+                None,
+                Some("failed"),
+                Some(&error),
+            );
+            self.persist_turn_trace_with_provider_calls_and_hooks(
+                input.session_id.as_deref(),
+                &turn_id,
+                &prepared.display_message,
+                "failed",
+                trace_steps.clone(),
+                Vec::new(),
+                Vec::new(),
+                {
+                    let mut records = planner_hook_trace_records.clone();
+                    records.extend(tool_selection_dispatch.trace_records);
+                    records
+                },
+                Some(&prepared_provider_meta),
+                None,
+                None,
+                Some(prepared.build_context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                initial_turn_first_token_latency_ms,
+                Some(turn_started_at.elapsed().as_millis() as u64),
+                None,
+                None,
+                Some(error.clone()),
+            );
+            emit_turn_failed(
+                sink,
+                turn_id,
+                Some(prepared.provider.requested_name().to_string()),
+                Some(prepared.provider.name().to_string()),
+                Some(prepared.provider.protocol_label().to_string()),
+                Some(prepared.provider.model().to_string()),
+                trace_steps,
+                error,
+                input.session_id.clone(),
+            );
+            return;
+        }
+        if let Some(error) = tool_selection_dispatch.blocked_error.take() {
+            let trace_steps = self.telemetry_builder.failed_trace_before_tool();
+            self.update_execution_checkpoint(
+                control,
+                &turn_id,
+                "failed",
+                Some(&prepared_provider_meta),
+                0,
+                None,
+                &trace_steps,
+                &[],
+                None,
+                None,
+                None,
+                Some("failed"),
+                Some(&error),
+            );
+            self.persist_turn_trace_with_provider_calls_and_hooks(
+                input.session_id.as_deref(),
+                &turn_id,
+                &prepared.display_message,
+                "failed",
+                trace_steps.clone(),
+                Vec::new(),
+                Vec::new(),
+                {
+                    let mut records = planner_hook_trace_records.clone();
+                    records.extend(tool_selection_dispatch.trace_records);
+                    records
+                },
+                Some(&prepared_provider_meta),
+                None,
+                None,
+                Some(prepared.build_context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                initial_turn_first_token_latency_ms,
+                Some(turn_started_at.elapsed().as_millis() as u64),
+                None,
+                None,
+                Some(error.clone()),
+            );
+            emit_turn_failed(
+                sink,
+                turn_id,
+                Some(prepared.provider.requested_name().to_string()),
+                Some(prepared.provider.name().to_string()),
+                Some(prepared.provider.protocol_label().to_string()),
+                Some(prepared.provider.model().to_string()),
+                trace_steps,
+                error,
+                input.session_id.clone(),
+            );
+            return;
+        }
+        let resolved_tool_call = tool_selection_dispatch.selected_tool_call;
+        planner_hook_trace_records.extend(tool_selection_dispatch.trace_records);
+        planner_hook_trace_records.push(self.build_planner_tool_selection_trace_record(
+            &prepared.user_message,
+            first_decision.tool_call.as_ref(),
+            resolved_tool_call.as_ref(),
+        ));
         let PreparedTurn {
             user_message,
             display_message,
@@ -2615,7 +4528,9 @@ impl AgentRuntime {
                 Some(build_context_observation.clone()),
                 None,
                 Some(provider_call_records.clone()),
+                None,
                 error,
+                input.session_id.clone(),
             );
             return;
         }
@@ -2652,6 +4567,7 @@ impl AgentRuntime {
                 &planning_request,
                 &first_decision,
                 tool_call,
+                planner_hook_trace_records.clone(),
                 initial_turn_first_token_latency_ms,
                 &turn_started_at,
                 &mut provider_call_records,
@@ -2664,7 +4580,7 @@ impl AgentRuntime {
             "turn:trace",
             turn_id.clone(),
             "trace",
-            Some("calling_model"),
+            Some("response_ready"),
             None,
             None,
             None,
@@ -2694,11 +4610,13 @@ impl AgentRuntime {
                 } else {
                     None
                 },
-                "calling_model",
+                "response_ready",
             )),
             None,
             None,
             None,
+            None,
+            input.session_id.clone(),
         );
         self.update_execution_checkpoint(
             control,
@@ -2733,7 +4651,8 @@ impl AgentRuntime {
             return;
         }
 
-        let first_token_latency_ms = if initial_latency_kind == ProviderLatencyKind::ProviderStream {
+        let first_token_latency_ms = if initial_latency_kind == ProviderLatencyKind::ProviderStream
+        {
             initial_turn_first_token_latency_ms
         } else {
             let first_visible_first_token_latency_ms =
@@ -2817,7 +4736,9 @@ impl AgentRuntime {
                     Some(build_context_observation.clone()),
                     None,
                     Some(provider_call_records.clone()),
+                    None,
                     error,
+                    input.session_id.clone(),
                 );
                 return;
             }
@@ -2837,6 +4758,129 @@ impl AgentRuntime {
             attachments,
         );
         let trace_steps = self.telemetry_builder.completed_trace_without_tool();
+        let turn_duration_ms = Some(turn_started_at.elapsed().as_millis() as u64);
+        self.update_execution_checkpoint(
+            control,
+            &turn_id,
+            "checkpointing",
+            Some(&provider_meta),
+            0,
+            None,
+            &trace_steps,
+            &[],
+            Some(first_decision.provider_source.as_str()),
+            Some(first_decision.provider_mode.as_str()),
+            first_decision.fallback_reason.as_deref(),
+            Some("running"),
+            None,
+        );
+        emit_stream_event(
+            sink,
+            "turn:phase_changed",
+            turn_id.clone(),
+            "phase",
+            Some("checkpointing"),
+            None,
+            None,
+            Some(&provider_meta),
+            Some(first_decision.provider_source.clone()),
+            Some(first_decision.provider_mode.clone()),
+            first_decision.fallback_reason.clone(),
+            Some(build_context_observation.clone()),
+            persisted.input_tokens,
+            persisted.cache_hit_input_tokens,
+            persisted.reasoning_tokens,
+            persisted.output_tokens,
+            persisted.total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+            Some(trace_steps.clone()),
+            None,
+            Some(Vec::new()),
+            Some(provider_call_records.clone()),
+            None,
+            None,
+            input.session_id.clone(),
+        );
+        let checkpoint_hook_outcome =
+            self.dispatch_hook_trace_records(TurnHookPoint::CheckpointPersistEnd);
+        let checkpoint_hook_trace_records = checkpoint_hook_outcome.trace_records.clone();
+        emit_stream_event(
+            sink,
+            "turn:checkpoint_persisted",
+            turn_id.clone(),
+            "checkpoint",
+            Some("checkpointing"),
+            None,
+            None,
+            Some(&provider_meta),
+            Some(first_decision.provider_source.clone()),
+            Some(first_decision.provider_mode.clone()),
+            first_decision.fallback_reason.clone(),
+            Some(build_context_observation.clone()),
+            persisted.input_tokens,
+            persisted.cache_hit_input_tokens,
+            persisted.reasoning_tokens,
+            persisted.output_tokens,
+            persisted.total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+            Some(trace_steps.clone()),
+            None,
+            Some(Vec::new()),
+            Some(provider_call_records.clone()),
+            Some(checkpoint_hook_trace_records.clone()),
+            Some(persisted.session_summary.clone()),
+            input.session_id.clone(),
+        );
+        if let Some(error) = checkpoint_hook_outcome.fail_turn_error {
+            let mut checkpoint_terminal_hook_trace_records = planner_hook_trace_records.clone();
+            checkpoint_terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());
+            self.fail_stream_turn_with_hook_dispatch(
+                sink,
+                control,
+                input.session_id.as_deref(),
+                &turn_id,
+                &display_message,
+                Some(&provider_meta),
+                Some(build_context_observation.clone()),
+                self.telemetry_builder.failed_trace_before_tool(),
+                Vec::new(),
+                provider_call_records.clone(),
+                checkpoint_terminal_hook_trace_records,
+                first_token_latency_ms,
+                turn_duration_ms,
+                0,
+                error,
+            );
+            return;
+        }
+        let finalize_hook_outcome =
+            self.dispatch_hook_trace_records(TurnHookPoint::TurnFinalizeEnd);
+        let finalize_hook_trace_records = finalize_hook_outcome.trace_records.clone();
+        let mut terminal_hook_trace_records = planner_hook_trace_records.clone();
+        terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());
+        terminal_hook_trace_records.extend(finalize_hook_trace_records.clone());
+        if let Some(error) = finalize_hook_outcome.fail_turn_error {
+            self.fail_stream_turn_with_hook_dispatch(
+                sink,
+                control,
+                input.session_id.as_deref(),
+                &turn_id,
+                &display_message,
+                Some(&provider_meta),
+                Some(build_context_observation.clone()),
+                self.telemetry_builder.failed_trace_before_tool(),
+                Vec::new(),
+                provider_call_records.clone(),
+                terminal_hook_trace_records,
+                first_token_latency_ms,
+                turn_duration_ms,
+                0,
+                error,
+            );
+            return;
+        }
         self.update_execution_checkpoint(
             control,
             &turn_id,
@@ -2852,7 +4896,7 @@ impl AgentRuntime {
             Some("completed"),
             None,
         );
-        self.persist_turn_trace_with_provider_calls(
+        self.persist_turn_trace_with_provider_calls_and_hooks(
             input.session_id.as_deref(),
             &turn_id,
             &display_message,
@@ -2860,6 +4904,7 @@ impl AgentRuntime {
             trace_steps.clone(),
             Vec::new(),
             provider_call_records.clone(),
+            terminal_hook_trace_records.clone(),
             Some(&provider_meta),
             Some(first_decision.provider_source.clone()),
             Some(first_decision.provider_mode.clone()),
@@ -2873,7 +4918,7 @@ impl AgentRuntime {
             persisted.output_tokens,
             persisted.total_tokens,
             first_token_latency_ms,
-            Some(turn_started_at.elapsed().as_millis() as u64),
+            turn_duration_ms,
             Some(persisted.session_summary.clone()),
             None,
         );
@@ -2896,14 +4941,14 @@ impl AgentRuntime {
             persisted.output_tokens,
             persisted.total_tokens,
             first_token_latency_ms,
-            Some(turn_started_at.elapsed().as_millis() as u64),
+            turn_duration_ms,
         );
         emit_stream_event(
             sink,
             "turn:completed",
             turn_id,
             "completed",
-            Some("ready"),
+            Some("completed"),
             Some(first_decision.output_text.clone()),
             first_decision.reasoning_content.clone(),
             Some(&provider_meta),
@@ -2917,12 +4962,14 @@ impl AgentRuntime {
             Some(persisted.output_tokens).flatten(),
             Some(persisted.total_tokens).flatten(),
             first_token_latency_ms,
-            Some(turn_started_at.elapsed().as_millis() as u64),
+            turn_duration_ms,
             Some(trace_steps),
             Some(completed_timeline),
             Some(Vec::new()),
             Some(provider_call_records),
+            Some(terminal_hook_trace_records),
             Some(persisted.session_summary),
+            input.session_id.clone(),
         );
     }
 
@@ -2944,12 +4991,17 @@ impl AgentRuntime {
         &self,
         user_message: &str,
         history: &[TurnHistoryMessage],
+        available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
         provider_tool_call: Option<ToolCall>,
         allow_local_fallback: bool,
     ) -> Option<ToolCall> {
         if allow_local_fallback {
-            self.planner
-                .select_tool_call(user_message, history, provider_tool_call)
+            self.planner.select_tool_call(
+                user_message,
+                history,
+                available_skills,
+                provider_tool_call,
+            )
         } else {
             provider_tool_call
         }
@@ -2991,6 +5043,495 @@ impl AgentRuntime {
             failure_kind,
         }
     }
+
+    fn execute_registered_tool_call(
+        &self,
+        tool_call: &ToolCall,
+    ) -> (
+        crate::agent::tools::ToolResult,
+        crate::agent::telemetry::CapabilityInvocationRecord,
+        Vec<HookTraceRecord>,
+    ) {
+        if let Some(skill) = self
+            .capability_registry
+            .match_executable_skill_tool_name(&tool_call.name)
+        {
+            let mediation_envelope = self.build_skill_mediation_envelope(tool_call, &skill);
+            let mediation = self.dispatch_capability_mediation_hooks(
+                CapabilityMediationHookPoint::SkillToolActionsResolve,
+                &mediation_envelope,
+            );
+            if let Some(error) = mediation.fail_turn_error {
+                return (
+                    blocked_tool_result(tool_call, &error),
+                    build_blocked_skill_invocation_record(tool_call, Some(&skill), &error),
+                    mediation.trace_records,
+                );
+            }
+            if let Some(error) = mediation.blocked_error {
+                return (
+                    blocked_tool_result(tool_call, &error),
+                    build_blocked_skill_invocation_record(tool_call, Some(&skill), &error),
+                    mediation.trace_records,
+                );
+            }
+
+            let execution = self.execute_skill_tool_call(&SkillInvocationRequest {
+                skill_id: skill.skill_id.clone(),
+                arguments: mediation.arguments.clone(),
+            });
+            let mut hook_trace_records = mediation.trace_records;
+            hook_trace_records.push(self.build_skill_resolution_trace_record(
+                &SkillInvocationRequest {
+                    skill_id: skill.skill_id.clone(),
+                    arguments: mediation.arguments,
+                },
+                &execution,
+            ));
+            let invocation_record = execution
+                .capability_executions
+                .first()
+                .map(|result| {
+                    result.invocation_record_with_skill_context(
+                        execution.skill.as_ref(),
+                        execution.failure_layer.as_ref(),
+                    )
+                })
+                .unwrap_or(crate::agent::telemetry::CapabilityInvocationRecord {
+                    tool_name: tool_call.name.clone(),
+                    capability_id: None,
+                    source_id: None,
+                    source_kind: None,
+                    capability_kind: None,
+                    invocation_mode: None,
+                    failure_kind: None,
+                    requires_approval: None,
+                    host_mediated: None,
+                    permission_scope: None,
+                    skill_id: execution
+                        .skill
+                        .as_ref()
+                        .map(|descriptor| descriptor.skill_id.clone()),
+                    skill_source_id: execution
+                        .skill
+                        .as_ref()
+                        .map(|descriptor| descriptor.source_id.clone()),
+                    composed_capability_refs: execution
+                        .skill
+                        .as_ref()
+                        .map(|descriptor| descriptor.composed_capability_refs.clone()),
+                    composed_capability_kinds: execution.skill.as_ref().map(|descriptor| {
+                        descriptor
+                            .composed_capability_kinds
+                            .iter()
+                            .map(|kind| kind.as_str().to_string())
+                            .collect()
+                    }),
+                    failure_layer: execution
+                        .failure_layer
+                        .as_ref()
+                        .map(|layer| layer.as_str().to_string()),
+                });
+
+            let tool_result = build_skill_tool_result(tool_call, &execution);
+            return (tool_result, invocation_record, hook_trace_records);
+        }
+
+        let mediation_envelope = self.build_capability_mediation_envelope(tool_call);
+        let mediation = self.dispatch_capability_mediation_hooks(
+            CapabilityMediationHookPoint::CapabilityResolve,
+            &mediation_envelope,
+        );
+        if let Some(error) = mediation.fail_turn_error {
+            return (
+                blocked_tool_result(tool_call, &error),
+                build_blocked_capability_invocation_record(tool_call, &error),
+                mediation.trace_records,
+            );
+        }
+        if let Some(error) = mediation.blocked_error {
+            return (
+                blocked_tool_result(tool_call, &error),
+                build_blocked_capability_invocation_record(tool_call, &error),
+                mediation.trace_records,
+            );
+        }
+        let execution = self.execute_capability_tool_call(&ToolCall {
+            arguments: mediation.arguments,
+            ..tool_call.clone()
+        });
+        let invocation_record = execution.invocation_record();
+        let mut hook_trace_records = mediation.trace_records;
+        hook_trace_records.push(self.build_capability_resolution_trace_record(tool_call, &execution));
+        (execution.tool_result, invocation_record, hook_trace_records)
+    }
+
+    fn execute_skill_tool_call(
+        &self,
+        request: &SkillInvocationRequest,
+    ) -> SkillToolExecutionResult {
+        let (skill, actions) = match self.capability_registry.resolve_skill_tool_actions(request) {
+            Ok(resolved) => resolved,
+            Err(failure_layer) => {
+                runtime_log(format!(
+                    "turn:skill-resolve-failure skill_id={} layer={}",
+                    request.skill_id,
+                    failure_layer.as_str()
+                ));
+                return self
+                    .capability_registry
+                    .skill_failure_result(request, failure_layer);
+            }
+        };
+
+        runtime_log(format!(
+            "turn:skill-resolved skill_id={} source_id={} composed_refs={} kinds={}",
+            skill.skill_id,
+            skill.source_id,
+            skill.composed_capability_refs.join(","),
+            skill
+                .composed_capability_kinds
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+
+        let mut capability_executions = Vec::with_capacity(actions.len());
+        let mut failure_layer = None;
+
+        for action in actions {
+            let tool_result = self.tool_executor.execute(&action.tool_call);
+            let capability_failure = if tool_result.status == "ok" {
+                None
+            } else {
+                failure_layer = Some(SkillFailureLayer::UnderlyingCapabilityExecution);
+                Some(CapabilityFailureKind::InvocationFailed)
+            };
+            capability_executions.push(CapabilityToolExecutionResult {
+                capability: Some(action.capability),
+                tool_call: action.tool_call,
+                tool_result,
+                failure_kind: capability_failure,
+            });
+            if failure_layer.is_some() {
+                break;
+            }
+        }
+
+        SkillToolExecutionResult {
+            skill: Some(skill),
+            capability_executions,
+            failure_layer,
+        }
+    }
+}
+
+fn candidate_capability_ids_for_tool_name(
+    registry: &CapabilityRegistry,
+    tool_name: &str,
+) -> Vec<String> {
+    let mut candidate_ids = Vec::new();
+    let raw = tool_name.trim();
+    if raw.is_empty() {
+        return candidate_ids;
+    }
+
+    candidate_ids.push(format!("builtin:{raw}"));
+    let canonical = raw.replace('.', "_");
+    if canonical != raw {
+        candidate_ids.push(format!("builtin:{canonical}"));
+    }
+
+    for capability in registry.list_capabilities(None, Some("tool")) {
+        if capability.label == raw && !candidate_ids.contains(&capability.capability_id) {
+            candidate_ids.push(capability.capability_id);
+        }
+    }
+
+    candidate_ids
+}
+
+fn normalized_arguments_from_summary(summary: &str) -> Value {
+    serde_json::from_str(summary).unwrap_or_else(|_| Value::Object(Map::new()))
+}
+
+fn apply_capability_argument_patches(
+    hook_point: &CapabilityMediationHookPoint,
+    original_argument_summary: &str,
+    execution_results: &[crate::agent::hooks::HookExecutionResult],
+) -> Result<Value, String> {
+    let merge_outcome = crate::agent::hooks::merge_patch_results(
+        execution_results,
+        HookPatchConflictPolicy::LastWriteWins,
+    )?;
+    let mut arguments = normalized_arguments_from_summary(original_argument_summary);
+
+    for operation in merge_outcome.operations {
+        if !crate::agent::hooks::capability_mediation_transform_operation_allowed(
+            hook_point,
+            &operation.operation,
+        ) {
+            return Err(format!(
+                "hook `{}` attempted non-whitelisted capability mediation patch `{}`",
+                operation.hook_name, operation.operation.path
+            ));
+        }
+        arguments = apply_arguments_patch(arguments, &operation.operation)?;
+    }
+
+    Ok(arguments)
+}
+
+fn apply_arguments_patch(arguments: Value, operation: &HookPatchOperation) -> Result<Value, String> {
+    if operation.path != "request.arguments" {
+        return Err(format!(
+            "unsupported capability mediation patch path `{}`",
+            operation.path
+        ));
+    }
+
+    match operation.operation {
+        HookPatchOperationKind::Set => {
+            let value = parse_hook_patch_value(operation)?;
+            Ok(value)
+        }
+        HookPatchOperationKind::Merge => {
+            let value = parse_hook_patch_value(operation)?;
+            match (arguments, value) {
+                (Value::Object(mut existing), Value::Object(incoming)) => {
+                    for (key, value) in incoming {
+                        existing.insert(key, value);
+                    }
+                    Ok(Value::Object(existing))
+                }
+                (_, other) => Ok(other),
+            }
+        }
+        HookPatchOperationKind::Remove => Ok(Value::Object(Map::new())),
+    }
+}
+
+fn parse_hook_patch_value(operation: &HookPatchOperation) -> Result<Value, String> {
+    let Some(value_text) = operation.value_text.as_deref() else {
+        return Err(format!(
+            "hook patch on `{}` requires value_text for capability mediation",
+            operation.path
+        ));
+    };
+    serde_json::from_str(value_text).map_err(|error| {
+        format!(
+            "invalid capability mediation patch payload for `{}`: {error}",
+            operation.path
+        )
+    })
+}
+
+fn summarize_provider_decision(decision: &ProviderDecision) -> String {
+    match decision.tool_call.as_ref() {
+        Some(tool_call) => format!("decision tool `{}`", tool_call.name),
+        None => "decision without tool call".to_string(),
+    }
+}
+
+fn apply_planner_patches(
+    hook_point: &PlannerHookPoint,
+    mut decision: Option<ProviderDecision>,
+    mut selected_tool_call: Option<ToolCall>,
+    execution_results: &[crate::agent::hooks::HookExecutionResult],
+) -> Result<(Option<ProviderDecision>, Option<ToolCall>), String> {
+    let merge_outcome = crate::agent::hooks::merge_patch_results(
+        execution_results,
+        HookPatchConflictPolicy::LastWriteWins,
+    )?;
+
+    for operation in merge_outcome.operations {
+        if !crate::agent::hooks::planner_transform_operation_allowed(hook_point, &operation.operation) {
+            return Err(format!(
+                "hook `{}` attempted non-whitelisted planner patch `{}`",
+                operation.hook_name, operation.operation.path
+            ));
+        }
+        match operation.operation.path.as_str() {
+            "provider_decision" => {
+                decision = Some(parse_planner_provider_decision_patch(&operation.operation)?);
+            }
+            "provider_tool_call" => {
+                let tool_call = parse_planner_tool_call_patch(&operation.operation)?;
+                ensure_planner_decision(&mut decision).tool_call = Some(tool_call);
+            }
+            "selected_tool_call" => {
+                selected_tool_call = Some(parse_planner_tool_call_patch(&operation.operation)?);
+            }
+            "selected_skill_id" => {
+                let skill_id = parse_planner_string_patch(&operation.operation)?;
+                selected_tool_call = Some(ToolCall {
+                    call_id: None,
+                    name: skill_id,
+                    arguments: Value::Object(Map::new()),
+                    plan: None,
+                });
+            }
+            "decision_summary" => {}
+            other => {
+                return Err(format!("unsupported planner patch path `{other}`"));
+            }
+        }
+    }
+
+    Ok((decision, selected_tool_call))
+}
+
+fn ensure_planner_decision(decision: &mut Option<ProviderDecision>) -> &mut ProviderDecision {
+    decision.get_or_insert_with(|| ProviderDecision {
+        output_text: String::new(),
+        tool_call: None,
+        reasoning_content: None,
+        reasoning_content_value: None,
+        assistant_message: None,
+        provider_source: "planner-hook".to_string(),
+        provider_mode: "hook_transform".to_string(),
+        fallback_reason: None,
+        token_usage: None,
+    })
+}
+
+fn parse_planner_provider_decision_patch(
+    operation: &HookPatchOperation,
+) -> Result<ProviderDecision, String> {
+    let Some(value_text) = operation.value_text.as_deref() else {
+        return Err("planner provider_decision patch requires value_text".to_string());
+    };
+    serde_json::from_str(value_text).map_err(|error| {
+        format!(
+            "invalid planner provider_decision patch payload for `{}`: {error}",
+            operation.path
+        )
+    })
+}
+
+fn parse_planner_tool_call_patch(operation: &HookPatchOperation) -> Result<ToolCall, String> {
+    let Some(value_text) = operation.value_text.as_deref() else {
+        return Err(format!(
+            "planner tool_call patch on `{}` requires value_text",
+            operation.path
+        ));
+    };
+    serde_json::from_str(value_text).map_err(|error| {
+        format!(
+            "invalid planner tool_call patch payload for `{}`: {error}",
+            operation.path
+        )
+    })
+}
+
+fn parse_planner_string_patch(operation: &HookPatchOperation) -> Result<String, String> {
+    let Some(value_text) = operation.value_text.as_deref() else {
+        return Err(format!(
+            "planner string patch on `{}` requires value_text",
+            operation.path
+        ));
+    };
+    serde_json::from_str(value_text).map_err(|error| {
+        format!(
+            "invalid planner string patch payload for `{}`: {error}",
+            operation.path
+        )
+    })
+}
+
+fn apply_graph_decision_patches(
+    decision: &mut GraphDecision,
+    execution_results: &[crate::agent::hooks::HookExecutionResult],
+) -> Result<(), String> {
+    let merge_outcome = crate::agent::hooks::merge_patch_results(
+        execution_results,
+        HookPatchConflictPolicy::LastWriteWins,
+    )?;
+
+    for operation in merge_outcome.operations {
+        if !crate::agent::hooks::planner_transform_operation_allowed(
+            &PlannerHookPoint::GraphDecision,
+            &operation.operation,
+        ) {
+            return Err(format!(
+                "hook `{}` attempted non-whitelisted graph decision patch `{}`",
+                operation.hook_name, operation.operation.path
+            ));
+        }
+        match operation.operation.path.as_str() {
+            "decision_summary" => {
+                decision.summary = parse_planner_string_patch(&operation.operation)?;
+            }
+            other => {
+                return Err(format!("unsupported graph decision patch path `{other}`"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn blocked_tool_result(tool_call: &ToolCall, error: &str) -> crate::agent::tools::ToolResult {
+    crate::agent::tools::ToolResult {
+        tool_name: tool_call.name.clone(),
+        status: "error".to_string(),
+        output: error.to_string(),
+        duration_ms: 0,
+    }
+}
+
+fn build_blocked_capability_invocation_record(
+    tool_call: &ToolCall,
+    error: &str,
+) -> crate::agent::telemetry::CapabilityInvocationRecord {
+    crate::agent::telemetry::CapabilityInvocationRecord {
+        tool_name: tool_call.name.clone(),
+        capability_id: None,
+        source_id: None,
+        source_kind: None,
+        capability_kind: None,
+        invocation_mode: None,
+        failure_kind: Some("hook_blocked".to_string()),
+        requires_approval: None,
+        host_mediated: None,
+        permission_scope: None,
+        skill_id: None,
+        skill_source_id: None,
+        composed_capability_refs: None,
+        composed_capability_kinds: None,
+        failure_layer: Some(error.to_string()),
+    }
+}
+
+fn build_blocked_skill_invocation_record(
+    tool_call: &ToolCall,
+    skill: Option<&crate::agent::capability_bridge::SkillDescriptor>,
+    error: &str,
+) -> crate::agent::telemetry::CapabilityInvocationRecord {
+    crate::agent::telemetry::CapabilityInvocationRecord {
+        tool_name: tool_call.name.clone(),
+        capability_id: None,
+        source_id: None,
+        source_kind: None,
+        capability_kind: None,
+        invocation_mode: None,
+        failure_kind: Some("hook_blocked".to_string()),
+        requires_approval: None,
+        host_mediated: None,
+        permission_scope: None,
+        skill_id: skill.map(|descriptor| descriptor.skill_id.clone()),
+        skill_source_id: skill.map(|descriptor| descriptor.source_id.clone()),
+        composed_capability_refs: skill.map(|descriptor| descriptor.composed_capability_refs.clone()),
+        composed_capability_kinds: skill.map(|descriptor| {
+            descriptor
+                .composed_capability_kinds
+                .iter()
+                .map(|kind| kind.as_str().to_string())
+                .collect()
+        }),
+        failure_layer: Some(error.to_string()),
+    }
 }
 
 fn annotate_capability_tool_activities(
@@ -3001,6 +5542,51 @@ fn annotate_capability_tool_activities(
         parent.capability_invocation = Some(invocation_record);
     }
     activities
+}
+
+fn build_skill_tool_result(
+    tool_call: &ToolCall,
+    execution: &SkillToolExecutionResult,
+) -> crate::agent::tools::ToolResult {
+    let status = if execution.failure_layer.is_none()
+        && execution
+            .capability_executions
+            .iter()
+            .all(|result| result.tool_result.status == "ok")
+    {
+        "ok"
+    } else {
+        "error"
+    };
+    let duration_ms = execution
+        .capability_executions
+        .iter()
+        .map(|result| result.tool_result.duration_ms)
+        .sum();
+    let skill_label = execution
+        .skill
+        .as_ref()
+        .map(|descriptor| descriptor.label.as_str())
+        .unwrap_or(tool_call.name.as_str());
+    let mut lines = vec![format!("skill `{skill_label}` execution summary:")];
+    for result in &execution.capability_executions {
+        lines.push(format!(
+            "- [{}] {} -> {}",
+            result.tool_result.status,
+            result.tool_result.tool_name,
+            preview_text(&result.tool_result.output, 120)
+        ));
+    }
+    if let Some(layer) = execution.failure_layer.as_ref() {
+        lines.push(format!("failure_layer={}", layer.as_str()));
+    }
+
+    crate::agent::tools::ToolResult {
+        tool_name: tool_call.name.clone(),
+        status: status.to_string(),
+        output: lines.join("\n"),
+        duration_ms,
+    }
 }
 /*
     #[cfg(any())]
@@ -3105,7 +5691,7 @@ fn annotate_capability_tool_activities(
             Some("需要先读取目录再回答。")
         );
         assert_eq!(first_delta.text.as_deref(), Some(final_text));
-        assert_eq!(completed.phase.as_deref(), Some("ready"));
+        assert_eq!(completed.phase.as_deref(), Some("completed"));
         assert_eq!(
             completed.provider_source.as_deref(),
             Some("provider_followup_stream_compat_sync")
@@ -3252,7 +5838,7 @@ fn annotate_capability_tool_activities(
             Some("need workspace listing before answering")
         );
         assert_eq!(first_delta.text.as_deref(), Some(final_text));
-        assert_eq!(completed.phase.as_deref(), Some("ready"));
+        assert_eq!(completed.phase.as_deref(), Some("completed"));
         assert_eq!(
             completed.provider_source.as_deref(),
             Some("provider_followup_stream_compat_sync")
@@ -3269,6 +5855,17 @@ fn planner_decision_can_override_native_tool_flow(decision: &ProviderDecision) -
         .as_ref()
         .and_then(|call| call.plan.as_ref())
         .is_some()
+}
+
+fn graph_decision_kind_label(kind: &GraphDecisionKind) -> &'static str {
+    match kind {
+        GraphDecisionKind::Continue => "continue",
+        GraphDecisionKind::WaitUser => "wait_user",
+        GraphDecisionKind::Pause => "pause",
+        GraphDecisionKind::Complete => "complete",
+        GraphDecisionKind::Fail => "fail",
+        GraphDecisionKind::Cancel => "cancel",
+    }
 }
 
 fn validate_turn_images(images: &[TurnInputImage]) -> Result<(), String> {
@@ -4036,6 +6633,35 @@ fn build_persisted_trace_timeline(
         last_model_entry.turn_duration_ms = turn_duration_ms;
     }
 
+    if phase == "completed" {
+        timeline.push(TraceTimelineEntry {
+            id: format!("checkpoint-{}", sequence),
+            kind: "checkpoint_persist".to_string(),
+            label: "PERSIST CHECKPOINT".to_string(),
+            state: "completed".to_string(),
+            sequence,
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+            provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source: provider_source.map(str::to_string),
+            provider_mode: provider_mode.map(str::to_string),
+            build_context_observation: None,
+            tool_activities: Vec::new(),
+            text: None,
+            reasoning_content: None,
+            fallback_reason: fallback_reason.map(str::to_string),
+            error: None,
+            input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
+            output_tokens,
+            total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+        });
+    }
+
     timeline
 }
 
@@ -4204,7 +6830,29 @@ fn build_tool_hop_limit_error(limit: usize) -> String {
     )
 }
 
+fn build_tool_execution_error(tool_name: &str, output: &str) -> String {
+    format!(
+        "工具 `{}` 执行失败：{}",
+        tool_name,
+        preview_text(output, 160)
+    )
+}
+
+#[cfg(test)]
+fn tool_hop_limit_override_registry() -> &'static AtomicUsize {
+    static OVERRIDE: OnceLock<AtomicUsize> = OnceLock::new();
+    OVERRIDE.get_or_init(|| AtomicUsize::new(0))
+}
+
 fn max_tool_hops_per_turn() -> usize {
+    #[cfg(test)]
+    {
+        let override_limit = tool_hop_limit_override_registry().load(AtomicOrdering::SeqCst);
+        if override_limit > 0 {
+            return override_limit;
+        }
+    }
+
     static MAX_TOOL_HOPS: OnceLock<usize> = OnceLock::new();
     *MAX_TOOL_HOPS.get_or_init(|| {
         parse_max_tool_hops_per_turn(std::env::var(MAX_TOOL_HOPS_ENV).ok().as_deref())
@@ -4224,6 +6872,14 @@ mod tests {
         ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
     };
     use crate::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
+    use crate::agent::hooks::{
+        hook_point_matches_canonical_boundary, AgentHookDescriptor, AgentHookExecutor,
+        CapabilityMediationEnvelope, CapabilityMediationHookPoint, HookClass, HookFailurePolicy,
+        HookPatchOperation, HookPatchOperationKind, HookPatchTarget, HookRecoveryMode,
+        HookReplayRequirements, HookResultKind, HookSideEffectPersistenceRequirements,
+        HookStructuredResult, HookTraceRequirements, PlannerFactsEnvelope, PlannerHookPoint,
+        TurnHookPoint,
+    };
     use crate::agent::planner::TurnPlanner;
     use crate::agent::session::{
         FileSessionBackend, SessionSnapshot, SessionStore, TurnHistoryMessage,
@@ -4238,6 +6894,23 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct ToolHopLimitOverrideGuard {
+        previous: usize,
+    }
+
+    impl ToolHopLimitOverrideGuard {
+        fn set(limit: usize) -> Self {
+            let previous = tool_hop_limit_override_registry().swap(limit, AtomicOrdering::SeqCst);
+            Self { previous }
+        }
+    }
+
+    impl Drop for ToolHopLimitOverrideGuard {
+        fn drop(&mut self) {
+            tool_hop_limit_override_registry().store(self.previous, AtomicOrdering::SeqCst);
+        }
+    }
 
     struct RecordingTurnEventSink {
         events: RefCell<Vec<(String, TurnStreamEvent)>>,
@@ -4255,6 +6928,21 @@ mod tests {
         fn emit(&self, name: &str, payload: TurnStreamEvent) {
             self.events.borrow_mut().push((name.to_string(), payload));
         }
+    }
+
+    fn assert_hook_boundary_alignment(
+        payload: &TurnStreamEvent,
+        hook_point: TurnHookPoint,
+        expected_event_type: &str,
+        expected_phase: &str,
+    ) {
+        assert_eq!(payload.event_type.as_deref(), Some(expected_event_type));
+        assert_eq!(payload.phase.as_deref(), Some(expected_phase));
+        assert!(hook_point_matches_canonical_boundary(
+            &hook_point,
+            expected_event_type,
+            expected_phase
+        ));
     }
 
     #[derive(Clone)]
@@ -4279,6 +6967,7 @@ mod tests {
             &self,
             _user_message: &str,
             _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
         ) -> Option<ProviderDecision> {
             None
         }
@@ -4287,6 +6976,7 @@ mod tests {
             &self,
             _user_message: &str,
             _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
             provider_tool_call: Option<ToolCall>,
         ) -> Option<ToolCall> {
             provider_tool_call
@@ -4302,6 +6992,7 @@ mod tests {
             &self,
             _user_message: &str,
             _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
         ) -> Option<ProviderDecision> {
             std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
             None
@@ -4311,6 +7002,54 @@ mod tests {
             &self,
             _user_message: &str,
             _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+            provider_tool_call: Option<ToolCall>,
+        ) -> Option<ToolCall> {
+            provider_tool_call
+        }
+    }
+
+    struct ForcedToolPlanner {
+        tool_name: String,
+        arguments: Value,
+    }
+
+    impl TurnPlanner for ForcedToolPlanner {
+        fn preflight_decision(
+            &self,
+            _user_message: &str,
+            _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+        ) -> Option<ProviderDecision> {
+            Some(ProviderDecision {
+                output_text: String::new(),
+                tool_call: Some(ToolCall {
+                    call_id: Some("forced-tool-call".to_string()),
+                    name: self.tool_name.clone(),
+                    arguments: self.arguments.clone(),
+                    plan: Some(crate::agent::tools::ToolPlan {
+                        kind: "forced".to_string(),
+                        summary: format!("强制执行工具 `{}`。", self.tool_name),
+                        parallel: false,
+                        continue_on_error: false,
+                        steps: Vec::new(),
+                    }),
+                }),
+                reasoning_content: None,
+                reasoning_content_value: None,
+                assistant_message: None,
+                provider_source: "planner_preflight".to_string(),
+                provider_mode: "preflight".to_string(),
+                fallback_reason: None,
+                token_usage: None,
+            })
+        }
+
+        fn select_tool_call(
+            &self,
+            _user_message: &str,
+            _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
             provider_tool_call: Option<ToolCall>,
         ) -> Option<ToolCall> {
             provider_tool_call
@@ -4348,6 +7087,185 @@ mod tests {
         fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
             std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
             StubToolExecutor.execute(call)
+        }
+    }
+
+    struct RequestStopToolExecutor {
+        control: Arc<ExecutionControlRegistry>,
+        turn_id: String,
+        delay_ms: u64,
+    }
+
+    impl crate::agent::tools::ToolExecutor for RequestStopToolExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+            let _ = self.control.request_stop(&self.turn_id);
+            StubToolExecutor.execute(call)
+        }
+    }
+
+    struct ErrorToolExecutor;
+
+    struct CountingToolExecutor {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::agent::tools::ToolExecutor for CountingToolExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            StubToolExecutor.execute(call)
+        }
+    }
+
+    struct FailingHookExecutor;
+
+    struct RecordingToolExecutor {
+        calls: Arc<Mutex<Vec<ToolCall>>>,
+    }
+
+    impl crate::agent::tools::ToolExecutor for RecordingToolExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            self.calls.lock().unwrap().push(call.clone());
+            crate::agent::tools::ToolResult {
+                tool_name: call.name.clone(),
+                status: "ok".to_string(),
+                output: call.arguments.to_string(),
+                duration_ms: 1,
+            }
+        }
+    }
+
+    struct TransformingCapabilityHookExecutor;
+    struct TransformingPlannerHookExecutor;
+
+    impl AgentHookExecutor for FailingHookExecutor {
+        fn execute(
+            &self,
+            descriptor: &AgentHookDescriptor,
+            hook_point: TurnHookPoint,
+        ) -> Result<crate::agent::hooks::HookExecutionResult, String> {
+            Err(format!(
+                "intentional hook failure for `{}` on `{:?}`",
+                descriptor.name, hook_point
+            ))
+        }
+    }
+
+    impl AgentHookExecutor for TransformingCapabilityHookExecutor {
+        fn execute(
+            &self,
+            descriptor: &AgentHookDescriptor,
+            hook_point: TurnHookPoint,
+        ) -> Result<crate::agent::hooks::HookExecutionResult, String> {
+            NoopHookExecutor.execute(descriptor, hook_point)
+        }
+
+        fn execute_capability_mediation(
+            &self,
+            descriptor: &AgentHookDescriptor,
+            hook_point: CapabilityMediationHookPoint,
+            envelope: &CapabilityMediationEnvelope,
+        ) -> Result<crate::agent::hooks::HookExecutionResult, String> {
+            let operations = match hook_point {
+                CapabilityMediationHookPoint::CapabilityResolve => vec![HookPatchOperation {
+                    target: HookPatchTarget::CapabilityMediation,
+                    path: "request.arguments".to_string(),
+                    operation: HookPatchOperationKind::Merge,
+                    value_summary: Some("rewrite capability arguments".to_string()),
+                    value_text: Some("{\"path\":\"src-tauri\"}".to_string()),
+                }],
+                CapabilityMediationHookPoint::SkillToolActionsResolve => vec![HookPatchOperation {
+                    target: HookPatchTarget::CapabilityMediation,
+                    path: "request.arguments".to_string(),
+                    operation: HookPatchOperationKind::Merge,
+                    value_summary: Some("rewrite skill arguments".to_string()),
+                    value_text: Some("{\"message\":\"patched by hook\"}".to_string()),
+                }],
+                CapabilityMediationHookPoint::McpSourceIngress
+                | CapabilityMediationHookPoint::SkillSourceIngress => Vec::new(),
+            };
+            Ok(crate::agent::hooks::HookExecutionResult {
+                hook_name: descriptor.name.clone(),
+                hook_class: HookClass::Transform,
+                hook_point: turn_hook_point_for_capability_mediation_hook_point(&hook_point),
+                hook_order: 0,
+                result_kind: HookResultKind::Patch,
+                structured_result: HookStructuredResult::Patch { operations },
+                blocked: false,
+                elapsed_ms: 0,
+                input_summary: Some(envelope.argument_summary.clone()),
+                persistence_evidence_ref: None,
+                trace_summary: format!("hook rewrote mediation arguments at {:?}", hook_point),
+            })
+        }
+    }
+
+    impl AgentHookExecutor for TransformingPlannerHookExecutor {
+        fn execute(
+            &self,
+            descriptor: &AgentHookDescriptor,
+            hook_point: TurnHookPoint,
+        ) -> Result<crate::agent::hooks::HookExecutionResult, String> {
+            NoopHookExecutor.execute(descriptor, hook_point)
+        }
+
+        fn execute_planner(
+            &self,
+            descriptor: &AgentHookDescriptor,
+            hook_point: PlannerHookPoint,
+            envelope: &PlannerFactsEnvelope,
+        ) -> Result<crate::agent::hooks::HookExecutionResult, String> {
+            let operations = match hook_point {
+                PlannerHookPoint::TurnPreflight => vec![HookPatchOperation {
+                    target: HookPatchTarget::PlannerFacts,
+                    path: "provider_tool_call".to_string(),
+                    operation: HookPatchOperationKind::Set,
+                    value_summary: Some("rewrite provider tool call".to_string()),
+                    value_text: Some(
+                        "{\"call_id\":null,\"name\":\"workspace_list_files\",\"arguments\":{\"path\":\"src-tauri\",\"limit\":5},\"plan\":{\"kind\":\"forced\",\"summary\":\"hook rewritten preflight tool\",\"parallel\":false,\"continue_on_error\":false,\"steps\":[]}}".to_string(),
+                    ),
+                }],
+                PlannerHookPoint::ToolSelection => vec![HookPatchOperation {
+                    target: HookPatchTarget::PlannerFacts,
+                    path: "selected_tool_call".to_string(),
+                    operation: HookPatchOperationKind::Set,
+                    value_summary: Some("rewrite selected tool call".to_string()),
+                    value_text: Some(
+                        "{\"call_id\":null,\"name\":\"workspace_list_files\",\"arguments\":{\"path\":\"tests\",\"limit\":3},\"plan\":null}".to_string(),
+                    ),
+                }],
+                PlannerHookPoint::GraphDecision => vec![HookPatchOperation {
+                    target: HookPatchTarget::PlannerFacts,
+                    path: "decision_summary".to_string(),
+                    operation: HookPatchOperationKind::Set,
+                    value_summary: Some("rewrite graph decision summary".to_string()),
+                    value_text: Some("\"planner summary patched by hook\"".to_string()),
+                }],
+            };
+            Ok(crate::agent::hooks::HookExecutionResult {
+                hook_name: descriptor.name.clone(),
+                hook_class: HookClass::Transform,
+                hook_point: turn_hook_point_for_planner_hook_point(&hook_point),
+                hook_order: 0,
+                result_kind: HookResultKind::Patch,
+                structured_result: HookStructuredResult::Patch { operations },
+                blocked: false,
+                elapsed_ms: 0,
+                input_summary: envelope.user_message_summary.clone(),
+                persistence_evidence_ref: None,
+                trace_summary: format!("hook rewrote planner payload at {:?}", hook_point),
+            })
+        }
+    }
+
+    impl crate::agent::tools::ToolExecutor for ErrorToolExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            crate::agent::tools::ToolResult {
+                tool_name: call.name.clone(),
+                status: "error".to_string(),
+                output: format!("tool {} failed in test", call.name),
+                duration_ms: 1,
+            }
         }
     }
 
@@ -4581,9 +7499,78 @@ mod tests {
         )
     }
 
+    fn observe_hook_descriptor(
+        name: &str,
+        priority: i32,
+        hook_point: TurnHookPoint,
+    ) -> AgentHookDescriptor {
+        AgentHookDescriptor {
+            contract_version: "agent-hooks-v1".to_string(),
+            name: name.to_string(),
+            class: HookClass::Observe,
+            priority,
+            timeout_ms: 1_000,
+            allowed_hook_points: vec![hook_point],
+            allowed_result_kinds: vec![HookResultKind::Observe],
+            can_block: false,
+            default_failure_policy: HookFailurePolicy::Ignore,
+            allowed_failure_policies: vec![HookFailurePolicy::Ignore],
+            default_recovery_mode: HookRecoveryMode::ReplayRequired,
+            trace_requirements: HookTraceRequirements {
+                include_name: true,
+                include_hook_point: true,
+                include_elapsed_ms: true,
+                include_result_summary: true,
+            },
+            replay_requirements: HookReplayRequirements {
+                include_hook_order: true,
+                include_input_summary: true,
+            },
+            side_effect_persistence_requirements: HookSideEffectPersistenceRequirements {
+                require_persistence_evidence: false,
+                require_effect_summary: false,
+            },
+        }
+    }
+
+    fn transform_hook_descriptor(
+        name: &str,
+        priority: i32,
+        hook_point: TurnHookPoint,
+    ) -> AgentHookDescriptor {
+        AgentHookDescriptor {
+            contract_version: "agent-hooks-v1".to_string(),
+            name: name.to_string(),
+            class: HookClass::Transform,
+            priority,
+            timeout_ms: 1_000,
+            allowed_hook_points: vec![hook_point],
+            allowed_result_kinds: vec![HookResultKind::Patch],
+            can_block: false,
+            default_failure_policy: HookFailurePolicy::Ignore,
+            allowed_failure_policies: vec![HookFailurePolicy::Ignore, HookFailurePolicy::FailTurn],
+            default_recovery_mode: HookRecoveryMode::ReplayRequired,
+            trace_requirements: HookTraceRequirements {
+                include_name: true,
+                include_hook_point: true,
+                include_elapsed_ms: true,
+                include_result_summary: true,
+            },
+            replay_requirements: HookReplayRequirements {
+                include_hook_order: true,
+                include_input_summary: true,
+            },
+            side_effect_persistence_requirements: HookSideEffectPersistenceRequirements {
+                require_persistence_evidence: false,
+                require_effect_summary: false,
+            },
+        }
+    }
+
     #[test]
     fn capability_bridge_resolves_dotted_builtin_tool_calls_before_execution() {
-        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        let runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
         let execution = runtime.execute_capability_tool_call(&ToolCall {
             call_id: Some("call_time".to_string()),
             name: "time.now".to_string(),
@@ -4605,8 +7592,1639 @@ mod tests {
     }
 
     #[test]
+    fn runtime_hook_dispatch_returns_trace_records_in_priority_order() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.second",
+                20,
+                TurnHookPoint::ModelCallStart,
+            ))
+            .expect("register second hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.first",
+                10,
+                TurnHookPoint::ModelCallStart,
+            ))
+            .expect("register first hook");
+
+        let traces = runtime
+            .dispatch_hook_trace_records(TurnHookPoint::ModelCallStart)
+            .trace_records;
+
+        assert_eq!(traces.len(), 2);
+        assert_eq!(traces[0].hook_name, "observe.first");
+        assert_eq!(traces[0].hook_order, 1);
+        assert_eq!(traces[1].hook_name, "observe.second");
+        assert_eq!(traces[1].hook_order, 2);
+        assert!(traces
+            .iter()
+            .all(|trace| trace.hook_point == TurnHookPoint::ModelCallStart));
+    }
+
+    #[test]
+    fn runtime_hook_dispatch_returns_empty_for_unregistered_boundary() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.model",
+                10,
+                TurnHookPoint::ModelCallStart,
+            ))
+            .expect("register model hook");
+
+        let traces = runtime
+            .dispatch_hook_trace_records(TurnHookPoint::ToolCallEnd)
+            .trace_records;
+
+        assert!(traces.is_empty());
+    }
+
+    #[test]
+    fn runtime_hook_dispatch_records_executor_failure_without_stopping_turn_by_default() {
+        let selection = test_provider_selection("http://localhost".to_string());
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            Box::new(StubToolExecutor),
+            Box::new(PassthroughPlanner),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.failure",
+                10,
+                TurnHookPoint::ModelCallStart,
+            ))
+            .expect("register failing hook");
+
+        let outcome = runtime.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
+        let traces = outcome.trace_records;
+        assert!(outcome.fail_turn_error.is_none());
+
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].hook_name, "observe.failure");
+        assert_eq!(traces[0].hook_order, 1);
+        assert_eq!(traces[0].hook_point, TurnHookPoint::ModelCallStart);
+        assert!(
+            traces[0]
+                .summary
+                .contains("hook execution failed under ignore")
+                || traces[0]
+                    .summary
+                    .contains("hook execution failed under Ignore")
+        );
+        assert!(traces[0]
+            .input_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("intentional hook failure")));
+    }
+
+    #[test]
+    fn runtime_hook_dispatch_records_degrade_failure_evidence_without_stopping_turn() {
+        let selection = test_provider_selection("http://localhost".to_string());
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            Box::new(StubToolExecutor),
+            Box::new(PassthroughPlanner),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor =
+            observe_hook_descriptor("observe.degrade-failure", 10, TurnHookPoint::ModelCallStart);
+        descriptor.default_failure_policy = HookFailurePolicy::Degrade;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Ignore, HookFailurePolicy::Degrade];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register degrade hook");
+
+        let outcome = runtime.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
+        let traces = outcome.trace_records;
+        assert!(outcome.fail_turn_error.is_none());
+
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].hook_name, "observe.degrade-failure");
+        assert!(traces[0]
+            .summary
+            .contains("hook execution failed under Degrade"));
+    }
+
+    #[test]
+    fn run_turn_records_planner_trace_records_in_terminal_trace() {
+        let server = MockHttpServer::start(vec![json_completion("planner trace answer")]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请总结当前状态".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("planner-trace-session".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let _ = server.finish();
+
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_point == TurnHookPoint::PlannerTurnPreflight));
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_point == TurnHookPoint::PlannerToolSelection));
+
+        let snapshot = runtime.load_session_snapshot(Some("planner-trace-session"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("planner trace should persist");
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "planner.preflight.observe"));
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "planner.tool_selection.observe"));
+    }
+
+    #[test]
+    fn run_turn_records_capability_mediation_trace_for_forced_tool_planner() {
+        let selection = test_provider_selection("http://localhost".to_string());
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            Box::new(StubToolExecutor),
+            Box::new(ForcedToolPlanner {
+                tool_name: "workspace_list_files".to_string(),
+                arguments: json!({}),
+            }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+
+        let result = runtime.run_turn(TurnInput {
+            message: "列出当前目录".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("capability-trace-session".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_point == TurnHookPoint::CapabilityResolve));
+
+        let capability_trace = result
+            .hook_trace_records
+            .iter()
+            .find(|record| record.hook_point == TurnHookPoint::CapabilityResolve)
+            .expect("capability resolve trace should exist");
+        assert!(capability_trace
+            .summary
+            .contains("capability mediation resolved"));
+
+        let snapshot = runtime.load_session_snapshot(Some("capability-trace-session"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("capability trace should persist");
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "capability.resolve.observe"));
+    }
+
+    #[test]
+    fn capability_mediation_hooks_can_rewrite_arguments_before_tool_execution() {
+        let recorded_calls = Arc::new(Mutex::new(Vec::new()));
+        let selection = test_provider_selection("http://localhost".to_string());
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            Box::new(RecordingToolExecutor {
+                calls: Arc::clone(&recorded_calls),
+            }),
+            Box::new(ForcedToolPlanner {
+                tool_name: "workspace_list_files".to_string(),
+                arguments: json!({"path":"."}),
+            }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        runtime.set_hook_executor_for_test(Box::new(TransformingCapabilityHookExecutor));
+        runtime
+            .register_hook_descriptor(transform_hook_descriptor(
+                "capability.rewrite",
+                10,
+                TurnHookPoint::CapabilityResolve,
+            ))
+            .expect("register capability transform hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "列出当前目录".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("capability-hook-rewrite".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "capability.rewrite"));
+        let calls = recorded_calls.lock().unwrap();
+        let call = calls.last().expect("tool call should be recorded");
+        assert_eq!(call.arguments.get("path").and_then(Value::as_str), Some("src-tauri"));
+
+        let snapshot = runtime.load_session_snapshot(Some("capability-hook-rewrite"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("capability hook trace should persist");
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "capability.rewrite"));
+    }
+
+    #[test]
+    fn planner_preflight_hooks_can_rewrite_tool_call_before_execution() {
+        let recorded_calls = Arc::new(Mutex::new(Vec::new()));
+        let selection = test_provider_selection("http://localhost".to_string());
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            Box::new(RecordingToolExecutor {
+                calls: Arc::clone(&recorded_calls),
+            }),
+            Box::new(ForcedToolPlanner {
+                tool_name: "workspace_list_files".to_string(),
+                arguments: json!({"path":"."}),
+            }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        runtime.set_hook_executor_for_test(Box::new(TransformingPlannerHookExecutor));
+        runtime
+            .register_hook_descriptor(transform_hook_descriptor(
+                "planner.preflight.rewrite",
+                10,
+                TurnHookPoint::PlannerTurnPreflight,
+            ))
+            .expect("register planner preflight transform hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "列出当前目录".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("planner-preflight-rewrite".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "planner.preflight.rewrite"));
+        let calls = recorded_calls.lock().unwrap();
+        let call = calls.last().expect("planner preflight tool call should execute");
+        assert_eq!(call.arguments.get("path").and_then(Value::as_str), Some("src-tauri"));
+
+        let snapshot = runtime.load_session_snapshot(Some("planner-preflight-rewrite"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("planner preflight hook trace should persist");
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "planner.preflight.rewrite"));
+    }
+
+    #[test]
+    fn planner_tool_selection_hooks_can_rewrite_selected_tool_before_execution() {
+        let recorded_calls = Arc::new(Mutex::new(Vec::new()));
+        let selection = test_provider_selection("http://localhost".to_string());
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            Box::new(RecordingToolExecutor {
+                calls: Arc::clone(&recorded_calls),
+            }),
+            Box::new(ForcedToolPlanner {
+                tool_name: "workspace_list_files".to_string(),
+                arguments: json!({"path":"."}),
+            }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        runtime.set_hook_executor_for_test(Box::new(TransformingPlannerHookExecutor));
+        runtime
+            .register_hook_descriptor(transform_hook_descriptor(
+                "planner.tool_selection.rewrite",
+                10,
+                TurnHookPoint::PlannerToolSelection,
+            ))
+            .expect("register planner tool-selection transform hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "列出当前目录".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("planner-tool-selection-rewrite".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "planner.tool_selection.rewrite"));
+        let calls = recorded_calls.lock().unwrap();
+        let call = calls.last().expect("planner tool-selection call should execute");
+        assert_eq!(call.arguments.get("path").and_then(Value::as_str), Some("tests"));
+
+        let snapshot = runtime.load_session_snapshot(Some("planner-tool-selection-rewrite"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("planner tool-selection hook trace should persist");
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "planner.tool_selection.rewrite"));
+    }
+
+    #[test]
+    fn skill_mediation_hooks_can_rewrite_arguments_before_skill_execution() {
+        let recorded_calls = Arc::new(Mutex::new(Vec::new()));
+        let selection = test_provider_selection("http://localhost".to_string());
+        let mut runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver { selection }),
+            Box::new(RecordingToolExecutor {
+                calls: Arc::clone(&recorded_calls),
+            }),
+            Box::new(ForcedToolPlanner {
+                tool_name: "echo_skill".to_string(),
+                arguments: json!({"message":"original"}),
+            }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        runtime
+            .apply_skill_source_snapshot(crate::agent::capability_bridge::SkillSourceSnapshot {
+                source: crate::agent::capability_bridge::SkillSourceView {
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    display_name: "Builtin Skills".to_string(),
+                    availability:
+                        crate::agent::capability_bridge::CapabilityAvailability::Available,
+                    transport_kind: "host".to_string(),
+                    server_identity: "skills://builtin".to_string(),
+                    updated_at_ms: 1,
+                    last_ingress_observation: None,
+                },
+                skills: vec![crate::agent::capability_bridge::SkillDescriptor {
+                    skill_id: "skill:echo".to_string(),
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    label: "echo_skill".to_string(),
+                    description: "Echo message".to_string(),
+                    input_schema_summary: "{}".to_string(),
+                    safety_class: "".to_string(),
+                    visibility: "default".to_string(),
+                    observability_tags: vec![],
+                    requires_approval: false,
+                    host_mediated: false,
+                    permission_scope: "".to_string(),
+                    composed_capability_refs: vec!["builtin:echo_input".to_string()],
+                    composed_capability_kinds: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                    executable_in_v1: true,
+                }],
+            })
+            .expect("skill snapshot should apply");
+        runtime.set_hook_executor_for_test(Box::new(TransformingCapabilityHookExecutor));
+        runtime
+            .register_hook_descriptor(transform_hook_descriptor(
+                "skill.rewrite",
+                10,
+                TurnHookPoint::SkillToolActionsResolve,
+            ))
+            .expect("register skill transform hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "运行 skill".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("skill-hook-rewrite".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "skill.rewrite"));
+        let calls = recorded_calls.lock().unwrap();
+        let call = calls.last().expect("skill tool call should be recorded");
+        assert_eq!(
+            call.arguments.get("message").and_then(Value::as_str),
+            Some("patched by hook")
+        );
+
+        let snapshot = runtime.load_session_snapshot(Some("skill-hook-rewrite"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("skill hook trace should persist");
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "skill.rewrite"));
+    }
+
+    #[test]
+    fn start_turn_stream_does_not_dispatch_unstable_prepare_or_context_hooks() {
+        let server = MockHttpServer::start(vec![sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "稳定边界答案。"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 4,
+                    "total_tokens": 16
+                }
+            }),
+        ])]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.prepare-start",
+                10,
+                TurnHookPoint::TurnPrepareStart,
+            ))
+            .expect("register prepare start hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.prepare-end",
+                20,
+                TurnHookPoint::TurnPrepareEnd,
+            ))
+            .expect("register prepare end hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.context-start",
+                30,
+                TurnHookPoint::ContextBuildStart,
+            ))
+            .expect("register context start hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.context-end",
+                40,
+                TurnHookPoint::ContextBuildEnd,
+            ))
+            .expect("register context end hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.checkpoint-stable",
+                50,
+                TurnHookPoint::CheckpointPersistEnd,
+            ))
+            .expect("register checkpoint stable hook");
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-unstable-boundary-not-dispatched".to_string(),
+            TurnInput {
+                message: "请给出稳定边界测试答案。".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("session-unstable-boundary-not-dispatched".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let _ = server.finish();
+
+        let unstable_hook_names = [
+            "observe.prepare-start",
+            "observe.prepare-end",
+            "observe.context-start",
+            "observe.context-end",
+        ];
+        let event_hook_names = sink
+            .events
+            .borrow()
+            .iter()
+            .flat_map(|(_, payload)| payload.hook_trace_records.clone().unwrap_or_default())
+            .map(|record| record.hook_name)
+            .collect::<Vec<_>>();
+
+        assert!(event_hook_names
+            .iter()
+            .any(|name| name == "observe.checkpoint-stable"));
+        for unstable_hook_name in unstable_hook_names {
+            assert!(
+                !event_hook_names
+                    .iter()
+                    .any(|name| name == unstable_hook_name),
+                "unstable hook `{unstable_hook_name}` should not be dispatched in streamed events"
+            );
+        }
+
+        let snapshot =
+            runtime.load_session_snapshot(Some("session-unstable-boundary-not-dispatched"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted turn trace");
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.checkpoint-stable"));
+        for unstable_hook_name in [
+            "observe.prepare-start",
+            "observe.prepare-end",
+            "observe.context-start",
+            "observe.context-end",
+        ] {
+            assert!(
+                !trace
+                    .hook_trace_records
+                    .iter()
+                    .any(|record| record.hook_name == unstable_hook_name),
+                "unstable hook `{unstable_hook_name}` should not leak into persisted traces"
+            );
+        }
+    }
+
+    #[test]
+    fn start_turn_stream_fail_turn_policy_emits_failed_terminal_with_hook_evidence() {
+        let server = MockHttpServer::start(vec![]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor =
+            observe_hook_descriptor("observe.fail-turn", 10, TurnHookPoint::ModelCallStart);
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register fail-turn hook");
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-hook-failturn".to_string(),
+            TurnInput {
+                message: "请尝试开始一个会被 hook failturn 阻断的 turn".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("session-hook-failturn".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let request_bodies = server.finish();
+        assert!(request_bodies.is_empty());
+
+        let events = sink.events.borrow();
+        let trace_event = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:trace").then_some(payload.clone()))
+            .expect("trace event");
+        let failed_event = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
+            .expect("failed event");
+
+        assert_eq!(trace_event.phase.as_deref(), Some("calling_model"));
+        assert_eq!(failed_event.phase.as_deref(), Some("failed"));
+        assert!(failed_event
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("observe.fail-turn")));
+        assert_eq!(
+            trace_event
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert_eq!(
+            failed_event
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert!(failed_event
+            .hook_trace_records
+            .as_ref()
+            .and_then(|records| records.first())
+            .is_some_and(|record| record.blocked));
+        assert_hook_boundary_alignment(
+            &failed_event,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.failed",
+            "failed",
+        );
+
+        let snapshot = runtime.load_session_snapshot(Some("session-hook-failturn"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted failed trace");
+        assert_eq!(trace.phase, "failed");
+        assert!(trace
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("observe.fail-turn")));
+        assert_eq!(trace.hook_trace_records.len(), 1);
+        assert!(trace.hook_trace_records[0].blocked);
+    }
+
+    #[test]
+    fn start_turn_stream_fail_turn_policy_on_tool_call_start_stops_before_tool_execution() {
+        let server = MockHttpServer::start(vec![
+            json_response(decision_tool_call(
+                "workspace_list_files",
+                json!({"path": ".", "limit": 40}),
+            )),
+            json_response(decision_tool_call(
+                "workspace_list_files",
+                json!({"path": ".", "limit": 40}),
+            )),
+        ]);
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(CountingToolExecutor {
+                calls: Arc::clone(&tool_calls),
+            }),
+        );
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor = observe_hook_descriptor(
+            "observe.tool-start-failturn",
+            10,
+            TurnHookPoint::ToolCallStart,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register tool-start failturn hook");
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-tool-start-failturn".to_string(),
+            TurnInput {
+                message: "请先列出文件。".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("session-tool-start-failturn".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let request_bodies = server.finish();
+        assert!((1..=2).contains(&request_bodies.len()));
+        assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 0);
+
+        let events = sink.events.borrow();
+        let tool_started = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
+            })
+            .expect("tool started event");
+        let failed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
+            .expect("failed event");
+
+        assert_eq!(
+            tool_started
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert_eq!(
+            failed
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert!(failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("observe.tool-start-failturn")));
+
+        let snapshot = runtime.load_session_snapshot(Some("session-tool-start-failturn"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted failed trace");
+        assert_eq!(trace.phase, "failed");
+        assert_eq!(trace.hook_trace_records.len(), 1);
+        assert!(trace.hook_trace_records[0].blocked);
+    }
+
+    #[test]
+    fn start_turn_stream_fail_turn_policy_on_tool_call_end_stops_before_followup_model_call() {
+        let server = MockHttpServer::start(vec![
+            json_response(decision_tool_call(
+                "workspace_list_files",
+                json!({"path": ".", "limit": 40}),
+            )),
+            json_response(decision_tool_call(
+                "workspace_list_files",
+                json!({"path": ".", "limit": 40}),
+            )),
+        ]);
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(CountingToolExecutor {
+                calls: Arc::clone(&tool_calls),
+            }),
+        );
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor =
+            observe_hook_descriptor("observe.tool-end-failturn", 10, TurnHookPoint::ToolCallEnd);
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register tool-end failturn hook");
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-tool-end-failturn".to_string(),
+            TurnInput {
+                message: "请先列出文件。".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("session-tool-end-failturn".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let request_bodies = server.finish();
+        assert!((1..=2).contains(&request_bodies.len()));
+        assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 1);
+
+        let events = sink.events.borrow();
+        let tool_completed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_completed"))
+                .then_some(payload.clone())
+            })
+            .expect("tool completed event");
+        let failed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
+            .expect("failed event");
+
+        assert_eq!(
+            tool_completed
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert_eq!(
+            failed
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert!(failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("observe.tool-end-failturn")));
+
+        let snapshot = runtime.load_session_snapshot(Some("session-tool-end-failturn"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted failed trace");
+        assert_eq!(trace.phase, "failed");
+        assert_eq!(trace.hook_trace_records.len(), 1);
+        assert!(trace.hook_trace_records[0].blocked);
+    }
+
+    #[test]
+    fn start_turn_stream_fail_turn_policy_on_checkpoint_boundary_emits_failed_instead_of_completed()
+    {
+        let server = MockHttpServer::start(vec![sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "checkpoint failturn answer"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 4,
+                    "total_tokens": 16
+                }
+            }),
+        ])]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor = observe_hook_descriptor(
+            "observe.checkpoint-failturn",
+            10,
+            TurnHookPoint::CheckpointPersistEnd,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register checkpoint failturn hook");
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-checkpoint-failturn".to_string(),
+            TurnInput {
+                message: "请回答一个会在 checkpoint boundary failturn 的问题".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("session-checkpoint-failturn".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let _ = server.finish();
+        let events = sink.events.borrow();
+        assert!(!events.iter().any(|(name, _)| name == "turn:completed"));
+        let checkpoint = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:checkpoint_persisted").then_some(payload.clone())
+            })
+            .expect("checkpoint persisted event");
+        let failed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
+            .expect("failed event");
+
+        assert_eq!(
+            checkpoint
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert_eq!(
+            failed
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert!(failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("observe.checkpoint-failturn")));
+
+        let snapshot = runtime.load_session_snapshot(Some("session-checkpoint-failturn"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted failed trace");
+        assert_eq!(trace.phase, "failed");
+        assert_eq!(trace.hook_trace_records.len(), 1);
+        assert!(trace.hook_trace_records[0].blocked);
+    }
+
+    #[test]
+    fn start_turn_stream_fail_turn_policy_on_finalize_boundary_emits_failed_with_terminal_hook_evidence(
+    ) {
+        let server = MockHttpServer::start(vec![sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "finalize failturn answer"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 4,
+                    "total_tokens": 16
+                }
+            }),
+        ])]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.checkpoint-ok",
+                10,
+                TurnHookPoint::CheckpointPersistEnd,
+            ))
+            .expect("register checkpoint observe hook");
+        let mut descriptor = observe_hook_descriptor(
+            "observe.finalize-failturn",
+            20,
+            TurnHookPoint::TurnFinalizeEnd,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register finalize failturn hook");
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-finalize-failturn".to_string(),
+            TurnInput {
+                message: "请回答一个会在 finalize boundary failturn 的问题".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("session-finalize-failturn".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let _ = server.finish();
+        let events = sink.events.borrow();
+        assert!(!events.iter().any(|(name, _)| name == "turn:completed"));
+        let checkpoint = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:checkpoint_persisted").then_some(payload.clone())
+            })
+            .expect("checkpoint persisted event");
+        let failed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
+            .expect("failed event");
+
+        assert_eq!(
+            checkpoint
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert_eq!(
+            failed
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(2)
+        );
+        assert!(failed
+            .hook_trace_records
+            .as_ref()
+            .is_some_and(|records| records.iter().any(|record| {
+                record.hook_name == "observe.finalize-failturn" && record.blocked
+            })));
+
+        let snapshot = runtime.load_session_snapshot(Some("session-finalize-failturn"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted failed trace");
+        assert_eq!(trace.phase, "failed");
+        assert_eq!(trace.hook_trace_records.len(), 2);
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.finalize-failturn" && record.blocked));
+    }
+
+    #[test]
+    fn run_turn_fail_turn_policy_on_model_call_start_returns_failed_result_with_hook_evidence() {
+        let server = MockHttpServer::start(vec![]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor = observe_hook_descriptor(
+            "observe.sync-model-failturn",
+            10,
+            TurnHookPoint::ModelCallStart,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register sync model failturn hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请尝试一个同步 failturn turn".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-model-failturn".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let request_bodies = server.finish();
+        assert!(request_bodies.is_empty());
+        assert_eq!(result.phase, "failed");
+        assert_eq!(result.hook_trace_records.len(), 1);
+        assert!(result.hook_trace_records[0].blocked);
+        assert!(result
+            .assistant_message
+            .contains("observe.sync-model-failturn"));
+    }
+
+    #[test]
+    fn run_turn_fail_turn_policy_on_tool_call_start_returns_failed_before_tool_execution() {
+        let server = MockHttpServer::start(vec![json_response(decision_tool_call(
+            "workspace_list_files",
+            json!({"path": ".", "limit": 40}),
+        ))]);
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(CountingToolExecutor {
+                calls: Arc::clone(&tool_calls),
+            }),
+        );
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor = observe_hook_descriptor(
+            "observe.sync-tool-start-failturn",
+            10,
+            TurnHookPoint::ToolCallStart,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register sync tool-start failturn hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请先列出文件。".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-tool-start-failturn".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let request_bodies = server.finish();
+        assert_eq!(request_bodies.len(), 1);
+        assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(result.phase, "failed");
+        assert!(result
+            .assistant_message
+            .contains("observe.sync-tool-start-failturn"));
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(
+                |record| record.hook_name == "observe.sync-tool-start-failturn" && record.blocked
+            ));
+    }
+
+    #[test]
+    fn run_turn_fail_turn_policy_on_tool_call_end_returns_failed_before_followup_model_call() {
+        let server = MockHttpServer::start(vec![json_response(decision_tool_call(
+            "workspace_list_files",
+            json!({"path": ".", "limit": 40}),
+        ))]);
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(CountingToolExecutor {
+                calls: Arc::clone(&tool_calls),
+            }),
+        );
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor = observe_hook_descriptor(
+            "observe.sync-tool-end-failturn",
+            10,
+            TurnHookPoint::ToolCallEnd,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register sync tool-end failturn hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请先列出文件。".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-tool-end-failturn".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let request_bodies = server.finish();
+        assert_eq!(request_bodies.len(), 1);
+        assert_eq!(tool_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(result.phase, "failed");
+        assert!(result
+            .assistant_message
+            .contains("observe.sync-tool-end-failturn"));
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.sync-tool-end-failturn" && record.blocked));
+    }
+
+    #[test]
+    fn run_turn_persists_terminal_hook_traces_on_completed_sync_turn() {
+        let server = MockHttpServer::start(vec![json_response(json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "同步完成答案。"
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 16,
+                "completion_tokens": 5,
+                "total_tokens": 21
+            }
+        }))]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.sync-checkpoint",
+                10,
+                TurnHookPoint::CheckpointPersistEnd,
+            ))
+            .expect("register sync checkpoint hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.sync-finalize",
+                20,
+                TurnHookPoint::TurnFinalizeEnd,
+            ))
+            .expect("register sync finalize hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请直接同步回答。".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-hook-trace-terminal".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let request_bodies = server.finish();
+        assert_eq!(request_bodies.len(), 1);
+        assert_eq!(result.phase, "ready");
+        assert!(result
+            .event_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sync:sync-hook-trace-terminal:")));
+        assert_eq!(result.event_type.as_deref(), Some("turn.completed"));
+        assert_eq!(result.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(result.sequence, Some(1));
+        assert!(result.emitted_at_ms.is_some());
+        assert_eq!(result.hook_trace_records.len(), 2);
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.sync-checkpoint"
+                && record.hook_point == TurnHookPoint::CheckpointPersistEnd));
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.sync-finalize"
+                && record.hook_point == TurnHookPoint::TurnFinalizeEnd));
+
+        let snapshot = runtime.load_session_snapshot(Some("sync-hook-trace-terminal"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted sync trace");
+        assert_eq!(trace.phase, "completed");
+        assert!(trace
+            .event_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sync:sync-hook-trace-terminal:")));
+        assert_eq!(trace.event_type.as_deref(), Some("turn.completed"));
+        assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(trace.sequence, Some(1));
+        assert!(trace.emitted_at_ms.is_some());
+        assert_eq!(trace.hook_trace_records.len(), 2);
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.sync-checkpoint"
+                && record.hook_point == TurnHookPoint::CheckpointPersistEnd));
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.sync-finalize"
+                && record.hook_point == TurnHookPoint::TurnFinalizeEnd));
+    }
+
+    #[test]
+    fn run_turn_fail_turn_policy_on_checkpoint_boundary_persists_failed_sync_trace() {
+        let server = MockHttpServer::start(vec![json_response(json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "checkpoint failturn answer"
+                    }
+                }
+            ]
+        }))]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        let mut descriptor = observe_hook_descriptor(
+            "observe.sync-checkpoint-failturn",
+            10,
+            TurnHookPoint::CheckpointPersistEnd,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register sync checkpoint failturn hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请回答一个会在 sync checkpoint failturn 的问题".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-checkpoint-failturn".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let request_bodies = server.finish();
+        assert_eq!(request_bodies.len(), 1);
+        assert_eq!(result.phase, "failed");
+        assert!(result
+            .event_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sync:sync-checkpoint-failturn:")));
+        assert_eq!(result.event_type.as_deref(), Some("turn.failed"));
+        assert_eq!(result.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(result.sequence, Some(1));
+        assert!(result.emitted_at_ms.is_some());
+        assert_eq!(result.hook_trace_records.len(), 1);
+        assert!(result.hook_trace_records[0].blocked);
+        assert!(result
+            .assistant_message
+            .contains("observe.sync-checkpoint-failturn"));
+
+        let snapshot = runtime.load_session_snapshot(Some("sync-checkpoint-failturn"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted failed sync trace");
+        assert_eq!(trace.phase, "failed");
+        assert!(trace
+            .event_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sync:sync-checkpoint-failturn:")));
+        assert_eq!(trace.event_type.as_deref(), Some("turn.failed"));
+        assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(trace.sequence, Some(1));
+        assert!(trace.emitted_at_ms.is_some());
+        assert_eq!(trace.hook_trace_records.len(), 1);
+        assert!(trace.hook_trace_records[0].blocked);
+        assert!(trace
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("observe.sync-checkpoint-failturn")));
+    }
+
+    #[test]
+    fn run_turn_fail_turn_policy_on_finalize_boundary_persists_terminal_sync_hook_evidence() {
+        let server = MockHttpServer::start(vec![json_response(json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "finalize failturn answer"
+                    }
+                }
+            ]
+        }))]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.sync-checkpoint-ok",
+                10,
+                TurnHookPoint::CheckpointPersistEnd,
+            ))
+            .expect("register sync checkpoint observe hook");
+        let mut descriptor = observe_hook_descriptor(
+            "observe.sync-finalize-failturn",
+            20,
+            TurnHookPoint::TurnFinalizeEnd,
+        );
+        descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+        descriptor.allowed_failure_policies =
+            vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+        runtime
+            .register_hook_descriptor(descriptor)
+            .expect("register sync finalize failturn hook");
+
+        let result = runtime.run_turn(TurnInput {
+            message: "请回答一个会在 sync finalize failturn 的问题".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            session_id: Some("sync-finalize-failturn".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let request_bodies = server.finish();
+        assert_eq!(request_bodies.len(), 1);
+        assert_eq!(result.phase, "failed");
+        assert!(result
+            .event_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sync:sync-finalize-failturn:")));
+        assert_eq!(result.event_type.as_deref(), Some("turn.failed"));
+        assert_eq!(result.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(result.sequence, Some(1));
+        assert!(result.emitted_at_ms.is_some());
+        assert_eq!(result.hook_trace_records.len(), 2);
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.sync-checkpoint-ok"
+                && record.hook_point == TurnHookPoint::CheckpointPersistEnd));
+        assert!(result
+            .hook_trace_records
+            .iter()
+            .any(
+                |record| record.hook_name == "observe.sync-finalize-failturn"
+                    && record.hook_point == TurnHookPoint::TurnFinalizeEnd
+                    && record.blocked
+            ));
+
+        let snapshot = runtime.load_session_snapshot(Some("sync-finalize-failturn"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted failed sync trace");
+        assert_eq!(trace.phase, "failed");
+        assert!(trace
+            .event_id
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sync:sync-finalize-failturn:")));
+        assert_eq!(trace.event_type.as_deref(), Some("turn.failed"));
+        assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(trace.sequence, Some(1));
+        assert!(trace.emitted_at_ms.is_some());
+        assert_eq!(trace.hook_trace_records.len(), 2);
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.sync-finalize-failturn" && record.blocked));
+    }
+
+    #[test]
+    fn start_turn_stream_persists_terminal_hook_traces_on_stable_boundaries() {
+        let server = MockHttpServer::start(vec![sse_response(&[
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "先想一下。"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "最终答案。"
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 6,
+                    "total_tokens": 26
+                }
+            }),
+        ])]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.checkpoint",
+                10,
+                TurnHookPoint::CheckpointPersistEnd,
+            ))
+            .expect("register checkpoint hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.finalize",
+                20,
+                TurnHookPoint::TurnFinalizeEnd,
+            ))
+            .expect("register finalize hook");
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-hook-trace-terminal".to_string(),
+            TurnInput {
+                message: "请直接回答。".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-hook-trace-terminal".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let _ = server.finish();
+        {
+            let events = sink.events.borrow();
+            let checkpoint_persisted = events
+                .iter()
+                .find_map(|(name, payload)| {
+                    (name == "turn:checkpoint_persisted"
+                        && payload.event_type.as_deref() == Some("turn.checkpoint_persisted"))
+                    .then_some(payload.clone())
+                })
+                .expect("checkpoint persisted event");
+            let completed = events
+                .iter()
+                .find_map(|(name, payload)| {
+                    (name == "turn:completed"
+                        && payload.event_type.as_deref() == Some("turn.completed"))
+                    .then_some(payload.clone())
+                })
+                .expect("completed event");
+
+            let checkpoint_records = checkpoint_persisted
+                .hook_trace_records
+                .clone()
+                .expect("checkpoint hook traces");
+            assert_eq!(checkpoint_records.len(), 1);
+            assert_eq!(checkpoint_records[0].hook_name, "observe.checkpoint");
+            assert_eq!(
+                checkpoint_records[0].hook_point,
+                TurnHookPoint::CheckpointPersistEnd
+            );
+
+            let completed_records = completed
+                .hook_trace_records
+                .clone()
+                .expect("completed hook traces");
+            assert_eq!(completed_records.len(), 2);
+            assert!(completed_records
+                .iter()
+                .any(|record| record.hook_name == "observe.checkpoint"
+                    && record.hook_point == TurnHookPoint::CheckpointPersistEnd));
+            assert!(completed_records
+                .iter()
+                .any(|record| record.hook_name == "observe.finalize"
+                    && record.hook_point == TurnHookPoint::TurnFinalizeEnd));
+        }
+
+        let snapshot = runtime.load_session_snapshot(Some("stream-hook-trace-terminal"));
+        let trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("persisted turn trace");
+        assert_eq!(trace.hook_trace_records.len(), 2);
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.checkpoint"
+                && record.hook_point == TurnHookPoint::CheckpointPersistEnd));
+        assert!(trace
+            .hook_trace_records
+            .iter()
+            .any(|record| record.hook_name == "observe.finalize"
+                && record.hook_point == TurnHookPoint::TurnFinalizeEnd));
+    }
+
+    #[test]
     fn capability_bridge_returns_normalized_not_found_failure_for_unknown_tools() {
-        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        let runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
         let execution = runtime.execute_capability_tool_call(&ToolCall {
             call_id: Some("call_unknown".to_string()),
             name: "unknown_tool".to_string(),
@@ -4638,6 +9256,7 @@ mod tests {
                 declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
                 permission_profile: "host-mediated".to_string(),
                 updated_at_ms: 1,
+                last_ingress_observation: None,
             },
             capabilities: vec![crate::agent::capability_bridge::CapabilityView {
                 capability_id: "mcp:tool:workspace_search".to_string(),
@@ -4691,6 +9310,7 @@ mod tests {
                 declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
                 permission_profile: "host-mediated".to_string(),
                 updated_at_ms: 1,
+                last_ingress_observation: None,
             },
             capabilities: vec![crate::agent::capability_bridge::CapabilityView {
                 capability_id: "mcp:tool:workspace_search".to_string(),
@@ -4719,7 +9339,12 @@ mod tests {
             plan: None,
         };
         let planned = planner
-            .select_tool_call("搜索 Cargo.toml", &Vec::<TurnHistoryMessage>::new(), Some(provider_tool_call))
+            .select_tool_call(
+                "搜索 Cargo.toml",
+                &Vec::<TurnHistoryMessage>::new(),
+                &[],
+                Some(provider_tool_call),
+            )
             .expect("planner should preserve provider tool call");
 
         assert_eq!(planned.name, "workspace_search");
@@ -4738,7 +9363,10 @@ mod tests {
             Some("mcp:tool:workspace_search")
         );
         assert_eq!(execution.tool_call.name, "workspace_search");
-        assert_eq!(execution.tool_call.arguments, json!({ "query": "Cargo.toml" }));
+        assert_eq!(
+            execution.tool_call.arguments,
+            json!({ "query": "Cargo.toml" })
+        );
         assert_eq!(execution.tool_result.status, "ok");
     }
 
@@ -4753,11 +9381,11 @@ mod tests {
                 display_name: "Offline MCP".to_string(),
                 transport_kind: "stdio".to_string(),
                 server_identity: "mcp://offline".to_string(),
-                availability:
-                    crate::agent::capability_bridge::CapabilityAvailability::Unreachable,
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Unreachable,
                 declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
                 permission_profile: "host-mediated".to_string(),
                 updated_at_ms: 1,
+                last_ingress_observation: None,
             },
             capabilities: vec![crate::agent::capability_bridge::CapabilityView {
                 capability_id: "mcp:tool:offline_search".to_string(),
@@ -4807,6 +9435,7 @@ mod tests {
                 declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
                 permission_profile: "requires-approval".to_string(),
                 updated_at_ms: 1,
+                last_ingress_observation: None,
             },
             capabilities: vec![crate::agent::capability_bridge::CapabilityView {
                 capability_id: "mcp:tool:guarded_search".to_string(),
@@ -4876,6 +9505,295 @@ mod tests {
             Some(CapabilityFailureKind::MalformedResponse)
         );
         assert!(execution.tool_result.output.contains("registry"));
+    }
+
+    #[test]
+    fn skill_bridge_executes_tool_only_skill_without_second_scheduler() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-skills".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Skills MCP".to_string(),
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://skills".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:workspace_search".to_string(),
+                source_id: "mcp-skills".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "workspace_search".to_string(),
+                description: "Search workspace".to_string(),
+                invocation_mode:
+                    crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+        runtime
+            .apply_skill_source_snapshot(crate::agent::capability_bridge::SkillSourceSnapshot {
+                source: crate::agent::capability_bridge::SkillSourceView {
+                    source_id: "host-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    display_name: "Host Skills".to_string(),
+                    availability:
+                        crate::agent::capability_bridge::CapabilityAvailability::Available,
+                    transport_kind: "host".to_string(),
+                    server_identity: "skills://host".to_string(),
+                    updated_at_ms: 2,
+                    last_ingress_observation: None,
+                },
+                skills: vec![crate::agent::capability_bridge::SkillDescriptor {
+                    skill_id: "skill:search".to_string(),
+                    source_id: "host-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    label: "search".to_string(),
+                    description: "Search workspace".to_string(),
+                    input_schema_summary: "{}".to_string(),
+                    safety_class: "".to_string(),
+                    visibility: "default".to_string(),
+                    observability_tags: vec!["host".to_string()],
+                    requires_approval: false,
+                    host_mediated: false,
+                    permission_scope: "".to_string(),
+                    composed_capability_refs: vec!["mcp:tool:workspace_search".to_string()],
+                    composed_capability_kinds: vec![],
+                    executable_in_v1: false,
+                }],
+            })
+            .expect("skill snapshot should apply");
+
+        let execution = runtime.execute_skill_tool_call(&SkillInvocationRequest {
+            skill_id: "skill:search".to_string(),
+            arguments: json!({ "query": "Cargo.toml" }),
+        });
+
+        assert_eq!(execution.failure_layer, None);
+        assert_eq!(execution.capability_executions.len(), 1);
+        assert_eq!(
+            execution
+                .skill
+                .as_ref()
+                .map(|skill| skill.composed_capability_refs.as_slice()),
+            Some(["mcp:tool:workspace_search".to_string()].as_slice())
+        );
+        assert_eq!(
+            execution.capability_executions[0].tool_call.arguments,
+            json!({ "query": "Cargo.toml" })
+        );
+        assert!(execution.capability_executions[0]
+            .invocation_record_with_skill_context(
+                execution.skill.as_ref(),
+                execution.failure_layer.as_ref()
+            )
+            .skill_id
+            .is_some());
+    }
+
+    #[test]
+    fn runtime_executes_registered_skill_by_tool_name() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime
+            .apply_skill_source_snapshot(crate::agent::capability_bridge::SkillSourceSnapshot {
+                source: crate::agent::capability_bridge::SkillSourceView {
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    display_name: "Builtin Skills".to_string(),
+                    availability:
+                        crate::agent::capability_bridge::CapabilityAvailability::Available,
+                    transport_kind: "host".to_string(),
+                    server_identity: "skills://builtin".to_string(),
+                    updated_at_ms: 1,
+                    last_ingress_observation: None,
+                },
+                skills: vec![crate::agent::capability_bridge::SkillDescriptor {
+                    skill_id: "skill:clock".to_string(),
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    label: "clock".to_string(),
+                    description: "Get current time".to_string(),
+                    input_schema_summary: "{}".to_string(),
+                    safety_class: "".to_string(),
+                    visibility: "default".to_string(),
+                    observability_tags: vec![],
+                    requires_approval: false,
+                    host_mediated: false,
+                    permission_scope: "".to_string(),
+                    composed_capability_refs: vec!["builtin:time_now".to_string()],
+                    composed_capability_kinds: vec![],
+                    executable_in_v1: false,
+                }],
+            })
+            .expect("skill snapshot should apply");
+
+        let (tool_result, invocation_record, hook_trace_records) = runtime
+            .execute_registered_tool_call(&ToolCall {
+                call_id: None,
+                name: "clock".to_string(),
+                arguments: json!({}),
+                plan: None,
+            });
+
+        assert_eq!(tool_result.status, "ok");
+        assert_eq!(invocation_record.skill_id.as_deref(), Some("skill:clock"));
+        assert_eq!(invocation_record.failure_layer.as_deref(), None);
+        assert_eq!(hook_trace_records.len(), 1);
+        assert_eq!(
+            hook_trace_records[0].hook_point,
+            TurnHookPoint::SkillToolActionsResolve
+        );
+    }
+
+    #[test]
+    fn skill_bridge_rejects_non_tool_composed_skill_as_unsupported() {
+        let mut runtime =
+            build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-skills".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Skills MCP".to_string(),
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://skills".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                declared_capabilities: vec![
+                    crate::agent::capability_bridge::CapabilityKind::Resource,
+                ],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:resource:repo_index".to_string(),
+                source_id: "mcp-skills".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Resource,
+                label: "repo_index".to_string(),
+                description: "Repository index".to_string(),
+                invocation_mode:
+                    crate::agent::capability_bridge::CapabilityInvocationMode::ReadOnlyFetch,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "read_only".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "resource".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+        runtime
+            .apply_skill_source_snapshot(crate::agent::capability_bridge::SkillSourceSnapshot {
+                source: crate::agent::capability_bridge::SkillSourceView {
+                    source_id: "host-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    display_name: "Host Skills".to_string(),
+                    availability:
+                        crate::agent::capability_bridge::CapabilityAvailability::Available,
+                    transport_kind: "host".to_string(),
+                    server_identity: "skills://host".to_string(),
+                    updated_at_ms: 2,
+                    last_ingress_observation: None,
+                },
+                skills: vec![crate::agent::capability_bridge::SkillDescriptor {
+                    skill_id: "skill:index".to_string(),
+                    source_id: "host-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    label: "index".to_string(),
+                    description: "Index repository".to_string(),
+                    input_schema_summary: "{}".to_string(),
+                    safety_class: "".to_string(),
+                    visibility: "default".to_string(),
+                    observability_tags: vec![],
+                    requires_approval: false,
+                    host_mediated: false,
+                    permission_scope: "".to_string(),
+                    composed_capability_refs: vec!["mcp:resource:repo_index".to_string()],
+                    composed_capability_kinds: vec![],
+                    executable_in_v1: false,
+                }],
+            })
+            .expect("skill snapshot should apply");
+
+        let execution = runtime.execute_skill_tool_call(&SkillInvocationRequest {
+            skill_id: "skill:index".to_string(),
+            arguments: json!({ "path": "." }),
+        });
+
+        assert_eq!(
+            execution.failure_layer,
+            Some(SkillFailureLayer::UnsupportedComposition)
+        );
+        assert_eq!(
+            execution.capability_executions[0].tool_result.status,
+            "error"
+        );
+    }
+
+    #[test]
+    fn skill_bridge_propagates_underlying_capability_execution_failure() {
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection("http://localhost".to_string()),
+            Box::new(ErrorToolExecutor),
+        );
+        runtime
+            .apply_skill_source_snapshot(crate::agent::capability_bridge::SkillSourceSnapshot {
+                source: crate::agent::capability_bridge::SkillSourceView {
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    display_name: "Builtin Skills".to_string(),
+                    availability:
+                        crate::agent::capability_bridge::CapabilityAvailability::Available,
+                    transport_kind: "host".to_string(),
+                    server_identity: "skills://builtin".to_string(),
+                    updated_at_ms: 1,
+                    last_ingress_observation: None,
+                },
+                skills: vec![crate::agent::capability_bridge::SkillDescriptor {
+                    skill_id: "skill:read-file".to_string(),
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    label: "read-file".to_string(),
+                    description: "Read a file".to_string(),
+                    input_schema_summary: "{\"path\":\"string\"}".to_string(),
+                    safety_class: "".to_string(),
+                    visibility: "default".to_string(),
+                    observability_tags: vec![],
+                    requires_approval: false,
+                    host_mediated: false,
+                    permission_scope: "".to_string(),
+                    composed_capability_refs: vec!["builtin:workspace_read_file".to_string()],
+                    composed_capability_kinds: vec![],
+                    executable_in_v1: false,
+                }],
+            })
+            .expect("skill snapshot should apply");
+
+        let execution = runtime.execute_skill_tool_call(&SkillInvocationRequest {
+            skill_id: "skill:read-file".to_string(),
+            arguments: json!({ "path": "missing-file-for-skill-bridge-test.txt" }),
+        });
+
+        assert_eq!(
+            execution.failure_layer,
+            Some(SkillFailureLayer::UnderlyingCapabilityExecution)
+        );
+        assert_eq!(
+            execution.capability_executions[0].failure_kind,
+            Some(CapabilityFailureKind::InvocationFailed)
+        );
     }
 
     fn temp_marker_file_path(prefix: &str) -> PathBuf {
@@ -4961,6 +9879,12 @@ mod tests {
         assert_eq!(events[0].1.turn_id, "turn-empty");
         assert_eq!(events[0].1.phase.as_deref(), Some("failed"));
         assert_eq!(events[0].1.error.as_deref(), Some("Message is empty."));
+        assert_hook_boundary_alignment(
+            &events[0].1,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.failed",
+            "failed",
+        );
     }
 
     #[test]
@@ -4970,7 +9894,7 @@ mod tests {
         let sink = RecordingTurnEventSink::new();
         let control = ExecutionControlRegistry::new();
 
-        control.register_turn("turn-cancelled", Some("stop-session"));
+        control.register_turn("turn-cancelled", Some("stop-session"), None);
         let response = control.request_stop("turn-cancelled");
         assert!(response.accepted);
 
@@ -4997,6 +9921,16 @@ mod tests {
                 && payload.turn_id == "turn-cancelled"
                 && payload.error.as_deref() == Some("stopped_by_user")
         }));
+        let cancelled = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:cancelled").then_some(payload.clone()))
+            .expect("cancelled event");
+        assert_hook_boundary_alignment(
+            &cancelled,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.cancelled",
+            "cancelled",
+        );
 
         let snapshot = runtime.load_session_snapshot(Some("stop-session"));
         assert_eq!(snapshot.history.len(), 2);
@@ -5012,6 +9946,11 @@ mod tests {
         let mut runtime = build_runtime_for_test(selection);
         runtime.load_session_snapshot(Some("graph-session"));
         let result = TurnResult {
+            event_id: None,
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
             phase: "ready".to_string(),
             provider_requested_name: "OpenAI".to_string(),
             provider_name: "OpenAI".to_string(),
@@ -5034,11 +9973,20 @@ mod tests {
             trace_timeline: Vec::new(),
             tool_activities: Vec::new(),
             provider_call_records: Vec::new(),
+            hook_trace_records: Vec::new(),
             session_summary: "summary".to_string(),
         };
         let checkpoint = ExecutionCheckpoint {
+            contract_version: "execution-checkpoint-v1".to_string(),
             turn_id: "turn-graph".to_string(),
             session_id: Some("graph-session".to_string()),
+            run_id: None,
+            checkpoint_kind: "runtime_control".to_string(),
+            recovery_mode: "replay_required".to_string(),
+            projected_runtime_phase: "ready".to_string(),
+            submission_command: None,
+            resumable: false,
+            replayable: false,
             status: "completed".to_string(),
             phase: "ready".to_string(),
             provider_requested_name: Some("OpenAI".to_string()),
@@ -5053,6 +10001,7 @@ mod tests {
             active_tool_name: None,
             trace_steps: Vec::new(),
             tool_activities: Vec::new(),
+            persisted_effect_evidence: Vec::new(),
             error: None,
             started_at_ms: 0,
             updated_at_ms: 0,
@@ -5170,6 +10119,11 @@ mod tests {
             provider_native_transcript: Vec::new(),
             turn_trace_history: Vec::new(),
             long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
+            run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
             turn_count: 2,
             last_referenced_file: None,
             updated_at_ms: 0,
@@ -5217,6 +10171,11 @@ mod tests {
             provider_native_transcript: Vec::new(),
             turn_trace_history: Vec::new(),
             long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
+            run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
             turn_count: 1,
             last_referenced_file: None,
             updated_at_ms: 0,
@@ -5603,10 +10562,26 @@ mod tests {
     fn start_turn_stream_completes_after_multi_hop_followup_stream() {
         let final_text = "tauri.conf.json 的第 3 行是 `\"productName\": \"Pony Agent\",`。";
         let server = MockHttpServer::start(vec![
-            json_response(decision_tool_call(
-                "workspace_list_files",
-                json!({"path": ".", "limit": 40}),
-            )),
+            sse_response(&[json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "需要先执行 workspace_list_files。",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })]),
             sse_response(&[
                 json!({
                     "choices": [
@@ -5693,6 +10668,27 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.model",
+                10,
+                TurnHookPoint::ModelCallStart,
+            ))
+            .expect("register model hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.tool-start",
+                20,
+                TurnHookPoint::ToolCallStart,
+            ))
+            .expect("register tool-start hook");
+        runtime
+            .register_hook_descriptor(observe_hook_descriptor(
+                "observe.tool-end",
+                30,
+                TurnHookPoint::ToolCallEnd,
+            ))
+            .expect("register tool-end hook");
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -5722,8 +10718,138 @@ mod tests {
                 }
             })
             .expect("completed event");
+        let tool_completed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_completed"))
+                .then_some(payload.clone())
+            })
+            .expect("tool completed event");
+        let checkpoint_phase_changed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:phase_changed"
+                    && payload.event_type.as_deref() == Some("turn.phase_changed")
+                    && payload.phase.as_deref() == Some("checkpointing"))
+                .then_some(payload.clone())
+            })
+            .expect("checkpoint phase changed event");
+        let checkpoint_persisted = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:checkpoint_persisted"
+                    && payload.event_type.as_deref() == Some("turn.checkpoint_persisted"))
+                .then_some(payload.clone())
+            })
+            .expect("checkpoint persisted event");
+        let tool_started = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
+            })
+            .expect("tool started event");
+        let model_started_events: Vec<TurnStreamEvent> = events
+            .iter()
+            .filter_map(|(name, payload)| {
+                (name == "turn:trace"
+                    && payload.event_type.as_deref() == Some("turn.model_call_started"))
+                .then_some(payload.clone())
+            })
+            .collect();
 
         assert_eq!(completed.text.as_deref(), Some(final_text));
+        assert!(model_started_events.len() >= 2);
+        assert!(model_started_events.iter().all(|payload| {
+            payload
+                .hook_trace_records
+                .as_ref()
+                .map(|records| {
+                    records.iter().any(|record| {
+                        record.hook_name == "observe.model"
+                            && record.hook_point == TurnHookPoint::ModelCallStart
+                    })
+                })
+                .unwrap_or(false)
+        }));
+        assert_hook_boundary_alignment(
+            &tool_started,
+            TurnHookPoint::ToolCallStart,
+            "turn.tool_call_started",
+            "executing_tool",
+        );
+        assert_eq!(
+            tool_started
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert_eq!(
+            tool_started
+                .hook_trace_records
+                .as_ref()
+                .and_then(|records| records.first())
+                .map(|record| record.hook_name.as_str()),
+            Some("observe.tool-start")
+        );
+        assert_hook_boundary_alignment(
+            &checkpoint_phase_changed,
+            TurnHookPoint::CheckpointPersistStart,
+            "turn.phase_changed",
+            "checkpointing",
+        );
+        assert_hook_boundary_alignment(
+            &checkpoint_persisted,
+            TurnHookPoint::CheckpointPersistEnd,
+            "turn.checkpoint_persisted",
+            "checkpointing",
+        );
+        assert_hook_boundary_alignment(
+            &completed,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.completed",
+            "completed",
+        );
+        assert_hook_boundary_alignment(
+            &tool_completed,
+            TurnHookPoint::ToolCallEnd,
+            "turn.tool_call_completed",
+            "tool_result_integrating",
+        );
+        assert_eq!(
+            tool_completed
+                .hook_trace_records
+                .as_ref()
+                .map(|records| records.len()),
+            Some(1)
+        );
+        assert_eq!(
+            tool_completed
+                .hook_trace_records
+                .as_ref()
+                .and_then(|records| records.first())
+                .map(|record| record.hook_name.as_str()),
+            Some("observe.tool-end")
+        );
+        assert!(
+            checkpoint_phase_changed.sequence.unwrap_or_default()
+                < checkpoint_persisted.sequence.unwrap_or_default()
+        );
+        assert!(
+            checkpoint_persisted.sequence.unwrap_or_default()
+                < completed.sequence.unwrap_or_default()
+        );
+        assert_eq!(
+            completed
+                .trace_timeline
+                .as_ref()
+                .and_then(|timeline| timeline.last())
+                .map(|entry| entry.kind.as_str()),
+            Some("checkpoint_persist")
+        );
         assert_eq!(
             completed
                 .tool_activities
@@ -5746,6 +10872,307 @@ mod tests {
         assert_eq!(request_bodies.len(), 3);
         assert!(request_bodies[1].contains("\"tool_choice\":\"auto\""));
         assert!(request_bodies[2].contains("\"tool_choice\":\"auto\""));
+    }
+
+    #[test]
+    fn start_turn_stream_fails_with_canonical_finalize_boundary_when_tool_hop_limit_is_hit() {
+        let _limit_guard = ToolHopLimitOverrideGuard::set(1);
+        let server = MockHttpServer::start(vec![
+            json_response(decision_tool_call(
+                "workspace_list_files",
+                json!({"path": ".", "limit": 40}),
+            )),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "已经找到目标文件。"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_read_file",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_read_file",
+                                            "arguments": "{\"path\":\"tauri.conf.json\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+            ]),
+        ]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-tool-hop-limit".to_string(),
+            TurnInput {
+                message: "请连续调用两个工具".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-tool-hop-limit".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let request_bodies = server.finish();
+        let events = sink.events.borrow();
+        let failed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
+            .expect("failed event");
+        let tool_completed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_completed"))
+                .then_some(payload.clone())
+            })
+            .expect("tool completed event before hop-limit failure");
+        let expected_error = build_tool_hop_limit_error(1);
+
+        assert_hook_boundary_alignment(
+            &failed,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.failed",
+            "failed",
+        );
+        assert_hook_boundary_alignment(
+            &tool_completed,
+            TurnHookPoint::ToolCallEnd,
+            "turn.tool_call_completed",
+            "tool_result_integrating",
+        );
+        assert_eq!(failed.error.as_deref(), Some(expected_error.as_str()));
+        assert_eq!(
+            failed
+                .tool_activities
+                .as_ref()
+                .map(|activities| activities.len()),
+            Some(1)
+        );
+        assert_eq!(request_bodies.len(), 2);
+
+        let snapshot = runtime.load_session_snapshot(Some("stream-tool-hop-limit"));
+        let persisted_trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("failed trace should be persisted");
+        assert_eq!(persisted_trace.phase, "failed");
+        assert_eq!(
+            persisted_trace.error.as_deref(),
+            Some(expected_error.as_str())
+        );
+        assert_eq!(persisted_trace.tool_activities.len(), 1);
+    }
+
+    #[test]
+    fn start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_requested_during_tool_execution(
+    ) {
+        let server = MockHttpServer::start(vec![json_response(decision_tool_call(
+            "workspace_list_files",
+            json!({"path": ".", "limit": 40}),
+        ))]);
+        let control = Arc::new(ExecutionControlRegistry::new());
+        let turn_id = "turn-cancel-during-tool".to_string();
+        control.register_turn(&turn_id, Some("stream-cancel-during-tool"), None);
+
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(RequestStopToolExecutor {
+                control: Arc::clone(&control),
+                turn_id: turn_id.clone(),
+                delay_ms: 30,
+            }),
+        );
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream_with_control(
+            &sink,
+            &control,
+            turn_id.clone(),
+            TurnInput {
+                message: "先调用工具，然后我会中止".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-cancel-during-tool".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let request_bodies = server.finish();
+        let events = sink.events.borrow();
+        let cancelled = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:cancelled").then_some(payload.clone()))
+            .expect("cancelled event");
+        let tool_started = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
+            })
+            .expect("tool started event");
+
+        assert_hook_boundary_alignment(
+            &tool_started,
+            TurnHookPoint::ToolCallStart,
+            "turn.tool_call_started",
+            "executing_tool",
+        );
+        assert_hook_boundary_alignment(
+            &cancelled,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.cancelled",
+            "cancelled",
+        );
+        assert_eq!(cancelled.error.as_deref(), Some("stopped_by_user"));
+        assert_eq!(
+            cancelled
+                .tool_activities
+                .as_ref()
+                .map(|activities| activities.len()),
+            Some(1)
+        );
+        assert!(!events.iter().any(|(name, payload)| {
+            name == "turn:tool" && payload.event_type.as_deref() == Some("turn.tool_call_completed")
+        }));
+        assert_eq!(request_bodies.len(), 1);
+
+        let snapshot = runtime.load_session_snapshot(Some("stream-cancel-during-tool"));
+        assert_eq!(
+            snapshot
+                .history
+                .last()
+                .map(|message| message.content.as_str()),
+            Some(CANCELLED_TURN_MESSAGE)
+        );
+        let persisted_trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("cancelled trace should be persisted");
+        assert_eq!(persisted_trace.phase, "cancelled");
+        assert_eq!(persisted_trace.error.as_deref(), Some("stopped_by_user"));
+        assert_eq!(persisted_trace.tool_activities.len(), 1);
+    }
+
+    #[test]
+    fn start_turn_stream_fails_with_canonical_finalize_boundary_when_tool_execution_errors() {
+        let server = MockHttpServer::start(vec![json_response(decision_tool_call(
+            "workspace_list_files",
+            json!({"path": ".", "limit": 40}),
+        ))]);
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(ErrorToolExecutor),
+        );
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-tool-error".to_string(),
+            TurnInput {
+                message: "调用工具但让它失败".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-tool-error".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let request_bodies = server.finish();
+        let events = sink.events.borrow();
+        let tool_started = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
+            })
+            .expect("tool started event");
+        let tool_completed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_completed"))
+                .then_some(payload.clone())
+            })
+            .expect("tool completed event");
+        let failed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
+            .expect("failed event");
+        let expected_error = build_tool_execution_error(
+            "workspace_list_files",
+            "tool workspace_list_files failed in test",
+        );
+
+        assert_hook_boundary_alignment(
+            &tool_started,
+            TurnHookPoint::ToolCallStart,
+            "turn.tool_call_started",
+            "executing_tool",
+        );
+        assert_hook_boundary_alignment(
+            &tool_completed,
+            TurnHookPoint::ToolCallEnd,
+            "turn.tool_call_completed",
+            "tool_result_integrating",
+        );
+        assert_hook_boundary_alignment(
+            &failed,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.failed",
+            "failed",
+        );
+        assert_eq!(failed.error.as_deref(), Some(expected_error.as_str()));
+        assert_eq!(
+            failed
+                .tool_activities
+                .as_ref()
+                .map(|activities| activities.len()),
+            Some(1)
+        );
+        assert!(!events.iter().any(|(name, _)| name == "turn:completed"));
+        assert_eq!(request_bodies.len(), 1);
+
+        let snapshot = runtime.load_session_snapshot(Some("stream-tool-error"));
+        let persisted_trace = snapshot
+            .turn_trace_history
+            .last()
+            .expect("failed trace should be persisted");
+        assert_eq!(persisted_trace.phase, "failed");
+        assert_eq!(
+            persisted_trace.error.as_deref(),
+            Some(expected_error.as_str())
+        );
+        assert_eq!(persisted_trace.tool_activities.len(), 1);
     }
 
     #[test]
@@ -5819,6 +11246,23 @@ mod tests {
                 }
             })
             .expect("completed event");
+        let checkpoint_phase_changed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:phase_changed"
+                    && payload.event_type.as_deref() == Some("turn.phase_changed")
+                    && payload.phase.as_deref() == Some("checkpointing"))
+                .then_some(payload.clone())
+            })
+            .expect("checkpoint phase changed event");
+        let checkpoint_persisted = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:checkpoint_persisted"
+                    && payload.event_type.as_deref() == Some("turn.checkpoint_persisted"))
+                .then_some(payload.clone())
+            })
+            .expect("checkpoint persisted event");
 
         assert_eq!(first_delta.reasoning_content.as_deref(), Some("先想一下。"));
         assert_eq!(first_delta.text, None);
@@ -5827,9 +11271,36 @@ mod tests {
             completed.first_token_latency_ms,
             first_delta.first_token_latency_ms
         );
+        assert_hook_boundary_alignment(
+            &checkpoint_phase_changed,
+            TurnHookPoint::CheckpointPersistStart,
+            "turn.phase_changed",
+            "checkpointing",
+        );
+        assert_hook_boundary_alignment(
+            &checkpoint_persisted,
+            TurnHookPoint::CheckpointPersistEnd,
+            "turn.checkpoint_persisted",
+            "checkpointing",
+        );
+        assert!(
+            checkpoint_persisted.sequence.unwrap_or_default()
+                < completed.sequence.unwrap_or_default()
+        );
+        assert_eq!(
+            completed
+                .trace_timeline
+                .as_ref()
+                .and_then(|timeline| timeline.last())
+                .map(|entry| entry.kind.as_str()),
+            Some("checkpoint_persist")
+        );
         let decision_request: Value =
             serde_json::from_str(&requests[0]).expect("decision request should be json");
-        assert_eq!(decision_request.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            decision_request.get("stream").and_then(Value::as_bool),
+            Some(true)
+        );
         assert_eq!(
             completed.provider_source.as_deref(),
             Some("provider_decision_stream")
@@ -5839,7 +11310,10 @@ mod tests {
             .as_ref()
             .and_then(|records| records.first())
             .expect("initial provider call record");
-        assert_eq!(provider_call.latency_kind, ProviderLatencyKind::ProviderStream);
+        assert_eq!(
+            provider_call.latency_kind,
+            ProviderLatencyKind::ProviderStream
+        );
         assert!(provider_call.first_token_latency_ms.is_some());
         assert!(provider_call.turn_duration_ms.is_some());
         assert!(
@@ -5926,34 +11400,35 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(false)
         );
-        assert_eq!(completed.provider_source.as_deref(), Some("provider_decision"));
+        assert_eq!(
+            completed.provider_source.as_deref(),
+            Some("provider_decision")
+        );
     }
 
     #[test]
     fn start_turn_stream_measures_first_token_latency_from_turn_start_across_tool_hops() {
         let final_text = "工具调用后返回最终答案。";
         let server = MockHttpServer::start(vec![
-            sse_response(&[
-                json!({
-                    "choices": [
-                        {
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": 0,
-                                        "id": "call_workspace_list_files",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "workspace_list_files",
-                                            "arguments": "{\"path\":\".\",\"limit\":40}"
-                                        }
+            sse_response(&[json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
                                     }
-                                ]
-                            }
+                                }
+                            ]
                         }
-                    ]
-                }),
-            ]),
+                    }
+                ]
+            })]),
             sse_response(&[
                 json!({
                     "choices": [
@@ -6002,6 +11477,14 @@ mod tests {
             .iter()
             .find_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
             .expect("first delta event");
+        let tool_completed = events
+            .iter()
+            .find_map(|(name, payload)| {
+                (name == "turn:tool"
+                    && payload.event_type.as_deref() == Some("turn.tool_call_completed"))
+                .then_some(payload.clone())
+            })
+            .expect("tool completed event");
         let completed = events
             .iter()
             .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
@@ -6011,6 +11494,18 @@ mod tests {
         assert_eq!(
             completed.first_token_latency_ms,
             first_delta.first_token_latency_ms
+        );
+        assert_hook_boundary_alignment(
+            &tool_completed,
+            TurnHookPoint::ToolCallEnd,
+            "turn.tool_call_completed",
+            "tool_result_integrating",
+        );
+        assert_hook_boundary_alignment(
+            &completed,
+            TurnHookPoint::TurnFinalizeEnd,
+            "turn.completed",
+            "completed",
         );
     }
 
@@ -6078,7 +11573,8 @@ mod tests {
                 }),
             ]),
         ]);
-        let mut runtime = build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+        let mut runtime =
+            build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -6114,8 +11610,14 @@ mod tests {
             serde_json::from_str(&requests[0]).expect("decision request should be json");
         let followup_request: Value =
             serde_json::from_str(&requests[1]).expect("followup request should be json");
-        assert_eq!(decision_request.get("stream").and_then(Value::as_bool), Some(true));
-        assert_eq!(followup_request.get("stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            decision_request.get("stream").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            followup_request.get("stream").and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(followup_request.get("stream_options").is_some());
         let replayed_assistant_message = followup_request
             .get("messages")
@@ -6138,7 +11640,7 @@ mod tests {
             Some("need workspace listing before answering")
         );
         assert_eq!(text_delta.text.as_deref(), Some(final_text));
-        assert_eq!(completed.phase.as_deref(), Some("ready"));
+        assert_eq!(completed.phase.as_deref(), Some("completed"));
         assert_eq!(
             completed.provider_source.as_deref(),
             Some("provider_followup_stream")
@@ -6161,37 +11663,41 @@ mod tests {
     fn start_turn_stream_accumulates_token_usage_across_tool_followups() {
         let final_text = "流式回合已累计整轮 token usage。";
         let server = MockHttpServer::start(vec![
-            json_response(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "先调用 workspace_list_files。",
-                            "reasoning_content": "需要先执行 workspace_list_files。",
-                            "tool_calls": [
-                                {
-                                    "id": "call_workspace_list_files",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "workspace_list_files",
-                                        "arguments": json!({"path": ".", "limit": 40}).to_string()
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "需要先执行 workspace_list_files。",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_workspace_list_files",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_list_files",
+                                            "arguments": "{\"path\":\".\",\"limit\":40}"
+                                        }
                                     }
-                                }
-                            ]
+                                ]
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "prompt_cache_hit_tokens": 30,
+                        "prompt_cache_miss_tokens": 70,
+                        "completion_tokens": 20,
+                        "total_tokens": 120,
+                        "completion_tokens_details": {
+                            "reasoning_tokens": 7
                         }
                     }
-                ],
-                "usage": {
-                    "prompt_tokens": 100,
-                    "prompt_cache_hit_tokens": 30,
-                    "prompt_cache_miss_tokens": 70,
-                    "completion_tokens": 20,
-                    "total_tokens": 120,
-                    "completion_tokens_details": {
-                        "reasoning_tokens": 7
-                    }
-                }
-            })),
+                }),
+            ]),
             sse_response(&[
                 json!({
                     "choices": [
@@ -6347,10 +11853,26 @@ mod tests {
     fn start_turn_stream_repairs_blank_tool_name_in_followup_stream() {
         let final_text = "tauri.conf.json 已在流式回合中成功读取。";
         let server = MockHttpServer::start(vec![
-            json_response(decision_tool_call(
-                "workspace_list_files",
-                json!({"path": ".", "limit": 40}),
-            )),
+            sse_response(&[json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "需要先执行 workspace_list_files。",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_workspace_list_files",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_list_files",
+                                        "arguments": "{\"path\":\".\",\"limit\":40}"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })]),
             sse_response(&[
                 json!({
                     "choices": [
@@ -6708,7 +12230,7 @@ mod tests {
             Some("need workspace listing before answering")
         );
         assert_eq!(text_delta.text.as_deref(), Some(final_text));
-        assert_eq!(completed.phase.as_deref(), Some("ready"));
+        assert_eq!(completed.phase.as_deref(), Some("completed"));
         assert_eq!(
             completed.provider_source.as_deref(),
             Some("provider_followup_stream")
@@ -6874,14 +12396,16 @@ mod tests {
         let second_replayed = second_followup
             .get("messages")
             .and_then(Value::as_array)
-            .and_then(|messages| messages.iter().rev().find(|message| {
-                message.get("role").and_then(Value::as_str) == Some("assistant")
-                    && message
-                        .get("tool_calls")
-                        .and_then(Value::as_array)
-                        .map(|calls| !calls.is_empty())
-                        .unwrap_or(false)
-            }))
+            .and_then(|messages| {
+                messages.iter().rev().find(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                        && message
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .map(|calls| !calls.is_empty())
+                            .unwrap_or(false)
+                })
+            })
             .and_then(|message| message.get("reasoning_content"))
             .cloned()
             .expect("second followup should replay structured reasoning");

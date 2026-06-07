@@ -1259,7 +1259,14 @@ impl ToolRouter {
         } else {
             raw_path.trim()
         };
-        self.canonicalize_workspace_target(trimmed)
+        match self.canonicalize_workspace_target(trimmed) {
+            Ok(canonical) => Ok(canonical),
+            Err(primary_error) => match self.try_repair_file_path(trimmed) {
+                Ok(Some(repaired)) => Ok(repaired),
+                Ok(None) => Err(primary_error),
+                Err(repair_error) => Err(repair_error),
+            },
+        }
     }
 
     fn resolve_workspace_dir(&self, raw_path: &str) -> Result<PathBuf, String> {
@@ -1320,7 +1327,12 @@ impl ToolRouter {
     }
 
     fn try_repair_file_path(&self, raw_path: &str) -> Result<Option<PathBuf>, String> {
-        let file_name = Path::new(raw_path)
+        let normalized_raw_path = raw_path
+            .trim()
+            .trim_end_matches(['/', '\\'])
+            .replace('\\', "/");
+        let raw_path_object = Path::new(raw_path);
+        let file_name = raw_path_object
             .file_name()
             .and_then(|value| value.to_str())
             .map(str::trim)
@@ -1336,28 +1348,76 @@ impl ToolRouter {
             return Ok(None);
         }
 
-        let matches = files
-            .into_iter()
+        let exact_name_matches = files
+            .iter()
             .filter(|path| {
                 path.file_name()
                     .and_then(|value| value.to_str())
                     .map(|value| value.eq_ignore_ascii_case(file_name))
                     .unwrap_or(false)
             })
+            .cloned()
             .collect::<Vec<_>>();
 
-        match matches.len() {
-            0 => Ok(None),
-            1 => Ok(matches.into_iter().next()),
+        match exact_name_matches.len() {
+            0 => {}
+            1 => return Ok(exact_name_matches.into_iter().next()),
             _ => {
-                let candidates = matches
+                let candidates = exact_name_matches
+                    .iter()
+                    .take(5)
+                    .map(|path| self.display_workspace_relative(path))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "无法解析路径 {}：工作区内发现多个同名文件 {}，请提供更精确的相对路径。",
+                    raw_path, candidates
+                ));
+            }
+        }
+
+        let stem_matches = files
+            .iter()
+            .filter(|path| {
+                let relative = match path.strip_prefix(&root) {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                };
+                let relative_without_extension = relative
+                    .parent()
+                    .map(|parent| parent.join(
+                        relative
+                            .file_stem()
+                            .unwrap_or_default(),
+                    ))
+                    .unwrap_or_else(|| PathBuf::from(relative.file_stem().unwrap_or_default()));
+
+                relative_without_extension
+                    .display()
+                    .to_string()
+                    .replace('\\', "/")
+                    .eq_ignore_ascii_case(&normalized_raw_path)
+                    || path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .map(|value| value.eq_ignore_ascii_case(file_name))
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        match stem_matches.len() {
+            0 => Ok(None),
+            1 => Ok(stem_matches.into_iter().next()),
+            _ => {
+                let candidates = stem_matches
                     .iter()
                     .take(5)
                     .map(|path| self.display_workspace_relative(path))
                     .collect::<Vec<_>>()
                     .join(", ");
                 Err(format!(
-                    "无法解析路径 {}：工作区内发现多个同名文件 {}，请提供更精确的相对路径。",
+                    "无法解析路径 {}：工作区内发现多个缺扩展名候选文件 {}，请提供更精确的相对路径。",
                     raw_path, candidates
                 ))
             }
@@ -2404,5 +2464,66 @@ mod tests {
 
         assert_eq!(result.status, "error");
         assert!(result.output.contains("多个同名文件"));
+    }
+
+    #[test]
+    fn gather_context_repairs_unique_missing_extension_file_path() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
+        fs::write(
+            workspace.join("src/agent/context.rs"),
+            "pub struct AgentContext;\n",
+        )
+        .expect("write context file");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "path": "src/agent/context"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload.get("status").and_then(Value::as_str), Some("ok"));
+        assert!(payload
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|results| {
+                results.iter().any(|entry| {
+                    entry.get("tool").and_then(Value::as_str) == Some(TOOL_WORKSPACE_READ_FILE_SEGMENT)
+                })
+            })
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn gather_context_keeps_error_when_missing_extension_path_is_ambiguous() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
+        fs::create_dir_all(workspace.join("nested")).expect("create nested dir");
+        fs::write(
+            workspace.join("src/agent/context.rs"),
+            "pub struct AgentContext;\n",
+        )
+        .expect("write first context file");
+        fs::write(workspace.join("nested/context.rs"), "pub struct OtherContext;\n")
+            .expect("write second context file");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "path": "context"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        assert!(result.output.contains("多个缺扩展名候选文件"));
     }
 }

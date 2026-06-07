@@ -1,3 +1,13 @@
+use crate::agent::hooks::{
+    merge_patch_results, HistoryStateCommandKind, HistoryStateCursorSummary,
+    HistoryStateHookEnvelope, HistoryStateHookEvidence, HistoryStateHookExecutor,
+    HistoryStateHookPoint, HookPatchConflictPolicy, HookPatchOperationKind, HookPatchTarget,
+    HookResultKind, HookStructuredResult, HookTraceRecord, MemoryWriteHookEnvelope,
+    MemoryWriteHookExecutor, MemoryWriteHookPoint, MemoryWriteIntentRecord,
+    MemoryWriteOperation, MemoryWriteTarget, NoopHistoryStateHookExecutor,
+    NoopMemoryWriteHookExecutor, PersistedEffectEvidence,
+};
+use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 use crate::agent::input::TurnInputImage;
 use crate::agent::provider::BuildContextObservation;
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
@@ -6,6 +16,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const DEFAULT_SESSION_ID: &str = "local-dev-session";
 const DEFAULT_SESSION_SUMMARY: &str = "Pony Agent 本地开发会话";
@@ -100,6 +111,10 @@ pub struct HistoryNode {
     pub turn_trace_history: Vec<TurnTraceRecord>,
     #[serde(default)]
     pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
+    #[serde(default)]
+    pub memory_write_evidence: Vec<PersistedEffectEvidence>,
+    #[serde(default)]
+    pub memory_write_hook_trace_records: Vec<HookTraceRecord>,
     #[serde(default)]
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
@@ -250,6 +265,12 @@ pub struct SessionState {
     pub turn_trace_history: Vec<TurnTraceRecord>,
     #[serde(default)]
     pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
+    #[serde(default)]
+    pub memory_write_evidence: Vec<PersistedEffectEvidence>,
+    #[serde(default)]
+    pub memory_write_hook_trace_records: Vec<HookTraceRecord>,
+    #[serde(default)]
+    pub history_state_evidence: Vec<HistoryStateHookEvidence>,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     #[serde(default)]
@@ -277,6 +298,14 @@ pub struct SessionSnapshot {
     pub turn_trace_history: Vec<TurnTraceRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_write_evidence: Vec<PersistedEffectEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_write_hook_trace_records: Vec<HookTraceRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_state_evidence: Vec<HistoryStateHookEvidence>,
+    pub history_state_audit_summary: HistoryStateAuditSummary,
+    pub run_control_audit_summary: RunControlAuditSummary,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     pub updated_at_ms: u64,
@@ -288,6 +317,87 @@ pub struct SessionSnapshot {
     pub history_cursor: HistoryCursor,
     pub resolved_node_id: Option<String>,
     pub latest_node_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryStateAuditActionSummary {
+    pub status: String,
+    pub source_family: String,
+    pub command_kind: Option<String>,
+    pub boundary: Option<String>,
+    pub result_kind: Option<String>,
+    pub summary: String,
+    pub elapsed_ms: Option<u64>,
+    pub blocked: bool,
+    pub degraded: bool,
+    pub evidence_id: Option<String>,
+    pub observed_at_ms: Option<u64>,
+    pub requested_node_id: Option<String>,
+    pub requested_branch_id: Option<String>,
+    pub resolved_node_id: Option<String>,
+    pub resolved_branch_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryStateAuditCurrentContext {
+    pub mode: String,
+    pub visible_node_id: Option<String>,
+    pub active_branch_id: Option<String>,
+    pub branch_head_node_id: Option<String>,
+    pub workspace_node_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryStateAuditSummary {
+    pub action: HistoryStateAuditActionSummary,
+    pub current_context: HistoryStateAuditCurrentContext,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunControlAuditActionSummary {
+    pub status: String,
+    pub source_family: String,
+    pub command_kind: Option<String>,
+    pub boundary: Option<String>,
+    pub result_kind: Option<String>,
+    pub summary: String,
+    pub target_summary: String,
+    pub elapsed_ms: Option<u64>,
+    pub blocked: bool,
+    pub degraded: bool,
+    pub evidence_id: Option<String>,
+    pub observed_at_ms: Option<u64>,
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub checkpoint_turn_id: Option<String>,
+    pub checkpoint_kind: Option<String>,
+    pub recovery_mode: Option<String>,
+    pub projected_command: Option<String>,
+    pub degradation_reason: Option<String>,
+    pub request_summary: Option<String>,
+    pub start_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunControlAuditCurrentContext {
+    pub phase: String,
+    pub checkpoint_status: String,
+    pub active_run_id: Option<String>,
+    pub checkpoint_kind: Option<String>,
+    pub checkpoint_recovery_mode: Option<String>,
+    pub submission_plan_command: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunControlAuditSummary {
+    pub action_evidence_summary: RunControlAuditActionSummary,
+    pub current_context_projection: RunControlAuditCurrentContext,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -335,6 +445,18 @@ pub struct TraceTimelineEntry {
 #[serde(rename_all = "camelCase")]
 pub struct TurnTraceRecord {
     pub turn_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    #[serde(default)]
+    pub event_type: Option<String>,
+    #[serde(default)]
+    pub event_version: Option<String>,
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    #[serde(default)]
+    pub emitted_at_ms: Option<u64>,
     pub title: String,
     pub phase: String,
     #[serde(default)]
@@ -345,6 +467,8 @@ pub struct TurnTraceRecord {
     pub tool_activities: Vec<TurnToolActivity>,
     #[serde(default)]
     pub provider_call_records: Vec<ProviderCallCacheRecord>,
+    #[serde(default)]
+    pub hook_trace_records: Vec<HookTraceRecord>,
     pub provider_requested_name: Option<String>,
     pub provider_name: Option<String>,
     pub provider_protocol: Option<String>,
@@ -376,8 +500,12 @@ pub struct SessionStore {
     sessions: SessionMap,
     attachment_assets: AttachmentAssetMap,
     session_attachment_index: SessionAttachmentIndex,
+    mcp_source_snapshots: HashMap<String, McpSourceSnapshot>,
+    skill_source_snapshots: HashMap<String, SkillSourceSnapshot>,
     backend: Box<dyn SessionBackend>,
     attachment_root: PathBuf,
+    memory_write_hook_executor: Arc<dyn MemoryWriteHookExecutor>,
+    history_state_hook_executor: Arc<dyn HistoryStateHookExecutor>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -388,6 +516,10 @@ pub struct PersistedStore {
     attachment_assets: AttachmentAssetMap,
     #[serde(default)]
     session_attachment_index: SessionAttachmentIndex,
+    #[serde(default)]
+    mcp_source_snapshots: HashMap<String, McpSourceSnapshot>,
+    #[serde(default)]
+    skill_source_snapshots: HashMap<String, SkillSourceSnapshot>,
 }
 
 pub struct FileSessionBackend {
@@ -423,6 +555,8 @@ impl SessionStore {
         };
         let mut attachment_assets = persisted.attachment_assets;
         let mut session_attachment_index = persisted.session_attachment_index;
+        let mcp_source_snapshots = persisted.mcp_source_snapshots;
+        let skill_source_snapshots = persisted.skill_source_snapshots;
         let mut should_save = false;
         for session in sessions.values_mut() {
             refresh_session_metadata(session, false);
@@ -451,8 +585,12 @@ impl SessionStore {
             sessions,
             attachment_assets,
             session_attachment_index,
+            mcp_source_snapshots,
+            skill_source_snapshots,
             backend,
             attachment_root,
+            memory_write_hook_executor: Arc::new(NoopMemoryWriteHookExecutor),
+            history_state_hook_executor: Arc::new(NoopHistoryStateHookExecutor),
         };
         if should_save {
             store.save_to_backend();
@@ -514,6 +652,7 @@ impl SessionStore {
         attachments: Vec<SessionAttachment>,
     ) -> SessionSnapshot {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let memory_write_hook_executor = Arc::clone(&self.memory_write_hook_executor);
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
@@ -538,7 +677,11 @@ impl SessionStore {
                 session.provider_native_transcript.extend(messages);
             }
 
-            update_long_term_memory_from_user_message(session, user_message);
+            update_long_term_memory_from_user_message(
+                session,
+                user_message,
+                memory_write_hook_executor.as_ref(),
+            );
             refresh_session_metadata(session, true);
             commit_history_node_from_live_state(
                 session,
@@ -588,6 +731,101 @@ impl SessionStore {
         snapshot
     }
 
+    pub fn annotate_turn_trace_terminal_event(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        event_id: Option<String>,
+        event_type: Option<String>,
+        event_version: Option<String>,
+        sequence: Option<u64>,
+        emitted_at_ms: Option<u64>,
+    ) -> Option<SessionSnapshot> {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        {
+            let session = self.sessions.get_mut(&session_key)?;
+            let trace = session
+                .turn_trace_history
+                .iter_mut()
+                .find(|item| item.turn_id == turn_id)?;
+            trace.session_id = Some(session_key.clone());
+            trace.event_id = event_id;
+            trace.event_type = event_type;
+            trace.event_version = event_version;
+            trace.sequence = sequence;
+            trace.emitted_at_ms = emitted_at_ms;
+            trace.updated_at = now_timestamp_ms();
+            refresh_session_metadata(session, true);
+        }
+        let snapshot = self.snapshot_for_session(&session_key);
+        self.save_to_backend();
+        Some(snapshot)
+    }
+
+    pub fn append_turn_trace_hook_records(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        hook_trace_records: Vec<HookTraceRecord>,
+    ) -> Option<SessionSnapshot> {
+        if hook_trace_records.is_empty() {
+            return Some(self.snapshot(session_id, &[]));
+        }
+
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        {
+            let session = self.sessions.get_mut(&session_key)?;
+            let trace = session
+                .turn_trace_history
+                .iter_mut()
+                .find(|item| item.turn_id == turn_id)?;
+            trace.session_id = Some(session_key.clone());
+            trace.hook_trace_records.extend(hook_trace_records);
+            trace.updated_at = now_timestamp_ms();
+            refresh_session_metadata(session, true);
+            sync_latest_history_node(session, Some(turn_id.to_string()));
+        }
+        let snapshot = self.snapshot_for_session(&session_key);
+        self.save_to_backend();
+        Some(snapshot)
+    }
+
+    pub fn persist_mcp_source_snapshot(&mut self, snapshot: McpSourceSnapshot) {
+        self.mcp_source_snapshots
+            .insert(snapshot.source.source_id.clone(), snapshot);
+        self.save_to_backend();
+    }
+
+    pub fn persist_skill_source_snapshot(&mut self, snapshot: SkillSourceSnapshot) {
+        self.skill_source_snapshots
+            .insert(snapshot.source.source_id.clone(), snapshot);
+        self.save_to_backend();
+    }
+
+    pub fn list_persisted_mcp_source_snapshots(&self) -> Vec<McpSourceSnapshot> {
+        self.mcp_source_snapshots.values().cloned().collect()
+    }
+
+    pub fn list_persisted_skill_source_snapshots(&self) -> Vec<SkillSourceSnapshot> {
+        self.skill_source_snapshots.values().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub fn set_memory_write_hook_executor_for_test(
+        &mut self,
+        executor: Box<dyn MemoryWriteHookExecutor>,
+    ) {
+        self.memory_write_hook_executor = executor.into();
+    }
+
+    #[cfg(test)]
+    pub fn set_history_state_hook_executor_for_test(
+        &mut self,
+        executor: Box<dyn HistoryStateHookExecutor>,
+    ) {
+        self.history_state_hook_executor = executor.into();
+    }
+
     #[allow(dead_code)]
     pub fn replace_long_term_memory(
         &mut self,
@@ -599,6 +837,9 @@ impl SessionStore {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
             session.long_term_memory_entries = entries;
+            session.memory_write_evidence.clear();
+            session.memory_write_hook_trace_records.clear();
+            session.history_state_evidence.clear();
             refresh_session_metadata(session, true);
             sync_latest_history_node(session, None);
         }
@@ -616,44 +857,104 @@ impl SessionStore {
         mode: HistoryCheckoutMode,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let hook_executor = Arc::clone(&self.history_state_hook_executor);
+        let mut blocked_error = None;
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
-            let Some(node) = history_node(session, node_id).cloned() else {
-                return Err(format!("unknown history node: {node_id}"));
-            };
-            hydrate_session_from_node(session, &node);
-            let branch_head_node_id = session
-                .history_branches
-                .iter()
-                .find(|branch| branch.branch_id == node.branch_id)
-                .and_then(|branch| branch.head_node_id.clone());
-            session.history_cursor.visible_node_id = Some(node.node_id.clone());
-            session.history_cursor.active_branch_id = Some(node.branch_id.clone());
-            session.history_cursor.branch_head_node_id = branch_head_node_id;
-            session.history_cursor.workspace_node_id = Some(node.node_id.clone());
-            session.history_cursor.mode = if session.history_cursor.branch_head_node_id.as_deref()
-                == Some(node.node_id.as_str())
-            {
-                HistoryCursorMode::Live
-            } else {
-                HistoryCursorMode::Historical
-            };
-            session.history_cursor.checkout_mode = mode.clone();
-            session.history_cursor.checkout_status = match mode {
-                HistoryCheckoutMode::TranscriptOnly => HistoryCheckoutStatus::Applied,
-                HistoryCheckoutMode::TranscriptAndWorkspace => {
-                    if node.workspace_ref.rollback_capable {
-                        HistoryCheckoutStatus::Applied
-                    } else {
-                        HistoryCheckoutStatus::DegradedToTranscriptOnly
-                    }
+            let requested_mode = mode.clone();
+            if let Some(start_envelope) = build_history_state_hook_envelope(
+                session,
+                HistoryStateHookPoint::HistoryCheckoutStart,
+                HistoryStateCommandKind::CheckoutHistoryNode,
+                Some(node_id),
+                None,
+                Some(&requested_mode),
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                None,
+            ) {
+                let hook_results = hook_executor.execute(&start_envelope).unwrap_or_default();
+                persist_history_state_hook_evidence(session, &start_envelope, &hook_results);
+                if history_state_hook_results_blocked(&hook_results) {
+                    refresh_session_metadata(session, true);
+                    blocked_error = Some(format!(
+                        "history checkout blocked by hook before resolving node: {node_id}"
+                    ));
                 }
-            };
-            refresh_session_metadata(session, true);
+            }
+            if blocked_error.is_some() {
+                // Keep the current truth-source unchanged when guard hooks block checkout.
+                sync_latest_history_node(session, None);
+            } else {
+                let Some(node) = history_node(session, node_id).cloned() else {
+                    return Err(format!("unknown history node: {node_id}"));
+                };
+                hydrate_session_from_node(session, &node);
+                let branch_head_node_id = session
+                    .history_branches
+                    .iter()
+                    .find(|branch| branch.branch_id == node.branch_id)
+                    .and_then(|branch| branch.head_node_id.clone());
+                session.history_cursor.visible_node_id = Some(node.node_id.clone());
+                session.history_cursor.active_branch_id = Some(node.branch_id.clone());
+                session.history_cursor.branch_head_node_id = branch_head_node_id;
+                session.history_cursor.workspace_node_id = Some(node.node_id.clone());
+                session.history_cursor.mode = if session.history_cursor.branch_head_node_id.as_deref()
+                    == Some(node.node_id.as_str())
+                {
+                    HistoryCursorMode::Live
+                } else {
+                    HistoryCursorMode::Historical
+                };
+                session.history_cursor.checkout_mode = requested_mode.clone();
+                session.history_cursor.checkout_status = match requested_mode {
+                    HistoryCheckoutMode::TranscriptOnly => HistoryCheckoutStatus::Applied,
+                    HistoryCheckoutMode::TranscriptAndWorkspace => {
+                        if node.workspace_ref.rollback_capable {
+                            HistoryCheckoutStatus::Applied
+                        } else {
+                            HistoryCheckoutStatus::DegradedToTranscriptOnly
+                        }
+                    }
+                };
+                refresh_session_metadata(session, true);
+                if let Some(resolved_envelope) = build_history_state_hook_envelope(
+                    session,
+                    HistoryStateHookPoint::HistoryCheckoutResolved,
+                    HistoryStateCommandKind::CheckoutHistoryNode,
+                    Some(node_id),
+                    None,
+                    Some(&requested_mode),
+                    Some(node.node_id.as_str()),
+                    Some(node.branch_id.as_str()),
+                    true,
+                    node.workspace_ref.rollback_capable,
+                    matches!(session.history_cursor.checkout_status, HistoryCheckoutStatus::Applied),
+                    matches!(
+                        session.history_cursor.checkout_status,
+                        HistoryCheckoutStatus::DegradedToTranscriptOnly
+                    ),
+                    matches!(
+                        session.history_cursor.checkout_status,
+                        HistoryCheckoutStatus::DegradedToTranscriptOnly
+                    )
+                    .then_some("workspace_rollback_unsupported"),
+                ) {
+                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
+                }
+            }
+        }
+        self.save_to_backend();
+        if let Some(error) = blocked_error {
+            return Err(error);
         }
         let snapshot = self.snapshot_for_session(&session_key);
-        self.save_to_backend();
         Ok(snapshot)
     }
 
@@ -690,7 +991,10 @@ impl SessionStore {
         branch_id: Option<&str>,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
-        let restored_node_id = {
+        let hook_executor = Arc::clone(&self.history_state_hook_executor);
+        let mut blocked_error = None;
+        let mut restored_node_id = None;
+        {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
             let target_branch_id = branch_id
@@ -699,32 +1003,82 @@ impl SessionStore {
                 .map(str::to_string)
                 .or_else(|| session.history_cursor.active_branch_id.clone())
                 .unwrap_or_else(|| DEFAULT_HISTORY_BRANCH_ID.to_string());
-            let branch = session
-                .history_branches
-                .iter()
-                .find(|item| item.branch_id == target_branch_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown history branch: {target_branch_id}"))?;
-            let node_id = branch
-                .head_node_id
-                .clone()
-                .ok_or_else(|| format!("history branch has no head node: {target_branch_id}"))?;
-            let node = history_node(session, &node_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown history node: {node_id}"))?;
-            hydrate_session_from_node(session, &node);
-            session.history_cursor.visible_node_id = Some(node.node_id.clone());
-            session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
-            session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
-            session.history_cursor.workspace_node_id = Some(node.node_id.clone());
-            session.history_cursor.mode = HistoryCursorMode::Live;
-            session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
-            session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
-            refresh_session_metadata(session, true);
-            node.node_id
-        };
-        let snapshot = self.snapshot_for_session_at(&session_key, Some(restored_node_id.as_str()));
+            if let Some(start_envelope) = build_history_state_hook_envelope(
+                session,
+                HistoryStateHookPoint::BranchRestoreStart,
+                HistoryStateCommandKind::RestoreBranchHead,
+                None,
+                Some(target_branch_id.as_str()),
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                None,
+            ) {
+                let hook_results = hook_executor.execute(&start_envelope).unwrap_or_default();
+                persist_history_state_hook_evidence(session, &start_envelope, &hook_results);
+                if history_state_hook_results_blocked(&hook_results) {
+                    refresh_session_metadata(session, true);
+                    blocked_error = Some(format!(
+                        "history branch restore blocked by hook before resolving branch: {target_branch_id}"
+                    ));
+                }
+            }
+            if blocked_error.is_some() {
+                sync_latest_history_node(session, None);
+            } else {
+                let branch = session
+                    .history_branches
+                    .iter()
+                    .find(|item| item.branch_id == target_branch_id)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown history branch: {target_branch_id}"))?;
+                let node_id = branch
+                    .head_node_id
+                    .clone()
+                    .ok_or_else(|| format!("history branch has no head node: {target_branch_id}"))?;
+                let node = history_node(session, &node_id)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown history node: {node_id}"))?;
+                hydrate_session_from_node(session, &node);
+                session.history_cursor.visible_node_id = Some(node.node_id.clone());
+                session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
+                session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
+                session.history_cursor.workspace_node_id = Some(node.node_id.clone());
+                session.history_cursor.mode = HistoryCursorMode::Live;
+                session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+                session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+                refresh_session_metadata(session, true);
+                if let Some(resolved_envelope) = build_history_state_hook_envelope(
+                    session,
+                    HistoryStateHookPoint::BranchRestoreResolved,
+                    HistoryStateCommandKind::RestoreBranchHead,
+                    None,
+                    Some(target_branch_id.as_str()),
+                    None,
+                    Some(node.node_id.as_str()),
+                    Some(branch.branch_id.as_str()),
+                    true,
+                    false,
+                    false,
+                    false,
+                    None,
+                ) {
+                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
+                }
+                restored_node_id = Some(node.node_id);
+            }
+        }
         self.save_to_backend();
+        if let Some(error) = blocked_error {
+            return Err(error);
+        }
+        let restored_node_id = restored_node_id.expect("restored node id should be available");
+        let snapshot = self.snapshot_for_session_at(&session_key, Some(restored_node_id.as_str()));
         Ok(snapshot)
     }
 
@@ -734,39 +1088,90 @@ impl SessionStore {
         node_id: &str,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let hook_executor = Arc::clone(&self.history_state_hook_executor);
+        let mut blocked_error = None;
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
-            let source_node = history_node(session, node_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown history node: {node_id}"))?;
-            let source_branch_id = source_node.branch_id.clone();
-            let created_at_ms = now_timestamp_ms();
-            let label_index = session.history_branches.len() + 1;
-            let new_branch_id = new_history_branch_id(session, label_index);
-            session.history_branches.push(HistoryBranch {
-                branch_id: new_branch_id.clone(),
-                session_id: session.conversation_id.clone(),
-                base_node_id: Some(source_node.node_id.clone()),
-                head_node_id: Some(source_node.node_id.clone()),
-                forked_from_branch_id: Some(source_branch_id),
-                forked_from_node_id: Some(source_node.node_id.clone()),
-                label: format!("fork-{label_index}"),
-                created_at_ms,
-                updated_at_ms: created_at_ms,
-            });
-            hydrate_session_from_node(session, &source_node);
-            session.history_cursor.visible_node_id = Some(source_node.node_id.clone());
-            session.history_cursor.active_branch_id = Some(new_branch_id);
-            session.history_cursor.branch_head_node_id = Some(source_node.node_id.clone());
-            session.history_cursor.workspace_node_id = Some(source_node.node_id);
-            session.history_cursor.mode = HistoryCursorMode::Live;
-            session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
-            session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
-            refresh_session_metadata(session, true);
+            if let Some(start_envelope) = build_history_state_hook_envelope(
+                session,
+                HistoryStateHookPoint::BranchForkStart,
+                HistoryStateCommandKind::ForkFromHistoryNode,
+                Some(node_id),
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                None,
+            ) {
+                let hook_results = hook_executor.execute(&start_envelope).unwrap_or_default();
+                persist_history_state_hook_evidence(session, &start_envelope, &hook_results);
+                if history_state_hook_results_blocked(&hook_results) {
+                    refresh_session_metadata(session, true);
+                    blocked_error = Some(format!(
+                        "history branch fork blocked by hook before resolving node: {node_id}"
+                    ));
+                }
+            }
+            if blocked_error.is_some() {
+                sync_latest_history_node(session, None);
+            } else {
+                let source_node = history_node(session, node_id)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown history node: {node_id}"))?;
+                let source_branch_id = source_node.branch_id.clone();
+                let created_at_ms = now_timestamp_ms();
+                let label_index = session.history_branches.len() + 1;
+                let new_branch_id = new_history_branch_id(session, label_index);
+                session.history_branches.push(HistoryBranch {
+                    branch_id: new_branch_id.clone(),
+                    session_id: session.conversation_id.clone(),
+                    base_node_id: Some(source_node.node_id.clone()),
+                    head_node_id: Some(source_node.node_id.clone()),
+                    forked_from_branch_id: Some(source_branch_id),
+                    forked_from_node_id: Some(source_node.node_id.clone()),
+                    label: format!("fork-{label_index}"),
+                    created_at_ms,
+                    updated_at_ms: created_at_ms,
+                });
+                hydrate_session_from_node(session, &source_node);
+                session.history_cursor.visible_node_id = Some(source_node.node_id.clone());
+                session.history_cursor.active_branch_id = Some(new_branch_id.clone());
+                session.history_cursor.branch_head_node_id = Some(source_node.node_id.clone());
+                session.history_cursor.workspace_node_id = Some(source_node.node_id.clone());
+                session.history_cursor.mode = HistoryCursorMode::Live;
+                session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+                session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+                refresh_session_metadata(session, true);
+                if let Some(resolved_envelope) = build_history_state_hook_envelope(
+                    session,
+                    HistoryStateHookPoint::BranchForkResolved,
+                    HistoryStateCommandKind::ForkFromHistoryNode,
+                    Some(node_id),
+                    None,
+                    None,
+                    Some(source_node.node_id.as_str()),
+                    Some(new_branch_id.as_str()),
+                    true,
+                    false,
+                    false,
+                    false,
+                    None,
+                ) {
+                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
+                }
+            }
+        }
+        self.save_to_backend();
+        if let Some(error) = blocked_error {
+            return Err(error);
         }
         let snapshot = self.snapshot_for_session(&session_key);
-        self.save_to_backend();
         Ok(snapshot)
     }
 
@@ -776,35 +1181,88 @@ impl SessionStore {
         branch_id: &str,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
-        let target_node_id = {
+        let hook_executor = Arc::clone(&self.history_state_hook_executor);
+        let mut blocked_error = None;
+        let mut target_node_id = None;
+        {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
-            let branch = session
-                .history_branches
-                .iter()
-                .find(|item| item.branch_id == branch_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown history branch: {branch_id}"))?;
-            let node_id = branch
-                .head_node_id
-                .clone()
-                .ok_or_else(|| format!("history branch has no head node: {branch_id}"))?;
-            let node = history_node(session, &node_id)
-                .cloned()
-                .ok_or_else(|| format!("unknown history node: {node_id}"))?;
-            hydrate_session_from_node(session, &node);
-            session.history_cursor.visible_node_id = Some(node.node_id.clone());
-            session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
-            session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
-            session.history_cursor.workspace_node_id = Some(node.node_id.clone());
-            session.history_cursor.mode = HistoryCursorMode::Live;
-            session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
-            session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
-            refresh_session_metadata(session, true);
-            node.node_id
-        };
-        let snapshot = self.snapshot_for_session_at(&session_key, Some(target_node_id.as_str()));
+            if let Some(start_envelope) = build_history_state_hook_envelope(
+                session,
+                HistoryStateHookPoint::BranchSwitchStart,
+                HistoryStateCommandKind::SwitchHistoryBranch,
+                None,
+                Some(branch_id),
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                None,
+            ) {
+                let hook_results = hook_executor.execute(&start_envelope).unwrap_or_default();
+                persist_history_state_hook_evidence(session, &start_envelope, &hook_results);
+                if history_state_hook_results_blocked(&hook_results) {
+                    refresh_session_metadata(session, true);
+                    blocked_error = Some(format!(
+                        "history branch switch blocked by hook before resolving branch: {branch_id}"
+                    ));
+                }
+            }
+            if blocked_error.is_some() {
+                sync_latest_history_node(session, None);
+            } else {
+                let branch = session
+                    .history_branches
+                    .iter()
+                    .find(|item| item.branch_id == branch_id)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown history branch: {branch_id}"))?;
+                let node_id = branch
+                    .head_node_id
+                    .clone()
+                    .ok_or_else(|| format!("history branch has no head node: {branch_id}"))?;
+                let node = history_node(session, &node_id)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown history node: {node_id}"))?;
+                hydrate_session_from_node(session, &node);
+                session.history_cursor.visible_node_id = Some(node.node_id.clone());
+                session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
+                session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
+                session.history_cursor.workspace_node_id = Some(node.node_id.clone());
+                session.history_cursor.mode = HistoryCursorMode::Live;
+                session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+                session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+                refresh_session_metadata(session, true);
+                if let Some(resolved_envelope) = build_history_state_hook_envelope(
+                    session,
+                    HistoryStateHookPoint::BranchSwitchResolved,
+                    HistoryStateCommandKind::SwitchHistoryBranch,
+                    None,
+                    Some(branch_id),
+                    None,
+                    Some(node.node_id.as_str()),
+                    Some(branch.branch_id.as_str()),
+                    true,
+                    false,
+                    false,
+                    false,
+                    None,
+                ) {
+                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
+                }
+                target_node_id = Some(node.node_id);
+            }
+        }
         self.save_to_backend();
+        if let Some(error) = blocked_error {
+            return Err(error);
+        }
+        let target_node_id = target_node_id.expect("target node id should be available");
+        let snapshot = self.snapshot_for_session_at(&session_key, Some(target_node_id.as_str()));
         Ok(snapshot)
     }
 
@@ -1049,6 +1507,9 @@ impl SessionStore {
                 provider_native_transcript: Vec::new(),
                 turn_trace_history: Vec::new(),
                 long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
                 turn_count: 0,
                 last_referenced_file: None,
                 updated_at_ms: now_timestamp_ms(),
@@ -1071,6 +1532,8 @@ impl SessionStore {
                 .collect::<SessionMap>(),
             attachment_assets: self.attachment_assets.clone(),
             session_attachment_index: self.session_attachment_index.clone(),
+            mcp_source_snapshots: self.mcp_source_snapshots.clone(),
+            skill_source_snapshots: self.skill_source_snapshots.clone(),
         });
     }
 
@@ -1207,6 +1670,20 @@ fn snapshot_from_state(
         } else {
             HistoryCheckoutStatus::NotRequested
         };
+        let history_cursor = HistoryCursor {
+            session_id: session.conversation_id.clone(),
+            visible_node_id: Some(selected_node.node_id.clone()),
+            active_branch_id: Some(selected_node.branch_id.clone()),
+            branch_head_node_id: branch_head_node_id.clone(),
+            workspace_node_id: Some(selected_node.node_id.clone()),
+            mode: if branch_head_node_id.as_deref() == Some(selected_node.node_id.as_str()) {
+                HistoryCursorMode::Live
+            } else {
+                HistoryCursorMode::Historical
+            },
+            checkout_mode: HistoryCheckoutMode::TranscriptOnly,
+            checkout_status,
+        };
         return SessionSnapshot {
             conversation_id: session.conversation_id.clone(),
             title: selected_node.title.clone(),
@@ -1216,25 +1693,20 @@ fn snapshot_from_state(
             provider_native_transcript: selected_node.provider_native_transcript.clone(),
             turn_trace_history: selected_node.turn_trace_history.clone(),
             long_term_memory_entries: selected_node.long_term_memory_entries.clone(),
+            memory_write_evidence: selected_node.memory_write_evidence.clone(),
+            memory_write_hook_trace_records: selected_node.memory_write_hook_trace_records.clone(),
+            history_state_evidence: session.history_state_evidence.clone(),
+            history_state_audit_summary: build_history_state_audit_summary(
+                &history_cursor,
+                &session.history_state_evidence,
+            ),
+            run_control_audit_summary: build_missing_run_control_audit_summary(),
             turn_count: selected_node.turn_count,
             last_referenced_file: selected_node.last_referenced_file.clone(),
             updated_at_ms: session.updated_at_ms,
             history_nodes: session.history_nodes.clone(),
             history_branches: session.history_branches.clone(),
-            history_cursor: HistoryCursor {
-                session_id: session.conversation_id.clone(),
-                visible_node_id: Some(selected_node.node_id.clone()),
-                active_branch_id: Some(selected_node.branch_id.clone()),
-                branch_head_node_id: branch_head_node_id.clone(),
-                workspace_node_id: Some(selected_node.node_id.clone()),
-                mode: if branch_head_node_id.as_deref() == Some(selected_node.node_id.as_str()) {
-                    HistoryCursorMode::Live
-                } else {
-                    HistoryCursorMode::Historical
-                },
-                checkout_mode: HistoryCheckoutMode::TranscriptOnly,
-                checkout_status,
-            },
+            history_cursor,
             resolved_node_id: Some(selected_node.node_id.clone()),
             latest_node_id,
         };
@@ -1249,6 +1721,14 @@ fn snapshot_from_state(
         provider_native_transcript: session.provider_native_transcript.clone(),
         turn_trace_history: session.turn_trace_history.clone(),
         long_term_memory_entries: session.long_term_memory_entries.clone(),
+        memory_write_evidence: session.memory_write_evidence.clone(),
+        memory_write_hook_trace_records: session.memory_write_hook_trace_records.clone(),
+        history_state_evidence: session.history_state_evidence.clone(),
+        history_state_audit_summary: build_history_state_audit_summary(
+            &session.history_cursor,
+            &session.history_state_evidence,
+        ),
+        run_control_audit_summary: build_missing_run_control_audit_summary(),
         turn_count: session.turn_count,
         last_referenced_file: session.last_referenced_file.clone(),
         updated_at_ms: session.updated_at_ms,
@@ -1257,6 +1737,95 @@ fn snapshot_from_state(
         history_cursor: session.history_cursor.clone(),
         resolved_node_id: session.history_cursor.visible_node_id.clone(),
         latest_node_id,
+    }
+}
+
+fn build_history_state_audit_summary(
+    cursor: &HistoryCursor,
+    evidence: &[HistoryStateHookEvidence],
+) -> HistoryStateAuditSummary {
+    let action = evidence.last().map_or_else(
+        || HistoryStateAuditActionSummary {
+            status: "missing".to_string(),
+            source_family: "history_state".to_string(),
+            command_kind: None,
+            boundary: None,
+            result_kind: None,
+            summary: "history-state audit summary unavailable".to_string(),
+            elapsed_ms: None,
+            blocked: false,
+            degraded: false,
+            evidence_id: None,
+            observed_at_ms: None,
+            requested_node_id: None,
+            requested_branch_id: None,
+            resolved_node_id: None,
+            resolved_branch_id: None,
+        },
+        |latest| HistoryStateAuditActionSummary {
+            status: "available".to_string(),
+            source_family: "history_state".to_string(),
+            command_kind: Some(latest.command_kind.clone()),
+            boundary: Some(latest.boundary.clone()),
+            result_kind: Some(latest.result_kind.clone()),
+            summary: latest.summary.clone(),
+            elapsed_ms: Some(latest.elapsed_ms),
+            blocked: latest.blocked,
+            degraded: latest.degraded,
+            evidence_id: Some(latest.evidence_id.clone()),
+            observed_at_ms: Some(latest.recorded_at_ms),
+            requested_node_id: latest.requested_node_id.clone(),
+            requested_branch_id: latest.requested_branch_id.clone(),
+            resolved_node_id: latest.resolved_node_id.clone(),
+            resolved_branch_id: latest.resolved_branch_id.clone(),
+        },
+    );
+
+    HistoryStateAuditSummary {
+        action,
+        current_context: HistoryStateAuditCurrentContext {
+            mode: history_cursor_mode_label(&cursor.mode).to_string(),
+            visible_node_id: cursor.visible_node_id.clone(),
+            active_branch_id: cursor.active_branch_id.clone(),
+            branch_head_node_id: cursor.branch_head_node_id.clone(),
+            workspace_node_id: cursor.workspace_node_id.clone(),
+        },
+    }
+}
+
+pub fn build_missing_run_control_audit_summary() -> RunControlAuditSummary {
+    RunControlAuditSummary {
+        action_evidence_summary: RunControlAuditActionSummary {
+            status: "missing".to_string(),
+            source_family: "run_control".to_string(),
+            command_kind: None,
+            boundary: None,
+            result_kind: None,
+            summary: "run-control audit summary unavailable".to_string(),
+            target_summary: "target unavailable".to_string(),
+            elapsed_ms: None,
+            blocked: false,
+            degraded: false,
+            evidence_id: None,
+            observed_at_ms: None,
+            run_id: None,
+            turn_id: None,
+            checkpoint_turn_id: None,
+            checkpoint_kind: None,
+            recovery_mode: None,
+            projected_command: None,
+            degradation_reason: None,
+            request_summary: None,
+            start_reason: None,
+        },
+        current_context_projection: RunControlAuditCurrentContext {
+            phase: "idle".to_string(),
+            checkpoint_status: "missing".to_string(),
+            active_run_id: None,
+            checkpoint_kind: None,
+            checkpoint_recovery_mode: None,
+            submission_plan_command: None,
+        },
     }
 }
 
@@ -1310,6 +1879,9 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                     .cloned()
                     .collect(),
                 long_term_memory_entries: replay_long_term_memory(&session.history[..end]),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
                 turn_count: 0,
                 last_referenced_file: None,
                 updated_at_ms: session.updated_at_ms,
@@ -1339,6 +1911,10 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 provider_native_transcript: materialized.provider_native_transcript.clone(),
                 turn_trace_history: materialized.turn_trace_history.clone(),
                 long_term_memory_entries: materialized.long_term_memory_entries.clone(),
+                memory_write_evidence: materialized.memory_write_evidence.clone(),
+                memory_write_hook_trace_records: materialized
+                    .memory_write_hook_trace_records
+                    .clone(),
                 turn_count: materialized.turn_count,
                 last_referenced_file: materialized.last_referenced_file.clone(),
                 created_at_ms: session.updated_at_ms.saturating_add(turn_index as u64),
@@ -1485,6 +2061,8 @@ fn commit_history_node_from_live_state(
         provider_native_transcript: session.provider_native_transcript.clone(),
         turn_trace_history: session.turn_trace_history.clone(),
         long_term_memory_entries: session.long_term_memory_entries.clone(),
+        memory_write_evidence: session.memory_write_evidence.clone(),
+        memory_write_hook_trace_records: session.memory_write_hook_trace_records.clone(),
         turn_count: session.turn_count,
         last_referenced_file: session.last_referenced_file.clone(),
         created_at_ms,
@@ -1498,10 +2076,11 @@ fn commit_history_node_from_live_state(
     }
     session.history_cursor.visible_node_id = Some(node_id.clone());
     session.history_cursor.branch_head_node_id = Some(node_id.clone());
-    session.history_cursor.workspace_node_id = Some(node_id);
+    session.history_cursor.workspace_node_id = Some(node_id.clone());
     session.history_cursor.mode = HistoryCursorMode::Live;
     session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
     session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+    bind_unanchored_memory_write_evidence_to_history_node(session, &node_id);
 }
 
 fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) {
@@ -1514,6 +2093,8 @@ fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) 
     let provider_native_transcript = session.provider_native_transcript.clone();
     let turn_trace_history = session.turn_trace_history.clone();
     let long_term_memory_entries = session.long_term_memory_entries.clone();
+    let memory_write_evidence = session.memory_write_evidence.clone();
+    let memory_write_hook_trace_records = session.memory_write_hook_trace_records.clone();
     let turn_count = session.turn_count;
     let last_referenced_file = session.last_referenced_file.clone();
     let Some(node) = history_node_mut(session, &latest_node_id) else {
@@ -1525,11 +2106,35 @@ fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) 
     node.provider_native_transcript = provider_native_transcript;
     node.turn_trace_history = turn_trace_history;
     node.long_term_memory_entries = long_term_memory_entries;
+    node.memory_write_evidence = memory_write_evidence;
+    node.memory_write_hook_trace_records = memory_write_hook_trace_records;
     node.turn_count = turn_count;
     node.last_referenced_file = last_referenced_file;
     if run_id.is_some() {
         node.run_id = run_id;
     }
+}
+
+fn bind_unanchored_memory_write_evidence_to_history_node(
+    session: &mut SessionState,
+    history_node_id: &str,
+) {
+    let mut changed = false;
+    for evidence in &mut session.memory_write_evidence {
+        if evidence.source_history_node_id.is_none() {
+            evidence.source_history_node_id = Some(history_node_id.to_string());
+            changed = true;
+        }
+    }
+    if !changed {
+        return;
+    }
+
+    let evidence = session.memory_write_evidence.clone();
+    let Some(node) = history_node_mut(session, history_node_id) else {
+        return;
+    };
+    node.memory_write_evidence = evidence;
 }
 
 fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
@@ -1539,8 +2144,155 @@ fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
     session.provider_native_transcript = node.provider_native_transcript.clone();
     session.turn_trace_history = node.turn_trace_history.clone();
     session.long_term_memory_entries = node.long_term_memory_entries.clone();
+    session.memory_write_evidence = node.memory_write_evidence.clone();
+    session.memory_write_hook_trace_records = node.memory_write_hook_trace_records.clone();
     session.turn_count = node.turn_count;
     session.last_referenced_file = node.last_referenced_file.clone();
+}
+
+fn build_history_state_cursor_summary(cursor: &HistoryCursor) -> HistoryStateCursorSummary {
+    HistoryStateCursorSummary {
+        visible_node_id: cursor.visible_node_id.clone(),
+        active_branch_id: cursor.active_branch_id.clone(),
+        branch_head_node_id: cursor.branch_head_node_id.clone(),
+        workspace_node_id: cursor.workspace_node_id.clone(),
+        mode: history_cursor_mode_label(&cursor.mode).to_string(),
+        checkout_mode: history_checkout_mode_label(&cursor.checkout_mode).to_string(),
+        checkout_status: history_checkout_status_label(&cursor.checkout_status).to_string(),
+    }
+}
+
+fn history_cursor_mode_label(mode: &HistoryCursorMode) -> &'static str {
+    match mode {
+        HistoryCursorMode::Live => "live",
+        HistoryCursorMode::Historical => "historical",
+        HistoryCursorMode::HistoricalDirty => "historical_dirty",
+    }
+}
+
+fn history_checkout_mode_label(mode: &HistoryCheckoutMode) -> &'static str {
+    match mode {
+        HistoryCheckoutMode::TranscriptOnly => "transcript_only",
+        HistoryCheckoutMode::TranscriptAndWorkspace => "transcript_and_workspace",
+    }
+}
+
+fn history_checkout_status_label(status: &HistoryCheckoutStatus) -> &'static str {
+    match status {
+        HistoryCheckoutStatus::NotRequested => "not_requested",
+        HistoryCheckoutStatus::Applied => "applied",
+        HistoryCheckoutStatus::DegradedToTranscriptOnly => "degraded_to_transcript_only",
+    }
+}
+
+fn history_state_boundary_label(hook_point: &HistoryStateHookPoint) -> Option<&'static str> {
+    match hook_point {
+        HistoryStateHookPoint::HistoryCheckoutStart => Some("history.checkout.start"),
+        HistoryStateHookPoint::HistoryCheckoutResolved => Some("history.checkout.resolved"),
+        HistoryStateHookPoint::BranchRestoreStart => Some("history.branch_restore.start"),
+        HistoryStateHookPoint::BranchRestoreResolved => Some("history.branch_restore.resolved"),
+        HistoryStateHookPoint::BranchForkStart => Some("history.branch_fork.start"),
+        HistoryStateHookPoint::BranchForkResolved => Some("history.branch_fork.resolved"),
+        HistoryStateHookPoint::BranchSwitchStart => Some("history.branch_switch.start"),
+        HistoryStateHookPoint::BranchSwitchResolved => Some("history.branch_switch.resolved"),
+    }
+}
+
+fn build_history_state_hook_envelope(
+    session: &SessionState,
+    hook_point: HistoryStateHookPoint,
+    command_kind: HistoryStateCommandKind,
+    requested_node_id: Option<&str>,
+    requested_branch_id: Option<&str>,
+    requested_mode: Option<&HistoryCheckoutMode>,
+    resolved_node_id: Option<&str>,
+    resolved_branch_id: Option<&str>,
+    transcript_restore_applied: bool,
+    workspace_rollback_capable: bool,
+    workspace_rollback_applied: bool,
+    degraded: bool,
+    degradation_reason: Option<&str>,
+) -> Option<HistoryStateHookEnvelope> {
+    Some(HistoryStateHookEnvelope {
+        session_id: session.conversation_id.clone(),
+        hook_point: hook_point.clone(),
+        command_kind,
+        source_boundary: history_state_boundary_label(&hook_point)?.to_string(),
+        requested_node_id: requested_node_id.map(|value| value.to_string()),
+        requested_branch_id: requested_branch_id.map(|value| value.to_string()),
+        requested_checkout_mode: requested_mode
+            .map(|value| history_checkout_mode_label(value).to_string()),
+        resolved_node_id: resolved_node_id.map(|value| value.to_string()),
+        resolved_branch_id: resolved_branch_id.map(|value| value.to_string()),
+        transcript_restore_applied,
+        workspace_rollback_capable,
+        workspace_rollback_applied,
+        degraded,
+        degradation_reason: degradation_reason.map(|value| value.to_string()),
+        cursor_summary: build_history_state_cursor_summary(&session.history_cursor),
+    })
+}
+
+fn history_state_hook_results_blocked(hook_results: &[crate::agent::hooks::HookExecutionResult]) -> bool {
+    hook_results.iter().any(|result| {
+        result.blocked || matches!(result.structured_result, HookStructuredResult::Deny(_))
+    })
+}
+
+fn history_state_command_kind_label(command_kind: &HistoryStateCommandKind) -> &'static str {
+    match command_kind {
+        HistoryStateCommandKind::CheckoutHistoryNode => "checkout_history_node",
+        HistoryStateCommandKind::RestoreBranchHead => "restore_branch_head",
+        HistoryStateCommandKind::ForkFromHistoryNode => "fork_from_history_node",
+        HistoryStateCommandKind::SwitchHistoryBranch => "switch_history_branch",
+    }
+}
+
+fn hook_result_kind_label(result_kind: &HookResultKind) -> &'static str {
+    match result_kind {
+        HookResultKind::Observe => "observe",
+        HookResultKind::Allow => "allow",
+        HookResultKind::Deny => "deny",
+        HookResultKind::Patch => "patch",
+        HookResultKind::SideEffectRequest => "side_effect_request",
+    }
+}
+
+fn persist_history_state_hook_evidence(
+    session: &mut SessionState,
+    envelope: &HistoryStateHookEnvelope,
+    hook_results: &[crate::agent::hooks::HookExecutionResult],
+) {
+    if hook_results.is_empty() {
+        return;
+    }
+
+    let recorded_at_ms = now_timestamp_ms();
+    for (index, result) in hook_results.iter().enumerate() {
+        session.history_state_evidence.push(HistoryStateHookEvidence {
+            evidence_id: format!(
+                "history-state:{}:{}:{}:{}",
+                session.conversation_id,
+                envelope.source_boundary,
+                recorded_at_ms,
+                index
+            ),
+            session_id: session.conversation_id.clone(),
+            boundary: envelope.source_boundary.clone(),
+            command_kind: history_state_command_kind_label(&envelope.command_kind).to_string(),
+            result_kind: hook_result_kind_label(&result.result_kind).to_string(),
+            summary: result.trace_summary.clone(),
+            elapsed_ms: result.elapsed_ms,
+            blocked: result.blocked
+                || matches!(result.structured_result, HookStructuredResult::Deny(_)),
+            degraded: envelope.degraded,
+            requested_node_id: envelope.requested_node_id.clone(),
+            requested_branch_id: envelope.requested_branch_id.clone(),
+            resolved_node_id: envelope.resolved_node_id.clone(),
+            resolved_branch_id: envelope.resolved_branch_id.clone(),
+            recorded_at_ms,
+        });
+    }
 }
 
 fn replay_long_term_memory(history: &[TurnHistoryMessage]) -> Vec<LongTermMemoryRecord> {
@@ -1662,14 +2414,50 @@ fn normalize_trace_timeline_entries(turn_trace_history: &mut [TurnTraceRecord]) 
 fn update_long_term_memory_from_user_message(
     session: &mut SessionState,
     user_message: &str,
+    hook_executor: &dyn MemoryWriteHookExecutor,
 ) -> bool {
     let extracted_entries = extract_long_term_memory_from_user_message(user_message);
     if extracted_entries.is_empty() {
         return false;
     }
 
+    let existing_entries = session.long_term_memory_entries.clone();
+    let mut planned_writes = plan_memory_write_intents(&existing_entries, &extracted_entries);
+    if let Some(envelope) = build_memory_write_hook_envelope(
+        &session.conversation_id,
+        user_message,
+        planned_writes.clone(),
+    ) {
+        let hook_results = hook_executor.execute(&envelope).unwrap_or_default();
+        session.memory_write_hook_trace_records.extend(
+            hook_results
+                .iter()
+                .map(crate::agent::hooks::HookExecutionResult::to_trace_record),
+        );
+        let hook_outcome =
+            apply_memory_write_hook_results(&existing_entries, &mut planned_writes, &hook_results);
+        if hook_outcome.blocked {
+            return false;
+        }
+    }
+
+    recalculate_planned_memory_write_operations(&existing_entries, &mut planned_writes);
+    if let Some(envelope) = build_memory_write_hook_envelope(
+        &session.conversation_id,
+        user_message,
+        planned_writes.clone(),
+    ) {
+        session.memory_write_evidence.extend(
+            planned_writes
+                .iter()
+                .filter(|planned| planned.operation != MemoryWriteOperation::Noop)
+                .map(|planned| build_persisted_memory_write_evidence(&envelope, planned)),
+        );
+    }
+
     let mut changed = false;
-    for entry in extracted_entries {
+    for planned in planned_writes {
+        let entry = planned.entry;
         match session
             .long_term_memory_entries
             .iter_mut()
@@ -1689,6 +2477,240 @@ fn update_long_term_memory_from_user_message(
     }
 
     changed
+}
+
+#[derive(Default)]
+struct MemoryWriteHookApplicationOutcome {
+    blocked: bool,
+}
+
+#[derive(Clone)]
+struct PlannedMemoryWrite {
+    key: String,
+    entry: LongTermMemoryRecord,
+    operation: MemoryWriteOperation,
+}
+
+fn plan_memory_write_intents(
+    existing_entries: &[LongTermMemoryRecord],
+    extracted_entries: &[LongTermMemoryRecord],
+) -> Vec<PlannedMemoryWrite> {
+    extracted_entries
+        .iter()
+        .cloned()
+        .map(|entry| {
+            let operation = match existing_entries
+                .iter()
+                .find(|existing| memory_record_identity(existing) == memory_record_identity(&entry))
+            {
+                Some(existing)
+                    if existing.content == entry.content && existing.source == entry.source =>
+                {
+                    MemoryWriteOperation::Noop
+                }
+                Some(_) => MemoryWriteOperation::Update,
+                None => MemoryWriteOperation::Insert,
+            };
+            PlannedMemoryWrite {
+                key: memory_record_identity(&entry),
+                entry,
+                operation,
+            }
+        })
+        .collect()
+}
+
+fn recalculate_planned_memory_write_operations(
+    existing_entries: &[LongTermMemoryRecord],
+    planned_writes: &mut [PlannedMemoryWrite],
+) {
+    for planned in planned_writes {
+        planned.operation = match existing_entries.iter().find(|existing| {
+            memory_record_identity(existing) == memory_record_identity(&planned.entry)
+        }) {
+            Some(existing)
+                if existing.content == planned.entry.content
+                    && existing.source == planned.entry.source =>
+            {
+                MemoryWriteOperation::Noop
+            }
+            Some(_) => MemoryWriteOperation::Update,
+            None => MemoryWriteOperation::Insert,
+        };
+        planned.key = memory_record_identity(&planned.entry);
+    }
+}
+
+fn apply_memory_write_hook_results(
+    existing_entries: &[LongTermMemoryRecord],
+    planned_writes: &mut [PlannedMemoryWrite],
+    hook_results: &[crate::agent::hooks::HookExecutionResult],
+) -> MemoryWriteHookApplicationOutcome {
+    for result in hook_results {
+        if result.blocked {
+            return MemoryWriteHookApplicationOutcome { blocked: true };
+        }
+        if matches!(result.structured_result, HookStructuredResult::Deny(_)) {
+            return MemoryWriteHookApplicationOutcome { blocked: true };
+        }
+    }
+
+    let transform_results = hook_results
+        .iter()
+        .filter(|result| result.result_kind == crate::agent::hooks::HookResultKind::Patch)
+        .cloned()
+        .collect::<Vec<_>>();
+    if transform_results.is_empty() {
+        return MemoryWriteHookApplicationOutcome { blocked: false };
+    }
+
+    let merged =
+        match merge_patch_results(&transform_results, HookPatchConflictPolicy::LastWriteWins) {
+            Ok(merged) => merged,
+            Err(_) => return MemoryWriteHookApplicationOutcome { blocked: false },
+        };
+
+    for operation in merged.operations {
+        let patch = operation.operation;
+        if patch.target != HookPatchTarget::MemoryWriteIntent {
+            continue;
+        }
+        if patch.operation != HookPatchOperationKind::Set {
+            continue;
+        }
+
+        let Some((index, field)) = parse_memory_write_patch_path(&patch.path) else {
+            continue;
+        };
+        let Some(planned) = planned_writes.get_mut(index) else {
+            continue;
+        };
+        let Some(value_text) = patch
+            .value_text
+            .clone()
+            .or_else(|| patch.value_summary.clone())
+        else {
+            continue;
+        };
+
+        match field {
+            MemoryWritePatchField::Kind => planned.entry.kind = value_text,
+            MemoryWritePatchField::Content => planned.entry.content = value_text,
+            MemoryWritePatchField::Source => planned.entry.source = value_text,
+            MemoryWritePatchField::Operation => {
+                if let Some(operation) = parse_memory_write_operation(&value_text) {
+                    planned.operation = operation;
+                }
+            }
+        }
+    }
+
+    recalculate_planned_memory_write_operations(existing_entries, planned_writes);
+    MemoryWriteHookApplicationOutcome { blocked: false }
+}
+
+#[derive(Clone, Copy)]
+enum MemoryWritePatchField {
+    Kind,
+    Content,
+    Source,
+    Operation,
+}
+
+fn parse_memory_write_patch_path(path: &str) -> Option<(usize, MemoryWritePatchField)> {
+    let suffix = path.strip_prefix("writes[")?;
+    let (index_text, field_text) = suffix.split_once("].")?;
+    let index = index_text.parse::<usize>().ok()?;
+    let field = match field_text {
+        "kind" => MemoryWritePatchField::Kind,
+        "content" => MemoryWritePatchField::Content,
+        "source" => MemoryWritePatchField::Source,
+        "operation" => MemoryWritePatchField::Operation,
+        _ => return None,
+    };
+    Some((index, field))
+}
+
+fn parse_memory_write_operation(value: &str) -> Option<MemoryWriteOperation> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "insert" => Some(MemoryWriteOperation::Insert),
+        "update" => Some(MemoryWriteOperation::Update),
+        "noop" => Some(MemoryWriteOperation::Noop),
+        _ => None,
+    }
+}
+
+fn build_memory_write_hook_envelope(
+    session_id: &str,
+    user_message: &str,
+    planned_writes: Vec<PlannedMemoryWrite>,
+) -> Option<MemoryWriteHookEnvelope> {
+    if planned_writes.is_empty() {
+        return None;
+    }
+
+    Some(MemoryWriteHookEnvelope {
+        session_id: Some(session_id.to_string()),
+        hook_point: MemoryWriteHookPoint::LongTermMemoryWrite,
+        target: MemoryWriteTarget::LongTermMemory,
+        source_boundary: "session.update_long_term_memory_from_user_message".to_string(),
+        user_message_summary: summarize_memory_text(user_message),
+        writes: planned_writes
+            .into_iter()
+            .map(|planned| MemoryWriteIntentRecord {
+                key: planned.key,
+                kind: planned.entry.kind,
+                content_summary: summarize_memory_text(&planned.entry.content),
+                content: planned.entry.content,
+                source: planned.entry.source,
+                operation: planned.operation,
+            })
+            .collect(),
+    })
+}
+
+fn build_persisted_memory_write_evidence(
+    envelope: &MemoryWriteHookEnvelope,
+    planned: &PlannedMemoryWrite,
+) -> PersistedEffectEvidence {
+    PersistedEffectEvidence {
+        evidence_id: format!(
+            "memory-write:{}:{}",
+            planned.key, planned.entry.updated_at_ms
+        ),
+        effect_kind: "memory_write.long_term_memory".to_string(),
+        boundary: "session.update_long_term_memory_from_user_message".to_string(),
+        target_session_id: envelope.session_id.clone(),
+        source_history_node_id: None,
+        target_summary: format!(
+            "{}:{}",
+            planned.entry.kind,
+            summarize_memory_text(&planned.entry.content)
+        ),
+        persistence_ref: format!("long_term_memory_entries/{}", planned.key),
+        replay_decision_basis:
+            "persisted memory write evidence is required to avoid replaying side effects"
+                .to_string(),
+        persisted_at_ms: planned.entry.updated_at_ms,
+        replay_required_if_missing: true,
+    }
+}
+
+fn summarize_memory_text(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.trim();
+    if normalized.chars().count() <= 80 {
+        return normalized.to_string();
+    }
+    let mut summary = String::new();
+    for (index, ch) in normalized.chars().enumerate() {
+        if index >= 77 {
+            break;
+        }
+        summary.push(ch);
+    }
+    summary.push_str("...");
+    summary
 }
 
 fn extract_long_term_memory_from_user_message(user_message: &str) -> Vec<LongTermMemoryRecord> {
@@ -2237,6 +3259,9 @@ fn session_is_persistable(session: &SessionState) -> bool {
     !session.history.is_empty()
         || !session.turn_trace_history.is_empty()
         || !session.long_term_memory_entries.is_empty()
+        || !session.memory_write_evidence.is_empty()
+        || !session.memory_write_hook_trace_records.is_empty()
+        || !session.history_state_evidence.is_empty()
 }
 
 fn build_title(history: &[TurnHistoryMessage]) -> String {
@@ -2366,6 +3391,9 @@ fn default_sessions() -> SessionMap {
             provider_native_transcript: Vec::new(),
             turn_trace_history: Vec::new(),
             long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
             turn_count: 0,
             last_referenced_file: None,
             updated_at_ms: now_timestamp_ms(),
@@ -2759,6 +3787,42 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    struct StaticMemoryWriteHookExecutor {
+        results: Vec<crate::agent::hooks::HookExecutionResult>,
+    }
+
+    impl MemoryWriteHookExecutor for StaticMemoryWriteHookExecutor {
+        fn execute(
+            &self,
+            _envelope: &MemoryWriteHookEnvelope,
+        ) -> Result<Vec<crate::agent::hooks::HookExecutionResult>, String> {
+            Ok(self.results.clone())
+        }
+    }
+
+    struct StaticHistoryStateHookExecutor {
+        start_results: Vec<crate::agent::hooks::HookExecutionResult>,
+        resolved_results: Vec<crate::agent::hooks::HookExecutionResult>,
+    }
+
+    impl HistoryStateHookExecutor for StaticHistoryStateHookExecutor {
+        fn execute(
+            &self,
+            envelope: &HistoryStateHookEnvelope,
+        ) -> Result<Vec<crate::agent::hooks::HookExecutionResult>, String> {
+            Ok(match envelope.hook_point {
+                HistoryStateHookPoint::HistoryCheckoutStart
+                | HistoryStateHookPoint::BranchRestoreStart
+                | HistoryStateHookPoint::BranchForkStart
+                | HistoryStateHookPoint::BranchSwitchStart => self.start_results.clone(),
+                HistoryStateHookPoint::HistoryCheckoutResolved
+                | HistoryStateHookPoint::BranchRestoreResolved
+                | HistoryStateHookPoint::BranchForkResolved
+                | HistoryStateHookPoint::BranchSwitchResolved => self.resolved_results.clone(),
+            })
+        }
+    }
+
     #[test]
     fn memory_backend_keeps_turns_in_process() {
         let mut store = SessionStore::memory_only();
@@ -2831,6 +3895,933 @@ mod tests {
             snapshot.long_term_memory_entries[0].content,
             "Reply in Chinese and keep answers concise."
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn append_turn_persists_memory_write_evidence_for_explicit_note() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(
+            Some("memory-evidence"),
+            "请记住这个项目当前优先推进 PA-018。",
+            "我会记住这条信息。",
+            None,
+            Vec::new(),
+        );
+
+        let snapshot = store.snapshot(Some("memory-evidence"), &[]);
+        assert!(!snapshot.memory_write_evidence.is_empty());
+        let latest_node_id = snapshot
+            .history_cursor
+            .visible_node_id
+            .clone()
+            .expect("latest history node id");
+        assert!(snapshot.memory_write_evidence.iter().any(|evidence| {
+            evidence.effect_kind == "memory_write.long_term_memory"
+                && evidence.boundary == "session.update_long_term_memory_from_user_message"
+                && evidence.replay_required_if_missing
+                && evidence
+                    .persistence_ref
+                    .starts_with("long_term_memory_entries/")
+                && evidence.source_history_node_id.as_deref() == Some(latest_node_id.as_str())
+        }));
+    }
+
+    #[test]
+    fn memory_write_evidence_roundtrip_through_store() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+        store.append_turn(
+            Some("memory-evidence-roundtrip"),
+            "请记住这个项目当前优先推进 PA-018。",
+            "我会记住这条信息。",
+            None,
+            Vec::new(),
+        );
+
+        let reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let mut reloaded = reloaded;
+        let snapshot = reloaded.snapshot(Some("memory-evidence-roundtrip"), &[]);
+        assert!(!snapshot.memory_write_evidence.is_empty());
+        assert!(snapshot.memory_write_evidence.iter().all(|evidence| {
+            evidence.effect_kind == "memory_write.long_term_memory"
+                && evidence.replay_required_if_missing
+                && evidence.source_history_node_id.is_some()
+        }));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn memory_write_guard_deny_blocks_persistence_and_memory_mutation() {
+        let mut store = SessionStore::memory_only();
+        store.set_memory_write_hook_executor_for_test(Box::new(StaticMemoryWriteHookExecutor {
+            results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "memory.guard".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Guard,
+                hook_point: crate::agent::hooks::TurnHookPoint::ContextBuildStart,
+                hook_order: 1,
+                result_kind: crate::agent::hooks::HookResultKind::Deny,
+                structured_result: HookStructuredResult::Deny(
+                    crate::agent::hooks::HookDenyDecision {
+                        reason_code: "memory_write_blocked".to_string(),
+                        message: "memory write denied by guard".to_string(),
+                    },
+                ),
+                blocked: true,
+                elapsed_ms: 1,
+                input_summary: Some("deny memory write".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "memory write denied".to_string(),
+            }],
+        }));
+
+        store.append_turn(
+            Some("memory-guard-deny"),
+            "请记住这个项目当前优先推进 PA-039。",
+            "收到。",
+            None,
+            Vec::new(),
+        );
+
+        let snapshot = store.snapshot(Some("memory-guard-deny"), &[]);
+        assert!(snapshot.long_term_memory_entries.is_empty());
+        assert!(snapshot.memory_write_evidence.is_empty());
+        assert_eq!(snapshot.memory_write_hook_trace_records.len(), 1);
+        assert_eq!(
+            snapshot.memory_write_hook_trace_records[0].hook_name,
+            "memory.guard"
+        );
+        assert!(snapshot.memory_write_hook_trace_records[0].blocked);
+        assert_eq!(
+            snapshot.memory_write_hook_trace_records[0].summary,
+            "memory write denied"
+        );
+    }
+
+    #[test]
+    fn memory_write_transform_patch_can_rewrite_persisted_memory_intent() {
+        let mut store = SessionStore::memory_only();
+        store.set_memory_write_hook_executor_for_test(Box::new(StaticMemoryWriteHookExecutor {
+            results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "memory.transform".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Transform,
+                hook_point: crate::agent::hooks::TurnHookPoint::ContextBuildEnd,
+                hook_order: 1,
+                result_kind: crate::agent::hooks::HookResultKind::Patch,
+                structured_result: HookStructuredResult::Patch {
+                    operations: vec![crate::agent::hooks::HookPatchOperation {
+                        target: HookPatchTarget::MemoryWriteIntent,
+                        path: "writes[1].content".to_string(),
+                        operation: HookPatchOperationKind::Set,
+                        value_summary: Some("Current active task is PA-040.".to_string()),
+                        value_text: Some("Current active task is PA-040.".to_string()),
+                    }],
+                },
+                blocked: false,
+                elapsed_ms: 1,
+                input_summary: Some("rewrite memory content".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "memory write transformed".to_string(),
+            }],
+        }));
+
+        store.append_turn(
+            Some("memory-transform"),
+            "请记住这个项目当前优先推进 PA-039。",
+            "收到。",
+            None,
+            Vec::new(),
+        );
+
+        let snapshot = store.snapshot(Some("memory-transform"), &[]);
+        let active_task = snapshot
+            .long_term_memory_entries
+            .iter()
+            .find(|entry| entry.kind == "project_focus.active_task")
+            .expect("transformed active task entry");
+        assert_eq!(active_task.content, "Current active task is PA-040.");
+        assert!(snapshot.memory_write_evidence.iter().any(|evidence| {
+            evidence.target_summary.contains("PA-040")
+                && evidence.persistence_ref == "long_term_memory_entries/project_focus.active_task"
+        }));
+        assert_eq!(snapshot.memory_write_hook_trace_records.len(), 1);
+        assert_eq!(
+            snapshot.memory_write_hook_trace_records[0].hook_name,
+            "memory.transform"
+        );
+        assert!(!snapshot.memory_write_hook_trace_records[0].blocked);
+    }
+
+    #[test]
+    fn memory_write_hook_trace_records_roundtrip_through_store() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+        store.set_memory_write_hook_executor_for_test(Box::new(StaticMemoryWriteHookExecutor {
+            results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "memory.transform".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Transform,
+                hook_point: crate::agent::hooks::TurnHookPoint::ContextBuildEnd,
+                hook_order: 1,
+                result_kind: crate::agent::hooks::HookResultKind::Patch,
+                structured_result: HookStructuredResult::Patch {
+                    operations: vec![crate::agent::hooks::HookPatchOperation {
+                        target: HookPatchTarget::MemoryWriteIntent,
+                        path: "writes[1].content".to_string(),
+                        operation: HookPatchOperationKind::Set,
+                        value_summary: Some("Current active task is PA-040.".to_string()),
+                        value_text: Some("Current active task is PA-040.".to_string()),
+                    }],
+                },
+                blocked: false,
+                elapsed_ms: 1,
+                input_summary: Some("rewrite memory content".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "memory write transformed".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("memory-hook-trace-roundtrip"),
+            "请记住这个项目当前优先推进 PA-039。",
+            "收到。",
+            None,
+            Vec::new(),
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("memory-hook-trace-roundtrip"), &[]);
+        assert_eq!(snapshot.memory_write_hook_trace_records.len(), 1);
+        assert_eq!(
+            snapshot.memory_write_hook_trace_records[0].hook_name,
+            "memory.transform"
+        );
+        assert_eq!(
+            snapshot.memory_write_hook_trace_records[0].summary,
+            "memory write transformed"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_checkout_restores_memory_write_hook_trace_records_from_selected_node() {
+        let mut store = SessionStore::memory_only();
+        store.set_memory_write_hook_executor_for_test(Box::new(StaticMemoryWriteHookExecutor {
+            results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "memory.transform".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Transform,
+                hook_point: crate::agent::hooks::TurnHookPoint::ContextBuildEnd,
+                hook_order: 1,
+                result_kind: crate::agent::hooks::HookResultKind::Patch,
+                structured_result: HookStructuredResult::Patch {
+                    operations: vec![crate::agent::hooks::HookPatchOperation {
+                        target: HookPatchTarget::MemoryWriteIntent,
+                        path: "writes[1].content".to_string(),
+                        operation: HookPatchOperationKind::Set,
+                        value_summary: Some("Current active task is PA-040.".to_string()),
+                        value_text: Some("Current active task is PA-040.".to_string()),
+                    }],
+                },
+                blocked: false,
+                elapsed_ms: 1,
+                input_summary: Some("rewrite memory content".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "memory write transformed".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("memory-hook-history"),
+            "请记住这个项目当前优先推进 PA-039。",
+            "收到。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("memory-hook-history"),
+            "请记住这个项目当前风险是 trace reload 不稳定。",
+            "收到。",
+            None,
+            Vec::new(),
+        );
+
+        let (nodes, _, _) = store.load_history_graph(Some("memory-hook-history"));
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].memory_write_hook_trace_records.len(), 1);
+        assert_eq!(nodes[1].memory_write_hook_trace_records.len(), 2);
+
+        let historical = store
+            .checkout_history_node(
+                Some("memory-hook-history"),
+                nodes[0].node_id.as_str(),
+                HistoryCheckoutMode::TranscriptOnly,
+            )
+            .expect("checkout should succeed");
+        assert_eq!(historical.memory_write_hook_trace_records.len(), 1);
+        assert_eq!(
+            historical.memory_write_hook_trace_records[0].hook_name,
+            "memory.transform"
+        );
+
+        let live = store.snapshot(Some("memory-hook-history"), &[]);
+        assert_eq!(live.memory_write_hook_trace_records.len(), 1);
+    }
+
+    #[test]
+    fn checkout_history_node_persists_history_state_hook_evidence() {
+        let mut store = SessionStore::memory_only();
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.guard.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout start observed".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 2,
+                input_summary: Some("checkout start".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout start observed".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.resolved.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout resolved".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 3,
+                input_summary: Some("checkout resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout resolved".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("history-hook-session"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-hook-session"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+
+        let (nodes, _, _) = store.load_history_graph(Some("history-hook-session"));
+        let snapshot = store
+            .checkout_history_node(
+                Some("history-hook-session"),
+                nodes[0].node_id.as_str(),
+                HistoryCheckoutMode::TranscriptOnly,
+            )
+            .expect("checkout should succeed");
+
+        assert_eq!(snapshot.history_state_evidence.len(), 2);
+        assert_eq!(
+            snapshot.history_state_evidence[0].boundary,
+            "history.checkout.start"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].boundary,
+            "history.checkout.resolved"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].resolved_node_id.as_deref(),
+            Some(nodes[0].node_id.as_str())
+        );
+        assert!(!snapshot.history_state_evidence[1].degraded);
+    }
+
+    #[test]
+    fn checkout_history_node_blocked_by_hook_persists_only_start_evidence() {
+        let mut store = SessionStore::memory_only();
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.guard.deny".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Guard,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Deny,
+                structured_result: HookStructuredResult::Deny(
+                    crate::agent::hooks::HookDenyDecision {
+                        reason_code: "history_checkout_blocked".to_string(),
+                        message: "history checkout denied by guard".to_string(),
+                    },
+                ),
+                blocked: true,
+                elapsed_ms: 1,
+                input_summary: Some("checkout denied".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout denied".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.resolved.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "should not execute".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 1,
+                input_summary: Some("unexpected resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "unexpected resolved".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("history-hook-blocked"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-hook-blocked"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+
+        let live_before = store.snapshot(Some("history-hook-blocked"), &[]);
+        let latest_before = live_before
+            .history_cursor
+            .visible_node_id
+            .clone()
+            .expect("latest visible node before blocked checkout");
+        let (nodes, _, _) = store.load_history_graph(Some("history-hook-blocked"));
+        let error = store
+            .checkout_history_node(
+                Some("history-hook-blocked"),
+                nodes[0].node_id.as_str(),
+                HistoryCheckoutMode::TranscriptOnly,
+            )
+            .expect_err("checkout should be blocked by hook");
+        assert!(error.contains("history checkout blocked by hook"));
+
+        let live_after = store.snapshot(Some("history-hook-blocked"), &[]);
+        assert_eq!(live_after.history_state_evidence.len(), 1);
+        assert_eq!(
+            live_after.history_state_evidence[0].boundary,
+            "history.checkout.start"
+        );
+        assert_eq!(
+            live_after.history_state_evidence[0].resolved_node_id,
+            None
+        );
+        assert_eq!(
+            live_after.history_cursor.visible_node_id.as_deref(),
+            Some(latest_before.as_str())
+        );
+        assert_eq!(live_after.history_cursor.mode, HistoryCursorMode::Live);
+    }
+
+    #[test]
+    fn history_state_hook_evidence_roundtrip_through_file_backend() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.guard.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout start observed".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 2,
+                input_summary: Some("checkout start".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout start observed".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.resolved.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout resolved".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 3,
+                input_summary: Some("checkout resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout resolved".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("history-hook-roundtrip"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-hook-roundtrip"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+
+        let (nodes, _, _) = store.load_history_graph(Some("history-hook-roundtrip"));
+        store
+            .checkout_history_node(
+                Some("history-hook-roundtrip"),
+                nodes[0].node_id.as_str(),
+                HistoryCheckoutMode::TranscriptOnly,
+            )
+            .expect("checkout should succeed");
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("history-hook-roundtrip"), &[]);
+        assert_eq!(snapshot.history_state_evidence.len(), 2);
+        assert_eq!(
+            snapshot.history_state_evidence[0].boundary,
+            "history.checkout.start"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].boundary,
+            "history.checkout.resolved"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].resolved_node_id.as_deref(),
+            Some(nodes[0].node_id.as_str())
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn restore_branch_head_persists_history_state_hook_evidence() {
+        let mut store = SessionStore::memory_only();
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.restore.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history restore start observed".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 2,
+                input_summary: Some("restore start".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history restore start observed".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.restore.resolved".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history restore resolved".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 3,
+                input_summary: Some("restore resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history restore resolved".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("history-restore-session"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-restore-session"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+
+        let snapshot = store
+            .restore_branch_head(Some("history-restore-session"), Some("branch-main"))
+            .expect("restore should succeed");
+
+        assert_eq!(snapshot.history_state_evidence.len(), 2);
+        assert_eq!(
+            snapshot.history_state_evidence[0].boundary,
+            "history.branch_restore.start"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].boundary,
+            "history.branch_restore.resolved"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].resolved_branch_id.as_deref(),
+            Some("branch-main")
+        );
+        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Live);
+    }
+
+    #[test]
+    fn fork_from_history_node_blocked_by_hook_persists_only_start_evidence() {
+        let mut store = SessionStore::memory_only();
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.fork.deny".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Guard,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Deny,
+                structured_result: HookStructuredResult::Deny(
+                    crate::agent::hooks::HookDenyDecision {
+                        reason_code: "history_fork_blocked".to_string(),
+                        message: "history fork denied by guard".to_string(),
+                    },
+                ),
+                blocked: true,
+                elapsed_ms: 1,
+                input_summary: Some("fork denied".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history fork denied".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.fork.resolved".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "should not execute".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 1,
+                input_summary: Some("unexpected fork resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "unexpected fork resolved".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("history-fork-blocked"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-fork-blocked"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+
+        let live_before = store.snapshot(Some("history-fork-blocked"), &[]);
+        let latest_before = live_before
+            .history_cursor
+            .visible_node_id
+            .clone()
+            .expect("latest visible node before blocked fork");
+        let (nodes, branches, _) = store.load_history_graph(Some("history-fork-blocked"));
+        let error = store
+            .fork_from_history_node(Some("history-fork-blocked"), nodes[0].node_id.as_str())
+            .expect_err("fork should be blocked by hook");
+        assert!(error.contains("history branch fork blocked by hook"));
+
+        let live_after = store.snapshot(Some("history-fork-blocked"), &[]);
+        assert_eq!(live_after.history_state_evidence.len(), 1);
+        assert_eq!(
+            live_after.history_state_evidence[0].boundary,
+            "history.branch_fork.start"
+        );
+        assert_eq!(
+            live_after.history_cursor.visible_node_id.as_deref(),
+            Some(latest_before.as_str())
+        );
+        let (branches_after, _, _) = {
+            let (nodes_after, branches_after, cursor_after) =
+                store.load_history_graph(Some("history-fork-blocked"));
+            (branches_after, nodes_after, cursor_after)
+        };
+        assert_eq!(branches_after.len(), branches.len());
+    }
+
+    #[test]
+    fn switch_history_branch_persists_history_state_hook_evidence() {
+        let mut store = SessionStore::memory_only();
+        store.append_turn(
+            Some("history-switch-session"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-switch-session"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+        let (nodes, _, _) = store.load_history_graph(Some("history-switch-session"));
+        store
+            .fork_from_history_node(Some("history-switch-session"), nodes[0].node_id.as_str())
+            .expect("fork should succeed before switch test");
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.switch.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history switch start observed".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 2,
+                input_summary: Some("switch start".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history switch start observed".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.switch.resolved".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history switch resolved".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 3,
+                input_summary: Some("switch resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history switch resolved".to_string(),
+            }],
+        }));
+
+        let snapshot = store
+            .switch_history_branch(Some("history-switch-session"), "branch-main")
+            .expect("switch should succeed");
+
+        assert_eq!(snapshot.history_state_evidence.len(), 2);
+        assert_eq!(
+            snapshot.history_state_evidence[0].boundary,
+            "history.branch_switch.start"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].boundary,
+            "history.branch_switch.resolved"
+        );
+        assert_eq!(
+            snapshot.history_state_evidence[1].resolved_branch_id.as_deref(),
+            Some("branch-main")
+        );
+        assert_eq!(snapshot.history_cursor.active_branch_id.as_deref(), Some("branch-main"));
+    }
+
+    #[test]
+    fn checkout_history_node_preserves_degraded_truth_source_with_hooks() {
+        let mut store = SessionStore::memory_only();
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.checkout.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout start observed".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 2,
+                input_summary: Some("checkout start".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout start observed".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.checkout.resolved".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout resolved".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 3,
+                input_summary: Some("checkout resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout resolved".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("history-degrade-truth"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-degrade-truth"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+
+        let (nodes, _, _) = store.load_history_graph(Some("history-degrade-truth"));
+        let snapshot = store
+            .checkout_history_node(
+                Some("history-degrade-truth"),
+                nodes[0].node_id.as_str(),
+                HistoryCheckoutMode::TranscriptAndWorkspace,
+            )
+            .expect("degraded checkout should succeed");
+
+        assert_eq!(
+            snapshot.history_cursor.checkout_mode,
+            HistoryCheckoutMode::TranscriptAndWorkspace
+        );
+        assert_eq!(
+            snapshot.history_cursor.checkout_status,
+            HistoryCheckoutStatus::DegradedToTranscriptOnly
+        );
+        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Historical);
+        assert_eq!(snapshot.history_state_evidence.len(), 2);
+        assert_eq!(
+            snapshot.history_state_evidence[1].boundary,
+            "history.checkout.resolved"
+        );
+        assert!(snapshot.history_state_evidence[1].degraded);
+        assert_eq!(
+            snapshot.history_state_audit_summary.action.status,
+            "available"
+        );
+        assert_eq!(
+            snapshot.history_state_audit_summary.action.boundary.as_deref(),
+            Some("history.checkout.resolved")
+        );
+        assert!(snapshot.history_state_audit_summary.action.degraded);
+        assert_eq!(
+            snapshot.history_state_audit_summary.current_context.mode,
+            "historical"
+        );
+    }
+
+    #[test]
+    fn missing_history_state_evidence_does_not_reconstruct_restore_conclusion_after_reload() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+        store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
+            start_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.checkout.observe".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareStart,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout start observed".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 2,
+                input_summary: Some("checkout start".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout start observed".to_string(),
+            }],
+            resolved_results: vec![crate::agent::hooks::HookExecutionResult {
+                hook_name: "history.checkout.resolved".to_string(),
+                hook_class: crate::agent::hooks::HookClass::Observe,
+                hook_point: crate::agent::hooks::TurnHookPoint::TurnPrepareEnd,
+                hook_order: 1,
+                result_kind: HookResultKind::Observe,
+                structured_result: HookStructuredResult::Observe {
+                    summary: "history checkout resolved".to_string(),
+                },
+                blocked: false,
+                elapsed_ms: 3,
+                input_summary: Some("checkout resolved".to_string()),
+                persistence_evidence_ref: None,
+                trace_summary: "history checkout resolved".to_string(),
+            }],
+        }));
+        store.append_turn(
+            Some("history-missing-evidence"),
+            "第一轮对话",
+            "收到第一轮。",
+            None,
+            Vec::new(),
+        );
+        store.append_turn(
+            Some("history-missing-evidence"),
+            "第二轮对话",
+            "收到第二轮。",
+            None,
+            Vec::new(),
+        );
+
+        let (nodes, _, _) = store.load_history_graph(Some("history-missing-evidence"));
+        let initial = store
+            .checkout_history_node(
+                Some("history-missing-evidence"),
+                nodes[0].node_id.as_str(),
+                HistoryCheckoutMode::TranscriptAndWorkspace,
+            )
+            .expect("degraded checkout should succeed");
+        assert_eq!(
+            initial.history_cursor.checkout_status,
+            HistoryCheckoutStatus::DegradedToTranscriptOnly
+        );
+        assert_eq!(initial.history_state_evidence.len(), 2);
+        let resolved_node_id = initial
+            .resolved_node_id
+            .clone()
+            .expect("resolved node id after checkout");
+
+        {
+            let session = store
+                .sessions
+                .get_mut("history-missing-evidence")
+                .expect("persisted session should exist");
+            session.history_state_evidence.clear();
+        }
+        store.save_to_backend();
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("history-missing-evidence"), &[]);
+        assert!(snapshot.history_state_evidence.is_empty());
+        assert_eq!(snapshot.history_state_audit_summary.action.status, "missing");
+        assert_eq!(
+            snapshot.history_cursor.checkout_status,
+            HistoryCheckoutStatus::DegradedToTranscriptOnly
+        );
+        assert_eq!(
+            snapshot.history_cursor.checkout_mode,
+            HistoryCheckoutMode::TranscriptAndWorkspace
+        );
+        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Historical);
+        assert_eq!(snapshot.resolved_node_id.as_deref(), Some(resolved_node_id.as_str()));
 
         let _ = fs::remove_file(path);
     }
@@ -3628,6 +5619,9 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
                 turn_count: 1,
                 last_referenced_file: None,
                 updated_at_ms: now_timestamp_ms(),
@@ -3687,6 +5681,9 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
                 turn_count: 1,
                 last_referenced_file: Some("src-tauri/tauri.conf.json".to_string()),
                 updated_at_ms: now_timestamp_ms(),
@@ -3765,6 +5762,9 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
                 turn_count: 1,
                 last_referenced_file: Some("tauri.conf.json".to_string()),
                 updated_at_ms: now_timestamp_ms(),
@@ -3829,6 +5829,9 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
                 turn_count: 1,
                 last_referenced_file: Some("src-tauri/tauri.conf.json".to_string()),
                 updated_at_ms: now_timestamp_ms(),
@@ -3877,6 +5880,12 @@ mod tests {
             Some("trace-persisted"),
             TurnTraceRecord {
                 turn_id: "turn-1".to_string(),
+                session_id: Some("trace-persisted".to_string()),
+                event_id: Some("turn-1:4".to_string()),
+                event_type: Some("turn.completed".to_string()),
+                event_version: Some("turn-event-v1".to_string()),
+                sequence: Some(4),
+                emitted_at_ms: Some(4242),
                 title: "检查流式输出".to_string(),
                 phase: "completed".to_string(),
                 trace_steps: vec![TurnTraceStep {
@@ -3918,18 +5927,25 @@ mod tests {
                     arguments_text: Some("{\"path\":\"src/main.ts\"}".to_string()),
                     result_text: Some("ok".to_string()),
                     duration_seconds: Some(0.12),
-                    capability_invocation: Some(crate::agent::telemetry::CapabilityInvocationRecord {
-                        tool_name: "workspace.read_file".to_string(),
-                        capability_id: Some("mcp:tool:workspace.read_file".to_string()),
-                        source_id: Some("mcp-local".to_string()),
-                        source_kind: Some("mcp".to_string()),
-                        capability_kind: Some("tool".to_string()),
-                        invocation_mode: Some("direct_tool_call".to_string()),
-                        failure_kind: None,
-                        requires_approval: Some(false),
-                        host_mediated: Some(true),
-                        permission_scope: Some("workspace.read".to_string()),
-                    }),
+                    capability_invocation: Some(
+                        crate::agent::telemetry::CapabilityInvocationRecord {
+                            tool_name: "workspace.read_file".to_string(),
+                            capability_id: Some("mcp:tool:workspace.read_file".to_string()),
+                            source_id: Some("mcp-local".to_string()),
+                            source_kind: Some("mcp".to_string()),
+                            capability_kind: Some("tool".to_string()),
+                            invocation_mode: Some("direct_tool_call".to_string()),
+                            failure_kind: None,
+                            requires_approval: Some(false),
+                            host_mediated: Some(true),
+                            permission_scope: Some("workspace.read".to_string()),
+                            skill_id: None,
+                            skill_source_id: None,
+                            composed_capability_refs: None,
+                            composed_capability_kinds: None,
+                            failure_layer: None,
+                        },
+                    ),
                 }],
                 provider_call_records: vec![ProviderCallCacheRecord {
                     request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
@@ -3945,6 +5961,21 @@ mod tests {
                     turn_duration_ms: Some(920),
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     prefix_mutation_reasons: Vec::new(),
+                }],
+                hook_trace_records: vec![HookTraceRecord {
+                    hook_name: "audit.observe".to_string(),
+                    hook_class: crate::agent::hooks::HookClass::Observe,
+                    hook_point: crate::agent::hooks::TurnHookPoint::ModelCallStart,
+                    hook_order: 1,
+                    result_kind: crate::agent::hooks::HookResultKind::Observe,
+                    structured_result: crate::agent::hooks::HookStructuredResult::Observe {
+                        summary: "hook observed lifecycle boundary without mutation".to_string(),
+                    },
+                    blocked: false,
+                    elapsed_ms: 2,
+                    input_summary: Some("prompt-prefix".to_string()),
+                    persistence_evidence_ref: None,
+                    summary: "observe hook summary".to_string(),
                 }],
                 provider_requested_name: Some("ppx".to_string()),
                 provider_name: Some("ppx".to_string()),
@@ -3967,12 +5998,34 @@ mod tests {
             },
         );
 
+        let expected_snapshot = store.snapshot(Some("trace-persisted"), &[]);
+        let expected_trace = serde_json::to_value(&expected_snapshot.turn_trace_history[0])
+            .expect("expected trace should serialize");
+
         let mut reloaded =
             SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
         let snapshot = reloaded.snapshot(Some("trace-persisted"), &[]);
 
         assert_eq!(snapshot.turn_trace_history.len(), 1);
         assert_eq!(snapshot.turn_trace_history[0].turn_id, "turn-1");
+        assert_eq!(
+            snapshot.turn_trace_history[0].session_id.as_deref(),
+            Some("trace-persisted")
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_id.as_deref(),
+            Some("turn-1:4")
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_type.as_deref(),
+            Some("turn.completed")
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_version.as_deref(),
+            Some("turn-event-v1")
+        );
+        assert_eq!(snapshot.turn_trace_history[0].sequence, Some(4));
+        assert_eq!(snapshot.turn_trace_history[0].emitted_at_ms, Some(4242));
         assert_eq!(
             snapshot.turn_trace_history[0].provider_model.as_deref(),
             Some("gpt-5.4")
@@ -3991,6 +6044,919 @@ mod tests {
                 .as_ref()
                 .and_then(|record| record.source_id.as_deref()),
             Some("mcp-local")
+        );
+        assert_eq!(snapshot.turn_trace_history[0].hook_trace_records.len(), 1);
+        assert_eq!(
+            snapshot.turn_trace_history[0].hook_trace_records[0].hook_name,
+            "audit.observe"
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].trace_timeline[0].kind,
+            "return_result"
+        );
+        assert_eq!(
+            serde_json::to_value(&snapshot.turn_trace_history[0])
+                .expect("reloaded trace should serialize"),
+            expected_trace
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backend_roundtrip_restores_runtime_generated_multi_boundary_hook_traces() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        store.record_turn_trace(
+            Some("trace-multi-hook"),
+            TurnTraceRecord {
+                turn_id: "turn-multi-hook".to_string(),
+                session_id: Some("trace-multi-hook".to_string()),
+                event_id: Some("turn-multi-hook:11".to_string()),
+                event_type: Some("turn.completed".to_string()),
+                event_version: Some("turn-event-v1".to_string()),
+                sequence: Some(11),
+                emitted_at_ms: Some(1111),
+                title: "multi boundary hook roundtrip".to_string(),
+                phase: "completed".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-return".to_string(),
+                    label: "Return result".to_string(),
+                    state: "completed".to_string(),
+                }],
+                trace_timeline: Vec::new(),
+                tool_activities: Vec::new(),
+                provider_call_records: Vec::new(),
+                hook_trace_records: vec![
+                    HookTraceRecord {
+                        hook_name: "audit.observe".to_string(),
+                        hook_class: crate::agent::hooks::HookClass::Observe,
+                        hook_point: crate::agent::hooks::TurnHookPoint::ModelCallStart,
+                        hook_order: 1,
+                        result_kind: crate::agent::hooks::HookResultKind::Observe,
+                        structured_result: crate::agent::hooks::HookStructuredResult::Observe {
+                            summary: "model boundary observed".to_string(),
+                        },
+                        blocked: false,
+                        elapsed_ms: 2,
+                        input_summary: Some("model".to_string()),
+                        persistence_evidence_ref: None,
+                        summary: "model hook summary".to_string(),
+                    },
+                    HookTraceRecord {
+                        hook_name: "guard.tool".to_string(),
+                        hook_class: crate::agent::hooks::HookClass::Guard,
+                        hook_point: crate::agent::hooks::TurnHookPoint::ToolCallEnd,
+                        hook_order: 1,
+                        result_kind: crate::agent::hooks::HookResultKind::Allow,
+                        structured_result: crate::agent::hooks::HookStructuredResult::Allow {
+                            summary: "tool boundary allowed".to_string(),
+                        },
+                        blocked: false,
+                        elapsed_ms: 4,
+                        input_summary: Some("tool".to_string()),
+                        persistence_evidence_ref: None,
+                        summary: "tool hook summary".to_string(),
+                    },
+                ],
+                provider_requested_name: Some("ppx".to_string()),
+                provider_name: Some("ppx".to_string()),
+                provider_protocol: Some("openai".to_string()),
+                provider_model: Some("gpt-5.4".to_string()),
+                provider_source: Some("provider_decision".to_string()),
+                provider_mode: Some("live".to_string()),
+                build_context_observation: None,
+                session_summary: Some("多边界 hook 持久化".to_string()),
+                fallback_reason: None,
+                error: None,
+                input_tokens: Some(12),
+                cache_hit_input_tokens: Some(5),
+                reasoning_tokens: Some(3),
+                output_tokens: Some(34),
+                total_tokens: Some(46),
+                first_token_latency_ms: Some(180),
+                turn_duration_ms: Some(920),
+                updated_at: 0,
+            },
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("trace-multi-hook"), &[]);
+
+        assert_eq!(snapshot.turn_trace_history.len(), 1);
+        assert_eq!(snapshot.turn_trace_history[0].hook_trace_records.len(), 2);
+        assert_eq!(
+            snapshot.turn_trace_history[0].hook_trace_records[0].hook_name,
+            "audit.observe"
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].hook_trace_records[1].hook_name,
+            "guard.tool"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backend_roundtrip_restores_terminal_event_annotation_after_trace_update() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        store.record_turn_trace(
+            Some("trace-annotated"),
+            TurnTraceRecord {
+                turn_id: "turn-annotated".to_string(),
+                session_id: Some("trace-annotated".to_string()),
+                event_id: None,
+                event_type: None,
+                event_version: None,
+                sequence: None,
+                emitted_at_ms: None,
+                title: "等待 terminal event".to_string(),
+                phase: "completed".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-return".to_string(),
+                    label: "Return result".to_string(),
+                    state: "completed".to_string(),
+                }],
+                trace_timeline: vec![TraceTimelineEntry {
+                    id: "return-1".to_string(),
+                    kind: "return".to_string(),
+                    label: "RETURN RESULT".to_string(),
+                    state: "completed".to_string(),
+                    sequence: 1,
+                    provider_requested_name: None,
+                    provider_name: None,
+                    provider_protocol: None,
+                    provider_model: None,
+                    provider_source: None,
+                    provider_mode: None,
+                    build_context_observation: None,
+                    tool_activities: Vec::new(),
+                    text: Some("ok".to_string()),
+                    reasoning_content: None,
+                    fallback_reason: None,
+                    error: None,
+                    input_tokens: Some(8),
+                    cache_hit_input_tokens: Some(3),
+                    reasoning_tokens: Some(1),
+                    output_tokens: Some(13),
+                    total_tokens: Some(21),
+                    first_token_latency_ms: Some(90),
+                    turn_duration_ms: Some(420),
+                }],
+                tool_activities: Vec::new(),
+                provider_call_records: Vec::new(),
+                hook_trace_records: vec![HookTraceRecord {
+                    hook_name: "guard.input".to_string(),
+                    hook_class: crate::agent::hooks::HookClass::Guard,
+                    hook_point: crate::agent::hooks::TurnHookPoint::ContextBuildStart,
+                    hook_order: 1,
+                    result_kind: crate::agent::hooks::HookResultKind::Allow,
+                    structured_result: crate::agent::hooks::HookStructuredResult::Allow {
+                        summary: "guard allowed runtime to continue".to_string(),
+                    },
+                    blocked: false,
+                    elapsed_ms: 1,
+                    input_summary: Some("context-window".to_string()),
+                    persistence_evidence_ref: None,
+                    summary: "guard hook summary".to_string(),
+                }],
+                provider_requested_name: None,
+                provider_name: None,
+                provider_protocol: None,
+                provider_model: None,
+                provider_source: None,
+                provider_mode: None,
+                build_context_observation: None,
+                session_summary: Some("等待回写".to_string()),
+                fallback_reason: None,
+                error: None,
+                input_tokens: Some(8),
+                cache_hit_input_tokens: Some(3),
+                reasoning_tokens: Some(1),
+                output_tokens: Some(13),
+                total_tokens: Some(21),
+                first_token_latency_ms: Some(90),
+                turn_duration_ms: Some(420),
+                updated_at: 0,
+            },
+        );
+
+        let annotation_snapshot = store
+            .annotate_turn_trace_terminal_event(
+                Some("trace-annotated"),
+                "turn-annotated",
+                Some("turn-annotated:7".to_string()),
+                Some("turn.completed".to_string()),
+                Some("turn-event-v1".to_string()),
+                Some(7),
+                Some(7007),
+            )
+            .expect("annotation should update trace");
+        assert_eq!(
+            annotation_snapshot.turn_trace_history[0]
+                .event_id
+                .as_deref(),
+            Some("turn-annotated:7")
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("trace-annotated"), &[]);
+
+        assert_eq!(snapshot.turn_trace_history.len(), 1);
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_id.as_deref(),
+            Some("turn-annotated:7")
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_type.as_deref(),
+            Some("turn.completed")
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_version.as_deref(),
+            Some("turn-event-v1")
+        );
+        assert_eq!(snapshot.turn_trace_history[0].sequence, Some(7));
+        assert_eq!(snapshot.turn_trace_history[0].emitted_at_ms, Some(7007));
+        assert_eq!(snapshot.turn_trace_history[0].hook_trace_records.len(), 1);
+        assert_eq!(
+            snapshot.turn_trace_history[0].hook_trace_records[0].hook_name,
+            "guard.input"
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0].trace_timeline[0].kind,
+            "return_result"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn append_turn_trace_hook_records_updates_existing_trace_and_roundtrips() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        store.record_turn_trace(
+            Some("trace-append-hook"),
+            TurnTraceRecord {
+                turn_id: "turn-append-hook".to_string(),
+                session_id: Some("trace-append-hook".to_string()),
+                event_id: Some("turn-append-hook:3".to_string()),
+                event_type: Some("turn.completed".to_string()),
+                event_version: Some("turn-event-v1".to_string()),
+                sequence: Some(3),
+                emitted_at_ms: Some(3003),
+                title: "等待 graph decision evidence".to_string(),
+                phase: "completed".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-return".to_string(),
+                    label: "Return result".to_string(),
+                    state: "completed".to_string(),
+                }],
+                trace_timeline: Vec::new(),
+                tool_activities: Vec::new(),
+                provider_call_records: Vec::new(),
+                hook_trace_records: vec![HookTraceRecord {
+                    hook_name: "planner.preflight.observe".to_string(),
+                    hook_class: crate::agent::hooks::HookClass::Observe,
+                    hook_point: crate::agent::hooks::TurnHookPoint::PlannerTurnPreflight,
+                    hook_order: 1,
+                    result_kind: crate::agent::hooks::HookResultKind::Observe,
+                    structured_result: crate::agent::hooks::HookStructuredResult::Observe {
+                        summary: "planner preflight summary".to_string(),
+                    },
+                    blocked: false,
+                    elapsed_ms: 1,
+                    input_summary: Some("message=hello".to_string()),
+                    persistence_evidence_ref: None,
+                    summary: "planner preflight summary".to_string(),
+                }],
+                provider_requested_name: None,
+                provider_name: None,
+                provider_protocol: None,
+                provider_model: None,
+                provider_source: None,
+                provider_mode: None,
+                build_context_observation: None,
+                session_summary: Some("append hook trace".to_string()),
+                fallback_reason: None,
+                error: None,
+                input_tokens: None,
+                cache_hit_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                first_token_latency_ms: None,
+                turn_duration_ms: None,
+                updated_at: 0,
+            },
+        );
+
+        let appended = store
+            .append_turn_trace_hook_records(
+                Some("trace-append-hook"),
+                "turn-append-hook",
+                vec![HookTraceRecord {
+                    hook_name: "planner.graph_decision.observe".to_string(),
+                    hook_class: crate::agent::hooks::HookClass::Observe,
+                    hook_point: crate::agent::hooks::TurnHookPoint::PlannerGraphDecision,
+                    hook_order: 1,
+                    result_kind: crate::agent::hooks::HookResultKind::Observe,
+                    structured_result: crate::agent::hooks::HookStructuredResult::Observe {
+                        summary: "planner graph decision summary".to_string(),
+                    },
+                    blocked: false,
+                    elapsed_ms: 2,
+                    input_summary: Some("run_phase=ready".to_string()),
+                    persistence_evidence_ref: None,
+                    summary: "planner graph decision summary".to_string(),
+                }],
+            )
+            .expect("append should update existing trace");
+
+        assert_eq!(appended.turn_trace_history.len(), 1);
+        assert_eq!(appended.turn_trace_history[0].hook_trace_records.len(), 2);
+        assert_eq!(
+            appended.turn_trace_history[0].hook_trace_records[1].hook_name,
+            "planner.graph_decision.observe"
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("trace-append-hook"), &[]);
+        assert_eq!(snapshot.turn_trace_history[0].hook_trace_records.len(), 2);
+        assert_eq!(
+            snapshot.turn_trace_history[0].hook_trace_records[1].hook_point,
+            crate::agent::hooks::TurnHookPoint::PlannerGraphDecision
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persisted_mcp_source_snapshots_roundtrip_through_store() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+        store.persist_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-local".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Local MCP".to_string(),
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://local".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 7,
+                last_ingress_observation: Some(
+                    crate::agent::capability_bridge::SourceIngressObservation {
+                        boundary: "control_plane.apply_mcp_source_snapshot".to_string(),
+                        summary: "mcp source ingress registered `mcp-local` with 1 capability candidates"
+                            .to_string(),
+                        candidate_ids: vec!["mcp:tool:workspace-search".to_string()],
+                        observed_at_ms: 77,
+                    },
+                ),
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:workspace-search".to_string(),
+                source_id: "mcp-local".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "workspace.search".to_string(),
+                description: "Search workspace files".to_string(),
+                invocation_mode:
+                    crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshots = reloaded.list_persisted_mcp_source_snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].source.source_id, "mcp-local");
+        assert_eq!(
+            snapshots[0]
+                .source
+                .last_ingress_observation
+                .as_ref()
+                .expect("ingress observation should persist")
+                .candidate_ids,
+            vec!["mcp:tool:workspace-search".to_string()]
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persisted_skill_source_snapshots_roundtrip_through_store() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+        store.persist_skill_source_snapshot(crate::agent::capability_bridge::SkillSourceSnapshot {
+            source: crate::agent::capability_bridge::SkillSourceView {
+                source_id: "host-skills".to_string(),
+                source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                display_name: "Host Skills".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                transport_kind: "host".to_string(),
+                server_identity: "skills://host".to_string(),
+                updated_at_ms: 9,
+                last_ingress_observation: Some(
+                    crate::agent::capability_bridge::SourceIngressObservation {
+                        boundary: "control_plane.apply_skill_source_snapshot".to_string(),
+                        summary: "skill source ingress registered `host-skills` with 1 skill candidates"
+                            .to_string(),
+                        candidate_ids: vec!["skill:search".to_string()],
+                        observed_at_ms: 99,
+                    },
+                ),
+            },
+            skills: vec![crate::agent::capability_bridge::SkillDescriptor {
+                skill_id: "skill:search".to_string(),
+                source_id: "host-skills".to_string(),
+                source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                label: "search".to_string(),
+                description: "Search workspace".to_string(),
+                input_schema_summary: "{}".to_string(),
+                safety_class: "".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["host".to_string()],
+                requires_approval: false,
+                host_mediated: false,
+                permission_scope: "".to_string(),
+                composed_capability_refs: vec!["mcp:tool:workspace-search".to_string()],
+                composed_capability_kinds: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                executable_in_v1: true,
+            }],
+        });
+
+        let reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshots = reloaded.list_persisted_skill_source_snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].source.source_id, "host-skills");
+        assert_eq!(
+            snapshots[0]
+                .source
+                .last_ingress_observation
+                .as_ref()
+                .expect("ingress observation should persist")
+                .candidate_ids,
+            vec!["skill:search".to_string()]
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backend_roundtrip_restores_checkpoint_persist_evidence() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        store.record_turn_trace(
+            Some("trace-checkpoint-boundary"),
+            TurnTraceRecord {
+                turn_id: "turn-checkpoint-boundary".to_string(),
+                session_id: Some("trace-checkpoint-boundary".to_string()),
+                event_id: Some("turn-checkpoint-boundary:9".to_string()),
+                event_type: Some("turn.completed".to_string()),
+                event_version: Some("turn-event-v1".to_string()),
+                sequence: Some(9),
+                emitted_at_ms: Some(9009),
+                title: "checkpoint boundary roundtrip".to_string(),
+                phase: "completed".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-return".to_string(),
+                    label: "Return result".to_string(),
+                    state: "completed".to_string(),
+                }],
+                trace_timeline: vec![
+                    TraceTimelineEntry {
+                        id: "return-1".to_string(),
+                        kind: "return".to_string(),
+                        label: "RETURN RESULT".to_string(),
+                        state: "completed".to_string(),
+                        sequence: 1,
+                        provider_requested_name: Some("openai".to_string()),
+                        provider_name: Some("openai".to_string()),
+                        provider_protocol: Some("openai".to_string()),
+                        provider_model: Some("gpt-5".to_string()),
+                        provider_source: Some("provider_decision".to_string()),
+                        provider_mode: Some("live".to_string()),
+                        build_context_observation: None,
+                        tool_activities: Vec::new(),
+                        text: Some("final answer".to_string()),
+                        reasoning_content: None,
+                        fallback_reason: None,
+                        error: None,
+                        input_tokens: Some(11),
+                        cache_hit_input_tokens: Some(4),
+                        reasoning_tokens: Some(2),
+                        output_tokens: Some(19),
+                        total_tokens: Some(30),
+                        first_token_latency_ms: Some(120),
+                        turn_duration_ms: Some(860),
+                    },
+                    TraceTimelineEntry {
+                        id: "checkpoint-2".to_string(),
+                        kind: "checkpoint_persist".to_string(),
+                        label: "PERSIST CHECKPOINT".to_string(),
+                        state: "completed".to_string(),
+                        sequence: 2,
+                        provider_requested_name: Some("openai".to_string()),
+                        provider_name: Some("openai".to_string()),
+                        provider_protocol: Some("openai".to_string()),
+                        provider_model: Some("gpt-5".to_string()),
+                        provider_source: Some("provider_decision".to_string()),
+                        provider_mode: Some("live".to_string()),
+                        build_context_observation: None,
+                        tool_activities: Vec::new(),
+                        text: None,
+                        reasoning_content: None,
+                        fallback_reason: None,
+                        error: None,
+                        input_tokens: Some(11),
+                        cache_hit_input_tokens: Some(4),
+                        reasoning_tokens: Some(2),
+                        output_tokens: Some(19),
+                        total_tokens: Some(30),
+                        first_token_latency_ms: Some(120),
+                        turn_duration_ms: Some(860),
+                    },
+                ],
+                tool_activities: Vec::new(),
+                provider_call_records: Vec::new(),
+                hook_trace_records: Vec::new(),
+                provider_requested_name: Some("openai".to_string()),
+                provider_name: Some("openai".to_string()),
+                provider_protocol: Some("openai".to_string()),
+                provider_model: Some("gpt-5".to_string()),
+                provider_source: Some("provider_decision".to_string()),
+                provider_mode: Some("live".to_string()),
+                build_context_observation: None,
+                session_summary: Some("checkpoint boundary summary".to_string()),
+                fallback_reason: None,
+                error: None,
+                input_tokens: Some(11),
+                cache_hit_input_tokens: Some(4),
+                reasoning_tokens: Some(2),
+                output_tokens: Some(19),
+                total_tokens: Some(30),
+                first_token_latency_ms: Some(120),
+                turn_duration_ms: Some(860),
+                updated_at: 0,
+            },
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("trace-checkpoint-boundary"), &[]);
+
+        assert_eq!(snapshot.turn_trace_history.len(), 1);
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_type.as_deref(),
+            Some("turn.completed")
+        );
+        assert_eq!(snapshot.turn_trace_history[0].phase, "completed");
+        assert_eq!(
+            snapshot.turn_trace_history[0]
+                .trace_timeline
+                .last()
+                .map(|entry| entry.kind.as_str()),
+            Some("checkpoint_persist")
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0]
+                .trace_timeline
+                .last()
+                .map(|entry| entry.label.as_str()),
+            Some("PERSIST CHECKPOINT")
+        );
+        assert_eq!(
+            snapshot.turn_trace_history[0]
+                .trace_timeline
+                .last()
+                .and_then(|entry| entry.turn_duration_ms),
+            Some(860)
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidence() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        store.record_turn_trace(
+            Some("trace-failed-terminal"),
+            TurnTraceRecord {
+                turn_id: "turn-failed-terminal".to_string(),
+                session_id: Some("trace-failed-terminal".to_string()),
+                event_id: Some("turn-failed-terminal:8".to_string()),
+                event_type: Some("turn.failed".to_string()),
+                event_version: Some("turn-event-v1".to_string()),
+                sequence: Some(8),
+                emitted_at_ms: Some(8008),
+                title: "failed terminal roundtrip".to_string(),
+                phase: "failed".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-return".to_string(),
+                    label: "Return result".to_string(),
+                    state: "failed".to_string(),
+                }],
+                trace_timeline: vec![TraceTimelineEntry {
+                    id: "return-1".to_string(),
+                    kind: "return".to_string(),
+                    label: "RETURN RESULT".to_string(),
+                    state: "failed".to_string(),
+                    sequence: 1,
+                    provider_requested_name: Some("openai".to_string()),
+                    provider_name: Some("openai".to_string()),
+                    provider_protocol: Some("openai".to_string()),
+                    provider_model: Some("gpt-5".to_string()),
+                    provider_source: Some("provider_decision".to_string()),
+                    provider_mode: Some("live".to_string()),
+                    build_context_observation: None,
+                    tool_activities: Vec::new(),
+                    text: Some("failed terminal".to_string()),
+                    reasoning_content: None,
+                    fallback_reason: None,
+                    error: Some("hook blocked finalize".to_string()),
+                    input_tokens: Some(11),
+                    cache_hit_input_tokens: Some(4),
+                    reasoning_tokens: Some(2),
+                    output_tokens: Some(0),
+                    total_tokens: Some(13),
+                    first_token_latency_ms: Some(120),
+                    turn_duration_ms: Some(640),
+                }],
+                tool_activities: vec![TurnToolActivity {
+                    id: "tool-1".to_string(),
+                    name: "workspace_list_files".to_string(),
+                    status: "completed".to_string(),
+                    summary: "tool completed before finalize failed".to_string(),
+                    arguments_text: Some("{\"path\":\".\"}".to_string()),
+                    result_text: Some("ok".to_string()),
+                    duration_seconds: Some(0.2),
+                    capability_invocation: None,
+                }],
+                provider_call_records: vec![ProviderCallCacheRecord {
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                    provider_source: Some("provider_decision".to_string()),
+                    provider_mode: Some("live".to_string()),
+                    input_tokens: Some(11),
+                    cache_hit_input_tokens: Some(4),
+                    cache_miss_input_tokens: Some(7),
+                    reasoning_tokens: Some(2),
+                    output_tokens: Some(0),
+                    total_tokens: Some(13),
+                    first_token_latency_ms: Some(120),
+                    turn_duration_ms: Some(640),
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::BufferedResponse,
+                    prefix_mutation_reasons: vec![
+                        crate::agent::provider::PrefixMutationReason::SessionSummaryChanged,
+                    ],
+                }],
+                hook_trace_records: vec![HookTraceRecord {
+                    hook_name: "observe.sync-finalize-failturn".to_string(),
+                    hook_class: crate::agent::hooks::HookClass::Observe,
+                    hook_point: crate::agent::hooks::TurnHookPoint::TurnFinalizeEnd,
+                    hook_order: 1,
+                    result_kind: crate::agent::hooks::HookResultKind::Deny,
+                    structured_result: crate::agent::hooks::HookStructuredResult::Deny(
+                        crate::agent::hooks::HookDenyDecision {
+                            reason_code: "hook_blocked_finalize".to_string(),
+                            message: "hook blocked finalize".to_string(),
+                        },
+                    ),
+                    blocked: true,
+                    elapsed_ms: 5,
+                    input_summary: Some("failed".to_string()),
+                    persistence_evidence_ref: Some(
+                        "trace://turn-failed-terminal/finalize".to_string(),
+                    ),
+                    summary: "finalize hook blocked terminal".to_string(),
+                }],
+                provider_requested_name: Some("openai".to_string()),
+                provider_name: Some("openai".to_string()),
+                provider_protocol: Some("openai".to_string()),
+                provider_model: Some("gpt-5".to_string()),
+                provider_source: Some("provider_decision".to_string()),
+                provider_mode: Some("live".to_string()),
+                build_context_observation: None,
+                session_summary: Some("failed summary".to_string()),
+                fallback_reason: None,
+                error: Some("hook blocked finalize".to_string()),
+                input_tokens: Some(11),
+                cache_hit_input_tokens: Some(4),
+                reasoning_tokens: Some(2),
+                output_tokens: Some(0),
+                total_tokens: Some(13),
+                first_token_latency_ms: Some(120),
+                turn_duration_ms: Some(640),
+                updated_at: 0,
+            },
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("trace-failed-terminal"), &[]);
+
+        assert_eq!(snapshot.turn_trace_history.len(), 1);
+        let trace = &snapshot.turn_trace_history[0];
+        assert_eq!(trace.phase, "failed");
+        assert_eq!(trace.event_id.as_deref(), Some("turn-failed-terminal:8"));
+        assert_eq!(trace.event_type.as_deref(), Some("turn.failed"));
+        assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(trace.sequence, Some(8));
+        assert_eq!(trace.emitted_at_ms, Some(8008));
+        assert_eq!(trace.error.as_deref(), Some("hook blocked finalize"));
+        assert_eq!(trace.provider_call_records.len(), 1);
+        assert_eq!(
+            trace.provider_call_records[0].request_kind,
+            crate::agent::telemetry::ProviderRequestKind::InitialRequest
+        );
+        assert_eq!(trace.tool_activities.len(), 1);
+        assert_eq!(trace.tool_activities[0].name, "workspace_list_files");
+        assert_eq!(trace.hook_trace_records.len(), 1);
+        assert!(trace.hook_trace_records[0].blocked);
+        assert_eq!(
+            trace.hook_trace_records[0]
+                .persistence_evidence_ref
+                .as_deref(),
+            Some("trace://turn-failed-terminal/finalize")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evidence() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        store.record_turn_trace(
+            Some("trace-cancelled-terminal"),
+            TurnTraceRecord {
+                turn_id: "turn-cancelled-terminal".to_string(),
+                session_id: Some("trace-cancelled-terminal".to_string()),
+                event_id: Some("turn-cancelled-terminal:6".to_string()),
+                event_type: Some("turn.cancelled".to_string()),
+                event_version: Some("turn-event-v1".to_string()),
+                sequence: Some(6),
+                emitted_at_ms: Some(6006),
+                title: "cancelled terminal roundtrip".to_string(),
+                phase: "cancelled".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-call-tool".to_string(),
+                    label: "Call tool".to_string(),
+                    state: "completed".to_string(),
+                }],
+                trace_timeline: vec![TraceTimelineEntry {
+                    id: "tool-1".to_string(),
+                    kind: "tool".to_string(),
+                    label: "CALL TOOL #1".to_string(),
+                    state: "completed".to_string(),
+                    sequence: 1,
+                    provider_requested_name: Some("openai".to_string()),
+                    provider_name: Some("openai".to_string()),
+                    provider_protocol: Some("openai".to_string()),
+                    provider_model: Some("gpt-5".to_string()),
+                    provider_source: Some("provider_decision".to_string()),
+                    provider_mode: Some("live".to_string()),
+                    build_context_observation: None,
+                    tool_activities: vec![TurnToolActivity {
+                        id: "tool-1".to_string(),
+                        name: "workspace_list_files".to_string(),
+                        status: "completed".to_string(),
+                        summary: "tool completed before cancel".to_string(),
+                        arguments_text: Some("{\"path\":\".\"}".to_string()),
+                        result_text: Some("ok".to_string()),
+                        duration_seconds: Some(0.2),
+                        capability_invocation: None,
+                    }],
+                    text: None,
+                    reasoning_content: None,
+                    fallback_reason: None,
+                    error: None,
+                    input_tokens: Some(9),
+                    cache_hit_input_tokens: Some(3),
+                    reasoning_tokens: Some(1),
+                    output_tokens: Some(0),
+                    total_tokens: Some(10),
+                    first_token_latency_ms: Some(90),
+                    turn_duration_ms: Some(510),
+                }],
+                tool_activities: vec![TurnToolActivity {
+                    id: "tool-1".to_string(),
+                    name: "workspace_list_files".to_string(),
+                    status: "completed".to_string(),
+                    summary: "tool completed before cancel".to_string(),
+                    arguments_text: Some("{\"path\":\".\"}".to_string()),
+                    result_text: Some("ok".to_string()),
+                    duration_seconds: Some(0.2),
+                    capability_invocation: None,
+                }],
+                provider_call_records: vec![ProviderCallCacheRecord {
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                    provider_source: Some("provider_decision".to_string()),
+                    provider_mode: Some("live".to_string()),
+                    input_tokens: Some(9),
+                    cache_hit_input_tokens: Some(3),
+                    cache_miss_input_tokens: Some(6),
+                    reasoning_tokens: Some(1),
+                    output_tokens: Some(0),
+                    total_tokens: Some(10),
+                    first_token_latency_ms: Some(90),
+                    turn_duration_ms: Some(510),
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                    prefix_mutation_reasons: vec![
+                        crate::agent::provider::PrefixMutationReason::HistoryBoundaryShifted,
+                    ],
+                }],
+                hook_trace_records: vec![HookTraceRecord {
+                    hook_name: "observe.cancelled-finalize".to_string(),
+                    hook_class: crate::agent::hooks::HookClass::Observe,
+                    hook_point: crate::agent::hooks::TurnHookPoint::TurnFinalizeEnd,
+                    hook_order: 1,
+                    result_kind: crate::agent::hooks::HookResultKind::Observe,
+                    structured_result: crate::agent::hooks::HookStructuredResult::Observe {
+                        summary: "cancelled terminal observed".to_string(),
+                    },
+                    blocked: false,
+                    elapsed_ms: 3,
+                    input_summary: Some("cancelled".to_string()),
+                    persistence_evidence_ref: Some(
+                        "trace://turn-cancelled-terminal/finalize".to_string(),
+                    ),
+                    summary: "cancelled hook summary".to_string(),
+                }],
+                provider_requested_name: Some("openai".to_string()),
+                provider_name: Some("openai".to_string()),
+                provider_protocol: Some("openai".to_string()),
+                provider_model: Some("gpt-5".to_string()),
+                provider_source: Some("provider_decision".to_string()),
+                provider_mode: Some("live".to_string()),
+                build_context_observation: None,
+                session_summary: Some("cancelled summary".to_string()),
+                fallback_reason: Some("stopped_by_user".to_string()),
+                error: Some("stopped_by_user".to_string()),
+                input_tokens: Some(9),
+                cache_hit_input_tokens: Some(3),
+                reasoning_tokens: Some(1),
+                output_tokens: Some(0),
+                total_tokens: Some(10),
+                first_token_latency_ms: Some(90),
+                turn_duration_ms: Some(510),
+                updated_at: 0,
+            },
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("trace-cancelled-terminal"), &[]);
+
+        assert_eq!(snapshot.turn_trace_history.len(), 1);
+        let trace = &snapshot.turn_trace_history[0];
+        assert_eq!(trace.phase, "cancelled");
+        assert_eq!(trace.event_id.as_deref(), Some("turn-cancelled-terminal:6"));
+        assert_eq!(trace.event_type.as_deref(), Some("turn.cancelled"));
+        assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
+        assert_eq!(trace.sequence, Some(6));
+        assert_eq!(trace.emitted_at_ms, Some(6006));
+        assert_eq!(trace.error.as_deref(), Some("stopped_by_user"));
+        assert_eq!(trace.fallback_reason.as_deref(), Some("stopped_by_user"));
+        assert_eq!(trace.provider_call_records.len(), 1);
+        assert_eq!(
+            trace.provider_call_records[0].request_kind,
+            crate::agent::telemetry::ProviderRequestKind::InitialRequest
+        );
+        assert_eq!(trace.tool_activities.len(), 1);
+        assert_eq!(trace.tool_activities[0].status, "completed");
+        assert_eq!(trace.hook_trace_records.len(), 1);
+        assert_eq!(
+            trace.hook_trace_records[0]
+                .persistence_evidence_ref
+                .as_deref(),
+            Some("trace://turn-cancelled-terminal/finalize")
         );
 
         let _ = fs::remove_file(path);

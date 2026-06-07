@@ -1,4 +1,5 @@
 use crate::agent::context::RetrievedContextState;
+use crate::agent::hooks::RunControlHookEnvelope;
 use crate::agent::planner::{GraphPlanner, GraphPlanningContext};
 use crate::agent::runtime::TurnResult;
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,8 @@ pub struct GraphRun {
     #[serde(default)]
     pub resume_count: u32,
     pub last_decision: Option<GraphDecision>,
+    #[serde(default)]
+    pub control_boundary_evidence: Vec<GraphRunControlBoundaryEvidence>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -138,6 +141,20 @@ pub struct GraphRunEvent {
     pub summary: String,
     pub step_count: usize,
     pub updated_at_ms: u64,
+    pub hook_point: Option<String>,
+    pub canonical_event_type: Option<String>,
+    pub canonical_phase: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphRunControlBoundaryEvidence {
+    pub hook_point: String,
+    pub canonical_event_type: String,
+    pub canonical_phase: String,
+    pub summary: String,
+    pub hook_envelope: RunControlHookEnvelope,
+    pub created_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,6 +194,8 @@ pub struct GraphRunCheckpoint {
     pub last_handoff: Option<GraphTurnHandoff>,
     #[serde(default)]
     pub resume_count: u32,
+    #[serde(default)]
+    pub control_boundary_evidence: Vec<GraphRunControlBoundaryEvidence>,
     pub resumable: bool,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -256,6 +275,7 @@ impl GraphEngine {
             last_handoff: None,
             resume_count: 0,
             last_decision: None,
+            control_boundary_evidence: Vec::new(),
             created_at_ms: now,
             updated_at_ms: now,
         }
@@ -617,6 +637,7 @@ impl GraphRunner {
             last_decision: run.last_decision.clone(),
             last_handoff: run.last_handoff.clone(),
             resume_count: run.resume_count,
+            control_boundary_evidence: run.control_boundary_evidence.clone(),
             resumable: matches!(
                 run.phase,
                 GraphRunPhase::Ready | GraphRunPhase::WaitingUser | GraphRunPhase::Paused
@@ -624,6 +645,18 @@ impl GraphRunner {
             created_at_ms: run.created_at_ms,
             updated_at_ms: run.updated_at_ms,
         }
+    }
+
+    pub fn record_control_boundary_evidence(
+        &self,
+        store: &mut GraphRunStore,
+        run_id: &str,
+        evidence: GraphRunControlBoundaryEvidence,
+    ) -> Option<GraphRun> {
+        let mut run = store.load_run(run_id)?;
+        run.control_boundary_evidence.push(evidence);
+        run.updated_at_ms = now_timestamp_ms();
+        Some(store.save_run(run))
     }
 }
 
@@ -765,6 +798,8 @@ fn load_runs_from_path(path: &PathBuf) -> GraphRunMap {
 }
 
 fn build_run_event(run: &GraphRun, kind: GraphRunEventKind, summary: String) -> GraphRunEvent {
+    let (hook_point, canonical_event_type, canonical_phase) =
+        graph_run_hook_annotation_for_event(&kind, &run.phase);
     GraphRunEvent {
         run_id: run.id.clone(),
         kind,
@@ -772,7 +807,62 @@ fn build_run_event(run: &GraphRun, kind: GraphRunEventKind, summary: String) -> 
         summary,
         step_count: run.steps.len(),
         updated_at_ms: run.updated_at_ms,
+        hook_point,
+        canonical_event_type,
+        canonical_phase,
     }
+}
+
+fn graph_run_hook_annotation_for_event(
+    kind: &GraphRunEventKind,
+    phase: &GraphRunPhase,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match (kind, phase) {
+        (GraphRunEventKind::Started, GraphRunPhase::Ready | GraphRunPhase::Running) => (
+            Some("run_start".to_string()),
+            Some("graph_run.started".to_string()),
+            Some(graph_run_phase_token(phase)),
+        ),
+        (GraphRunEventKind::Updated, GraphRunPhase::WaitingUser) => (
+            Some("wait_user".to_string()),
+            Some("graph_run.updated".to_string()),
+            Some("waiting_user".to_string()),
+        ),
+        (GraphRunEventKind::Paused, GraphRunPhase::Paused) => (
+            Some("run_paused".to_string()),
+            Some("graph_run.paused".to_string()),
+            Some("paused".to_string()),
+        ),
+        (GraphRunEventKind::Completed, GraphRunPhase::Completed) => (
+            Some("run_completed".to_string()),
+            Some("graph_run.completed".to_string()),
+            Some("completed".to_string()),
+        ),
+        (GraphRunEventKind::Failed, GraphRunPhase::Failed) => (
+            Some("run_failed".to_string()),
+            Some("graph_run.failed".to_string()),
+            Some("failed".to_string()),
+        ),
+        (GraphRunEventKind::Cancelled, GraphRunPhase::Cancelled) => (
+            Some("run_cancelled".to_string()),
+            Some("graph_run.cancelled".to_string()),
+            Some("cancelled".to_string()),
+        ),
+        _ => (None, None, None),
+    }
+}
+
+fn graph_run_phase_token(phase: &GraphRunPhase) -> String {
+    match phase {
+        GraphRunPhase::Ready => "ready",
+        GraphRunPhase::Running => "running",
+        GraphRunPhase::WaitingUser => "waiting_user",
+        GraphRunPhase::Paused => "paused",
+        GraphRunPhase::Completed => "completed",
+        GraphRunPhase::Failed => "failed",
+        GraphRunPhase::Cancelled => "cancelled",
+    }
+    .to_string()
 }
 
 fn event_kind_for_decision(decision: &GraphDecision) -> GraphRunEventKind {
@@ -827,6 +917,11 @@ mod tests {
 
     fn sample_result(phase: &str) -> TurnResult {
         TurnResult {
+            event_id: None,
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
             phase: phase.to_string(),
             provider_requested_name: "OpenAI".to_string(),
             provider_name: "OpenAI".to_string(),
@@ -849,6 +944,7 @@ mod tests {
             trace_timeline: Vec::new(),
             tool_activities: Vec::new(),
             provider_call_records: Vec::new(),
+            hook_trace_records: Vec::new(),
             session_summary: "session summary".to_string(),
         }
     }
@@ -1056,6 +1152,12 @@ mod tests {
 
         assert_eq!(created.event.kind, GraphRunEventKind::Started);
         assert_eq!(created.run.phase, GraphRunPhase::Ready);
+        assert_eq!(created.event.hook_point.as_deref(), Some("run_start"));
+        assert_eq!(
+            created.event.canonical_event_type.as_deref(),
+            Some("graph_run.started")
+        );
+        assert_eq!(created.event.canonical_phase.as_deref(), Some("ready"));
 
         let running = runner
             .begin_turn(&mut store, "run-1", "turn-1", Some("session-1"))
@@ -1077,6 +1179,15 @@ mod tests {
         assert_eq!(advance.run.steps.len(), 1);
         assert_eq!(advance.run.phase, GraphRunPhase::WaitingUser);
         assert_eq!(advance.event.kind, GraphRunEventKind::Updated);
+        assert_eq!(advance.event.hook_point.as_deref(), Some("wait_user"));
+        assert_eq!(
+            advance.event.canonical_event_type.as_deref(),
+            Some("graph_run.updated")
+        );
+        assert_eq!(
+            advance.event.canonical_phase.as_deref(),
+            Some("waiting_user")
+        );
         assert_eq!(
             advance.run.last_decision.as_ref().map(|item| &item.kind),
             Some(&GraphDecisionKind::WaitUser)
@@ -1164,6 +1275,12 @@ mod tests {
             .expect("run should pause");
         assert_eq!(paused.run.phase, GraphRunPhase::Paused);
         assert_eq!(paused.run.stop_reason, Some(GraphRunStopReason::UserStop));
+        assert_eq!(paused.event.hook_point.as_deref(), Some("run_paused"));
+        assert_eq!(
+            paused.event.canonical_event_type.as_deref(),
+            Some("graph_run.paused")
+        );
+        assert_eq!(paused.event.canonical_phase.as_deref(), Some("paused"));
 
         let checkpoint = runner.build_checkpoint(&paused.run);
         assert!(checkpoint.resumable);
@@ -1176,6 +1293,7 @@ mod tests {
         assert_eq!(resumed.run.phase, GraphRunPhase::Ready);
         assert_eq!(resumed.run.resume_count, 1);
         assert_eq!(resumed.run.stop_reason, None);
+        assert!(resumed.event.hook_point.is_none());
     }
 
     #[test]
@@ -1221,6 +1339,28 @@ mod tests {
                 "persist stop",
             )
             .expect("run should pause");
+        let evidence = GraphRunControlBoundaryEvidence {
+            hook_point: "stop_requested".to_string(),
+            canonical_event_type: "graph_run.stop_requested".to_string(),
+            canonical_phase: "running".to_string(),
+            summary: "persisted stop request".to_string(),
+            hook_envelope: crate::agent::hooks::RunControlHookEnvelope {
+                session_id: Some("session-persist".to_string()),
+                run_id: Some("run-persist".to_string()),
+                phase: "running".to_string(),
+                command: crate::agent::hooks::ExecutionControlCommandKind::StopGraphRun,
+                source: "graph.test".to_string(),
+                checkpoint_kind: Some("runtime_control".to_string()),
+                recovery_mode: Some("replay_required".to_string()),
+                resumable: false,
+                replayable: false,
+            },
+            created_at_ms: paused.run.updated_at_ms,
+        };
+        let persisted = runner
+            .record_control_boundary_evidence(&mut store, "run-persist", evidence.clone())
+            .expect("control boundary evidence should persist");
+        assert_eq!(persisted.control_boundary_evidence.len(), 1);
         drop(store);
 
         let reloaded = GraphRunStore::persistent(path.clone());
@@ -1231,7 +1371,9 @@ mod tests {
 
         assert_eq!(run.phase, GraphRunPhase::Paused);
         assert_eq!(run.stop_reason, Some(GraphRunStopReason::UserStop));
+        assert_eq!(run.control_boundary_evidence, vec![evidence.clone()]);
         assert_eq!(checkpoint.run_id, paused.run.id);
+        assert_eq!(checkpoint.control_boundary_evidence, vec![evidence]);
         assert!(checkpoint.resumable);
 
         let mut reloaded = reloaded;

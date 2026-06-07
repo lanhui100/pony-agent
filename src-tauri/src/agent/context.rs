@@ -1,3 +1,4 @@
+use crate::agent::capability_bridge::SkillDescriptor;
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::graph::GraphRun;
 use crate::agent::input::TurnInputImage;
@@ -138,6 +139,7 @@ pub trait TurnContextBuilder: Send {
         graph_name: &str,
         provider: &ProviderManager,
         retrieved: &RetrievedContextState,
+        planner_skills: &[SkillDescriptor],
     ) -> ProviderRequest;
 
     fn build_session_summary(
@@ -179,6 +181,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         graph_name: &str,
         provider: &ProviderManager,
         retrieved: &RetrievedContextState,
+        planner_skills: &[SkillDescriptor],
     ) -> ProviderRequest {
         let current_user_message =
             ProviderMessage::user(retrieved.turn_context.user_message.clone());
@@ -198,6 +201,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         let base_semistable_context = provider_semistable_context_note(
             graph_name,
             retrieved,
+            planner_skills,
             image_note.as_deref(),
             None,
             None,
@@ -214,6 +218,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         let semi_stable_context = provider_semistable_context_note(
             graph_name,
             retrieved,
+            planner_skills,
             image_note.as_deref(),
             history_truncation_note.as_deref(),
             Some(PrefixMutationReason::HistoryBoundaryShifted),
@@ -237,6 +242,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
                 let base_native_context = provider_semistable_context_note(
                     graph_name,
                     retrieved,
+                    planner_skills,
                     image_note.as_deref(),
                     None,
                     None,
@@ -271,6 +277,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
                 let semi_stable_native_context_note = provider_semistable_context_note(
                     graph_name,
                     retrieved,
+                    planner_skills,
                     image_note.as_deref(),
                     native_transcript_note.as_deref(),
                     Some(PrefixMutationReason::NativeTranscriptBoundaryShifted),
@@ -466,6 +473,7 @@ fn provider_capability_note(provider: &ProviderManager) -> String {
 fn provider_semistable_context_note(
     graph_name: &str,
     retrieved: &RetrievedContextState,
+    planner_skills: &[SkillDescriptor],
     image_note: Option<&str>,
     truncation_note: Option<&str>,
     boundary_reason: Option<PrefixMutationReason>,
@@ -494,6 +502,11 @@ fn provider_semistable_context_note(
         reasons.push(PrefixMutationReason::LongTermMemoryChanged);
     }
 
+    if !planner_skills.is_empty() {
+        notes.push(render_planner_skills_note(planner_skills));
+        reasons.push(PrefixMutationReason::PlannerSkillsChanged);
+    }
+
     if let Some(note) = image_note {
         notes.push(note.to_string());
         reasons.push(PrefixMutationReason::ImageNoteChanged);
@@ -510,6 +523,39 @@ fn provider_semistable_context_note(
     SemistableContextSection {
         note: notes.join(" "),
         prefix_mutation_reasons: dedupe_prefix_mutation_reasons(reasons),
+    }
+}
+
+fn render_planner_skills_note(planner_skills: &[SkillDescriptor]) -> String {
+    let preview = planner_skills
+        .iter()
+        .take(6)
+        .map(|skill| {
+            format!(
+                "{} [{}] approval={} host_mediated={} scope={} kinds={}",
+                skill.label,
+                skill.input_schema_summary,
+                skill.requires_approval,
+                skill.host_mediated,
+                skill.permission_scope,
+                skill
+                    .composed_capability_kinds
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ");
+    if planner_skills.len() > 6 {
+        format!(
+            "Available executable skills (showing 6/{}): {}.",
+            planner_skills.len(),
+            preview
+        )
+    } else {
+        format!("Available executable skills: {}.", preview)
     }
 }
 
@@ -1026,6 +1072,7 @@ fn to_provider_history_message(message: &TurnHistoryMessage) -> Option<ProviderM
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::capability_bridge::{CapabilityKind, SkillDescriptor, SkillSourceKind};
     use crate::agent::config::{ProviderModelCapabilities, ResolvedProviderSelection};
     use crate::agent::graph::{
         GraphDecision, GraphDecisionKind, GraphDecisionReason, GraphRun, GraphRunPhase,
@@ -1053,6 +1100,26 @@ mod tests {
         })
     }
 
+    fn sample_planner_skill(label: &str) -> SkillDescriptor {
+        SkillDescriptor {
+            skill_id: format!("skill:{label}"),
+            source_id: "host-skills".to_string(),
+            source_kind: SkillSourceKind::Host,
+            label: label.to_string(),
+            description: "demo skill".to_string(),
+            input_schema_summary: "{}".to_string(),
+            safety_class: "skill".to_string(),
+            visibility: "default".to_string(),
+            observability_tags: vec!["skill".to_string()],
+            requires_approval: false,
+            host_mediated: true,
+            permission_scope: "workspace.read".to_string(),
+            composed_capability_refs: vec!["builtin:time_now".to_string()],
+            composed_capability_kinds: vec![CapabilityKind::Tool],
+            executable_in_v1: true,
+        }
+    }
+
     fn session_snapshot(
         history: Vec<TurnHistoryMessage>,
         provider_native_transcript: Vec<Value>,
@@ -1067,6 +1134,11 @@ mod tests {
             provider_native_transcript,
             turn_trace_history: Vec::new(),
             long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
+            run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
             turn_count: 3,
             last_referenced_file: last_referenced_file.map(str::to_string),
             updated_at_ms: 0,
@@ -1096,6 +1168,7 @@ mod tests {
                 summary: "等待用户继续输入".to_string(),
                 target_phase: GraphRunPhase::WaitingUser,
             }),
+            control_boundary_evidence: Vec::new(),
             created_at_ms: 0,
             updated_at_ms: 0,
         }
@@ -1103,8 +1176,16 @@ mod tests {
 
     fn sample_checkpoint() -> ExecutionCheckpoint {
         ExecutionCheckpoint {
+            contract_version: "execution-checkpoint-v1".to_string(),
             turn_id: "turn-active".to_string(),
             session_id: Some("session-1".to_string()),
+            run_id: None,
+            checkpoint_kind: "runtime_control".to_string(),
+            recovery_mode: "replay_required".to_string(),
+            projected_runtime_phase: "ready".to_string(),
+            submission_command: None,
+            resumable: false,
+            replayable: false,
             status: "completed".to_string(),
             phase: "ready".to_string(),
             provider_requested_name: None,
@@ -1119,6 +1200,7 @@ mod tests {
             active_tool_name: None,
             trace_steps: Vec::new(),
             tool_activities: Vec::new(),
+            persisted_effect_evidence: Vec::new(),
             error: None,
             started_at_ms: 0,
             updated_at_ms: 0,
@@ -1261,7 +1343,7 @@ mod tests {
             Some(&sample_run()),
             Some(&sample_checkpoint()),
         );
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
 
         assert!(request
             .observation
@@ -1350,7 +1432,7 @@ mod tests {
             Some(&sample_run()),
             Some(&sample_checkpoint()),
         );
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
 
         assert!(request
             .observation
@@ -1411,7 +1493,7 @@ mod tests {
 
         let retrieved =
             builder.retrieve_context_state("current volatile request", &[], &session, None, None);
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
 
         assert!(request
             .observation
@@ -1469,7 +1551,7 @@ mod tests {
             None,
             None,
         );
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
 
         assert!(!request
             .observation
@@ -1543,7 +1625,7 @@ mod tests {
         );
 
         let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let joined = request
             .input
             .iter()
@@ -1579,7 +1661,7 @@ mod tests {
             None,
             None,
         );
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let developer_text = request
             .input
             .iter()
@@ -1620,7 +1702,7 @@ mod tests {
         );
 
         let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let serialized = serde_json::to_string(&request.native_messages)
             .expect("native messages should serialize");
 
@@ -1674,7 +1756,7 @@ mod tests {
         );
 
         let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
-        let request = builder.build_request("graph-a", &provider, &retrieved);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let serialized = serde_json::to_string(&request.native_messages)
             .expect("native messages should serialize");
 
@@ -1682,5 +1764,41 @@ mod tests {
         assert!(!serialized.contains("old assistant follow-up"));
         assert!(serialized.contains("recent user asks for summary"));
         assert!(serialized.contains("recent assistant summary"));
+    }
+
+    #[test]
+    fn build_request_includes_normalized_planner_skill_summary() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-5.4",
+            64,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(4096),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+            },
+        );
+        let session = session_snapshot(Vec::new(), Vec::new(), None);
+        let retrieved =
+            builder.retrieve_context_state("请继续规划下一步", &[], &session, None, None);
+        let request = builder.build_request(
+            "graph-a",
+            &provider,
+            &retrieved,
+            &[sample_planner_skill("repo_triage")],
+        );
+
+        assert!(request.input.iter().any(|message| matches!(
+            message.role,
+            ProviderRole::Developer
+        ) && message
+            .content
+            .contains("Available executable skills")));
+        assert!(request
+            .observation
+            .prefix_mutation_reasons
+            .contains(&PrefixMutationReason::PlannerSkillsChanged));
     }
 }

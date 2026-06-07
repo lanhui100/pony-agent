@@ -1,3 +1,4 @@
+use crate::agent::capability_bridge::SkillDescriptor;
 use crate::agent::graph::{
     GraphDecision, GraphDecisionKind, GraphDecisionReason, GraphRun, GraphRunPhase,
     GraphTurnHandoff,
@@ -15,12 +16,14 @@ pub trait TurnPlanner: Send {
         &self,
         user_message: &str,
         history: &[TurnHistoryMessage],
+        available_skills: &[SkillDescriptor],
     ) -> Option<ProviderDecision>;
 
     fn select_tool_call(
         &self,
         user_message: &str,
         history: &[TurnHistoryMessage],
+        available_skills: &[SkillDescriptor],
         provider_tool_call: Option<ToolCall>,
     ) -> Option<ToolCall>;
 }
@@ -95,6 +98,7 @@ impl TurnPlanner for LocalTurnPlanner {
         &self,
         user_message: &str,
         history: &[TurnHistoryMessage],
+        _available_skills: &[SkillDescriptor],
     ) -> Option<ProviderDecision> {
         Self::preflight_tool_decision(user_message, history)
     }
@@ -103,9 +107,12 @@ impl TurnPlanner for LocalTurnPlanner {
         &self,
         user_message: &str,
         history: &[TurnHistoryMessage],
+        available_skills: &[SkillDescriptor],
         provider_tool_call: Option<ToolCall>,
     ) -> Option<ToolCall> {
         let local_tool_call = Self::infer_local_tool_call(user_message, history);
+        let explicit_skill_call =
+            Self::infer_explicit_skill_tool_call(user_message, available_skills);
         match (provider_tool_call, local_tool_call) {
             (Some(provider), Some(local))
                 if Self::should_prefer_local_tool_call(&provider, &local) =>
@@ -114,12 +121,43 @@ impl TurnPlanner for LocalTurnPlanner {
             }
             (Some(provider), _) => Some(provider),
             (None, Some(local)) => Some(local),
-            (None, None) => None,
+            (None, None) => explicit_skill_call,
         }
     }
 }
 
 impl LocalTurnPlanner {
+    fn infer_explicit_skill_tool_call(
+        user_message: &str,
+        available_skills: &[SkillDescriptor],
+    ) -> Option<ToolCall> {
+        let lowered = user_message.to_lowercase();
+        if !contains_any(&lowered, &["skill", "技能"]) {
+            return None;
+        }
+
+        available_skills.iter().find_map(|skill| {
+            let label = skill.label.trim();
+            let skill_id = skill.skill_id.trim();
+            if label.is_empty() {
+                return None;
+            }
+
+            let label_lower = label.to_lowercase();
+            let skill_id_lower = skill_id.to_lowercase();
+            if !lowered.contains(&label_lower) && !lowered.contains(&skill_id_lower) {
+                return None;
+            }
+
+            Some(ToolCall {
+                call_id: None,
+                name: skill.label.clone(),
+                arguments: json!({}),
+                plan: Some(skill_tool_plan(skill)),
+            })
+        })
+    }
+
     fn should_prefer_local_tool_call(
         provider_tool_call: &ToolCall,
         local_tool_call: &ToolCall,
@@ -545,6 +583,25 @@ impl LocalTurnPlanner {
     }
 }
 
+fn skill_tool_plan(skill: &SkillDescriptor) -> ToolPlan {
+    ToolPlan {
+        kind: "skill".to_string(),
+        summary: format!("执行 skill `{}`。", skill.label),
+        parallel: false,
+        continue_on_error: false,
+        steps: skill
+            .composed_capability_refs
+            .iter()
+            .zip(skill.composed_capability_kinds.iter())
+            .map(|(capability_ref, kind)| ToolPlanStep {
+                name: capability_ref.clone(),
+                arguments: json!({}),
+                summary: format!("调用 {} capability `{}`。", kind.as_str(), capability_ref),
+            })
+            .collect(),
+    }
+}
+
 fn assistant_requests_user_input(message: &str) -> bool {
     let normalized = message.trim().to_lowercase();
     if normalized.is_empty() {
@@ -700,6 +757,7 @@ fn preview_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::capability_bridge::{CapabilityKind, SkillDescriptor, SkillSourceKind};
     use crate::agent::graph::{GraphRun, GraphRunPhase};
 
     fn history(role: &str, content: &str) -> TurnHistoryMessage {
@@ -723,6 +781,7 @@ mod tests {
             last_handoff: None,
             resume_count: 0,
             last_decision: None,
+            control_boundary_evidence: Vec::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
         }
@@ -755,6 +814,26 @@ mod tests {
             tool_activity_count: 1,
             provider_name: "OpenAI".to_string(),
             provider_model: "gpt-5".to_string(),
+        }
+    }
+
+    fn sample_skill(label: &str) -> SkillDescriptor {
+        SkillDescriptor {
+            skill_id: format!("skill:{label}"),
+            source_id: "host-skills".to_string(),
+            source_kind: SkillSourceKind::Host,
+            label: label.to_string(),
+            description: "demo skill".to_string(),
+            input_schema_summary: "{}".to_string(),
+            safety_class: "skill".to_string(),
+            visibility: "default".to_string(),
+            observability_tags: vec!["skill".to_string()],
+            requires_approval: false,
+            host_mediated: true,
+            permission_scope: "workspace.read".to_string(),
+            composed_capability_refs: vec!["builtin:time_now".to_string()],
+            composed_capability_kinds: vec![CapabilityKind::Tool],
+            executable_in_v1: true,
         }
     }
 
@@ -959,6 +1038,7 @@ mod tests {
             .select_tool_call(
                 "请同时查看 src-tauri/src/agent/tools.rs、src-tauri/src/agent/planner.rs，并概括差异",
                 &[],
+                &[],
                 Some(provider_tool_call),
             )
             .expect("selected tool call");
@@ -966,6 +1046,28 @@ mod tests {
         assert_eq!(call.name, "workspace_batch");
         assert!(call.plan.is_some());
         assert!(call.arguments.get("calls").is_some());
+    }
+
+    #[test]
+    fn planner_can_select_explicit_skill_by_normalized_label() {
+        let call = LocalTurnPlanner
+            .select_tool_call(
+                "请使用 skill repo_triage",
+                &[],
+                &[sample_skill("repo_triage")],
+                None,
+            )
+            .expect("selected skill tool call");
+
+        assert_eq!(call.name, "repo_triage");
+        assert!(call.plan.is_some());
+        assert_eq!(
+            call.plan
+                .as_ref()
+                .and_then(|plan| plan.steps.first())
+                .map(|step| step.name.as_str()),
+            Some("builtin:time_now")
+        );
     }
 
     #[test]

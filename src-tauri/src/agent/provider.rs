@@ -117,6 +117,7 @@ pub enum PrefixMutationReason {
     SessionSummaryChanged,
     RunGoalChanged,
     LongTermMemoryChanged,
+    PlannerSkillsChanged,
     ImageNoteChanged,
     TruncationNoteChanged,
     HistoryBoundaryShifted,
@@ -417,7 +418,9 @@ impl ProviderManager {
             ProviderProtocol::OpenAi => {
                 self.send_openai_tool_decision_stream_request(request, tools, &mut on_delta)
             }
-            ProviderProtocol::Anthropic => self.send_anthropic_tool_decision_request(request, tools),
+            ProviderProtocol::Anthropic => {
+                self.send_anthropic_tool_decision_request(request, tools)
+            }
         };
 
         match result {
@@ -832,11 +835,13 @@ impl ProviderManager {
             .unwrap_or_else(|| estimate_token_usage(request, &output_text));
         provider_log_token_usage("openai followup-stream", &token_usage);
         let assistant_message = if let Some(tool_call) = message.tool_call.as_ref() {
-            Some(provider_native_assistant_tool_call_message_with_reasoning_value(
-                text_if_present(&output_text),
-                message.reasoning_content_value.as_ref(),
-                tool_call,
-            ))
+            Some(
+                provider_native_assistant_tool_call_message_with_reasoning_value(
+                    text_if_present(&output_text),
+                    message.reasoning_content_value.as_ref(),
+                    tool_call,
+                ),
+            )
         } else {
             Some(provider_native_assistant_message_with_reasoning_value(
                 &output_text,
@@ -1072,8 +1077,12 @@ impl ProviderManager {
         ));
 
         let response = self.post_openai_stream_response(&endpoint, &body)?;
-        let message =
-            collect_openai_sse_message_from_response(response, Instant::now(), &endpoint, on_delta)?;
+        let message = collect_openai_sse_message_from_response(
+            response,
+            Instant::now(),
+            &endpoint,
+            on_delta,
+        )?;
         let output_text = message.output_text.clone();
         let tool_call = message.tool_call.clone();
         if output_text.trim().is_empty() && tool_call.is_none() {
@@ -1086,11 +1095,13 @@ impl ProviderManager {
         provider_log_token_usage("openai decision-stream", &token_usage);
 
         let assistant_message = if let Some(tool_call) = tool_call.as_ref() {
-            Some(provider_native_assistant_tool_call_message_with_reasoning_value(
-                text_if_present(&output_text),
-                message.reasoning_content_value.as_ref(),
-                tool_call,
-            ))
+            Some(
+                provider_native_assistant_tool_call_message_with_reasoning_value(
+                    text_if_present(&output_text),
+                    message.reasoning_content_value.as_ref(),
+                    tool_call,
+                ),
+            )
         } else {
             Some(provider_native_assistant_message_with_reasoning_value(
                 &output_text,
@@ -1537,8 +1548,7 @@ impl OpenAiSseAccumulator {
                 Some(reasoning_content.clone())
             },
             reasoning_content_value: reasoning_content_value.or_else(|| {
-                (!reasoning_content.trim().is_empty())
-                    .then(|| Value::String(reasoning_content))
+                (!reasoning_content.trim().is_empty()).then(|| Value::String(reasoning_content))
             }),
             token_usage,
         })
@@ -1681,9 +1691,8 @@ where
         } else {
             Some(reasoning.clone())
         },
-        reasoning_content_value: reasoning_value.or_else(|| {
-            (!reasoning.trim().is_empty()).then(|| Value::String(reasoning))
-        }),
+        reasoning_content_value: reasoning_value
+            .or_else(|| (!reasoning.trim().is_empty()).then(|| Value::String(reasoning))),
         token_usage: None,
     })
 }
@@ -2276,7 +2285,9 @@ pub fn provider_native_assistant_message_with_reasoning(
 ) -> Value {
     provider_native_assistant_message_with_reasoning_value(
         content,
-        reasoning_content.map(|value| Value::String(value.to_string())).as_ref(),
+        reasoning_content
+            .map(|value| Value::String(value.to_string()))
+            .as_ref(),
     )
 }
 
@@ -2298,7 +2309,9 @@ pub fn provider_native_assistant_tool_call_message(
 ) -> Value {
     provider_native_assistant_tool_call_message_with_reasoning_value(
         content,
-        reasoning_content.map(|value| Value::String(value.to_string())).as_ref(),
+        reasoning_content
+            .map(|value| Value::String(value.to_string()))
+            .as_ref(),
         tool_call,
     )
 }
@@ -3468,7 +3481,10 @@ mod tests {
         );
 
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[1].get("reasoning_content"), Some(&structured_reasoning));
+        assert_eq!(
+            messages[1].get("reasoning_content"),
+            Some(&structured_reasoning)
+        );
     }
 
     #[test]
@@ -3570,9 +3586,13 @@ mod tests {
             ]
         });
 
-        let rebuilt = openai_assistant_message_for_tool_result(Some(&assistant_message), &tool_call);
+        let rebuilt =
+            openai_assistant_message_for_tool_result(Some(&assistant_message), &tool_call);
 
-        assert_eq!(rebuilt.get("reasoning_content"), Some(&structured_reasoning));
+        assert_eq!(
+            rebuilt.get("reasoning_content"),
+            Some(&structured_reasoning)
+        );
         assert_eq!(
             rebuilt
                 .get("tool_calls")
