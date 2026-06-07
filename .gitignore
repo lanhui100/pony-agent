@@ -6,6 +6,7 @@ codex-openai/
 reasonix-esengine/
 
 src-tauri/target/
+src-tauri/target-codex-*/
 src-tauri/gen/
 
 .DS_Store
@@ -16,11 +17,18 @@ desktop.ini
 .vscode/
 
 *.log
+.codex-logs/
 .devlogs/
+.tmp/
 src-tauri/target-check/
 src-tauri/.pony-agent/
-tmp-dev-*.png
+tmp-*.png
+tmp-*.log
 target/
 target-check/
+target-test/
+target-test-exact*/
 target-check-tests*/
 target-check-tests-*/
+playwright-report/
+test-results/
