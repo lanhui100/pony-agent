@@ -8,6 +8,8 @@ reasonix-esengine/
 src-tauri/target/
 src-tauri/target-codex-*/
 src-tauri/gen/
+src-tauri/target-test*/
+src-tauri/target-check-tests*/
 
 .DS_Store
 Thumbs.db
@@ -28,10 +30,19 @@ src-tauri/.pony-agent/
 tmp-*.png
 tmp-*.log
 target/
+target-codex-*/
 target-check/
+target-check-*/
 target-test/
+target-test-*/
 target-test-exact*/
 target-check-tests*/
 target-check-tests-*/
 playwright-report/
 test-results/
+attachments/
+sessions/
+*.rlib
+*.lib
+*.a
+*.pdb

@@ -1,0 +1,3 @@
+#!/bin/sh
+powershell -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-push
+exit $?

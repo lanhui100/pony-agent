@@ -570,8 +570,7 @@ impl SessionStore {
                 should_save = true;
             }
         }
-        let rebuilt_assets =
-            rebuild_attachment_assets(&sessions, &attachment_assets, &attachment_root);
+        let rebuilt_assets = rebuild_attachment_assets_from_sessions(&sessions, &attachment_assets);
         let rebuilt_index = rebuild_session_attachment_index(&sessions);
         if attachment_assets != rebuilt_assets {
             attachment_assets = rebuilt_assets;
@@ -3450,6 +3449,23 @@ fn rebuild_attachment_assets(
     attachment_root: &Path,
 ) -> AttachmentAssetMap {
     let mut assets = scan_attachment_assets(attachment_root, existing_assets);
+    merge_session_attachment_assets(sessions, &mut assets);
+    assets
+}
+
+fn rebuild_attachment_assets_from_sessions(
+    sessions: &SessionMap,
+    existing_assets: &AttachmentAssetMap,
+) -> AttachmentAssetMap {
+    let mut assets = existing_assets.clone();
+    merge_session_attachment_assets(sessions, &mut assets);
+    assets
+}
+
+fn merge_session_attachment_assets(
+    sessions: &SessionMap,
+    assets: &mut AttachmentAssetMap,
+) {
     for session in sessions.values() {
         for attachment in session
             .history
@@ -3491,7 +3507,6 @@ fn rebuild_attachment_assets(
             }
         }
     }
-    assets
 }
 
 fn rebuild_session_attachment_index(sessions: &SessionMap) -> SessionAttachmentIndex {
