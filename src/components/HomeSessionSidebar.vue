@@ -63,6 +63,7 @@ const {
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
 const historyOpen = ref(loadStoredBoolean(HISTORY_OPEN_STORAGE_KEY, true));
 const modelOpen = ref(loadStoredBoolean(MODEL_OPEN_STORAGE_KEY, true));
+const pendingDeleteSessionId = ref<string | null>(null);
 const historyFeedback = ref<{
   tone: FeedbackTone;
   title: string;
@@ -439,6 +440,7 @@ function handleHistoryToggle() {
 }
 
 function openSessionHistory(conversationId: string) {
+  pendingDeleteSessionId.value = null;
   if (props.currentPage !== "home") {
     navigate("home");
   }
@@ -446,17 +448,37 @@ function openSessionHistory(conversationId: string) {
   runtimeStore.switchSession(conversationId);
 }
 
+function sessionHeadline(session: SessionOverview) {
+  return session.title?.trim() || session.summary?.trim() || session.conversationId;
+}
+
 function formatSessionTime(updatedAtMs?: number) {
   if (!updatedAtMs) {
     return "未保存";
   }
 
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(updatedAtMs);
+  const now = new Date();
+  const updatedAt = new Date(updatedAtMs);
+  const isSameDay =
+    now.getFullYear() === updatedAt.getFullYear() &&
+    now.getMonth() === updatedAt.getMonth() &&
+    now.getDate() === updatedAt.getDate();
+
+  if (isSameDay) {
+    return new Intl.DateTimeFormat("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(updatedAt);
+  }
+
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfUpdatedDay = new Date(
+    updatedAt.getFullYear(),
+    updatedAt.getMonth(),
+    updatedAt.getDate()
+  ).getTime();
+  const elapsedDays = Math.max(1, Math.floor((startOfToday - startOfUpdatedDay) / 86_400_000));
+  return `${elapsedDays}天前`;
 }
 
 function hasPersistableMessages(sessionMessages: ChatMessage[]) {
@@ -472,6 +494,20 @@ function isTransientSession(session: SessionOverview) {
 
 function canDeleteSession(session: SessionOverview) {
   return !isSubmitting.value && !sessionOperation.value && !isTransientSession(session);
+}
+
+async function handleDeleteSession(session: SessionOverview) {
+  if (!canDeleteSession(session)) {
+    return;
+  }
+
+  if (pendingDeleteSessionId.value !== session.conversationId) {
+    pendingDeleteSessionId.value = session.conversationId;
+    return;
+  }
+
+  pendingDeleteSessionId.value = null;
+  await runtimeStore.deleteSession(session.conversationId);
 }
 
 function formatHistoryNodeTime(createdAtMs?: number | null) {
@@ -750,7 +786,7 @@ async function handleSwitchBranch(branchId: string) {
           </button>
         </div>
 
-        <div class="mt-3 flex min-h-0 flex-1 flex-col gap-2">
+        <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="pr-1.5"><div class="flex flex-col gap-2">
           <section class="rounded-[0.5rem]" data-testid="session-sidebar-history-panel">
             <button
               class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
@@ -952,9 +988,12 @@ async function handleSwitchBranch(branchId: string) {
                   v-for="session in visibleSessions"
                   :key="session.conversationId"
                   class="group rounded-[0.2rem]"
-                  :class="session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass"
+                  :class="[
+                    session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass,
+                    pendingDeleteSessionId === session.conversationId ? 'bg-rose-50 text-rose-700' : ''
+                  ]"
                 >
-                  <div class="flex items-start gap-2 px-1.5 py-1.5">
+                  <div class="flex items-center gap-2 px-1.5 py-1.5">
                     <button
                       class="min-w-0 flex-1 text-left"
                       type="button"
@@ -962,34 +1001,45 @@ async function handleSwitchBranch(branchId: string) {
                       :data-testid="`session-switch-${session.conversationId}`"
                       @click="openSessionHistory(session.conversationId)"
                     >
-                      <div
-                        class="truncate text-[12px] leading-5"
-                        :class="session.conversationId === sessionId ? 'font-medium text-stone-900' : 'text-stone-700'"
-                      >
-                        {{ session.title || session.summary || session.conversationId }}
-                        <span v-if="isTransientSession(session)" class="ml-1 text-[10px] text-amber-600">
+                      <div class="flex items-center gap-2 text-[12px] leading-5">
+                        <span
+                          class="truncate"
+                          :class="session.conversationId === sessionId ? 'font-medium text-stone-900' : 'text-stone-700'"
+                        >
+                          {{ sessionHeadline(session) }}
+                        </span>
+                        <span v-if="isTransientSession(session)" class="shrink-0 text-[10px] text-amber-600">
                           未保存
                         </span>
-                      </div>
-                      <div class="mt-0.5 truncate text-[10px] text-stone-400">
-                        {{ session.summary }}
-                      </div>
-                      <div class="mt-0.5 text-[10px] text-stone-400">
-                        {{ session.turnCount }} 轮
-                        <span v-if="session.lastReferencedFile"> · {{ session.lastReferencedFile }}</span>
-                        <span v-if="session.updatedAtMs"> · {{ formatSessionTime(session.updatedAtMs) }}</span>
+                        <span class="shrink-0 text-[10px] text-stone-400">
+                          {{ formatSessionTime(session.updatedAtMs) }}
+                        </span>
                       </div>
                     </button>
 
                     <button
-                      class="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:text-rose-600 disabled:cursor-not-allowed disabled:text-stone-300"
+                      class="inline-flex shrink-0 cursor-pointer items-center justify-center text-[10px] text-stone-400 transition hover:cursor-pointer hover:text-rose-600 disabled:cursor-not-allowed disabled:text-stone-300"
+                      :class="
+                        pendingDeleteSessionId === session.conversationId
+                          ? 'h-5 rounded-full bg-rose-200 px-1.5 text-rose-800 hover:bg-rose-300 hover:text-rose-900'
+                          : 'rounded-[0.35rem] px-1.5 py-1'
+                      "
                       type="button"
                       :disabled="!canDeleteSession(session)"
-                      :title="isTransientSession(session) ? '空白新对话会在切换后自动丢弃，无需单独删除。' : '删除对话'"
+                      :title="
+                        isTransientSession(session)
+                          ? '空白新对话会在切换后自动丢弃，无需单独删除。'
+                          : pendingDeleteSessionId === session.conversationId
+                            ? '再点一次确认删除。'
+                            : '删除对话'
+                      "
                       :data-testid="`session-delete-${session.conversationId}`"
-                      @click.stop="runtimeStore.deleteSession(session.conversationId)"
+                      @click.stop="handleDeleteSession(session)"
                     >
-                      <Trash2 class="h-3.5 w-3.5" />
+                      <Trash2 v-if="pendingDeleteSessionId !== session.conversationId" class="h-3.5 w-3.5" />
+                      <span v-else class="inline-flex items-center justify-center text-[10px] font-medium text-rose-800">
+                        确认？
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -1055,7 +1105,7 @@ async function handleSwitchBranch(branchId: string) {
             class="hidden"
             aria-hidden="true"
           />
-        </div>
+        </div></ScrollArea>
       </template>
     </div>
   </aside>

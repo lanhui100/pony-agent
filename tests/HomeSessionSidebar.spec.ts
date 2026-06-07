@@ -272,12 +272,15 @@ describe("HomeSessionSidebar", () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     setActivePinia(createPinia());
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-07T15:00:00+08:00"));
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     vi.spyOn(console, "info").mockImplementation(() => {});
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -329,6 +332,67 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.get('[data-testid="session-switch-session-other"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('[data-testid="session-delete-session-current"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('[data-testid="session-delete-session-other"]').attributes("disabled")).toBeDefined();
+  });
+
+  it("renders each saved session as a single compact line with relative time", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      sessionList: [
+        createSession({
+          conversationId: "session-current",
+          title: "Current session",
+          summary: "Current summary",
+          updatedAtMs: new Date("2026-06-07T09:30:00+08:00").getTime()
+        }),
+        createSession({
+          conversationId: "session-other",
+          title: "Other session",
+          summary: "Other summary",
+          turnCount: 3,
+          lastReferencedFile: "src/demo.ts",
+          updatedAtMs: new Date("2026-06-05T12:00:00+08:00").getTime()
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    const currentRow = wrapper.get('[data-testid="session-switch-session-current"]').text();
+    const otherRow = wrapper.get('[data-testid="session-switch-session-other"]').text();
+
+    expect(currentRow).toContain("Current session");
+    expect(currentRow).toMatch(/\d{2}:\d{2}/);
+    expect(currentRow).not.toContain("Current summary");
+    expect(otherRow).toContain("Other session");
+    expect(otherRow).toContain("2天前");
+    expect(otherRow).not.toContain("Other summary");
+    expect(otherRow).not.toContain("3 轮");
+    expect(otherRow).not.toContain("src/demo.ts");
+  });
+
+  it("requires a second click before deleting a session", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    const deleteSessionSpy = vi.spyOn(runtimeStore, "deleteSession").mockResolvedValue();
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    const deleteButton = wrapper.get('[data-testid="session-delete-session-other"]');
+    await deleteButton.trigger("click");
+    await nextTick();
+
+    expect(deleteSessionSpy).not.toHaveBeenCalled();
+    expect(wrapper.get('[data-testid="session-delete-session-other"]').text()).toContain("确认");
+
+    await wrapper.get('[data-testid="session-delete-session-other"]').trigger("click");
+
+    expect(deleteSessionSpy).toHaveBeenCalledWith("session-other");
   });
 
   it("keeps create actions above history and model sections", async () => {
@@ -575,6 +639,8 @@ describe("HomeSessionSidebar", () => {
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-new-chat"]').trigger("click");
+    await wrapper.get('[data-testid="session-delete-session-other"]').trigger("click");
+    await nextTick();
     await wrapper.get('[data-testid="session-delete-session-other"]').trigger("click");
 
     expect(createSessionSpy).toHaveBeenCalledTimes(1);
