@@ -26,14 +26,32 @@
 - 当前 turn / tool / session / checkpoint 生命周期已经有雏形，但还没有统一 hook pipeline
 - `PA-014` 将先稳定 run/goal 级 lifecycle
 - `PA-018 ~ PA-021` 将先把 context/state retrieval、planner、MCP、skills 的边界固定下来
+- `PA-033` 已把其中 turn-lifecycle foundation 范围单独拆成可执行卡；本卡保留为 foundation 之后的更大 hooks 扩展入口
+- 当前已进一步拆成下一轮可执行卡：
+  - `PA-038`：run hooks 与 execution-control boundary
+  - `PA-039`：memory-write hooks 与 persisted side-effect contract
+  - `PA-040`：planner 与 capability-mediation hooks
+- `PA-038 / PA-039 / PA-040` 现已全部完成 closeout，并已完成 OpenSpec spec 同步与 archive：
+  - `openspec/specs/` 已新增对应 canonical spec
+  - `openspec/changes/archive/2026-06-05-*` 已完成归档
+- 当前 hooks 主线已完成第一轮 post-foundation 扩展收口：
+  - turn foundation：`PA-033 / PA-035`
+  - run / execution-control：`PA-038`
+  - memory write / persisted side effect：`PA-039`
+  - planner / capability mediation：`PA-040`
+
+## 与 PA-033 的关系
+- `PA-033` 只覆盖 turn lifecycle foundation
+- 本卡仍保留 `run / memory write / planner / skills / MCP` 等 post-foundation 扩展范围
+- `PA-033` 完成不自动关闭本卡；后续需根据 foundation 交付结果重写或拆分本卡
 
 ## 下一步动作
-- 先枚举稳定可承诺的 lifecycle 节点
-- 再决定 hooks 的注册、执行次序与失败策略
-- 最后为未来扩展能力提供统一挂接点
+- 保持本卡作为 post-foundation hooks 总入口与分流说明，不直接承载实现
+- 仅当出现新的稳定 lifecycle boundary 且未被 `PA-033 / PA-035 / PA-038 / PA-039 / PA-040` 覆盖时，再拆新的独立 change
+- 在没有新稳定边界之前，不新增第四张近线 hooks 主卡，避免重新回到模糊大卡
 
 ## 当前卡点
-- hooks 属于横切层，若在 graph/runtime/memory/planner 尚未稳定时过早引入，只会把原本应收束的主流程再次打散
+- 当前近线底座已基本稳定；本卡的主要工作不再是补实现，而是继续防止后续需求把 hooks 范围重新混回一张大卡
 
 ## 断点续跑提示
 继续前先看：

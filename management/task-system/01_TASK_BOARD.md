@@ -13,7 +13,7 @@
 ## Backlog
 
 - `PA-022` lifecycle hooks pipeline
-  说明：在 graph/runtime/memory/capability 的边界稳定后，补统一 hooks 横切机制。
+  说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排
   说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
 
@@ -23,8 +23,7 @@
 
 ## In Progress
 
-- `PA-021` skills registry 与 bridge
-  说明：已启动 OpenSpec change `add-skills-registry-bridge`，当前聚焦 skill manifest / registry / invocation boundary，以及和 `PA-020` capability bridge、`PA-022` hooks、planner/runtime 的清晰分界。
+- 暂无
 
 ## Review
 
@@ -36,8 +35,36 @@
 
 ## Done
 
+- `PA-036` terminal trace envelope 与 monitor 真相源
+  说明：已完成 sync failed / streamed cancelled terminal envelope 对齐、reload evidence 保真、monitor canonical truth-source 收紧与前端 raw-trace 防误读约束，并已通过 acceptance audit 与完成态裁定。
+- `PA-033` agent hooks pipeline foundation
+  说明：已完成 foundation/no-op contract、binding、traceability 与 persisted roundtrip 基础，并已通过独立 acceptance audit；runtime hook dispatch integration 已由 `PA-035` 单独承接。
+- `PA-037` session 控制交互面与反馈闭环
+  说明：已完成 stop/resume/continue/replay 显式入口、history degrade feedback、统一状态语言与 disabled reason，并已通过 acceptance audit 与前端完成态验证。
+- `PA-035` runtime hook dispatch stable-boundary integration
+  说明：已完成 stable-boundary runtime hook dispatch、runtime-produced hook trace realtime/persisted/read-plane 闭环，以及 ordering/failure/reload/front-end 验收，并已通过 acceptance audit 与 closeout。
+- `PA-034` checkpoint lifecycle boundary implementation
+  说明：已完成 runtime checkpoint boundary、persisted evidence、reload/control-plane 投影与前端 runtime store 消费闭环，并已通过 acceptance audit 与完成态验证。
+- `PA-032` trace persistence 与 recovery contract
+  说明：已完成 recovery contract、submission plan 仲裁、reload/hydration 收口、history degrade 合同与后端/前端恢复仲裁闭环，并已通过 acceptance audit 与完成态裁定。
+- `PA-031` turn lifecycle 与 event contract
+  说明：已完成 canonical lifecycle/event vocabulary、SSE/event envelope、multi-hop/failed/cancelled 终态语义与前端 canonical 消费收口，并已通过 acceptance audit 与完成态裁定。
+- `PA-021` skills registry 与 bridge
+  说明：已完成 skill source snapshot ingress、统一 registry、`list_skills / inspect_skill`、tool-only runtime execution、planner normalized skill facts consumption 与 monitor skill lineage 聚合/下钻展示，并已通过 acceptance audit 与完成态 closeout。
 - `PA-020` MCP capability bridge
   说明：已完成 capability registry 统一读面、runtime capability bridge、MCP source snapshot 写面、permission/failure 归一化、capability telemetry summary/drilldown，以及 `tool / resource / prompt_template` 的规范化合同与定向验证。
+- `PA-040` planner 与 capability-mediation hooks
+  说明：已完成 planner `preflight / tool selection / graph decision`、capability `resolve / skill mediation` 与 source ingress 的真实 hook dispatch、白名单 transform、session snapshot / control-plane drilldown 读面闭环，并已通过 acceptance audit 与 closeout。
+- `PA-041` history-state hooks 与 restore-boundary contract
+  说明：已完成 `history checkout / branch restore / branch fork / branch switch` 四类 boundary 的真实 hook dispatch、persisted audit chain、reload/control-plane/runtime-view/frontend contract 对齐，以及 degrade/non-regression 验收，并已通过 acceptance audit。
+- `PA-042` session control audit surface 与 history evidence summary
+  说明：已完成 `Session Control Plane audit surface v1`、history-control summary read-model、snapshot/runtime-view/response 统一投影、frontend summary-first explainability 与 acceptance audit/closeout；后续 run-control summary 扩展应由新卡承接。
+- `PA-043` run-control audit surface 与 summary-first explainability
+  说明：已完成 `Run Control audit surface v1`、`stop / continue / resume / replay(start)` summary contract、snapshot/runtime-view/response 统一投影、frontend summary-first explainability 与 acceptance audit/closeout；普通首轮 `start_graph_run_stream` 排除、truth-source guardrail 与 reload/hydration 回归已收口。
+- `PA-039` memory-write hooks 与 persisted side-effect contract
+  说明：已完成 `long-term memory write` 的 `intent -> hook -> evidence -> recovery` 真闭环，`memory_write_evidence` 与 `memory_write_hook_trace_records` 已通过 snapshot / history checkout / file roundtrip / checkpoint recovery 验证，并已通过 acceptance audit 与 closeout。
+- `PA-038` run hooks 与 execution-control boundary
+  说明：已完成 `submission_plan / wait_user / stop_requested / run_resume` 的 canonical boundary persisted evidence、runtime view/session control 统一读面与前端回归，并已通过 acceptance audit 与 closeout。
 
 - `PA-024` 模型监控与 telemetry 聚合面
   说明：已完成 monitor summary / session drill-down 的 Tauri 聚合读面、`ModelMonitorPage` 真实数据页、trace / build-context 下钻展示与前后端定向测试。

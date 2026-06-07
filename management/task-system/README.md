@@ -41,7 +41,7 @@
 - OpenSpec 根目录固定为 `openspec/`
 - 任务系统负责记录和推进；OpenSpec 在复杂开发任务开始实现时按需启动
 - 复杂任务完成时，要同步维护：
-  - `openspec/changes/<name>/`
+  - `openspec/changes/<name>/` 或归档后的 `openspec/changes/archive/YYYY-MM-DD-<name>/`
   - `openspec/specs/`
   - `management/task-system/03_TASKS/*.md`
   - `management/task-system/99_LOGS/*.md`
@@ -68,6 +68,15 @@
 4. 创建或更新任务卡，并回填 OpenSpec 路径
 5. 按 spec 和任务卡实施
 6. 完成后按 `docs/standards/engineering.md` 的 5 个质量门同步验收证据、canonical specs 与归档状态
+
+### 完成态回写要求
+
+复杂任务完成并归档时，至少要同步四类信息：
+
+1. canonical spec 已落到 `openspec/specs/`
+2. OpenSpec change 已迁入 `openspec/changes/archive/`
+3. 任务卡、review、session log 已改成稳定引用，不再依赖 active change 路径
+4. 架构文档或索引页若把该任务写成“下一步”，必须同步改成“已完成态”或“下一阶段建议”
 
 ### 验收证据组织
 

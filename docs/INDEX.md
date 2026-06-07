@@ -12,6 +12,17 @@
 - [Context/State 子系统 V1](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)
 - [Rust 运行时设计](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/runtime.md)
 - [前端工作台架构](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/frontend-workbench.md)
+- [Turn Lifecycle、Hooks 与 Recovery 架构基线](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/turn-lifecycle-hooks-and-recovery.md)
+- [Session Control Plane 与 Audit Surface 架构基线](C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/session-control-plane-and-audit-surface.md)
+
+## 2.1 Session Control 主线
+
+- [PA-042 canonical spec：history-control audit surface](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/session-control-audit-surface-and-history-evidence-summary/spec.md)
+- [PA-043 canonical spec：run-control audit surface](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/run-control-audit-surface-and-summary-first-explainability/spec.md)
+- [PA-042 任务卡](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-042-build-session-control-audit-surface-and-history-evidence-summary.md)
+- [PA-043 任务卡](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-043-build-run-control-audit-surface-and-summary-first-explainability.md)
+- [PA-042 验收审计](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-05-pa042-acceptance-audit.md)
+- [PA-043 验收审计](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-05-pa043-acceptance-audit.md)
 
 ## 3. 决策记录
 
@@ -43,6 +54,7 @@
 
 - [OpenSpec 根目录](C:/Users/HUAWEI/Documents/pony-agent/openspec)
 - [复杂任务交付 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/spec-driven-delivery/spec.md)
+- [OpenSpec 归档目录](C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive)
 
 ## 9. 路线图
 
@@ -56,5 +68,6 @@
 - 想开始写代码：看“开发指南”
 - 想沉淀学习和未来写文章素材：看“学习记录”
 - 想知道现在做到哪：看“任务系统”
+- 想理解 session control 这一轮已经收口了什么：先看 `docs/architecture/session-control-plane-and-audit-surface.md`，再看 `PA-042 / PA-043` canonical specs
 - 想保持工程质量：看“规范”
 - 想推进复杂开发任务：看“OpenSpec”

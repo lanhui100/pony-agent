@@ -16,6 +16,8 @@
 - `PA-027` 已把 OpenSpec 接入仓库与任务系统，复杂任务现在有正式 spec-first 流程
 - `PA-028` 已完成历史节点管理实现、前端交互与定向验证
 - `PA-020 / PA-021` 现在不再被 `PA-018` 阻塞
+- 当前已正式启动 `PA-031 / PA-032 / PA-033` 三卡串联，用于收口 turn lifecycle、trace persistence/recovery 与 hooks foundation
+- `PA-034` 已补入近线主视图，负责把 `checkpointing` 从 contract 名词推进成 runtime / persistence / reload / frontend 共同可见的真实 lifecycle boundary
 
 ## 当前重点
 
@@ -29,12 +31,28 @@
    core 历史图、分支游标、历史 checkout/fork/restore/switch branch 与前端历史交互均已落地，且已通过 Rust 与前端定向测试。
 5. `PA-020` 已完成并通过定向验证
    capability registry 统一读面、runtime bridge、MCP source snapshot 写面、permission/failure 归一化、monitor capability summary/drilldown 与 `tool / resource / prompt_template` 规范化合同均已落地。
-6. `PA-021` 已进入 spec-first 启动阶段
-   已建立 `add-skills-registry-bridge` change，当前聚焦 skills 作为 capability-composition layer 的 registry / invocation / observability 边界，不吸收 hooks、workflow 或 planner redesign 范围。
+6. `PA-021` 已关闭
+   已落地 skill source snapshot ingress、统一 registry、`list_skills / inspect_skill`、tool-only runtime resolution、planner normalized skill facts consumption，以及 monitor summary/drilldown skill lineage 聚合与展示，并已完成 acceptance audit 与 closeout。
 7. `PA-030` 已完成并通过前端验收
    已建立并完成 `add-trace-panel-call-model-observability` change，trace 面板 `call_model` 现已补齐 cache hit / TTFT、工具调用与消息输出保真，以及多 hop 输出归因修正。
 7. 复杂开发任务治理已升级为 OpenSpec + 任务系统双轨
    `openspec/` 承载 proposal/spec/design/tasks，`management/task-system/` 承载状态、审计、日志与断点续跑。
+8. turn lifecycle / recovery / hooks 新主线已完成第一批近线收口
+   `PA-031 / PA-032 / PA-033 / PA-034 / PA-035 / PA-036 / PA-037` 已全部完成并关闭，分别收口了 canonical lifecycle/event contract、trace persistence/recovery contract、hooks foundation、checkpoint lifecycle boundary、stable-boundary runtime hook dispatch、terminal truth-source 与 session control UX 闭环。
+9. 当前近线主线已从“补 contract / 补闭环”切到“归档首批 / 定下一轮”
+   当前 review 队列已清空；`PA-021 / PA-030 / PA-031 / PA-032 / PA-033 / PA-034 / PA-035 / PA-036 / PA-037` 对应的 OpenSpec changes 已同步进 `openspec/specs/` 并归档到 `openspec/changes/archive/`，下一步更适合决定是否把 `PA-022`/后续扩展正式提到近线。
+10. `PA-022` 已不再保留为模糊大卡
+   当前已把 post-foundation hooks 范围拆成 `PA-038 / PA-039 / PA-040` 三张近线卡，而且三张卡都已完成 closeout：`PA-038` 收口了 run/execution-control boundary evidence，`PA-039` 收口了 memory-write persisted side-effect contract，`PA-040` 收口了 planner/capability mediation hooks。
+11. hooks post-foundation 近线三卡已完成第一轮工业化闭环
+   当前 `run hooks`、`memory-write hooks`、`planner/capability hooks` 都已经具备各自的稳定边界、persisted/read-plane 证据链与 acceptance audit，后续扩展更适合以新卡承接，而不是回灌到同一批 closeout 卡。
+12. `PA-038 / PA-039 / PA-040` 对应的 OpenSpec changes 已归档
+   三张 change 的 delta specs 已同步到 `openspec/specs/`，并已迁入 `openspec/changes/archive/2026-06-05-*`；当前活跃 `openspec/changes/` 已重新清空，只保留 `archive/`。
+13. hooks post-foundation 近线第四卡也已完成
+   `PA-041` 已完成 `history checkout / branch restore / branch fork / branch switch` 四类 history-state control boundary 的 hook dispatch、persisted audit chain、reload/read-plane/front-end contract 对齐，以及 degrade truth-source non-regression。
+14. `PA-042` 已完成并通过验收审计
+   `Session Control Plane audit surface v1` 已完成 history-control summary contract、snapshot/runtime-view/response 统一投影、reload roundtrip、truth-source guardrail 与前端 summary-first explainability，当前这轮近线主线已完成收口。
+15. `PA-043` 已完成并通过验收审计
+   `Run Control audit surface v1` 已完成 `stop / continue / resume / replay(start)` summary contract、snapshot/runtime-view/response 统一投影、普通首轮 `start_graph_run_stream` 排除、reload/hydration guardrail 与前端 summary-first explainability，当前近线主线已进一步完成 run-control 收口。
 
 ## 远期扩展
 
@@ -84,9 +102,14 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 
 ## 下一步最小动作
 
-1. 回到 `PA-021`，继续推进 skills registry / bridge 的最小实现与验证。
-2. 若继续做缓存优化或 trace 展示深化，应基于 `PA-029`、`PA-024` 与 `PA-030` 的现有观测口径再拆增量卡，而不是回滚当前边界。
-3. 保持当前阶段不提前实现完整 auto-compaction；该工作保留到 Phase 4/5 的后续卡。
+1. 当前 `PA-042 / PA-043` 已把 history-control 与 run-control 的 summary family 都收口到 `Session Control Plane`，下一步更适合评估是否要继续补细 monitor/drilldown，而不是回灌已关闭任务。
+2. 保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏，把后续 control-plane 扩展继续压在 stable boundary 上。
+3. 若后续继续扩展 replay/control family，应新开任务承接，不在 `PA-043` 上继续叠加 scope。
+
+## 新近线候选
+
+1. 基于 `Session Control Plane` 的 monitor / drilldown 读面扩展
+   在 `PA-042 / PA-043` 已完成 summary family 收口的前提下，评估是否需要新增更细的 run-control / history-control 审计下钻，而不是回灌已关闭任务。
 
 ## 关联入口
 
