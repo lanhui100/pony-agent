@@ -20,6 +20,9 @@ desktop.ini
 .codex-logs/
 .devlogs/
 .tmp/
+.cargo-target-*/
+.omo/
+empty.stdin
 src-tauri/target-check/
 src-tauri/.pony-agent/
 tmp-*.png
