@@ -44,6 +44,11 @@ const SwitchStub = defineComponent({
   template: '<input class="switch-stub" type="checkbox" :checked="modelValue" />'
 });
 
+async function flushMarkdownRender() {
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 160));
+  await nextTick();
+}
+
 function createProviderRegistry(): ProviderRegistry {
   return {
     selectedProviderId: "provider-ppx",
@@ -164,6 +169,7 @@ describe("HomeWorkspace markdown rendering", () => {
     });
 
     await nextTick();
+    await flushMarkdownRender();
 
     expect(wrapper.html()).toContain("<h1>标题</h1>");
     expect(wrapper.html()).toContain("<blockquote>");

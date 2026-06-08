@@ -66,7 +66,6 @@ const scrollAfterPaintFrameId = ref<number | null>(null);
 const stopRequested = ref(false);
 const checkpointPickerOpen = ref(false);
 const forkSummaryOpenForNodeId = ref<string | null>(null);
-let lastMessageSignature = "";
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const streamSnapshotTextByMessageId = reactive<Record<string, string>>({});
 const streamSnapshotReasoningByMessageId = reactive<Record<string, string>>({});
@@ -934,15 +933,11 @@ watch(latestTurnSignature, () => {
   pendingStreamAutoFollow = isTimelineNearBottom();
 }, { flush: "pre" });
 
-watch(latestTurnSignature, (signature) => {
+watch(latestTurnSignature, () => {
   syncStreamingPresentationState();
-  const hasPendingAssistant = messages.value.some(
-    (message) => message.role === "assistant" && message.status === "pending"
-  );
-  const behavior: ScrollBehavior = hasPendingAssistant ? "auto" : signature && lastMessageSignature ? "smooth" : "auto";
+  const behavior: ScrollBehavior = "auto";
   streamAutoFollowEnabled.value = pendingStreamAutoFollow;
 
-  lastMessageSignature = signature;
   if (streamAutoFollowEnabled.value) {
     queueScrollToLatestTurn(behavior);
   }

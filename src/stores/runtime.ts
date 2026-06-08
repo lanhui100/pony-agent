@@ -1250,6 +1250,32 @@ function waitForNextPaint() {
   });
 }
 
+const LOW_PRIORITY_TURN_WORK_DELAY_MS = 800;
+const LOW_PRIORITY_TURN_WORK_IDLE_TIMEOUT_MS = 2500;
+const OUTPUT_END_PERSIST_DELAY_MS = 1200;
+
+function runLowPriorityTurnWork(callback: () => void) {
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    callback();
+    return;
+  }
+
+  window.setTimeout(() => {
+    const requestIdleCallback = (window as Window & {
+      requestIdleCallback?: (handler: IdleRequestCallback, options?: IdleRequestOptions) => number;
+    }).requestIdleCallback;
+
+    if (typeof requestIdleCallback === "function") {
+      requestIdleCallback(() => callback(), {
+        timeout: LOW_PRIORITY_TURN_WORK_IDLE_TIMEOUT_MS
+      });
+      return;
+    }
+
+    window.setTimeout(callback, 0);
+  }, LOW_PRIORITY_TURN_WORK_DELAY_MS);
+}
+
 function buildAssistantModelLabel(providerName?: string | null, modelName?: string | null) {
   const provider = providerName?.trim();
   const model = modelName?.trim();
@@ -3808,6 +3834,38 @@ export const useRuntimeStore = defineStore("runtime", {
         this.persistHistory();
       }
     },
+    applyOutputEnd(payload: TurnStreamEvent) {
+      this.flushBufferedStreamText(payload.turnId);
+
+      const assistantMessage = this.ensureAssistantMessage(
+        payload.turnId,
+        buildAssistantModelLabel(payload.providerName, payload.providerModel)
+      );
+
+      const finalText = payload.text?.trim();
+      if (finalText) {
+        assistantMessage.content = payload.text ?? assistantMessage.content;
+      }
+      assistantMessage.reasoningContent = normalizeReasoningContent(
+        payload.reasoningContent ?? assistantMessage.reasoningContent ?? null
+      );
+      assistantMessage.status = "done";
+      assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
+
+      this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+      this.providerName = payload.providerName ?? this.providerName;
+      this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+      this.providerModel = payload.providerModel ?? this.providerModel;
+      this.providerSource = payload.providerSource ?? this.providerSource;
+      this.providerMode = payload.providerMode ?? this.providerMode;
+      this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+      this.inputTokens = payload.inputTokens ?? this.inputTokens;
+      this.outputTokens = payload.outputTokens ?? this.outputTokens;
+      this.totalTokens = payload.totalTokens ?? this.totalTokens;
+      this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+      this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+      this.scheduleDeferredPersist(OUTPUT_END_PERSIST_DELAY_MS);
+    },
     ensureAssistantMessage(turnId: string, modelName?: string | null) {
       const messageId = `assistant-${turnId}`;
       const existingMessage = this.messages.find((item) => item.id === messageId && item.role === "assistant");
@@ -4306,6 +4364,23 @@ export const useRuntimeStore = defineStore("runtime", {
         this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
+      const outputEndUnlisten = await safeListen<TurnStreamEvent>("turn:output_end", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+        if (!this.shouldProcessTurnEvent(payload)) {
+          return;
+        }
+        this.commitTurnEventCursor(payload);
+        this.applyOutputEnd(payload);
+        debugLog("event:output_end", {
+          turnId: payload.turnId,
+          finalTextLength: payload.text?.length ?? 0,
+          outputTokens: payload.outputTokens ?? null,
+          turnDurationMs: payload.turnDurationMs ?? null
+        });
+      });
+
       const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
         if (this.activeTurnId !== payload.turnId) {
           return;
@@ -4355,70 +4430,79 @@ export const useRuntimeStore = defineStore("runtime", {
         const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
-        const traceTimeline = resolveEventTraceTimeline(payload, () =>
-          buildFallbackRuntimeTraceTimeline({
-            turnId: payload.turnId,
-            eventType: payload.eventType,
-            messages: this.messages,
+        const completedSessionId = this.sessionId;
+        const completedRunId = this.activeRunId;
+        const completedNodeId = this.visibleNodeId;
+        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+        this.syncToolMessages(payload.turnId, payload.toolActivities, false);
+        this.isSubmitting = false;
+        this.activeTurnId = null;
+        runLowPriorityTurnWork(() => {
+          const traceTimeline = resolveEventTraceTimeline(payload, () =>
+            buildFallbackRuntimeTraceTimeline({
+              turnId: payload.turnId,
+              eventType: payload.eventType,
+              messages: this.messages,
+              phase: "completed",
+              assistantMessage,
+              toolActivities: terminalToolActivities,
+              providerPatch: {
+                providerName: payload.providerName ?? this.providerName,
+                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+                providerModel: payload.providerModel ?? this.providerModel,
+                providerSource: payload.providerSource ?? this.providerSource,
+                providerMode: payload.providerMode ?? this.providerMode
+              },
+              terminalState: "completed",
+              fallbackReason: payload.fallbackReason ?? null,
+              inputTokens: payload.inputTokens ?? this.inputTokens,
+              cacheHitInputTokens,
+              reasoningTokens,
+              outputTokens: payload.outputTokens ?? this.outputTokens,
+              totalTokens: payload.totalTokens ?? this.totalTokens,
+              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+              turnDurationMs: payload.turnDurationMs ?? null
+            })
+          );
+          this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
+            eventId: payload.eventId ?? null,
+            eventType: payload.eventType ?? null,
+            eventVersion: payload.eventVersion ?? null,
+            sequence: payload.sequence ?? null,
+            emittedAtMs: payload.emittedAtMs ?? null,
             phase: "completed",
-            assistantMessage,
+            traceSteps: payload.traceSteps ?? this.traceSteps,
             toolActivities: terminalToolActivities,
-            providerPatch: {
-              providerName: payload.providerName ?? this.providerName,
-              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-              providerModel: payload.providerModel ?? this.providerModel,
-              providerSource: payload.providerSource ?? this.providerSource,
-              providerMode: payload.providerMode ?? this.providerMode
-            },
-            terminalState: "completed",
+            providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
+            providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+            providerName: payload.providerName ?? this.providerName,
+            providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+            providerModel: payload.providerModel ?? this.providerModel,
+            providerSource: payload.providerSource ?? this.providerSource,
+            providerMode: payload.providerMode ?? this.providerMode,
+            buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
+            hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
+            sessionSummary: payload.sessionSummary ?? this.sessionSummary,
             fallbackReason: payload.fallbackReason ?? null,
             inputTokens: payload.inputTokens ?? this.inputTokens,
-            cacheHitInputTokens,
-            reasoningTokens,
             outputTokens: payload.outputTokens ?? this.outputTokens,
             totalTokens: payload.totalTokens ?? this.totalTokens,
             firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-            turnDurationMs: payload.turnDurationMs ?? null
-          })
-        );
-        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
-        this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: "completed",
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: terminalToolActivities,
-          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
-          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-          providerName: payload.providerName ?? this.providerName,
-          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-          providerModel: payload.providerModel ?? this.providerModel,
-          providerSource: payload.providerSource ?? this.providerSource,
-          providerMode: payload.providerMode ?? this.providerMode,
-          buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          sessionSummary: payload.sessionSummary ?? this.sessionSummary,
-          fallbackReason: payload.fallbackReason ?? null,
-          inputTokens: payload.inputTokens ?? this.inputTokens,
-          outputTokens: payload.outputTokens ?? this.outputTokens,
-          totalTokens: payload.totalTokens ?? this.totalTokens,
-          firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-          ...cacheHitInputTokenPatch,
-          ...reasoningTokenPatch,
-          ...turnDurationPatch,
-          error: null
-        });
-        this.persistHistory();
-        void this.loadSessionCatalog();
-        void this.loadRetrievedContextState(this.sessionId, {
-          runId: this.activeRunId,
-          nodeId: this.visibleNodeId
-        }).then((retrieved) => {
-          this.retrievedContext = retrieved;
+            ...cacheHitInputTokenPatch,
+            ...reasoningTokenPatch,
+            ...turnDurationPatch,
+            error: null
+          }, false);
+          this.scheduleDeferredPersist();
+          void this.loadSessionCatalog().catch(() => {});
+          void this.loadRetrievedContextState(completedSessionId, {
+            runId: completedRunId,
+            nodeId: completedNodeId
+          }).then((retrieved) => {
+            if (this.sessionId === completedSessionId) {
+              this.retrievedContext = retrieved;
+            }
+          }).catch(() => {});
         });
         debugLog("event:completed", {
           turnId: payload.turnId,
@@ -4438,8 +4522,6 @@ export const useRuntimeStore = defineStore("runtime", {
           traceCacheHitInputTokens:
             this.turnTraceHistory.find((turn) => turn.turnId === payload.turnId)?.cacheHitInputTokens ?? null
         });
-        this.isSubmitting = false;
-        this.activeTurnId = null;
       });
 
       const failedUnlisten = await safeListen<TurnStreamEvent>("turn:failed", ({ payload }) => {
@@ -4667,6 +4749,7 @@ export const useRuntimeStore = defineStore("runtime", {
       void phaseChangedUnlisten;
       void checkpointPersistedUnlisten;
       void toolUnlisten;
+      void outputEndUnlisten;
       void completedUnlisten;
       void failedUnlisten;
       void cancelledUnlisten;

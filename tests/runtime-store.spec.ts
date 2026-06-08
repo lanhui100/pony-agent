@@ -422,6 +422,23 @@ function flushMicrotasks() {
   return new Promise<void>((resolve) => window.setTimeout(resolve, 0));
 }
 
+function flushDeferredTurnWork() {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(() => {
+      const requestIdleCallback = (window as Window & {
+        requestIdleCallback?: (handler: IdleRequestCallback, options?: IdleRequestOptions) => number;
+      }).requestIdleCallback;
+
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(() => resolve());
+        return;
+      }
+
+      window.setTimeout(resolve, 0);
+    }, 820);
+  });
+}
+
 describe("runtime session resilience", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -3450,6 +3467,7 @@ describe("runtime session resilience", () => {
       }
     } as any);
 
+    await flushDeferredTurnWork();
     await flushMicrotasks();
 
     expect(store.phase).toBe("ready");
@@ -3481,6 +3499,123 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.traceTimeline?.at(-1)?.label).toBe("CALL MODEL #1");
     expect(store.turnTraceHistory[0]?.traceTimeline?.at(-1)?.outputTokens).toBe(34);
 
+    nowSpy.mockRestore();
+  });
+
+  it("shows finalized output before terminal trace work completes", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8080);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "resolve_graph_run_submission_plan") {
+        return { command: "start_graph_run_stream", runId: null };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-output-end" },
+          turnId: "8080"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const store = useRuntimeStore();
+    store.$patch({
+      sessionId: "session-output-end",
+      draftMessage: "stream request",
+      phase: "idle",
+      messages: [],
+      turnTraceHistory: []
+    });
+
+    await store.submitTurn();
+
+    eventHandlers.get("turn:delta")?.({
+      payload: {
+        turnId: "8080",
+        eventId: "event-turn-delta-8080",
+        eventType: "turn.output_delta",
+        sequence: 1,
+        emittedAtMs: 1000,
+        text: "partial "
+      }
+    });
+
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+    eventHandlers.get("turn:output_end")?.({
+      payload: {
+        turnId: "8080",
+        eventId: "event-turn-output-end-8080",
+        eventType: "turn.output_end",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 1200,
+        text: "final answer",
+        reasoningContent: "done thinking",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        outputTokens: 9
+      }
+    });
+
+    await flushMicrotasks();
+
+    const assistant = store.messages.find((message) => message.role === "assistant");
+    expect(assistant?.content).toBe("final answer");
+    expect(assistant?.reasoningContent).toBe("done thinking");
+    expect(assistant?.status).toBe("done");
+    expect(assistant?.tokenCount).toBe(9);
+    expect(store.activeTurnId).toBe("8080");
+    expect(store.isSubmitting).toBe(true);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.phase).toBe("calling_model");
+    expect(store.turnTraceHistory[0]?.eventType).not.toBe("turn.completed");
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "8080",
+        eventId: "event-turn-completed-8080",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 3,
+        emittedAtMs: 1500,
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        outputTokens: 9,
+        traceSteps: store.traceSteps,
+        toolActivities: []
+      }
+    });
+
+    await flushDeferredTurnWork();
+    await flushMicrotasks();
+
+    expect(store.activeTurnId).toBeNull();
+    expect(store.isSubmitting).toBe(false);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.eventType).toBe("turn.completed");
     nowSpy.mockRestore();
   });
 
@@ -3941,6 +4076,7 @@ describe("runtime session resilience", () => {
       }
     } as any);
 
+    await flushDeferredTurnWork();
     await flushMicrotasks();
 
     expect(store.turnTraceHistory[0]?.traceTimeline?.map((entry) => entry.kind)).toEqual([
@@ -4074,6 +4210,7 @@ describe("runtime session resilience", () => {
       }
     } as any);
 
+    await flushDeferredTurnWork();
     await flushMicrotasks();
 
     expect(store.turnTraceHistory[0]?.traceTimeline?.map((entry) => entry.kind)).toEqual([
@@ -4155,6 +4292,7 @@ describe("runtime session resilience", () => {
       }
     } as any);
 
+    await flushDeferredTurnWork();
     await flushMicrotasks();
 
     expect(store.turnTraceHistory).toHaveLength(1);
@@ -4225,6 +4363,7 @@ describe("runtime session resilience", () => {
       }
     } as any);
 
+    await flushDeferredTurnWork();
     await flushMicrotasks();
 
     expect(store.turnTraceHistory[0]?.providerCallRecords?.map((record) => record.requestKind)).toEqual([
@@ -4462,6 +4601,7 @@ describe("runtime session resilience", () => {
       }
     } as any);
 
+    await flushDeferredTurnWork();
     await flushMicrotasks();
 
     expect(store.phase).toBe("ready");
@@ -4623,6 +4763,7 @@ describe("runtime session resilience", () => {
       }
     });
 
+    await flushDeferredTurnWork();
     await flushMicrotasks();
 
     expect(store.turnTraceHistory[0]?.hookTraceRecords?.map((record) => record.hookName)).toEqual([

@@ -355,6 +355,7 @@ fn resolve_canonical_event_type(
     match name {
         "turn:started" => "turn.created".to_string(),
         "turn:delta" => "turn.output_delta".to_string(),
+        "turn:output_end" => "turn.output_end".to_string(),
         "turn:completed" => "turn.completed".to_string(),
         "turn:failed" => "turn.failed".to_string(),
         "turn:cancelled" => "turn.cancelled".to_string(),

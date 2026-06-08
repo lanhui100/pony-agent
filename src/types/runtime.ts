@@ -38,6 +38,7 @@ export type TurnLifecycleEventType =
   | "turn.model_call_started"
   | "turn.first_token"
   | "turn.output_delta"
+  | "turn.output_end"
   | "turn.tool_call_started"
   | "turn.tool_call_completed"
   | "turn.trace_updated"
@@ -941,7 +942,7 @@ export type TurnStreamEvent = {
   eventId?: string | null;
   sessionId?: string | null;
   turnId: string;
-  kind: "started" | "delta" | "trace" | "tool" | "completed" | "failed" | "cancelled";
+  kind: "started" | "delta" | "trace" | "tool" | "output_end" | "completed" | "failed" | "cancelled";
   eventType?: TurnLifecycleEventType | string | null;
   eventVersion?: string | null;
   sequence?: number | null;
