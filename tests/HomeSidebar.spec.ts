@@ -773,6 +773,7 @@ describe("HomeSidebar", () => {
     expect(modelButton.text()).not.toContain("耗时 2.80 s");
     expect(modelButton.text()).not.toContain("输入 300");
     expect(modelButton.text()).not.toContain("思考链");
+    expect(modelButton.text()).not.toContain("已读取 package.json，准备继续分析依赖。");
 
     await modelButton.trigger("click");
     await nextTick();
@@ -1296,6 +1297,74 @@ describe("HomeSidebar", () => {
     expect(secondModelSectionText).toContain("工具结果足够，可以整理成最终回答。");
     expect(wrapper.get('[data-testid="trace-detail-button-model-5-assistant-output"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="trace-detail-button-model-5-reasoning"]').exists()).toBe(true);
+  });
+
+  it("CALL MODEL 后续存在工具输出时，折叠态不展示模型输出", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-model-output-before-tool",
+          title: "model output before tool",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "input-1",
+              kind: "input",
+              label: "RECEIVE INPUT",
+              state: "completed",
+              sequence: 1,
+              text: "先给出计划，再读取 package.json"
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 2,
+              text: "我会先检查 package.json，然后根据依赖判断下一步。",
+              reasoningContent: "需要先看项目依赖。"
+            },
+            {
+              id: "tool-3",
+              kind: "call_tool",
+              label: "CALL TOOL #1 · workspace_read_file",
+              state: "completed",
+              sequence: 3,
+              toolActivities: [
+                {
+                  id: "tool-1",
+                  name: "workspace_read_file",
+                  status: "done",
+                  summary: "读取 package.json",
+                  argumentsText: "{\"path\":\"package.json\"}",
+                  resultText: "{\"name\":\"pony-agent\"}",
+                  durationSeconds: 0.2
+                }
+              ]
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+    expect(modelButton.text()).not.toContain("我会先检查 package.json，然后根据依赖判断下一步。");
+    expect(modelButton.text()).not.toContain("需要先看项目依赖。");
+    expect(modelButton.text()).not.toContain("workspace_read_file");
+    expect(modelButton.text()).not.toContain("{\"name\":\"pony-agent\"}");
+
+    await modelButton.trigger("click");
+    await nextTick();
+
+    const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(modelSectionText).toContain("模型输出");
+    expect(modelSectionText).toContain("我会先检查 package.json，然后根据依赖判断下一步。");
+    expect(modelSectionText).toContain("workspace_read_file");
+    expect(modelSectionText).toContain("{\"name\":\"pony-agent\"}");
   });
 
   it("assistant 仍在输出时，trace 中不提前展示活跃思考和模型输出", async () => {

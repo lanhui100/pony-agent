@@ -849,15 +849,9 @@ function timelinePreviewText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   }
 
   if (kind === "call_model") {
-    if (hasCallModelToolOutputs(turn, entry)) {
-      return "";
-    }
-
     return (
       entry.error?.trim()
       || entry.fallbackReason?.trim()
-      || (shouldShowCallModelOutput(entry) ? entry.text?.trim() : "")
-      || (shouldShowCallModelReasoning(entry) ? entry.reasoningContent?.trim() : "")
       || ""
     );
   }
