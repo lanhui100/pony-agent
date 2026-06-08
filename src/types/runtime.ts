@@ -328,10 +328,16 @@ export type HistoryNode = {
   branchId: string;
   forkedFromNodeId?: string | null;
   kind: HistoryNodeKind;
+  turnId?: string | null;
   transcriptRef?: string | null;
   runRef?: string | null;
   workspaceRef?: WorkspaceStateRef | null;
   summary: string;
+  title?: string | null;
+  history?: TurnHistoryMessage[];
+  turnTraceHistory?: TurnTraceRecord[];
+  turnCount?: number | null;
+  lastReferencedFile?: string | null;
   createdAtMs: number;
 };
 
@@ -543,6 +549,27 @@ export type HistoryStateAuditCurrentContext = {
 export type HistoryStateAuditSummary = {
   action: HistoryStateAuditActionSummary;
   currentContext: HistoryStateAuditCurrentContext;
+};
+
+export type ConversationCheckpointForkTarget = {
+  branchId: string;
+  nodeId: string;
+  label: string;
+  summary: string;
+  isActive: boolean;
+};
+
+export type ConversationCheckpointEntry = {
+  nodeId: string;
+  turnId: string;
+  branchId: string;
+  summary: string;
+  createdAtMs: number;
+  isLatest: boolean;
+  isVisible: boolean;
+  workspaceRollbackCapable: boolean;
+  availableModes: HistoryCheckoutMode[];
+  forkTargets: ConversationCheckpointForkTarget[];
 };
 
 export type RunControlAuditActionSummary = {

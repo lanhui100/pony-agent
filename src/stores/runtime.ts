@@ -10,6 +10,7 @@ import type {
   CapabilitySourceView,
   CapabilityView,
   ChatMessage,
+  ConversationCheckpointEntry,
   ExecutionCheckpoint,
   GraphRun,
   GraphRunControlResponse,
@@ -144,6 +145,18 @@ type RuntimeState = {
   historyBranches: HistoryBranch[];
   eventsReady: boolean;
   deferredPersistTimerId: number | null;
+  streamFlushFrameId: number | null;
+  streamBufferTurnId: string | null;
+  streamBufferText: string;
+  streamBufferReasoning: string;
+  streamDebugDeltaCount: number;
+  streamDebugFlushCount: number;
+  streamDebugLastDeltaAtMs: number | null;
+  streamDebugLastFlushAtMs: number | null;
+  streamDebugReasoningCharsReceived: number;
+  streamDebugReasoningCharsFlushed: number;
+  streamDebugTextCharsReceived: number;
+  streamDebugTextCharsFlushed: number;
   browserPreviewRunToken: number;
 };
 
@@ -250,6 +263,76 @@ function debugLog(event: string, payload?: Record<string, unknown>) {
     ts: new Date().toISOString()
   };
   console.info("[pony-agent][runtime]", message);
+}
+
+const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
+
+type StreamDebugBucket = {
+  runtime?: Record<string, unknown>;
+  reveal?: Record<string, unknown>;
+};
+
+let scheduledRuntimeMetricsPush = false;
+let pendingRuntimeMetricsPatch: Record<string, unknown> | null = null;
+
+function swallowAsyncError(result: unknown) {
+  if (result && typeof result === "object" && "catch" in result && typeof result.catch === "function") {
+    void result.catch(() => {});
+  }
+}
+
+function streamDebugEnabled() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return import.meta.env.DEV || window.localStorage.getItem(STREAM_DEBUG_STORAGE_KEY) === "true";
+}
+
+function updateStreamDebugBucket(section: keyof StreamDebugBucket, patch: Record<string, unknown>) {
+  if (!streamDebugEnabled() || typeof window === "undefined") {
+    return;
+  }
+
+  const streamWindow = window as Window & {
+    __ponyStreamMetrics?: StreamDebugBucket;
+  };
+
+  const current = streamWindow.__ponyStreamMetrics ?? {};
+  streamWindow.__ponyStreamMetrics = {
+    ...current,
+    [section]: {
+      ...(current[section] ?? {}),
+      ...patch,
+      updatedAt: Date.now()
+    }
+  };
+
+  if (section !== "runtime" || !isTauriAvailable()) {
+    return;
+  }
+
+  pendingRuntimeMetricsPatch = {
+    ...((streamWindow.__ponyStreamMetrics.runtime as Record<string, unknown> | undefined) ?? {})
+  };
+  if (scheduledRuntimeMetricsPush) {
+    return;
+  }
+
+  scheduledRuntimeMetricsPush = true;
+  window.setTimeout(() => {
+    scheduledRuntimeMetricsPush = false;
+    const payload = pendingRuntimeMetricsPatch;
+    pendingRuntimeMetricsPatch = null;
+    if (!payload) {
+      return;
+    }
+
+    swallowAsyncError(safeInvoke("record_stream_debug_metrics", {
+      section: "runtime",
+      payload
+    }));
+  }, 250);
 }
 
 function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
@@ -581,7 +664,12 @@ function cloneAttachmentAssets(assets?: AttachmentAsset[] | null) {
 function cloneHistoryNodes(nodes?: HistoryNode[] | null) {
   return (nodes ?? []).map((node) => ({
     ...node,
-    workspaceRef: node.workspaceRef ? { ...node.workspaceRef } : node.workspaceRef ?? null
+    workspaceRef: node.workspaceRef ? { ...node.workspaceRef } : node.workspaceRef ?? null,
+    history: (node.history ?? []).map((message) => ({
+      ...message,
+      attachments: (message.attachments ?? []).map((attachment) => ({ ...attachment }))
+    })),
+    turnTraceHistory: (node.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace))
   }));
 }
 
@@ -884,6 +972,22 @@ function normalizeReasoningContent(content?: string | null) {
   const normalized = content.replace(/^thinking\s*[:：]\s*/i, "");
   return normalized.length > 0 ? normalized : null;
 }
+
+function appendNormalizedReasoningContent(current: string | null, delta: string) {
+  if (!delta) {
+    return current;
+  }
+
+  const base = current ?? "";
+  const combined = `${base}${delta}`;
+  if (base.length <= 24) {
+    return normalizeReasoningContent(combined);
+  }
+
+  return combined;
+}
+
+const STREAM_FLUSH_EAGER_CHARS = 4096;
 
 const TRACE_STEP_IDS = {
   plan: "step-plan",
@@ -1274,6 +1378,87 @@ function resolveHistoryBranchHeadNodeId(branchId: string | null, branches: Histo
   return branches.find((branch) => branch.branchId === branchId)?.headNodeId ?? null;
 }
 
+function historyNodeStableTurnId(node: HistoryNode | null | undefined) {
+  const explicitTurnId = node?.turnId?.trim() || "";
+  if (explicitTurnId) {
+    return explicitTurnId;
+  }
+
+  const traceTurnId = node?.turnTraceHistory?.[node.turnTraceHistory.length - 1]?.turnId?.trim() || "";
+  if (traceTurnId) {
+    return traceTurnId;
+  }
+
+  return null;
+}
+
+function buildConversationCheckpointEntries(
+  historyNodes: HistoryNode[],
+  historyBranches: HistoryBranch[],
+  activeBranchId: string | null,
+  visibleNodeId: string | null,
+  branchHeadNodeId: string | null
+): ConversationCheckpointEntry[] {
+  const entriesByNodeId = new Map<string, ConversationCheckpointEntry>();
+  const forkBranchesByNodeId = new Map<string, HistoryBranch[]>();
+
+  for (const branch of historyBranches) {
+    const sourceNodeId = branch.forkedFromNodeId?.trim() || "";
+    if (!sourceNodeId) {
+      continue;
+    }
+
+    const existing = forkBranchesByNodeId.get(sourceNodeId) ?? [];
+    existing.push(branch);
+    forkBranchesByNodeId.set(sourceNodeId, existing);
+  }
+
+  const latestNodeId = branchHeadNodeId?.trim() || null;
+
+  for (const node of historyNodes) {
+    const turnId = historyNodeStableTurnId(node);
+    if (!turnId) {
+      continue;
+    }
+
+    const workspaceRollbackCapable = Boolean(node.workspaceRef?.rollbackCapable);
+    const forkTargets = (forkBranchesByNodeId.get(node.nodeId) ?? [])
+      .map((branch) => {
+        const targetNodeId = branch.headNodeId?.trim() || "";
+        if (!targetNodeId) {
+          return null;
+        }
+
+        const targetNode = historyNodes.find((item) => item.nodeId === targetNodeId) ?? null;
+        return {
+          branchId: branch.branchId,
+          nodeId: targetNodeId,
+          label: branch.label?.trim() || branch.branchId,
+          summary: targetNode?.summary?.trim() || branch.label?.trim() || branch.branchId,
+          isActive: branch.branchId === activeBranchId
+        };
+      })
+      .filter((target): target is ConversationCheckpointEntry["forkTargets"][number] => Boolean(target));
+
+    entriesByNodeId.set(node.nodeId, {
+      nodeId: node.nodeId,
+      turnId,
+      branchId: node.branchId,
+      summary: node.summary?.trim() || node.title?.trim() || node.nodeId,
+      createdAtMs: node.createdAtMs,
+      isLatest: latestNodeId != null && node.nodeId === latestNodeId,
+      isVisible: visibleNodeId != null && node.nodeId === visibleNodeId,
+      workspaceRollbackCapable,
+      availableModes: workspaceRollbackCapable
+        ? ["transcript_only", "transcript_and_workspace"]
+        : ["transcript_only"],
+      forkTargets
+    });
+  }
+
+  return [...entriesByNodeId.values()].sort((left, right) => right.createdAtMs - left.createdAtMs);
+}
+
 function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapshot {
   return {
     sessionId: state.sessionId,
@@ -1327,6 +1512,9 @@ function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapsh
 }
 
 function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRuntimeSnapshot) {
+  if (state.streamFlushFrameId != null) {
+    window.cancelAnimationFrame(state.streamFlushFrameId);
+  }
   state.sessionId = snapshot.sessionId;
   state.sessionList = snapshot.sessionList.map((session) => ({ ...session }));
   state.phase = snapshot.phase;
@@ -1374,6 +1562,18 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.eventCursorByTurnId = Object.fromEntries(
     Object.entries(snapshot.eventCursorByTurnId ?? {}).map(([turnId, cursor]) => [turnId, { ...cursor }])
   );
+  state.streamFlushFrameId = null;
+  state.streamBufferTurnId = null;
+  state.streamBufferText = "";
+  state.streamBufferReasoning = "";
+  state.streamDebugDeltaCount = 0;
+  state.streamDebugFlushCount = 0;
+  state.streamDebugLastDeltaAtMs = null;
+  state.streamDebugLastFlushAtMs = null;
+  state.streamDebugReasoningCharsReceived = 0;
+  state.streamDebugReasoningCharsFlushed = 0;
+  state.streamDebugTextCharsReceived = 0;
+  state.streamDebugTextCharsFlushed = 0;
 }
 
 function buildEventCursorByTurnTraceHistory(turnTraceHistory: TurnTraceRecord[]) {
@@ -2361,6 +2561,18 @@ export const useRuntimeStore = defineStore("runtime", {
       historyBranches: [],
       eventsReady: false,
       deferredPersistTimerId: null,
+      streamFlushFrameId: null,
+      streamBufferTurnId: null,
+      streamBufferText: "",
+      streamBufferReasoning: "",
+      streamDebugDeltaCount: 0,
+      streamDebugFlushCount: 0,
+      streamDebugLastDeltaAtMs: null,
+      streamDebugLastFlushAtMs: null,
+      streamDebugReasoningCharsReceived: 0,
+      streamDebugReasoningCharsFlushed: 0,
+      streamDebugTextCharsReceived: 0,
+      streamDebugTextCharsFlushed: 0,
       browserPreviewRunToken: 0,
       messages: persisted?.messages ?? [],
       attachmentAssets: persisted?.attachmentAssets ?? [],
@@ -2393,6 +2605,15 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     isHistoricalMode(state): boolean {
       return state.historyCursorMode !== "live";
+    },
+    conversationCheckpointEntries(state): ConversationCheckpointEntry[] {
+      return buildConversationCheckpointEntries(
+        state.historyNodes,
+        state.historyBranches,
+        state.activeBranchId,
+        state.visibleNodeId,
+        state.branchHeadNodeId
+      );
     }
   },
   actions: {
@@ -2434,6 +2655,18 @@ export const useRuntimeStore = defineStore("runtime", {
       this.traceTimeline = createDefaultTraceTimeline();
       this.turnTraceHistory = [];
       this.eventCursorByTurnId = {};
+      this.cancelStreamFlush();
+      this.streamBufferTurnId = null;
+      this.streamBufferText = "";
+      this.streamBufferReasoning = "";
+      this.streamDebugDeltaCount = 0;
+      this.streamDebugFlushCount = 0;
+      this.streamDebugLastDeltaAtMs = null;
+      this.streamDebugLastFlushAtMs = null;
+      this.streamDebugReasoningCharsReceived = 0;
+      this.streamDebugReasoningCharsFlushed = 0;
+      this.streamDebugTextCharsReceived = 0;
+      this.streamDebugTextCharsFlushed = 0;
       this.browserPreviewRunToken = 0;
     },
     cancelDeferredPersist() {
@@ -2443,6 +2676,98 @@ export const useRuntimeStore = defineStore("runtime", {
 
       window.clearTimeout(this.deferredPersistTimerId);
       this.deferredPersistTimerId = null;
+    },
+    cancelStreamFlush() {
+      if (this.streamFlushFrameId == null) {
+        return;
+      }
+
+      window.cancelAnimationFrame(this.streamFlushFrameId);
+      this.streamFlushFrameId = null;
+    },
+    resetStreamDebugMetrics() {
+      this.streamDebugDeltaCount = 0;
+      this.streamDebugFlushCount = 0;
+      this.streamDebugLastDeltaAtMs = null;
+      this.streamDebugLastFlushAtMs = null;
+      this.streamDebugReasoningCharsReceived = 0;
+      this.streamDebugReasoningCharsFlushed = 0;
+      this.streamDebugTextCharsReceived = 0;
+      this.streamDebugTextCharsFlushed = 0;
+    },
+    flushBufferedStreamText(turnId?: string | null) {
+      const bufferedTurnId = this.streamBufferTurnId;
+      if (!bufferedTurnId) {
+        return;
+      }
+      if (turnId && bufferedTurnId !== turnId) {
+        return;
+      }
+
+      this.cancelStreamFlush();
+      const flushStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      const bufferedTextLength = this.streamBufferText.length;
+      const bufferedReasoningLength = this.streamBufferReasoning.length;
+
+      const assistantMessage = this.ensureAssistantMessage(
+        bufferedTurnId,
+        buildAssistantModelLabel(this.providerName, this.providerModel)
+      );
+
+      if (this.streamBufferReasoning) {
+        assistantMessage.reasoningContent = appendNormalizedReasoningContent(
+          assistantMessage.reasoningContent ?? null,
+          this.streamBufferReasoning
+        );
+      }
+
+      if (this.streamBufferText) {
+        assistantMessage.content += this.streamBufferText;
+      }
+
+      this.streamDebugFlushCount += 1;
+      this.streamDebugLastFlushAtMs = Date.now();
+      this.streamDebugTextCharsFlushed += bufferedTextLength;
+      this.streamDebugReasoningCharsFlushed += bufferedReasoningLength;
+      updateStreamDebugBucket("runtime", {
+        turnId: bufferedTurnId,
+        deltaCount: this.streamDebugDeltaCount,
+        flushCount: this.streamDebugFlushCount,
+        textCharsReceived: this.streamDebugTextCharsReceived,
+        textCharsFlushed: this.streamDebugTextCharsFlushed,
+        reasoningCharsReceived: this.streamDebugReasoningCharsReceived,
+        reasoningCharsFlushed: this.streamDebugReasoningCharsFlushed,
+        bufferedTextLength,
+        bufferedReasoningLength,
+        pendingRaf: this.streamFlushFrameId != null,
+        flushDurationMs:
+          (typeof performance !== "undefined" ? performance.now() : Date.now()) - flushStartedAt
+      });
+
+      this.streamBufferTurnId = null;
+      this.streamBufferText = "";
+      this.streamBufferReasoning = "";
+    },
+    scheduleStreamFlush(turnId: string) {
+      if (this.streamBufferTurnId && this.streamBufferTurnId !== turnId) {
+        this.flushBufferedStreamText(this.streamBufferTurnId);
+      }
+
+      this.streamBufferTurnId = turnId;
+      const bufferedLength = this.streamBufferText.length + this.streamBufferReasoning.length;
+      if (bufferedLength >= STREAM_FLUSH_EAGER_CHARS) {
+        this.flushBufferedStreamText(turnId);
+        return;
+      }
+
+      if (this.streamFlushFrameId != null) {
+        return;
+      }
+
+      this.streamFlushFrameId = window.requestAnimationFrame(() => {
+        this.streamFlushFrameId = null;
+        this.flushBufferedStreamText(turnId);
+      });
     },
     cancelBrowserPreviewTurn(turnId: string) {
       if (this.activeTurnId !== turnId) {
@@ -3439,6 +3764,34 @@ export const useRuntimeStore = defineStore("runtime", {
         traceTimeline: this.traceTimeline
       }, persist);
     },
+    updateActiveTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
+      this.traceTimeline = cloneTraceTimeline(traceTimeline);
+    },
+    updateActiveModelTraceFromAssistant(turnId: string) {
+      const assistantMessage = this.messages.find((message) => message.turnId === turnId && message.role === "assistant");
+      if (!assistantMessage || !this.traceTimeline.length) {
+        return;
+      }
+
+      const traceTimeline = cloneTraceTimeline(this.traceTimeline);
+      const reverseModelIndex = [...traceTimeline]
+        .reverse()
+        .findIndex((entry) => canonicalizeTraceTimelineKind(entry.kind) === "call_model");
+      if (reverseModelIndex === -1) {
+        return;
+      }
+
+      const modelIndex = traceTimeline.length - 1 - reverseModelIndex;
+      const modelEntry = traceTimeline[modelIndex]!;
+      traceTimeline[modelIndex] = {
+        ...modelEntry,
+        state: assistantMessage.status === "pending" ? "active" : modelEntry.state,
+        text: assistantMessage.content || modelEntry.text || null,
+        reasoningContent: assistantMessage.reasoningContent ?? modelEntry.reasoningContent ?? null,
+        firstTokenLatencyMs: this.firstTokenLatencyMs ?? modelEntry.firstTokenLatencyMs ?? null
+      };
+      this.traceTimeline = traceTimeline;
+    },
     applyTurnTokenStats(turnId: string, inputTokens?: number | null, outputTokens?: number | null, persist = true) {
       const userMessage = this.messages.find((item) => item.turnId === turnId && item.role === "user");
       const assistantMessage = this.messages.find((item) => item.turnId === turnId && item.role === "assistant");
@@ -3701,6 +4054,11 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.cancelStreamFlush();
+        this.streamBufferTurnId = null;
+        this.streamBufferText = "";
+        this.streamBufferReasoning = "";
+        this.resetStreamDebugMetrics();
 
         this.ensureAssistantMessage(
           payload.turnId,
@@ -3721,11 +4079,6 @@ export const useRuntimeStore = defineStore("runtime", {
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
-        const reasoningTokens = resolveReasoningTokens(payload);
-        const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
-        const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
-        const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
         this.traceTimeline = resolveEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
@@ -3745,34 +4098,7 @@ export const useRuntimeStore = defineStore("runtime", {
         );
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities, false);
-        this.commitTurnTraceTimeline(payload.turnId, this.traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: this.phase,
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
-          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-          providerName: payload.providerName ?? this.providerName,
-          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-          providerModel: payload.providerModel ?? this.providerModel,
-          providerSource: payload.providerSource ?? this.providerSource,
-          providerMode: payload.providerMode ?? this.providerMode,
-          buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-          inputTokens: payload.inputTokens ?? this.inputTokens,
-          outputTokens: payload.outputTokens ?? this.outputTokens,
-          totalTokens: payload.totalTokens ?? this.totalTokens,
-          firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-          ...cacheHitInputTokenPatch,
-          ...reasoningTokenPatch,
-          ...turnDurationPatch,
-          error: null
-        }, false);
-        this.scheduleDeferredPersist();
+        this.updateActiveTraceTimeline(this.traceTimeline);
       });
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
@@ -3784,7 +4110,7 @@ export const useRuntimeStore = defineStore("runtime", {
         }
         this.commitTurnEventCursor(payload);
 
-        const assistantMessage = this.ensureAssistantMessage(
+        this.ensureAssistantMessage(
           payload.turnId,
           buildAssistantModelLabel(this.providerName, this.providerModel)
         );
@@ -3793,47 +4119,41 @@ export const useRuntimeStore = defineStore("runtime", {
         const deltaReasoning = payload.reasoningContent ?? "";
 
         if (deltaReasoning) {
-          assistantMessage.reasoningContent = normalizeReasoningContent(
-            `${assistantMessage.reasoningContent ?? ""}${deltaReasoning}`
-          );
+          this.streamBufferReasoning += deltaReasoning;
         }
 
         if (deltaText) {
-          assistantMessage.content += deltaText;
+          this.streamBufferText += deltaText;
         }
+
+        this.streamDebugDeltaCount += 1;
+        this.streamDebugLastDeltaAtMs = Date.now();
+        this.streamDebugTextCharsReceived += deltaText.length;
+        this.streamDebugReasoningCharsReceived += deltaReasoning.length;
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-        const traceTimeline = resolveEventTraceTimeline(payload, () =>
-          buildFallbackRuntimeTraceTimeline({
-            turnId: payload.turnId,
-            eventType: payload.eventType,
-            messages: this.messages,
-            phase: payload.phase ?? this.phase,
-            assistantMessage,
-            toolActivities: this.toolActivities,
-            providerPatch: {
-              providerName: this.providerName,
-              providerProtocol: this.providerProtocol,
-              providerModel: this.providerModel,
-              providerSource: this.providerSource,
-              providerMode: this.providerMode
-            },
-            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs
-          })
-        );
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: this.phase,
-          firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          error: null
-        }, false);
-        this.scheduleDeferredPersist();
+        if (payload.traceTimeline?.length) {
+          this.updateActiveTraceTimeline(payload.traceTimeline);
+        }
+        this.scheduleStreamFlush(payload.turnId);
+        updateStreamDebugBucket("runtime", {
+          turnId: payload.turnId,
+          deltaCount: this.streamDebugDeltaCount,
+          flushCount: this.streamDebugFlushCount,
+          textCharsReceived: this.streamDebugTextCharsReceived,
+          textCharsFlushed: this.streamDebugTextCharsFlushed,
+          reasoningCharsReceived: this.streamDebugReasoningCharsReceived,
+          reasoningCharsFlushed: this.streamDebugReasoningCharsFlushed,
+          lastDeltaTextLength: deltaText.length,
+          lastDeltaReasoningLength: deltaReasoning.length,
+          bufferTextLength: this.streamBufferText.length,
+          bufferReasoningLength: this.streamBufferReasoning.length,
+          bufferTurnId: this.streamBufferTurnId,
+          pendingRaf: this.streamFlushFrameId != null,
+          deltaToLastFlushMs:
+            this.streamDebugLastFlushAtMs == null ? null : this.streamDebugLastDeltaAtMs - this.streamDebugLastFlushAtMs
+        });
         debugLog("event:delta", {
           turnId: payload.turnId,
           deltaLength: deltaText.length,
@@ -3849,6 +4169,7 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -3870,19 +4191,8 @@ export const useRuntimeStore = defineStore("runtime", {
             firstTokenLatencyMs: this.firstTokenLatencyMs
           })
         );
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: this.phase,
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: this.toolActivities,
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          error: null
-        }, false);
-        this.scheduleDeferredPersist();
+        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveModelTraceFromAssistant(payload.turnId);
         debugLog("event:trace", {
           turnId: payload.turnId,
           steps: this.traceSteps.length
@@ -3897,6 +4207,7 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -3918,19 +4229,8 @@ export const useRuntimeStore = defineStore("runtime", {
             firstTokenLatencyMs: this.firstTokenLatencyMs
           })
         );
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: this.phase,
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          error: null
-        }, false);
-        this.scheduleDeferredPersist();
+        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
       const checkpointPersistedUnlisten = await safeListen<TurnStreamEvent>("turn:checkpoint_persisted", ({ payload }) => {
@@ -3941,6 +4241,7 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -3962,19 +4263,8 @@ export const useRuntimeStore = defineStore("runtime", {
             firstTokenLatencyMs: this.firstTokenLatencyMs
           })
         );
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: this.phase,
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          error: null
-        }, false);
-        this.scheduleDeferredPersist();
+        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
       const toolUnlisten = await safeListen<TurnStreamEvent>("turn:tool", ({ payload }) => {
@@ -3985,6 +4275,7 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         debugLog("event:tool", {
@@ -4011,19 +4302,8 @@ export const useRuntimeStore = defineStore("runtime", {
             firstTokenLatencyMs: this.firstTokenLatencyMs
           })
         );
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: this.phase,
-          traceSteps: this.traceSteps,
-          toolActivities: payload.toolActivities ?? this.toolActivities,
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          error: null
-        }, false);
-        this.scheduleDeferredPersist();
+        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
       const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
@@ -4034,6 +4314,7 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
 
         const completedPayloadRecord = payload as Record<string, unknown>;
 
@@ -4169,6 +4450,7 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
 
         const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,
@@ -4281,6 +4563,7 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
 
         const cancelledTraceSteps = finalizeCancelledTraceSteps(payload.traceSteps ?? this.traceSteps);
         const cancelledCacheHitInputTokens = resolveCacheHitInputTokens(payload);

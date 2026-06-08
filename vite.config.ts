@@ -19,7 +19,10 @@ export default defineConfig({
       ignored: [
         "**/.codex/**",
         "**/.codex-logs/**",
+        "**/.cargo-target*/**",
         "**/.git/**",
+        "**/.omo/**",
+        "**/.tmp/**",
         "**/.devlogs/**",
         "**/claude-code-sourcemap/**",
         "**/codex-openai/**",
@@ -35,9 +38,11 @@ export default defineConfig({
         "**/src-tauri/gen/**",
         "**/src-tauri/target/**",
         "**/src-tauri/target-check/**",
+        "**/test-results/**",
         "**/target-test*/**",
         "**/target-check*/**",
-        "**/target*/**"
+        "**/target*/**",
+        "**/*.log"
       ]
     }
   }

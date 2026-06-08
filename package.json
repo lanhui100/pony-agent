@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:tauri": "npm run dev:tauri:cool",
+    "dev:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-tauri-dev.ps1",
     "dev:tauri:full": "npm run tauri -- dev",
     "dev:tauri:cool": "set CARGO_BUILD_JOBS=2&& set CARGO_INCREMENTAL=1&& set CARGO_PROFILE_DEV_DEBUG=0&& set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri dev",
     "dev:tauri:fresh": "npm run clean:tauri:light && npm run dev:tauri",

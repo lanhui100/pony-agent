@@ -1385,11 +1385,7 @@ impl ToolRouter {
                 };
                 let relative_without_extension = relative
                     .parent()
-                    .map(|parent| parent.join(
-                        relative
-                            .file_stem()
-                            .unwrap_or_default(),
-                    ))
+                    .map(|parent| parent.join(relative.file_stem().unwrap_or_default()))
                     .unwrap_or_else(|| PathBuf::from(relative.file_stem().unwrap_or_default()));
 
                 relative_without_extension
@@ -2305,7 +2301,10 @@ mod tests {
 
         assert_eq!(result.status, "ok");
         let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
-        assert_eq!(payload.get("successCount").and_then(Value::as_u64), Some(17));
+        assert_eq!(
+            payload.get("successCount").and_then(Value::as_u64),
+            Some(17)
+        );
         assert_eq!(payload.get("status").and_then(Value::as_str), Some("ok"));
     }
 
@@ -2494,7 +2493,8 @@ mod tests {
             .and_then(Value::as_array)
             .map(|results| {
                 results.iter().any(|entry| {
-                    entry.get("tool").and_then(Value::as_str) == Some(TOOL_WORKSPACE_READ_FILE_SEGMENT)
+                    entry.get("tool").and_then(Value::as_str)
+                        == Some(TOOL_WORKSPACE_READ_FILE_SEGMENT)
                 })
             })
             .unwrap_or(false));
@@ -2510,8 +2510,11 @@ mod tests {
             "pub struct AgentContext;\n",
         )
         .expect("write first context file");
-        fs::write(workspace.join("nested/context.rs"), "pub struct OtherContext;\n")
-            .expect("write second context file");
+        fs::write(
+            workspace.join("nested/context.rs"),
+            "pub struct OtherContext;\n",
+        )
+        .expect("write second context file");
         let router = ToolRouter::with_workspace_root(workspace);
 
         let result = router.execute(&ToolCall {

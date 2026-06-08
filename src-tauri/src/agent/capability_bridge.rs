@@ -794,7 +794,8 @@ impl CapabilityRegistry {
         let snapshot = enrich_skill_source_snapshot(snapshot);
         let source_id = snapshot.source.source_id.clone();
         self.skills.retain(|_, skill| skill.source_id != source_id);
-        self.skill_sources.insert(source_id, snapshot.source.clone());
+        self.skill_sources
+            .insert(source_id, snapshot.source.clone());
 
         for skill in snapshot.skills {
             self.skills.insert(skill.skill_id.clone(), skill);

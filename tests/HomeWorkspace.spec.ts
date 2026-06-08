@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { defineComponent, nextTick } from "vue";
+import { defineComponent, h, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import { useProviderStore } from "@/stores/providers";
@@ -11,6 +11,8 @@ import type {
   ExecutionCheckpoint,
   GraphRunControlBoundaryEvidence,
   GraphRunSubmissionPlan,
+  HistoryBranch,
+  HistoryNode,
   RunControlAuditSummary
 } from "@/types/runtime";
 
@@ -26,8 +28,25 @@ vi.mock("@/lib/tauri", () => ({
   isTauriAvailable: tauriMocks.mockIsTauriAvailable
 }));
 
+const scrollToBottomSpy = vi.fn();
+const viewportScrollToSpy = vi.fn();
+
 const ScrollAreaStub = defineComponent({
-  template: '<div class="scroll-area-stub"><slot /></div>'
+  setup(_props, { slots, expose }) {
+    const viewportEl = {
+      scrollHeight: 1000,
+      scrollTop: 700,
+      clientHeight: 400,
+      scrollTo: viewportScrollToSpy
+    } as unknown as HTMLElement;
+
+    expose({
+      viewportEl,
+      scrollToBottom: scrollToBottomSpy
+    });
+
+    return () => h("div", { class: "scroll-area-stub" }, slots.default ? slots.default() : []);
+  }
 });
 
 const MarkdownRendererStub = defineComponent({
@@ -155,6 +174,42 @@ function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
     toolName: partial.toolName ?? null,
     detail: partial.detail ?? null,
     durationSeconds: partial.durationSeconds ?? null
+  };
+}
+
+function createHistoryNode(partial: Partial<HistoryNode> = {}): HistoryNode {
+  return {
+    nodeId: partial.nodeId ?? "node-1",
+    sessionId: partial.sessionId ?? "session-current",
+    parentNodeId: partial.parentNodeId ?? null,
+    branchId: partial.branchId ?? "branch-main",
+    forkedFromNodeId: partial.forkedFromNodeId ?? null,
+    kind: partial.kind ?? "turn_committed",
+    turnId: partial.turnId ?? null,
+    transcriptRef: partial.transcriptRef ?? null,
+    runRef: partial.runRef ?? null,
+    workspaceRef: partial.workspaceRef ?? { kind: "none", rollbackCapable: false },
+    summary: partial.summary ?? "checkpoint summary",
+    title: partial.title ?? "checkpoint title",
+    history: partial.history ?? [],
+    turnTraceHistory: partial.turnTraceHistory ?? [],
+    turnCount: partial.turnCount ?? 1,
+    lastReferencedFile: partial.lastReferencedFile ?? null,
+    createdAtMs: partial.createdAtMs ?? 1000
+  };
+}
+
+function createHistoryBranch(partial: Partial<HistoryBranch> = {}): HistoryBranch {
+  return {
+    branchId: partial.branchId ?? "branch-main",
+    sessionId: partial.sessionId ?? "session-current",
+    baseNodeId: partial.baseNodeId ?? "node-1",
+    headNodeId: partial.headNodeId ?? "node-2",
+    forkedFromBranchId: partial.forkedFromBranchId ?? null,
+    forkedFromNodeId: partial.forkedFromNodeId ?? null,
+    label: partial.label ?? "main",
+    createdAtMs: partial.createdAtMs ?? 1000,
+    updatedAtMs: partial.updatedAtMs ?? 2000
   };
 }
 
@@ -308,6 +363,8 @@ describe("HomeWorkspace", () => {
       }) as typeof requestAnimationFrame
     );
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    scrollToBottomSpy.mockReset();
+    viewportScrollToSpy.mockReset();
   });
 
   afterEach(() => {
@@ -570,7 +627,8 @@ describe("HomeWorkspace", () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
-      phase: "ready",
+      phase: "running",
+      isSubmitting: true,
       error: null,
       messages: [
         createMessage({
@@ -604,11 +662,12 @@ describe("HomeWorkspace", () => {
     expect(wrapper.text()).not.toContain("OUT:456");
   });
 
-  it("renders pending assistant content as inline streaming text before final markdown", async () => {
+  it("renders pending assistant content as accumulated text and highlights only the latest delta", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
       phase: "running",
+      isSubmitting: true,
       error: null,
       messages: [
         createMessage({
@@ -621,7 +680,7 @@ describe("HomeWorkspace", () => {
           id: "assistant-1",
           turnId: "turn-1",
           role: "assistant",
-          content: "**正在** 输出中",
+          content: "",
           status: "pending",
           modelName: "OpenAI/GPT-5"
         })
@@ -631,17 +690,7 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
-    expect(wrapper.find(".assistant-streaming-content").text()).toContain("**正在** 输出中");
-    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
-  });
-
-  it("switches from streaming text to final markdown when assistant completes", async () => {
-    const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
-      sessionOperation: null,
-      phase: "running",
-      error: null,
       messages: [
         createMessage({
           id: "user-1",
@@ -659,8 +708,138 @@ describe("HomeWorkspace", () => {
         })
       ]
     });
+    await nextTick();
+
+    const streamingContent = wrapper.get(".assistant-streaming-content");
+    expect(streamingContent.text()).toContain("**正在** 输出中");
+    expect(streamingContent.findAll("span")[0]?.text()).toBe("**正在** 输出中");
+    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
+    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
+  });
+
+  it("fades only the latest streamed assistant delta instead of replaying the full accumulated content", async () => {
+    const runtimeStore = useRuntimeStore();
+
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
 
     const wrapper = mountWorkspace();
+    await nextTick();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+    let streamingSpans = wrapper.get(".assistant-streaming-content").findAll("span");
+    expect(streamingSpans[0]?.text()).toBe("hello");
+    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello this is a longer streamed assistant delta",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    streamingSpans = wrapper.get(".assistant-streaming-content").findAll("span");
+    expect(streamingSpans[0]?.text()).toBe("hello");
+    expect(wrapper.get(".assistant-streaming-fade").text()).toBe("this is a longer streamed assistant delta");
+  });
+
+  it("switches from streaming text to final markdown when assistant completes", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "**正在** 输出中",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
     await nextTick();
 
     expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
@@ -693,6 +872,139 @@ describe("HomeWorkspace", () => {
     expect(markdownBlock.classes()).toContain("text-stone-800");
   });
 
+  it("requests scroll follow-up when streaming content grows", async () => {
+    const runtimeStore = useRuntimeStore();
+
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "src/agent 是如何组织的"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "src/agent 是如何组织的"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "a".repeat(240),
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    scrollToBottomSpy.mockClear();
+    await nextTick();
+    expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
+    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
+  });
+
+  it("keeps auto-follow armed across small streaming content updates", async () => {
+    const runtimeStore = useRuntimeStore();
+
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    scrollToBottomSpy.mockClear();
+    await nextTick();
+    expect(scrollToBottomSpy.mock.calls.length).toBeGreaterThan(0);
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello world",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    await nextTick();
+    expect(wrapper.find(".assistant-streaming-content").text()).toContain("hello");
+    expect(wrapper.find(".assistant-streaming-content").text().length).toBeGreaterThan(5);
+  });
+
   it("opens provider menu, selects another model, and closes afterwards", async () => {
     const providerStore = useProviderStore();
     const selectModelSpy = vi.spyOn(providerStore, "selectModel");
@@ -702,7 +1014,7 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    const [providerTrigger] = wrapper.findAll("button.composer-select-trigger");
+    const [, providerTrigger] = wrapper.findAll("button.composer-select-trigger");
     await providerTrigger.trigger("click");
     await nextTick();
 
@@ -731,7 +1043,7 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    const [providerTrigger, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
+    const [, providerTrigger, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
     await providerTrigger.trigger("click");
     await nextTick();
     expect(wrapper.text()).toContain("OpenAI");
@@ -758,7 +1070,7 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    const [, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
+    const [, , reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
     await reasoningTrigger.trigger("click");
     await nextTick();
 
@@ -789,7 +1101,7 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    const [, reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
+    const [, , reasoningTrigger] = wrapper.findAll("button.composer-select-trigger");
     expect(reasoningTrigger.attributes("disabled")).toBeUndefined();
 
     await reasoningTrigger.trigger("click");
@@ -885,7 +1197,7 @@ describe("HomeWorkspace", () => {
           id: "assistant-1",
           turnId: "turn-1",
           role: "assistant",
-          content: "thinking...",
+          content: "",
           status: "pending",
           modelName: "OpenAI/GPT-5"
         }),
@@ -913,7 +1225,79 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.find(".assistant-streaming-content").classes()).toContain("text-stone-800");
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "first question"
+        }),
+        createMessage({
+          id: "tool-1",
+          turnId: "turn-1",
+          role: "tool",
+          content: "",
+          status: "pending",
+          tokenCount: 33,
+          toolName: "Search",
+          detail: "running",
+          durationSeconds: 2.4
+        }),
+        createMessage({
+          id: "tool-2",
+          turnId: "turn-1",
+          role: "tool",
+          content: "",
+          status: "done",
+          tokenCount: 12,
+          toolName: "Edit",
+          detail: "done",
+          durationSeconds: 1.2
+        }),
+        createMessage({
+          id: "tool-3",
+          turnId: "turn-1",
+          role: "tool",
+          content: "",
+          status: "error",
+          tokenCount: null,
+          toolName: "Fail",
+          detail: "boom",
+          durationSeconds: null
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "thinking...",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "assistant-2",
+          turnId: "turn-2",
+          role: "assistant",
+          content: "failed answer",
+          status: "error",
+          reasoningContent: "error reasoning",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "assistant-3",
+          turnId: "turn-3",
+          role: "assistant",
+          content: "done answer",
+          status: "done",
+          reasoningContent: "final reasoning",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+    await nextTick();
+
+    expect(wrapper.text()).toContain("正在思考...");
 
     const markdownBlocks = wrapper.findAll(".markdown-stub");
     expect(markdownBlocks.some((node) => node.classes().includes("text-rose-800"))).toBe(true);
@@ -1009,5 +1393,190 @@ describe("HomeWorkspace", () => {
     await nextTick();
 
     expect(wrapper.find(".assistant-reasoning").exists()).toBe(true);
+  });
+
+  it("renders message-level checkpoint actions only for non-latest assistant turns and reuses checkout actions", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-old",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: false },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="workspace-checkpoint-transcript-node-old"]').attributes("title")).toContain(
+      "仅对话"
+    );
+    expect(wrapper.get('[data-testid="workspace-checkpoint-workspace-node-old"]').attributes("title")).toContain(
+      "将仅恢复对话历史"
+    );
+    expect(wrapper.find('[data-testid="workspace-checkpoint-transcript-node-head"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="workspace-checkpoint-transcript-node-old"]').trigger("click");
+    await wrapper.get('[data-testid="workspace-checkpoint-workspace-node-old"]').trigger("click");
+
+    expect(checkoutSpy).toHaveBeenNthCalledWith(1, "node-old", "transcript_only");
+    expect(checkoutSpy).toHaveBeenNthCalledWith(2, "node-old", "transcript_and_workspace");
+  });
+
+  it("opens checkpoint picker from trigger and global shortcut, then rolls back using the best available mode", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-old",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    await wrapper.get('[data-testid="workspace-checkpoint-picker-trigger"]').trigger("click");
+    await nextTick();
+    expect(wrapper.get('[data-testid="workspace-checkpoint-picker-menu"]').text()).toContain("旧 checkpoint");
+
+    await wrapper.get('[data-testid="workspace-checkpoint-picker-item-node-old"]').trigger("click");
+    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_and_workspace");
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+    await nextTick();
+    expect(wrapper.get('[data-testid="workspace-checkpoint-picker-menu"]').exists()).toBe(true);
+  });
+
+  it("shows fork summary menu and jumps through existing branch actions", async () => {
+    const runtimeStore = useRuntimeStore();
+    const switchSpy = vi.spyOn(runtimeStore, "switchHistoryBranch").mockResolvedValue({
+      sessionId: "session-current",
+      branchId: "branch-fork",
+      nodeId: "node-fork-head",
+      visibleNodeId: "node-fork-head",
+      activeBranchId: "branch-fork",
+      branchHeadNodeId: "node-fork-head",
+      workspaceNodeId: "node-fork-head",
+      mode: "live",
+      historyNodes: runtimeStore.historyNodes,
+      historyBranches: runtimeStore.historyBranches
+    });
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-source", role: "user", content: "源问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-source", role: "assistant", content: "源回答" }),
+        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-source",
+          turnId: "turn-source",
+          summary: "源 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-fork-head",
+          turnId: "turn-fork-head",
+          branchId: "branch-fork",
+          summary: "fork 摘要",
+          createdAtMs: 1500
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" }),
+        createHistoryBranch({
+          branchId: "branch-fork",
+          baseNodeId: "node-source",
+          headNodeId: "node-fork-head",
+          forkedFromNodeId: "node-source",
+          label: "fork-1",
+          updatedAtMs: 2500
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    await wrapper.get('[data-testid="workspace-checkpoint-forks-node-source"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="workspace-checkpoint-fork-menu-node-source"]').text()).toContain("fork-1");
+
+    await wrapper.get('[data-testid="workspace-checkpoint-fork-target-branch-fork"]').trigger("click");
+
+    expect(switchSpy).toHaveBeenCalledWith("branch-fork");
+    expect(checkoutSpy).not.toHaveBeenCalled();
   });
 });

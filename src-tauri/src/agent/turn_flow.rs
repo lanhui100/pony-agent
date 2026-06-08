@@ -292,6 +292,7 @@ pub fn emit_stream_event(
     session_summary: Option<String>,
     session_id: Option<String>,
 ) {
+    let is_delta_event = name == "turn:delta";
     emit_event(
         sink,
         name,
@@ -315,7 +316,11 @@ pub fn emit_stream_event(
             provider_source,
             provider_mode,
             fallback_reason,
-            build_context_observation,
+            build_context_observation: if is_delta_event {
+                None
+            } else {
+                build_context_observation
+            },
             input_tokens,
             cache_hit_input_tokens,
             reasoning_tokens,
@@ -323,11 +328,19 @@ pub fn emit_stream_event(
             total_tokens,
             first_token_latency_ms,
             turn_duration_ms,
-            trace_steps,
-            trace_timeline,
-            tool_activities,
-            provider_call_records,
-            hook_trace_records,
+            trace_steps: if is_delta_event { None } else { trace_steps },
+            trace_timeline: if is_delta_event { None } else { trace_timeline },
+            tool_activities: if is_delta_event { None } else { tool_activities },
+            provider_call_records: if is_delta_event {
+                None
+            } else {
+                provider_call_records
+            },
+            hook_trace_records: if is_delta_event {
+                None
+            } else {
+                hook_trace_records
+            },
             session_summary,
         },
     );
@@ -674,6 +687,25 @@ pub fn runtime_log(message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    struct RecordingSink {
+        events: RefCell<Vec<(String, TurnStreamEvent)>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                events: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl TurnEventSink for RecordingSink {
+        fn emit(&self, name: &str, payload: TurnStreamEvent) {
+            self.events.borrow_mut().push((name.to_string(), payload));
+        }
+    }
 
     #[test]
     fn canonical_trace_event_aligns_with_context_build_end_hook_point() {
@@ -764,6 +796,92 @@ mod tests {
             &event_type,
             "streaming_response"
         ));
+    }
+
+    #[test]
+    fn delta_stream_event_strips_heavy_payload_fields() {
+        let sink = RecordingSink::new();
+        let observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 4,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: "tools".to_string(),
+        };
+
+        emit_stream_event(
+            &sink,
+            "turn:delta",
+            "turn-heavy-delta".to_string(),
+            "delta",
+            Some("calling_model"),
+            Some("partial".to_string()),
+            Some("thinking".to_string()),
+            None,
+            None,
+            None,
+            None,
+            Some(observation),
+            Some(11),
+            Some(3),
+            Some(5),
+            Some(7),
+            Some(18),
+            Some(42),
+            None,
+            Some(vec![TurnTraceStep {
+                id: "call-model".to_string(),
+                label: "Call model".to_string(),
+                state: "active".to_string(),
+            }]),
+            Some(vec![TraceTimelineEntry {
+                id: "model-1".to_string(),
+                kind: "call_model".to_string(),
+                label: "CALL MODEL #1".to_string(),
+                state: "active".to_string(),
+                sequence: 1,
+                text: Some("partial".to_string()),
+                ..TraceTimelineEntry::default()
+            }]),
+            Some(vec![TurnToolActivity {
+                id: "tool-1".to_string(),
+                name: "workspace.read_file".to_string(),
+                status: "done".to_string(),
+                summary: "read done".to_string(),
+                arguments_text: None,
+                result_text: None,
+                duration_seconds: Some(0.1),
+                capability_invocation: None,
+            }]),
+            Some(vec![ProviderCallCacheRecord::default()]),
+            Some(Vec::new()),
+            Some("summary".to_string()),
+            Some("session-1".to_string()),
+        );
+
+        let events = sink.events.borrow();
+        let (_, payload) = events
+            .first()
+            .expect("delta event should have been emitted");
+
+        assert_eq!(payload.text.as_deref(), Some("partial"));
+        assert_eq!(payload.reasoning_content.as_deref(), Some("thinking"));
+        assert_eq!(payload.first_token_latency_ms, Some(42));
+        assert_eq!(payload.session_id.as_deref(), Some("session-1"));
+        assert_eq!(payload.session_summary.as_deref(), Some("summary"));
+        assert!(payload.build_context_observation.is_none());
+        assert!(payload.trace_steps.is_none());
+        assert!(payload.trace_timeline.is_none());
+        assert!(payload.tool_activities.is_none());
+        assert!(payload.provider_call_records.is_none());
+        assert!(payload.hook_trace_records.is_none());
     }
 
     #[test]

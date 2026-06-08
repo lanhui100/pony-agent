@@ -51,8 +51,9 @@ use crate::agent::turn_flow::{
     SyncToolTurnOutcome, TurnEventEnvelope, TurnEventSink,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::rc::Rc;
 #[cfg(test)]
@@ -151,6 +152,10 @@ pub struct TurnStreamEvent {
 const DEFAULT_MAX_TOOL_HOPS_PER_TURN: usize = 1024;
 const MAX_ALLOWED_TOOL_HOPS_PER_TURN: usize = 4096;
 const MAX_TOOL_HOPS_ENV: &str = "PONY_AGENT_MAX_TOOL_HOPS_PER_TURN";
+const DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN: usize = 4;
+const MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN: usize = 32;
+const MAX_TOOL_FOLLOWUPS_ENV: &str = "PONY_AGENT_MAX_TOOL_FOLLOWUPS_PER_TURN";
+const STREAM_REASONING_BATCH_CHARS: usize = 96;
 const MAX_TURN_IMAGES: usize = 3;
 const MAX_TURN_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 const CANCELLED_TURN_MESSAGE: &str = "This turn was cancelled.";
@@ -163,6 +168,11 @@ struct ToolTurnHopRecord {
     assistant_reasoning_content_value: Option<Value>,
     tool_call: ToolCall,
     tool_result: crate::agent::tools::ToolResult,
+}
+
+struct RecoveredToolFollowup {
+    response: ProviderResponse,
+    provider_call_record: ProviderCallCacheRecord,
 }
 
 struct HookDispatchOutcome {
@@ -307,7 +317,8 @@ impl AgentRuntime {
     pub fn apply_mcp_source_snapshot(&mut self, snapshot: McpSourceSnapshot) {
         let snapshot = enrich_mcp_source_snapshot(snapshot);
         self.sessions.persist_mcp_source_snapshot(snapshot.clone());
-        self.capability_registry.replace_mcp_source_snapshot(snapshot);
+        self.capability_registry
+            .replace_mcp_source_snapshot(snapshot);
     }
 
     pub fn dispatch_mcp_source_ingress_hooks(
@@ -332,8 +343,10 @@ impl AgentRuntime {
         snapshot: SkillSourceSnapshot,
     ) -> Result<(), String> {
         let snapshot = enrich_skill_source_snapshot(snapshot);
-        self.sessions.persist_skill_source_snapshot(snapshot.clone());
-        self.capability_registry.replace_skill_source_snapshot(snapshot)
+        self.sessions
+            .persist_skill_source_snapshot(snapshot.clone());
+        self.capability_registry
+            .replace_skill_source_snapshot(snapshot)
     }
 
     pub fn dispatch_skill_source_ingress_hooks(
@@ -505,11 +518,15 @@ impl AgentRuntime {
         }
 
         let arguments = if fail_turn_error.is_none() && blocked_error.is_none() {
-            apply_capability_argument_patches(&hook_point, &envelope.argument_summary, &execution_results)
-                .unwrap_or_else(|error| {
-                    fail_turn_error = Some(error);
-                    normalized_arguments_from_summary(&envelope.argument_summary)
-                })
+            apply_capability_argument_patches(
+                &hook_point,
+                &envelope.argument_summary,
+                &execution_results,
+            )
+            .unwrap_or_else(|error| {
+                fail_turn_error = Some(error);
+                normalized_arguments_from_summary(&envelope.argument_summary)
+            })
         } else {
             normalized_arguments_from_summary(&envelope.argument_summary)
         };
@@ -591,16 +608,21 @@ impl AgentRuntime {
             }
         }
 
-        let (decision, selected_tool_call) =
-            if fail_turn_error.is_none() && blocked_error.is_none() {
-                apply_planner_patches(&hook_point, decision, selected_tool_call, &execution_results)
-                    .unwrap_or_else(|error| {
-                        fail_turn_error = Some(error);
-                        (None, None)
-                    })
-            } else {
-                (decision, selected_tool_call)
-            };
+        let (decision, selected_tool_call) = if fail_turn_error.is_none() && blocked_error.is_none()
+        {
+            apply_planner_patches(
+                &hook_point,
+                decision,
+                selected_tool_call,
+                &execution_results,
+            )
+            .unwrap_or_else(|error| {
+                fail_turn_error = Some(error);
+                (None, None)
+            })
+        } else {
+            (decision, selected_tool_call)
+        };
 
         PlannerDispatchOutcome {
             decision,
@@ -1358,7 +1380,8 @@ impl AgentRuntime {
         &self,
         tool_call: &ToolCall,
     ) -> CapabilityMediationEnvelope {
-        let candidate_ids = candidate_capability_ids_for_tool_name(&self.capability_registry, &tool_call.name);
+        let candidate_ids =
+            candidate_capability_ids_for_tool_name(&self.capability_registry, &tool_call.name);
         let resolved_capability = candidate_ids
             .first()
             .and_then(|capability_id| self.capability_registry.inspect_capability(capability_id));
@@ -1391,7 +1414,9 @@ impl AgentRuntime {
         tool_call: &ToolCall,
         skill: &crate::agent::capability_bridge::SkillDescriptor,
     ) -> CapabilityMediationEnvelope {
-        let source = self.capability_registry.inspect_skill_source(&skill.source_id);
+        let source = self
+            .capability_registry
+            .inspect_skill_source(&skill.source_id);
         CapabilityMediationEnvelope {
             session_id: None,
             run_id: None,
@@ -2117,6 +2142,7 @@ impl AgentRuntime {
         let mut accumulated_token_usage = first_decision.token_usage.clone();
         let first_token_latency = Rc::new(Cell::new(initial_turn_first_token_latency_ms));
         let mut hook_trace_records = initial_hook_trace_records;
+        let mut seen_tool_signatures = BTreeSet::from([tool_call_signature(&current_tool_call)]);
 
         loop {
             completed_hops += 1;
@@ -2492,16 +2518,15 @@ impl AgentRuntime {
 
             let delta_turn_id = turn_id.to_string();
             let first_token_latency_for_emit = Rc::clone(&first_token_latency);
-            let context_observation_for_delta = context_observation.clone();
-            let tool_activities_for_delta = tool_activities.clone();
-            let display_message_for_delta = display_message.to_string();
-            let provider_meta_for_delta = provider_meta.clone();
             let turn_started_at_for_latency = *turn_started_at;
             let supports_true_streaming_followup = provider.supports_true_streaming_followup();
-            let provider_call_started_at = Instant::now();
             let provider_call_first_token_latency = Rc::new(Cell::new(None));
             let provider_call_first_token_latency_for_emit =
                 Rc::clone(&provider_call_first_token_latency);
+            let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
+            let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+            let delta_turn_id_for_emit = delta_turn_id.clone();
+            let provider_call_started_at = Instant::now();
             let response = match provider_followup_stream(
                 provider,
                 planning_request,
@@ -2510,15 +2535,44 @@ impl AgentRuntime {
                 &current_tool_call,
                 &tool_result,
                 move |delta| {
-                    let call_latency = if supports_true_streaming_followup
+                    let flush_delta = |text: Option<String>,
+                                       reasoning_content: Option<String>,
+                                       latency: Option<u64>| {
+                        emit_stream_event(
+                            sink,
+                            "turn:delta",
+                            delta_turn_id_for_emit.clone(),
+                            "delta",
+                            Some("calling_model"),
+                            text,
+                            reasoning_content,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            latency,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        );
+                    };
+                    if supports_true_streaming_followup
                         && provider_call_first_token_latency_for_emit.get().is_none()
                     {
                         let value = provider_call_started_at.elapsed().as_millis() as u64;
                         provider_call_first_token_latency_for_emit.set(Some(value));
-                        Some(value)
-                    } else {
-                        None
-                    };
+                    }
                     let latency = if supports_true_streaming_followup
                         && first_token_latency_for_emit.get().is_none()
                     {
@@ -2529,51 +2583,22 @@ impl AgentRuntime {
                         None
                     };
 
-                    let (text, reasoning_content) = match delta {
-                        ProviderStreamChunk::Text(text) => (Some(text), None),
-                        ProviderStreamChunk::Reasoning(reasoning) => (None, Some(reasoning)),
-                    };
-                    let timeline_reasoning_content = reasoning_content.clone();
-
-                    emit_stream_event(
-                        sink,
-                        "turn:delta",
-                        delta_turn_id.clone(),
-                        "delta",
-                        Some("calling_model"),
-                        text.clone(),
-                        reasoning_content.clone(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(context_observation_for_delta.clone()),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        latency,
-                        None,
-                        None,
-                        Some(build_stream_progress_trace_timeline(
-                            display_message_for_delta.as_str(),
-                            &provider_meta_for_delta,
-                            None,
-                            None,
-                            &context_observation_for_delta,
-                            &tool_activities_for_delta,
-                            None,
-                            timeline_reasoning_content.as_deref(),
-                            call_latency.or(provider_call_first_token_latency_for_emit.get()),
-                            "calling_model",
-                        )),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    );
+                    match delta {
+                        ProviderStreamChunk::Text(text) => {
+                            if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush()
+                            {
+                                flush_delta(None, Some(reasoning), latency);
+                            }
+                            flush_delta(Some(text), None, latency);
+                        }
+                        ProviderStreamChunk::Reasoning(reasoning) => {
+                            if let Some(buffered_reasoning) =
+                                reasoning_batcher_for_emit.borrow_mut().push(reasoning)
+                            {
+                                flush_delta(None, Some(buffered_reasoning), latency);
+                            }
+                        }
+                    }
                 },
             ) {
                 Ok(response) => response,
@@ -2598,6 +2623,36 @@ impl AgentRuntime {
                     return;
                 }
             };
+            if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
+                emit_stream_event(
+                    sink,
+                    "turn:delta",
+                    delta_turn_id.clone(),
+                    "delta",
+                    Some("calling_model"),
+                    None,
+                    Some(buffered_reasoning.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    input.session_id.clone(),
+                );
+            }
             let mut response = response;
             let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
             let provider_call_used_true_stream =
@@ -2719,7 +2774,33 @@ impl AgentRuntime {
             }
 
             if let Some(next_tool_call) = response.tool_call.clone() {
-                if completed_hops >= max_tool_hops_per_turn() {
+                if completed_hops >= max_tool_followups_per_turn() {
+                    let recovery = recover_tool_followup_completion_stream(
+                        sink,
+                        provider,
+                        planning_request,
+                        &user_message,
+                        &hop_records,
+                        &next_tool_call,
+                        response.assistant_message.as_ref(),
+                        &build_tool_followup_limit_error(max_tool_followups_per_turn()),
+                        &context_observation,
+                        turn_id,
+                        input.session_id.clone(),
+                        &first_token_latency,
+                        turn_started_at,
+                    );
+                    provider_call_records.push(recovery.provider_call_record);
+                    accumulated_token_usage = merge_token_usage(
+                        accumulated_token_usage,
+                        recovery.response.token_usage.as_ref(),
+                    );
+                    accumulated_fallback_reason = merge_fallback_reason(
+                        accumulated_fallback_reason,
+                        recovery.response.fallback_reason.clone(),
+                    );
+                    response = recovery.response;
+                } else if completed_hops >= max_tool_hops_per_turn() {
                     self.fail_stream_turn_with_hook_dispatch(
                         sink,
                         control,
@@ -2738,14 +2819,44 @@ impl AgentRuntime {
                         build_tool_hop_limit_error(max_tool_hops_per_turn()),
                     );
                     return;
+                } else {
+                    let next_signature = tool_call_signature(&next_tool_call);
+                    if !seen_tool_signatures.insert(next_signature) {
+                        let recovery = recover_tool_followup_completion_stream(
+                            sink,
+                            provider,
+                            planning_request,
+                            &user_message,
+                            &hop_records,
+                            &next_tool_call,
+                            response.assistant_message.as_ref(),
+                            &build_duplicate_tool_call_error(&next_tool_call),
+                            &context_observation,
+                            turn_id,
+                            input.session_id.clone(),
+                            &first_token_latency,
+                            turn_started_at,
+                        );
+                        provider_call_records.push(recovery.provider_call_record);
+                        accumulated_token_usage = merge_token_usage(
+                            accumulated_token_usage,
+                            recovery.response.token_usage.as_ref(),
+                        );
+                        accumulated_fallback_reason = merge_fallback_reason(
+                            accumulated_fallback_reason,
+                            recovery.response.fallback_reason.clone(),
+                        );
+                        response = recovery.response;
+                    } else {
+                        current_assistant_message = response.assistant_message.clone();
+                        current_assistant_output_text = response.output_text.clone();
+                        current_assistant_reasoning = response.reasoning_content.clone();
+                        current_assistant_reasoning_value =
+                            response.reasoning_content_value.clone();
+                        current_tool_call = next_tool_call;
+                        continue;
+                    }
                 }
-
-                current_assistant_message = response.assistant_message.clone();
-                current_assistant_output_text = response.output_text.clone();
-                current_assistant_reasoning = response.reasoning_content.clone();
-                current_assistant_reasoning_value = response.reasoning_content_value.clone();
-                current_tool_call = next_tool_call;
-                continue;
             }
 
             let completed_text = response.output_text.clone();
@@ -3032,6 +3143,7 @@ impl AgentRuntime {
         let mut accumulated_fallback_reason = first_decision.fallback_reason.clone();
         let mut accumulated_token_usage = first_decision.token_usage.clone();
         let mut hook_trace_records = initial_model_hook_trace_records;
+        let mut seen_tool_signatures = BTreeSet::from([tool_call_signature(&current_tool_call)]);
 
         loop {
             completed_hops += 1;
@@ -3184,7 +3296,28 @@ impl AgentRuntime {
             }
 
             if let Some(next_tool_call) = response.tool_call.clone() {
-                if completed_hops >= max_tool_hops_per_turn() {
+                if completed_hops >= max_tool_followups_per_turn() {
+                    let recovery = recover_tool_followup_completion(
+                        provider,
+                        planning_request,
+                        &user_message,
+                        &hop_records,
+                        &next_tool_call,
+                        response.assistant_message.as_ref(),
+                        &build_tool_followup_limit_error(max_tool_followups_per_turn()),
+                        &context_observation,
+                    );
+                    provider_call_records.push(recovery.provider_call_record);
+                    accumulated_token_usage = merge_token_usage(
+                        accumulated_token_usage,
+                        recovery.response.token_usage.as_ref(),
+                    );
+                    accumulated_fallback_reason = merge_fallback_reason(
+                        accumulated_fallback_reason,
+                        recovery.response.fallback_reason.clone(),
+                    );
+                    response = recovery.response;
+                } else if completed_hops >= max_tool_hops_per_turn() {
                     return Err(self.fail_sync_turn_result(
                         Some(provider_meta),
                         display_message,
@@ -3193,13 +3326,39 @@ impl AgentRuntime {
                         hook_trace_records,
                         build_tool_hop_limit_error(max_tool_hops_per_turn()),
                     ));
+                } else {
+                    let next_signature = tool_call_signature(&next_tool_call);
+                    if !seen_tool_signatures.insert(next_signature) {
+                        let recovery = recover_tool_followup_completion(
+                            provider,
+                            planning_request,
+                            &user_message,
+                            &hop_records,
+                            &next_tool_call,
+                            response.assistant_message.as_ref(),
+                            &build_duplicate_tool_call_error(&next_tool_call),
+                            &context_observation,
+                        );
+                        provider_call_records.push(recovery.provider_call_record);
+                        accumulated_token_usage = merge_token_usage(
+                            accumulated_token_usage,
+                            recovery.response.token_usage.as_ref(),
+                        );
+                        accumulated_fallback_reason = merge_fallback_reason(
+                            accumulated_fallback_reason,
+                            recovery.response.fallback_reason.clone(),
+                        );
+                        response = recovery.response;
+                    } else {
+                        current_assistant_message = response.assistant_message.clone();
+                        current_assistant_output_text = response.output_text.clone();
+                        current_assistant_reasoning = response.reasoning_content.clone();
+                        current_assistant_reasoning_value =
+                            response.reasoning_content_value.clone();
+                        current_tool_call = next_tool_call;
+                        continue;
+                    }
                 }
-                current_assistant_message = response.assistant_message.clone();
-                current_assistant_output_text = response.output_text.clone();
-                current_assistant_reasoning = response.reasoning_content.clone();
-                current_assistant_reasoning_value = response.reasoning_content_value.clone();
-                current_tool_call = next_tool_call;
-                continue;
             }
 
             return Ok(SyncToolTurnOutcome {
@@ -3958,78 +4117,107 @@ impl AgentRuntime {
                 Rc::clone(&initial_turn_first_token_latency);
             let initial_call_first_token_latency_for_emit =
                 Rc::clone(&initial_call_first_token_latency);
-            let display_message_for_delta = prepared.display_message.clone();
-            let provider_meta_for_delta = prepared_provider_meta.clone();
-            let build_context_for_delta = prepared.build_context_observation.clone();
+            let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
+            let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+            let turn_id_for_delta_emit = turn_id_for_stream.clone();
+            let stream_session_id_for_delta_emit = stream_session_id.clone();
 
             let decision = provider_decision_stream(
                 &prepared.provider,
                 &prepared.planning_request,
                 &prepared.tools,
                 move |delta| {
-                    let call_latency =
-                        if initial_call_first_token_latency_for_emit.get().is_none() {
-                            let value = initial_decision_started_at.elapsed().as_millis() as u64;
-                            initial_call_first_token_latency_for_emit.set(Some(value));
-                            Some(value)
-                        } else {
-                            None
-                        };
+                    let flush_delta = |text: Option<String>,
+                                       reasoning_content: Option<String>,
+                                       turn_latency: Option<u64>| {
+                        emit_stream_event(
+                            sink,
+                            "turn:delta",
+                            turn_id_for_delta_emit.clone(),
+                            "delta",
+                            Some("calling_model"),
+                            text,
+                            reasoning_content,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            turn_latency,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            stream_session_id_for_delta_emit.clone(),
+                        );
+                    };
+                    if initial_call_first_token_latency_for_emit.get().is_none() {
+                        let value = initial_decision_started_at.elapsed().as_millis() as u64;
+                        initial_call_first_token_latency_for_emit.set(Some(value));
+                    }
                     let turn_latency =
                         if initial_turn_first_token_latency_for_emit.get().is_none() {
                             let value = turn_started_at.elapsed().as_millis() as u64;
                             initial_turn_first_token_latency_for_emit.set(Some(value));
                             Some(value)
-                        } else {
-                            None
-                        };
-                    let (text, reasoning_content) = match delta {
-                        ProviderStreamChunk::Text(text) => (Some(text), None),
-                        ProviderStreamChunk::Reasoning(reasoning) => (None, Some(reasoning)),
+                    } else {
+                        None
                     };
-                    let timeline_reasoning_content = reasoning_content.clone();
-
-                    emit_stream_event(
-                        sink,
-                        "turn:delta",
-                        turn_id_for_stream.clone(),
-                        "delta",
-                        Some("calling_model"),
-                        text,
-                        reasoning_content,
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(build_context_for_delta.clone()),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        turn_latency,
-                        None,
-                        None,
-                        Some(build_stream_progress_trace_timeline(
-                            display_message_for_delta.as_str(),
-                            &provider_meta_for_delta,
-                            None,
-                            None,
-                            &build_context_for_delta,
-                            &[],
-                            None,
-                            timeline_reasoning_content.as_deref(),
-                            call_latency.or(initial_call_first_token_latency_for_emit.get()),
-                            "calling_model",
-                        )),
-                        None,
-                        None,
-                        None,
-                        None,
-                        stream_session_id.clone(),
-                    );
+                    match delta {
+                        ProviderStreamChunk::Text(text) => {
+                            if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush() {
+                                flush_delta(None, Some(reasoning), turn_latency);
+                            }
+                            flush_delta(Some(text), None, turn_latency);
+                        }
+                        ProviderStreamChunk::Reasoning(reasoning) => {
+                            if let Some(buffered_reasoning) =
+                                reasoning_batcher_for_emit.borrow_mut().push(reasoning)
+                            {
+                                flush_delta(None, Some(buffered_reasoning), turn_latency);
+                            }
+                        }
+                    }
                 },
             )?;
+            if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
+                emit_stream_event(
+                    sink,
+                    "turn:delta",
+                    turn_id_for_stream.clone(),
+                    "delta",
+                    Some("calling_model"),
+                    None,
+                    Some(buffered_reasoning.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    input.session_id.clone(),
+                );
+            }
             Ok((
                 decision,
                 Some(initial_decision_started_at.elapsed().as_millis() as u64),
@@ -5162,7 +5350,8 @@ impl AgentRuntime {
         });
         let invocation_record = execution.invocation_record();
         let mut hook_trace_records = mediation.trace_records;
-        hook_trace_records.push(self.build_capability_resolution_trace_record(tool_call, &execution));
+        hook_trace_records
+            .push(self.build_capability_resolution_trace_record(tool_call, &execution));
         (execution.tool_result, invocation_record, hook_trace_records)
     }
 
@@ -5283,7 +5472,10 @@ fn apply_capability_argument_patches(
     Ok(arguments)
 }
 
-fn apply_arguments_patch(arguments: Value, operation: &HookPatchOperation) -> Result<Value, String> {
+fn apply_arguments_patch(
+    arguments: Value,
+    operation: &HookPatchOperation,
+) -> Result<Value, String> {
     if operation.path != "request.arguments" {
         return Err(format!(
             "unsupported capability mediation patch path `{}`",
@@ -5346,7 +5538,10 @@ fn apply_planner_patches(
     )?;
 
     for operation in merge_outcome.operations {
-        if !crate::agent::hooks::planner_transform_operation_allowed(hook_point, &operation.operation) {
+        if !crate::agent::hooks::planner_transform_operation_allowed(
+            hook_point,
+            &operation.operation,
+        ) {
             return Err(format!(
                 "hook `{}` attempted non-whitelisted planner patch `{}`",
                 operation.hook_name, operation.operation.path
@@ -5522,7 +5717,8 @@ fn build_blocked_skill_invocation_record(
         permission_scope: None,
         skill_id: skill.map(|descriptor| descriptor.skill_id.clone()),
         skill_source_id: skill.map(|descriptor| descriptor.source_id.clone()),
-        composed_capability_refs: skill.map(|descriptor| descriptor.composed_capability_refs.clone()),
+        composed_capability_refs: skill
+            .map(|descriptor| descriptor.composed_capability_refs.clone()),
         composed_capability_kinds: skill.map(|descriptor| {
             descriptor
                 .composed_capability_kinds
@@ -6679,6 +6875,456 @@ fn build_turn_trace_title(message: &str) -> String {
     }
 }
 
+fn recover_tool_followup_completion<P: crate::agent::provider::ProviderClient>(
+    provider: &P,
+    planning_request: &ProviderRequest,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+    blocked_tool_call: &ToolCall,
+    blocked_assistant_message: Option<&Value>,
+    recovery_reason: &str,
+    context_observation: &BuildContextObservation,
+) -> RecoveredToolFollowup {
+    let recovery_request =
+        build_tool_followup_recovery_request(planning_request, user_message, hop_records);
+    let synthetic_tool_result =
+        build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
+    let started_at = Instant::now();
+    let mut response = provider_followup(
+        provider,
+        &recovery_request,
+        &[],
+        blocked_assistant_message,
+        blocked_tool_call,
+        &synthetic_tool_result,
+    )
+    .unwrap_or_else(|error| {
+        build_local_tool_followup_recovery_response(&synthetic_tool_result, hop_records, &error)
+    });
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let provider_source_snapshot = response.provider_source.clone();
+    let provider_mode_snapshot = response.provider_mode.clone();
+    let token_usage_snapshot = response.token_usage.clone();
+    let latency_kind = if response.provider_source == "provider_followup_sync" {
+        ProviderLatencyKind::BufferedResponse
+    } else {
+        ProviderLatencyKind::Unknown
+    };
+
+    if response.tool_call.is_some() {
+        response.fallback_reason = merge_fallback_reason(
+            response.fallback_reason.clone(),
+            Some("tool_followup_recovery_dropped_redundant_tool_call".to_string()),
+        );
+        response.tool_call = None;
+        response.assistant_message = Some(match response.reasoning_content_value.as_ref() {
+            Some(reasoning_value) => provider_native_assistant_message_with_reasoning_value(
+                &response.output_text,
+                Some(reasoning_value),
+            ),
+            None => provider_native_assistant_message_with_reasoning(
+                &response.output_text,
+                response.reasoning_content.as_deref(),
+            ),
+        });
+    }
+
+    RecoveredToolFollowup {
+        response,
+        provider_call_record: build_provider_call_cache_record(
+            ProviderRequestKind::ToolFollowup,
+            Some(provider_source_snapshot.as_str()),
+            Some(provider_mode_snapshot.as_str()),
+            token_usage_snapshot.as_ref(),
+            None,
+            Some(duration_ms),
+            latency_kind,
+            Some(context_observation),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderClient>(
+    sink: &impl TurnEventSink,
+    provider: &P,
+    planning_request: &ProviderRequest,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+    blocked_tool_call: &ToolCall,
+    blocked_assistant_message: Option<&Value>,
+    recovery_reason: &str,
+    context_observation: &BuildContextObservation,
+    turn_id: &str,
+    session_id: Option<String>,
+    first_token_latency: &Rc<Cell<Option<u64>>>,
+    turn_started_at: &Instant,
+) -> RecoveredToolFollowup {
+    let recovery_request =
+        build_tool_followup_recovery_request(planning_request, user_message, hop_records);
+    let synthetic_tool_result =
+        build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
+    let started_at = Instant::now();
+    let started_at_for_emit = started_at;
+    let call_first_token_latency = Rc::new(Cell::new(None));
+    let call_first_token_latency_for_emit = Rc::clone(&call_first_token_latency);
+    let first_token_latency_for_emit = Rc::clone(first_token_latency);
+    let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
+    let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+    let turn_id_for_emit = turn_id.to_string();
+    let session_id_for_emit = session_id.clone();
+    let turn_started_at_for_latency = *turn_started_at;
+    let emitted_text_ref = Rc::new(RefCell::new(String::new()));
+    let emitted_reasoning_chars_ref = Rc::new(Cell::new(0usize));
+    let emitted_text_for_emit = Rc::clone(&emitted_text_ref);
+    let emitted_reasoning_chars_for_emit = Rc::clone(&emitted_reasoning_chars_ref);
+
+    let mut response = provider_followup_stream(
+        provider,
+        &recovery_request,
+        &[],
+        blocked_assistant_message,
+        blocked_tool_call,
+        &synthetic_tool_result,
+        move |delta| {
+            if call_first_token_latency_for_emit.get().is_none() {
+                let value = started_at_for_emit.elapsed().as_millis() as u64;
+                call_first_token_latency_for_emit.set(Some(value));
+            }
+            let latency = if first_token_latency_for_emit.get().is_none() {
+                let value = turn_started_at_for_latency.elapsed().as_millis() as u64;
+                first_token_latency_for_emit.set(Some(value));
+                Some(value)
+            } else {
+                None
+            };
+            match delta {
+                ProviderStreamChunk::Text(text) => {
+                    if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush() {
+                        emitted_reasoning_chars_for_emit.set(
+                            emitted_reasoning_chars_for_emit
+                                .get()
+                                .saturating_add(reasoning.chars().count()),
+                        );
+                        emit_lightweight_delta(
+                            sink,
+                            &turn_id_for_emit,
+                            None,
+                            Some(reasoning),
+                            latency,
+                            session_id_for_emit.clone(),
+                        );
+                    }
+                    emitted_text_for_emit.borrow_mut().push_str(&text);
+                    emit_lightweight_delta(
+                        sink,
+                        &turn_id_for_emit,
+                        Some(text),
+                        None,
+                        latency,
+                        session_id_for_emit.clone(),
+                    );
+                }
+                ProviderStreamChunk::Reasoning(reasoning) => {
+                    if let Some(buffered_reasoning) =
+                        reasoning_batcher_for_emit.borrow_mut().push(reasoning)
+                    {
+                        emitted_reasoning_chars_for_emit.set(
+                            emitted_reasoning_chars_for_emit
+                                .get()
+                                .saturating_add(buffered_reasoning.chars().count()),
+                        );
+                        emit_lightweight_delta(
+                            sink,
+                            &turn_id_for_emit,
+                            None,
+                            Some(buffered_reasoning),
+                            latency,
+                            session_id_for_emit.clone(),
+                        );
+                    }
+                }
+            }
+        },
+    )
+    .unwrap_or_else(|error| {
+        build_local_tool_followup_recovery_response(&synthetic_tool_result, hop_records, &error)
+    });
+
+    if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
+        emitted_reasoning_chars_ref.set(
+            emitted_reasoning_chars_ref
+                .get()
+                .saturating_add(buffered_reasoning.chars().count()),
+        );
+        emit_lightweight_delta(
+            sink,
+            turn_id,
+            None,
+            Some(buffered_reasoning),
+            None,
+            session_id.clone(),
+        );
+    }
+
+    let emitted_text = emitted_text_ref.borrow().clone();
+    let emitted_reasoning_chars = emitted_reasoning_chars_ref.get();
+    if emitted_reasoning_chars == 0 {
+        if let Some(reasoning_content) = response.reasoning_content.clone() {
+            emit_lightweight_delta(
+                sink,
+                turn_id,
+                None,
+                Some(reasoning_content),
+                None,
+                session_id.clone(),
+            );
+        }
+    }
+    if !response.output_text.is_empty() {
+        let missing_text = if emitted_text.is_empty() {
+            Some(response.output_text.clone())
+        } else {
+            response
+                .output_text
+                .strip_prefix(&emitted_text)
+                .filter(|suffix| !suffix.is_empty())
+                .map(str::to_string)
+        };
+        if let Some(text) = missing_text {
+            emit_lightweight_delta(sink, turn_id, Some(text), None, None, session_id.clone());
+        }
+    }
+
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let provider_source_snapshot = response.provider_source.clone();
+    let provider_mode_snapshot = response.provider_mode.clone();
+    let token_usage_snapshot = response.token_usage.clone();
+    let latency_kind = match response.provider_source.as_str() {
+        "provider_followup_stream" => ProviderLatencyKind::ProviderStream,
+        "provider_followup_sync" | "provider_followup_stream_sync_fallback" => {
+            ProviderLatencyKind::BufferedResponse
+        }
+        _ => ProviderLatencyKind::Unknown,
+    };
+
+    if response.tool_call.is_some() {
+        response.fallback_reason = merge_fallback_reason(
+            response.fallback_reason.clone(),
+            Some("tool_followup_recovery_dropped_redundant_tool_call".to_string()),
+        );
+        response.tool_call = None;
+        response.assistant_message = Some(match response.reasoning_content_value.as_ref() {
+            Some(reasoning_value) => provider_native_assistant_message_with_reasoning_value(
+                &response.output_text,
+                Some(reasoning_value),
+            ),
+            None => provider_native_assistant_message_with_reasoning(
+                &response.output_text,
+                response.reasoning_content.as_deref(),
+            ),
+        });
+    }
+
+    RecoveredToolFollowup {
+        response,
+        provider_call_record: build_provider_call_cache_record(
+            ProviderRequestKind::ToolFollowup,
+            Some(provider_source_snapshot.as_str()),
+            Some(provider_mode_snapshot.as_str()),
+            token_usage_snapshot.as_ref(),
+            if latency_kind == ProviderLatencyKind::ProviderStream {
+                call_first_token_latency.get()
+            } else {
+                None
+            },
+            Some(duration_ms),
+            latency_kind,
+            Some(context_observation),
+        ),
+    }
+}
+
+fn emit_lightweight_delta(
+    sink: &impl TurnEventSink,
+    turn_id: &str,
+    text: Option<String>,
+    reasoning_content: Option<String>,
+    first_token_latency_ms: Option<u64>,
+    session_id: Option<String>,
+) {
+    emit_stream_event(
+        sink,
+        "turn:delta",
+        turn_id.to_string(),
+        "delta",
+        Some("calling_model"),
+        text,
+        reasoning_content,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        first_token_latency_ms,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_id,
+    );
+}
+
+fn build_tool_followup_recovery_request(
+    planning_request: &ProviderRequest,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+) -> ProviderRequest {
+    let mut request = planning_request.clone();
+    request.native_messages = tool_turn_native_transcript_prefix(user_message, hop_records);
+    request.observation = Default::default();
+    request
+}
+
+fn tool_turn_native_transcript_prefix(
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+) -> Vec<Value> {
+    let mut transcript = vec![provider_native_user_message(user_message)];
+    for hop in hop_records {
+        transcript.push(tool_request_assistant_message(hop));
+        transcript.push(provider_native_tool_result_message(
+            &hop.tool_call,
+            &hop.tool_result,
+        ));
+    }
+    transcript
+}
+
+fn build_tool_followup_recovery_tool_result(
+    blocked_tool_call: &ToolCall,
+    hop_records: &[ToolTurnHopRecord],
+    recovery_reason: &str,
+) -> crate::agent::tools::ToolResult {
+    let recent_results = hop_records
+        .iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|hop| {
+            json!({
+                "tool": hop.tool_call.name,
+                "summary": local_tool_result_summary(&hop.tool_result),
+                "output_preview": preview_text(&hop.tool_result.output, 400)
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "status": "blocked_redundant_followup",
+        "reason": recovery_reason,
+        "instruction": "请不要继续申请工具；请基于当前上下文直接给出最佳答案。如果信息仍不完整，请明确缺口。",
+        "recent_tool_results": recent_results
+    });
+
+    crate::agent::tools::ToolResult {
+        tool_name: blocked_tool_call.name.clone(),
+        status: "blocked".to_string(),
+        output: serde_json::to_string_pretty(&payload)
+            .unwrap_or_else(|_| recovery_reason.to_string()),
+        duration_ms: 0,
+    }
+}
+
+fn build_local_tool_followup_recovery_response(
+    synthetic_tool_result: &crate::agent::tools::ToolResult,
+    hop_records: &[ToolTurnHopRecord],
+    error: &str,
+) -> ProviderResponse {
+    let recent_summaries = hop_records
+        .iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|hop| {
+            format!(
+                "- {}: {}",
+                hop.tool_call.name,
+                local_tool_result_summary(&hop.tool_result)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output_text = format!(
+        "已停止重复探索并进入本地收口。\n原因：{}\n\n最近已拿到的上下文：\n{}\n\n如需更精确答案，请缩小到更具体的文件或符号。",
+        preview_text(error, 240),
+        if recent_summaries.is_empty() {
+            "- 暂无可复用的工具结果。".to_string()
+        } else {
+            recent_summaries
+        }
+    );
+
+    ProviderResponse {
+        output_text: output_text.clone(),
+        tool_call: None,
+        reasoning_content: None,
+        reasoning_content_value: None,
+        assistant_message: Some(provider_native_assistant_message_with_reasoning(
+            &output_text,
+            Some(&synthetic_tool_result.output),
+        )),
+        provider_source: "provider_followup_recovery_local_fallback".to_string(),
+        provider_mode: "fallback".to_string(),
+        fallback_reason: Some(format!(
+            "tool_followup_recovery_failed:{}",
+            preview_text(error, 180)
+        )),
+        token_usage: Some(TokenUsage {
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+        }),
+    }
+}
+
+fn local_tool_result_summary(tool_result: &crate::agent::tools::ToolResult) -> String {
+    if let Ok(value) = serde_json::from_str::<Value>(&tool_result.output) {
+        if let Some(summary_text) = value
+            .get("summary")
+            .and_then(|summary| summary.get("text"))
+            .and_then(Value::as_str)
+        {
+            return summary_text.to_string();
+        }
+
+        if let Some(plan_summary) = value
+            .get("plan")
+            .and_then(|plan| plan.get("summary"))
+            .and_then(Value::as_str)
+        {
+            return plan_summary.to_string();
+        }
+
+        return preview_text(&value.to_string(), 240);
+    }
+
+    preview_text(&tool_result.output, 240)
+}
+
 fn native_transcript_for_tool_turn(
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
@@ -6823,10 +7469,78 @@ fn running_tool_activities_with_history(
     combined
 }
 
+#[derive(Default)]
+struct StreamReasoningBatcher {
+    buffer: String,
+}
+
+impl StreamReasoningBatcher {
+    fn push(&mut self, reasoning: String) -> Option<String> {
+        self.buffer.push_str(&reasoning);
+        if self.buffer.chars().count() >= STREAM_REASONING_BATCH_CHARS {
+            return self.flush();
+        }
+        None
+    }
+
+    fn flush(&mut self) -> Option<String> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        Some(std::mem::take(&mut self.buffer))
+    }
+}
+
+fn canonicalize_tool_argument_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(canonicalize_tool_argument_value)
+                .collect::<Vec<_>>(),
+        ),
+        Value::Object(map) => {
+            let mut normalized = Map::new();
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                if let Some(entry) = map.get(&key) {
+                    normalized.insert(key, canonicalize_tool_argument_value(entry));
+                }
+            }
+            Value::Object(normalized)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn tool_call_signature(tool_call: &ToolCall) -> String {
+    let normalized = canonicalize_tool_argument_value(&tool_call.arguments);
+    format!(
+        "{}:{}",
+        tool_call.name,
+        serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
 fn build_tool_hop_limit_error(limit: usize) -> String {
     format!(
         "同一 turn 内连续工具调用超过 {} 次，已停止继续 follow-up 以避免进入无限循环；如属复杂任务，可提高 PONY_AGENT_MAX_TOOL_HOPS_PER_TURN。",
         limit
+    )
+}
+
+fn build_tool_followup_limit_error(limit: usize) -> String {
+    format!(
+        "同一 turn 内 follow-up 轮次超过 {} 次，已停止继续 follow-up 以避免重复探索；如属复杂任务，可提高 PONY_AGENT_MAX_TOOL_FOLLOWUPS_PER_TURN。",
+        limit
+    )
+}
+
+fn build_duplicate_tool_call_error(tool_call: &ToolCall) -> String {
+    format!(
+        "工具 `{}` 在同一 turn 内重复调用了近似相同的参数，已停止继续 follow-up 以避免重复探索。",
+        tool_call.name
     )
 }
 
@@ -6863,6 +7577,33 @@ fn parse_max_tool_hops_per_turn(raw: Option<&str>) -> usize {
     raw.and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| (1..=MAX_ALLOWED_TOOL_HOPS_PER_TURN).contains(value))
         .unwrap_or(DEFAULT_MAX_TOOL_HOPS_PER_TURN)
+}
+
+#[cfg(test)]
+fn tool_followup_limit_override_registry() -> &'static AtomicUsize {
+    static OVERRIDE: OnceLock<AtomicUsize> = OnceLock::new();
+    OVERRIDE.get_or_init(|| AtomicUsize::new(0))
+}
+
+fn max_tool_followups_per_turn() -> usize {
+    #[cfg(test)]
+    {
+        let override_limit = tool_followup_limit_override_registry().load(AtomicOrdering::SeqCst);
+        if override_limit > 0 {
+            return override_limit;
+        }
+    }
+
+    static MAX_TOOL_FOLLOWUPS: OnceLock<usize> = OnceLock::new();
+    *MAX_TOOL_FOLLOWUPS.get_or_init(|| {
+        parse_max_tool_followups_per_turn(std::env::var(MAX_TOOL_FOLLOWUPS_ENV).ok().as_deref())
+    })
+}
+
+fn parse_max_tool_followups_per_turn(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1..=MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN).contains(value))
+        .unwrap_or(DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN)
 }
 
 #[cfg(test)]
@@ -7856,7 +8597,10 @@ mod tests {
             .any(|record| record.hook_name == "capability.rewrite"));
         let calls = recorded_calls.lock().unwrap();
         let call = calls.last().expect("tool call should be recorded");
-        assert_eq!(call.arguments.get("path").and_then(Value::as_str), Some("src-tauri"));
+        assert_eq!(
+            call.arguments.get("path").and_then(Value::as_str),
+            Some("src-tauri")
+        );
 
         let snapshot = runtime.load_session_snapshot(Some("capability-hook-rewrite"));
         let trace = snapshot
@@ -7912,8 +8656,13 @@ mod tests {
             .iter()
             .any(|record| record.hook_name == "planner.preflight.rewrite"));
         let calls = recorded_calls.lock().unwrap();
-        let call = calls.last().expect("planner preflight tool call should execute");
-        assert_eq!(call.arguments.get("path").and_then(Value::as_str), Some("src-tauri"));
+        let call = calls
+            .last()
+            .expect("planner preflight tool call should execute");
+        assert_eq!(
+            call.arguments.get("path").and_then(Value::as_str),
+            Some("src-tauri")
+        );
 
         let snapshot = runtime.load_session_snapshot(Some("planner-preflight-rewrite"));
         let trace = snapshot
@@ -7969,8 +8718,13 @@ mod tests {
             .iter()
             .any(|record| record.hook_name == "planner.tool_selection.rewrite"));
         let calls = recorded_calls.lock().unwrap();
-        let call = calls.last().expect("planner tool-selection call should execute");
-        assert_eq!(call.arguments.get("path").and_then(Value::as_str), Some("tests"));
+        let call = calls
+            .last()
+            .expect("planner tool-selection call should execute");
+        assert_eq!(
+            call.arguments.get("path").and_then(Value::as_str),
+            Some("tests")
+        );
 
         let snapshot = runtime.load_session_snapshot(Some("planner-tool-selection-rewrite"));
         let trace = snapshot
@@ -8027,7 +8781,9 @@ mod tests {
                     host_mediated: false,
                     permission_scope: "".to_string(),
                     composed_capability_refs: vec!["builtin:echo_input".to_string()],
-                    composed_capability_kinds: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                    composed_capability_kinds: vec![
+                        crate::agent::capability_bridge::CapabilityKind::Tool,
+                    ],
                     executable_in_v1: true,
                 }],
             })
@@ -10123,7 +10879,8 @@ mod tests {
             memory_write_hook_trace_records: Vec::new(),
             history_state_evidence: Vec::new(),
             history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
-            run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
+            run_control_audit_summary:
+                crate::agent::session::build_missing_run_control_audit_summary(),
             turn_count: 2,
             last_referenced_file: None,
             updated_at_ms: 0,
@@ -10175,7 +10932,8 @@ mod tests {
             memory_write_hook_trace_records: Vec::new(),
             history_state_evidence: Vec::new(),
             history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
-            run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
+            run_control_audit_summary:
+                crate::agent::session::build_missing_run_control_audit_summary(),
             turn_count: 1,
             last_referenced_file: None,
             updated_at_ms: 0,
@@ -10556,6 +11314,65 @@ mod tests {
             parse_max_tool_hops_per_turn(Some("not-a-number")),
             DEFAULT_MAX_TOOL_HOPS_PER_TURN
         );
+    }
+
+    #[test]
+    fn tool_followup_limit_uses_default_when_env_is_missing() {
+        assert_eq!(
+            parse_max_tool_followups_per_turn(None),
+            DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
+        );
+    }
+
+    #[test]
+    fn tool_followup_limit_accepts_reasonable_env_override() {
+        assert_eq!(parse_max_tool_followups_per_turn(Some("3")), 3);
+        assert_eq!(parse_max_tool_followups_per_turn(Some("12")), 12);
+    }
+
+    #[test]
+    fn tool_followup_limit_rejects_invalid_env_values() {
+        assert_eq!(
+            parse_max_tool_followups_per_turn(Some("0")),
+            DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
+        );
+        assert_eq!(
+            parse_max_tool_followups_per_turn(Some("64")),
+            DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
+        );
+        assert_eq!(
+            parse_max_tool_followups_per_turn(Some("not-a-number")),
+            DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
+        );
+    }
+
+    #[test]
+    fn tool_call_signature_normalizes_object_key_order() {
+        let left = ToolCall {
+            call_id: None,
+            name: "workspace_list_files".to_string(),
+            arguments: json!({"path":"src/agent","limit":20}),
+            plan: None,
+        };
+        let right = ToolCall {
+            call_id: None,
+            name: "workspace_list_files".to_string(),
+            arguments: json!({"limit":20,"path":"src/agent"}),
+            plan: None,
+        };
+
+        assert_eq!(tool_call_signature(&left), tool_call_signature(&right));
+    }
+
+    #[test]
+    fn stream_reasoning_batcher_batches_until_threshold() {
+        let mut batcher = StreamReasoningBatcher::default();
+        assert!(batcher.push("abc".repeat(10)).is_none());
+        let chunk = batcher
+            .push("d".repeat(STREAM_REASONING_BATCH_CHARS))
+            .unwrap();
+        assert!(chunk.chars().count() >= STREAM_REASONING_BATCH_CHARS);
+        assert!(batcher.flush().is_none());
     }
 
     #[test]
@@ -11657,6 +12474,124 @@ mod tests {
         assert!(provider_calls
             .iter()
             .all(|record| record.first_token_latency_ms.is_some()));
+    }
+
+    #[test]
+    fn start_turn_stream_streams_duplicate_tool_recovery_answer() {
+        let final_text = "根据已读取的内容，tauri.conf.json 中 productName 是 Pony Agent。";
+        let duplicate_args = "{\"path\":\"tauri.conf.json\"}";
+        let server = MockHttpServer::start(vec![
+            sse_response(&[json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "先读取配置文件。",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_workspace_read_file",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_read_file",
+                                        "arguments": duplicate_args
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })]),
+            sse_response(&[json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "还想重复读取同一个文件。",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_workspace_read_file_again",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_read_file",
+                                        "arguments": duplicate_args
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })]),
+            sse_response(&[
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "重复工具调用已停止，直接总结。"
+                            }
+                        }
+                    ]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": final_text
+                            }
+                        }
+                    ]
+                }),
+            ]),
+        ]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-duplicate-tool-recovery-stream".to_string(),
+            TurnInput {
+                message: "读取 tauri.conf.json 并回答 productName".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                session_id: Some("stream-duplicate-tool-recovery".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        let events = sink.events.borrow();
+        let text_delta = events
+            .iter()
+            .filter_map(|(name, payload)| (name == "turn:delta").then_some(payload.clone()))
+            .find(|payload| payload.text.as_deref() == Some(final_text))
+            .expect("recovery answer should be streamed as delta");
+        let completed = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
+
+        assert_eq!(requests.len(), 3);
+        assert!(text_delta.trace_timeline.is_none());
+        assert_eq!(completed.text.as_deref(), Some(final_text));
+        assert_eq!(
+            completed.provider_source.as_deref(),
+            Some("provider_followup_stream")
+        );
+        let provider_calls = completed
+            .provider_call_records
+            .as_ref()
+            .expect("provider call records");
+        assert_eq!(
+            provider_calls.last().map(|record| &record.latency_kind),
+            Some(&ProviderLatencyKind::ProviderStream)
+        );
+        assert!(provider_calls
+            .last()
+            .and_then(|record| record.first_token_latency_ms)
+            .is_some());
     }
 
     #[test]

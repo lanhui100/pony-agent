@@ -1,13 +1,13 @@
+use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 use crate::agent::hooks::{
     merge_patch_results, HistoryStateCommandKind, HistoryStateCursorSummary,
     HistoryStateHookEnvelope, HistoryStateHookEvidence, HistoryStateHookExecutor,
     HistoryStateHookPoint, HookPatchConflictPolicy, HookPatchOperationKind, HookPatchTarget,
     HookResultKind, HookStructuredResult, HookTraceRecord, MemoryWriteHookEnvelope,
-    MemoryWriteHookExecutor, MemoryWriteHookPoint, MemoryWriteIntentRecord,
-    MemoryWriteOperation, MemoryWriteTarget, NoopHistoryStateHookExecutor,
-    NoopMemoryWriteHookExecutor, PersistedEffectEvidence,
+    MemoryWriteHookExecutor, MemoryWriteHookPoint, MemoryWriteIntentRecord, MemoryWriteOperation,
+    MemoryWriteTarget, NoopHistoryStateHookExecutor, NoopMemoryWriteHookExecutor,
+    PersistedEffectEvidence,
 };
-use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 use crate::agent::input::TurnInputImage;
 use crate::agent::provider::BuildContextObservation;
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
@@ -903,13 +903,14 @@ impl SessionStore {
                 session.history_cursor.active_branch_id = Some(node.branch_id.clone());
                 session.history_cursor.branch_head_node_id = branch_head_node_id;
                 session.history_cursor.workspace_node_id = Some(node.node_id.clone());
-                session.history_cursor.mode = if session.history_cursor.branch_head_node_id.as_deref()
-                    == Some(node.node_id.as_str())
-                {
-                    HistoryCursorMode::Live
-                } else {
-                    HistoryCursorMode::Historical
-                };
+                session.history_cursor.mode =
+                    if session.history_cursor.branch_head_node_id.as_deref()
+                        == Some(node.node_id.as_str())
+                    {
+                        HistoryCursorMode::Live
+                    } else {
+                        HistoryCursorMode::Historical
+                    };
                 session.history_cursor.checkout_mode = requested_mode.clone();
                 session.history_cursor.checkout_status = match requested_mode {
                     HistoryCheckoutMode::TranscriptOnly => HistoryCheckoutStatus::Applied,
@@ -933,7 +934,10 @@ impl SessionStore {
                     Some(node.branch_id.as_str()),
                     true,
                     node.workspace_ref.rollback_capable,
-                    matches!(session.history_cursor.checkout_status, HistoryCheckoutStatus::Applied),
+                    matches!(
+                        session.history_cursor.checkout_status,
+                        HistoryCheckoutStatus::Applied
+                    ),
                     matches!(
                         session.history_cursor.checkout_status,
                         HistoryCheckoutStatus::DegradedToTranscriptOnly
@@ -944,7 +948,9 @@ impl SessionStore {
                     )
                     .then_some("workspace_rollback_unsupported"),
                 ) {
-                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    let hook_results = hook_executor
+                        .execute(&resolved_envelope)
+                        .unwrap_or_default();
                     persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
                 }
             }
@@ -1035,10 +1041,9 @@ impl SessionStore {
                     .find(|item| item.branch_id == target_branch_id)
                     .cloned()
                     .ok_or_else(|| format!("unknown history branch: {target_branch_id}"))?;
-                let node_id = branch
-                    .head_node_id
-                    .clone()
-                    .ok_or_else(|| format!("history branch has no head node: {target_branch_id}"))?;
+                let node_id = branch.head_node_id.clone().ok_or_else(|| {
+                    format!("history branch has no head node: {target_branch_id}")
+                })?;
                 let node = history_node(session, &node_id)
                     .cloned()
                     .ok_or_else(|| format!("unknown history node: {node_id}"))?;
@@ -1066,7 +1071,9 @@ impl SessionStore {
                     false,
                     None,
                 ) {
-                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    let hook_results = hook_executor
+                        .execute(&resolved_envelope)
+                        .unwrap_or_default();
                     persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
                 }
                 restored_node_id = Some(node.node_id);
@@ -1161,7 +1168,9 @@ impl SessionStore {
                     false,
                     None,
                 ) {
-                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    let hook_results = hook_executor
+                        .execute(&resolved_envelope)
+                        .unwrap_or_default();
                     persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
                 }
             }
@@ -1250,7 +1259,9 @@ impl SessionStore {
                     false,
                     None,
                 ) {
-                    let hook_results = hook_executor.execute(&resolved_envelope).unwrap_or_default();
+                    let hook_results = hook_executor
+                        .execute(&resolved_envelope)
+                        .unwrap_or_default();
                     persist_history_state_hook_evidence(session, &resolved_envelope, &hook_results);
                 }
                 target_node_id = Some(node.node_id);
@@ -2232,7 +2243,9 @@ fn build_history_state_hook_envelope(
     })
 }
 
-fn history_state_hook_results_blocked(hook_results: &[crate::agent::hooks::HookExecutionResult]) -> bool {
+fn history_state_hook_results_blocked(
+    hook_results: &[crate::agent::hooks::HookExecutionResult],
+) -> bool {
     hook_results.iter().any(|result| {
         result.blocked || matches!(result.structured_result, HookStructuredResult::Deny(_))
     })
@@ -2268,29 +2281,28 @@ fn persist_history_state_hook_evidence(
 
     let recorded_at_ms = now_timestamp_ms();
     for (index, result) in hook_results.iter().enumerate() {
-        session.history_state_evidence.push(HistoryStateHookEvidence {
-            evidence_id: format!(
-                "history-state:{}:{}:{}:{}",
-                session.conversation_id,
-                envelope.source_boundary,
+        session
+            .history_state_evidence
+            .push(HistoryStateHookEvidence {
+                evidence_id: format!(
+                    "history-state:{}:{}:{}:{}",
+                    session.conversation_id, envelope.source_boundary, recorded_at_ms, index
+                ),
+                session_id: session.conversation_id.clone(),
+                boundary: envelope.source_boundary.clone(),
+                command_kind: history_state_command_kind_label(&envelope.command_kind).to_string(),
+                result_kind: hook_result_kind_label(&result.result_kind).to_string(),
+                summary: result.trace_summary.clone(),
+                elapsed_ms: result.elapsed_ms,
+                blocked: result.blocked
+                    || matches!(result.structured_result, HookStructuredResult::Deny(_)),
+                degraded: envelope.degraded,
+                requested_node_id: envelope.requested_node_id.clone(),
+                requested_branch_id: envelope.requested_branch_id.clone(),
+                resolved_node_id: envelope.resolved_node_id.clone(),
+                resolved_branch_id: envelope.resolved_branch_id.clone(),
                 recorded_at_ms,
-                index
-            ),
-            session_id: session.conversation_id.clone(),
-            boundary: envelope.source_boundary.clone(),
-            command_kind: history_state_command_kind_label(&envelope.command_kind).to_string(),
-            result_kind: hook_result_kind_label(&result.result_kind).to_string(),
-            summary: result.trace_summary.clone(),
-            elapsed_ms: result.elapsed_ms,
-            blocked: result.blocked
-                || matches!(result.structured_result, HookStructuredResult::Deny(_)),
-            degraded: envelope.degraded,
-            requested_node_id: envelope.requested_node_id.clone(),
-            requested_branch_id: envelope.requested_branch_id.clone(),
-            resolved_node_id: envelope.resolved_node_id.clone(),
-            resolved_branch_id: envelope.resolved_branch_id.clone(),
-            recorded_at_ms,
-        });
+            });
     }
 }
 
@@ -3462,10 +3474,7 @@ fn rebuild_attachment_assets_from_sessions(
     assets
 }
 
-fn merge_session_attachment_assets(
-    sessions: &SessionMap,
-    assets: &mut AttachmentAssetMap,
-) {
+fn merge_session_attachment_assets(sessions: &SessionMap, assets: &mut AttachmentAssetMap) {
     for session in sessions.values() {
         for attachment in session
             .history
@@ -4254,7 +4263,9 @@ mod tests {
             "history.checkout.resolved"
         );
         assert_eq!(
-            snapshot.history_state_evidence[1].resolved_node_id.as_deref(),
+            snapshot.history_state_evidence[1]
+                .resolved_node_id
+                .as_deref(),
             Some(nodes[0].node_id.as_str())
         );
         assert!(!snapshot.history_state_evidence[1].degraded);
@@ -4335,10 +4346,7 @@ mod tests {
             live_after.history_state_evidence[0].boundary,
             "history.checkout.start"
         );
-        assert_eq!(
-            live_after.history_state_evidence[0].resolved_node_id,
-            None
-        );
+        assert_eq!(live_after.history_state_evidence[0].resolved_node_id, None);
         assert_eq!(
             live_after.history_cursor.visible_node_id.as_deref(),
             Some(latest_before.as_str())
@@ -4420,7 +4428,9 @@ mod tests {
             "history.checkout.resolved"
         );
         assert_eq!(
-            snapshot.history_state_evidence[1].resolved_node_id.as_deref(),
+            snapshot.history_state_evidence[1]
+                .resolved_node_id
+                .as_deref(),
             Some(nodes[0].node_id.as_str())
         );
 
@@ -4491,7 +4501,9 @@ mod tests {
             "history.branch_restore.resolved"
         );
         assert_eq!(
-            snapshot.history_state_evidence[1].resolved_branch_id.as_deref(),
+            snapshot.history_state_evidence[1]
+                .resolved_branch_id
+                .as_deref(),
             Some("branch-main")
         );
         assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Live);
@@ -4648,10 +4660,15 @@ mod tests {
             "history.branch_switch.resolved"
         );
         assert_eq!(
-            snapshot.history_state_evidence[1].resolved_branch_id.as_deref(),
+            snapshot.history_state_evidence[1]
+                .resolved_branch_id
+                .as_deref(),
             Some("branch-main")
         );
-        assert_eq!(snapshot.history_cursor.active_branch_id.as_deref(), Some("branch-main"));
+        assert_eq!(
+            snapshot.history_cursor.active_branch_id.as_deref(),
+            Some("branch-main")
+        );
     }
 
     #[test]
@@ -4733,7 +4750,11 @@ mod tests {
             "available"
         );
         assert_eq!(
-            snapshot.history_state_audit_summary.action.boundary.as_deref(),
+            snapshot
+                .history_state_audit_summary
+                .action
+                .boundary
+                .as_deref(),
             Some("history.checkout.resolved")
         );
         assert!(snapshot.history_state_audit_summary.action.degraded);
@@ -4826,7 +4847,10 @@ mod tests {
             SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
         let snapshot = reloaded.snapshot(Some("history-missing-evidence"), &[]);
         assert!(snapshot.history_state_evidence.is_empty());
-        assert_eq!(snapshot.history_state_audit_summary.action.status, "missing");
+        assert_eq!(
+            snapshot.history_state_audit_summary.action.status,
+            "missing"
+        );
         assert_eq!(
             snapshot.history_cursor.checkout_status,
             HistoryCheckoutStatus::DegradedToTranscriptOnly
@@ -4836,7 +4860,10 @@ mod tests {
             HistoryCheckoutMode::TranscriptAndWorkspace
         );
         assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Historical);
-        assert_eq!(snapshot.resolved_node_id.as_deref(), Some(resolved_node_id.as_str()));
+        assert_eq!(
+            snapshot.resolved_node_id.as_deref(),
+            Some(resolved_node_id.as_str())
+        );
 
         let _ = fs::remove_file(path);
     }
@@ -6434,8 +6461,9 @@ mod tests {
                 last_ingress_observation: Some(
                     crate::agent::capability_bridge::SourceIngressObservation {
                         boundary: "control_plane.apply_mcp_source_snapshot".to_string(),
-                        summary: "mcp source ingress registered `mcp-local` with 1 capability candidates"
-                            .to_string(),
+                        summary:
+                            "mcp source ingress registered `mcp-local` with 1 capability candidates"
+                                .to_string(),
                         candidate_ids: vec!["mcp:tool:workspace-search".to_string()],
                         observed_at_ms: 77,
                     },
@@ -6494,8 +6522,9 @@ mod tests {
                 last_ingress_observation: Some(
                     crate::agent::capability_bridge::SourceIngressObservation {
                         boundary: "control_plane.apply_skill_source_snapshot".to_string(),
-                        summary: "skill source ingress registered `host-skills` with 1 skill candidates"
-                            .to_string(),
+                        summary:
+                            "skill source ingress registered `host-skills` with 1 skill candidates"
+                                .to_string(),
                         candidate_ids: vec!["skill:search".to_string()],
                         observed_at_ms: 99,
                     },
@@ -6515,7 +6544,9 @@ mod tests {
                 host_mediated: false,
                 permission_scope: "".to_string(),
                 composed_capability_refs: vec!["mcp:tool:workspace-search".to_string()],
-                composed_capability_kinds: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                composed_capability_kinds: vec![
+                    crate::agent::capability_bridge::CapabilityKind::Tool,
+                ],
                 executable_in_v1: true,
             }],
         });

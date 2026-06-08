@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   ArrowUp,
@@ -7,15 +7,19 @@ import {
   Bot,
   Check,
   ChevronDown,
+  GitFork,
+  History,
   LoaderCircle,
+  RotateCcw,
   Square,
   UserRound,
   Wrench
 } from "lucide-vue-next";
 import type { ProviderReasoningEffort } from "@/types/provider";
-import type { ChatMessage } from "@/types/runtime";
+import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
+import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 import Button from "@/components/ui/Button.vue";
 import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
@@ -28,11 +32,13 @@ type TurnBucket = {
 };
 
 type ComposerActionKind = "submit" | "resume" | "continue" | "restart";
+type CheckpointRollbackAction = "transcript_only" | "transcript_and_workspace";
 
 const runtimeStore = useRuntimeStore();
 const providerStore = useProviderStore();
 
 const {
+  conversationCheckpointEntries,
   draftMessage,
   isSubmitting,
   latestExecutionCheckpoint,
@@ -49,12 +55,95 @@ const reasoningMenuOpen = ref(false);
 const showReasoningContent = ref(false);
 const providerMenuRef = ref<HTMLElement | null>(null);
 const reasoningMenuRef = ref<HTMLElement | null>(null);
-const timelineScrollAreaRef = ref<{ scrollToBottom: (behavior?: ScrollBehavior) => void } | null>(null);
-const bottomAnchorRef = ref<HTMLElement | null>(null);
-const scrollFrameId = ref<number | null>(null);
+const checkpointPickerMenuRef = ref<HTMLElement | null>(null);
+const forkSummaryMenuRef = ref<HTMLElement | null>(null);
+const timelineScrollAreaRef = ref<{
+  scrollToBottom: (behavior?: ScrollBehavior) => void;
+  viewportEl: HTMLElement | null;
+} | null>(null);
+const scrollQueued = ref(false);
+const scrollAfterPaintFrameId = ref<number | null>(null);
 const stopRequested = ref(false);
+const checkpointPickerOpen = ref(false);
+const forkSummaryOpenForNodeId = ref<string | null>(null);
 let lastMessageSignature = "";
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
+const streamSnapshotTextByMessageId = reactive<Record<string, string>>({});
+const streamSnapshotReasoningByMessageId = reactive<Record<string, string>>({});
+const streamFadeTextByMessageId = reactive<Record<string, string>>({});
+const streamFadeKeyByMessageId = reactive<Record<string, number>>({});
+const streamReasoningFadeTextByMessageId = reactive<Record<string, string>>({});
+const streamReasoningFadeKeyByMessageId = reactive<Record<string, number>>({});
+const AUTO_SCROLL_THRESHOLD_PX = 160;
+const STREAM_FADE_MIN_CHARS = 24;
+const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
+let scheduledRevealMetricsPush = false;
+let pendingRevealMetricsPatch: Record<string, unknown> | null = null;
+let pendingStreamAutoFollow = true;
+let pendingScrollBehavior: ScrollBehavior = "auto";
+let scheduledScrollRequestId = 0;
+const streamAutoFollowEnabled = ref(true);
+
+function swallowAsyncError(result: unknown) {
+  if (result && typeof result === "object" && "catch" in result && typeof result.catch === "function") {
+    void result.catch(() => {});
+  }
+}
+
+function streamDebugEnabled() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return import.meta.env.DEV || window.localStorage.getItem(STREAM_DEBUG_STORAGE_KEY) === "true";
+}
+
+function updateStreamDebugReveal(patch: Record<string, unknown>) {
+  if (!streamDebugEnabled() || typeof window === "undefined") {
+    return;
+  }
+
+  const streamWindow = window as Window & {
+    __ponyStreamMetrics?: Record<string, unknown>;
+  };
+
+  const current = streamWindow.__ponyStreamMetrics ?? {};
+  const reveal = (current.reveal as Record<string, unknown> | undefined) ?? {};
+  streamWindow.__ponyStreamMetrics = {
+    ...current,
+    reveal: {
+      ...reveal,
+      ...patch,
+      updatedAt: Date.now()
+    }
+  };
+
+  if (!isTauriAvailable()) {
+    return;
+  }
+
+  pendingRevealMetricsPatch = {
+    ...((streamWindow.__ponyStreamMetrics.reveal as Record<string, unknown> | undefined) ?? {})
+  };
+  if (scheduledRevealMetricsPush) {
+    return;
+  }
+
+  scheduledRevealMetricsPush = true;
+  window.setTimeout(() => {
+    scheduledRevealMetricsPush = false;
+    const payload = pendingRevealMetricsPatch;
+    pendingRevealMetricsPatch = null;
+    if (!payload) {
+      return;
+    }
+
+    swallowAsyncError(safeInvoke("record_stream_debug_metrics", {
+      section: "reveal",
+      payload
+    }));
+  }, 250);
+}
 
 const currentModelSupportsReasoning = computed(
   () => currentModel.value?.capabilities?.supportsReasoning ?? false
@@ -203,19 +292,47 @@ const turns = computed<TurnBucket[]>(() => {
 
 const isEmptyWorkspace = computed(() => turns.value.length === 0);
 
+const checkpointEntries = computed(() => conversationCheckpointEntries.value ?? []);
+
+const checkpointEntryByTurnId = computed(() => {
+  const lookup = new Map<string, ConversationCheckpointEntry>();
+  for (const entry of checkpointEntries.value) {
+    if (!lookup.has(entry.turnId)) {
+      lookup.set(entry.turnId, entry);
+    }
+  }
+  return lookup;
+});
+
+const checkpointPickerEntries = computed(() => checkpointEntries.value.filter((entry) => !entry.isLatest));
+
+const checkpointShortcutLabel = computed(() => {
+  if (typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac")) {
+    return "Cmd+K";
+  }
+
+  return "Ctrl+K";
+});
+
 const latestTurnSignature = computed(() => {
-  const latestTurnId = messages.value[messages.value.length - 1]?.turnId ?? "";
+  const latestMessage = messages.value[messages.value.length - 1] ?? null;
+  const latestTurnId = latestMessage?.turnId ?? "";
   if (!latestTurnId) {
     return "";
   }
 
-  return messages.value
-    .filter((message) => message.turnId === latestTurnId)
-    .map(
-      (message) =>
-        `${message.id}:${message.content.length}:${message.reasoningContent?.length ?? ""}:${message.status ?? ""}:${message.tokenCount ?? ""}`
-    )
-    .join("|");
+  const parts: string[] = [];
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const message = messages.value[index]!;
+    if (message.turnId !== latestTurnId) {
+      break;
+    }
+    parts.push(
+      `${message.id}:${message.content.length}:${message.reasoningContent?.length ?? ""}:${message.status ?? ""}:${message.tokenCount ?? ""}`
+    );
+  }
+
+  return parts.reverse().join("|");
 });
 
 function formatAssistantModelLabel(modelName?: string | null) {
@@ -243,7 +360,188 @@ function assistantHeaderModel(message: ChatMessage | null) {
 }
 
 function assistantReasoning(message: ChatMessage | null) {
-  return message?.reasoningContent?.trim() || "";
+  return message?.reasoningContent ?? "";
+}
+
+function isAssistantReasoningStreaming(message: ChatMessage | null) {
+  return message?.status === "pending";
+}
+
+function isIncrementalStreamingAppend(previous: string, next: string) {
+  return next.length > previous.length && next.startsWith(previous);
+}
+
+function syncStreamingPresentationState() {
+  const activeMessageIds = new Set<string>();
+  let pendingAssistantCount = 0;
+
+  for (const message of messages.value) {
+    if (message.role !== "assistant") {
+      continue;
+    }
+
+    activeMessageIds.add(message.id);
+    const nextReasoning = assistantReasoning(message);
+    const nextText = message.content;
+
+    if (message.status !== "pending") {
+      streamSnapshotTextByMessageId[message.id] = nextText;
+      streamSnapshotReasoningByMessageId[message.id] = nextReasoning;
+      streamFadeTextByMessageId[message.id] = "";
+      streamReasoningFadeTextByMessageId[message.id] = "";
+      continue;
+    }
+
+    pendingAssistantCount += 1;
+    const previousText = streamSnapshotTextByMessageId[message.id] ?? "";
+    const previousReasoning = streamSnapshotReasoningByMessageId[message.id] ?? "";
+
+    const appendedText = isIncrementalStreamingAppend(previousText, nextText)
+      ? nextText.slice(previousText.length)
+      : "";
+    streamFadeTextByMessageId[message.id] = appendedText.length >= STREAM_FADE_MIN_CHARS ? appendedText : "";
+    if (!(message.id in streamFadeKeyByMessageId)) {
+      streamFadeKeyByMessageId[message.id] = 0;
+    }
+    if (streamFadeTextByMessageId[message.id]) {
+      streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
+    }
+
+    const appendedReasoning = isIncrementalStreamingAppend(previousReasoning, nextReasoning)
+      ? nextReasoning.slice(previousReasoning.length)
+      : "";
+    streamReasoningFadeTextByMessageId[message.id] =
+      appendedReasoning.length >= STREAM_FADE_MIN_CHARS ? appendedReasoning : "";
+    if (!(message.id in streamReasoningFadeKeyByMessageId)) {
+      streamReasoningFadeKeyByMessageId[message.id] = 0;
+    }
+    if (streamReasoningFadeTextByMessageId[message.id]) {
+      streamReasoningFadeKeyByMessageId[message.id] =
+        (streamReasoningFadeKeyByMessageId[message.id] ?? 0) + 1;
+    }
+
+    streamSnapshotTextByMessageId[message.id] = nextText;
+    streamSnapshotReasoningByMessageId[message.id] = nextReasoning;
+  }
+
+  for (const messageId of Object.keys(streamSnapshotTextByMessageId)) {
+    if (!activeMessageIds.has(messageId)) {
+      delete streamSnapshotTextByMessageId[messageId];
+    }
+  }
+
+  for (const messageId of Object.keys(streamSnapshotReasoningByMessageId)) {
+    if (!activeMessageIds.has(messageId)) {
+      delete streamSnapshotReasoningByMessageId[messageId];
+    }
+  }
+
+  for (const messageId of Object.keys(streamFadeTextByMessageId)) {
+    if (!activeMessageIds.has(messageId)) {
+      delete streamFadeTextByMessageId[messageId];
+    }
+  }
+
+  for (const messageId of Object.keys(streamFadeKeyByMessageId)) {
+    if (!activeMessageIds.has(messageId)) {
+      delete streamFadeKeyByMessageId[messageId];
+    }
+  }
+
+  for (const messageId of Object.keys(streamReasoningFadeTextByMessageId)) {
+    if (!activeMessageIds.has(messageId)) {
+      delete streamReasoningFadeTextByMessageId[messageId];
+    }
+  }
+
+  for (const messageId of Object.keys(streamReasoningFadeKeyByMessageId)) {
+    if (!activeMessageIds.has(messageId)) {
+      delete streamReasoningFadeKeyByMessageId[messageId];
+    }
+  }
+  updateStreamDebugReveal({
+    pendingAssistantCount,
+    maxTextBacklog: 0,
+    maxReasoningBacklog: 0,
+    currentTextBacklog: 0,
+    currentReasoningBacklog: 0,
+    revealLoopActive: false,
+    autoScrollQueued: scrollQueued.value
+  });
+}
+
+function assistantDisplayContent(message: ChatMessage | null) {
+  if (!message) {
+    return "";
+  }
+
+  return message.content;
+}
+
+function assistantDisplayStableContent(message: ChatMessage | null) {
+  if (!message) {
+    return "";
+  }
+
+  const displayText = assistantDisplayContent(message);
+  const fadeText = streamFadeTextByMessageId[message.id] ?? "";
+  return fadeText ? displayText.slice(0, Math.max(0, displayText.length - fadeText.length)) : displayText;
+}
+
+function assistantDisplayFadeContent(message: ChatMessage | null) {
+  if (!message) {
+    return "";
+  }
+
+  return streamFadeTextByMessageId[message.id] ?? "";
+}
+
+function assistantDisplayFadeStyle(message: ChatMessage | null) {
+  if (!message) {
+    return undefined;
+  }
+
+  const key = streamFadeKeyByMessageId[message.id] ?? 0;
+  return {
+    animationName: key % 2 === 0 ? "assistant-stream-fade-in-a" : "assistant-stream-fade-in-b"
+  };
+}
+
+function assistantDisplayedReasoning(message: ChatMessage | null) {
+  if (!message) {
+    return "";
+  }
+
+  return assistantReasoning(message);
+}
+
+function assistantDisplayedReasoningStable(message: ChatMessage | null) {
+  if (!message) {
+    return "";
+  }
+
+  const displayText = assistantDisplayedReasoning(message);
+  const fadeText = streamReasoningFadeTextByMessageId[message.id] ?? "";
+  return fadeText ? displayText.slice(0, Math.max(0, displayText.length - fadeText.length)) : displayText;
+}
+
+function assistantDisplayedReasoningFade(message: ChatMessage | null) {
+  if (!message) {
+    return "";
+  }
+
+  return streamReasoningFadeTextByMessageId[message.id] ?? "";
+}
+
+function assistantDisplayedReasoningFadeStyle(message: ChatMessage | null) {
+  if (!message) {
+    return undefined;
+  }
+
+  const key = streamReasoningFadeKeyByMessageId[message.id] ?? 0;
+  return {
+    animationName: key % 2 === 0 ? "assistant-stream-fade-in-a" : "assistant-stream-fade-in-b"
+  };
 }
 
 function shouldShowReasoningBlock(message: ChatMessage | null) {
@@ -251,7 +549,7 @@ function shouldShowReasoningBlock(message: ChatMessage | null) {
     return false;
   }
 
-  return message.status === "pending" || assistantReasoning(message).length > 0;
+  return message.status === "pending" || assistantDisplayedReasoning(message).length > 0;
 }
 
 function shouldOpenReasoningBlock(_message: ChatMessage | null) {
@@ -267,7 +565,12 @@ function reasoningPlaceholder(message: ChatMessage | null) {
 }
 
 function assistantHasVisibleContent(message: ChatMessage | null) {
-  return Boolean(message?.content?.trim());
+  if (!message) {
+    return false;
+  }
+
+  const visibleContent = message.status === "pending" ? assistantDisplayContent(message) : message.content;
+  return Boolean(visibleContent.trim());
 }
 
 function isAssistantStreaming(message: ChatMessage | null) {
@@ -310,13 +613,154 @@ function toolStatusIcon(message: ChatMessage) {
   return "pending";
 }
 
+function checkpointEntryForTurn(turnId: string) {
+  return checkpointEntryByTurnId.value.get(turnId) ?? null;
+}
+
+function requireCheckpointEntryForTurn(turnId: string) {
+  const entry = checkpointEntryForTurn(turnId);
+  if (!entry) {
+    throw new Error(`Missing checkpoint entry for turn ${turnId}`);
+  }
+  return entry;
+}
+
+function messageCheckpointActionTitle(
+  entry: ConversationCheckpointEntry,
+  action: CheckpointRollbackAction
+) {
+  if (action === "transcript_only") {
+    if (isSubmitting.value) {
+      return "运行中暂不可回退 checkpoint（仅对话）";
+    }
+    if (sessionOperation.value) {
+      return "当前正在处理会话操作，暂不可回退 checkpoint（仅对话）";
+    }
+    return "回到此 checkpoint（仅对话）";
+  }
+
+  if (isSubmitting.value) {
+    return "运行中暂不可回退 checkpoint（对话 + 文件）";
+  }
+  if (sessionOperation.value) {
+    return "当前正在处理会话操作，暂不可回退 checkpoint（对话 + 文件）";
+  }
+  if (!entry.workspaceRollbackCapable) {
+    return "该 checkpoint 不支持文件回退，将仅恢复对话历史";
+  }
+  return "回到此 checkpoint（对话 + 文件）";
+}
+
+function canUseCheckpointAction(_entry: ConversationCheckpointEntry, _action: CheckpointRollbackAction) {
+  return !isSubmitting.value && !sessionOperation.value;
+}
+
+function checkpointPickerEntryTitle(entry: ConversationCheckpointEntry) {
+  return entry.workspaceRollbackCapable
+    ? "回到此 checkpoint（优先恢复对话与文件）"
+    : "回到此 checkpoint（仅恢复对话历史）";
+}
+
+function checkpointModeForPickerEntry(entry: ConversationCheckpointEntry): HistoryCheckoutMode {
+  return entry.workspaceRollbackCapable ? "transcript_and_workspace" : "transcript_only";
+}
+
+function checkpointMetaLabel(entry: ConversationCheckpointEntry) {
+  return entry.workspaceRollbackCapable ? "对话 + 文件" : "仅对话";
+}
+
+async function rollbackToCheckpoint(
+  entry: ConversationCheckpointEntry,
+  action: CheckpointRollbackAction
+) {
+  if (!canUseCheckpointAction(entry, action)) {
+    return;
+  }
+
+  forkSummaryOpenForNodeId.value = null;
+  checkpointPickerOpen.value = false;
+  await runtimeStore.checkoutHistoryNode(entry.nodeId, action);
+}
+
+function toggleCheckpointPicker() {
+  checkpointPickerOpen.value = !checkpointPickerOpen.value;
+  if (checkpointPickerOpen.value) {
+    providerMenuOpen.value = false;
+    hoveredProviderId.value = null;
+    reasoningMenuOpen.value = false;
+    forkSummaryOpenForNodeId.value = null;
+  }
+}
+
+async function selectCheckpointPickerEntry(entry: ConversationCheckpointEntry) {
+  await rollbackToCheckpoint(entry, checkpointModeForPickerEntry(entry));
+}
+
+function toggleForkSummary(nodeId: string) {
+  forkSummaryOpenForNodeId.value = forkSummaryOpenForNodeId.value === nodeId ? null : nodeId;
+  checkpointPickerOpen.value = false;
+}
+
+async function jumpToForkTarget(
+  entry: ConversationCheckpointEntry,
+  target: ConversationCheckpointEntry["forkTargets"][number]
+) {
+  forkSummaryOpenForNodeId.value = null;
+
+  if (target.branchId && !target.isActive) {
+    const switched = await runtimeStore.switchHistoryBranch(target.branchId);
+    if (switched?.visibleNodeId === target.nodeId || switched?.branchHeadNodeId === target.nodeId) {
+      return;
+    }
+  }
+
+  await runtimeStore.checkoutHistoryNode(target.nodeId, checkpointModeForPickerEntry(entry));
+}
+
+function handleCheckpointShortcut(event: KeyboardEvent) {
+  const isMac = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
+  const shortcutPressed = event.key.toLowerCase() === "k" && (isMac ? event.metaKey : event.ctrlKey);
+
+  if (shortcutPressed && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    if (checkpointPickerEntries.value.length > 0) {
+      checkpointPickerOpen.value = true;
+      providerMenuOpen.value = false;
+      hoveredProviderId.value = null;
+      reasoningMenuOpen.value = false;
+      forkSummaryOpenForNodeId.value = null;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 function handleComposerKeydown(event: KeyboardEvent) {
+  if (handleCheckpointShortcut(event)) {
+    return;
+  }
+
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     if (!isSubmitting.value) {
       runtimeStore.submitTurn();
     }
   }
+}
+
+function handleWindowKeydown(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null;
+  const isEditableTarget =
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLInputElement ||
+    target?.isContentEditable === true;
+
+  if (isEditableTarget && target !== document.activeElement) {
+    return;
+  }
+
+  handleCheckpointShortcut(event);
 }
 
 async function handlePrimaryAction() {
@@ -383,55 +827,125 @@ function handleClickOutside(event: MouseEvent) {
   if (reasoningMenuRef.value && target && !reasoningMenuRef.value.contains(target)) {
     reasoningMenuOpen.value = false;
   }
+
+  if (checkpointPickerMenuRef.value && target && !checkpointPickerMenuRef.value.contains(target)) {
+    checkpointPickerOpen.value = false;
+  }
+
+  if (forkSummaryMenuRef.value && target && !forkSummaryMenuRef.value.contains(target)) {
+    forkSummaryOpenForNodeId.value = null;
+  }
+}
+
+function isTimelineNearBottom() {
+  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+  if (!viewport) {
+    return true;
+  }
+
+  const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+  return distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX;
 }
 
 function queueScrollToLatestTurn(behavior: ScrollBehavior = "smooth") {
-  if (scrollFrameId.value != null) {
-    return;
-  }
-
-  scrollFrameId.value = window.requestAnimationFrame(async () => {
-    scrollFrameId.value = null;
-    await nextTick();
-    await new Promise<void>((resolve) => {
-      window.requestAnimationFrame(() => resolve());
-    });
-
-    if (bottomAnchorRef.value) {
-      bottomAnchorRef.value.scrollIntoView({
-        block: "end",
-        behavior
-      });
+  pendingScrollBehavior = pendingScrollBehavior === "smooth" || behavior === "smooth" ? "smooth" : behavior;
+  scheduledScrollRequestId += 1;
+  const requestId = scheduledScrollRequestId;
+  scrollQueued.value = true;
+  void nextTick().then(() => {
+    if (requestId !== scheduledScrollRequestId) {
       return;
     }
+    if (scrollAfterPaintFrameId.value != null) {
+      window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
+    }
 
-    timelineScrollAreaRef.value?.scrollToBottom(behavior);
+    scrollAfterPaintFrameId.value = window.requestAnimationFrame(() => {
+      if (requestId !== scheduledScrollRequestId) {
+        return;
+      }
+      scrollAfterPaintFrameId.value = null;
+      scrollQueued.value = false;
+      const scrollArea = timelineScrollAreaRef.value;
+      if (scrollArea && typeof scrollArea.scrollToBottom === "function") {
+        scrollArea.scrollToBottom(pendingScrollBehavior);
+      } else {
+        const viewport = scrollArea?.viewportEl ?? null;
+        if (viewport) {
+          viewport.scrollTo({
+            top: viewport.scrollHeight,
+            behavior: pendingScrollBehavior
+          });
+        }
+      }
+
+      updateStreamDebugReveal({
+        scrolledToBottom: true,
+        scrollBehavior: pendingScrollBehavior,
+        nearBottom: isTimelineNearBottom()
+      });
+      pendingScrollBehavior = "auto";
+    });
   });
+}
+
+function handleTimelineViewportScroll() {
+  streamAutoFollowEnabled.value = isTimelineNearBottom();
 }
 
 onMounted(() => {
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
   }
+  syncStreamingPresentationState();
   window.addEventListener("click", handleClickOutside);
+  window.addEventListener("keydown", handleWindowKeydown);
+  handleTimelineViewportScroll();
   queueScrollToLatestTurn("auto");
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("click", handleClickOutside);
-  if (scrollFrameId.value != null) {
-    window.cancelAnimationFrame(scrollFrameId.value);
+  window.removeEventListener("keydown", handleWindowKeydown);
+  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+  if (viewport && "removeEventListener" in viewport) {
+    viewport.removeEventListener("scroll", handleTimelineViewportScroll);
+  }
+  if (scrollAfterPaintFrameId.value != null) {
+    window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
   }
 });
 
+watch(
+  () => timelineScrollAreaRef.value?.viewportEl ?? null,
+  (viewport, previousViewport) => {
+    if (previousViewport && "removeEventListener" in previousViewport) {
+      previousViewport.removeEventListener("scroll", handleTimelineViewportScroll);
+    }
+    if (viewport && "addEventListener" in viewport) {
+      viewport.addEventListener("scroll", handleTimelineViewportScroll, { passive: true });
+    }
+    handleTimelineViewportScroll();
+  },
+  { flush: "post" }
+);
+
+watch(latestTurnSignature, () => {
+  pendingStreamAutoFollow = isTimelineNearBottom();
+}, { flush: "pre" });
+
 watch(latestTurnSignature, (signature) => {
-  const behavior: ScrollBehavior =
-    signature.startsWith(lastMessageSignature) && lastMessageSignature.length > 0
-      ? "auto"
-      : "smooth";
+  syncStreamingPresentationState();
+  const hasPendingAssistant = messages.value.some(
+    (message) => message.role === "assistant" && message.status === "pending"
+  );
+  const behavior: ScrollBehavior = hasPendingAssistant ? "auto" : signature && lastMessageSignature ? "smooth" : "auto";
+  streamAutoFollowEnabled.value = pendingStreamAutoFollow;
 
   lastMessageSignature = signature;
-  queueScrollToLatestTurn(behavior);
+  if (streamAutoFollowEnabled.value) {
+    queueScrollToLatestTurn(behavior);
+  }
 }, { flush: "post" });
 
 watch(showReasoningContent, (value) => {
@@ -441,6 +955,7 @@ watch(showReasoningContent, (value) => {
 });
 
 watch(isSubmitting, (submitting) => {
+  syncStreamingPresentationState();
   if (!submitting) {
     stopRequested.value = false;
   }
@@ -549,10 +1064,23 @@ watch(isSubmitting, (submitting) => {
               </summary>
               <div class="mt-2">
                 <MarkdownRenderer
-                  v-if="assistantReasoning(turn.assistant)"
+                  v-if="assistantReasoning(turn.assistant) && !isAssistantReasoningStreaming(turn.assistant)"
                   :content="assistantReasoning(turn.assistant)"
                   wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
                 />
+                <div
+                  v-else-if="assistantDisplayedReasoning(turn.assistant)"
+                  class="assistant-reasoning whitespace-pre-wrap text-[13px] leading-6 text-stone-600"
+                >
+                  <span>{{ assistantDisplayedReasoningStable(turn.assistant) }}</span>
+                  <span
+                    v-if="assistantDisplayedReasoningFade(turn.assistant)"
+                    class="assistant-streaming-fade"
+                    :style="assistantDisplayedReasoningFadeStyle(turn.assistant)"
+                  >
+                    {{ assistantDisplayedReasoningFade(turn.assistant) }}
+                  </span>
+                </div>
                 <p
                   v-else-if="reasoningPlaceholder(turn.assistant)"
                   class="assistant-reasoning"
@@ -571,7 +1099,14 @@ watch(isSubmitting, (submitting) => {
                 class="assistant-streaming-content text-sm"
                 :class="assistantTone(turn.assistant)"
               >
-                {{ turn.assistant.content }}
+                <span>{{ assistantDisplayStableContent(turn.assistant) }}</span>
+                <span
+                  v-if="assistantDisplayFadeContent(turn.assistant)"
+                  class="assistant-streaming-fade"
+                  :style="assistantDisplayFadeStyle(turn.assistant)"
+                >
+                  {{ assistantDisplayFadeContent(turn.assistant) }}
+                </span>
               </div>
               <MarkdownRenderer
                 v-else
@@ -580,10 +1115,86 @@ watch(isSubmitting, (submitting) => {
                 :tone-class="assistantTone(turn.assistant)"
               />
             </div>
+
+            <div
+              v-if="turn.assistant && checkpointEntryForTurn(turn.turnId) && !checkpointEntryForTurn(turn.turnId)?.isLatest"
+              class="mt-3 flex flex-wrap items-center gap-2 border-t border-stone-200/60 pt-2.5"
+              data-testid="workspace-checkpoint-actions"
+            >
+              <button
+                class="checkpoint-icon-button"
+                type="button"
+                :disabled="!canUseCheckpointAction(requireCheckpointEntryForTurn(turn.turnId), 'transcript_only')"
+                :title="messageCheckpointActionTitle(requireCheckpointEntryForTurn(turn.turnId), 'transcript_only')"
+                :data-testid="`workspace-checkpoint-transcript-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
+                @click="rollbackToCheckpoint(requireCheckpointEntryForTurn(turn.turnId), 'transcript_only')"
+              >
+                <History class="h-3.5 w-3.5" />
+                <span class="sr-only">仅回退对话历史</span>
+              </button>
+
+              <button
+                class="checkpoint-icon-button"
+                type="button"
+                :disabled="!canUseCheckpointAction(requireCheckpointEntryForTurn(turn.turnId), 'transcript_and_workspace')"
+                :title="messageCheckpointActionTitle(requireCheckpointEntryForTurn(turn.turnId), 'transcript_and_workspace')"
+                :data-testid="`workspace-checkpoint-workspace-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
+                @click="rollbackToCheckpoint(requireCheckpointEntryForTurn(turn.turnId), 'transcript_and_workspace')"
+              >
+                <RotateCcw class="h-3.5 w-3.5" />
+                <span class="sr-only">回退对话历史并尝试恢复文件改动</span>
+              </button>
+
+              <div
+                v-if="checkpointEntryForTurn(turn.turnId)?.forkTargets.length"
+                ref="forkSummaryMenuRef"
+                class="relative"
+              >
+                <button
+                  class="checkpoint-icon-button"
+                  type="button"
+                  title="查看从该 checkpoint 分叉出来的对话轨迹"
+                  :data-testid="`workspace-checkpoint-forks-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
+                  @click="toggleForkSummary(requireCheckpointEntryForTurn(turn.turnId).nodeId)"
+                >
+                  <GitFork class="h-3.5 w-3.5" />
+                  <span class="sr-only">查看 fork 对话摘要</span>
+                </button>
+
+                <div
+                  v-if="forkSummaryOpenForNodeId === checkpointEntryForTurn(turn.turnId)?.nodeId"
+                  class="checkpoint-popover absolute left-0 top-[calc(100%+0.45rem)] z-20 w-[19rem] max-w-[calc(100vw-2rem)]"
+                  :data-testid="`workspace-checkpoint-fork-menu-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
+                >
+                  <div class="checkpoint-popover-caption">Fork 对话</div>
+                  <div class="checkpoint-popover-divider"></div>
+                  <button
+                    v-for="target in checkpointEntryForTurn(turn.turnId)?.forkTargets ?? []"
+                    :key="`${checkpointEntryForTurn(turn.turnId)?.nodeId}-${target.branchId}-${target.nodeId}`"
+                    class="checkpoint-picker-item"
+                    type="button"
+                    :data-testid="`workspace-checkpoint-fork-target-${target.branchId}`"
+                    @click="jumpToForkTarget(requireCheckpointEntryForTurn(turn.turnId), target)"
+                  >
+                    <div class="flex min-w-0 flex-1 flex-col text-left">
+                      <span class="truncate text-[12px] text-stone-800">{{ target.label }}</span>
+                      <span class="mt-0.5 line-clamp-2 text-[10px] leading-4 text-stone-500">
+                        {{ target.summary }}
+                      </span>
+                    </div>
+                    <span
+                      class="shrink-0 rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] text-stone-500"
+                    >
+                      {{ target.isActive ? "当前" : "转到" }}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
           </article>
         </section>
       </TransitionGroup>
-      <div ref="bottomAnchorRef" class="h-px w-full" aria-hidden="true"></div>
+      <div class="h-px w-full" aria-hidden="true"></div>
       </div>
     </ScrollArea>
 
@@ -604,6 +1215,57 @@ watch(isSubmitting, (submitting) => {
 
       <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200/70 pt-2.5">
         <div class="flex min-w-0 flex-wrap items-center gap-2">
+          <div ref="checkpointPickerMenuRef" class="relative">
+            <button
+              class="composer-select-trigger"
+              type="button"
+              :disabled="checkpointPickerEntries.length === 0"
+              :title="
+                checkpointPickerEntries.length
+                  ? `打开 checkpoint 菜单（${checkpointShortcutLabel}）`
+                  : '当前还没有可回退的 checkpoint'
+              "
+              data-testid="workspace-checkpoint-picker-trigger"
+              @click.stop="toggleCheckpointPicker"
+            >
+              <History class="h-3.5 w-3.5 text-stone-500" />
+              <span class="truncate">Checkpoint</span>
+              <ChevronDown class="h-2.5 w-2.5 text-stone-400" />
+            </button>
+
+            <div
+              v-if="checkpointPickerOpen"
+              class="composer-menu-panel absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[18rem] max-w-[min(28rem,calc(100vw-2rem))]"
+              data-testid="workspace-checkpoint-picker-menu"
+            >
+              <div class="composer-menu-caption">Checkpoint 菜单</div>
+              <div class="composer-menu-divider"></div>
+              <button
+                v-for="entry in checkpointPickerEntries"
+                :key="`picker-${entry.nodeId}`"
+                class="checkpoint-picker-item"
+                type="button"
+                :title="checkpointPickerEntryTitle(entry)"
+                :data-testid="`workspace-checkpoint-picker-item-${entry.nodeId}`"
+                @click="selectCheckpointPickerEntry(entry)"
+              >
+                <div class="flex min-w-0 flex-1 flex-col text-left">
+                  <span class="truncate text-[12px] text-stone-800">{{ entry.summary }}</span>
+                  <span class="mt-0.5 text-[10px] leading-4 text-stone-500">
+                    分支 {{ entry.branchId }} · {{ checkpointMetaLabel(entry) }}
+                  </span>
+                </div>
+                <span
+                  class="shrink-0 rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] text-stone-500"
+                >
+                  {{ entry.isVisible ? "当前" : "回退" }}
+                </span>
+              </button>
+              <div class="composer-menu-divider"></div>
+              <div class="composer-menu-caption">快捷键：{{ checkpointShortcutLabel }}</div>
+            </div>
+          </div>
+
           <div ref="providerMenuRef" class="relative">
             <button
               class="composer-select-trigger"
@@ -932,27 +1594,34 @@ watch(isSubmitting, (submitting) => {
   transition: color 140ms ease;
 }
 
-.assistant-streaming-content::after {
-  content: "";
-  display: inline-block;
-  width: 0.45rem;
-  height: 1em;
-  margin-left: 0.18rem;
-  vertical-align: -0.14em;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.55;
-  animation: assistant-stream-caret 1s ease-in-out infinite;
+.assistant-streaming-fade {
+  display: inline;
+  animation-duration: 180ms;
+  animation-timing-function: ease-out;
+  animation-fill-mode: both;
 }
 
-@keyframes assistant-stream-caret {
-  0%,
-  100% {
-    opacity: 0.2;
+@keyframes assistant-stream-fade-in-a {
+  from {
+    opacity: 0.16;
+    filter: blur(0.14rem);
   }
 
-  50% {
-    opacity: 0.7;
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes assistant-stream-fade-in-b {
+  from {
+    opacity: 0.16;
+    filter: blur(0.14rem);
+  }
+
+  to {
+    opacity: 1;
+    filter: blur(0);
   }
 }
 
@@ -1094,5 +1763,65 @@ watch(isSubmitting, (submitting) => {
   font-size: 10px;
   line-height: 1.2;
   color: rgb(168 162 158);
+}
+
+.checkpoint-icon-button {
+  display: inline-flex;
+  height: 1.9rem;
+  width: 1.9rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  border: 1px solid rgba(231, 229, 228, 0.95);
+  background: rgba(255, 255, 255, 0.92);
+  color: rgb(120 113 108);
+  transition:
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.checkpoint-icon-button:hover {
+  border-color: rgba(214, 188, 146, 0.95);
+  background: rgba(251, 244, 232, 0.98);
+  color: rgb(68 64 60);
+}
+
+.checkpoint-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.checkpoint-popover {
+  border: 1px solid rgba(231, 229, 228, 0.95);
+  border-radius: 0.8rem;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 16px 36px rgba(41, 37, 36, 0.12);
+  backdrop-filter: blur(14px);
+}
+
+.checkpoint-popover-caption {
+  padding: 0.75rem 0.9rem 0.45rem;
+  font-size: 10px;
+  line-height: 1;
+  color: rgb(168 162 158);
+}
+
+.checkpoint-popover-divider {
+  margin: 0 0.65rem;
+  border-top: 1px solid rgba(231, 229, 228, 0.92);
+}
+
+.checkpoint-picker-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.9rem;
+  transition: background-color 0.16s ease;
+}
+
+.checkpoint-picker-item:hover {
+  background: rgba(245, 245, 244, 0.9);
 }
 </style>

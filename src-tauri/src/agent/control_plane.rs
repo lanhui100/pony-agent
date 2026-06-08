@@ -12,6 +12,7 @@ use crate::agent::graph::{
     GraphDecision, GraphRun, GraphRunCheckpoint, GraphRunControlBoundaryEvidence, GraphRunEvent,
     GraphRunPhase, GraphRunStopReason, GraphRunStore, GraphRunner, GraphTurnHandoff,
 };
+use crate::agent::hooks::HistoryStateHookEvidence;
 use crate::agent::hooks::{
     build_submission_plan_run_control_hook_envelope, CanonicalGraphRunEventType,
     RunControlCheckpointContext, RunControlHookEnvelope,
@@ -20,11 +21,10 @@ use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
 use crate::agent::runtime::{AgentRuntime, TurnInput, TurnResult, TurnStreamEvent};
 use crate::agent::session::{
     build_missing_run_control_audit_summary, HistoryBranch,
-    HistoryCheckoutMode as SessionHistoryCheckoutMode, HistoryCursor, HistoryStateAuditSummary,
-    HistoryNode, RunControlAuditActionSummary, RunControlAuditCurrentContext,
+    HistoryCheckoutMode as SessionHistoryCheckoutMode, HistoryCursor, HistoryNode,
+    HistoryStateAuditSummary, RunControlAuditActionSummary, RunControlAuditCurrentContext,
     RunControlAuditSummary, SessionOverview, SessionSnapshot, TurnTraceRecord,
 };
-use crate::agent::hooks::HistoryStateHookEvidence;
 use crate::agent::turn_flow::TurnEventSink;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -808,7 +808,10 @@ impl HostControlPlane {
             .inspect_source(&query.source_id)
     }
 
-    pub fn inspect_skill_source(&self, query: SkillSourceInspectionQuery) -> Option<SkillSourceView> {
+    pub fn inspect_skill_source(
+        &self,
+        query: SkillSourceInspectionQuery,
+    ) -> Option<SkillSourceView> {
         self.capability_registry
             .lock()
             .expect("capability registry lock poisoned")
@@ -1938,10 +1941,6 @@ impl HostControlPlane {
             source,
             checkpoint_context.as_ref(),
         );
-        let canonical_phase = hook_envelope
-            .as_ref()
-            .map(|envelope| envelope.phase.clone())
-            .unwrap_or_else(|| "ready".to_string());
         GraphRunSubmissionPlan {
             command,
             run_id,
@@ -1950,7 +1949,7 @@ impl HostControlPlane {
             canonical_event_type: CanonicalGraphRunEventType::SubmissionPlanResolved
                 .as_str()
                 .to_string(),
-            canonical_phase,
+            canonical_phase: "ready".to_string(),
             hook_envelope,
         }
     }
@@ -2088,7 +2087,8 @@ impl HostControlPlane {
     fn project_history_state_evidence(
         snapshot: &SessionSnapshot,
     ) -> Option<Vec<HistoryStateHookEvidence>> {
-        (!snapshot.history_state_evidence.is_empty()).then_some(snapshot.history_state_evidence.clone())
+        (!snapshot.history_state_evidence.is_empty())
+            .then_some(snapshot.history_state_evidence.clone())
     }
 
     fn project_history_state_audit_summary(snapshot: &SessionSnapshot) -> HistoryStateAuditSummary {
@@ -2146,7 +2146,11 @@ impl HostControlPlane {
             return summary;
         };
 
-        let command_kind = evidence.hook_envelope.command.as_submission_command().to_string();
+        let command_kind = evidence
+            .hook_envelope
+            .command
+            .as_submission_command()
+            .to_string();
         let start_reason = Self::project_run_control_start_reason(
             Some(command_kind.as_str()),
             checkpoint,
@@ -2187,7 +2191,10 @@ impl HostControlPlane {
             elapsed_ms: Some(0),
             blocked: false,
             degraded,
-            evidence_id: Some(format!("{}:{}", evidence.created_at_ms, evidence.hook_point)),
+            evidence_id: Some(format!(
+                "{}:{}",
+                evidence.created_at_ms, evidence.hook_point
+            )),
             observed_at_ms: Some(evidence.created_at_ms),
             run_id: run
                 .map(|item| item.id.clone())
@@ -2304,7 +2311,8 @@ impl HostControlPlane {
             turn_id: None,
             session_id: Some(snapshot.conversation_id.clone()),
         });
-        let run = self.resolve_graph_run_for_retrieval(None, Some(snapshot.conversation_id.as_str()));
+        let run =
+            self.resolve_graph_run_for_retrieval(None, Some(snapshot.conversation_id.as_str()));
         let submission_plan = Some(self.resolve_graph_run_submission_plan(
             GraphRunSubmissionPlanQuery {
                 session_id: Some(snapshot.conversation_id.clone()),
@@ -2545,10 +2553,7 @@ impl HostControlPlane {
         }) {
             if let Some(command) = checkpoint.submission_command.clone() {
                 let checkpoint_run = run.as_ref().filter(|run| {
-                    checkpoint
-                        .run_id
-                        .as_deref()
-                        .or(query.run_id.as_deref())
+                    checkpoint.run_id.as_deref().or(query.run_id.as_deref())
                         == Some(run.id.as_str())
                 });
                 let (command, run_id, source) =
@@ -2556,13 +2561,25 @@ impl HostControlPlane {
                 return Self::build_graph_run_submission_plan(
                     command,
                     run_id,
-                    if source == "default" { "checkpoint" } else { source },
+                    if source == "default" {
+                        "checkpoint"
+                    } else {
+                        "graph_run_reconciled"
+                    },
                     Some(&checkpoint),
                 );
             }
         }
 
         if let Some(run) = run.as_ref() {
+            if run.phase == GraphRunPhase::Running {
+                return Self::build_graph_run_submission_plan(
+                    "continue_graph_run_stream".to_string(),
+                    Some(run.id.clone()),
+                    "graph_run",
+                    None,
+                );
+            }
             let requested_command = match run.phase {
                 GraphRunPhase::Completed | GraphRunPhase::Failed | GraphRunPhase::Cancelled => {
                     "start_graph_run_stream"
@@ -2572,12 +2589,7 @@ impl HostControlPlane {
             };
             let (command, run_id, source) =
                 Self::resolve_submission_command_against_run(Some(run), requested_command);
-            return Self::build_graph_run_submission_plan(
-                command,
-                run_id,
-                source,
-                None,
-            );
+            return Self::build_graph_run_submission_plan(command, run_id, source, None);
         }
 
         let _ = query.node_id;
@@ -2690,7 +2702,12 @@ impl HostControlPlane {
         let submission_plan = Some(Self::build_graph_run_submission_plan(
             control_boundary_evidence
                 .as_ref()
-                .map(|item| item.hook_envelope.command.as_submission_command().to_string())
+                .map(|item| {
+                    item.hook_envelope
+                        .command
+                        .as_submission_command()
+                        .to_string()
+                })
                 .unwrap_or_else(|| "start_graph_run_stream".to_string()),
             Some(lifecycle.run.id.clone()),
             "response",
@@ -3514,13 +3531,12 @@ mod tests {
         GraphDecisionKind, GraphDecisionReason, GraphRunEventKind, GraphRunPhase,
     };
     use crate::agent::hooks::{
-        AgentHookDescriptor, AgentHookExecutor, HistoryStateHookEnvelope,
-        HistoryStateHookExecutor, HistoryStateHookPoint, HookClass, HookDenyDecision,
-        HookFailurePolicy, HookPatchOperation, HookPatchOperationKind, HookPatchTarget,
-        HookRecoveryMode, HookReplayRequirements, HookResultKind,
+        turn_hook_point_for_planner_hook_point, AgentHookDescriptor, AgentHookExecutor,
+        HistoryStateHookEnvelope, HistoryStateHookExecutor, HistoryStateHookPoint, HookClass,
+        HookDenyDecision, HookFailurePolicy, HookPatchOperation, HookPatchOperationKind,
+        HookPatchTarget, HookRecoveryMode, HookReplayRequirements, HookResultKind,
         HookSideEffectPersistenceRequirements, HookStructuredResult, HookTraceRequirements,
         NoopHookExecutor, PlannerFactsEnvelope, PlannerHookPoint, TurnHookPoint,
-        turn_hook_point_for_planner_hook_point,
     };
     use crate::agent::planner::LocalTurnPlanner;
     use crate::agent::provider::ProviderProtocol;
@@ -5095,8 +5111,10 @@ mod tests {
 
     #[test]
     fn running_graph_stream_uses_runtime_checkpoint_until_waiting_user_boundary() {
-        let (control_plane, server) =
-            build_test_control_plane(vec![json_completion("single streamed response")]);
+        let (control_plane, server) = build_test_control_plane(vec![
+            json_completion("ignored stream response"),
+            json_completion("single streamed response"),
+        ]);
 
         let (started, prepared_start) = control_plane
             .prepare_start_graph_run_stream(StartGraphRunStreamCommand {
@@ -5172,7 +5190,10 @@ mod tests {
             .expect("ordinary graph stream should prepare");
 
         assert_eq!(
-            started.run_control_audit_summary.action_evidence_summary.status,
+            started
+                .run_control_audit_summary
+                .action_evidence_summary
+                .status,
             "missing"
         );
         assert_eq!(
@@ -5513,7 +5534,11 @@ mod tests {
 
         let run = {
             let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
-            runtime.start_graph_run("run-not-resumable", "plan reconcile", Some("plan-reconcile"))
+            runtime.start_graph_run(
+                "run-not-resumable",
+                "plan reconcile",
+                Some("plan-reconcile"),
+            )
         };
 
         {
@@ -5957,7 +5982,10 @@ mod tests {
             .last_ingress_observation
             .expect("mcp ingress should survive reload");
         assert_eq!(ingress.boundary, "control_plane.apply_mcp_source_snapshot");
-        assert_eq!(ingress.candidate_ids, vec!["mcp:tool:reload-search".to_string()]);
+        assert_eq!(
+            ingress.candidate_ids,
+            vec!["mcp:tool:reload-search".to_string()]
+        );
 
         let reloaded_skill_source = reloaded_control_plane
             .inspect_skill_source(SkillSourceInspectionQuery {
@@ -5967,8 +5995,14 @@ mod tests {
         let skill_ingress = reloaded_skill_source
             .last_ingress_observation
             .expect("skill ingress should survive reload");
-        assert_eq!(skill_ingress.boundary, "control_plane.apply_skill_source_snapshot");
-        assert_eq!(skill_ingress.candidate_ids, vec!["skill:reload-search".to_string()]);
+        assert_eq!(
+            skill_ingress.boundary,
+            "control_plane.apply_skill_source_snapshot"
+        );
+        assert_eq!(
+            skill_ingress.candidate_ids,
+            vec!["skill:reload-search".to_string()]
+        );
 
         let reloaded_capabilities = reloaded_control_plane.list_capabilities(CapabilityListQuery {
             source_id: Some("mcp-reload".to_string()),
@@ -6437,7 +6471,10 @@ mod tests {
             checkout_evidence[1].resolved_node_id.as_deref(),
             Some(first_node_id.as_str())
         );
-        assert_eq!(runtime_view.session.history_state_evidence, checkout_evidence);
+        assert_eq!(
+            runtime_view.session.history_state_evidence,
+            checkout_evidence
+        );
         assert_eq!(
             checkout.history_state_audit_summary,
             runtime_view.history_state_audit_summary
@@ -6562,20 +6599,23 @@ mod tests {
             })
             .expect("switch should succeed");
         assert_eq!(
-            switch.history_state_evidence
+            switch
+                .history_state_evidence
                 .as_ref()
                 .map(|items| items.len()),
             Some(4)
         );
         assert_eq!(
-            switch.history_state_evidence
+            switch
+                .history_state_evidence
                 .as_ref()
                 .and_then(|items| items.get(2))
                 .map(|evidence| evidence.boundary.as_str()),
             Some("history.branch_switch.start")
         );
         assert_eq!(
-            switch.history_state_evidence
+            switch
+                .history_state_evidence
                 .as_ref()
                 .and_then(|items| items.last())
                 .map(|evidence| evidence.boundary.as_str()),
@@ -6589,20 +6629,23 @@ mod tests {
             })
             .expect("restore should succeed");
         assert_eq!(
-            restore.history_state_evidence
+            restore
+                .history_state_evidence
                 .as_ref()
                 .map(|items| items.len()),
             Some(6)
         );
         assert_eq!(
-            restore.history_state_evidence
+            restore
+                .history_state_evidence
                 .as_ref()
                 .and_then(|items| items.get(4))
                 .map(|evidence| evidence.boundary.as_str()),
             Some("history.branch_restore.start")
         );
         assert_eq!(
-            restore.history_state_evidence
+            restore
+                .history_state_evidence
                 .as_ref()
                 .and_then(|items| items.last())
                 .map(|evidence| evidence.boundary.as_str()),
@@ -6724,13 +6767,11 @@ mod tests {
             crate::agent::session::HistoryCheckoutStatus::DegradedToTranscriptOnly
         );
         assert_eq!(runtime_view.session.history_state_evidence.len(), 2);
-        assert!(
-            runtime_view
-                .history_state_evidence
-                .as_ref()
-                .and_then(|items| items.last())
-                .is_some_and(|evidence| evidence.degraded)
-        );
+        assert!(runtime_view
+            .history_state_evidence
+            .as_ref()
+            .and_then(|items| items.last())
+            .is_some_and(|evidence| evidence.degraded));
 
         server.finish();
     }
@@ -7543,7 +7584,8 @@ mod tests {
 
     #[test]
     fn monitor_and_drilldown_read_runtime_generated_planner_hook_evidence() {
-        let (control_plane, server) = build_test_control_plane(vec![json_completion("目录已分析。")]);
+        let (control_plane, server) =
+            build_test_control_plane(vec![json_completion("目录已分析。")]);
 
         let result = control_plane.run_turn(RunTurnCommand {
             input: TurnInput {
@@ -7796,7 +7838,10 @@ mod tests {
             .last_ingress_observation
             .expect("mcp source ingress observation should be recorded");
         assert_eq!(ingress.boundary, "control_plane.apply_mcp_source_snapshot");
-        assert_eq!(ingress.candidate_ids, vec!["mcp:tool:workspace-search".to_string()]);
+        assert_eq!(
+            ingress.candidate_ids,
+            vec!["mcp:tool:workspace-search".to_string()]
+        );
         assert!(ingress.summary.contains("mcp-local"));
 
         let capabilities = control_plane.list_capabilities(CapabilityListQuery {
@@ -8089,7 +8134,10 @@ mod tests {
         let ingress = source
             .last_ingress_observation
             .expect("skill source ingress observation should be recorded");
-        assert_eq!(ingress.boundary, "control_plane.apply_skill_source_snapshot");
+        assert_eq!(
+            ingress.boundary,
+            "control_plane.apply_skill_source_snapshot"
+        );
         assert_eq!(ingress.candidate_ids, vec!["skill:search".to_string()]);
         assert!(ingress.summary.contains("host-skills"));
 
@@ -8104,7 +8152,10 @@ mod tests {
             runtime_ingress.boundary,
             "control_plane.apply_skill_source_snapshot"
         );
-        assert_eq!(runtime_ingress.candidate_ids, vec!["skill:search".to_string()]);
+        assert_eq!(
+            runtime_ingress.candidate_ids,
+            vec!["skill:search".to_string()]
+        );
         let runtime_skill = runtime
             .inspect_skill("skill:search")
             .expect("runtime skill registry should be synchronized");

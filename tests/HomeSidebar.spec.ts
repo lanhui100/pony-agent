@@ -594,7 +594,7 @@ describe("HomeSidebar", () => {
     expect(turnButton!.text()).toContain("输入 150");
     expect(turnButton!.text()).toContain("缓存 70");
     expect(turnButton!.text()).toContain("输出 60");
-    expect(turnButton!.text()).toContain("速度 20.7 token/s");
+    expect(turnButton!.text()).toContain("速度 18.8 token/s");
     expect(turnButton!.text()).toContain("延时 150 ms");
     expect(turnButton!.text()).not.toContain("思考链");
     expect(turnButton!.text()).not.toContain("输入 40");
@@ -767,7 +767,7 @@ describe("HomeSidebar", () => {
     expect(modelButton.text()).toContain("输入 120");
     expect(modelButton.text()).toContain("缓存 80");
     expect(modelButton.text()).toContain("输出 40");
-    expect(modelButton.text()).toContain("速度 16.1 token/s");
+    expect(modelButton.text()).toContain("速度 14.3 token/s");
     expect(modelButton.text()).toContain("延时 321 ms");
     expect(modelButton.text()).toContain("2.80 s");
     expect(modelButton.text()).not.toContain("耗时 2.80 s");
@@ -788,7 +788,7 @@ describe("HomeSidebar", () => {
     expect(modelSectionText).toContain("缓存");
     expect(modelSectionText).toContain("输出");
     expect(modelSectionText).toContain("速度");
-    expect(modelSectionText).toContain("16.1 token/s");
+    expect(modelSectionText).toContain("14.3 token/s");
     expect(modelSectionText).not.toContain("Provider");
     expect(modelSectionText).not.toContain("输出详情");
     expect(modelSectionText).not.toContain("对应一次独立的模型调用，不与其他 hop 合并。");
@@ -912,6 +912,203 @@ describe("HomeSidebar", () => {
     expect(modelButton.text()).not.toContain("89000.0 token/s");
     expect(modelButton.text()).not.toContain("延时 4510 ms");
     expect(modelButton.text()).toContain("1.91 s");
+  });
+
+  it("CALL MODEL 首 token 延时接近耗时时按整次耗时计算速度，避免最后一跳爆速", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-near-terminal-latency",
+          title: "near terminal latency",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              providerName: "deepseek",
+              providerModel: "deepseek-v4-flash",
+              outputTokens: 72,
+              firstTokenLatencyMs: 1946,
+              turnDurationMs: 1964,
+              text: "final answer"
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "tool_followup",
+              providerSource: "provider_followup_stream",
+              providerMode: "live",
+              inputTokens: 2116,
+              cacheHitInputTokens: 0,
+              reasoningTokens: 73,
+              outputTokens: 72,
+              totalTokens: 2188,
+              firstTokenLatencyMs: 1946,
+              turnDurationMs: 1964,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
+    expect(modelButton.text()).toContain("速度 36.7 token/s");
+    expect(modelButton.text()).not.toContain("4000.0 token/s");
+    expect(modelButton.text()).not.toContain("3960.");
+    expect(modelButton.text()).toContain("1.96 s");
+  });
+
+  it("多次 CALL MODEL 时最后一跳不使用整轮 token 兜底，避免混用整轮输出和单跳耗时", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-final-hop-no-token-fallback",
+          title: "src/agent下是怎么组织的？",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              outputTokens: 930,
+              turnDurationMs: 17868
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #2",
+              state: "completed",
+              sequence: 2,
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              text: "final answer"
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "initial_request",
+              providerSource: "provider_decision_stream",
+              providerMode: "live",
+              outputTokens: 930,
+              totalTokens: 930,
+              firstTokenLatencyMs: 799,
+              turnDurationMs: 17868,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            },
+            {
+              requestKind: "tool_followup",
+              providerSource: "provider_followup_stream",
+              providerMode: "live",
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ],
+          outputTokens: 998,
+          reasoningTokens: 152,
+          firstTokenLatencyMs: 799,
+          turnDurationMs: 19567
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+    expect(modelButton.text()).not.toContain("输出 998");
+    expect(modelButton.text()).not.toContain("速度 587.4 token/s");
+    expect(modelButton.text()).not.toContain("速度");
+    expect(modelButton.text()).toContain("延时 1447 ms");
+    expect(modelButton.text()).toContain("1.70 s");
+  });
+
+  it("最后一跳有 per-call 输出时按该跳完整耗时计算速度，不扣首 token 延时", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-final-hop-per-call-speed",
+          title: "final hop per-call speed",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              outputTokens: 930,
+              turnDurationMs: 17868
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #2",
+              state: "completed",
+              sequence: 2,
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              text: "final answer"
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "initial_request",
+              providerSource: "provider_decision_stream",
+              providerMode: "live",
+              outputTokens: 930,
+              totalTokens: 930,
+              firstTokenLatencyMs: 799,
+              turnDurationMs: 17868,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            },
+            {
+              requestKind: "tool_followup",
+              providerSource: "provider_followup_stream",
+              providerMode: "live",
+              reasoningTokens: 18,
+              outputTokens: 68,
+              totalTokens: 86,
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ],
+          outputTokens: 998,
+          reasoningTokens: 152,
+          firstTokenLatencyMs: 799,
+          turnDurationMs: 19567
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+    expect(modelButton.text()).toContain("输出 68");
+    expect(modelButton.text()).toContain("速度 40.0 token/s");
+    expect(modelButton.text()).not.toContain("速度 269.8 token/s");
+    expect(modelButton.text()).not.toContain("速度 587.4 token/s");
+    expect(modelButton.text()).toContain("延时 1447 ms");
+    expect(modelButton.text()).toContain("1.70 s");
   });
 
   it("CALL TOOL 的折叠摘要只显示耗时，不显示内容详情", async () => {

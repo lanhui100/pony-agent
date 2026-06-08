@@ -240,11 +240,29 @@ function createHistoryNode(partial: Partial<HistoryNode> = {}): HistoryNode {
     branchId: partial.branchId ?? "branch-main",
     forkedFromNodeId: partial.forkedFromNodeId ?? null,
     kind: partial.kind ?? "turn_committed",
+    turnId: partial.turnId ?? null,
     transcriptRef: partial.transcriptRef ?? null,
     runRef: partial.runRef ?? null,
     workspaceRef: partial.workspaceRef ?? null,
     summary: partial.summary ?? "History node",
+    title: partial.title ?? "History node title",
+    history: partial.history ?? [],
+    turnTraceHistory: partial.turnTraceHistory ?? [],
+    turnCount: partial.turnCount ?? 1,
+    lastReferencedFile: partial.lastReferencedFile ?? null,
     createdAtMs: partial.createdAtMs ?? 1000
+  };
+}
+
+function createTurnTraceRecord(partial: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
+  return {
+    turnId: partial.turnId ?? "turn-1",
+    sessionId: partial.sessionId ?? "session-1",
+    title: partial.title ?? "Turn trace",
+    phase: partial.phase ?? "completed",
+    traceSteps: partial.traceSteps ?? [],
+    toolActivities: partial.toolActivities ?? [],
+    updatedAt: partial.updatedAt ?? 1000
   };
 }
 
@@ -3299,6 +3317,13 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.turnId).toBe("6060");
     expect(store.turnTraceHistory[0]?.phase).toBe("calling_model");
 
+    store.$patch({
+      streamDebugDeltaCount: 42,
+      streamDebugFlushCount: 9,
+      streamDebugTextCharsReceived: 120,
+      streamDebugTextCharsFlushed: 100
+    });
+
     eventHandlers.get("turn:started")?.({
       payload: {
         turnId: "6060",
@@ -3319,9 +3344,14 @@ describe("runtime session resilience", () => {
       }
     });
 
-    expect(store.turnTraceHistory[0]?.buildContextObservation).toEqual(startedObservation);
-    expect(store.turnTraceHistory[0]?.buildContextObservation).not.toBe(startedObservation);
-    expect(store.turnTraceHistory[0]?.traceTimeline?.map((entry) => entry.kind)).toEqual([
+    expect(store.streamDebugDeltaCount).toBe(0);
+    expect(store.streamDebugFlushCount).toBe(0);
+    expect(store.streamDebugTextCharsReceived).toBe(0);
+    expect(store.streamDebugTextCharsFlushed).toBe(0);
+
+    expect(store.traceTimeline.find((entry) => entry.kind === "build_context")?.buildContextObservation).toEqual(startedObservation);
+    expect(store.traceTimeline.find((entry) => entry.kind === "build_context")?.buildContextObservation).not.toBe(startedObservation);
+    expect(store.traceTimeline.map((entry) => entry.kind)).toEqual([
       "input",
       "prepare_retrieval",
       "build_context",
@@ -3342,9 +3372,12 @@ describe("runtime session resilience", () => {
       }
     });
 
-    expect(store.turnTraceHistory[0]?.firstTokenLatencyMs).toBe(321);
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+    expect(store.firstTokenLatencyMs).toBe(321);
+    expect(store.messages.find((message) => message.role === "assistant")?.content).toBe("partial answer");
     expect(
-      store.turnTraceHistory[0]?.traceTimeline?.find((entry) => entry.kind === "call_model" && entry.text)?.text
+      store.traceTimeline.find((entry) => entry.kind === "call_model" && entry.text)?.text
     ).toBeUndefined();
 
     eventHandlers.get("turn:phase_changed")?.({
@@ -3360,7 +3393,11 @@ describe("runtime session resilience", () => {
     });
 
     expect(store.phase).toBe("connecting");
-    expect(store.turnTraceHistory[0]?.eventType).toBe("turn.phase_changed");
+    expect(store.eventCursorByTurnId["6060"]?.eventId).toBe("event-turn-phase-changed-6060");
+    expect(store.eventCursorByTurnId["6060"]?.sequence).toBe(5);
+    expect(
+      store.traceTimeline.find((entry) => entry.kind === "call_model" && entry.text)?.text
+    ).toBe("partial answer");
 
     eventHandlers.get("turn:checkpoint_persisted")?.({
       payload: {
@@ -3375,7 +3412,8 @@ describe("runtime session resilience", () => {
     });
 
     expect(store.phase).toBe("connecting");
-    expect(store.turnTraceHistory[0]?.eventType).toBe("turn.checkpoint_persisted");
+    expect(store.eventCursorByTurnId["6060"]?.eventId).toBe("event-turn-checkpoint-6060");
+    expect(store.eventCursorByTurnId["6060"]?.sequence).toBe(6);
 
     eventHandlers.get("turn:completed")?.({
       payload: {
@@ -3532,8 +3570,8 @@ describe("runtime session resilience", () => {
     persisted = readPersistedSessions().sessions["stream-session-deferred-persist"] as {
       messages: ChatMessage[];
     };
-    expect(persisted.messages.find((message) => message.role === "assistant")?.content).toBe("partial answer");
-    expect(persisted.messages.find((message) => message.role === "assistant")?.reasoningContent).toBe("thinking");
+    expect(persisted.messages.find((message) => message.role === "assistant")?.content).toBe("");
+    expect(persisted.messages.find((message) => message.role === "assistant")?.reasoningContent ?? null).toBeNull();
 
     nowSpy.mockRestore();
   }, 10000);
@@ -3744,8 +3782,8 @@ describe("runtime session resilience", () => {
     expect(
       store.messages.find((message) => message.turnId === "7373" && message.role === "assistant")?.content
     ).toBe(assistantBeforeStaleDelta);
-    expect(store.turnTraceHistory[0]?.eventId).toBe("event-turn-tool-7373");
-    expect(store.turnTraceHistory[0]?.sequence).toBe(6);
+    expect(store.eventCursorByTurnId["7373"]?.eventId).toBe("event-turn-tool-7373");
+    expect(store.eventCursorByTurnId["7373"]?.sequence).toBe(6);
 
     eventHandlers.get("turn:tool")?.({
       payload: {
@@ -3767,8 +3805,8 @@ describe("runtime session resilience", () => {
     });
 
     expect(store.toolActivities[0]?.summary).toBe("read file done");
-    expect(store.turnTraceHistory[0]?.eventId).toBe("event-turn-tool-7373");
-    expect(store.turnTraceHistory[0]?.sequence).toBe(6);
+    expect(store.eventCursorByTurnId["7373"]?.eventId).toBe("event-turn-tool-7373");
+    expect(store.eventCursorByTurnId["7373"]?.sequence).toBe(6);
 
     nowSpy.mockRestore();
   });
@@ -4504,9 +4542,9 @@ describe("runtime session resilience", () => {
       }
     });
 
-    expect(store.turnTraceHistory[0]?.hookTraceRecords?.map((record) => record.hookName)).toEqual([
-      "observe.model"
-    ]);
+    expect(store.traceTimeline.length).toBeGreaterThan(0);
+    expect(store.toolActivities).toEqual([]);
+    expect(store.turnTraceHistory[0]?.hookTraceRecords ?? []).toEqual([]);
 
     eventHandlers.get("turn:tool")?.({
       payload: {
@@ -4539,9 +4577,8 @@ describe("runtime session resilience", () => {
       }
     });
 
-    expect(store.turnTraceHistory[0]?.hookTraceRecords?.map((record) => record.hookName)).toEqual([
-      "observe.tool-start"
-    ]);
+    expect(store.toolActivities.map((tool) => tool.name)).toEqual(["workspace.read_file"]);
+    expect(store.turnTraceHistory[0]?.hookTraceRecords ?? []).toEqual([]);
 
     eventHandlers.get("turn:completed")?.({
       payload: {
@@ -5253,5 +5290,123 @@ describe("runtime session resilience", () => {
     expect(store.branchHeadNodeId).toBe("node-head");
     expect(store.historyCursorMode).toBe("live");
     nowSpy.mockRestore();
+  });
+
+  it("derives conversation checkpoint entries from explicit turn ids and trace-backed turn ids", () => {
+    const store = useRuntimeStore();
+    store.$patch({
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-old",
+          sessionId: "checkpoint-session",
+          branchId: "branch-main",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: false },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-fork-source",
+          sessionId: "checkpoint-session",
+          branchId: "branch-main",
+          summary: "会产生 fork 的 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          turnTraceHistory: [createTurnTraceRecord({ turnId: "turn-fork-source", updatedAt: 2000 })],
+          createdAtMs: 2000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          sessionId: "checkpoint-session",
+          branchId: "branch-main",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 3000
+        }),
+        createHistoryNode({
+          nodeId: "node-unmapped",
+          sessionId: "checkpoint-session",
+          branchId: "branch-main",
+          turnId: null,
+          turnTraceHistory: [],
+          summary: "不应进入消息级 affordance",
+          createdAtMs: 4000
+        }),
+        createHistoryNode({
+          nodeId: "node-fork-target",
+          sessionId: "checkpoint-session",
+          branchId: "branch-fork",
+          turnId: "turn-fork-target",
+          summary: "fork 目标 checkpoint",
+          createdAtMs: 2500
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          sessionId: "checkpoint-session",
+          headNodeId: "node-head",
+          label: "main"
+        }),
+        createHistoryBranch({
+          branchId: "branch-fork",
+          sessionId: "checkpoint-session",
+          baseNodeId: "node-fork-source",
+          headNodeId: "node-fork-target",
+          forkedFromNodeId: "node-fork-source",
+          label: "fork-1"
+        })
+      ]
+    });
+
+    const entries = store.conversationCheckpointEntries;
+
+    expect(entries.map((entry) => entry.nodeId)).toEqual(["node-head", "node-fork-target", "node-fork-source", "node-old"]);
+    expect(entries.find((entry) => entry.nodeId === "node-unmapped")).toBeUndefined();
+    expect(entries.find((entry) => entry.nodeId === "node-old")?.availableModes).toEqual(["transcript_only"]);
+    expect(entries.find((entry) => entry.nodeId === "node-fork-source")?.turnId).toBe("turn-fork-source");
+    expect(entries.find((entry) => entry.nodeId === "node-head")?.isLatest).toBe(true);
+    expect(entries.find((entry) => entry.nodeId === "node-head")?.isVisible).toBe(true);
+    expect(entries.find((entry) => entry.nodeId === "node-fork-source")?.forkTargets).toEqual([
+      {
+        branchId: "branch-fork",
+        nodeId: "node-fork-target",
+        label: "fork-1",
+        summary: "fork 目标 checkpoint",
+        isActive: false
+      }
+    ]);
+  });
+
+  it("keeps checkpoint entries empty when no stable turn mapping exists", () => {
+    const store = useRuntimeStore();
+    store.$patch({
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-unmapped",
+      branchHeadNodeId: "node-unmapped",
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-unmapped",
+          sessionId: "checkpoint-empty-session",
+          branchId: "branch-main",
+          turnId: null,
+          turnTraceHistory: [],
+          summary: "缺少映射"
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          sessionId: "checkpoint-empty-session",
+          headNodeId: "node-unmapped",
+          label: "main"
+        })
+      ]
+    });
+
+    expect(store.conversationCheckpointEntries).toEqual([]);
   });
 });

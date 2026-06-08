@@ -1138,7 +1138,8 @@ mod tests {
             memory_write_hook_trace_records: Vec::new(),
             history_state_evidence: Vec::new(),
             history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
-            run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
+            run_control_audit_summary:
+                crate::agent::session::build_missing_run_control_audit_summary(),
             turn_count: 3,
             last_referenced_file: last_referenced_file.map(str::to_string),
             updated_at_ms: 0,

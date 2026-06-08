@@ -61,10 +61,16 @@ const providerStore = useProviderStore();
 
 const {
   availableTools,
+  activeTurnId: runtimeActiveTurnId,
   error,
   fallbackReason,
+  firstTokenLatencyMs,
+  inputTokens,
   isSubmitting,
   latestRunControlAuditSummary,
+  messages,
+  outputTokens,
+  phase,
   phaseLabel,
   providerMode,
   providerModel,
@@ -74,6 +80,10 @@ const {
   sessionError,
   sessionId,
   sessionOperation,
+  toolActivities,
+  totalTokens,
+  traceSteps,
+  traceTimeline,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
@@ -155,7 +165,50 @@ function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
   return left.turnId.localeCompare(right.turnId);
 }
 
-const orderedTurnTraces = computed(() => [...turnTraceHistory.value].sort(compareTurnTraceOrder));
+const liveTraceTurn = computed<TurnTraceRecord | null>(() => {
+  const turnId = runtimeActiveTurnId.value?.trim() || "";
+  if (!isSubmitting.value || !turnId || traceTimeline.value.length === 0) {
+    return null;
+  }
+
+  const latestUserMessage = [...messages.value]
+    .reverse()
+    .find((message) => message.turnId === turnId && message.role === "user");
+
+  return {
+    turnId,
+    title: latestUserMessage?.content?.trim() || "当前执行中",
+    phase: phase.value,
+    traceSteps: traceSteps.value,
+    traceTimeline: traceTimeline.value,
+    toolActivities: toolActivities.value,
+    providerName: providerName.value,
+    providerProtocol: providerProtocol.value,
+    providerModel: providerModel.value,
+    providerMode: providerMode.value,
+    fallbackReason: fallbackReason.value,
+    error: error.value,
+    inputTokens: inputTokens.value,
+    outputTokens: outputTokens.value,
+    totalTokens: totalTokens.value,
+    firstTokenLatencyMs: firstTokenLatencyMs.value,
+    updatedAt: Date.now()
+  };
+});
+
+const orderedTurnTraces = computed(() => {
+  const turns = [...turnTraceHistory.value];
+  const activeTurn = liveTraceTurn.value;
+  if (activeTurn) {
+    const existingIndex = turns.findIndex((turn) => turn.turnId === activeTurn.turnId);
+    if (existingIndex >= 0) {
+      turns[existingIndex] = activeTurn;
+    } else {
+      turns.push(activeTurn);
+    }
+  }
+  return turns.sort(compareTurnTraceOrder);
+});
 const latestTurn = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1] ?? null);
 const latestTurnId = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1]?.turnId ?? "");
 const currentContextWindowTokens = computed(
@@ -513,9 +566,8 @@ function tokenSpeed(turn: TurnTraceRecord) {
     return null;
   }
 
-  const activeGenerationMs = Math.max(turn.turnDurationMs, 1);
-
-  const tokensPerSecond = turn.outputTokens / (activeGenerationMs / 1000);
+  const durationMs = Math.max(turn.turnDurationMs, 1);
+  const tokensPerSecond = turn.outputTokens / (durationMs / 1000);
   return Number.isFinite(tokensPerSecond) ? tokensPerSecond : null;
 }
 
@@ -544,14 +596,9 @@ function effectiveFirstTokenLatencyMs(entry: TraceTimelineEntry, record: Provide
   return latency;
 }
 
-function activeGenerationDurationMs(entry: TraceTimelineEntry, record: ProviderCallCacheRecord | null | undefined) {
+function activeGenerationDurationMs(entry: TraceTimelineEntry, _record: ProviderCallCacheRecord | null | undefined) {
   if (entry.turnDurationMs == null) {
     return null;
-  }
-
-  const latency = effectiveFirstTokenLatencyMs(entry, record);
-  if (latency != null) {
-    return Math.max(entry.turnDurationMs - latency, 1);
   }
 
   return Math.max(entry.turnDurationMs, 1);
@@ -598,26 +645,26 @@ function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry, o
   const record = timelineProviderCallRecord(turn, entry);
   const allowTurnFallback = options.allowTurnFallback ?? true;
   const callModelEntries = turnTimeline(turn).filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model");
-  const isFinalCallModel = allowTurnFallback && callModelEntries[callModelEntries.length - 1]?.id === entry.id;
+  const useTurnFallback = allowTurnFallback && callModelEntries.length === 1 && callModelEntries[0]?.id === entry.id;
 
   return {
     ...entry,
-    inputTokens: entry.inputTokens ?? record?.inputTokens ?? (isFinalCallModel ? turn.inputTokens ?? null : null),
+    inputTokens: entry.inputTokens ?? record?.inputTokens ?? (useTurnFallback ? turn.inputTokens ?? null : null),
     cacheHitInputTokens:
-      entry.cacheHitInputTokens ?? record?.cacheHitInputTokens ?? (isFinalCallModel ? cacheHitInputTokens(turn) ?? null : null),
+      entry.cacheHitInputTokens ?? record?.cacheHitInputTokens ?? (useTurnFallback ? cacheHitInputTokens(turn) ?? null : null),
     reasoningTokens:
-      entry.reasoningTokens ?? record?.reasoningTokens ?? (isFinalCallModel ? reasoningTokens(turn) ?? null : null),
-    outputTokens: entry.outputTokens ?? record?.outputTokens ?? (isFinalCallModel ? turn.outputTokens ?? null : null),
-    totalTokens: entry.totalTokens ?? record?.totalTokens ?? (isFinalCallModel ? turn.totalTokens ?? null : null),
+      entry.reasoningTokens ?? record?.reasoningTokens ?? (useTurnFallback ? reasoningTokens(turn) ?? null : null),
+    outputTokens: entry.outputTokens ?? record?.outputTokens ?? (useTurnFallback ? turn.outputTokens ?? null : null),
+    totalTokens: entry.totalTokens ?? record?.totalTokens ?? (useTurnFallback ? turn.totalTokens ?? null : null),
     firstTokenLatencyMs: effectiveFirstTokenLatencyMs(
       {
         ...entry,
-        firstTokenLatencyMs: record?.firstTokenLatencyMs ?? entry.firstTokenLatencyMs ?? (isFinalCallModel ? turn.firstTokenLatencyMs ?? null : null),
-        turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (isFinalCallModel ? turn.turnDurationMs ?? null : null)
+        firstTokenLatencyMs: record?.firstTokenLatencyMs ?? entry.firstTokenLatencyMs ?? (useTurnFallback ? turn.firstTokenLatencyMs ?? null : null),
+        turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
       },
       record
     ),
-    turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (isFinalCallModel ? turn.turnDurationMs ?? null : null)
+    turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
   };
 }
 
@@ -1188,17 +1235,20 @@ watch(sessionId, () => {
   expandedResultKeys.value = [];
 });
 
-watch(
-  orderedTurnTraces,
-  (turns) => {
-    if (!turns.some((turn) => turn.turnId === activeTurnId.value)) {
-      activeTurnId.value = turns[turns.length - 1]?.turnId ?? "";
-      activeTraceStepKey.value = "";
-      activeTraceDetailKey.value = "";
-    }
-  },
-  { deep: true }
+const orderedTurnTraceSignature = computed(() =>
+  orderedTurnTraces.value
+    .map((turn) => `${turn.turnId}:${turn.updatedAt}:${turn.phase}:${turn.traceTimeline?.length ?? 0}`)
+    .join("|")
 );
+
+watch(orderedTurnTraceSignature, () => {
+  const turns = orderedTurnTraces.value;
+  if (!turns.some((turn) => turn.turnId === activeTurnId.value)) {
+    activeTurnId.value = turns[turns.length - 1]?.turnId ?? "";
+    activeTraceStepKey.value = "";
+    activeTraceDetailKey.value = "";
+  }
+});
 </script>
 
 <template>

@@ -6,7 +6,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  CircleAlert,
   MessageSquareMore,
   Plus,
   Settings2,
@@ -18,13 +17,9 @@ import { useRuntimeStore } from "@/stores/runtime";
 import type { ChatMessage, SessionOverview } from "@/types/runtime";
 
 const SESSION_SIDEBAR_STORAGE_KEY = "pony-agent.session-sidebar-collapsed.v1";
-const HISTORY_OPEN_STORAGE_KEY = "pony-agent.session-sidebar-history-open.v1";
 const MODEL_OPEN_STORAGE_KEY = "pony-agent.session-sidebar-model-open.v1";
 
 type NavigationPage = "home" | "providers" | "model-monitor";
-type SectionKey = "history" | "model";
-type FeedbackTone = "info" | "warning" | "success";
-type ExplainabilityTone = "info" | "warning" | "success";
 
 const props = withDefaults(
   defineProps<{
@@ -41,34 +36,16 @@ const emit = defineEmits<{
 
 const runtimeStore = useRuntimeStore();
 const {
-  activeBranchId,
-  branchHeadNodeId,
-  historyBranches,
-  historyCursorMode,
-  historyNodes,
   isSubmitting,
-  latestExecutionCheckpoint,
-  latestGraphRunControlBoundaryEvidence,
-  latestRunControlAuditSummary,
-  latestHistoryStateAuditSummary,
-  latestGraphRunSubmissionPlan,
   messages,
-  phase,
   sessionId,
   sessionList,
-  sessionOperation,
-  visibleNodeId
+  sessionOperation
 } = storeToRefs(runtimeStore);
 
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
-const historyOpen = ref(loadStoredBoolean(HISTORY_OPEN_STORAGE_KEY, true));
 const modelOpen = ref(loadStoredBoolean(MODEL_OPEN_STORAGE_KEY, true));
 const pendingDeleteSessionId = ref<string | null>(null);
-const historyFeedback = ref<{
-  tone: FeedbackTone;
-  title: string;
-  text: string;
-} | null>(null);
 const menuInteractiveClass =
   "rounded-[0.2rem] transition-colors hover:bg-[#f6dfb8] hover:text-stone-900";
 const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
@@ -100,282 +77,6 @@ const visibleSessions = computed<SessionOverview[]>(() => {
     ...sessionList.value.filter((session) => session.conversationId !== sessionId.value)
   ];
 });
-
-const sortedHistoryNodes = computed(() =>
-  [...historyNodes.value].sort((left, right) => right.createdAtMs - left.createdAtMs).slice(0, 8)
-);
-
-const sortedHistoryBranches = computed(() =>
-  [...historyBranches.value].sort((left, right) => right.updatedAtMs - left.updatedAtMs)
-);
-
-const canManageHistory = computed(
-  () => !isSubmitting.value && !sessionOperation.value && historyNodes.value.length > 0
-);
-
-const hasHistoryNodes = computed(() => historyNodes.value.length > 0);
-
-const isHistoricalMode = computed(() => historyCursorMode.value !== "live");
-
-const historyModeMeta = computed(() => {
-  switch (historyCursorMode.value) {
-    case "historical":
-      return {
-        label: "历史浏览",
-        summary: "当前正在查看历史节点；恢复后会回到最新分支头。",
-        badgeClass: "bg-amber-100 text-amber-700"
-      };
-    case "historical_dirty":
-      return {
-        label: "历史分叉待处理",
-        summary: "当前视图已偏离最新分支头；请恢复、分叉或切换分支后继续。",
-        badgeClass: "bg-rose-100 text-rose-700"
-      };
-    default:
-      return {
-        label: "最新节点",
-        summary: "当前会话位于最新分支头，可直接开始下一轮执行。",
-        badgeClass: "bg-emerald-100 text-emerald-700"
-      };
-  }
-});
-
-const sessionControlMeta = computed(() => {
-  if (isSubmitting.value) {
-    return {
-      label: "运行中",
-      summary: "当前回合正在执行，可在工作区显式停止并等待安全边界暂停。",
-      badgeClass: "bg-sky-100 text-sky-700"
-    };
-  }
-
-  const actionSummary = latestRunControlAuditSummary.value?.actionEvidenceSummary ?? null;
-  const currentContext = latestRunControlAuditSummary.value?.currentContextProjection ?? null;
-  const planCommand = latestGraphRunSubmissionPlan.value?.command?.trim().toLowerCase() || null;
-  const checkpointCommand = latestExecutionCheckpoint.value?.submissionCommand?.trim().toLowerCase() || null;
-  const projectedCommand = actionSummary?.projectedCommand?.trim().toLowerCase() || null;
-  const command = projectedCommand || planCommand || checkpointCommand;
-  const checkpoint = latestExecutionCheckpoint.value;
-
-  if (actionSummary?.commandKind === "stop_graph_run") {
-    return {
-      label: actionSummary.blocked ? "停止受阻" : "已请求停止",
-      summary:
-        actionSummary.summary?.trim() ||
-        "最近一次会话控制动作请求停止当前运行，等待下次提交时决定恢复或重放。",
-      badgeClass: actionSummary.blocked ? "bg-amber-100 text-amber-700" : "bg-amber-100 text-amber-700"
-    };
-  }
-
-  if (command === "resume_graph_run_stream") {
-    return {
-      label: "可恢复",
-      summary:
-        actionSummary?.summary?.trim() ||
-        "存在暂停中的运行；下一次发送会恢复该 run 并继续推进。",
-      badgeClass: "bg-sky-100 text-sky-700"
-    };
-  }
-
-  if (command === "continue_graph_run_stream") {
-    return {
-      label: "可继续",
-      summary:
-        actionSummary?.summary?.trim() ||
-        "存在可继续的 graph run；下一次发送会接着当前运行推进。",
-      badgeClass: "bg-violet-100 text-violet-700"
-    };
-  }
-
-  if (
-    actionSummary?.startReason === "replay_from_checkpoint" ||
-    actionSummary?.startReason === "restart_from_checkpoint" ||
-    actionSummary?.degraded ||
-    checkpoint?.recoveryMode === "replay_required" ||
-    checkpoint?.checkpointKind === "lifecycle_boundary" ||
-    (command === "start_graph_run_stream" &&
-      latestGraphRunSubmissionPlan.value?.source?.trim().toLowerCase() === "checkpoint")
-  ) {
-    return {
-      label: "需重新开始",
-      summary:
-        actionSummary?.summary?.trim() ||
-        "当前恢复点只保留持久化事实；下一次发送会重新开始新的执行。",
-      badgeClass: "bg-stone-200 text-stone-700"
-    };
-  }
-
-  if (currentContext?.phase?.trim().toLowerCase() === "paused") {
-    return {
-      label: "可恢复",
-      summary: "当前运行停在安全边界；下一次发送可继续恢复。",
-      badgeClass: "bg-sky-100 text-sky-700"
-    };
-  }
-
-  if (phase.value === "cancelled") {
-    return {
-      label: "已停止",
-      summary: "上一轮已停止；可在工作区选择恢复继续或重新开始。",
-      badgeClass: "bg-amber-100 text-amber-700"
-    };
-  }
-
-  return {
-    label: "当前会话",
-    summary: "未检测到暂停或恢复点；下一次发送会启动新的执行。",
-    badgeClass: "bg-emerald-100 text-emerald-700"
-  };
-});
-
-const latestControlBoundaryEvidenceText = computed(() => {
-  const actionSummary = latestRunControlAuditSummary.value?.actionEvidenceSummary ?? null;
-  const currentContext = latestRunControlAuditSummary.value?.currentContextProjection ?? null;
-
-  if (actionSummary?.summary?.trim()) {
-    const badge = actionSummary.status?.trim().toLowerCase() === "missing" ? "控制证据缺失" : "控制摘要";
-    const detail = [actionSummary.commandKind, actionSummary.boundary, actionSummary.resultKind]
-      .filter(Boolean)
-      .join(" · ");
-    const contextDetail = [
-      currentContext?.phase ? `phase ${currentContext.phase}` : null,
-      currentContext?.submissionPlanCommand ? `next ${currentContext.submissionPlanCommand}` : null
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    return [badge, actionSummary.summary.trim(), detail || contextDetail].filter(Boolean).join("：");
-  }
-
-  const latestEvidence = latestGraphRunControlBoundaryEvidence.value[0];
-
-  if (!latestEvidence) {
-    return "";
-  }
-
-  const summary = latestEvidence.summary?.trim();
-  if (summary) {
-    return `边界依据：${summary}`;
-  }
-
-  return `边界依据：${latestEvidence.canonicalPhase} · ${latestEvidence.hookPoint}`;
-});
-
-const historyActionEvidenceMeta = computed(() => {
-  const action = latestHistoryStateAuditSummary.value?.action;
-
-  if (!action) {
-    return null;
-  }
-
-  const normalizedStatus = action.status?.trim().toLowerCase() || "";
-  let badge = "已记录";
-  let tone: ExplainabilityTone = "success";
-
-  if (action.blocked) {
-    badge = "已阻断";
-    tone = "warning";
-  } else if (action.degraded) {
-    badge = "已降级";
-    tone = "warning";
-  } else if (normalizedStatus === "missing") {
-    badge = "证据缺失";
-    tone = "warning";
-  } else if (normalizedStatus && normalizedStatus !== "available") {
-    badge = normalizedStatus;
-    tone = "info";
-  }
-
-  return {
-    badge,
-    tone,
-    summary: action.summary?.trim() || "最近一次 history-control 动作尚未返回可展示的证据摘要。",
-    detail: [action.commandKind, action.boundary, action.resultKind].filter(Boolean).join(" · ")
-  };
-});
-
-const historyCurrentContextMeta = computed(() => {
-  const currentContext = latestHistoryStateAuditSummary.value?.currentContext ?? {
-    mode: historyCursorMode.value,
-    visibleNodeId: visibleNodeId.value,
-    activeBranchId: activeBranchId.value,
-    branchHeadNodeId: branchHeadNodeId.value
-  };
-
-  return {
-    summary: `模式 ${formatHistoryCursorMode(currentContext.mode)} · 分支 ${
-      currentContext.activeBranchId || "main"
-    } · 可见 ${currentContext.visibleNodeId || "latest"}`,
-    detail: [
-      currentContext.branchHeadNodeId ? `分支头 ${currentContext.branchHeadNodeId}` : null,
-      currentContext.workspaceNodeId ? `工作区 ${currentContext.workspaceNodeId}` : null
-    ]
-      .filter(Boolean)
-      .join(" · ")
-  };
-});
-
-const historyCheckoutDisabledReason = computed(() => {
-  if (isSubmitting.value) {
-    return "运行中不可切换历史节点，请先停止当前执行。";
-  }
-  if (sessionOperation.value) {
-    return "当前正在处理会话切换或删除，暂时不可切换历史节点。";
-  }
-  if (!hasHistoryNodes.value) {
-    return "当前会话还没有可回退的历史节点。";
-  }
-  return null;
-});
-
-const historyRestoreDisabledReason = computed(() => {
-  if (isSubmitting.value) {
-    return "运行中不可恢复到分支头，请先停止当前执行。";
-  }
-  if (sessionOperation.value) {
-    return "当前正在处理会话切换或删除，暂时不可恢复到分支头。";
-  }
-  if (!hasHistoryNodes.value) {
-    return "当前会话还没有可恢复的历史节点。";
-  }
-  if (!isHistoricalMode.value) {
-    return "只有在历史浏览或历史分叉状态下，才需要恢复到分支头。";
-  }
-  return null;
-});
-
-const historyForkDisabledReason = computed(() => {
-  if (isSubmitting.value) {
-    return "运行中不可从历史节点分叉，请先停止当前执行。";
-  }
-  if (sessionOperation.value) {
-    return "当前正在处理会话切换或删除，暂时不可分叉。";
-  }
-  if (!visibleNodeId.value) {
-    return "当前没有可见历史节点，无法从中创建分支。";
-  }
-  return null;
-});
-
-const historyBranchSwitchDisabledReason = computed(() => {
-  if (isSubmitting.value) {
-    return "运行中不可切换分支，请先停止当前执行。";
-  }
-  if (sessionOperation.value) {
-    return "当前正在处理会话切换或删除，暂时不可切换分支。";
-  }
-  if (!sortedHistoryBranches.value.length) {
-    return "当前没有可切换的历史分支。";
-  }
-  return null;
-});
-
-const historyActionDisabledHint = computed(
-  () =>
-    historyRestoreDisabledReason.value ||
-    historyForkDisabledReason.value ||
-    historyBranchSwitchDisabledReason.value ||
-    historyCheckoutDisabledReason.value
-);
 
 const asideClass = computed(() =>
   collapsed.value
@@ -409,34 +110,13 @@ function toggleCollapsed() {
   persistStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, collapsed.value);
 }
 
-function toggleSection(section: SectionKey) {
-  if (section === "history") {
-    historyOpen.value = !historyOpen.value;
-    persistStoredBoolean(HISTORY_OPEN_STORAGE_KEY, historyOpen.value);
-    return;
-  }
-
+function toggleModelSection() {
   modelOpen.value = !modelOpen.value;
   persistStoredBoolean(MODEL_OPEN_STORAGE_KEY, modelOpen.value);
 }
 
 function navigate(page: NavigationPage) {
   emit("navigate", page);
-}
-
-function openHistoryHome() {
-  historyOpen.value = true;
-  persistStoredBoolean(HISTORY_OPEN_STORAGE_KEY, true);
-  navigate("home");
-}
-
-function handleHistoryToggle() {
-  if (props.currentPage !== "home") {
-    openHistoryHome();
-    return;
-  }
-
-  toggleSection("history");
 }
 
 function openSessionHistory(conversationId: string) {
@@ -509,161 +189,6 @@ async function handleDeleteSession(session: SessionOverview) {
   pendingDeleteSessionId.value = null;
   await runtimeStore.deleteSession(session.conversationId);
 }
-
-function formatHistoryNodeTime(createdAtMs?: number | null) {
-  if (!createdAtMs) {
-    return "刚刚";
-  }
-
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(createdAtMs);
-}
-
-function formatHistoryNodeKind(kind: string) {
-  switch (kind) {
-    case "turn_cancelled":
-      return "已中止";
-    case "run_paused":
-      return "暂停";
-    case "checkpoint":
-      return "检查点";
-    case "manual_snapshot":
-      return "手动快照";
-    default:
-      return "已提交";
-  }
-}
-
-function formatHistoryCursorMode(mode: string) {
-  switch (mode) {
-    case "historical":
-      return "历史浏览";
-    case "historical_dirty":
-      return "历史分叉待处理";
-    default:
-      return "最新节点";
-  }
-}
-
-function describeDegradationReason(reason?: string | null) {
-  switch (reason?.trim().toLowerCase()) {
-    case "workspace_rollback_unsupported":
-      return "当前工作区暂不支持回滚，所以只恢复了对话";
-    default:
-      return "当前操作发生了降级";
-  }
-}
-
-function feedbackClass(tone: FeedbackTone) {
-  switch (tone) {
-    case "warning":
-      return "border-amber-200/80 bg-amber-50 text-amber-800";
-    case "success":
-      return "border-emerald-200/80 bg-emerald-50 text-emerald-800";
-    default:
-      return "border-stone-200/80 bg-white text-stone-700";
-  }
-}
-
-function explainabilityClass(tone: ExplainabilityTone) {
-  switch (tone) {
-    case "warning":
-      return "border-amber-200/80 bg-amber-50 text-amber-800";
-    case "success":
-      return "border-emerald-200/80 bg-emerald-50 text-emerald-800";
-    default:
-      return "border-stone-200/80 bg-stone-50 text-stone-700";
-  }
-}
-
-async function handleCheckoutHistoryNode(nodeId: string) {
-  if (!canManageHistory.value) {
-    return;
-  }
-  const result = await runtimeStore.checkoutHistoryNode(nodeId, "transcript_and_workspace");
-  if (!result) {
-    return;
-  }
-
-  if (result.degraded || result.degradedToTranscriptOnly) {
-    historyFeedback.value = {
-      tone: "warning",
-      title: "仅恢复对话，未恢复工作区",
-      text: `${describeDegradationReason(result.degradationReason)}。当前分支 ${
-        result.activeBranchId || "main"
-      }，可见节点 ${result.visibleNodeId || "latest"}。`
-    };
-    return;
-  }
-
-  historyFeedback.value = {
-    tone: "success",
-    title: "已切换到历史节点",
-    text: `当前分支 ${result.activeBranchId || "main"}，可见节点 ${
-      result.visibleNodeId || "latest"
-    }，状态 ${historyModeMeta.value.label}。`
-  };
-}
-
-async function handleRestoreBranchHead() {
-  if (!canManageHistory.value) {
-    return;
-  }
-  const result = await runtimeStore.restoreBranchHead(activeBranchId.value);
-  if (!result) {
-    return;
-  }
-
-  historyFeedback.value = {
-    tone: "success",
-    title: "已恢复到分支头",
-    text: `当前分支 ${result.activeBranchId || "main"}，可见节点 ${
-      result.visibleNodeId || result.branchHeadNodeId || "latest"
-    }，已回到最新视图。`
-  };
-}
-
-async function handleForkFromVisibleNode() {
-  if (!canManageHistory.value || !visibleNodeId.value) {
-    return;
-  }
-  const result = await runtimeStore.forkHistoryNode(visibleNodeId.value);
-  if (!result) {
-    return;
-  }
-
-  historyFeedback.value = {
-    tone: "success",
-    title: "已创建历史分支",
-    text: `已从节点 ${result.nodeId || result.forkedFromNodeId} 分叉到分支 ${
-      result.branch?.branchId || result.createdBranchId
-    }，当前可见节点 ${
-      result.visibleNodeId || result.nodeId || result.forkedFromNodeId
-    }。`
-  };
-}
-
-async function handleSwitchBranch(branchId: string) {
-  if (!canManageHistory.value) {
-    return;
-  }
-  const result = await runtimeStore.switchHistoryBranch(branchId);
-  if (!result) {
-    return;
-  }
-
-  historyFeedback.value = {
-    tone: "info",
-    title: "已切换历史分支",
-    text: `已从分支 ${result.previousBranchId || "main"} 切换到 ${
-      result.activeBranchId || result.branchId || branchId
-    }，当前可见节点 ${result.visibleNodeId || result.branchHeadNodeId || "latest"}。`
-  };
-}
 </script>
 
 <template>
@@ -732,9 +257,9 @@ async function handleSwitchBranch(branchId: string) {
               : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
           "
           type="button"
-          title="对话历史"
-          data-testid="session-sidebar-history-collapsed"
-          @click="openHistoryHome()"
+          title="对话工作区"
+          data-testid="session-sidebar-home-collapsed"
+          @click="navigate('home')"
         >
           <MessageSquareMore class="h-4 w-4" />
         </button>
@@ -787,203 +312,14 @@ async function handleSwitchBranch(branchId: string) {
         </div>
 
         <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="pr-1.5"><div class="flex flex-col gap-2">
-          <section class="rounded-[0.5rem]" data-testid="session-sidebar-history-panel">
-            <button
-              class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
-              :class="[menuInteractiveClass, props.currentPage === 'home' ? menuSelectedClass : 'text-stone-800']"
-              type="button"
-              data-testid="session-sidebar-history-toggle"
-              @click="handleHistoryToggle"
-            >
+          <section class="rounded-[0.5rem]" data-testid="session-sidebar-session-list">
+            <div class="px-1.5 py-2">
               <div class="flex items-center gap-2 text-[12px] font-medium text-stone-800">
                 <MessageSquareMore class="h-3.5 w-3.5" />
-                <span>对话历史</span>
+                <span>对话</span>
               </div>
-              <ChevronDown class="h-4 w-4 text-stone-400 transition" :class="{ 'rotate-180': historyOpen }" />
-            </button>
-
-            <ScrollArea
-              v-if="historyOpen"
-              class="min-h-0 flex-1"
-              viewport-class="h-full w-full pr-1"
-              data-testid="session-sidebar-history"
-            >
-              <div class="space-y-1.5 py-1">
-                <div
-                  class="rounded-[0.45rem] border border-stone-200/80 bg-[#fcf7ef] px-2 py-2"
-                  data-testid="session-sidebar-history-graph"
-                >
-                  <div class="flex items-center justify-between gap-2">
-                    <div class="min-w-0">
-                      <div class="text-[11px] font-medium text-stone-800">
-                        {{ isHistoricalMode ? "历史浏览中" : "当前在最新节点" }}
-                      </div>
-                      <div class="mt-0.5 truncate text-[10px] text-stone-500">
-                        分支 {{ activeBranchId || "main" }} · 可见 {{ visibleNodeId || "latest" }}
-                      </div>
-                      <div class="mt-1 text-[10px] leading-4 text-stone-500">
-                        {{ historyModeMeta.summary }}
-                      </div>
-                    </div>
-                    <span class="rounded-full px-2 py-0.5 text-[10px]" :class="historyModeMeta.badgeClass">
-                      {{ historyModeMeta.label }}
-                    </span>
-                  </div>
-
-                  <div
-                    class="mt-2 rounded-[0.4rem] border border-stone-200/80 bg-white/90 px-2 py-2"
-                    data-testid="session-sidebar-control-status"
-                  >
-                    <div class="flex items-center justify-between gap-2">
-                      <div class="text-[10px] font-medium text-stone-700">会话控制</div>
-                      <span class="rounded-full px-2 py-0.5 text-[10px]" :class="sessionControlMeta.badgeClass">
-                        {{ sessionControlMeta.label }}
-                      </span>
-                    </div>
-                    <div class="mt-1 text-[10px] leading-4 text-stone-500">
-                      {{ sessionControlMeta.summary }}
-                    </div>
-                    <div
-                      v-if="latestControlBoundaryEvidenceText"
-                      class="mt-1 rounded-[0.35rem] bg-stone-50 px-2 py-1 text-[10px] leading-4 text-stone-500"
-                      data-testid="session-sidebar-control-boundary-evidence"
-                    >
-                      {{ latestControlBoundaryEvidenceText }}
-                    </div>
-                  </div>
-
-                  <div
-                    v-if="historyActionEvidenceMeta"
-                    class="mt-2 rounded-[0.4rem] border px-2 py-2"
-                    :class="explainabilityClass(historyActionEvidenceMeta.tone)"
-                    data-testid="session-sidebar-history-action-evidence"
-                  >
-                    <div class="flex items-center justify-between gap-2">
-                      <div class="text-[10px] font-medium">最近动作证据</div>
-                      <span class="rounded-full px-2 py-0.5 text-[10px]">{{ historyActionEvidenceMeta.badge }}</span>
-                    </div>
-                    <div class="mt-1 text-[10px] leading-4">
-                      {{ historyActionEvidenceMeta.summary }}
-                    </div>
-                    <div v-if="historyActionEvidenceMeta.detail" class="mt-1 text-[10px] leading-4 opacity-75">
-                      {{ historyActionEvidenceMeta.detail }}
-                    </div>
-                  </div>
-
-                  <div
-                    class="mt-2 rounded-[0.4rem] border border-stone-200/80 bg-stone-50 px-2 py-2 text-stone-700"
-                    data-testid="session-sidebar-history-current-context"
-                  >
-                    <div class="text-[10px] font-medium">当前上下文（非动作证据）</div>
-                    <div class="mt-1 text-[10px] leading-4">
-                      {{ historyCurrentContextMeta.summary }}
-                    </div>
-                    <div v-if="historyCurrentContextMeta.detail" class="mt-1 text-[10px] leading-4 opacity-75">
-                      {{ historyCurrentContextMeta.detail }}
-                    </div>
-                  </div>
-
-                  <div class="mt-2 flex flex-wrap gap-1.5">
-                    <button
-                      class="rounded-[0.35rem] border border-stone-200 bg-white px-2 py-1 text-[10px] text-stone-700 transition hover:border-stone-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:text-stone-300"
-                      type="button"
-                      :disabled="!canManageHistory || !isHistoricalMode"
-                      :title="historyRestoreDisabledReason || '恢复到当前分支头，并回到最新视图。'"
-                      data-testid="session-sidebar-history-restore"
-                      @click="handleRestoreBranchHead"
-                    >
-                      恢复到分支头
-                    </button>
-                    <button
-                      class="rounded-[0.35rem] border border-stone-200 bg-white px-2 py-1 text-[10px] text-stone-700 transition hover:border-stone-300 hover:text-stone-900 disabled:cursor-not-allowed disabled:text-stone-300"
-                      type="button"
-                      :disabled="!canManageHistory || !visibleNodeId"
-                      :title="historyForkDisabledReason || '从当前可见历史节点创建新分支。'"
-                      data-testid="session-sidebar-history-fork"
-                      @click="handleForkFromVisibleNode"
-                    >
-                      从当前节点分叉
-                    </button>
-                  </div>
-
-                  <div
-                    v-if="historyActionDisabledHint"
-                    class="mt-2 rounded-[0.35rem] border border-dashed border-stone-200 bg-stone-50 px-2 py-1.5 text-[10px] leading-4 text-stone-500"
-                    data-testid="session-sidebar-history-disabled-reason"
-                  >
-                    {{ historyActionDisabledHint }}
-                  </div>
-
-                  <div
-                    v-if="historyFeedback"
-                    class="mt-2 rounded-[0.4rem] border px-2 py-2"
-                    :class="feedbackClass(historyFeedback.tone)"
-                    data-testid="session-sidebar-history-feedback"
-                  >
-                    <div class="flex items-start gap-2">
-                      <CircleAlert class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <div class="min-w-0">
-                        <div class="text-[10px] font-medium">{{ historyFeedback.title }}</div>
-                        <div class="mt-0.5 text-[10px] leading-4">
-                          {{ historyFeedback.text }}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div v-if="sortedHistoryBranches.length" class="mt-2 flex flex-wrap gap-1.5">
-                    <button
-                      v-for="branch in sortedHistoryBranches"
-                      :key="branch.branchId"
-                      class="rounded-full border px-2 py-0.5 text-[10px] transition"
-                      :class="
-                        branch.branchId === activeBranchId
-                          ? 'border-[#d8a15d] bg-[#f3c98d] text-stone-900'
-                          : 'border-stone-200 bg-white text-stone-500 hover:border-stone-300 hover:text-stone-800'
-                      "
-                      type="button"
-                      :disabled="!canManageHistory"
-                      :title="historyBranchSwitchDisabledReason || '切换到该分支的当前头节点。'"
-                      :data-testid="`session-sidebar-history-branch-${branch.branchId}`"
-                      @click="handleSwitchBranch(branch.branchId)"
-                    >
-                      {{ branch.label || branch.branchId }}
-                    </button>
-                  </div>
-
-                  <div v-if="hasHistoryNodes" class="mt-2 space-y-1">
-                    <button
-                      v-for="node in sortedHistoryNodes"
-                      :key="node.nodeId"
-                      class="w-full rounded-[0.35rem] border px-2 py-1.5 text-left transition"
-                      :class="
-                        node.nodeId === visibleNodeId
-                          ? 'border-[#d8a15d] bg-white text-stone-900'
-                          : 'border-transparent bg-white/70 text-stone-600 hover:border-stone-200 hover:text-stone-900'
-                      "
-                      type="button"
-                      :disabled="!canManageHistory"
-                      :title="historyCheckoutDisabledReason || '切换到该历史节点，并尝试恢复工作区。'"
-                      :data-testid="`session-sidebar-history-node-${node.nodeId}`"
-                      @click="handleCheckoutHistoryNode(node.nodeId)"
-                    >
-                      <div class="flex items-center justify-between gap-2">
-                        <span class="truncate text-[11px] font-medium">
-                          {{ node.summary || node.nodeId }}
-                        </span>
-                        <span class="text-[10px] text-stone-400">{{ formatHistoryNodeTime(node.createdAtMs) }}</span>
-                      </div>
-                      <div class="mt-0.5 flex items-center gap-2 text-[10px] text-stone-400">
-                        <span>{{ formatHistoryNodeKind(node.kind) }}</span>
-                        <span>{{ node.branchId }}</span>
-                        <span v-if="node.nodeId === branchHeadNodeId">branch head</span>
-                      </div>
-                    </button>
-                  </div>
-
-                  <div v-else class="mt-2 text-[10px] text-stone-400">当前会话还没有可回退的历史节点。</div>
-                </div>
-
+            </div>
+            <div class="space-y-1.5 py-1">
                 <div
                   v-for="session in visibleSessions"
                   :key="session.conversationId"
@@ -1043,8 +379,7 @@ async function handleSwitchBranch(branchId: string) {
                     </button>
                   </div>
                 </div>
-              </div>
-            </ScrollArea>
+            </div>
           </section>
 
           <section class="rounded-[0.5rem]" data-testid="session-sidebar-model-nav">
@@ -1058,7 +393,7 @@ async function handleSwitchBranch(branchId: string) {
               ]"
               type="button"
               data-testid="session-sidebar-model-toggle"
-              @click="toggleSection('model')"
+              @click="toggleModelSection"
             >
               <div class="flex items-center gap-2 text-[12px] font-medium text-stone-800">
                 <Settings2 class="h-3.5 w-3.5" />

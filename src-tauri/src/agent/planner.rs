@@ -111,11 +111,12 @@ impl TurnPlanner for LocalTurnPlanner {
         provider_tool_call: Option<ToolCall>,
     ) -> Option<ToolCall> {
         let local_tool_call = Self::infer_local_tool_call(user_message, history);
+        let explicit_paths = Self::extract_explicit_paths(user_message);
         let explicit_skill_call =
             Self::infer_explicit_skill_tool_call(user_message, available_skills);
         match (provider_tool_call, local_tool_call) {
             (Some(provider), Some(local))
-                if Self::should_prefer_local_tool_call(&provider, &local) =>
+                if Self::should_prefer_local_tool_call(&provider, &local, explicit_paths.len()) =>
             {
                 Some(local)
             }
@@ -161,13 +162,15 @@ impl LocalTurnPlanner {
     fn should_prefer_local_tool_call(
         provider_tool_call: &ToolCall,
         local_tool_call: &ToolCall,
+        explicit_path_count: usize,
     ) -> bool {
         let local_has_explicit_plan = local_tool_call.plan.is_some();
         let local_is_multi_path = local_tool_call.name == "workspace_batch"
             || local_tool_call.arguments.get("paths").is_some();
         let provider_is_single_path = provider_tool_call.arguments.get("paths").is_none();
 
-        local_has_explicit_plan
+        explicit_path_count >= 2
+            && local_has_explicit_plan
             && local_is_multi_path
             && provider_is_single_path
             && (provider_tool_call.name != local_tool_call.name

@@ -26,7 +26,14 @@ use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
 use agent::session::SessionOverview;
 use agent::tools::ToolDefinition;
+use serde_json::{json, Value};
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
+
+#[derive(Default)]
+struct StreamDebugMetricsState {
+    latest: Mutex<Value>,
+}
 
 #[tauri::command]
 fn health_check(control_plane: State<'_, HostControlPlane>) -> HostHealthSnapshot {
@@ -403,9 +410,45 @@ fn inspect_skill(
     control_plane.inspect_skill(SkillInspectionQuery { skill_id })
 }
 
+#[tauri::command]
+fn record_stream_debug_metrics(
+    section: String,
+    payload: Value,
+    state: State<'_, StreamDebugMetricsState>,
+) -> Result<(), String> {
+    let mut latest = state
+        .latest
+        .lock()
+        .map_err(|_| "stream debug lock poisoned".to_string())?;
+    let current = latest.as_object().cloned().unwrap_or_default();
+    let mut next = serde_json::Map::new();
+    for (key, value) in current {
+        next.insert(key, value);
+    }
+    next.insert(section.clone(), payload.clone());
+    *latest = Value::Object(next);
+    println!(
+        "[pony-agent][stream-debug] section={} payload={}",
+        section, payload
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn load_stream_debug_metrics(state: State<'_, StreamDebugMetricsState>) -> Result<Value, String> {
+    let latest = state
+        .latest
+        .lock()
+        .map_err(|_| "stream debug lock poisoned".to_string())?;
+    Ok(latest.clone())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(HostControlPlane::new())
+        .manage(StreamDebugMetricsState {
+            latest: Mutex::new(json!({})),
+        })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(icon) = app.default_window_icon().cloned() {
@@ -451,6 +494,8 @@ pub fn run() {
             load_execution_checkpoint,
             load_graph_run_checkpoint,
             inspect_host,
+            record_stream_debug_metrics,
+            load_stream_debug_metrics,
             save_provider_registry,
             save_provider_registry_without_env_sync
         ])
