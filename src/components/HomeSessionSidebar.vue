@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  LoaderCircle,
   MessageSquareMore,
   Plus,
   Settings2,
@@ -46,6 +47,7 @@ const {
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
 const modelOpen = ref(loadStoredBoolean(MODEL_OPEN_STORAGE_KEY, true));
 const pendingDeleteSessionId = ref<string | null>(null);
+const deletingSessionId = ref<string | null>(null);
 const menuInteractiveClass =
   "rounded-[0.2rem] transition-colors hover:bg-[#f6dfb8] hover:text-stone-900";
 const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
@@ -176,6 +178,10 @@ function canDeleteSession(session: SessionOverview) {
   return !isSubmitting.value && !sessionOperation.value && !isTransientSession(session);
 }
 
+function isDeletingSession(session: SessionOverview) {
+  return deletingSessionId.value === session.conversationId;
+}
+
 async function handleDeleteSession(session: SessionOverview) {
   if (!canDeleteSession(session)) {
     return;
@@ -187,7 +193,20 @@ async function handleDeleteSession(session: SessionOverview) {
   }
 
   pendingDeleteSessionId.value = null;
-  await runtimeStore.deleteSession(session.conversationId);
+  deletingSessionId.value = session.conversationId;
+  try {
+    await runtimeStore.deleteSession(session.conversationId);
+  } finally {
+    if (deletingSessionId.value === session.conversationId) {
+      deletingSessionId.value = null;
+    }
+  }
+}
+
+function clearPendingDeleteSession(session: SessionOverview) {
+  if (pendingDeleteSessionId.value === session.conversationId) {
+    pendingDeleteSessionId.value = null;
+  }
 }
 </script>
 
@@ -325,9 +344,9 @@ async function handleDeleteSession(session: SessionOverview) {
                   :key="session.conversationId"
                   class="group rounded-[0.2rem]"
                   :class="[
-                    session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass,
-                    pendingDeleteSessionId === session.conversationId ? 'bg-rose-50 text-rose-700' : ''
+                    session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass
                   ]"
+                  @mouseleave="clearPendingDeleteSession(session)"
                 >
                   <div class="flex items-center gap-2 px-1.5 py-1.5">
                     <button
@@ -354,9 +373,11 @@ async function handleDeleteSession(session: SessionOverview) {
                     </button>
 
                     <button
-                      class="inline-flex shrink-0 cursor-pointer items-center justify-center text-[10px] text-stone-400 transition hover:cursor-pointer hover:text-rose-600 disabled:cursor-not-allowed disabled:text-stone-300"
+                      class="pointer-events-none inline-flex shrink-0 cursor-pointer items-center justify-center text-[10px] text-stone-400 opacity-0 transition hover:cursor-pointer hover:text-rose-600 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:text-stone-300"
                       :class="
-                        pendingDeleteSessionId === session.conversationId
+                        isDeletingSession(session)
+                          ? 'h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100'
+                          : pendingDeleteSessionId === session.conversationId
                           ? 'h-5 rounded-full bg-rose-200 px-1.5 text-rose-800 hover:bg-rose-300 hover:text-rose-900'
                           : 'rounded-[0.35rem] px-1.5 py-1'
                       "
@@ -365,16 +386,23 @@ async function handleDeleteSession(session: SessionOverview) {
                       :title="
                         isTransientSession(session)
                           ? '空白新对话会在切换后自动丢弃，无需单独删除。'
-                          : pendingDeleteSessionId === session.conversationId
-                            ? '再点一次确认删除。'
+                          : isDeletingSession(session)
+                            ? '正在删除'
+                            : pendingDeleteSessionId === session.conversationId
+                            ? '确认删除'
                             : '删除对话'
                       "
                       :data-testid="`session-delete-${session.conversationId}`"
                       @click.stop="handleDeleteSession(session)"
                     >
-                      <Trash2 v-if="pendingDeleteSessionId !== session.conversationId" class="h-3.5 w-3.5" />
+                      <LoaderCircle
+                        v-if="isDeletingSession(session)"
+                        class="h-3.5 w-3.5 animate-spin text-stone-400"
+                        :data-testid="`session-delete-loading-${session.conversationId}`"
+                      />
+                      <Trash2 v-else-if="pendingDeleteSessionId !== session.conversationId" class="h-3.5 w-3.5" />
                       <span v-else class="inline-flex items-center justify-center text-[10px] font-medium text-rose-800">
-                        确认？
+                        确认
                       </span>
                     </button>
                   </div>

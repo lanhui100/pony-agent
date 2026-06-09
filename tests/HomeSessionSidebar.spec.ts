@@ -248,6 +248,72 @@ describe("HomeSessionSidebar", () => {
     expect(deleteSessionSpy).toHaveBeenCalledWith("session-other");
   });
 
+  it("shows delete and confirmation controls only while a session row is hovered or focused", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    const deleteButton = wrapper.get('[data-testid="session-delete-session-other"]');
+    expect(deleteButton.classes()).toContain("opacity-0");
+    expect(deleteButton.classes()).toContain("pointer-events-none");
+    expect(deleteButton.classes()).toContain("group-hover:opacity-100");
+    expect(deleteButton.classes()).toContain("group-hover:pointer-events-auto");
+    expect(deleteButton.classes()).toContain("group-focus-within:opacity-100");
+
+    await deleteButton.trigger("click");
+    await nextTick();
+
+    const confirmButton = wrapper.get('[data-testid="session-delete-session-other"]');
+    expect(confirmButton.text()).toContain("确认");
+    expect(confirmButton.text()).not.toContain("确认？");
+    expect(confirmButton.classes()).toContain("opacity-0");
+    expect(confirmButton.classes()).toContain("group-hover:opacity-100");
+
+    await confirmButton.element.parentElement?.parentElement?.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true })
+    );
+    await nextTick();
+
+    const restoredButton = wrapper.get('[data-testid="session-delete-session-other"]');
+    expect(restoredButton.text()).not.toContain("确认");
+    expect(restoredButton.find("svg").exists()).toBe(true);
+  });
+
+  it("shows a loading indicator for the session being deleted", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    let finishDelete: (() => void) | null = null;
+    const deleteSessionSpy = vi.spyOn(runtimeStore, "deleteSession").mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDelete = resolve;
+        })
+    );
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-delete-session-other"]').trigger("click");
+    await nextTick();
+    wrapper.get('[data-testid="session-delete-session-other"]').element.dispatchEvent(
+      new MouseEvent("click", { bubbles: true })
+    );
+    await nextTick();
+
+    expect(deleteSessionSpy).toHaveBeenCalledWith("session-other");
+    expect(wrapper.find('[data-testid="session-delete-loading-session-other"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="session-delete-session-other"]').attributes("title")).toBe("正在删除");
+    expect(wrapper.get('[data-testid="session-delete-session-other"]').classes()).toContain("opacity-100");
+    expect(wrapper.get('[data-testid="session-delete-session-other"]').text()).not.toContain("确认");
+
+    finishDelete?.();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-delete-loading-session-other"]').exists()).toBe(false);
+  });
+
   it("keeps create actions above session list and model sections", async () => {
     seedSidebarSessions();
 
