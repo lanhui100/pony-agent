@@ -61,6 +61,7 @@ const timelineScrollAreaRef = ref<{
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   viewportEl: HTMLElement | null;
 } | null>(null);
+const timelineFollowAnchorRef = ref<HTMLElement | null>(null);
 const scrollQueued = ref(false);
 const scrollAfterPaintFrameId = ref<number | null>(null);
 const stopRequested = ref(false);
@@ -76,11 +77,13 @@ const streamReasoningFadeKeyByMessageId = reactive<Record<string, number>>({});
 const AUTO_SCROLL_THRESHOLD_PX = 160;
 const STREAM_FADE_MIN_CHARS = 24;
 const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
+const PROGRAMMATIC_SCROLL_GRACE_MS = 700;
 let scheduledRevealMetricsPush = false;
 let pendingRevealMetricsPatch: Record<string, unknown> | null = null;
 let pendingStreamAutoFollow = true;
 let pendingScrollBehavior: ScrollBehavior = "auto";
 let scheduledScrollRequestId = 0;
+let programmaticScrollUntilMs = 0;
 const streamAutoFollowEnabled = ref(true);
 
 function swallowAsyncError(result: unknown) {
@@ -327,7 +330,7 @@ const latestTurnSignature = computed(() => {
       break;
     }
     parts.push(
-      `${message.id}:${message.content.length}:${message.reasoningContent?.length ?? ""}:${message.status ?? ""}:${message.tokenCount ?? ""}`
+      `${message.id}:${message.role}:${message.content.length}:${message.reasoningContent?.length ?? ""}:${message.tokenCount ?? ""}`
     );
   }
 
@@ -851,6 +854,7 @@ function queueScrollToLatestTurn(behavior: ScrollBehavior = "smooth") {
   scheduledScrollRequestId += 1;
   const requestId = scheduledScrollRequestId;
   scrollQueued.value = true;
+  programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
   void nextTick().then(() => {
     if (requestId !== scheduledScrollRequestId) {
       return;
@@ -866,8 +870,12 @@ function queueScrollToLatestTurn(behavior: ScrollBehavior = "smooth") {
       scrollAfterPaintFrameId.value = null;
       scrollQueued.value = false;
       const scrollArea = timelineScrollAreaRef.value;
-      if (scrollArea && typeof scrollArea.scrollToBottom === "function") {
-        scrollArea.scrollToBottom(pendingScrollBehavior);
+      const followAnchor = timelineFollowAnchorRef.value;
+      if (followAnchor) {
+        followAnchor.scrollIntoView({
+          block: "end",
+          behavior: pendingScrollBehavior
+        });
       } else {
         const viewport = scrollArea?.viewportEl ?? null;
         if (viewport) {
@@ -875,20 +883,33 @@ function queueScrollToLatestTurn(behavior: ScrollBehavior = "smooth") {
             top: viewport.scrollHeight,
             behavior: pendingScrollBehavior
           });
+        } else if (scrollArea && typeof scrollArea.scrollToBottom === "function") {
+          scrollArea.scrollToBottom(pendingScrollBehavior);
         }
       }
 
       updateStreamDebugReveal({
-        scrolledToBottom: true,
+        scrolledToComposerEdge: true,
         scrollBehavior: pendingScrollBehavior,
         nearBottom: isTimelineNearBottom()
       });
+      programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
       pendingScrollBehavior = "auto";
     });
   });
 }
 
 function handleTimelineViewportScroll() {
+  if (Date.now() < programmaticScrollUntilMs) {
+    streamAutoFollowEnabled.value = true;
+    return;
+  }
+
+  streamAutoFollowEnabled.value = isTimelineNearBottom();
+}
+
+function handleTimelineUserScrollIntent() {
+  programmaticScrollUntilMs = 0;
   streamAutoFollowEnabled.value = isTimelineNearBottom();
 }
 
@@ -909,6 +930,8 @@ onBeforeUnmount(() => {
   const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
   if (viewport && "removeEventListener" in viewport) {
     viewport.removeEventListener("scroll", handleTimelineViewportScroll);
+    viewport.removeEventListener("wheel", handleTimelineUserScrollIntent);
+    viewport.removeEventListener("touchstart", handleTimelineUserScrollIntent);
   }
   if (scrollAfterPaintFrameId.value != null) {
     window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
@@ -920,9 +943,13 @@ watch(
   (viewport, previousViewport) => {
     if (previousViewport && "removeEventListener" in previousViewport) {
       previousViewport.removeEventListener("scroll", handleTimelineViewportScroll);
+      previousViewport.removeEventListener("wheel", handleTimelineUserScrollIntent);
+      previousViewport.removeEventListener("touchstart", handleTimelineUserScrollIntent);
     }
     if (viewport && "addEventListener" in viewport) {
       viewport.addEventListener("scroll", handleTimelineViewportScroll, { passive: true });
+      viewport.addEventListener("wheel", handleTimelineUserScrollIntent, { passive: true });
+      viewport.addEventListener("touchstart", handleTimelineUserScrollIntent, { passive: true });
     }
     handleTimelineViewportScroll();
   },
@@ -930,12 +957,12 @@ watch(
 );
 
 watch(latestTurnSignature, () => {
-  pendingStreamAutoFollow = isTimelineNearBottom();
+  pendingStreamAutoFollow = streamAutoFollowEnabled.value || isTimelineNearBottom();
 }, { flush: "pre" });
 
 watch(latestTurnSignature, () => {
   syncStreamingPresentationState();
-  const behavior: ScrollBehavior = "auto";
+  const behavior: ScrollBehavior = pendingStreamAutoFollow ? "smooth" : "auto";
   streamAutoFollowEnabled.value = pendingStreamAutoFollow;
 
   if (streamAutoFollowEnabled.value) {
@@ -977,7 +1004,7 @@ watch(isSubmitting, (submitting) => {
           </h2>
         </section>
         <section v-for="turn in turns" :key="turn.turnId" class="space-y-3">
-          <article v-if="turn.user" class="ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
+          <article v-if="turn.user" class="conversation-user-message ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
             <div class="flex flex-col items-end">
               <div :class="actorLabelClass()" class="mb-1">
                 <span>User</span>
@@ -991,8 +1018,8 @@ watch(isSubmitting, (submitting) => {
             </div>
           </article>
 
-          <article v-if="turn.assistant || turn.tools.length" class="w-full px-0 py-1">
-            <div class="flex items-center justify-between gap-3">
+          <article v-if="turn.assistant || turn.tools.length" class="conversation-agent-shell w-full px-0 py-1">
+            <div class="conversation-agent-header flex items-center justify-between gap-3">
               <div :class="actorLabelClass()" class="min-w-0">
                 <Bot class="h-3.5 w-3.5" />
                 <span>Agent</span>
@@ -1007,7 +1034,7 @@ watch(isSubmitting, (submitting) => {
             </div>
             <div class="mt-2 h-px w-full bg-stone-200/70"></div>
 
-            <div v-if="turn.tools.length" class="mt-2">
+            <div v-if="turn.tools.length" class="conversation-tool-panel mt-2">
               <div class="flex items-center justify-between gap-3 text-[12px] leading-[1.4] text-stone-500">
                 <div class="flex min-w-0 items-center gap-2">
                   <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
@@ -1021,7 +1048,7 @@ watch(isSubmitting, (submitting) => {
                 <div
                   v-for="tool in turn.tools"
                   :key="tool.id"
-                  class="flex items-center justify-between gap-3 px-1 py-0.5 text-[12px] leading-5 text-stone-500"
+                  class="conversation-tool-row flex items-center justify-between gap-3 px-1 py-0.5 text-[12px] leading-5 text-stone-500"
                 >
                   <div class="flex min-w-0 items-center gap-2">
                     <span class="truncate">{{ tool.toolName || "Tool" }}</span>
@@ -1048,7 +1075,7 @@ watch(isSubmitting, (submitting) => {
             <details
               v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
               :open="shouldOpenReasoningBlock(turn.assistant)"
-              class="conversation-disclosure mt-2 group"
+              class="conversation-disclosure conversation-reasoning-panel mt-2 group"
             >
               <summary class="conversation-disclosure-summary">
                 <div class="flex min-w-0 items-center gap-2">
@@ -1086,7 +1113,7 @@ watch(isSubmitting, (submitting) => {
             </details>
             <div
               v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
-              class="mt-2"
+              class="assistant-response-panel mt-2"
             >
               <div
                 v-if="isAssistantStreaming(turn.assistant)"
@@ -1189,7 +1216,7 @@ watch(isSubmitting, (submitting) => {
           </article>
         </section>
       </TransitionGroup>
-      <div class="h-px w-full" aria-hidden="true"></div>
+      <div ref="timelineFollowAnchorRef" class="h-px w-full" aria-hidden="true"></div>
       </div>
     </ScrollArea>
 
@@ -1571,14 +1598,55 @@ watch(isSubmitting, (submitting) => {
 .turn-flow-enter-active,
 .turn-flow-leave-active {
   transition:
-    opacity 220ms ease,
-    transform 220ms ease;
+    opacity 260ms ease,
+    transform 260ms ease;
 }
 
 .turn-flow-enter-from,
 .turn-flow-leave-to {
   opacity: 0;
   transform: translateY(0.45rem);
+}
+
+.turn-flow-move {
+  transition: transform 260ms ease;
+}
+
+.conversation-user-message,
+.conversation-agent-shell,
+.conversation-agent-header,
+.conversation-tool-panel,
+.conversation-tool-row,
+.conversation-reasoning-panel,
+.assistant-response-panel {
+  animation: conversation-element-rise 220ms ease-out both;
+  will-change: opacity, transform;
+}
+
+.conversation-agent-header {
+  animation-delay: 20ms;
+}
+
+.conversation-tool-panel,
+.conversation-reasoning-panel,
+.assistant-response-panel {
+  animation-delay: 40ms;
+}
+
+.conversation-tool-row {
+  animation-duration: 180ms;
+}
+
+@keyframes conversation-element-rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.35rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .assistant-streaming-content {

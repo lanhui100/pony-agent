@@ -30,6 +30,7 @@ vi.mock("@/lib/tauri", () => ({
 
 const scrollToBottomSpy = vi.fn();
 const viewportScrollToSpy = vi.fn();
+const scrollIntoViewSpy = vi.fn();
 
 const ScrollAreaStub = defineComponent({
   setup(_props, { slots, expose }) {
@@ -353,7 +354,7 @@ describe("HomeWorkspace", () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
       configurable: true,
-      value: vi.fn()
+      value: scrollIntoViewSpy
     });
     vi.stubGlobal(
       "requestAnimationFrame",
@@ -365,6 +366,7 @@ describe("HomeWorkspace", () => {
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
     scrollToBottomSpy.mockReset();
     viewportScrollToSpy.mockReset();
+    scrollIntoViewSpy.mockReset();
   });
 
   afterEach(() => {
@@ -872,6 +874,63 @@ describe("HomeWorkspace", () => {
     expect(markdownBlock.classes()).toContain("text-stone-800");
   });
 
+  it("does not auto-scroll again when a pending assistant flips to final markdown without new content", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "**完成** 输出",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
+
+    scrollIntoViewSpy.mockClear();
+    runtimeStore.$patch({
+      phase: "ready",
+      isSubmitting: false,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "**完成** 输出",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(false);
+    expect(wrapper.find(".markdown-stub").exists()).toBe(true);
+    expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+  });
+
   it("requests scroll follow-up when streaming content grows", async () => {
     const runtimeStore = useRuntimeStore();
 
@@ -921,9 +980,12 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    scrollToBottomSpy.mockClear();
+    scrollIntoViewSpy.mockClear();
     await nextTick();
-    expect(scrollToBottomSpy).toHaveBeenCalledTimes(1);
+    expect(scrollIntoViewSpy).toHaveBeenCalledWith({
+      block: "end",
+      behavior: "smooth"
+    });
     expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
   });
 
@@ -976,9 +1038,12 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    scrollToBottomSpy.mockClear();
+    scrollIntoViewSpy.mockClear();
     await nextTick();
-    expect(scrollToBottomSpy.mock.calls.length).toBeGreaterThan(0);
+    expect(scrollIntoViewSpy).toHaveBeenCalledWith({
+      block: "end",
+      behavior: "smooth"
+    });
 
     runtimeStore.$patch({
       messages: [
