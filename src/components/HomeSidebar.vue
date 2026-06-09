@@ -601,7 +601,16 @@ function activeGenerationDurationMs(entry: TraceTimelineEntry, _record: Provider
     return null;
   }
 
-  return Math.max(entry.turnDurationMs, 1);
+  if (entry.firstTokenLatencyMs == null) {
+    return Math.max(entry.turnDurationMs, 1);
+  }
+
+  const generationDurationMs = entry.turnDurationMs - entry.firstTokenLatencyMs;
+  return generationDurationMs > 0 ? generationDurationMs : null;
+}
+
+function formatTokenSpeedLabel(entry: TraceTimelineEntry) {
+  return entry.firstTokenLatencyMs == null ? "整体速度" : "生成速度";
 }
 
 function formatEntryTokenSpeed(entry: TraceTimelineEntry, record?: ProviderCallCacheRecord | null) {
@@ -647,24 +656,44 @@ function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry, o
   const callModelEntries = turnTimeline(turn).filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model");
   const useTurnFallback = allowTurnFallback && callModelEntries.length === 1 && callModelEntries[0]?.id === entry.id;
 
+  if (record) {
+    return {
+      ...entry,
+      inputTokens: record.inputTokens ?? null,
+      cacheHitInputTokens: record.cacheHitInputTokens ?? null,
+      reasoningTokens: record.reasoningTokens ?? null,
+      outputTokens: record.outputTokens ?? null,
+      totalTokens: record.totalTokens ?? null,
+      firstTokenLatencyMs: effectiveFirstTokenLatencyMs(
+        {
+          ...entry,
+          firstTokenLatencyMs: record.firstTokenLatencyMs ?? null,
+          turnDurationMs: record.turnDurationMs ?? null
+        },
+        record
+      ),
+      turnDurationMs: record.turnDurationMs ?? null
+    };
+  }
+
   return {
     ...entry,
-    inputTokens: entry.inputTokens ?? record?.inputTokens ?? (useTurnFallback ? turn.inputTokens ?? null : null),
+    inputTokens: entry.inputTokens ?? (useTurnFallback ? turn.inputTokens ?? null : null),
     cacheHitInputTokens:
-      entry.cacheHitInputTokens ?? record?.cacheHitInputTokens ?? (useTurnFallback ? cacheHitInputTokens(turn) ?? null : null),
+      entry.cacheHitInputTokens ?? (useTurnFallback ? cacheHitInputTokens(turn) ?? null : null),
     reasoningTokens:
-      entry.reasoningTokens ?? record?.reasoningTokens ?? (useTurnFallback ? reasoningTokens(turn) ?? null : null),
-    outputTokens: entry.outputTokens ?? record?.outputTokens ?? (useTurnFallback ? turn.outputTokens ?? null : null),
-    totalTokens: entry.totalTokens ?? record?.totalTokens ?? (useTurnFallback ? turn.totalTokens ?? null : null),
+      entry.reasoningTokens ?? (useTurnFallback ? reasoningTokens(turn) ?? null : null),
+    outputTokens: entry.outputTokens ?? (useTurnFallback ? turn.outputTokens ?? null : null),
+    totalTokens: entry.totalTokens ?? (useTurnFallback ? turn.totalTokens ?? null : null),
     firstTokenLatencyMs: effectiveFirstTokenLatencyMs(
       {
         ...entry,
-        firstTokenLatencyMs: record?.firstTokenLatencyMs ?? entry.firstTokenLatencyMs ?? (useTurnFallback ? turn.firstTokenLatencyMs ?? null : null),
-        turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
+        firstTokenLatencyMs: entry.firstTokenLatencyMs ?? (useTurnFallback ? turn.firstTokenLatencyMs ?? null : null),
+        turnDurationMs: entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
       },
-      record
+      null
     ),
-    turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
+    turnDurationMs: entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
   };
 }
 
@@ -721,6 +750,11 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
   const speedAverage = outputTotal != null && generationDurations.length
     ? outputTotal / (generationDurations.reduce((sum, value) => sum + value, 0) / 1000)
     : tokenSpeed(turn);
+  const speedLabel = latencies.length === generationDurations.length && generationDurations.length > 0
+    ? "生成速度"
+    : latencies.length === 0
+      ? "整体速度"
+      : "速度";
   const latencyAverage = latencies.length ? average(latencies) : turn.firstTokenLatencyMs ?? null;
 
   if (inputTotal != null) {
@@ -733,7 +767,7 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
     metrics.push(`输出 ${formatInteger(outputTotal)}`);
   }
   if (speedAverage != null) {
-    metrics.push(`速度 ${speedAverage.toFixed(1)} token/s`);
+    metrics.push(`${speedLabel} ${speedAverage.toFixed(1)} token/s`);
   }
   if (latencyAverage != null) {
     metrics.push(`延时 ${Math.round(latencyAverage)} ms`);
@@ -775,7 +809,7 @@ function timelineEntryStats(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   }
   const tokenSpeed = formatEntryTokenSpeed(metricEntry);
   if (tokenSpeed) {
-    stats.push(`速度 ${tokenSpeed}`);
+    stats.push(`${formatTokenSpeedLabel(metricEntry)} ${tokenSpeed}`);
   }
   if (metricEntry.firstTokenLatencyMs != null) {
     stats.push(`延时 ${metricEntry.firstTokenLatencyMs} ms`);
@@ -909,7 +943,7 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
     pushRow(rows, "输入", metricEntry.inputTokens);
     pushRow(rows, "缓存", metricEntry.cacheHitInputTokens);
     pushRow(rows, "输出", metricEntry.outputTokens);
-    pushRow(rows, "速度", formatEntryTokenSpeed(metricEntry) || null);
+    pushRow(rows, formatTokenSpeedLabel(metricEntry), formatEntryTokenSpeed(metricEntry) || null);
     pushRow(rows, "延时", metricEntry.firstTokenLatencyMs != null ? `${metricEntry.firstTokenLatencyMs} ms` : null);
     pushRow(rows, "耗时", metricEntry.turnDurationMs != null ? formatDurationMs(metricEntry.turnDurationMs) : null);
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });

@@ -594,7 +594,8 @@ describe("HomeSidebar", () => {
     expect(turnButton!.text()).toContain("输入 150");
     expect(turnButton!.text()).toContain("缓存 70");
     expect(turnButton!.text()).toContain("输出 60");
-    expect(turnButton!.text()).toContain("速度 18.8 token/s");
+    expect(turnButton!.text()).toContain("生成速度 20.7 token/s");
+    expect(turnButton!.text()).not.toContain("速度 18.8 token/s");
     expect(turnButton!.text()).toContain("延时 150 ms");
     expect(turnButton!.text()).not.toContain("思考链");
     expect(turnButton!.text()).not.toContain("输入 40");
@@ -767,7 +768,8 @@ describe("HomeSidebar", () => {
     expect(modelButton.text()).toContain("输入 120");
     expect(modelButton.text()).toContain("缓存 80");
     expect(modelButton.text()).toContain("输出 40");
-    expect(modelButton.text()).toContain("速度 14.3 token/s");
+    expect(modelButton.text()).toContain("生成速度 16.1 token/s");
+    expect(modelButton.text()).not.toContain("速度 14.3 token/s");
     expect(modelButton.text()).toContain("延时 321 ms");
     expect(modelButton.text()).toContain("2.80 s");
     expect(modelButton.text()).not.toContain("耗时 2.80 s");
@@ -788,8 +790,8 @@ describe("HomeSidebar", () => {
     expect(modelSectionText).toContain("输入");
     expect(modelSectionText).toContain("缓存");
     expect(modelSectionText).toContain("输出");
-    expect(modelSectionText).toContain("速度");
-    expect(modelSectionText).toContain("14.3 token/s");
+    expect(modelSectionText).toContain("生成速度");
+    expect(modelSectionText).toContain("16.1 token/s");
     expect(modelSectionText).not.toContain("Provider");
     expect(modelSectionText).not.toContain("输出详情");
     expect(modelSectionText).not.toContain("对应一次独立的模型调用，不与其他 hop 合并。");
@@ -801,7 +803,7 @@ describe("HomeSidebar", () => {
     expect(wrapper.get('[data-testid="trace-detail-button-model-3-assistant-output"]').exists()).toBe(true);
   });
 
-  it("buffered CALL MODEL 不伪造首 token 延时，速度基于整次耗时", async () => {
+  it("buffered CALL MODEL 不伪造首 token 延时，展示整体速度", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       turnTraceHistory: [
@@ -849,7 +851,8 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
-    expect(modelButton.text()).toContain("速度 50.0 token/s");
+    expect(modelButton.text()).toContain("整体速度 50.0 token/s");
+    expect(modelButton.text()).not.toContain("生成速度");
     expect(modelButton.text()).not.toContain("延时");
     expect(modelButton.text()).toContain("1.80 s");
     expect(modelButton.text()).not.toContain("耗时 1.80 s");
@@ -858,6 +861,7 @@ describe("HomeSidebar", () => {
     await nextTick();
 
     const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(modelSectionText).toContain("整体速度");
     expect(modelSectionText).toContain("50.0 token/s");
     expect(modelSectionText).not.toContain("延时");
     expect(modelSectionText).toContain("1.80 s");
@@ -909,13 +913,13 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
-    expect(modelButton.text()).toContain("速度 46.6 token/s");
+    expect(modelButton.text()).toContain("整体速度 46.6 token/s");
     expect(modelButton.text()).not.toContain("89000.0 token/s");
     expect(modelButton.text()).not.toContain("延时 4510 ms");
     expect(modelButton.text()).toContain("1.91 s");
   });
 
-  it("CALL MODEL 首 token 延时接近耗时时按整次耗时计算速度，避免最后一跳爆速", async () => {
+  it("CALL MODEL 首 token 延时接近耗时时按真实生成耗时计算速度", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       turnTraceHistory: [
@@ -962,8 +966,8 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
-    expect(modelButton.text()).toContain("速度 36.7 token/s");
-    expect(modelButton.text()).not.toContain("4000.0 token/s");
+    expect(modelButton.text()).toContain("生成速度 4000.0 token/s");
+    expect(modelButton.text()).not.toContain("整体速度 36.7 token/s");
     expect(modelButton.text()).not.toContain("3960.");
     expect(modelButton.text()).toContain("1.96 s");
   });
@@ -995,6 +999,19 @@ describe("HomeSidebar", () => {
               firstTokenLatencyMs: 1447,
               turnDurationMs: 1699,
               text: "final answer"
+            },
+            {
+              id: "return-3",
+              kind: "return_result",
+              label: "RETURN RESULT",
+              state: "completed",
+              sequence: 3,
+              text: "final answer",
+              reasoningTokens: 152,
+              outputTokens: 998,
+              totalTokens: 1132,
+              firstTokenLatencyMs: 799,
+              turnDurationMs: 19567
             }
           ],
           providerCallRecords: [
@@ -1032,13 +1049,14 @@ describe("HomeSidebar", () => {
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
     expect(modelButton.text()).not.toContain("输出 998");
-    expect(modelButton.text()).not.toContain("速度 587.4 token/s");
+    expect(modelButton.text()).not.toContain("生成速度 3960.");
+    expect(modelButton.text()).not.toContain("整体速度 587.4 token/s");
     expect(modelButton.text()).not.toContain("速度");
     expect(modelButton.text()).toContain("延时 1447 ms");
     expect(modelButton.text()).toContain("1.70 s");
   });
 
-  it("最后一跳有 per-call 输出时按该跳完整耗时计算速度，不扣首 token 延时", async () => {
+  it("最后一跳有 per-call 输出时按首 token 后的生成耗时计算生成速度", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       turnTraceHistory: [
@@ -1105,9 +1123,9 @@ describe("HomeSidebar", () => {
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
     expect(modelButton.text()).toContain("输出 68");
-    expect(modelButton.text()).toContain("速度 40.0 token/s");
-    expect(modelButton.text()).not.toContain("速度 269.8 token/s");
-    expect(modelButton.text()).not.toContain("速度 587.4 token/s");
+    expect(modelButton.text()).toContain("生成速度 269.8 token/s");
+    expect(modelButton.text()).not.toContain("整体速度 40.0 token/s");
+    expect(modelButton.text()).not.toContain("整体速度 587.4 token/s");
     expect(modelButton.text()).toContain("延时 1447 ms");
     expect(modelButton.text()).toContain("1.70 s");
   });
