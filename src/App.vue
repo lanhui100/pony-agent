@@ -89,7 +89,7 @@ watch(rightSidebarOpen, (value) => {
   <main
     class="h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] text-stone-900"
   >
-    <section class="mx-auto flex h-full min-h-0 w-full max-w-[1540px] min-w-0 gap-4 px-3 py-3 sm:px-4 lg:px-5">
+    <section class="flex h-full min-h-0 w-full min-w-0 gap-4 px-3 py-3 sm:px-4 lg:px-5">
       <HomeSessionSidebar :current-page="currentPage" @navigate="currentPage = $event" />
 
       <section class="min-h-0 min-w-0 flex-1">
