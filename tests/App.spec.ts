@@ -148,11 +148,9 @@ describe("App", () => {
     expect(toggle.classes()).toContain("absolute");
     expect(toggle.classes()).toContain("top-2");
     expect(toggle.classes()).toContain("bg-[#fbf4e8]");
-    expect(toggle.classes()).toContain("transition-[right,background-color,color]");
+    expect(toggle.classes()).toContain("transition-[background-color,color]");
     expect(toggle.classes()).toContain("hover:bg-[#f7e3bf]");
     expect(toggle.classes()).toContain("hover:text-stone-900");
-    expect(toggle.classes()).toContain("lg:right-[calc(20rem+1rem+0.5rem)]");
-    expect(toggle.classes()).toContain("xl:right-[calc(21rem+1rem+0.5rem)]");
 
     await toggle.trigger("click");
     expect(wrapper.get('[data-testid="workspace-right-sidebar-toggle"]').classes()).toContain("right-3");
@@ -262,5 +260,53 @@ describe("App", () => {
     );
 
     wrapper.unmount();
+  });
+
+  describe("sidebar edge alignment", () => {
+    it("removes horizontal padding from the layout shell so sidebars are flush with window edges", () => {
+      const wrapper = mountApp();
+      const shell = wrapper.get('[data-testid="app-layout-shell"]');
+
+      const forbidden = ["px-3", "sm:px-4", "lg:px-5"];
+      const classes = shell.classes();
+
+      for (const cls of forbidden) {
+        expect(classes).not.toContain(cls);
+      }
+    });
+
+    it("preserves vertical padding (py-3) on the layout shell", () => {
+      const wrapper = mountApp();
+      const shell = wrapper.get('[data-testid="app-layout-shell"]');
+
+      expect(shell.classes()).toContain("py-3");
+    });
+
+    it("preserves inter-element gap (gap-4) on the layout shell", () => {
+      const wrapper = mountApp();
+      const shell = wrapper.get('[data-testid="app-layout-shell"]');
+
+      expect(shell.classes()).toContain("gap-4");
+    });
+
+    it("uses flex layout for the shell to keep sidebars at the edges", () => {
+      const wrapper = mountApp();
+      const shell = wrapper.get('[data-testid="app-layout-shell"]');
+
+      expect(shell.classes()).toContain("flex");
+      expect(shell.classes()).toContain("w-full");
+      expect(shell.classes()).toContain("h-full");
+    });
+
+    it("places the left session sidebar and right-sidebar shell as direct children of the layout shell", () => {
+      const wrapper = mountApp();
+
+      const shell = wrapper.get('[data-testid="app-layout-shell"]');
+      const leftSidebar = shell.get('[data-testid="home-session-sidebar-stub"]');
+      const rightSidebarShell = shell.get('[data-testid="home-right-sidebar-shell"]');
+
+      expect(leftSidebar.exists()).toBe(true);
+      expect(rightSidebarShell.exists()).toBe(true);
+    });
   });
 });

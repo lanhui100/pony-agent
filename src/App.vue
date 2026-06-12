@@ -89,7 +89,10 @@ watch(rightSidebarOpen, (value) => {
   <main
     class="h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] text-stone-900"
   >
-    <section class="flex h-full min-h-0 w-full min-w-0 gap-4 px-3 py-3 sm:px-4 lg:px-5">
+    <section
+      class="flex h-full min-h-0 w-full min-w-0 gap-4 py-3"
+      data-testid="app-layout-shell"
+    >
       <HomeSessionSidebar :current-page="currentPage" @navigate="currentPage = $event" />
 
       <section class="min-h-0 min-w-0 flex-1">
@@ -99,23 +102,6 @@ watch(rightSidebarOpen, (value) => {
           class="relative flex h-full min-h-0 min-w-0 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
           data-testid="home-layout-shell"
         >
-          <button
-            type="button"
-            :class="
-              rightSidebarOpen
-                ? 'right-3 lg:right-[calc(20rem+1rem+0.5rem)] xl:right-[calc(21rem+1rem+0.5rem)]'
-                : 'right-3'
-            "
-            class="absolute top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[right,background-color,color] duration-300 ease-out hover:bg-[#f7e3bf] hover:text-stone-900"
-            :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
-            :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
-            :data-open="rightSidebarOpen ? 'true' : 'false'"
-            data-testid="workspace-right-sidebar-toggle"
-            @click="rightSidebarOpen = !rightSidebarOpen"
-          >
-            <PanelRightClose v-if="rightSidebarOpen" class="h-4 w-4" />
-            <PanelRightOpen v-else class="h-4 w-4" />
-          </button>
           <div class="min-h-0 min-w-0 flex-1">
             <HomeWorkspace />
           </div>
@@ -133,6 +119,18 @@ watch(rightSidebarOpen, (value) => {
               <HomeSidebar />
             </div>
           </div>
+          <button
+            type="button"
+            class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:bg-[#f7e3bf] hover:text-stone-900"
+            :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+            :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+            :data-open="rightSidebarOpen ? 'true' : 'false'"
+            data-testid="workspace-right-sidebar-toggle"
+            @click="rightSidebarOpen = !rightSidebarOpen"
+          >
+            <PanelRightClose v-if="rightSidebarOpen" class="h-4 w-4" />
+            <PanelRightOpen v-else class="h-4 w-4" />
+          </button>
         </div>
 
         <ProviderConfigPage v-else-if="currentPage === 'providers'" class="h-full" />
