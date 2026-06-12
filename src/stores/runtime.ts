@@ -4560,6 +4560,8 @@ export const useRuntimeStore = defineStore("runtime", {
         if (!this.shouldProcessTurnEvent(payload)) {
           return;
         }
+
+        // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
 
@@ -4580,23 +4582,9 @@ export const useRuntimeStore = defineStore("runtime", {
         assistantMessage.status = "done";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
+        // Pre-compute values for later stages (captured by closure)
         const completedPhase = resolveRuntimePhaseFromEvent(payload, "completed");
-        this.phase = completedPhase === "completed" ? "ready" : completedPhase;
-        this.traceSteps = payload.traceSteps ?? this.traceSteps;
         const terminalToolActivities = resolveTerminalToolActivities(payload.toolActivities, this.toolActivities);
-        this.toolActivities = terminalToolActivities;
-        this.sessionSummary = payload.sessionSummary ?? this.sessionSummary;
-        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
-        this.providerName = payload.providerName ?? this.providerName;
-        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
-        this.providerModel = payload.providerModel ?? this.providerModel;
-        this.providerSource = payload.providerSource ?? this.providerSource;
-        this.providerMode = payload.providerMode ?? this.providerMode;
-        this.fallbackReason = payload.fallbackReason ?? null;
-        this.inputTokens = payload.inputTokens ?? this.inputTokens;
-        this.outputTokens = payload.outputTokens ?? this.outputTokens;
-        this.totalTokens = payload.totalTokens ?? this.totalTokens;
-        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         logCacheTelemetryContractViolations("completed", payload);
         const cacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
         const reasoningTokens = resolveReasoningTokens(payload);
@@ -4610,11 +4598,30 @@ export const useRuntimeStore = defineStore("runtime", {
         const completedSessionId = this.sessionId;
         const completedRunId = this.activeRunId;
         const completedNodeId = this.visibleNodeId;
-        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
-        this.syncToolMessages(payload.turnId, payload.toolActivities, false);
-        this.isSubmitting = false;
-        this.activeTurnId = null;
-        runLowPriorityTurnWork(() => {
+
+        // Yield to browser — let Vue flush reactivity + DOM for chat area
+        window.setTimeout(() => {
+          // ===== STAGE 2 (setTimeout 0): Trace + metadata + UI unlock =====
+          this.phase = completedPhase === "completed" ? "ready" : completedPhase;
+          this.traceSteps = payload.traceSteps ?? this.traceSteps;
+          this.toolActivities = terminalToolActivities;
+          this.sessionSummary = payload.sessionSummary ?? this.sessionSummary;
+          this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+          this.providerName = payload.providerName ?? this.providerName;
+          this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+          this.providerModel = payload.providerModel ?? this.providerModel;
+          this.providerSource = payload.providerSource ?? this.providerSource;
+          this.providerMode = payload.providerMode ?? this.providerMode;
+          this.fallbackReason = payload.fallbackReason ?? null;
+          this.inputTokens = payload.inputTokens ?? this.inputTokens;
+          this.outputTokens = payload.outputTokens ?? this.outputTokens;
+          this.totalTokens = payload.totalTokens ?? this.totalTokens;
+          this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+          this.syncToolMessages(payload.turnId, payload.toolActivities, false);
+          this.isSubmitting = false;
+          this.activeTurnId = null;
+
           const traceTimeline = resolveEventTraceTimeline(payload, () =>
             buildFallbackRuntimeTraceTimeline({
               turnId: payload.turnId,
@@ -4670,35 +4677,40 @@ export const useRuntimeStore = defineStore("runtime", {
             ...turnDurationPatch,
             error: null
           }, false);
-          this.scheduleDeferredPersist();
-          void this.loadSessionCatalog().catch(() => {});
-          void this.loadRetrievedContextState(completedSessionId, {
-            runId: completedRunId,
-            nodeId: completedNodeId
-          }).then((retrieved) => {
-            if (this.sessionId === completedSessionId) {
-              this.retrievedContext = retrieved;
-            }
-          }).catch(() => {});
-        });
-        debugLog("event:completed", {
-          turnId: payload.turnId,
-          inputTokens: payload.inputTokens ?? null,
-          cacheHitInputTokensRaw:
-            payload.cacheHitInputTokens ??
-            readNestedNumericTokenValue(completedPayloadRecord, [["cache_hit_input_tokens"]]) ??
-            readNestedNumericTokenValue(completedPayloadRecord, [["promptCacheHitTokens"]]) ??
-            readNestedNumericTokenValue(completedPayloadRecord, [["prompt_cache_hit_tokens"]]) ??
-            null,
-          cacheHitInputTokensResolved: cacheHitInputTokens,
-          reasoningTokensResolved: reasoningTokens,
-          turnDurationMs: payload.turnDurationMs ?? null,
-          finalTextLength: payload.text?.length ?? 0,
-          messages: this.messages.length,
-          traces: this.turnTraceHistory.length,
-          traceCacheHitInputTokens:
-            this.turnTraceHistory.find((turn) => turn.turnId === payload.turnId)?.cacheHitInputTokens ?? null
-        });
+
+          // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
+          runLowPriorityTurnWork(() => {
+            this.scheduleDeferredPersist();
+            void this.loadSessionCatalog().catch(() => {});
+            void this.loadRetrievedContextState(completedSessionId, {
+              runId: completedRunId,
+              nodeId: completedNodeId
+            }).then((retrieved) => {
+              if (this.sessionId === completedSessionId) {
+                this.retrievedContext = retrieved;
+              }
+            }).catch(() => {});
+          });
+
+          debugLog("event:completed", {
+            turnId: payload.turnId,
+            inputTokens: payload.inputTokens ?? null,
+            cacheHitInputTokensRaw:
+              payload.cacheHitInputTokens ??
+              readNestedNumericTokenValue(completedPayloadRecord, [["cache_hit_input_tokens"]]) ??
+              readNestedNumericTokenValue(completedPayloadRecord, [["promptCacheHitTokens"]]) ??
+              readNestedNumericTokenValue(completedPayloadRecord, [["prompt_cache_hit_tokens"]]) ??
+              null,
+            cacheHitInputTokensResolved: cacheHitInputTokens,
+            reasoningTokensResolved: reasoningTokens,
+            turnDurationMs: payload.turnDurationMs ?? null,
+            finalTextLength: payload.text?.length ?? 0,
+            messages: this.messages.length,
+            traces: this.turnTraceHistory.length,
+            traceCacheHitInputTokens:
+              this.turnTraceHistory.find((turn) => turn.turnId === payload.turnId)?.cacheHitInputTokens ?? null
+          });
+        }, 0);
       });
 
       const failedUnlisten = await safeListen<TurnStreamEvent>("turn:failed", ({ payload }) => {
@@ -4708,6 +4720,8 @@ export const useRuntimeStore = defineStore("runtime", {
         if (!this.shouldProcessTurnEvent(payload)) {
           return;
         }
+
+        // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
 
@@ -4721,22 +4735,8 @@ export const useRuntimeStore = defineStore("runtime", {
         assistantMessage.status = "error";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
-        this.phase = resolveRuntimePhaseFromEvent(payload, "failed");
-        this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
-        this.traceSteps = payload.traceSteps ?? this.traceSteps;
+        // Pre-compute values for later stages
         const terminalToolActivities = resolveTerminalToolActivities(payload.toolActivities, this.toolActivities);
-        this.toolActivities = terminalToolActivities;
-        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
-        this.providerName = payload.providerName ?? this.providerName;
-        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
-        this.providerModel = payload.providerModel ?? this.providerModel;
-        this.providerSource = payload.providerSource ?? this.providerSource;
-        this.providerMode = payload.providerMode ?? this.providerMode;
-        this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
-        this.inputTokens = payload.inputTokens ?? this.inputTokens;
-        this.outputTokens = payload.outputTokens ?? this.outputTokens;
-        this.totalTokens = payload.totalTokens ?? this.totalTokens;
-        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         logCacheTelemetryContractViolations("failed", payload);
         const cacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
         const reasoningTokens = resolveReasoningTokens(payload);
@@ -4747,76 +4747,107 @@ export const useRuntimeStore = defineStore("runtime", {
           terminalEvent: "failed",
           ...buildCacheTelemetryDebugSnapshot(payload)
         });
-        const traceTimeline = resolveEventTraceTimeline(payload, () =>
-          buildFallbackRuntimeTraceTimeline({
-            turnId: payload.turnId,
-            eventType: payload.eventType,
-            messages: this.messages,
+        const failedSessionId = this.sessionId;
+        const failedRunId = this.activeRunId;
+        const failedNodeId = this.visibleNodeId;
+
+        // Yield to browser
+        window.setTimeout(() => {
+          // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
+          this.phase = resolveRuntimePhaseFromEvent(payload, "failed");
+          this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
+          this.traceSteps = payload.traceSteps ?? this.traceSteps;
+          this.toolActivities = terminalToolActivities;
+          this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+          this.providerName = payload.providerName ?? this.providerName;
+          this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+          this.providerModel = payload.providerModel ?? this.providerModel;
+          this.providerSource = payload.providerSource ?? this.providerSource;
+          this.providerMode = payload.providerMode ?? this.providerMode;
+          this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+          this.inputTokens = payload.inputTokens ?? this.inputTokens;
+          this.outputTokens = payload.outputTokens ?? this.outputTokens;
+          this.totalTokens = payload.totalTokens ?? this.totalTokens;
+          this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+
+          const traceTimeline = resolveEventTraceTimeline(payload, () =>
+            buildFallbackRuntimeTraceTimeline({
+              turnId: payload.turnId,
+              eventType: payload.eventType,
+              messages: this.messages,
+              phase: "failed",
+              assistantMessage,
+              toolActivities: terminalToolActivities,
+              providerPatch: {
+                providerName: payload.providerName ?? this.providerName,
+                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+                providerModel: payload.providerModel ?? this.providerModel,
+                providerSource: payload.providerSource ?? this.providerSource,
+                providerMode: payload.providerMode ?? this.providerMode
+              },
+              terminalState: "error",
+              fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+              error: payload.error ?? DEFAULT_FAILED_TURN_ERROR,
+              inputTokens: payload.inputTokens ?? this.inputTokens,
+              cacheHitInputTokens,
+              reasoningTokens,
+              outputTokens: payload.outputTokens ?? this.outputTokens,
+              totalTokens: payload.totalTokens ?? this.totalTokens,
+              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+              turnDurationMs: payload.turnDurationMs ?? null
+            })
+          );
+          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
+          this.syncToolMessages(payload.turnId, payload.toolActivities);
+          this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
+            eventId: payload.eventId ?? null,
+            eventType: payload.eventType ?? null,
+            eventVersion: payload.eventVersion ?? null,
+            sequence: payload.sequence ?? null,
+            emittedAtMs: payload.emittedAtMs ?? null,
             phase: "failed",
-            assistantMessage,
+            traceSteps: payload.traceSteps ?? this.traceSteps,
             toolActivities: terminalToolActivities,
-            providerPatch: {
-              providerName: payload.providerName ?? this.providerName,
-              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-              providerModel: payload.providerModel ?? this.providerModel,
-              providerSource: payload.providerSource ?? this.providerSource,
-              providerMode: payload.providerMode ?? this.providerMode
-            },
-            terminalState: "error",
+            providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
+            providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+            providerName: payload.providerName ?? this.providerName,
+            providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+            providerModel: payload.providerModel ?? this.providerModel,
+            providerSource: payload.providerSource ?? this.providerSource,
+            providerMode: payload.providerMode ?? this.providerMode,
+            buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
+            hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
             fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-            error: payload.error ?? DEFAULT_FAILED_TURN_ERROR,
             inputTokens: payload.inputTokens ?? this.inputTokens,
-            cacheHitInputTokens,
-            reasoningTokens,
             outputTokens: payload.outputTokens ?? this.outputTokens,
             totalTokens: payload.totalTokens ?? this.totalTokens,
             firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-            turnDurationMs: payload.turnDurationMs ?? null
-          })
-        );
-        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
-        this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: "failed",
-          traceSteps: payload.traceSteps ?? this.traceSteps,
-          toolActivities: terminalToolActivities,
-          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
-          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-          providerName: payload.providerName ?? this.providerName,
-          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-          providerModel: payload.providerModel ?? this.providerModel,
-          providerSource: payload.providerSource ?? this.providerSource,
-          providerMode: payload.providerMode ?? this.providerMode,
-          buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-          inputTokens: payload.inputTokens ?? this.inputTokens,
-          outputTokens: payload.outputTokens ?? this.outputTokens,
-          totalTokens: payload.totalTokens ?? this.totalTokens,
-          firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-          ...cacheHitInputTokenPatch,
-          ...reasoningTokenPatch,
-          ...turnDurationPatch,
-          error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
-        });
-        this.persistHistory();
-        void this.loadRetrievedContextState(this.sessionId, {
-          runId: this.activeRunId,
-          nodeId: this.visibleNodeId
-        }).then((retrieved) => {
-          this.retrievedContext = retrieved;
-        });
-        debugLog("event:failed", {
-          turnId: payload.turnId,
-          error: this.error
-        });
-        this.isSubmitting = false;
-        this.activeTurnId = null;
+            ...cacheHitInputTokenPatch,
+            ...reasoningTokenPatch,
+            ...turnDurationPatch,
+            error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
+          });
+          this.isSubmitting = false;
+          this.activeTurnId = null;
+
+          // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
+          runLowPriorityTurnWork(() => {
+            this.persistHistory();
+            void this.loadRetrievedContextState(failedSessionId, {
+              runId: failedRunId,
+              nodeId: failedNodeId
+            }).then((retrieved) => {
+              if (this.sessionId === failedSessionId) {
+                this.retrievedContext = retrieved;
+              }
+            });
+          });
+
+          debugLog("event:failed", {
+            turnId: payload.turnId,
+            error: this.error
+          });
+        }, 0);
       });
 
       const cancelledUnlisten = await safeListen<TurnStreamEvent>("turn:cancelled", ({ payload }) => {
@@ -4826,6 +4857,8 @@ export const useRuntimeStore = defineStore("runtime", {
         if (!this.shouldProcessTurnEvent(payload)) {
           return;
         }
+
+        // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
 
@@ -4848,86 +4881,103 @@ export const useRuntimeStore = defineStore("runtime", {
         assistantMessage.status = "done";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
-        this.phase = resolveRuntimePhaseFromEvent(payload, "cancelled");
-        this.error = null;
-        this.traceSteps = cancelledTraceSteps;
+        // Pre-compute values for later stages
         const terminalToolActivities = resolveTerminalToolActivities(payload.toolActivities, this.toolActivities);
-        this.toolActivities = terminalToolActivities;
-        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
-        this.providerName = payload.providerName ?? this.providerName;
-        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
-        this.providerModel = payload.providerModel ?? this.providerModel;
-        this.providerSource = payload.providerSource ?? this.providerSource;
-        this.providerMode = payload.providerMode ?? this.providerMode;
-        this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
         const cacheHitInputTokenPatch = cancelledCacheHitInputTokens != null ? { cacheHitInputTokens: cancelledCacheHitInputTokens } : {};
         const reasoningTokenPatch = cancelledReasoningTokens != null ? { reasoningTokens: cancelledReasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
-        const traceTimeline = resolveEventTraceTimeline(payload, () =>
-          buildFallbackRuntimeTraceTimeline({
-            turnId: payload.turnId,
-            eventType: payload.eventType,
-            messages: this.messages,
+        const cancelledSessionId = this.sessionId;
+        const cancelledRunId = this.activeRunId;
+        const cancelledNodeId = this.visibleNodeId;
+
+        // Yield to browser
+        window.setTimeout(() => {
+          // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
+          this.phase = resolveRuntimePhaseFromEvent(payload, "cancelled");
+          this.error = null;
+          this.traceSteps = cancelledTraceSteps;
+          this.toolActivities = terminalToolActivities;
+          this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+          this.providerName = payload.providerName ?? this.providerName;
+          this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+          this.providerModel = payload.providerModel ?? this.providerModel;
+          this.providerSource = payload.providerSource ?? this.providerSource;
+          this.providerMode = payload.providerMode ?? this.providerMode;
+          this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+
+          const traceTimeline = resolveEventTraceTimeline(payload, () =>
+            buildFallbackRuntimeTraceTimeline({
+              turnId: payload.turnId,
+              eventType: payload.eventType,
+              messages: this.messages,
+              phase: "cancelled",
+              assistantMessage,
+              toolActivities: terminalToolActivities,
+              providerPatch: {
+                providerName: payload.providerName ?? this.providerName,
+                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+                providerModel: payload.providerModel ?? this.providerModel,
+                providerSource: payload.providerSource ?? this.providerSource,
+                providerMode: payload.providerMode ?? this.providerMode
+              },
+              terminalState: "cancelled",
+              fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+              error: payload.error ?? "stopped_by_user",
+              inputTokens: payload.inputTokens ?? null,
+              cacheHitInputTokens: cancelledCacheHitInputTokens,
+              reasoningTokens: cancelledReasoningTokens,
+              outputTokens: payload.outputTokens ?? null,
+              totalTokens: payload.totalTokens ?? null,
+              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+              turnDurationMs: payload.turnDurationMs ?? null
+            })
+          );
+          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
+          this.syncToolMessages(payload.turnId, payload.toolActivities);
+          this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
+            eventId: payload.eventId ?? null,
+            eventType: payload.eventType ?? null,
+            eventVersion: payload.eventVersion ?? null,
+            sequence: payload.sequence ?? null,
+            emittedAtMs: payload.emittedAtMs ?? null,
             phase: "cancelled",
-            assistantMessage,
+            traceSteps: cancelledTraceSteps,
             toolActivities: terminalToolActivities,
-            providerPatch: {
-              providerName: payload.providerName ?? this.providerName,
-              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-              providerModel: payload.providerModel ?? this.providerModel,
-              providerSource: payload.providerSource ?? this.providerSource,
-              providerMode: payload.providerMode ?? this.providerMode
-            },
-            terminalState: "cancelled",
+            providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
+            providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+            providerName: payload.providerName ?? this.providerName,
+            providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+            providerModel: payload.providerModel ?? this.providerModel,
+            providerSource: payload.providerSource ?? this.providerSource,
+            providerMode: payload.providerMode ?? this.providerMode,
+            buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
+            hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
             fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-            error: payload.error ?? "stopped_by_user",
-            inputTokens: payload.inputTokens ?? null,
-            cacheHitInputTokens: cancelledCacheHitInputTokens,
-            reasoningTokens: cancelledReasoningTokens,
-            outputTokens: payload.outputTokens ?? null,
-            totalTokens: payload.totalTokens ?? null,
-            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-            turnDurationMs: payload.turnDurationMs ?? null
-          })
-        );
-        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
-        this.syncToolMessages(payload.turnId, payload.toolActivities);
-        this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-          eventId: payload.eventId ?? null,
-          eventType: payload.eventType ?? null,
-          eventVersion: payload.eventVersion ?? null,
-          sequence: payload.sequence ?? null,
-          emittedAtMs: payload.emittedAtMs ?? null,
-          phase: "cancelled",
-          traceSteps: cancelledTraceSteps,
-          toolActivities: terminalToolActivities,
-          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
-          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-          providerName: payload.providerName ?? this.providerName,
-          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-          providerModel: payload.providerModel ?? this.providerModel,
-          providerSource: payload.providerSource ?? this.providerSource,
-          providerMode: payload.providerMode ?? this.providerMode,
-          buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
-          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-          fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-          ...cacheHitInputTokenPatch,
-          ...reasoningTokenPatch,
-          ...turnDurationPatch,
-          error: payload.error ?? "stopped_by_user"
-        });
-        this.persistHistory();
-        void this.loadRetrievedContextState(this.sessionId, {
-          runId: this.activeRunId,
-          nodeId: this.visibleNodeId
-        }).then((retrieved) => {
-          this.retrievedContext = retrieved;
-        });
-        debugLog("event:cancelled", {
-          turnId: payload.turnId
-        });
-        this.isSubmitting = false;
-        this.activeTurnId = null;
+            ...cacheHitInputTokenPatch,
+            ...reasoningTokenPatch,
+            ...turnDurationPatch,
+            error: payload.error ?? "stopped_by_user"
+          });
+          this.isSubmitting = false;
+          this.activeTurnId = null;
+
+          // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
+          runLowPriorityTurnWork(() => {
+            this.persistHistory();
+            void this.loadRetrievedContextState(cancelledSessionId, {
+              runId: cancelledRunId,
+              nodeId: cancelledNodeId
+            }).then((retrieved) => {
+              if (this.sessionId === cancelledSessionId) {
+                this.retrievedContext = retrieved;
+              }
+            });
+          });
+
+          debugLog("event:cancelled", {
+            turnId: payload.turnId
+          });
+        }, 0);
       });
 
       void startedUnlisten;
