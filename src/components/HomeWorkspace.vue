@@ -1004,7 +1004,7 @@ watch(isSubmitting, (submitting) => {
           </h2>
         </section>
         <section v-for="turn in turns" :key="turn.turnId" class="space-y-3">
-          <article v-if="turn.user" class="conversation-user-message ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
+          <article v-if="turn.user" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-user-message ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
             <div class="flex flex-col items-end">
               <div :class="actorLabelClass()" class="mb-1">
                 <span>User</span>
@@ -1018,8 +1018,8 @@ watch(isSubmitting, (submitting) => {
             </div>
           </article>
 
-          <article v-if="turn.assistant || turn.tools.length" class="conversation-agent-shell w-full px-0 py-1">
-            <div class="conversation-agent-header flex items-center justify-between gap-3">
+          <article v-if="turn.assistant || turn.tools.length" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-agent-shell w-full px-0 py-1">
+            <div v-motion :initial="{ opacity: 0, y: 6 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.02 }" class="conversation-agent-header flex items-center justify-between gap-3">
               <div :class="actorLabelClass()" class="min-w-0">
                 <Bot class="h-3.5 w-3.5" />
                 <span>Agent</span>
@@ -1034,7 +1034,7 @@ watch(isSubmitting, (submitting) => {
             </div>
             <div class="mt-2 h-px w-full bg-stone-200/70"></div>
 
-            <details v-if="turn.tools.length" class="conversation-disclosure conversation-tool-panel mt-2 group">
+            <details v-if="turn.tools.length" v-motion :initial="{ opacity: 0, y: 6 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }" class="conversation-disclosure conversation-tool-panel mt-2 group">
               <summary class="conversation-disclosure-summary">
                 <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
                 <span>工具调用</span>
@@ -1043,8 +1043,12 @@ watch(isSubmitting, (submitting) => {
               </summary>
               <div class="conversation-tool-list mt-1 space-y-0.5">
                 <div
-                  v-for="tool in turn.tools"
+                  v-for="(tool, idx) in turn.tools"
                   :key="tool.id"
+                  v-motion
+                  :initial="{ opacity: 0, y: 4 }"
+                  :animate="{ opacity: 1, y: 0 }"
+                  :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.04 + idx * 0.025 }"
                   class="conversation-tool-row flex items-center justify-between gap-3 px-1 py-0.5 text-[12px] leading-5 text-stone-500"
                 >
                   <div class="flex min-w-0 items-center gap-2">
@@ -1072,6 +1076,10 @@ watch(isSubmitting, (submitting) => {
             <details
               v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
               :open="shouldOpenReasoningBlock(turn.assistant)"
+              v-motion
+              :initial="{ opacity: 0, y: 6 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }"
               class="conversation-disclosure conversation-reasoning-panel mt-2 group"
             >
               <summary class="conversation-disclosure-summary">
@@ -1106,6 +1114,10 @@ watch(isSubmitting, (submitting) => {
             </details>
             <div
               v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
+              v-motion
+              :initial="{ opacity: 0, y: 6 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.04 }"
               class="assistant-response-panel mt-4"
             >
               <MarkdownRenderer
@@ -1497,6 +1509,7 @@ watch(isSubmitting, (submitting) => {
   border-radius: 0.9rem;
   display: block;
   color: #2f261d;
+  font-size: 1em;
 }
 
 :deep(.assistant-markdown .table-scroll-wrapper) {
@@ -1510,6 +1523,7 @@ watch(isSubmitting, (submitting) => {
   border-collapse: separate;
   border-spacing: 0;
   background: rgba(255, 251, 244, 0.92);
+  border-radius: 0.9rem;
 }
 
 :deep(.assistant-markdown .table-scroll-wrapper thead tr:first-child th:first-child) {
@@ -1622,34 +1636,7 @@ watch(isSubmitting, (submitting) => {
 .conversation-tool-row,
 .conversation-reasoning-panel,
 .assistant-response-panel {
-  animation: conversation-element-rise 220ms ease-out both;
   will-change: opacity, transform;
-}
-
-.conversation-agent-header {
-  animation-delay: 20ms;
-}
-
-.conversation-tool-panel,
-.conversation-reasoning-panel,
-.assistant-response-panel {
-  animation-delay: 40ms;
-}
-
-.conversation-tool-row {
-  animation-duration: 180ms;
-}
-
-@keyframes conversation-element-rise {
-  from {
-    opacity: 0;
-    transform: translateY(0.35rem);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 .streaming-unrendered-suffix {
