@@ -17,6 +17,7 @@ let renderTimerId: number | null = null;
 let idleCallbackId: number | null = null;
 let lastRenderTime = 0;
 let lastRenderedContentLength = 0;
+let lastRenderedFullContent = "";
 let streamRenderScheduled = false;
 
 const STREAMING_TIME_FALLBACK_MS = 1500;
@@ -59,12 +60,13 @@ function shouldRenderNow(content: string): boolean {
   return false;
 }
 
-function executeRender(version: number) {
-  const html = renderMarkdown(props.content);
+async function executeRender(version: number) {
+  const html = await renderMarkdown(props.content);
   if (version !== renderVersion) {
     return;
   }
   renderedHtml.value = html;
+  lastRenderedFullContent = props.content;
   renderPending.value = false;
   streamRenderScheduled = false;
   lastRenderTime = Date.now();
@@ -142,7 +144,7 @@ function handleContentChange(content: string) {
     // Conditions met — schedule a render
     unrenderedSuffix.value = content.slice(lastRenderedContentLength);
     scheduleStreamingRender();
-  } else {
+  } else if (lastRenderedFullContent !== content) {
     scheduleNonStreamingRender();
   }
 }
@@ -159,10 +161,17 @@ watch(
   () => props.streaming,
   (isStreaming, wasStreaming) => {
     if (wasStreaming && !isStreaming) {
-      // Streaming ended — force a final full render
+      // Streaming ended
       streamRenderScheduled = false;
-      lastRenderedContentLength = 0;
       unrenderedSuffix.value = "";
+
+      // If streaming already rendered the full content, skip re-render.
+      if (lastRenderedFullContent === props.content && lastRenderedContentLength >= props.content.length) {
+        return;
+      }
+
+      // Otherwise force a final full render
+      lastRenderedContentLength = 0;
       scheduleNonStreamingRender();
     }
   }

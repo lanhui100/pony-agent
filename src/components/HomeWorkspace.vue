@@ -1510,6 +1510,9 @@ watch(isSubmitting, (submitting) => {
   display: block;
   color: #2f261d;
   font-size: 1em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 :deep(.assistant-markdown .table-scroll-wrapper) {

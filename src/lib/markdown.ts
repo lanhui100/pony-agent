@@ -73,89 +73,117 @@ function isSafeUrl(value: string) {
   }
 }
 
-function shouldKeepAttribute(tagName: string, attrName: string) {
-  if (SAFE_GLOBAL_ATTRS.has(attrName)) {
-    return true;
-  }
-
-  const tagAttrs = SAFE_TAG_ATTRS[tagName];
-  return tagAttrs?.has(attrName) ?? false;
-}
-
-function sanitizeElementAttributes(element: Element) {
-  const tagName = element.tagName.toLowerCase();
-
-  for (const attr of Array.from(element.attributes)) {
-    const attrName = attr.name.toLowerCase();
-
-    if (!shouldKeepAttribute(tagName, attrName)) {
-      element.removeAttribute(attr.name);
-      continue;
-    }
-
-    if (tagName === "a" && attrName === "href" && !isSafeUrl(attr.value)) {
-      element.removeAttribute(attr.name);
-      continue;
-    }
-
-    if (tagName === "img" && attrName === "src" && !isSafeUrl(attr.value)) {
-      element.removeAttribute(attr.name);
-      continue;
-    }
-
-    if (tagName === "input" && attrName === "type" && attr.value !== "checkbox") {
-      element.removeAttribute(attr.name);
-    }
-  }
-
-  if (tagName === "a" && element.hasAttribute("href")) {
-    element.setAttribute("target", "_blank");
-    element.setAttribute("rel", "noopener noreferrer");
-  }
-
-  if (tagName === "input") {
-    element.setAttribute("disabled", "");
-  }
-}
-
-function sanitizeMarkdownHtml(html: string) {
+/**
+ * String-based HTML sanitizer.
+ *
+ * Strips unsafe tags and attributes without building a DOM tree, avoiding the
+ * expensive innerHTML-parse → walk → serialize cycle of the previous implementation.
+ *
+ * Security model:
+ *   - <script> / <style> removed entirely (tag + content)
+ *   - Tags not in SAFE_TAGS are removed (content preserved — "unwrap")
+ *   - Safe tags: only SAFE_TAG_ATTRS keys + SAFE_GLOBAL_ATTRS survive
+ *   - href/src verified by isSafeUrl()
+ *   - <a href="…"> gets target="_blank" rel="noopener noreferrer"
+ *   - <input> gets disabled="" and only "checkbox" type survives
+ */
+function sanitizeMarkdownHtml(html: string): string {
   if (typeof document === "undefined") {
     return html;
   }
 
-  const template = document.createElement("template");
-  template.innerHTML = html;
+  // ── Phase 1: Strip script/style blocks entirely (tag + content) ──
+  let clean = html.replace(
+    /<script\b[^<>]*>[\s\S]*?<\/script\s*>/gi,
+    "",
+  );
+  clean = clean.replace(
+    /<style\b[^<>]*>[\s\S]*?<\/style\s*>/gi,
+    "",
+  );
 
-  const visit = (node: ParentNode) => {
-    for (const child of Array.from(node.childNodes)) {
-      if (child.nodeType !== Node.ELEMENT_NODE) {
-        continue;
+  // ── Phase 2: Walk tags with a regex, sanitize in place ──
+  // Matches: leading slash? | tag-name | optional attrs   | self-close?
+  // Group:        (1)        |   (2)    |      (3)         |    (4)
+  const TAG_RE = /<(\/?)([a-zA-Z]\w*)((?:\s[^>]*)?)\s*(\/?)>/g;
+
+  let result = "";
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = TAG_RE.exec(clean)) !== null) {
+    // Text content before this tag
+    result += clean.slice(lastIndex, match.index);
+    lastIndex = match.index + match[0].length;
+
+    const closingSlash = match[1];
+    const tagName = match[2].toLowerCase();
+    const attrsStr = match[3];
+    const selfClose = match[4];
+
+    if (closingSlash) {
+      // Closing tag — keep only if tag is safe
+      if (SAFE_TAGS.has(tagName)) {
+        result += `</${tagName}>`;
       }
-
-      const element = child as Element;
-      const tagName = element.tagName.toLowerCase();
-
-      if (!SAFE_TAGS.has(tagName)) {
-        if (tagName === "script" || tagName === "style") {
-          element.remove();
-          continue;
-        }
-
-        while (element.firstChild) {
-          element.parentNode?.insertBefore(element.firstChild, element);
-        }
-
-        element.remove();
-        continue;
-      }
-
-      sanitizeElementAttributes(element);
-      visit(element);
+      continue;
     }
-  };
 
-  visit(template.content);
-  return template.innerHTML;
+    if (!SAFE_TAGS.has(tagName)) {
+      // Unknown tag — skip (content between tags is preserved as text)
+      continue;
+    }
+
+    // Safe tag — collect and sanitize attributes
+    const safe: [string, string][] = [];
+    if (attrsStr.trim()) {
+      const allowed = SAFE_TAG_ATTRS[tagName];
+      if (allowed) {
+        const ATTR_RE = /(\w[\w-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+)))?\s*/g;
+        let attrMatch: RegExpExecArray | null;
+        while ((attrMatch = ATTR_RE.exec(attrsStr)) !== null) {
+          const name = attrMatch[1].toLowerCase();
+          const value = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? "";
+
+          if (!allowed.has(name) && !SAFE_GLOBAL_ATTRS.has(name)) {
+            continue;
+          }
+          if (tagName === "a" && name === "href" && !isSafeUrl(value)) {
+            continue;
+          }
+          if (tagName === "img" && name === "src" && !isSafeUrl(value)) {
+            continue;
+          }
+          if (tagName === "input" && name === "type" && value !== "checkbox") {
+            continue;
+          }
+          if (tagName === "input" && name === "disabled") {
+            continue; // added unconditionally below
+          }
+          safe.push([name, value]);
+        }
+      }
+    }
+
+    // Enforce security invariants
+    if (tagName === "a" && safe.some(([n]) => n === "href")) {
+      safe.push(["target", "_blank"]);
+      safe.push(["rel", "noopener noreferrer"]);
+    }
+    if (tagName === "input") {
+      safe.push(["disabled", ""]);
+    }
+
+    const attrStr = safe
+      .map(([n, v]) => (v ? `${n}="${v.replace(/"/g, "&quot;")}"` : n))
+      .join(" ");
+
+    result += `<${tagName}${attrStr ? " " + attrStr : ""}${selfClose ? "/" : ""}>`;
+  }
+
+  // Trailing text after the last tag
+  result += clean.slice(lastIndex);
+  return result;
 }
 
 function normalizeMarkdownLine(line: string) {
@@ -384,11 +412,12 @@ function wrapTablesInScrollableContainer(html: string): string {
   );
 }
 
-export function renderMarkdown(content: string) {
+export async function renderMarkdown(content: string): Promise<string> {
   const normalizedContent = normalizeMarkdownSource(content);
-  const html = marked.parse(normalizedContent, {
+  const html = await marked.parse(normalizedContent, {
     breaks: true,
-    gfm: true
+    gfm: true,
+    async: true
   }) as string;
 
   return wrapTablesInScrollableContainer(sanitizeMarkdownHtml(html));
