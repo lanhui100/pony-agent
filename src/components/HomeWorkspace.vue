@@ -373,6 +373,8 @@ function isIncrementalStreamingAppend(previous: string, next: string) {
   return next.length > previous.length && next.startsWith(previous);
 }
 
+let lastCleanupMessageCount = 0;
+
 function syncStreamingPresentationState() {
   const activeMessageIds = new Set<string>();
   let pendingAssistantCount = 0;
@@ -426,39 +428,24 @@ function syncStreamingPresentationState() {
     streamSnapshotReasoningByMessageId[message.id] = nextReasoning;
   }
 
-  for (const messageId of Object.keys(streamSnapshotTextByMessageId)) {
-    if (!activeMessageIds.has(messageId)) {
-      delete streamSnapshotTextByMessageId[messageId];
-    }
-  }
-
-  for (const messageId of Object.keys(streamSnapshotReasoningByMessageId)) {
-    if (!activeMessageIds.has(messageId)) {
-      delete streamSnapshotReasoningByMessageId[messageId];
-    }
-  }
-
-  for (const messageId of Object.keys(streamFadeTextByMessageId)) {
-    if (!activeMessageIds.has(messageId)) {
-      delete streamFadeTextByMessageId[messageId];
-    }
-  }
-
-  for (const messageId of Object.keys(streamFadeKeyByMessageId)) {
-    if (!activeMessageIds.has(messageId)) {
-      delete streamFadeKeyByMessageId[messageId];
-    }
-  }
-
-  for (const messageId of Object.keys(streamReasoningFadeTextByMessageId)) {
-    if (!activeMessageIds.has(messageId)) {
-      delete streamReasoningFadeTextByMessageId[messageId];
-    }
-  }
-
-  for (const messageId of Object.keys(streamReasoningFadeKeyByMessageId)) {
-    if (!activeMessageIds.has(messageId)) {
-      delete streamReasoningFadeKeyByMessageId[messageId];
+  // Lazy cleanup: only purge stale entries when message count changes.
+  // During steady-state streaming, the set of messages stays constant so
+  // cleanup is unnecessary — avoids 6 × Object.keys() per delta.
+  if (messages.value.length !== lastCleanupMessageCount) {
+    lastCleanupMessageCount = messages.value.length;
+    for (const map of [
+      streamSnapshotTextByMessageId,
+      streamSnapshotReasoningByMessageId,
+      streamFadeTextByMessageId,
+      streamFadeKeyByMessageId,
+      streamReasoningFadeTextByMessageId,
+      streamReasoningFadeKeyByMessageId,
+    ]) {
+      for (const messageId of Object.keys(map)) {
+        if (!activeMessageIds.has(messageId)) {
+          delete map[messageId];
+        }
+      }
     }
   }
   updateStreamDebugReveal({
