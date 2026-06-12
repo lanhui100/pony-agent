@@ -1,5 +1,4 @@
 pub use pony_agent_core::agent;
-pub mod sse_adapter;
 mod tauri_adapter;
 
 use agent::capability_bridge::{CapabilitySourceView, CapabilityView, SkillDescriptor};
