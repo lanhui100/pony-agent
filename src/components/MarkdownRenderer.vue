@@ -99,7 +99,7 @@ function scheduleStreamingRender() {
 function scheduleNonStreamingRender() {
   cancelScheduledRender();
   const version = ++renderVersion;
-  renderedHtml.value = "";
+  // 不清空 renderedHtml，保持上一次渲染的内容可见，直到新渲染完成
   renderPending.value = Boolean(props.content.trim());
 
   if (!renderPending.value || typeof window === "undefined") {

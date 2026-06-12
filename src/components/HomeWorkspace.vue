@@ -1082,28 +1082,20 @@ watch(isSubmitting, (submitting) => {
                 <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
               </summary>
               <div class="mt-2">
-                <MarkdownRenderer
-                  v-if="assistantReasoning(turn.assistant) && !isAssistantReasoningStreaming(turn.assistant)"
-                  :content="assistantReasoning(turn.assistant)"
-                  wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
-                />
-                <div
-                  v-else-if="assistantDisplayedReasoning(turn.assistant)"
-                  class="assistant-reasoning whitespace-pre-wrap text-[13px] text-stone-600"
-                >
+                <template v-if="assistantReasoning(turn.assistant)">
                   <MarkdownRenderer
-                    :content="assistantDisplayedReasoningStable(turn.assistant)"
+                    :content="isAssistantReasoningStreaming(turn.assistant) ? assistantDisplayedReasoningStable(turn.assistant) : assistantReasoning(turn.assistant)"
                     wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
-                    :streaming="true"
+                    :streaming="isAssistantReasoningStreaming(turn.assistant)"
                   />
                   <span
-                    v-if="assistantDisplayedReasoningFade(turn.assistant)"
+                    v-if="isAssistantReasoningStreaming(turn.assistant) && assistantDisplayedReasoningFade(turn.assistant)"
                     class="assistant-streaming-fade"
                     :style="assistantDisplayedReasoningFadeStyle(turn.assistant)"
                   >
                     {{ assistantDisplayedReasoningFade(turn.assistant) }}
                   </span>
-                </div>
+                </template>
                 <p
                   v-else-if="reasoningPlaceholder(turn.assistant)"
                   class="assistant-reasoning"
@@ -1116,32 +1108,19 @@ watch(isSubmitting, (submitting) => {
               v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
               class="assistant-response-panel mt-4"
             >
-              <div
-                v-if="isAssistantStreaming(turn.assistant)"
-                data-testid="workspace-assistant-streaming"
-                class="assistant-streaming-content text-sm"
-                :class="assistantTone(turn.assistant)"
-              >
-                <MarkdownRenderer
-                  :content="assistantDisplayStableContent(turn.assistant)"
-                  wrapper-class="assistant-markdown text-sm"
-                  :tone-class="assistantTone(turn.assistant)"
-                  :streaming="true"
-                />
-                <span
-                  v-if="assistantDisplayFadeContent(turn.assistant)"
-                  class="assistant-streaming-fade"
-                  :style="assistantDisplayFadeStyle(turn.assistant)"
-                >
-                  {{ assistantDisplayFadeContent(turn.assistant) }}
-                </span>
-              </div>
               <MarkdownRenderer
-                v-else
-                :content="turn.assistant.content"
+                :content="isAssistantStreaming(turn.assistant) ? assistantDisplayStableContent(turn.assistant) : turn.assistant.content"
                 wrapper-class="assistant-markdown text-sm"
                 :tone-class="assistantTone(turn.assistant)"
+                :streaming="isAssistantStreaming(turn.assistant)"
               />
+              <span
+                v-if="isAssistantStreaming(turn.assistant) && assistantDisplayFadeContent(turn.assistant)"
+                class="assistant-streaming-fade"
+                :style="assistantDisplayFadeStyle(turn.assistant)"
+              >
+                {{ assistantDisplayFadeContent(turn.assistant) }}
+              </span>
             </div>
 
             <div
@@ -1445,7 +1424,7 @@ watch(isSubmitting, (submitting) => {
 }
 
 :deep(.assistant-markdown p) {
-  margin: 0 0 0.9rem;
+  margin: 0 0 1.2em;
   color: inherit;
 }
 
@@ -1759,6 +1738,11 @@ watch(isSubmitting, (submitting) => {
   color: #8d857a;
   font-style: italic;
   line-height: 1;
+}
+
+:deep(.assistant-reasoning-markdown p) {
+  line-height: 1;
+  margin: 0 0 1em;
 }
 
 :deep(.assistant-reasoning-markdown h1),
