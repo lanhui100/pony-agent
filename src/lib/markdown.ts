@@ -35,6 +35,7 @@ const SAFE_GLOBAL_ATTRS = new Set(["aria-label", "aria-hidden", "role", "title"]
 const SAFE_TAG_ATTRS: Record<string, Set<string>> = {
   a: new Set(["href", "rel", "target", "title"]),
   code: new Set(["class"]),
+  div: new Set(["class"]),
   img: new Set(["alt", "height", "loading", "src", "title", "width"]),
   input: new Set(["checked", "disabled", "type"]),
   pre: new Set(["class"]),
@@ -340,6 +341,49 @@ export function normalizeMarkdownSource(content: string) {
     .join("\n");
 }
 
+export function endsWithNaturalBoundary(content: string): boolean {
+  const trimmed = content.trimEnd();
+  if (!trimmed) {
+    return false;
+  }
+
+  const lastLine = trimmed.split(/\r?\n/).pop() ?? "";
+
+  // Paragraph break: trailing blank line(s)
+  if (trimmed.endsWith("\n\n")) {
+    return true;
+  }
+
+  // Closing code fence (``` or ~~~)
+  if (/^[`~]{3,}\s*$/.test(lastLine)) {
+    return true;
+  }
+
+  // Closing of a blockquote section (blank line after blockquote)
+  if (trimmed.endsWith("\n>") && lastLine.startsWith(">")) {
+    return true;
+  }
+
+  // End of a table row followed by a blank line
+  if (/^\|.+\|\s*$/.test(lastLine) && trimmed.endsWith("\n\n")) {
+    return true;
+  }
+
+  // End of a horizontal rule
+  if (/^\s{0,3}([-*_])\1{2,}\s*$/.test(lastLine)) {
+    return true;
+  }
+
+  return false;
+}
+
+function wrapTablesInScrollableContainer(html: string): string {
+  return html.replace(
+    /<table([^>]*)>([\s\S]*?)<\/table>/g,
+    '<div class="table-scroll-wrapper"><table$1>$2</table></div>'
+  );
+}
+
 export function renderMarkdown(content: string) {
   const normalizedContent = normalizeMarkdownSource(content);
   const html = marked.parse(normalizedContent, {
@@ -347,5 +391,5 @@ export function renderMarkdown(content: string) {
     gfm: true
   }) as string;
 
-  return sanitizeMarkdownHtml(html);
+  return wrapTablesInScrollableContainer(sanitizeMarkdownHtml(html));
 }

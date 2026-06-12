@@ -1,0 +1,351 @@
+diff --git a/src/components/HomeSidebar.vue b/src/components/HomeSidebar.vue
+index d73b661..aa720cb 100644
+--- a/src/components/HomeSidebar.vue
++++ b/src/components/HomeSidebar.vue
+@@ -601,7 +601,16 @@ function activeGenerationDurationMs(entry: TraceTimelineEntry, _record: Provider
+     return null;
+   }
+ 
+-  return Math.max(entry.turnDurationMs, 1);
++  if (entry.firstTokenLatencyMs == null) {
++    return Math.max(entry.turnDurationMs, 1);
++  }
++
++  const generationDurationMs = entry.turnDurationMs - entry.firstTokenLatencyMs;
++  return generationDurationMs > 0 ? generationDurationMs : null;
++}
++
++function formatTokenSpeedLabel(entry: TraceTimelineEntry) {
++  return entry.firstTokenLatencyMs == null ? "整体速度" : "生成速度";
+ }
+ 
+ function formatEntryTokenSpeed(entry: TraceTimelineEntry, record?: ProviderCallCacheRecord | null) {
+@@ -647,24 +656,44 @@ function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry, o
+   const callModelEntries = turnTimeline(turn).filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model");
+   const useTurnFallback = allowTurnFallback && callModelEntries.length === 1 && callModelEntries[0]?.id === entry.id;
+ 
++  if (record) {
++    return {
++      ...entry,
++      inputTokens: record.inputTokens ?? null,
++      cacheHitInputTokens: record.cacheHitInputTokens ?? null,
++      reasoningTokens: record.reasoningTokens ?? null,
++      outputTokens: record.outputTokens ?? null,
++      totalTokens: record.totalTokens ?? null,
++      firstTokenLatencyMs: effectiveFirstTokenLatencyMs(
++        {
++          ...entry,
++          firstTokenLatencyMs: record.firstTokenLatencyMs ?? null,
++          turnDurationMs: record.turnDurationMs ?? null
++        },
++        record
++      ),
++      turnDurationMs: record.turnDurationMs ?? null
++    };
++  }
++
+   return {
+     ...entry,
+-    inputTokens: entry.inputTokens ?? record?.inputTokens ?? (useTurnFallback ? turn.inputTokens ?? null : null),
++    inputTokens: entry.inputTokens ?? (useTurnFallback ? turn.inputTokens ?? null : null),
+     cacheHitInputTokens:
+-      entry.cacheHitInputTokens ?? record?.cacheHitInputTokens ?? (useTurnFallback ? cacheHitInputTokens(turn) ?? null : null),
++      entry.cacheHitInputTokens ?? (useTurnFallback ? cacheHitInputTokens(turn) ?? null : null),
+     reasoningTokens:
+-      entry.reasoningTokens ?? record?.reasoningTokens ?? (useTurnFallback ? reasoningTokens(turn) ?? null : null),
+-    outputTokens: entry.outputTokens ?? record?.outputTokens ?? (useTurnFallback ? turn.outputTokens ?? null : null),
+-    totalTokens: entry.totalTokens ?? record?.totalTokens ?? (useTurnFallback ? turn.totalTokens ?? null : null),
++      entry.reasoningTokens ?? (useTurnFallback ? reasoningTokens(turn) ?? null : null),
++    outputTokens: entry.outputTokens ?? (useTurnFallback ? turn.outputTokens ?? null : null),
++    totalTokens: entry.totalTokens ?? (useTurnFallback ? turn.totalTokens ?? null : null),
+     firstTokenLatencyMs: effectiveFirstTokenLatencyMs(
+       {
+         ...entry,
+-        firstTokenLatencyMs: record?.firstTokenLatencyMs ?? entry.firstTokenLatencyMs ?? (useTurnFallback ? turn.firstTokenLatencyMs ?? null : null),
+-        turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
++        firstTokenLatencyMs: entry.firstTokenLatencyMs ?? (useTurnFallback ? turn.firstTokenLatencyMs ?? null : null),
++        turnDurationMs: entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
+       },
+-      record
++      null
+     ),
+-    turnDurationMs: record?.turnDurationMs ?? entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
++    turnDurationMs: entry.turnDurationMs ?? (useTurnFallback ? turn.turnDurationMs ?? null : null)
+   };
+ }
+ 
+@@ -721,6 +750,11 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
+   const speedAverage = outputTotal != null && generationDurations.length
+     ? outputTotal / (generationDurations.reduce((sum, value) => sum + value, 0) / 1000)
+     : tokenSpeed(turn);
++  const speedLabel = latencies.length === generationDurations.length && generationDurations.length > 0
++    ? "生成速度"
++    : latencies.length === 0
++      ? "整体速度"
++      : "速度";
+   const latencyAverage = latencies.length ? average(latencies) : turn.firstTokenLatencyMs ?? null;
+ 
+   if (inputTotal != null) {
+@@ -733,7 +767,7 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
+     metrics.push(`输出 ${formatInteger(outputTotal)}`);
+   }
+   if (speedAverage != null) {
+-    metrics.push(`速度 ${speedAverage.toFixed(1)} token/s`);
++    metrics.push(`${speedLabel} ${speedAverage.toFixed(1)} token/s`);
+   }
+   if (latencyAverage != null) {
+     metrics.push(`延时 ${Math.round(latencyAverage)} ms`);
+@@ -775,7 +809,7 @@ function timelineEntryStats(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+   }
+   const tokenSpeed = formatEntryTokenSpeed(metricEntry);
+   if (tokenSpeed) {
+-    stats.push(`速度 ${tokenSpeed}`);
++    stats.push(`${formatTokenSpeedLabel(metricEntry)} ${tokenSpeed}`);
+   }
+   if (metricEntry.firstTokenLatencyMs != null) {
+     stats.push(`延时 ${metricEntry.firstTokenLatencyMs} ms`);
+@@ -849,15 +883,9 @@ function timelinePreviewText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+   }
+ 
+   if (kind === "call_model") {
+-    if (hasCallModelToolOutputs(turn, entry)) {
+-      return "";
+-    }
+-
+     return (
+       entry.error?.trim()
+       || entry.fallbackReason?.trim()
+-      || (shouldShowCallModelOutput(entry) ? entry.text?.trim() : "")
+-      || (shouldShowCallModelReasoning(entry) ? entry.reasoningContent?.trim() : "")
+       || ""
+     );
+   }
+@@ -915,7 +943,7 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+     pushRow(rows, "输入", metricEntry.inputTokens);
+     pushRow(rows, "缓存", metricEntry.cacheHitInputTokens);
+     pushRow(rows, "输出", metricEntry.outputTokens);
+-    pushRow(rows, "速度", formatEntryTokenSpeed(metricEntry) || null);
++    pushRow(rows, formatTokenSpeedLabel(metricEntry), formatEntryTokenSpeed(metricEntry) || null);
+     pushRow(rows, "延时", metricEntry.firstTokenLatencyMs != null ? `${metricEntry.firstTokenLatencyMs} ms` : null);
+     pushRow(rows, "耗时", metricEntry.turnDurationMs != null ? formatDurationMs(metricEntry.turnDurationMs) : null);
+     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
+diff --git a/tests/HomeSidebar.spec.ts b/tests/HomeSidebar.spec.ts
+index 5bc6328..b4e4554 100644
+--- a/tests/HomeSidebar.spec.ts
++++ b/tests/HomeSidebar.spec.ts
+@@ -594,7 +594,8 @@ describe("HomeSidebar", () => {
+     expect(turnButton!.text()).toContain("输入 150");
+     expect(turnButton!.text()).toContain("缓存 70");
+     expect(turnButton!.text()).toContain("输出 60");
+-    expect(turnButton!.text()).toContain("速度 18.8 token/s");
++    expect(turnButton!.text()).toContain("生成速度 20.7 token/s");
++    expect(turnButton!.text()).not.toContain("速度 18.8 token/s");
+     expect(turnButton!.text()).toContain("延时 150 ms");
+     expect(turnButton!.text()).not.toContain("思考链");
+     expect(turnButton!.text()).not.toContain("输入 40");
+@@ -767,12 +768,14 @@ describe("HomeSidebar", () => {
+     expect(modelButton.text()).toContain("输入 120");
+     expect(modelButton.text()).toContain("缓存 80");
+     expect(modelButton.text()).toContain("输出 40");
+-    expect(modelButton.text()).toContain("速度 14.3 token/s");
++    expect(modelButton.text()).toContain("生成速度 16.1 token/s");
++    expect(modelButton.text()).not.toContain("速度 14.3 token/s");
+     expect(modelButton.text()).toContain("延时 321 ms");
+     expect(modelButton.text()).toContain("2.80 s");
+     expect(modelButton.text()).not.toContain("耗时 2.80 s");
+     expect(modelButton.text()).not.toContain("输入 300");
+     expect(modelButton.text()).not.toContain("思考链");
++    expect(modelButton.text()).not.toContain("已读取 package.json，准备继续分析依赖。");
+ 
+     await modelButton.trigger("click");
+     await nextTick();
+@@ -787,8 +790,8 @@ describe("HomeSidebar", () => {
+     expect(modelSectionText).toContain("输入");
+     expect(modelSectionText).toContain("缓存");
+     expect(modelSectionText).toContain("输出");
+-    expect(modelSectionText).toContain("速度");
+-    expect(modelSectionText).toContain("14.3 token/s");
++    expect(modelSectionText).toContain("生成速度");
++    expect(modelSectionText).toContain("16.1 token/s");
+     expect(modelSectionText).not.toContain("Provider");
+     expect(modelSectionText).not.toContain("输出详情");
+     expect(modelSectionText).not.toContain("对应一次独立的模型调用，不与其他 hop 合并。");
+@@ -800,7 +803,7 @@ describe("HomeSidebar", () => {
+     expect(wrapper.get('[data-testid="trace-detail-button-model-3-assistant-output"]').exists()).toBe(true);
+   });
+ 
+-  it("buffered CALL MODEL 不伪造首 token 延时，速度基于整次耗时", async () => {
++  it("buffered CALL MODEL 不伪造首 token 延时，展示整体速度", async () => {
+     const runtimeStore = useRuntimeStore();
+     runtimeStore.$patch({
+       turnTraceHistory: [
+@@ -848,7 +851,8 @@ describe("HomeSidebar", () => {
+     await flushAll();
+ 
+     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
+-    expect(modelButton.text()).toContain("速度 50.0 token/s");
++    expect(modelButton.text()).toContain("整体速度 50.0 token/s");
++    expect(modelButton.text()).not.toContain("生成速度");
+     expect(modelButton.text()).not.toContain("延时");
+     expect(modelButton.text()).toContain("1.80 s");
+     expect(modelButton.text()).not.toContain("耗时 1.80 s");
+@@ -857,6 +861,7 @@ describe("HomeSidebar", () => {
+     await nextTick();
+ 
+     const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
++    expect(modelSectionText).toContain("整体速度");
+     expect(modelSectionText).toContain("50.0 token/s");
+     expect(modelSectionText).not.toContain("延时");
+     expect(modelSectionText).toContain("1.80 s");
+@@ -908,13 +913,13 @@ describe("HomeSidebar", () => {
+     await flushAll();
+ 
+     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
+-    expect(modelButton.text()).toContain("速度 46.6 token/s");
++    expect(modelButton.text()).toContain("整体速度 46.6 token/s");
+     expect(modelButton.text()).not.toContain("89000.0 token/s");
+     expect(modelButton.text()).not.toContain("延时 4510 ms");
+     expect(modelButton.text()).toContain("1.91 s");
+   });
+ 
+-  it("CALL MODEL 首 token 延时接近耗时时按整次耗时计算速度，避免最后一跳爆速", async () => {
++  it("CALL MODEL 首 token 延时接近耗时时按真实生成耗时计算速度", async () => {
+     const runtimeStore = useRuntimeStore();
+     runtimeStore.$patch({
+       turnTraceHistory: [
+@@ -961,8 +966,8 @@ describe("HomeSidebar", () => {
+     await flushAll();
+ 
+     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
+-    expect(modelButton.text()).toContain("速度 36.7 token/s");
+-    expect(modelButton.text()).not.toContain("4000.0 token/s");
++    expect(modelButton.text()).toContain("生成速度 4000.0 token/s");
++    expect(modelButton.text()).not.toContain("整体速度 36.7 token/s");
+     expect(modelButton.text()).not.toContain("3960.");
+     expect(modelButton.text()).toContain("1.96 s");
+   });
+@@ -994,6 +999,19 @@ describe("HomeSidebar", () => {
+               firstTokenLatencyMs: 1447,
+               turnDurationMs: 1699,
+               text: "final answer"
++            },
++            {
++              id: "return-3",
++              kind: "return_result",
++              label: "RETURN RESULT",
++              state: "completed",
++              sequence: 3,
++              text: "final answer",
++              reasoningTokens: 152,
++              outputTokens: 998,
++              totalTokens: 1132,
++              firstTokenLatencyMs: 799,
++              turnDurationMs: 19567
+             }
+           ],
+           providerCallRecords: [
+@@ -1031,13 +1049,14 @@ describe("HomeSidebar", () => {
+ 
+     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+     expect(modelButton.text()).not.toContain("输出 998");
+-    expect(modelButton.text()).not.toContain("速度 587.4 token/s");
++    expect(modelButton.text()).not.toContain("生成速度 3960.");
++    expect(modelButton.text()).not.toContain("整体速度 587.4 token/s");
+     expect(modelButton.text()).not.toContain("速度");
+     expect(modelButton.text()).toContain("延时 1447 ms");
+     expect(modelButton.text()).toContain("1.70 s");
+   });
+ 
+-  it("最后一跳有 per-call 输出时按该跳完整耗时计算速度，不扣首 token 延时", async () => {
++  it("最后一跳有 per-call 输出时按首 token 后的生成耗时计算生成速度", async () => {
+     const runtimeStore = useRuntimeStore();
+     runtimeStore.$patch({
+       turnTraceHistory: [
+@@ -1104,9 +1123,9 @@ describe("HomeSidebar", () => {
+ 
+     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+     expect(modelButton.text()).toContain("输出 68");
+-    expect(modelButton.text()).toContain("速度 40.0 token/s");
+-    expect(modelButton.text()).not.toContain("速度 269.8 token/s");
+-    expect(modelButton.text()).not.toContain("速度 587.4 token/s");
++    expect(modelButton.text()).toContain("生成速度 269.8 token/s");
++    expect(modelButton.text()).not.toContain("整体速度 40.0 token/s");
++    expect(modelButton.text()).not.toContain("整体速度 587.4 token/s");
+     expect(modelButton.text()).toContain("延时 1447 ms");
+     expect(modelButton.text()).toContain("1.70 s");
+   });
+@@ -1298,6 +1317,74 @@ describe("HomeSidebar", () => {
+     expect(wrapper.get('[data-testid="trace-detail-button-model-5-reasoning"]').exists()).toBe(true);
+   });
+ 
++  it("CALL MODEL 后续存在工具输出时，折叠态不展示模型输出", async () => {
++    const runtimeStore = useRuntimeStore();
++    runtimeStore.$patch({
++      turnTraceHistory: [
++        createTraceRecord({
++          turnId: "turn-model-output-before-tool",
++          title: "model output before tool",
++          phase: "completed",
++          traceTimeline: [
++            {
++              id: "input-1",
++              kind: "input",
++              label: "RECEIVE INPUT",
++              state: "completed",
++              sequence: 1,
++              text: "先给出计划，再读取 package.json"
++            },
++            {
++              id: "model-2",
++              kind: "call_model",
++              label: "CALL MODEL #1",
++              state: "completed",
++              sequence: 2,
++              text: "我会先检查 package.json，然后根据依赖判断下一步。",
++              reasoningContent: "需要先看项目依赖。"
++            },
++            {
++              id: "tool-3",
++              kind: "call_tool",
++              label: "CALL TOOL #1 · workspace_read_file",
++              state: "completed",
++              sequence: 3,
++              toolActivities: [
++                {
++                  id: "tool-1",
++                  name: "workspace_read_file",
++                  status: "done",
++                  summary: "读取 package.json",
++                  argumentsText: "{\"path\":\"package.json\"}",
++                  resultText: "{\"name\":\"pony-agent\"}",
++                  durationSeconds: 0.2
++                }
++              ]
++            }
++          ]
++        })
++      ]
++    });
++
++    const wrapper = mountSidebar();
++    await flushAll();
++
++    const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
++    expect(modelButton.text()).not.toContain("我会先检查 package.json，然后根据依赖判断下一步。");
++    expect(modelButton.text()).not.toContain("需要先看项目依赖。");
++    expect(modelButton.text()).not.toContain("workspace_read_file");
++    expect(modelButton.text()).not.toContain("{\"name\":\"pony-agent\"}");
++
++    await modelButton.trigger("click");
++    await nextTick();
++
++    const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
++    expect(modelSectionText).toContain("模型输出");
++    expect(modelSectionText).toContain("我会先检查 package.json，然后根据依赖判断下一步。");
++    expect(modelSectionText).toContain("workspace_read_file");
++    expect(modelSectionText).toContain("{\"name\":\"pony-agent\"}");
++  });
++
+   it("assistant 仍在输出时，trace 中不提前展示活跃思考和模型输出", async () => {
+     const runtimeStore = useRuntimeStore();
+     runtimeStore.$patch({

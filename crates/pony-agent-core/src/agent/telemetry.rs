@@ -75,6 +75,8 @@ pub struct ProviderCallCacheRecord {
     pub provider_mode: Option<String>,
     pub input_tokens: Option<u64>,
     pub cache_hit_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit_source: Option<String>,
     pub cache_miss_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,

@@ -1,11 +1,8 @@
-#[path = "../src/agent/tools.rs"]
-mod tools;
-
+use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tools::{ToolCall, ToolRouter};
 
 fn temp_workspace() -> PathBuf {
     let stamp = SystemTime::now()

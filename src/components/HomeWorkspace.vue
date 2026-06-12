@@ -1034,16 +1034,13 @@ watch(isSubmitting, (submitting) => {
             </div>
             <div class="mt-2 h-px w-full bg-stone-200/70"></div>
 
-            <div v-if="turn.tools.length" class="conversation-tool-panel mt-2">
-              <div class="flex items-center justify-between gap-3 text-[12px] leading-[1.4] text-stone-500">
-                <div class="flex min-w-0 items-center gap-2">
-                  <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
-                  <span>工具调用</span>
-                </div>
-                <div class="flex shrink-0 items-center gap-2 text-[11px] text-stone-400">
-                  <span>{{ turn.tools.length }} 项</span>
-                </div>
-              </div>
+            <details v-if="turn.tools.length" class="conversation-disclosure conversation-tool-panel mt-2 group">
+              <summary class="conversation-disclosure-summary">
+                <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
+                <span>工具调用</span>
+                <span class="inline-flex items-center rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] normal-case tracking-normal text-stone-500">{{ turn.tools.length }} 项</span>
+                <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
+              </summary>
               <div class="conversation-tool-list mt-1 space-y-0.5">
                 <div
                   v-for="tool in turn.tools"
@@ -1070,7 +1067,7 @@ watch(isSubmitting, (submitting) => {
                   </div>
                 </div>
               </div>
-            </div>
+            </details>
 
             <details
               v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
@@ -1092,9 +1089,13 @@ watch(isSubmitting, (submitting) => {
                 />
                 <div
                   v-else-if="assistantDisplayedReasoning(turn.assistant)"
-                  class="assistant-reasoning whitespace-pre-wrap text-[13px] leading-6 text-stone-600"
+                  class="assistant-reasoning whitespace-pre-wrap text-[13px] text-stone-600"
                 >
-                  <span>{{ assistantDisplayedReasoningStable(turn.assistant) }}</span>
+                  <MarkdownRenderer
+                    :content="assistantDisplayedReasoningStable(turn.assistant)"
+                    wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
+                    :streaming="true"
+                  />
                   <span
                     v-if="assistantDisplayedReasoningFade(turn.assistant)"
                     class="assistant-streaming-fade"
@@ -1113,7 +1114,7 @@ watch(isSubmitting, (submitting) => {
             </details>
             <div
               v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
-              class="assistant-response-panel mt-2"
+              class="assistant-response-panel mt-4"
             >
               <div
                 v-if="isAssistantStreaming(turn.assistant)"
@@ -1121,7 +1122,12 @@ watch(isSubmitting, (submitting) => {
                 class="assistant-streaming-content text-sm"
                 :class="assistantTone(turn.assistant)"
               >
-                <span>{{ assistantDisplayStableContent(turn.assistant) }}</span>
+                <MarkdownRenderer
+                  :content="assistantDisplayStableContent(turn.assistant)"
+                  wrapper-class="assistant-markdown text-sm"
+                  :tone-class="assistantTone(turn.assistant)"
+                  :streaming="true"
+                />
                 <span
                   v-if="assistantDisplayFadeContent(turn.assistant)"
                   class="assistant-streaming-fade"
@@ -1426,7 +1432,7 @@ watch(isSubmitting, (submitting) => {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
-  line-height: 1.65;
+  line-height: 1.2;
   color: #3d342d;
 }
 
@@ -1454,28 +1460,22 @@ watch(isSubmitting, (submitting) => {
 :deep(.assistant-markdown h5),
 :deep(.assistant-markdown h6) {
   margin: 1.15rem 0 0.65rem;
-  font-weight: 700;
-  line-height: 1.22;
+  font-size: inherit;
+  line-height: 1.2;
   letter-spacing: -0.015em;
   color: #241b14;
 }
 
-:deep(.assistant-markdown h1) {
-  font-size: 1.4rem;
-}
-
+:deep(.assistant-markdown h1),
 :deep(.assistant-markdown h2) {
-  font-size: 1.22rem;
+  font-weight: 700;
 }
 
-:deep(.assistant-markdown h3) {
-  font-size: 1.08rem;
-}
-
+:deep(.assistant-markdown h3),
 :deep(.assistant-markdown h4),
 :deep(.assistant-markdown h5),
 :deep(.assistant-markdown h6) {
-  font-size: 0.98rem;
+  font-weight: 600;
   color: #3c3028;
 }
 
@@ -1497,8 +1497,8 @@ watch(isSubmitting, (submitting) => {
   margin: 1rem 0;
   overflow-x: auto;
   border-radius: 0.9rem;
-  background: linear-gradient(180deg, rgba(247, 242, 234, 0.96), rgba(241, 233, 222, 0.92));
-  padding: 1rem 1.05rem;
+  background: transparent;
+  padding: 0;
   font-size: 0.82rem;
   line-height: 1.55;
   color: #2f261d;
@@ -1506,44 +1506,68 @@ watch(isSubmitting, (submitting) => {
 
 :deep(.assistant-markdown code) {
   border-radius: 0.42rem;
-  background: rgba(239, 230, 218, 0.92);
+  background: #f6efe3;
   padding: 0.08rem 0.34rem;
   font-size: 0.82em;
   color: #5b4330;
 }
 
 :deep(.assistant-markdown pre code) {
-  background: transparent;
-  padding: 0;
-  color: inherit;
+  background: #fefcf6;
+  padding: 1rem 1.05rem;
+  border-radius: 0.9rem;
+  display: block;
+  color: #2f261d;
 }
 
-:deep(.assistant-markdown table) {
-  display: block;
-  width: 100%;
+:deep(.assistant-markdown .table-scroll-wrapper) {
   overflow-x: auto;
   margin: 1rem 0;
+}
+
+:deep(.assistant-markdown .table-scroll-wrapper table) {
+  width: 100%;
+  table-layout: auto;
   border-collapse: separate;
   border-spacing: 0;
-  border-radius: 0.9rem;
   background: rgba(255, 251, 244, 0.92);
 }
 
-:deep(.assistant-markdown thead th) {
+:deep(.assistant-markdown .table-scroll-wrapper thead tr:first-child th:first-child) {
+  border-top-left-radius: 0.9rem;
+}
+
+:deep(.assistant-markdown .table-scroll-wrapper thead tr:first-child th:last-child) {
+  border-top-right-radius: 0.9rem;
+}
+
+:deep(.assistant-markdown .table-scroll-wrapper tbody tr:last-child td:first-child) {
+  border-bottom-left-radius: 0.9rem;
+}
+
+:deep(.assistant-markdown .table-scroll-wrapper tbody tr:last-child td:last-child) {
+  border-bottom-right-radius: 0.9rem;
+}
+
+:deep(.assistant-markdown .table-scroll-wrapper thead th) {
   background: rgba(244, 234, 221, 0.88);
   font-weight: 600;
   color: #56463a;
 }
 
-:deep(.assistant-markdown th),
-:deep(.assistant-markdown td) {
+
+:deep(.assistant-markdown .table-scroll-wrapper th),
+:deep(.assistant-markdown .table-scroll-wrapper td) {
   padding: 0.62rem 0.8rem;
   vertical-align: top;
   text-align: left;
   white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 320px;
 }
 
-:deep(.assistant-markdown tbody tr:nth-child(even)) {
+:deep(.assistant-markdown .table-scroll-wrapper tbody tr:nth-child(even)) {
   background: rgba(246, 240, 231, 0.7);
 }
 
@@ -1568,9 +1592,9 @@ watch(isSubmitting, (submitting) => {
 
 :deep(.assistant-markdown hr) {
   margin: 1.15rem 0;
-  height: 1px;
+  height: 0.5px;
   border: 0;
-  background: linear-gradient(90deg, transparent, rgba(198, 174, 147, 0.9), transparent);
+  background: linear-gradient(90deg, transparent, rgba(198, 174, 147, 0.18), transparent);
 }
 
 :deep(.assistant-markdown img) {
@@ -1649,11 +1673,18 @@ watch(isSubmitting, (submitting) => {
   }
 }
 
+.streaming-unrendered-suffix {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+  color: #3d342d;
+}
+
 .assistant-streaming-content {
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
-  line-height: 1.7;
+  line-height: 1.2;
   transition: color 140ms ease;
 }
 
@@ -1695,8 +1726,8 @@ watch(isSubmitting, (submitting) => {
 .conversation-disclosure-summary {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+  justify-content: flex-start;
+  gap: 0.5rem;
   cursor: pointer;
   list-style: none;
   font-size: 12px;
@@ -1720,22 +1751,34 @@ watch(isSubmitting, (submitting) => {
   margin: 0;
   color: #8d857a;
   font-size: 0.82rem;
-  line-height: 1.7;
+  line-height: 1;
   font-style: italic;
 }
 
 :deep(.assistant-reasoning-markdown) {
   color: #8d857a;
   font-style: italic;
-  line-height: 1.72;
+  line-height: 1;
 }
 
 :deep(.assistant-reasoning-markdown h1),
-:deep(.assistant-reasoning-markdown h2),
+:deep(.assistant-reasoning-markdown h2) {
+  font-size: inherit;
+  font-weight: 700;
+  line-height: 1;
+  color: #746d64;
+}
+
 :deep(.assistant-reasoning-markdown h3),
 :deep(.assistant-reasoning-markdown h4),
 :deep(.assistant-reasoning-markdown h5),
-:deep(.assistant-reasoning-markdown h6),
+:deep(.assistant-reasoning-markdown h6) {
+  font-size: inherit;
+  font-weight: 600;
+  line-height: 1;
+  color: #746d64;
+}
+
 :deep(.assistant-reasoning-markdown strong) {
   color: #746d64;
 }

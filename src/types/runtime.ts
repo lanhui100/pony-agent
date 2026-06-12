@@ -278,6 +278,7 @@ export type ProviderCallCacheRecord = {
   providerMode?: string | null;
   inputTokens?: number | null;
   cacheHitInputTokens?: number | null;
+  cacheHitSource?: string | null;
   cacheMissInputTokens?: number | null;
   reasoningTokens?: number | null;
   outputTokens?: number | null;

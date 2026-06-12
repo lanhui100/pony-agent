@@ -330,7 +330,11 @@ pub fn emit_stream_event(
             turn_duration_ms,
             trace_steps: if is_delta_event { None } else { trace_steps },
             trace_timeline: if is_delta_event { None } else { trace_timeline },
-            tool_activities: if is_delta_event { None } else { tool_activities },
+            tool_activities: if is_delta_event {
+                None
+            } else {
+                tool_activities
+            },
             provider_call_records: if is_delta_event {
                 None
             } else {
@@ -1016,17 +1020,26 @@ pub fn provider_followup<P: ProviderClient>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Result<crate::agent::provider::ProviderResponse, String> {
-    provider.continue_with_tool_result(request, tools, assistant_message, tool_call, tool_result)
+    provider.continue_with_tool_result(
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        tool_call,
+        tool_result,
+    )
 }
 
 pub fn provider_followup_stream<P, F>(
     provider: &P,
     request: &ProviderRequest,
     tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
@@ -1039,6 +1052,7 @@ where
     provider.continue_with_tool_result_stream(
         request,
         tools,
+        accumulated_messages,
         assistant_message,
         tool_call,
         tool_result,

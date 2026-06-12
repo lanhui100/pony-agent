@@ -265,6 +265,15 @@ function debugLog(event: string, payload?: Record<string, unknown>) {
   console.info("[pony-agent][runtime]", message);
 }
 
+function errorLog(event: string, payload?: Record<string, unknown>) {
+  const message = {
+    event,
+    payload: payload ?? {},
+    ts: new Date().toISOString()
+  };
+  console.error("[pony-agent][runtime]", message);
+}
+
 const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
 
 type StreamDebugBucket = {
@@ -1343,6 +1352,14 @@ function resolveCacheHitInputTokens(source: unknown): number | null {
   ]);
 }
 
+function resolveProviderReturnedCacheHitInputTokens(source: { providerCallRecords?: ProviderCallCacheRecord[] | null }): number | null {
+  const values = (source.providerCallRecords ?? [])
+    .map((record) => record.cacheHitInputTokens)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+}
+
 function resolveReasoningTokens(source: unknown): number | null {
   const direct = readNestedNumericTokenValue(source, [
     ["reasoningTokens"]
@@ -1360,6 +1377,142 @@ function resolveReasoningTokens(source: unknown): number | null {
     ["usage", "completion_tokens_details", "reasoning_tokens"],
     ["usage", "output_tokens_details", "reasoning_tokens"]
   ]);
+}
+
+function traceTimelineCallModelCacheEvidence(traceTimeline?: TraceTimelineEntry[] | null) {
+  return (traceTimeline ?? [])
+    .filter((entry) => canonicalizeTraceTimelineKind(entry.kind) === "call_model")
+    .map((entry, index) => ({
+      index,
+      id: entry.id,
+      label: entry.label,
+      state: entry.state,
+      inputTokens: entry.inputTokens ?? null,
+      cacheHitInputTokens: entry.cacheHitInputTokens ?? null,
+      outputTokens: entry.outputTokens ?? null,
+      totalTokens: entry.totalTokens ?? null,
+      providerSource: entry.providerSource ?? null,
+      providerMode: entry.providerMode ?? null
+    }));
+}
+
+function providerCallCacheEvidence(providerCallRecords?: ProviderCallCacheRecord[] | null) {
+  return (providerCallRecords ?? []).map((record, index) => ({
+    index,
+    requestKind: record.requestKind,
+    providerSource: record.providerSource ?? null,
+    providerMode: record.providerMode ?? null,
+    inputTokens: record.inputTokens ?? null,
+    cacheHitInputTokens: record.cacheHitInputTokens ?? null,
+    cacheHitSource: record.cacheHitSource ?? null,
+    cacheMissInputTokens: record.cacheMissInputTokens ?? null,
+    outputTokens: record.outputTokens ?? null,
+    totalTokens: record.totalTokens ?? null,
+    latencyKind: record.latencyKind ?? null
+  }));
+}
+
+function buildCacheTelemetryDebugSnapshot(
+  payload: Partial<TurnStreamEvent> | null | undefined,
+  traceTimeline?: TraceTimelineEntry[] | null,
+  persistedTrace?: TurnTraceRecord | null
+) {
+  const source = payload as unknown;
+  const providerCallRecords = payload?.providerCallRecords ?? [];
+  const providerCallsWithCacheHit = providerCallRecords.filter((record) => record.cacheHitInputTokens != null);
+  const timelineCallModels = traceTimelineCallModelCacheEvidence(traceTimeline ?? payload?.traceTimeline);
+  const timelineCallModelsWithCacheHit = timelineCallModels.filter((entry) => entry.cacheHitInputTokens != null);
+  const legacyResolvedCacheHitInputTokens = resolveCacheHitInputTokens(source);
+  const providerResolvedCacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens({ providerCallRecords });
+
+  return {
+    turnId: payload?.turnId ?? null,
+    eventType: payload?.eventType ?? null,
+    eventId: payload?.eventId ?? null,
+    sequence: payload?.sequence ?? null,
+    providerResolvedCacheHitInputTokens,
+    legacyResolvedCacheHitInputTokens,
+    rawCandidates: {
+      camelCase: readNestedNumericTokenValue(source, [["cacheHitInputTokens"]]),
+      snakeCase: readNestedNumericTokenValue(source, [["cache_hit_input_tokens"]]),
+      promptCacheHitTokens: readNestedNumericTokenValue(source, [["promptCacheHitTokens"]]),
+      promptCacheHitTokensSnake: readNestedNumericTokenValue(source, [["prompt_cache_hit_tokens"]]),
+      cachedInputTokens: readNestedNumericTokenValue(source, [["cachedInputTokens"]]),
+      cacheReadInputTokens: readNestedNumericTokenValue(source, [["cacheReadInputTokens"]]),
+      inputCachedTokens: readNestedNumericTokenValue(source, [["inputCachedTokens"]]),
+      cachedTokens: readNestedNumericTokenValue(source, [["cachedTokens"]])
+    },
+    nestedUsageCandidates: {
+      inputTokensDetailsCachedTokens: readNestedNumericTokenValue(source, [["inputTokensDetails", "cachedTokens"]]),
+      inputTokensDetailsCachedTokensSnake: readNestedNumericTokenValue(source, [["input_tokens_details", "cached_tokens"]]),
+      promptTokensDetailsCachedTokens: readNestedNumericTokenValue(source, [["promptTokensDetails", "cachedTokens"]]),
+      promptTokensDetailsCachedTokensSnake: readNestedNumericTokenValue(source, [["prompt_tokens_details", "cached_tokens"]]),
+      usageInputTokensDetailsCachedTokens: readNestedNumericTokenValue(source, [["usage", "input_tokens_details", "cached_tokens"]]),
+      usagePromptTokensDetailsCachedTokens: readNestedNumericTokenValue(source, [["usage", "prompt_tokens_details", "cached_tokens"]])
+    },
+    topLevelTokens: {
+      inputTokens: payload?.inputTokens ?? null,
+      cacheHitInputTokens: payload?.cacheHitInputTokens ?? null,
+      outputTokens: payload?.outputTokens ?? null,
+      totalTokens: payload?.totalTokens ?? null
+    },
+    providerCallRecords: providerCallCacheEvidence(providerCallRecords),
+    traceTimelineCallModels: timelineCallModels,
+    persistedTrace: persistedTrace
+      ? {
+          inputTokens: persistedTrace.inputTokens ?? null,
+          cacheHitInputTokens: persistedTrace.cacheHitInputTokens ?? null,
+          outputTokens: persistedTrace.outputTokens ?? null,
+          totalTokens: persistedTrace.totalTokens ?? null,
+          providerCallRecords: providerCallCacheEvidence(persistedTrace.providerCallRecords),
+          traceTimelineCallModels: traceTimelineCallModelCacheEvidence(persistedTrace.traceTimeline)
+        }
+      : null,
+    attribution: {
+      providerCallRecordCount: providerCallRecords.length,
+      providerCallsWithCacheHitCount: providerCallsWithCacheHit.length,
+      providerCallsWithCacheHit: providerCallsWithCacheHit.map((record, index) => ({
+        index,
+        requestKind: record.requestKind,
+        providerSource: record.providerSource ?? null,
+        cacheHitInputTokens: record.cacheHitInputTokens ?? null
+      })),
+      timelineCallModelCount: timelineCallModels.length,
+      timelineCallModelsWithCacheHitCount: timelineCallModelsWithCacheHit.length,
+      hasProviderCacheHitEvidence: providerCallsWithCacheHit.length > 0,
+      hasTimelineCacheHitEvidence: timelineCallModelsWithCacheHit.length > 0,
+      onlyTopLevelOrNestedEvidence:
+        legacyResolvedCacheHitInputTokens != null &&
+        providerCallsWithCacheHit.length === 0 &&
+        timelineCallModelsWithCacheHit.length === 0
+    }
+  };
+}
+
+function logCacheTelemetryContractViolations(terminalEvent: string, payload: TurnStreamEvent) {
+  const legacyResolvedCacheHitInputTokens = resolveCacheHitInputTokens(payload);
+  const providerResolvedCacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
+
+  if (legacyResolvedCacheHitInputTokens != null && providerResolvedCacheHitInputTokens == null) {
+    errorLog("cache-telemetry:error:non-provider-cache-hit", {
+      terminalEvent,
+      message: "Cache hit tokens were present outside providerCallRecords and were ignored.",
+      ...buildCacheTelemetryDebugSnapshot(payload)
+    });
+    return;
+  }
+
+  if (
+    legacyResolvedCacheHitInputTokens != null &&
+    providerResolvedCacheHitInputTokens != null &&
+    legacyResolvedCacheHitInputTokens !== providerResolvedCacheHitInputTokens
+  ) {
+    errorLog("cache-telemetry:error:cache-hit-mismatch", {
+      terminalEvent,
+      message: "Top-level or nested cache hit tokens differ from providerCallRecords; providerCallRecords are authoritative.",
+      ...buildCacheTelemetryDebugSnapshot(payload)
+    });
+  }
 }
 
 function createBlankSessionRuntimeFields() {
@@ -3789,6 +3942,25 @@ export const useRuntimeStore = defineStore("runtime", {
         ...patch,
         traceTimeline: this.traceTimeline
       }, persist);
+      debugLog("cache-telemetry:trace-committed", {
+        phase: patch.phase ?? this.phase,
+        ...buildCacheTelemetryDebugSnapshot(
+          {
+            turnId,
+            eventType: patch.eventType ?? undefined,
+            eventId: patch.eventId ?? undefined,
+            sequence: patch.sequence ?? undefined,
+            inputTokens: patch.inputTokens ?? undefined,
+            cacheHitInputTokens: patch.cacheHitInputTokens ?? undefined,
+            outputTokens: patch.outputTokens ?? undefined,
+            totalTokens: patch.totalTokens ?? undefined,
+            providerCallRecords: patch.providerCallRecords,
+            traceTimeline: this.traceTimeline
+          },
+          this.traceTimeline,
+          this.turnTraceHistory.find((trace) => trace.turnId === turnId) ?? null
+        )
+      });
     },
     updateActiveTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
       this.traceTimeline = cloneTraceTimeline(traceTimeline);
@@ -4425,11 +4597,16 @@ export const useRuntimeStore = defineStore("runtime", {
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        logCacheTelemetryContractViolations("completed", payload);
+        const cacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
         const reasoningTokens = resolveReasoningTokens(payload);
         const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
+        debugLog("cache-telemetry:terminal-payload", {
+          terminalEvent: "completed",
+          ...buildCacheTelemetryDebugSnapshot(payload)
+        });
         const completedSessionId = this.sessionId;
         const completedRunId = this.activeRunId;
         const completedNodeId = this.visibleNodeId;
@@ -4560,11 +4737,16 @@ export const useRuntimeStore = defineStore("runtime", {
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-        const cacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        logCacheTelemetryContractViolations("failed", payload);
+        const cacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
         const reasoningTokens = resolveReasoningTokens(payload);
         const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
+        debugLog("cache-telemetry:terminal-payload", {
+          terminalEvent: "failed",
+          ...buildCacheTelemetryDebugSnapshot(payload)
+        });
         const traceTimeline = resolveEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
             turnId: payload.turnId,
@@ -4648,8 +4830,13 @@ export const useRuntimeStore = defineStore("runtime", {
         this.flushBufferedStreamText(payload.turnId);
 
         const cancelledTraceSteps = finalizeCancelledTraceSteps(payload.traceSteps ?? this.traceSteps);
-        const cancelledCacheHitInputTokens = resolveCacheHitInputTokens(payload);
+        logCacheTelemetryContractViolations("cancelled", payload);
+        const cancelledCacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
         const cancelledReasoningTokens = resolveReasoningTokens(payload);
+        debugLog("cache-telemetry:terminal-payload", {
+          terminalEvent: "cancelled",
+          ...buildCacheTelemetryDebugSnapshot(payload)
+        });
 
         const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,

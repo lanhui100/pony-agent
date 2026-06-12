@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1780892849962,"sessionID":"ses_15a8537d8ffe654dKKtq7F0dwA","part":{"id":"prt_ea57c570f001EkKKBuzgvHLhnf","messageID":"msg_ea57c17df0010mCJLYvP4gayxf","sessionID":"ses_15a8537d8ffe654dKKtq7F0dwA","snapshot":"","type":"step-start"}}
+{"type":"error","timestamp":1780892862978,"sessionID":"ses_15a8537d8ffe654dKKtq7F0dwA","error":{"name":"UnknownError","data":{"message":"{\"type\":\"upstream_error\",\"message\":\"Upstream request failed\"}"}}}

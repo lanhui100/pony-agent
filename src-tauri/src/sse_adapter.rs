@@ -1,6 +1,6 @@
-use crate::agent::control_plane::{HostControlPlane, StartTurnStreamCommand};
-use crate::agent::runtime::TurnStreamEvent;
-use crate::agent::turn_flow::TurnEventSink;
+use pony_agent_core::agent::control_plane::{HostControlPlane, StartTurnStreamCommand};
+use pony_agent_core::agent::runtime::TurnStreamEvent;
+use pony_agent_core::agent::turn_flow::TurnEventSink;
 use std::sync::{Arc, Mutex};
 
 pub struct BufferingSseTurnEventSink {
@@ -65,7 +65,7 @@ pub fn collect_turn_stream_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::runtime::TurnInput;
+    use pony_agent_core::agent::runtime::TurnInput;
 
     #[test]
     fn format_sse_event_uses_standard_event_id_and_data_lines() {

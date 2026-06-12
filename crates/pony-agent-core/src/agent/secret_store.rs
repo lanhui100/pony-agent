@@ -109,12 +109,12 @@ struct FileSecretStorage {
     secrets: BTreeMap<String, String>,
 }
 
-struct FileSecretStore {
+pub struct FileSecretStore {
     path: PathBuf,
 }
 
 impl FileSecretStore {
-    fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 

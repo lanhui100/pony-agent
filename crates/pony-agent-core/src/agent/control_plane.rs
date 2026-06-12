@@ -18,7 +18,9 @@ use crate::agent::hooks::{
     RunControlCheckpointContext, RunControlHookEnvelope,
 };
 use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
-use crate::agent::runtime::{AgentRuntime, TurnInput, TurnResult, TurnStreamEvent};
+use crate::agent::runtime::{
+    AgentRuntime, AgentRuntimeBuilder, TurnInput, TurnResult, TurnStreamEvent,
+};
 use crate::agent::session::{
     build_missing_run_control_audit_summary, HistoryBranch,
     HistoryCheckoutMode as SessionHistoryCheckoutMode, HistoryCursor, HistoryNode,
@@ -738,31 +740,102 @@ pub struct HostControlPlane {
     capability_registry: Mutex<CapabilityRegistry>,
 }
 
-impl HostControlPlane {
+pub struct HostControlPlaneBuilder {
+    runtime: Option<AgentRuntime>,
+    execution_control: Option<ExecutionControlRegistry>,
+    graph_runs: Option<GraphRunStore>,
+    graph_runner: Option<GraphRunner>,
+    graph_planner: Option<Box<dyn GraphPlanner>>,
+}
+
+impl HostControlPlaneBuilder {
     pub fn new() -> Self {
-        let runtime = AgentRuntime::new();
-        let capability_registry = runtime.capability_registry_snapshot();
         Self {
-            runtime: Mutex::new(runtime),
-            execution_control: ExecutionControlRegistry::new(),
-            graph_runs: Mutex::new(default_graph_run_store()),
-            graph_runner: GraphRunner::new(),
-            graph_planner: Box::new(DefaultGraphPlanner),
-            capability_registry: Mutex::new(capability_registry),
+            runtime: None,
+            execution_control: None,
+            graph_runs: None,
+            graph_runner: None,
+            graph_planner: None,
         }
     }
 
-    #[cfg(test)]
-    fn with_runtime(runtime: AgentRuntime) -> Self {
+    pub fn desktop() -> Self {
+        Self::new().graph_run_store(default_graph_run_store())
+    }
+
+    pub fn runtime(mut self, runtime: AgentRuntime) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    pub fn runtime_builder(mut self, runtime_builder: AgentRuntimeBuilder) -> Self {
+        self.runtime = Some(runtime_builder.build());
+        self
+    }
+
+    pub fn execution_control(mut self, execution_control: ExecutionControlRegistry) -> Self {
+        self.execution_control = Some(execution_control);
+        self
+    }
+
+    pub fn graph_run_store(mut self, graph_runs: GraphRunStore) -> Self {
+        self.graph_runs = Some(graph_runs);
+        self
+    }
+
+    pub fn graph_runner(mut self, graph_runner: GraphRunner) -> Self {
+        self.graph_runner = Some(graph_runner);
+        self
+    }
+
+    pub fn graph_planner(mut self, graph_planner: Box<dyn GraphPlanner>) -> Self {
+        self.graph_planner = Some(graph_planner);
+        self
+    }
+
+    pub fn build(self) -> HostControlPlane {
+        let runtime = self.runtime.unwrap_or_else(AgentRuntime::new);
         let capability_registry = runtime.capability_registry_snapshot();
-        Self {
+        HostControlPlane {
             runtime: Mutex::new(runtime),
-            execution_control: ExecutionControlRegistry::new(),
-            graph_runs: Mutex::new(default_graph_run_store()),
-            graph_runner: GraphRunner::new(),
-            graph_planner: Box::new(DefaultGraphPlanner),
+            execution_control: self
+                .execution_control
+                .unwrap_or_else(ExecutionControlRegistry::new),
+            graph_runs: Mutex::new(self.graph_runs.unwrap_or_else(GraphRunStore::new)),
+            graph_runner: self.graph_runner.unwrap_or_else(GraphRunner::new),
+            graph_planner: self
+                .graph_planner
+                .unwrap_or_else(|| Box::new(DefaultGraphPlanner)),
             capability_registry: Mutex::new(capability_registry),
         }
+    }
+}
+
+impl Default for HostControlPlaneBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct DesktopHostPreset;
+
+impl DesktopHostPreset {
+    pub fn builder() -> HostControlPlaneBuilder {
+        HostControlPlaneBuilder::desktop()
+    }
+
+    pub fn build() -> HostControlPlane {
+        Self::builder().build()
+    }
+}
+
+impl HostControlPlane {
+    pub fn new() -> Self {
+        DesktopHostPreset::build()
+    }
+
+    pub fn with_runtime(runtime: AgentRuntime) -> Self {
+        HostControlPlaneBuilder::new().runtime(runtime).build()
     }
 
     pub fn health_snapshot(&self) -> HostHealthSnapshot {
@@ -3064,7 +3137,7 @@ impl MonitorAggregate {
         self.failed_request_count += u64::from(trace.error.is_some());
         self.retrieval_participation_count += u64::from(trace_uses_retrieval(trace));
         self.input_tokens += trace.input_tokens.unwrap_or(0);
-        self.cache_hit_input_tokens += trace.cache_hit_input_tokens.unwrap_or(0);
+        self.cache_hit_input_tokens += provider_returned_cache_hit_input_tokens(trace);
         self.output_tokens += trace.output_tokens.unwrap_or(0);
         self.total_tokens += trace.total_tokens.unwrap_or(0);
         self.first_token_latency.push(trace.first_token_latency_ms);
@@ -3227,7 +3300,7 @@ fn aggregate_session_metrics(session: &SessionSnapshot) -> SessionMetricsAggrega
         aggregate.failed_request_count += u64::from(trace.error.is_some());
         aggregate.retrieval_participation_count += u64::from(trace_uses_retrieval(trace));
         aggregate.input_tokens += trace.input_tokens.unwrap_or(0);
-        aggregate.cache_hit_input_tokens += trace.cache_hit_input_tokens.unwrap_or(0);
+        aggregate.cache_hit_input_tokens += provider_returned_cache_hit_input_tokens(trace);
         aggregate.output_tokens += trace.output_tokens.unwrap_or(0);
         aggregate.total_tokens += trace.total_tokens.unwrap_or(0);
         for hook_trace in &trace.hook_trace_records {
@@ -3337,6 +3410,14 @@ fn model_dimension_key_and_label(
 
 fn count_model_calls(trace: &crate::agent::session::TurnTraceRecord) -> u64 {
     trace.provider_call_records.len().max(1) as u64
+}
+
+fn provider_returned_cache_hit_input_tokens(trace: &crate::agent::session::TurnTraceRecord) -> u64 {
+    trace
+        .provider_call_records
+        .iter()
+        .filter_map(|record| record.cache_hit_input_tokens)
+        .sum()
 }
 
 fn count_tool_calls(trace: &crate::agent::session::TurnTraceRecord) -> u64 {
@@ -4246,6 +4327,7 @@ mod tests {
                         provider_mode: Some("live".to_string()),
                         input_tokens: Some(12),
                         cache_hit_input_tokens: Some(4),
+                        cache_hit_source: None,
                         cache_miss_input_tokens: Some(8),
                         reasoning_tokens: Some(2),
                         output_tokens: Some(0),
@@ -4332,6 +4414,7 @@ mod tests {
                         provider_mode: Some("live".to_string()),
                         input_tokens: Some(9),
                         cache_hit_input_tokens: Some(3),
+                        cache_hit_source: None,
                         cache_miss_input_tokens: Some(6),
                         reasoning_tokens: Some(1),
                         output_tokens: Some(0),
@@ -7163,6 +7246,7 @@ mod tests {
                     provider_mode: Some("live".to_string()),
                     input_tokens: Some(10),
                     cache_hit_input_tokens: Some(3),
+                    cache_hit_source: None,
                     cache_miss_input_tokens: Some(7),
                     reasoning_tokens: Some(1),
                     output_tokens: Some(7),
@@ -7205,6 +7289,7 @@ mod tests {
                     provider_mode: Some("live".to_string()),
                     input_tokens: Some(20),
                     cache_hit_input_tokens: Some(5),
+                    cache_hit_source: None,
                     cache_miss_input_tokens: Some(15),
                     reasoning_tokens: Some(2),
                     output_tokens: Some(9),

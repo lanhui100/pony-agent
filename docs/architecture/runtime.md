@@ -97,6 +97,16 @@
 - 这一层已完成第一刀抽离：core 通过 `TurnEventSink` 产出事件，Tauri 通过 `tauri_adapter.rs` 投递事件
 - 因此下一步不再是“先去掉 `AppHandle`”，而是验证第二种 adapter 是否能复用同一套 core 事件模型
 
+截至 2026-06-09，`PA-044` 已把该边界推进为独立 core package：
+
+- `crates/pony-agent-core` 是不依赖 Tauri 的 core crate，承载 `agent` 模块树
+- `src-tauri` 只作为 desktop adapter crate，依赖并 re-export `pony-agent-core::agent`
+- Tauri-only 类型、`AppHandle`、`State<...>`、`Emitter` 和 `tauri::async_runtime` 不进入 core crate
+- `AgentRuntimeBuilder` 暴露非测试可用的构造入口，可注入 `SessionStore / ProviderSelectionResolver / ToolExecutor / TurnPlanner / TurnContextBuilder / TurnTelemetryBuilder / workspace root`
+- `HostControlPlaneBuilder` 暴露非测试可用的控制面构造入口，可注入 `AgentRuntime / ExecutionControlRegistry / GraphRunStore / GraphRunner / GraphPlanner`
+- `DesktopRuntimePreset / DesktopHostPreset` 负责桌面默认构造，桌面路径、provider registry 和本地 workspace 行为属于 host preset，而不是 core 不可替换假设
+- `crates/pony-agent-core/src/bin/non_tauri_harness.rs` 是第二宿主烟测，使用 builder 显式构造 core，并验证 sync turn、stream turn、graph persistence、injected workspace root 与 non-Tauri event sink
+
 截至 2026-05-24，provider 配置边界也已进一步稳定：
 
 - `config.rs` 已接入统一 `SecretStore`，不再把 API Key 当作普通配置落盘
@@ -118,6 +128,12 @@
 3. `future HTTP-SSE adapter`
    负责把同一套 core 事件映射成 SSE `event/data`，不重复实现 provider、session 或 tool 语义。
 
+`PA-044` 后的强约束：
+
+- adapter 可以翻译宿主协议名称，但不得复制 runtime/session/tool/graph 语义
+- future HTTP-SSE/CLI/service host 应依赖 `pony-agent-core` 与 builder/preset seam，而不是从 `src-tauri` 借用桌面状态
+- provider blocking transport 可以继续服务 desktop preset，但必须被视为可替换 provider transport implementation，不应成为服务端宿主唯一并发模型
+
 ## 已完成的最小重构
 
 - 已抽出统一的 turn event sink / callback 接口，让 `runtime` 不再直接依赖 `AppHandle`
@@ -125,6 +141,7 @@
 - 当前 Tauri event 名与前端消费契约保持不变，由 Tauri adapter 做映射
 - 已新增 `sse_adapter.rs` 中的最小 SSE sink，把同一套 `TurnStreamEvent` 格式化成标准 `event/id/data` 帧
 - 已新增 `sse_turn_probe.rs`，可在非 Tauri 环境下直接验证第二 adapter 对 core 事件流的消费
+- 已新增 `pony-agent-core` crate 与 `non_tauri_harness`，证明 core 可以脱离 Tauri crate state 构造并执行最小 sync/stream/graph/workspace/persistence 路径
 
 ## 工具层收口
 

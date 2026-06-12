@@ -231,7 +231,7 @@ const sessionInputTokensTotal = computed(() =>
   orderedTurnTraces.value.reduce((sum, turn) => sum + (turn.inputTokens ?? 0), 0)
 );
 const sessionCacheHitTokensTotal = computed(() =>
-  orderedTurnTraces.value.reduce((sum, turn) => sum + (cacheHitInputTokens(turn) ?? 0), 0)
+  orderedTurnTraces.value.reduce((sum, turn) => sum + (providerReturnedCacheHitInputTokens(turn) ?? 0), 0)
 );
 const sessionOutputTokensTotal = computed(() =>
   orderedTurnTraces.value.reduce((sum, turn) => sum + (turn.outputTokens ?? 0), 0)
@@ -530,23 +530,12 @@ function readNestedNumericValue(source: unknown, paths: string[][]) {
   return null;
 }
 
-function cacheHitInputTokens(turn: TurnTraceRecord) {
-  return readNestedNumericValue(turn, [
-    ["cacheHitInputTokens"],
-    ["cache_hit_input_tokens"],
-    ["promptCacheHitTokens"],
-    ["prompt_cache_hit_tokens"],
-    ["cachedInputTokens"],
-    ["cacheReadInputTokens"],
-    ["inputCachedTokens"],
-    ["cachedTokens"],
-    ["inputTokensDetails", "cachedTokens"],
-    ["input_tokens_details", "cached_tokens"],
-    ["promptTokensDetails", "cachedTokens"],
-    ["prompt_tokens_details", "cached_tokens"],
-    ["usage", "input_tokens_details", "cached_tokens"],
-    ["usage", "prompt_tokens_details", "cached_tokens"]
-  ]);
+function providerReturnedCacheHitInputTokens(turn: TurnTraceRecord) {
+  const values = (turn.providerCallRecords ?? [])
+    .map((record) => record.cacheHitInputTokens)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
 }
 
 function reasoningTokens(turn: TurnTraceRecord) {
@@ -679,8 +668,7 @@ function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry, o
   return {
     ...entry,
     inputTokens: entry.inputTokens ?? (useTurnFallback ? turn.inputTokens ?? null : null),
-    cacheHitInputTokens:
-      entry.cacheHitInputTokens ?? (useTurnFallback ? cacheHitInputTokens(turn) ?? null : null),
+    cacheHitInputTokens: null,
     reasoningTokens:
       entry.reasoningTokens ?? (useTurnFallback ? reasoningTokens(turn) ?? null : null),
     outputTokens: entry.outputTokens ?? (useTurnFallback ? turn.outputTokens ?? null : null),
@@ -745,7 +733,7 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
 
   const metrics: string[] = [];
   const inputTotal = inputs.length ? inputs.reduce((sum, value) => sum + value, 0) : turn.inputTokens ?? null;
-  const cacheTotal = caches.length ? caches.reduce((sum, value) => sum + value, 0) : cacheHitInputTokens(turn);
+  const cacheTotal = caches.length ? caches.reduce((sum, value) => sum + value, 0) : providerReturnedCacheHitInputTokens(turn);
   const outputTotal = outputs.length ? outputs.reduce((sum, value) => sum + value, 0) : turn.outputTokens ?? null;
   const speedAverage = outputTotal != null && generationDurations.length
     ? outputTotal / (generationDurations.reduce((sum, value) => sum + value, 0) / 1000)
@@ -1281,7 +1269,7 @@ watch(orderedTurnTraceSignature, () => {
 
 <template>
   <aside class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/62">
-    <ScrollArea class="min-h-0 flex-1" viewport-class="px-4 py-4">
+    <ScrollArea class="min-h-0 flex-1" viewport-class="px-4 pt-10 pb-4">
       <div class="flex min-h-full flex-col gap-3">
         <section class="border-b border-stone-200/70 pb-4" data-open="true">
           <div class="flex w-full items-center justify-between gap-3 text-left" data-testid="status-panel-toggle">

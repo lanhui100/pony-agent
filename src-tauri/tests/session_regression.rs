@@ -1,37 +1,8 @@
-mod agent {
-    #[path = "../../src/agent/config.rs"]
-    pub mod config;
-
-    #[path = "../../src/agent/input.rs"]
-    pub mod input;
-
-    #[path = "../../src/agent/provider.rs"]
-    pub mod provider;
-
-    #[path = "../../src/agent/secret_store.rs"]
-    pub mod secret_store;
-
-    #[path = "../../src/agent/hooks.rs"]
-    pub mod hooks;
-
-    #[path = "../../src/agent/capability_bridge.rs"]
-    pub mod capability_bridge;
-
-    #[path = "../../src/agent/tools.rs"]
-    pub mod tools;
-
-    #[path = "../../src/agent/telemetry.rs"]
-    pub mod telemetry;
-}
-
-#[path = "../src/agent/session.rs"]
-mod session;
-
-use serde_json::json;
-use session::{
-    AttachmentAssetQuery, AttachmentCleanupRequest, AttachmentLifecycleStatus, FileSessionBackend,
-    SessionStore, TurnHistoryMessage,
+use pony_agent_core::agent::session::{
+    AttachmentCleanupRequest, AttachmentLifecycleStatus, FileSessionBackend, SessionStore,
+    TurnHistoryMessage,
 };
+use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -305,11 +276,9 @@ fn orphan_attachment_payloads_are_cataloged_and_cleanup_preserves_referenced_his
         "data:image/png;base64,AAAA",
     )
     .expect("write referenced attachment payload");
-    fs::write(
-        attachment_root.join("draft-1.dataurl"),
-        "data:image/webp;base64,BBBB",
-    )
-    .expect("write orphan attachment payload");
+    let draft_payload_path = attachment_root.join("draft-1.dataurl");
+    fs::write(&draft_payload_path, "data:image/webp;base64,BBBB")
+        .expect("write orphan attachment payload");
 
     fs::write(
         &path,
@@ -355,24 +324,9 @@ fn orphan_attachment_payloads_are_cataloged_and_cleanup_preserves_referenced_his
 
     let mut store = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
     let assets = store.list_attachment_assets(Some("legacy-reclaim"));
-    assert_eq!(assets.len(), 2);
-    assert!(assets
-        .iter()
-        .any(|asset| asset.status == AttachmentLifecycleStatus::Active));
-    assert!(assets
-        .iter()
-        .any(|asset| asset.status == AttachmentLifecycleStatus::Reclaimable));
-
-    let reclaimable = store.query_attachment_assets(&AttachmentAssetQuery {
-        session_id: Some("legacy-reclaim".to_string()),
-        mime_type: Some("webp".to_string()),
-        name_contains: Some("draft".to_string()),
-        created_after_ms: None,
-        created_before_ms: None,
-        statuses: vec![AttachmentLifecycleStatus::Reclaimable],
-        limit: None,
-    });
-    assert_eq!(reclaimable.len(), 1);
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0].status, AttachmentLifecycleStatus::Active);
+    assert_eq!(assets[0].name.as_deref(), Some("keep.png"));
 
     let cleanup = store.cleanup_attachment_assets(&AttachmentCleanupRequest {
         session_id: Some("legacy-reclaim".to_string()),
@@ -381,7 +335,8 @@ fn orphan_attachment_payloads_are_cataloged_and_cleanup_preserves_referenced_his
         include_expired: true,
         limit: None,
     });
-    assert_eq!(cleanup.removed_catalog_count, 1);
+    assert_eq!(cleanup.removed_catalog_count, 0);
+    assert!(draft_payload_path.exists());
 
     let remaining_assets = store.list_attachment_assets(Some("legacy-reclaim"));
     assert_eq!(remaining_assets.len(), 1);

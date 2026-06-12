@@ -404,7 +404,6 @@ impl GraphEngine {
 }
 
 impl GraphRunStore {
-    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             runs: HashMap::new(),

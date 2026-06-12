@@ -1,0 +1,20 @@
+请对当前实现做代码审查，不要修改代码，只输出审查结论。
+
+背景：用户反馈这次修复“没有成功”，也就是虽然单测和 build 通过，但前端主对话区在真实使用中仍然没有满足预期：
+1. agent 消息 stream 时，不会推动主对话区域平滑向上滚动；
+2. stream 效果应该是“最后新增片段”的平滑淡入。
+
+请重点审查这次实现本身为什么可能没有修好，而不是泛泛而谈。
+
+必看文件：
+- C:\Users\HUAWEI\Documents\pony-agent\src\components\HomeWorkspace.vue
+- C:\Users\HUAWEI\Documents\pony-agent\src\components\ui\ScrollArea.vue
+- C:\Users\HUAWEI\Documents\pony-agent\tests\HomeWorkspace.spec.ts
+
+请按 code review 风格输出：
+1. Findings 优先，按严重程度排序；
+2. 每条指出具体代码位置和为什么会导致“修复未生效”或“只在测试里成立”；
+3. 说明测试缺口；
+4. 最后给一个简短结论：这次修复失败的核心原因是什么。
+
+请用中文，尽量具体。

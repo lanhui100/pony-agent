@@ -1,13 +1,10 @@
 #![allow(dead_code)]
 
-#[path = "../agent/mod.rs"]
-mod agent;
-
-use agent::config::ProviderRegistryStore;
-use agent::provider::{
+use pony_agent_core::agent::config::ProviderRegistryStore;
+use pony_agent_core::agent::provider::{
     ProviderManager, ProviderMessage, ProviderRequest, ProviderRequestObservation,
 };
-use agent::tools::{builtin_tools, ToolCall, ToolDefinition};
+use pony_agent_core::agent::tools::{builtin_tools, ToolCall, ToolDefinition};
 use std::env;
 
 struct DecisionScenario {

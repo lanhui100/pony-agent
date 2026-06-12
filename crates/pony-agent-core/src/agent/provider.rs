@@ -227,6 +227,8 @@ pub enum ProviderStreamChunk {
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub cache_hit_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit_source: Option<String>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -257,6 +259,7 @@ pub trait ProviderClient {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -265,6 +268,7 @@ pub trait ProviderClient {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -448,6 +452,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -476,6 +481,7 @@ impl ProviderManager {
                 .send_openai_tool_followup_request(
                     request,
                     tools,
+                    accumulated_messages,
                     assistant_message,
                     tool_call,
                     tool_result,
@@ -506,6 +512,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -518,6 +525,7 @@ impl ProviderManager {
             let response = self.continue_with_tool_result(
                 request,
                 tools,
+                accumulated_messages,
                 assistant_message,
                 tool_call,
                 tool_result,
@@ -552,6 +560,7 @@ impl ProviderManager {
             ProviderProtocol::OpenAi => match self.send_openai_tool_followup_stream_request(
                 request,
                 tools,
+                accumulated_messages,
                 assistant_message,
                 tool_call,
                 tool_result,
@@ -566,6 +575,7 @@ impl ProviderManager {
                     let mut response = match self.send_openai_tool_followup_request(
                         request,
                         tools,
+                        accumulated_messages,
                         assistant_message,
                         tool_call,
                         tool_result,
@@ -611,6 +621,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -625,6 +636,7 @@ impl ProviderManager {
         ));
         let messages = normalize_openai_messages(openai_messages_with_tool_result(
             request,
+            accumulated_messages,
             assistant_message,
             tool_call,
             tool_result,
@@ -671,6 +683,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -689,6 +702,7 @@ impl ProviderManager {
         ));
         let messages = normalize_openai_messages(openai_messages_with_tool_result(
             request,
+            accumulated_messages,
             assistant_message,
             tool_call,
             tool_result,
@@ -1324,6 +1338,7 @@ impl ProviderClient for ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -1332,6 +1347,7 @@ impl ProviderClient for ProviderManager {
             self,
             request,
             tools,
+            accumulated_messages,
             assistant_message,
             tool_call,
             tool_result,
@@ -1342,6 +1358,7 @@ impl ProviderClient for ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -1354,6 +1371,7 @@ impl ProviderClient for ProviderManager {
             self,
             request,
             tools,
+            accumulated_messages,
             assistant_message,
             tool_call,
             tool_result,
@@ -2107,11 +2125,16 @@ fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
 
 fn openai_messages_with_tool_result(
     request: &ProviderRequest,
+    accumulated_messages: &mut Vec<Value>,
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Vec<Value> {
-    let mut messages = openai_request_messages(request);
+    let mut messages = if !accumulated_messages.is_empty() {
+        accumulated_messages.clone()
+    } else {
+        openai_request_messages(request)
+    };
 
     messages.push(openai_assistant_message_for_tool_result(
         assistant_message,
@@ -2119,6 +2142,8 @@ fn openai_messages_with_tool_result(
     ));
 
     messages.push(openai_followup_tool_result_message(tool_call, tool_result));
+
+    *accumulated_messages = messages.clone();
 
     messages
 }
@@ -2703,23 +2728,29 @@ fn extract_chat_delta_text(payload: &Value) -> Option<String> {
 
 fn extract_openai_usage(payload: &Value) -> Option<TokenUsage> {
     let usage = payload.get("usage")?;
+    provider_log(format!("usage:openai raw={}", usage));
+    let cache_hit = usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(Value::as_u64)
+        .map(|value| (value, "usage.prompt_cache_hit_tokens"))
+        .or_else(|| {
+            usage
+                .get("input_tokens_details")
+                .and_then(|value| value.get("cached_tokens"))
+                .and_then(Value::as_u64)
+                .map(|value| (value, "usage.input_tokens_details.cached_tokens"))
+        })
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|value| value.get("cached_tokens"))
+                .and_then(Value::as_u64)
+                .map(|value| (value, "usage.prompt_tokens_details.cached_tokens"))
+        });
     Some(normalize_token_usage(TokenUsage {
         input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
-        cache_hit_input_tokens: usage
-            .get("prompt_cache_hit_tokens")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                usage
-                    .get("input_tokens_details")
-                    .and_then(|value| value.get("cached_tokens"))
-                    .and_then(Value::as_u64)
-            })
-            .or_else(|| {
-                usage
-                    .get("prompt_tokens_details")
-                    .and_then(|value| value.get("cached_tokens"))
-                    .and_then(Value::as_u64)
-            }),
+        cache_hit_input_tokens: cache_hit.map(|(value, _source)| value),
+        cache_hit_source: cache_hit.map(|(_value, source)| source.to_string()),
         reasoning_tokens: usage
             .get("completion_tokens_details")
             .and_then(|value| value.get("reasoning_tokens"))
@@ -2772,6 +2803,7 @@ fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
     Some(normalize_token_usage(TokenUsage {
         input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
         cache_hit_input_tokens: None,
+        cache_hit_source: None,
         reasoning_tokens: None,
         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
@@ -2812,6 +2844,7 @@ fn estimate_token_usage(request: &ProviderRequest, output_text: &str) -> TokenUs
     normalize_token_usage(TokenUsage {
         input_tokens: Some(estimate_tokens_from_chars(input_chars)),
         cache_hit_input_tokens: None,
+        cache_hit_source: None,
         reasoning_tokens: None,
         output_tokens: Some(estimate_tokens_from_chars(output_chars)),
         total_tokens: None,
@@ -2872,6 +2905,7 @@ fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
     TokenUsage {
         input_tokens: usage.input_tokens,
         cache_hit_input_tokens: usage.cache_hit_input_tokens,
+        cache_hit_source: usage.cache_hit_source,
         reasoning_tokens: usage.reasoning_tokens,
         output_tokens: usage.output_tokens,
         total_tokens,
@@ -3045,10 +3079,11 @@ fn provider_log(message: String) {
 
 fn provider_log_token_usage(context: &str, usage: &TokenUsage) {
     provider_log(format!(
-        "usage:{} input={:?} cache_hit_input={:?} reasoning={:?} output={:?} total={:?}",
+        "usage:{} input={:?} cache_hit_input={:?} cache_hit_source={:?} reasoning={:?} output={:?} total={:?}",
         context,
         usage.input_tokens,
         usage.cache_hit_input_tokens,
+        usage.cache_hit_source,
         usage.reasoning_tokens,
         usage.output_tokens,
         usage.total_tokens
@@ -3414,6 +3449,7 @@ mod tests {
 
         let messages = openai_messages_with_tool_result(
             &request,
+            &mut vec![],
             Some(&provider_native_assistant_tool_call_message(
                 Some("先读取文件，再给出结论。"),
                 Some("先确认 provider 协议分支，再继续调用工具。"),
@@ -3475,6 +3511,7 @@ mod tests {
 
         let messages = openai_messages_with_tool_result(
             &request,
+            &mut vec![],
             Some(&assistant_message),
             &tool_call,
             &tool_result,
@@ -3536,6 +3573,7 @@ mod tests {
 
         let messages = openai_messages_with_tool_result(
             &request,
+            &mut vec![],
             Some(&assistant_message),
             &tool_call,
             &tool_result,
@@ -3811,6 +3849,7 @@ mod tests {
                     description: "gather context",
                     input_schema: json!({ "type": "object" }),
                 }],
+                &mut vec![],
                 None,
                 &tool_call,
                 &tool_result,

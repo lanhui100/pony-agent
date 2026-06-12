@@ -89,7 +89,6 @@ impl ToolRouter {
         }
     }
 
-    #[cfg(test)]
     pub fn with_workspace_root(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
     }
@@ -804,20 +803,19 @@ impl ToolRouter {
         let paths = unique_paths(paths);
 
         if !paths.is_empty() {
-            if paths.len() > MAX_GATHER_CONTEXT_PATHS {
-                return error_result(
-                    TOOL_WORKSPACE_GATHER_CONTEXT,
-                    "too_many_paths",
-                    format!(
-                        "单次 workspace_gather_context 最多允许 {} 个路径，当前收到 {} 个。",
-                        MAX_GATHER_CONTEXT_PATHS,
-                        paths.len()
-                    ),
-                    Some("请缩小本次聚合范围，或拆成多个 gather/batch 调用。".to_string()),
-                );
-            }
+            let requested_path_count = paths.len();
+            let skipped_paths = if requested_path_count > MAX_GATHER_CONTEXT_PATHS {
+                paths[MAX_GATHER_CONTEXT_PATHS..].to_vec()
+            } else {
+                Vec::new()
+            };
+            let gathered_paths = paths
+                .iter()
+                .take(MAX_GATHER_CONTEXT_PATHS)
+                .cloned()
+                .collect::<Vec<_>>();
 
-            let nested = paths
+            let mut nested = gathered_paths
                 .iter()
                 .enumerate()
                 .map(|(index, path)| {
@@ -836,13 +834,49 @@ impl ToolRouter {
                     (index, nested_call, result)
                 })
                 .collect::<Vec<_>>();
-            let plan = build_multi_path_gather_plan(&paths, &query, limit, line_count);
+            if !skipped_paths.is_empty() {
+                let skipped_call = ToolCall {
+                    call_id: None,
+                    name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+                    arguments: json!({
+                        "paths": skipped_paths,
+                        "limit": limit,
+                        "lineCount": line_count,
+                    }),
+                    plan: None,
+                };
+                nested.push((
+                    gathered_paths.len(),
+                    skipped_call,
+                    ToolResult {
+                        tool_name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+                        status: "ok".to_string(),
+                        output: json_string(json!({
+                            "ok": true,
+                            "status": "partial",
+                            "reason": "too_many_paths",
+                            "message": format!(
+                                "单次 workspace_gather_context 最多聚合前 {} 个路径，已跳过其余 {} 个。",
+                                MAX_GATHER_CONTEXT_PATHS,
+                                requested_path_count.saturating_sub(MAX_GATHER_CONTEXT_PATHS)
+                            ),
+                            "skippedPaths": skipped_paths,
+                        })),
+                        duration_ms: 0,
+                    },
+                ));
+            }
+            let plan = build_multi_path_gather_plan(&gathered_paths, &query, limit, line_count);
 
             return self.aggregate_nested_results(
                 TOOL_WORKSPACE_GATHER_CONTEXT,
                 json!({
                     "mode": "multi_path",
-                    "paths": paths,
+                    "paths": gathered_paths,
+                    "requestedPathCount": requested_path_count,
+                    "skippedPaths": skipped_paths,
+                    "limitApplied": requested_path_count > MAX_GATHER_CONTEXT_PATHS,
+                    "pathLimit": MAX_GATHER_CONTEXT_PATHS,
                     "query": if query.is_empty() { Value::Null } else { Value::String(query) },
                 }),
                 Some(plan),
@@ -2236,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn gather_context_rejects_too_many_paths() {
+    fn gather_context_limits_too_many_paths_as_partial_result() {
         let workspace = temp_workspace();
         for index in 0..=MAX_GATHER_CONTEXT_PATHS {
             fs::write(workspace.join(format!("demo-{index}.rs")), "fn demo() {}\n")
@@ -2257,12 +2291,39 @@ mod tests {
             plan: None,
         });
 
-        assert_eq!(result.status, "error");
+        assert_eq!(result.status, "ok");
         let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
         assert_eq!(
             payload
-                .get("error")
-                .and_then(|error| error.get("code"))
+                .get("meta")
+                .and_then(|meta| meta.get("requestedPathCount"))
+                .and_then(Value::as_u64),
+            Some((MAX_GATHER_CONTEXT_PATHS + 1) as u64)
+        );
+        assert_eq!(
+            payload.get("status").and_then(Value::as_str),
+            Some("partial")
+        );
+        assert_eq!(
+            payload.get("successCount").and_then(Value::as_u64),
+            Some(MAX_GATHER_CONTEXT_PATHS as u64)
+        );
+        assert_eq!(payload.get("partialCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            payload
+                .get("meta")
+                .and_then(|meta| meta.get("skippedPaths"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            payload
+                .get("results")
+                .and_then(Value::as_array)
+                .and_then(|results| results.last())
+                .and_then(|entry| entry.get("output"))
+                .and_then(|output| output.get("reason"))
                 .and_then(Value::as_str),
             Some("too_many_paths")
         );

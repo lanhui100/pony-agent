@@ -10,17 +10,19 @@ Pony Agent 的目标是构建一个可观察、可扩展的桌面智能体系统
 
 1. 宿主层：`Tauri / CLI / HTTP-SSE / TUI`
    职责：承载具体入口形态、窗口或进程生命周期、用户交互面。
-2. 宿主控制面：统一命令与状态查询
+2. Core 基础设施层：`pony-agent-core`
+   职责：承载不依赖 Tauri 的 `runtime / control plane / graph / session / tools / provider / telemetry` 主体语义。
+3. 宿主控制面：统一命令与状态查询
    职责：把不同宿主入口翻译成同一组 `turn / run / session / telemetry / attachment / checkpoint` 命令与 inspection 读取面。
-3. Graph 编排层：`goal / run / planner / stop / resume / checkpoint`
+4. Graph 编排层：`goal / run / planner / stop / resume / checkpoint`
    职责：围绕任务目标做跨 turn 编排、停止/恢复、budget 与 checkpoint 决策。
-4. Runtime 执行层：单 turn loop / tool follow-up / stream / cancel
+5. Runtime 执行层：单 turn loop / tool follow-up / stream / cancel
    职责：把单个 turn 真正执行完，处理 `model -> tool -> model -> ... -> final answer`、流式 delta 和 turn 级取消。
-5. 能力接入层：`tools / MCP / skills bridge`
+6. 能力接入层：`tools / MCP / skills bridge`
    职责：把外部能力纳入统一 capability registry，提供可被 runtime / graph 消费的稳定能力边界。
-6. 状态、上下文与记忆层：`session / attachments / context / state / memory / transcript / checkpoints`
+7. 状态、上下文与记忆层：`session / attachments / context / state / memory / transcript / checkpoints`
    职责：承载会话、附件、当前上下文、运行状态、长期记忆、provider transcript 与各层 checkpoint 的稳定状态面。
-7. 基础设施层：`provider / secret / telemetry / storage`
+8. 基础设施层：`provider / secret / telemetry / storage`
    职责：提供模型协议、密钥存储、遥测、文件/数据库存储等底座能力。
 
 这张图描述的是最终目标分层，不表示所有层都已经完成。
@@ -54,6 +56,15 @@ Pony Agent 的目标是构建一个可观察、可扩展的桌面智能体系统
 - Tauri 入口只保留参数翻译、状态注入与事件投递，不承载独立调度逻辑
 - `turn / session / checkpoint` 命令先进入统一的 `host control plane v1`，再下探 runtime / execution control
 - 后续 HTTP/SSE/CLI 需要复用同一套 core 命令和 inspection 读取面，而不是各自复制入口语义
+
+截至 `2026-06-09`，该边界已通过 `PA-044` 加固：
+
+- core 主体已迁入独立 workspace member：`crates/pony-agent-core`
+- `src-tauri` 作为 desktop adapter 依赖并 re-export `pony-agent-core::agent`
+- `tauri_adapter.rs` 继续负责 Tauri event delivery，不拥有 provider/session/tool/graph 语义
+- `AgentRuntimeBuilder / HostControlPlaneBuilder` 允许非 Tauri 宿主注入 runtime、session backend、graph store、workspace root、provider resolver 与 tool executor
+- `DesktopRuntimePreset / DesktopHostPreset` 保留桌面默认路径和 provider registry 行为，使桌面端仍是 first host，而不是 core ownership boundary
+- `non_tauri_harness` 已证明 core 可脱离 Tauri 构造、执行 sync/stream turn、消费 non-Tauri sink，并验证 injected workspace root 与 file-backed graph/session persistence
 
 ### 3. Rust Runtime
 

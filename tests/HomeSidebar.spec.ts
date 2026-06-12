@@ -8,6 +8,7 @@ import { useRuntimeStore } from "@/stores/runtime";
 import type { ProviderRegistry } from "@/types/provider";
 import type {
   BuildContextObservation,
+  ProviderCallCacheRecord,
   RetrievedContextState,
   TraceStep,
   TraceTimelineEntry,
@@ -216,6 +217,24 @@ function createTraceRecord(overrides: Partial<TurnTraceRecord> = {}): TurnTraceR
     turnDurationMs: overrides.turnDurationMs ?? null,
     updatedAt: overrides.updatedAt ?? 1,
     providerCallRecords: overrides.providerCallRecords ?? []
+  };
+}
+
+function createProviderCallRecord(overrides: Partial<ProviderCallCacheRecord> = {}): ProviderCallCacheRecord {
+  return {
+    requestKind: overrides.requestKind ?? "initial_request",
+    providerSource: overrides.providerSource ?? "provider_decision_stream",
+    providerMode: overrides.providerMode ?? "live",
+    inputTokens: overrides.inputTokens ?? null,
+    cacheHitInputTokens: overrides.cacheHitInputTokens ?? null,
+    cacheMissInputTokens: overrides.cacheMissInputTokens ?? null,
+    reasoningTokens: overrides.reasoningTokens ?? null,
+    outputTokens: overrides.outputTokens ?? null,
+    totalTokens: overrides.totalTokens ?? null,
+    firstTokenLatencyMs: overrides.firstTokenLatencyMs ?? null,
+    turnDurationMs: overrides.turnDurationMs ?? null,
+    latencyKind: overrides.latencyKind ?? "provider_stream",
+    prefixMutationReasons: overrides.prefixMutationReasons ?? []
   };
 }
 
@@ -581,7 +600,24 @@ describe("HomeSidebar", () => {
           cacheHitInputTokens: 70,
           outputTokens: 60,
           firstTokenLatencyMs: 150,
-          turnDurationMs: 3500
+          turnDurationMs: 3500,
+          providerCallRecords: [
+            createProviderCallRecord({
+              inputTokens: 110,
+              cacheHitInputTokens: 60,
+              outputTokens: 45,
+              firstTokenLatencyMs: 210,
+              turnDurationMs: 2400
+            }),
+            createProviderCallRecord({
+              requestKind: "tool_followup",
+              inputTokens: 40,
+              cacheHitInputTokens: 10,
+              outputTokens: 15,
+              firstTokenLatencyMs: 90,
+              turnDurationMs: 800
+            })
+          ]
         })
       ]
     });
@@ -756,7 +792,16 @@ describe("HomeSidebar", () => {
           cacheHitInputTokens: 200,
           outputTokens: 90,
           firstTokenLatencyMs: 500,
-          turnDurationMs: 6000
+          turnDurationMs: 6000,
+          providerCallRecords: [
+            createProviderCallRecord({
+              inputTokens: 120,
+              cacheHitInputTokens: 80,
+              outputTokens: 40,
+              firstTokenLatencyMs: 321,
+              turnDurationMs: 2800
+            })
+          ]
         })
       ]
     });

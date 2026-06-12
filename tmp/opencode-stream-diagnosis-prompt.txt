@@ -1,0 +1,17 @@
+请只做诊断和方案，不要修改代码。
+
+项目：C:\Users\HUAWEI\Documents\pony-agent
+目标文件重点：src/components/HomeWorkspace.vue，tests/HomeWorkspace.spec.ts，src/components/ui/ScrollArea.vue
+
+要诊断的问题：
+1. agent 消息在 stream 过程中，主对话区域不会随着新增内容平滑向上滚动；
+2. stream 效果应该改成“最后新增片段”的平滑淡入，而不是整段尾窗反复淡入。
+
+请你：
+1. 阅读相关实现和测试；
+2. 给出问题根因；
+3. 给出最小且稳妥的修复方案；
+4. 给出需要补的测试点；
+5. 明确说明你是否同意当前实现中 reveal loop / auto scroll / fade tail 的设计方向，哪些要保留，哪些要调整。
+
+请输出中文，尽量结构化，结论明确。

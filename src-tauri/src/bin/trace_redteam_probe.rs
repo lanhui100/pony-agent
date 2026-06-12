@@ -1,11 +1,8 @@
 #![allow(dead_code)]
 
-#[path = "../agent/mod.rs"]
-mod agent;
-
-use agent::config::{ProviderRegistryStore, ProviderSelectionResolver};
-use agent::runtime::{AgentRuntime, TurnInput, TurnStreamEvent};
-use agent::turn_flow::TurnEventSink;
+use pony_agent_core::agent::config::{ProviderRegistryStore, ProviderSelectionResolver};
+use pony_agent_core::agent::runtime::{AgentRuntime, TurnInput, TurnStreamEvent};
+use pony_agent_core::agent::turn_flow::TurnEventSink;
 use std::cell::RefCell;
 use std::env;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};

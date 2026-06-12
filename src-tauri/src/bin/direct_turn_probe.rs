@@ -1,10 +1,7 @@
 #![allow(dead_code)]
 
-#[path = "../agent/mod.rs"]
-mod agent;
-
-use agent::runtime::{AgentRuntime, TurnInput, TurnResult};
-use agent::telemetry::{TurnToolActivity, TurnTraceStep};
+use pony_agent_core::agent::runtime::{AgentRuntime, TurnInput, TurnResult};
+use pony_agent_core::agent::telemetry::{TurnToolActivity, TurnTraceStep};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::env;

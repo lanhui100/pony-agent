@@ -3459,6 +3459,12 @@ describe("runtime session resilience", () => {
         completionTokensDetails: {
           reasoningTokens: 8
         },
+        providerCallRecords: [
+          createProviderCallRecord({
+            requestKind: "initial_request",
+            cacheHitInputTokens: 5
+          })
+        ],
         firstTokenLatencyMs: 321,
         turnDurationMs: 2800,
         traceSteps: store.traceSteps,
@@ -4229,7 +4235,7 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
-  it("prefers accumulated cache-hit tokens over nested cached token details on completion", async () => {
+  it("ignores non-provider cache-hit candidates on completion", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(6262);
     const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
@@ -4296,7 +4302,7 @@ describe("runtime session resilience", () => {
     await flushMicrotasks();
 
     expect(store.turnTraceHistory).toHaveLength(1);
-    expect(store.turnTraceHistory[0]?.cacheHitInputTokens).toBe(70);
+    expect(store.turnTraceHistory[0]?.cacheHitInputTokens).toBeNull();
     expect(store.turnTraceHistory[0]?.inputTokens).toBe(240);
     expect(store.turnTraceHistory[0]?.outputTokens).toBe(70);
     expect(store.turnTraceHistory[0]?.totalTokens).toBe(310);
@@ -4370,6 +4376,7 @@ describe("runtime session resilience", () => {
       "initial_request",
       "tool_followup"
     ]);
+    expect(store.turnTraceHistory[0]?.cacheHitInputTokens).toBe(15);
     expect(store.turnTraceHistory[0]?.providerCallRecords?.[0]?.turnDurationMs).toBe(420);
     expect(store.turnTraceHistory[0]?.providerCallRecords?.[1]?.turnDurationMs).toBe(420);
 

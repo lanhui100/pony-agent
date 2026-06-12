@@ -1,11 +1,9 @@
 #![allow(dead_code)]
 
-#[path = "../agent/mod.rs"]
-mod agent;
 #[path = "../sse_adapter.rs"]
 mod sse_adapter;
 
-use agent::runtime::{AgentRuntime, TurnInput, TurnStreamEvent};
+use pony_agent_core::agent::runtime::{AgentRuntime, TurnInput, TurnStreamEvent};
 use sse_adapter::BufferingSseTurnEventSink;
 use std::collections::BTreeSet;
 use std::env;

@@ -1,30 +1,12 @@
-mod agent {
-    pub mod provider {
-        use serde::{Deserialize, Serialize};
-
-        #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-        #[serde(rename_all = "lowercase")]
-        pub enum ProviderProtocol {
-            OpenAi,
-            Anthropic,
-        }
-    }
-
-    #[path = "../../src/agent/secret_store.rs"]
-    pub mod secret_store;
-
-    #[path = "../../src/agent/config.rs"]
-    pub mod config;
-}
-
-use agent::config::{
+use pony_agent_core::agent::config::{
     ProviderCapabilityPreset, ProviderConfigView, ProviderModelCapabilities, ProviderModelConfig,
     ProviderRegistryStore, ProviderRegistryView,
 };
-use agent::provider::ProviderProtocol;
+use pony_agent_core::agent::provider::ProviderProtocol;
+use pony_agent_core::agent::secret_store::FileSecretStore;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_config_root() -> PathBuf {
@@ -38,7 +20,10 @@ fn temp_config_root() -> PathBuf {
 fn temp_provider_store() -> (PathBuf, ProviderRegistryStore) {
     let temp_root = temp_config_root();
     let store_path = temp_root.join("pony-agent").join("providers.json");
-    let store = ProviderRegistryStore::with_path(&store_path);
+    let store = ProviderRegistryStore::with_path_and_secret_store(
+        &store_path,
+        Arc::new(FileSecretStore::new(secret_store_file(&temp_root))),
+    );
 
     assert!(
         store_path.starts_with(&temp_root),

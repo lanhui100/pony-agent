@@ -1,4 +1,4 @@
-mod agent;
+pub use pony_agent_core::agent;
 pub mod sse_adapter;
 mod tauri_adapter;
 

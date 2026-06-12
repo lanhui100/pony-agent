@@ -9,6 +9,7 @@
 - 能力接入：`PA-020 / PA-021`
 - 生命周期横切：`PA-022`
 - 观测与监控：`PA-024`
+- core 基础设施边界：`PA-044`
 
 ## Backlog
 
@@ -19,7 +20,8 @@
 
 ## Ready
 
-- 暂无
+- `PA-044` agent core 多端基础设施边界加固
+  说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
 
 ## In Progress
 
