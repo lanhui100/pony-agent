@@ -1,7 +1,10 @@
 use crate::agent::provider::PrefixMutationReason;
-use crate::agent::tools::{ToolCall, ToolPlan, ToolPlanStep, ToolResult};
+use crate::agent::tools::{
+    model_visible_tool_name, product_canonical_tool_name, tool_display_metadata_for_name,
+    tool_error_from_output, ToolCall, ToolPermissionFacts, ToolPlan, ToolPlanStep, ToolResult,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +28,8 @@ pub struct CapabilityInvocationRecord {
     pub host_mediated: Option<bool>,
     pub permission_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_facts: Option<ToolPermissionFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_source_id: Option<String>,
@@ -41,11 +46,21 @@ pub struct CapabilityInvocationRecord {
 pub struct TurnToolActivity {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_zh: Option<String>,
     pub status: String,
     pub summary: String,
     pub arguments_text: Option<String>,
     pub result_text: Option<String>,
     pub duration_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_activity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_invocation: Option<CapabilityInvocationRecord>,
 }
@@ -263,12 +278,17 @@ fn trace_step(id: &str, label: &str, state: &str) -> TurnTraceStep {
 fn tool_activities_running(active_call: &ToolCall) -> Vec<TurnToolActivity> {
     let mut activities = vec![TurnToolActivity {
         id: tool_activity_id(&active_call.name, None),
-        name: active_call.name.to_string(),
+        name: model_visible_tool_name(&active_call.name).to_string(),
+        canonical_tool_name: Some(product_canonical_tool_name(&active_call.name).to_string()),
+        display_name_zh: tool_display_metadata_for_name(&active_call.name).display_name_zh,
         status: "running".to_string(),
         summary: running_summary(active_call),
         arguments_text: Some(pretty_json(&active_call.arguments)),
         result_text: None,
         duration_seconds: None,
+        parent_activity_id: None,
+        artifacts: None,
+        error: None,
         capability_invocation: None,
     }];
 
@@ -283,12 +303,18 @@ fn tool_activities_after_result(
     let parsed = parse_tool_output(&result.output);
     let mut activities = vec![TurnToolActivity {
         id: tool_activity_id(&active_call.name, None),
-        name: active_call.name.to_string(),
+        name: model_visible_tool_name(&active_call.name).to_string(),
+        canonical_tool_name: Some(product_canonical_tool_name(&active_call.name).to_string()),
+        display_name_zh: tool_display_metadata_for_name(&active_call.name).display_name_zh,
         status: activity_status(result.status.as_str(), composite_result_status(&parsed)),
         summary: completed_summary(active_call, result.status.as_str(), &parsed),
         arguments_text: Some(pretty_json(&active_call.arguments)),
         result_text: Some(parent_result_text(&parsed, &result.output)),
         duration_seconds: Some(result.duration_ms as f64 / 1000.0),
+        parent_activity_id: None,
+        artifacts: Some(extract_activity_artifacts(&parsed)),
+        error: tool_error_from_output(result.status.as_str(), &parsed)
+            .map(|error| serde_json::to_value(error).unwrap_or(Value::Null)),
         capability_invocation: None,
     }];
 
@@ -385,12 +411,17 @@ fn planned_child_activities(active_call: &ToolCall) -> Vec<TurnToolActivity> {
         .enumerate()
         .map(|(index, step)| TurnToolActivity {
             id: tool_activity_id(&active_call.name, Some(&format!("planned-{}", index + 1))),
-            name: step.name,
+            name: model_visible_tool_name(&step.name).to_string(),
+            canonical_tool_name: Some(product_canonical_tool_name(&step.name).to_string()),
+            display_name_zh: tool_display_metadata_for_name(&step.name).display_name_zh,
             status: "planned".to_string(),
             summary: step.summary,
             arguments_text: Some(pretty_json(&step.arguments)),
             result_text: None,
             duration_seconds: None,
+            parent_activity_id: Some(tool_activity_id(&active_call.name, None)),
+            artifacts: None,
+            error: None,
             capability_invocation: None,
         })
         .collect()
@@ -437,7 +468,9 @@ fn nested_result_to_activity(
 
     TurnToolActivity {
         id: tool_activity_id(&active_call.name, Some(&format!("child-{}", position + 1))),
-        name: tool_name.to_string(),
+        name: model_visible_tool_name(tool_name).to_string(),
+        canonical_tool_name: Some(product_canonical_tool_name(tool_name).to_string()),
+        display_name_zh: tool_display_metadata_for_name(tool_name).display_name_zh,
         status: match aggregate_status {
             "ok" => "done".to_string(),
             "partial" | "error" | "aborted" => "error".to_string(),
@@ -447,6 +480,9 @@ fn nested_result_to_activity(
         arguments_text: Some(pretty_json(&arguments)),
         result_text: Some(nested_result_text(&output, error_message)),
         duration_seconds,
+        parent_activity_id: Some(tool_activity_id(&active_call.name, None)),
+        artifacts: Some(extract_activity_artifacts(&output)),
+        error: entry.get("error").cloned(),
         capability_invocation: None,
     }
 }
@@ -488,6 +524,17 @@ fn nested_result_text(output: &Value, error_message: Option<&str>) -> String {
     }
 
     pretty_json(output)
+}
+
+fn extract_activity_artifacts(parsed: &Value) -> Vec<Value> {
+    let mut artifacts = Vec::new();
+    if let Some(path) = parsed.get("path") {
+        artifacts.push(json!({
+            "kind": "path",
+            "value": path,
+        }));
+    }
+    artifacts
 }
 
 fn composite_child_plan(active_call: &ToolCall) -> Option<ToolPlan> {

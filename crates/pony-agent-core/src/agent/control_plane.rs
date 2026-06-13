@@ -3183,7 +3183,7 @@ impl ToolAggregate {
 
     fn add_activity(&mut self, activity: &crate::agent::telemetry::TurnToolActivity) {
         self.call_count += 1;
-        self.failed_call_count += u64::from(activity.status != "completed");
+        self.failed_call_count += u64::from(activity.status == "error");
         let duration_ms = activity
             .duration_seconds
             .map(|value| (value * 1000.0).round().max(0.0) as u64);
@@ -3224,7 +3224,7 @@ impl ActivityAggregate {
 
     fn add_activity(&mut self, activity: &crate::agent::telemetry::TurnToolActivity) {
         self.call_count += 1;
-        self.failed_call_count += u64::from(activity.status != "completed");
+        self.failed_call_count += u64::from(activity.status == "error");
         let duration_ms = activity
             .duration_seconds
             .map(|value| (value * 1000.0).round().max(0.0) as u64);
@@ -4314,11 +4314,16 @@ mod tests {
                     tool_activities: vec![crate::agent::telemetry::TurnToolActivity {
                         id: "tool-failed-1".to_string(),
                         name: "workspace_list_files".to_string(),
+                        canonical_tool_name: Some("List".to_string()),
+                        display_name_zh: Some("列表".to_string()),
                         status: "completed".to_string(),
                         summary: "tool completed before failure".to_string(),
                         arguments_text: Some("{\"path\":\".\"}".to_string()),
                         result_text: Some("ok".to_string()),
                         duration_seconds: Some(0.2),
+                        parent_activity_id: None,
+                        artifacts: None,
+                        error: None,
                         capability_invocation: None,
                     }],
                     provider_call_records: vec![crate::agent::telemetry::ProviderCallCacheRecord {
@@ -4401,11 +4406,16 @@ mod tests {
                     tool_activities: vec![crate::agent::telemetry::TurnToolActivity {
                         id: "tool-cancelled-1".to_string(),
                         name: "workspace_list_files".to_string(),
+                        canonical_tool_name: Some("List".to_string()),
+                        display_name_zh: Some("列表".to_string()),
                         status: "completed".to_string(),
                         summary: "tool completed before cancel".to_string(),
                         arguments_text: Some("{\"path\":\".\"}".to_string()),
                         result_text: Some("ok".to_string()),
                         duration_seconds: Some(0.3),
+                        parent_activity_id: None,
+                        artifacts: None,
+                        error: None,
                         capability_invocation: None,
                     }],
                     provider_call_records: vec![crate::agent::telemetry::ProviderCallCacheRecord {
@@ -6924,11 +6934,16 @@ mod tests {
                     crate::agent::telemetry::TurnToolActivity {
                         id: "activity-1".to_string(),
                         name: "workspace_search".to_string(),
+                        canonical_tool_name: Some("Search".to_string()),
+                        display_name_zh: Some("搜索".to_string()),
                         status: "completed".to_string(),
                         summary: "tool ok".to_string(),
                         arguments_text: None,
                         result_text: None,
                         duration_seconds: Some(0.2),
+                        parent_activity_id: None,
+                        artifacts: None,
+                        error: None,
                         capability_invocation: Some(
                             crate::agent::telemetry::CapabilityInvocationRecord {
                                 tool_name: "workspace_search".to_string(),
@@ -6941,6 +6956,14 @@ mod tests {
                                 requires_approval: Some(false),
                                 host_mediated: Some(true),
                                 permission_scope: Some("workspace.read".to_string()),
+                                permission_facts: Some(crate::agent::tools::ToolPermissionFacts {
+                                    requires_approval: Some(false),
+                                    permission_scope: Some("workspace.read".to_string()),
+                                    host_mediated: Some(true),
+                                    permission_profile: Some("capability_registry".to_string()),
+                                    approval_mode: Some("none".to_string()),
+                                    decision_source: Some("capability_registry".to_string()),
+                                }),
                                 skill_id: Some("skill:search".to_string()),
                                 skill_source_id: Some("host-skills".to_string()),
                                 composed_capability_refs: Some(vec![
@@ -6954,11 +6977,16 @@ mod tests {
                     crate::agent::telemetry::TurnToolActivity {
                         id: "activity-2".to_string(),
                         name: "workspace_read".to_string(),
+                        canonical_tool_name: Some("Read".to_string()),
+                        display_name_zh: Some("读取".to_string()),
                         status: "error".to_string(),
                         summary: "resource denied".to_string(),
                         arguments_text: None,
                         result_text: None,
                         duration_seconds: Some(0.4),
+                        parent_activity_id: None,
+                        artifacts: None,
+                        error: None,
                         capability_invocation: Some(
                             crate::agent::telemetry::CapabilityInvocationRecord {
                                 tool_name: "workspace_read".to_string(),
@@ -6971,6 +6999,14 @@ mod tests {
                                 requires_approval: Some(true),
                                 host_mediated: Some(false),
                                 permission_scope: Some("workspace.read".to_string()),
+                                permission_facts: Some(crate::agent::tools::ToolPermissionFacts {
+                                    requires_approval: Some(true),
+                                    permission_scope: Some("workspace.read".to_string()),
+                                    host_mediated: Some(false),
+                                    permission_profile: Some("capability_registry".to_string()),
+                                    approval_mode: Some("approval_required".to_string()),
+                                    decision_source: Some("capability_registry".to_string()),
+                                }),
                                 skill_id: None,
                                 skill_source_id: None,
                                 composed_capability_refs: None,
@@ -6982,11 +7018,16 @@ mod tests {
                     crate::agent::telemetry::TurnToolActivity {
                         id: "activity-3".to_string(),
                         name: "local_tool".to_string(),
+                        canonical_tool_name: Some("Run".to_string()),
+                        display_name_zh: Some("运行".to_string()),
                         status: "completed".to_string(),
                         summary: "local only".to_string(),
                         arguments_text: None,
                         result_text: None,
                         duration_seconds: Some(0.1),
+                        parent_activity_id: None,
+                        artifacts: None,
+                        error: None,
                         capability_invocation: None,
                     },
                 ],
