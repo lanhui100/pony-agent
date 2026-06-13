@@ -1,9 +1,12 @@
 pub mod builder;
+pub mod checkpoint;
 pub mod hooks;
+pub mod tool_exec;
+pub mod tool_loop;
 
 use crate::agent::capability_bridge::{
-    enrich_mcp_source_snapshot, enrich_skill_source_snapshot, CapabilityFailureKind,
-    CapabilityRegistry, CapabilityToolExecutionResult, McpSourceSnapshot, SkillFailureLayer,
+    enrich_mcp_source_snapshot, enrich_skill_source_snapshot,
+    CapabilityRegistry, CapabilityToolExecutionResult, McpSourceSnapshot,
     SkillInvocationRequest, SkillSourceSnapshot, SkillToolExecutionResult,
 };
 use crate::agent::config::{
@@ -43,7 +46,7 @@ use crate::agent::telemetry::{
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
 use crate::agent::tools::{
-    builtin_tools, canonical_tool_name, default_permission_facts_for_name, ToolCall,
+    builtin_tools, canonical_tool_name, ToolCall,
     ToolDefinition, ToolExecutor,
 };
 use crate::agent::turn_flow::{
@@ -1627,47 +1630,7 @@ impl AgentRuntime {
         result.emitted_at_ms = Some(envelope.emitted_at_ms);
     }
 
-    fn update_execution_checkpoint(
-        &self,
-        control: &ExecutionControlRegistry,
-        turn_id: &str,
-        phase: &str,
-        provider_meta: Option<&ProviderEventMeta>,
-        completed_hops: usize,
-        active_tool_name: Option<&str>,
-        trace_steps: &[TurnTraceStep],
-        tool_activities: &[TurnToolActivity],
-        provider_source: Option<&str>,
-        provider_mode: Option<&str>,
-        fallback_reason: Option<&str>,
-        status: Option<&str>,
-        error: Option<&str>,
-    ) {
-        control.update(turn_id, |checkpoint| {
-            checkpoint.phase = phase.to_string();
-            checkpoint.completed_hops = completed_hops;
-            checkpoint.max_hops = max_tool_hops_per_turn();
-            checkpoint.active_tool_name = active_tool_name.map(str::to_string);
-            checkpoint.trace_steps = trace_steps.to_vec();
-            checkpoint.tool_activities = tool_activities.to_vec();
-            checkpoint.provider_requested_name =
-                provider_meta.map(|meta| meta.requested_name.clone());
-            checkpoint.provider_name = provider_meta.map(|meta| meta.provider_name.clone());
-            checkpoint.provider_protocol = provider_meta.map(|meta| meta.protocol.clone());
-            checkpoint.provider_model = provider_meta.map(|meta| meta.model.clone());
-            checkpoint.provider_source = provider_source.map(str::to_string);
-            checkpoint.provider_mode = provider_mode.map(str::to_string);
-            checkpoint.fallback_reason = fallback_reason.map(str::to_string);
-            checkpoint.error = error.map(str::to_string);
-            if let Some(status) = status {
-                checkpoint.status = status.to_string();
-            }
-        });
-    }
 
-    fn should_cancel_turn(&self, control: &ExecutionControlRegistry, turn_id: &str) -> bool {
-        control.is_stop_requested(turn_id)
-    }
 
     #[allow(clippy::too_many_arguments)]
     fn cancel_stream_turn<S: TurnEventSink>(
@@ -1959,11 +1922,12 @@ impl AgentRuntime {
                 self.execute_registered_tool_call(&current_tool_call);
             hook_trace_records.extend(capability_hook_trace_records);
             all_tools_ok &= tool_result.status == "ok";
-            tool_activities.extend(annotate_capability_tool_activities(
-                self.telemetry_builder
-                    .tool_activities_after_result(&current_tool_call, &tool_result),
+            self.push_tool_activity(
+                &mut tool_activities,
+                &current_tool_call,
+                &tool_result,
                 invocation_record,
-            ));
+            );
             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
             self.update_execution_checkpoint(
                 control,
@@ -2322,31 +2286,14 @@ impl AgentRuntime {
             }
             let mut response = response;
             let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
-            let provider_call_used_true_stream =
-                response.provider_source == "provider_followup_stream";
-            provider_call_records.push(build_provider_call_cache_record(
-                ProviderRequestKind::ToolFollowup,
-                Some(response.provider_source.as_str()),
-                Some(response.provider_mode.as_str()),
-                response.token_usage.as_ref(),
-                if provider_call_used_true_stream {
-                    provider_call_first_token_latency.get()
-                } else {
-                    None
-                },
-                Some(provider_call_duration_ms),
-                if provider_call_used_true_stream {
-                    ProviderLatencyKind::ProviderStream
-                } else {
-                    ProviderLatencyKind::BufferedResponse
-                },
-                Some(&context_observation),
-            ));
-            accumulated_token_usage =
-                merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
-            accumulated_fallback_reason = merge_fallback_reason(
-                accumulated_fallback_reason,
-                response.fallback_reason.clone(),
+            self.accumulate_followup_call_record(
+                provider_call_records,
+                &mut accumulated_token_usage,
+                &mut accumulated_fallback_reason,
+                &response,
+                provider_call_duration_ms,
+                provider_call_first_token_latency.get(),
+                &context_observation,
             );
             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
             self.update_execution_checkpoint(
@@ -2406,38 +2353,25 @@ impl AgentRuntime {
                 return;
             }
 
-            if let Some(next_tool_call) = response.tool_call.take() {
-                let normalized = match normalize_tool_directive(
-                    next_tool_call,
-                    response.assistant_message.take(),
-                    &response.output_text,
-                    response.reasoning_content.as_deref(),
-                    response.reasoning_content_value.as_ref(),
-                ) {
-                    Ok(normalized) => normalized,
-                    Err(error) => {
-                        self.fail_stream_turn_with_hook_dispatch(
-                            sink,
-                            control,
-                            input.session_id.as_deref(),
-                            turn_id,
-                            display_message,
-                            Some(provider_meta),
-                            Some(context_observation.clone()),
-                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                            tool_activities.clone(),
-                            provider_call_records.clone(),
-                            hook_trace_records.clone(),
-                            first_token_latency.get(),
-                            Some(turn_started_at.elapsed().as_millis() as u64),
-                            completed_hops,
-                            error,
-                        );
-                        return;
-                    }
-                };
-                response.tool_call = Some(normalized.tool_call);
-                response.assistant_message = normalized.assistant_message;
+            if let Err(error) = self.normalize_followup_tool_directive(&mut response) {
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    hook_trace_records.clone(),
+                    first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    completed_hops,
+                    error,
+                );
+                return;
             }
 
             if let Some(next_tool_call) = response.tool_call.clone() {
@@ -2873,11 +2807,12 @@ impl AgentRuntime {
                 preview_text(&tool_result.output, 160)
             ));
             all_tools_ok &= tool_result.status == "ok";
-            tool_activities.extend(annotate_capability_tool_activities(
-                self.telemetry_builder
-                    .tool_activities_after_result(&current_tool_call, &tool_result),
+            self.push_tool_activity(
+                &mut tool_activities,
+                &current_tool_call,
+                &tool_result,
                 invocation_record,
-            ));
+            );
             hop_records.push(ToolTurnHopRecord {
                 assistant_output_text: current_assistant_output_text.clone(),
                 assistant_reasoning_content: current_assistant_reasoning.clone(),
@@ -2919,7 +2854,7 @@ impl AgentRuntime {
             }
 
             let provider_call_started_at = Instant::now();
-            let response = match provider_followup(
+            let mut response = match provider_followup(
                 provider,
                 planning_request,
                 tools,
@@ -2939,23 +2874,15 @@ impl AgentRuntime {
                     ));
                 }
             };
-            let mut response = response;
             let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
-            provider_call_records.push(build_provider_call_cache_record(
-                ProviderRequestKind::ToolFollowup,
-                Some(response.provider_source.as_str()),
-                Some(response.provider_mode.as_str()),
-                response.token_usage.as_ref(),
+            self.accumulate_followup_call_record(
+                provider_call_records,
+                &mut accumulated_token_usage,
+                &mut accumulated_fallback_reason,
+                &response,
+                provider_call_duration_ms,
                 None,
-                Some(provider_call_duration_ms),
-                ProviderLatencyKind::BufferedResponse,
-                Some(&context_observation),
-            ));
-            accumulated_token_usage =
-                merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
-            accumulated_fallback_reason = merge_fallback_reason(
-                accumulated_fallback_reason,
-                response.fallback_reason.clone(),
+                &context_observation,
             );
 
             if let Some(error) = provider_failure_message(
@@ -2972,28 +2899,15 @@ impl AgentRuntime {
                 ));
             }
 
-            if let Some(next_tool_call) = response.tool_call.take() {
-                let normalized = match normalize_tool_directive(
-                    next_tool_call,
-                    response.assistant_message.take(),
-                    &response.output_text,
-                    response.reasoning_content.as_deref(),
-                    response.reasoning_content_value.as_ref(),
-                ) {
-                    Ok(normalized) => normalized,
-                    Err(error) => {
-                        return Err(self.fail_sync_turn_result(
-                            Some(provider_meta),
-                            display_message,
-                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                            tool_activities,
-                            hook_trace_records,
-                            error,
-                        ));
-                    }
-                };
-                response.tool_call = Some(normalized.tool_call);
-                response.assistant_message = normalized.assistant_message;
+            if let Err(error) = self.normalize_followup_tool_directive(&mut response) {
+                return Err(self.fail_sync_turn_result(
+                    Some(provider_meta),
+                    display_message,
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                    tool_activities,
+                    hook_trace_records,
+                    error,
+                ));
             }
 
             if let Some(next_tool_call) = response.tool_call.clone() {
@@ -4896,262 +4810,24 @@ impl AgentRuntime {
             input.session_id.clone(),
         );
     }
-
-    fn resolve_provider(&self, input: &TurnInput) -> ProviderManager {
-        let mut selection = self
-            .provider_resolver
-            .resolve_provider_selection(input.provider_id.as_deref(), input.model_id.as_deref());
-
-        if selection.capabilities.supports_reasoning {
-            selection.reasoning_effort = input.reasoning_effort.clone();
-        } else {
-            selection.reasoning_effort = None;
-        }
-
-        ProviderManager::new(selection)
-    }
-
-    fn resolve_tool_call(
-        &self,
-        user_message: &str,
-        history: &[TurnHistoryMessage],
-        available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
-        provider_tool_call: Option<ToolCall>,
-        allow_local_fallback: bool,
-    ) -> Option<ToolCall> {
-        if allow_local_fallback {
-            self.planner.select_tool_call(
-                user_message,
-                history,
-                available_skills,
-                provider_tool_call,
-            )
-        } else {
-            provider_tool_call
-        }
-    }
-
-    fn execute_capability_tool_call(&self, tool_call: &ToolCall) -> CapabilityToolExecutionResult {
-        let action = match self.capability_registry.resolve_tool_call(tool_call) {
-            Ok(action) => action,
-            Err(failure_kind) => {
-                runtime_log(format!(
-                    "turn:capability-resolve-failure tool={} class={}",
-                    tool_call.name,
-                    failure_kind.as_str()
-                ));
-                return self
-                    .capability_registry
-                    .capability_failure_result(tool_call, failure_kind);
-            }
-        };
-
-        runtime_log(format!(
-            "turn:capability-resolved capability_id={} kind={} mode={}",
-            action.capability.capability_id,
-            action.capability.kind.as_str(),
-            action.capability.invocation_mode.as_str()
-        ));
-
-        let tool_result = self.tool_executor.execute(&action.tool_call);
-        let failure_kind = if tool_result.status == "ok" {
-            None
-        } else {
-            Some(CapabilityFailureKind::InvocationFailed)
-        };
-
-        CapabilityToolExecutionResult {
-            capability: Some(action.capability),
-            tool_call: action.tool_call,
-            tool_result,
-            failure_kind,
-        }
-    }
-
-    fn execute_registered_tool_call(
-        &self,
-        tool_call: &ToolCall,
-    ) -> (
-        crate::agent::tools::ToolResult,
-        crate::agent::telemetry::CapabilityInvocationRecord,
-        Vec<HookTraceRecord>,
-    ) {
-        if let Some(skill) = self
-            .capability_registry
-            .match_executable_skill_tool_name(&tool_call.name)
-        {
-            let mediation_envelope = self.build_skill_mediation_envelope(tool_call, &skill);
-            let mediation = self.dispatch_capability_mediation_hooks(
-                CapabilityMediationHookPoint::SkillToolActionsResolve,
-                &mediation_envelope,
-            );
-            if let Some(error) = mediation.fail_turn_error {
-                return (
-                    blocked_tool_result(tool_call, &error),
-                    build_blocked_skill_invocation_record(tool_call, Some(&skill), &error),
-                    mediation.trace_records,
-                );
-            }
-            if let Some(error) = mediation.blocked_error {
-                return (
-                    blocked_tool_result(tool_call, &error),
-                    build_blocked_skill_invocation_record(tool_call, Some(&skill), &error),
-                    mediation.trace_records,
-                );
-            }
-
-            let execution = self.execute_skill_tool_call(&SkillInvocationRequest {
-                skill_id: skill.skill_id.clone(),
-                arguments: mediation.arguments.clone(),
-            });
-            let mut hook_trace_records = mediation.trace_records;
-            hook_trace_records.push(self.build_skill_resolution_trace_record(
-                &SkillInvocationRequest {
-                    skill_id: skill.skill_id.clone(),
-                    arguments: mediation.arguments,
-                },
-                &execution,
-            ));
-            let invocation_record = execution
-                .capability_executions
-                .first()
-                .map(|result| {
-                    result.invocation_record_with_skill_context(
-                        execution.skill.as_ref(),
-                        execution.failure_layer.as_ref(),
-                    )
-                })
-                .unwrap_or(crate::agent::telemetry::CapabilityInvocationRecord {
-                    tool_name: tool_call.name.clone(),
-                    capability_id: None,
-                    source_id: None,
-                    source_kind: None,
-                    capability_kind: None,
-                    invocation_mode: None,
-                    failure_kind: None,
-                    requires_approval: None,
-                    host_mediated: None,
-                    permission_scope: None,
-                    permission_facts: Some(default_permission_facts_for_name(&tool_call.name)),
-                    skill_id: execution
-                        .skill
-                        .as_ref()
-                        .map(|descriptor| descriptor.skill_id.clone()),
-                    skill_source_id: execution
-                        .skill
-                        .as_ref()
-                        .map(|descriptor| descriptor.source_id.clone()),
-                    composed_capability_refs: execution
-                        .skill
-                        .as_ref()
-                        .map(|descriptor| descriptor.composed_capability_refs.clone()),
-                    composed_capability_kinds: execution.skill.as_ref().map(|descriptor| {
-                        descriptor
-                            .composed_capability_kinds
-                            .iter()
-                            .map(|kind| kind.as_str().to_string())
-                            .collect()
-                    }),
-                    failure_layer: execution
-                        .failure_layer
-                        .as_ref()
-                        .map(|layer| layer.as_str().to_string()),
-                });
-
-            let tool_result = build_skill_tool_result(tool_call, &execution);
-            return (tool_result, invocation_record, hook_trace_records);
-        }
-
-        let mediation_envelope = self.build_capability_mediation_envelope(tool_call);
-        let mediation = self.dispatch_capability_mediation_hooks(
-            CapabilityMediationHookPoint::CapabilityResolve,
-            &mediation_envelope,
-        );
-        if let Some(error) = mediation.fail_turn_error {
-            return (
-                blocked_tool_result(tool_call, &error),
-                build_blocked_capability_invocation_record(tool_call, &error),
-                mediation.trace_records,
-            );
-        }
-        if let Some(error) = mediation.blocked_error {
-            return (
-                blocked_tool_result(tool_call, &error),
-                build_blocked_capability_invocation_record(tool_call, &error),
-                mediation.trace_records,
-            );
-        }
-        let execution = self.execute_capability_tool_call(&ToolCall {
-            arguments: mediation.arguments,
-            ..tool_call.clone()
-        });
-        let invocation_record = execution.invocation_record();
-        let mut hook_trace_records = mediation.trace_records;
-        hook_trace_records
-            .push(self.build_capability_resolution_trace_record(tool_call, &execution));
-        (execution.tool_result, invocation_record, hook_trace_records)
-    }
-
-    fn execute_skill_tool_call(
-        &self,
-        request: &SkillInvocationRequest,
-    ) -> SkillToolExecutionResult {
-        let (skill, actions) = match self.capability_registry.resolve_skill_tool_actions(request) {
-            Ok(resolved) => resolved,
-            Err(failure_layer) => {
-                runtime_log(format!(
-                    "turn:skill-resolve-failure skill_id={} layer={}",
-                    request.skill_id,
-                    failure_layer.as_str()
-                ));
-                return self
-                    .capability_registry
-                    .skill_failure_result(request, failure_layer);
-            }
-        };
-
-        runtime_log(format!(
-            "turn:skill-resolved skill_id={} source_id={} composed_refs={} kinds={}",
-            skill.skill_id,
-            skill.source_id,
-            skill.composed_capability_refs.join(","),
-            skill
-                .composed_capability_kinds
-                .iter()
-                .map(|kind| kind.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-
-        let mut capability_executions = Vec::with_capacity(actions.len());
-        let mut failure_layer = None;
-
-        for action in actions {
-            let tool_result = self.tool_executor.execute(&action.tool_call);
-            let capability_failure = if tool_result.status == "ok" {
-                None
-            } else {
-                failure_layer = Some(SkillFailureLayer::UnderlyingCapabilityExecution);
-                Some(CapabilityFailureKind::InvocationFailed)
-            };
-            capability_executions.push(CapabilityToolExecutionResult {
-                capability: Some(action.capability),
-                tool_call: action.tool_call,
-                tool_result,
-                failure_kind: capability_failure,
-            });
-            if failure_layer.is_some() {
-                break;
-            }
-        }
-
-        SkillToolExecutionResult {
-            skill: Some(skill),
-            capability_executions,
-            failure_layer,
-        }
-    }
 }
+
+// ---------------------------------------------------------------------------
+// Standalone helpers used by tool loop methods above
+// ---------------------------------------------------------------------------
+
+fn annotate_capability_tool_activities(
+    mut activities: Vec<TurnToolActivity>,
+    invocation_record: crate::agent::telemetry::CapabilityInvocationRecord,
+) -> Vec<TurnToolActivity> {
+    if let Some(parent) = activities.first_mut() {
+        parent.capability_invocation = Some(invocation_record);
+    }
+    activities
+}
+
+
+
 
 fn candidate_capability_ids_for_tool_name(
     registry: &CapabilityRegistry,
@@ -5411,125 +5087,6 @@ fn apply_graph_decision_patches(
     Ok(())
 }
 
-fn blocked_tool_result(tool_call: &ToolCall, error: &str) -> crate::agent::tools::ToolResult {
-    crate::agent::tools::ToolResult {
-        tool_name: tool_call.name.clone(),
-        status: "error".to_string(),
-        output: error.to_string(),
-        duration_ms: 0,
-    }
-}
-
-fn build_blocked_capability_invocation_record(
-    tool_call: &ToolCall,
-    error: &str,
-) -> crate::agent::telemetry::CapabilityInvocationRecord {
-    crate::agent::telemetry::CapabilityInvocationRecord {
-        tool_name: tool_call.name.clone(),
-        capability_id: None,
-        source_id: None,
-        source_kind: None,
-        capability_kind: None,
-        invocation_mode: None,
-        failure_kind: Some("hook_blocked".to_string()),
-        requires_approval: None,
-        host_mediated: None,
-        permission_scope: None,
-        permission_facts: Some(default_permission_facts_for_name(&tool_call.name)),
-        skill_id: None,
-        skill_source_id: None,
-        composed_capability_refs: None,
-        composed_capability_kinds: None,
-        failure_layer: Some(error.to_string()),
-    }
-}
-
-fn build_blocked_skill_invocation_record(
-    tool_call: &ToolCall,
-    skill: Option<&crate::agent::capability_bridge::SkillDescriptor>,
-    error: &str,
-) -> crate::agent::telemetry::CapabilityInvocationRecord {
-    crate::agent::telemetry::CapabilityInvocationRecord {
-        tool_name: tool_call.name.clone(),
-        capability_id: None,
-        source_id: None,
-        source_kind: None,
-        capability_kind: None,
-        invocation_mode: None,
-        failure_kind: Some("hook_blocked".to_string()),
-        requires_approval: None,
-        host_mediated: None,
-        permission_scope: None,
-        permission_facts: Some(default_permission_facts_for_name(&tool_call.name)),
-        skill_id: skill.map(|descriptor| descriptor.skill_id.clone()),
-        skill_source_id: skill.map(|descriptor| descriptor.source_id.clone()),
-        composed_capability_refs: skill
-            .map(|descriptor| descriptor.composed_capability_refs.clone()),
-        composed_capability_kinds: skill.map(|descriptor| {
-            descriptor
-                .composed_capability_kinds
-                .iter()
-                .map(|kind| kind.as_str().to_string())
-                .collect()
-        }),
-        failure_layer: Some(error.to_string()),
-    }
-}
-
-fn annotate_capability_tool_activities(
-    mut activities: Vec<TurnToolActivity>,
-    invocation_record: crate::agent::telemetry::CapabilityInvocationRecord,
-) -> Vec<TurnToolActivity> {
-    if let Some(parent) = activities.first_mut() {
-        parent.capability_invocation = Some(invocation_record);
-    }
-    activities
-}
-
-fn build_skill_tool_result(
-    tool_call: &ToolCall,
-    execution: &SkillToolExecutionResult,
-) -> crate::agent::tools::ToolResult {
-    let status = if execution.failure_layer.is_none()
-        && execution
-            .capability_executions
-            .iter()
-            .all(|result| result.tool_result.status == "ok")
-    {
-        "ok"
-    } else {
-        "error"
-    };
-    let duration_ms = execution
-        .capability_executions
-        .iter()
-        .map(|result| result.tool_result.duration_ms)
-        .sum();
-    let skill_label = execution
-        .skill
-        .as_ref()
-        .map(|descriptor| descriptor.label.as_str())
-        .unwrap_or(tool_call.name.as_str());
-    let mut lines = vec![format!("skill `{skill_label}` execution summary:")];
-    for result in &execution.capability_executions {
-        lines.push(format!(
-            "- [{}] {} -> {}",
-            result.tool_result.status,
-            result.tool_result.tool_name,
-            preview_text(&result.tool_result.output, 120)
-        ));
-    }
-    if let Some(layer) = execution.failure_layer.as_ref() {
-        lines.push(format!("failure_layer={}", layer.as_str()));
-    }
-
-    crate::agent::tools::ToolResult {
-        tool_name: tool_call.name.clone(),
-        status: status.to_string(),
-        output: lines.join("\n"),
-        duration_ms,
-    }
-}
 /*
     #[cfg(any())]
     fn start_turn_stream_uses_compat_sync_for_deepseek_tool_followup() {
@@ -7294,6 +6851,53 @@ fn tool_call_signature(tool_call: &ToolCall) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Typed turn error
+// ---------------------------------------------------------------------------
+
+/// Categorised errors that can terminate or abort a turn.
+#[derive(Debug, Clone)]
+pub enum TurnError {
+    EmptyMessage,
+    ProviderFailure(String),
+    HookBlocked(String),
+    ToolAborted(String),
+    ToolHopLimit(usize),
+    ToolFollowupLimit(usize),
+    DuplicateToolCall(String),
+    AttachmentPersistence(String),
+    PlannerError(String),
+    ToolDirectiveNormalization(String),
+    ProviderFailureResponse(String),
+}
+
+impl std::fmt::Display for TurnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TurnError::EmptyMessage => write!(f, "Message is empty."),
+            TurnError::ProviderFailure(msg) => write!(f, "{msg}"),
+            TurnError::HookBlocked(msg) => write!(f, "{msg}"),
+            TurnError::ToolAborted(name) => write!(f, "Tool `{name}` was aborted"),
+            TurnError::ToolHopLimit(limit) => write!(
+                f,
+                "同一 turn 内连续工具调用超过 {limit} 次，已停止继续 follow-up 以避免进入无限循环；如属复杂任务，可提高 PONY_AGENT_MAX_TOOL_HOPS_PER_TURN。"
+            ),
+            TurnError::ToolFollowupLimit(limit) => write!(
+                f,
+                "同一 turn 内 follow-up 轮次超过 {limit} 次，已停止继续 follow-up 以避免重复探索；如属复杂任务，可提高 PONY_AGENT_MAX_TOOL_FOLLOWUPS_PER_TURN。"
+            ),
+            TurnError::DuplicateToolCall(name) => write!(
+                f,
+                "工具 `{name}` 在同一 turn 内重复调用了近似相同的参数，已停止继续 follow-up 以避免重复探索。"
+            ),
+            TurnError::AttachmentPersistence(msg) => write!(f, "{msg}"),
+            TurnError::PlannerError(msg) => write!(f, "{msg}"),
+            TurnError::ToolDirectiveNormalization(msg) => write!(f, "{msg}"),
+            TurnError::ProviderFailureResponse(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 fn build_tool_hop_limit_error(limit: usize) -> String {
     format!(
         "同一 turn 内连续工具调用超过 {} 次，已停止继续 follow-up 以避免进入无限循环；如属复杂任务，可提高 PONY_AGENT_MAX_TOOL_HOPS_PER_TURN。",
@@ -7392,7 +6996,12 @@ mod tests {
         HookStructuredResult, HookTraceRequirements, PlannerFactsEnvelope, PlannerHookPoint,
         TurnHookPoint,
     };
-    use crate::agent::planner::TurnPlanner;
+    use crate::agent::capability_bridge::{CapabilityFailureKind, SkillFailureLayer};
+    use crate::agent::hooks::{
+        turn_hook_point_for_capability_mediation_hook_point,
+        turn_hook_point_for_planner_hook_point,
+    };
+    use crate::agent::planner::{LocalTurnPlanner, TurnPlanner};
     use crate::agent::session::{
         FileSessionBackend, SessionSnapshot, SessionStore, TurnHistoryMessage,
     };

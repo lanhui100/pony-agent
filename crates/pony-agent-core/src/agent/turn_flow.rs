@@ -350,6 +350,153 @@ pub fn emit_stream_event(
     );
 }
 
+// ---------------------------------------------------------------------------
+// TurnEventBuilder — fluent builder for emit_stream_event calls
+//
+// Instead of passing 20+ positional arguments (most of them None), callers
+// construct only the fields they need:
+//
+//     TurnEventBuilder::new(sink, "turn:trace", turn_id, "trace")
+//         .phase("executing_tool")
+//         .context_observation(obs)
+//         .trace_steps(steps)
+//         .send();
+// ---------------------------------------------------------------------------
+
+macro_rules! bld_method {
+    ($field:ident, $ty:ty) => {
+        pub fn $field(mut self, value: $ty) -> Self {
+            self.$field = Some(value);
+            self
+        }
+    };
+    ($field:ident, $ty:ty, into) => {
+        pub fn $field(mut self, value: impl Into<$ty>) -> Self {
+            self.$field = Some(value.into());
+            self
+        }
+    };
+}
+
+pub struct TurnEventBuilder<'a, S: TurnEventSink> {
+    sink: &'a S,
+    name: &'a str,
+    turn_id: String,
+    kind: String,
+    phase: Option<String>,
+    text: Option<String>,
+    reasoning_content: Option<String>,
+    provider_meta: Option<ProviderEventMeta>,
+    provider_source: Option<String>,
+    provider_mode: Option<String>,
+    fallback_reason: Option<String>,
+    build_context_observation: Option<BuildContextObservation>,
+    input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    trace_steps: Option<Vec<TurnTraceStep>>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
+    session_summary: Option<String>,
+    session_id: Option<String>,
+}
+
+impl<'a, S: TurnEventSink> TurnEventBuilder<'a, S> {
+    pub fn new(sink: &'a S, name: &'a str, turn_id: impl Into<String>, kind: impl Into<String>) -> Self {
+        Self {
+            sink,
+            name,
+            turn_id: turn_id.into(),
+            kind: kind.into(),
+            phase: None,
+            text: None,
+            reasoning_content: None,
+            provider_meta: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+            session_id: None,
+        }
+    }
+
+    bld_method!(phase, String, into);
+    bld_method!(text, String);
+    bld_method!(reasoning_content, String);
+    bld_method!(provider_meta, ProviderEventMeta);
+    bld_method!(provider_source, String);
+    bld_method!(provider_mode, String);
+    bld_method!(fallback_reason, String);
+    pub fn context_observation(mut self, value: BuildContextObservation) -> Self {
+        self.build_context_observation = Some(value);
+        self
+    }
+    bld_method!(input_tokens, u64);
+    bld_method!(cache_hit_input_tokens, u64);
+    bld_method!(reasoning_tokens, u64);
+    bld_method!(output_tokens, u64);
+    bld_method!(total_tokens, u64);
+    bld_method!(first_token_latency_ms, u64);
+    bld_method!(turn_duration_ms, u64);
+    bld_method!(trace_steps, Vec<TurnTraceStep>);
+    bld_method!(trace_timeline, Vec<TraceTimelineEntry>);
+    bld_method!(tool_activities, Vec<TurnToolActivity>);
+    bld_method!(provider_call_records, Vec<ProviderCallCacheRecord>);
+    bld_method!(hook_trace_records, Vec<HookTraceRecord>);
+    bld_method!(session_summary, String);
+    bld_method!(session_id, String);
+
+    pub fn send(self) {
+        emit_stream_event(
+            self.sink,
+            self.name,
+            self.turn_id,
+            &self.kind,
+            self.phase.as_deref(),
+            self.text,
+            self.reasoning_content,
+            self.provider_meta.as_ref(),
+            self.provider_source,
+            self.provider_mode,
+            self.fallback_reason,
+            self.build_context_observation,
+            self.input_tokens,
+            self.cache_hit_input_tokens,
+            self.reasoning_tokens,
+            self.output_tokens,
+            self.total_tokens,
+            self.first_token_latency_ms,
+            self.turn_duration_ms,
+            self.trace_steps,
+            self.trace_timeline,
+            self.tool_activities,
+            self.provider_call_records,
+            self.hook_trace_records,
+            self.session_summary,
+            self.session_id,
+        );
+    }
+}
+
 fn resolve_canonical_event_type(
     name: &str,
     phase: Option<&str>,
