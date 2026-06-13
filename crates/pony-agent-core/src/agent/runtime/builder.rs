@@ -1,9 +1,9 @@
 use crate::agent::config::{ProviderRegistryStore, ProviderSelectionResolver};
-use crate::agent::context::DefaultTurnContextBuilder;
-use crate::agent::planner::LocalTurnPlanner;
+use crate::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
+use crate::agent::planner::{LocalTurnPlanner, TurnPlanner};
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeBuilder};
 use crate::agent::session::SessionStore;
-use crate::agent::telemetry::TurnTelemetryBuilder;
+use crate::agent::telemetry::{DefaultTurnTelemetryBuilder, TurnTelemetryBuilder};
 use crate::agent::tools::{ToolExecutor, ToolRouter};
 
 impl AgentRuntimeBuilder {

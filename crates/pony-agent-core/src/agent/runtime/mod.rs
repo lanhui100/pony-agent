@@ -1,27 +1,29 @@
+pub mod builder;
+pub mod hooks;
+
 use crate::agent::capability_bridge::{
     enrich_mcp_source_snapshot, enrich_skill_source_snapshot, CapabilityFailureKind,
     CapabilityRegistry, CapabilityToolExecutionResult, McpSourceSnapshot, SkillFailureLayer,
     SkillInvocationRequest, SkillSourceSnapshot, SkillToolExecutionResult,
 };
 use crate::agent::config::{
-    ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
+    ProviderReasoningEffort, ProviderSelectionResolver,
 };
-use crate::agent::context::{DefaultTurnContextBuilder, RetrievedContextState, TurnContextBuilder};
+use crate::agent::context::{RetrievedContextState, TurnContextBuilder};
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::execution_control::ExecutionControlRegistry;
 use crate::agent::graph::{
     GraphDecision, GraphDecisionKind, GraphEngine, GraphRun, GraphTurnHandoff,
 };
 use crate::agent::hooks::{
-    build_observe_hook_trace_record, turn_hook_point_for_capability_mediation_hook_point,
-    turn_hook_point_for_planner_hook_point, AgentHookDescriptor, AgentHookExecutor,
+    build_observe_hook_trace_record, AgentHookDescriptor, AgentHookExecutor,
     AgentHookRegistry, CapabilityMediationEnvelope, CapabilityMediationHookPoint,
-    HookFailurePolicy, HookPatchConflictPolicy, HookPatchOperation, HookPatchOperationKind,
-    HookStructuredResult, HookTraceRecord, NoopHookExecutor, PlannerFactsEnvelope,
+    HookPatchConflictPolicy, HookPatchOperation, HookPatchOperationKind,
+    HookTraceRecord, NoopHookExecutor, PlannerFactsEnvelope,
     PlannerHookPoint, TurnHookPoint,
 };
 use crate::agent::input::TurnInputImage;
-use crate::agent::planner::{GraphPlanner, LocalTurnPlanner, TurnPlanner};
+use crate::agent::planner::{GraphPlanner, TurnPlanner};
 use crate::agent::provider::{
     build_context_observation, provider_native_assistant_message_with_reasoning,
     provider_native_assistant_message_with_reasoning_value,
@@ -37,12 +39,12 @@ use crate::agent::session::{
     TurnTraceRecord,
 };
 use crate::agent::telemetry::{
-    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
+    ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
 use crate::agent::tools::{
     builtin_tools, canonical_tool_name, default_permission_facts_for_name, ToolCall,
-    ToolDefinition, ToolExecutor, ToolRouter,
+    ToolDefinition, ToolExecutor,
 };
 use crate::agent::turn_flow::{
     build_failed_turn_result, build_failed_turn_result_with_hooks,
@@ -229,107 +231,18 @@ pub struct AgentRuntime {
 }
 
 pub struct AgentRuntimeBuilder {
-    sessions: Option<SessionStore>,
-    provider_resolver: Option<Box<dyn ProviderSelectionResolver>>,
-    tool_executor: Option<Box<dyn ToolExecutor>>,
-    planner: Option<Box<dyn TurnPlanner>>,
-    context_builder: Option<Box<dyn TurnContextBuilder>>,
-    telemetry_builder: Option<Box<dyn TurnTelemetryBuilder>>,
+    pub(super) sessions: Option<SessionStore>,
+    pub(super) provider_resolver: Option<Box<dyn ProviderSelectionResolver>>,
+    pub(super) tool_executor: Option<Box<dyn ToolExecutor>>,
+    pub(super) planner: Option<Box<dyn TurnPlanner>>,
+    pub(super) context_builder: Option<Box<dyn TurnContextBuilder>>,
+    pub(super) telemetry_builder: Option<Box<dyn TurnTelemetryBuilder>>,
 }
 
-impl AgentRuntimeBuilder {
-    pub fn new() -> Self {
-        Self {
-            sessions: None,
-            provider_resolver: None,
-            tool_executor: None,
-            planner: None,
-            context_builder: None,
-            telemetry_builder: None,
-        }
-    }
-
-    pub fn desktop() -> Self {
-        Self::new()
-    }
-
-    pub fn session_store(mut self, sessions: SessionStore) -> Self {
-        self.sessions = Some(sessions);
-        self
-    }
-
-    pub fn provider_resolver(
-        mut self,
-        provider_resolver: Box<dyn ProviderSelectionResolver>,
-    ) -> Self {
-        self.provider_resolver = Some(provider_resolver);
-        self
-    }
-
-    pub fn tool_executor(mut self, tool_executor: Box<dyn ToolExecutor>) -> Self {
-        self.tool_executor = Some(tool_executor);
-        self
-    }
-
-    pub fn planner(mut self, planner: Box<dyn TurnPlanner>) -> Self {
-        self.planner = Some(planner);
-        self
-    }
-
-    pub fn context_builder(mut self, context_builder: Box<dyn TurnContextBuilder>) -> Self {
-        self.context_builder = Some(context_builder);
-        self
-    }
-
-    pub fn telemetry_builder(mut self, telemetry_builder: Box<dyn TurnTelemetryBuilder>) -> Self {
-        self.telemetry_builder = Some(telemetry_builder);
-        self
-    }
-
-    pub fn workspace_root(mut self, workspace_root: impl Into<std::path::PathBuf>) -> Self {
-        self.tool_executor = Some(Box::new(ToolRouter::with_workspace_root(
-            workspace_root.into(),
-        )));
-        self
-    }
-
-    pub fn build(self) -> AgentRuntime {
-        AgentRuntime::with_dependencies(
-            self.sessions.unwrap_or_else(SessionStore::new),
-            self.provider_resolver
-                .unwrap_or_else(|| Box::new(ProviderRegistryStore::new())),
-            self.tool_executor
-                .unwrap_or_else(|| Box::new(ToolRouter::new())),
-            self.planner.unwrap_or_else(|| Box::new(LocalTurnPlanner)),
-            self.context_builder
-                .unwrap_or_else(|| Box::new(DefaultTurnContextBuilder)),
-            self.telemetry_builder
-                .unwrap_or_else(|| Box::new(DefaultTurnTelemetryBuilder)),
-        )
-    }
-}
-
-impl Default for AgentRuntimeBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct DesktopRuntimePreset;
-
-impl DesktopRuntimePreset {
-    pub fn builder() -> AgentRuntimeBuilder {
-        AgentRuntimeBuilder::desktop()
-    }
-
-    pub fn build() -> AgentRuntime {
-        Self::builder().build()
-    }
-}
 
 impl AgentRuntime {
     pub fn new() -> Self {
-        DesktopRuntimePreset::build()
+        builder::DesktopRuntimePreset::build()
     }
 
     pub fn with_dependencies(
@@ -416,22 +329,6 @@ impl AgentRuntime {
             .replace_mcp_source_snapshot(snapshot);
     }
 
-    pub fn dispatch_mcp_source_ingress_hooks(
-        &self,
-        snapshot: &McpSourceSnapshot,
-    ) -> Result<Vec<HookTraceRecord>, String> {
-        let mut dispatch = self.dispatch_capability_mediation_hooks(
-            CapabilityMediationHookPoint::McpSourceIngress,
-            &self.build_mcp_source_ingress_envelope(snapshot),
-        );
-        if let Some(error) = dispatch.fail_turn_error.take() {
-            return Err(error);
-        }
-        if let Some(error) = dispatch.blocked_error.take() {
-            return Err(error);
-        }
-        Ok(dispatch.trace_records)
-    }
 
     pub fn apply_skill_source_snapshot(
         &mut self,
@@ -444,22 +341,6 @@ impl AgentRuntime {
             .replace_skill_source_snapshot(snapshot)
     }
 
-    pub fn dispatch_skill_source_ingress_hooks(
-        &self,
-        snapshot: &SkillSourceSnapshot,
-    ) -> Result<Vec<HookTraceRecord>, String> {
-        let mut dispatch = self.dispatch_capability_mediation_hooks(
-            CapabilityMediationHookPoint::SkillSourceIngress,
-            &self.build_skill_source_ingress_envelope(snapshot),
-        );
-        if let Some(error) = dispatch.fail_turn_error.take() {
-            return Err(error);
-        }
-        if let Some(error) = dispatch.blocked_error.take() {
-            return Err(error);
-        }
-        Ok(dispatch.trace_records)
-    }
 
     pub fn capability_registry_snapshot(&self) -> CapabilityRegistry {
         self.capability_registry.clone()
@@ -491,324 +372,9 @@ impl AgentRuntime {
         self.sessions.record_turn_trace(session_id, trace);
     }
 
-    fn dispatch_hook_trace_records(&self, hook_point: TurnHookPoint) -> HookDispatchOutcome {
-        let descriptors = self.hook_registry.list_for_hook_point(&hook_point);
-        let mut records = Vec::with_capacity(descriptors.len());
-        let mut fail_turn_error = None;
 
-        for (index, descriptor) in descriptors.into_iter().enumerate() {
-            match self.hook_executor.execute(descriptor, hook_point.clone()) {
-                Ok(mut result) => {
-                    result.hook_order = (index + 1) as u32;
-                    records.push(result.to_trace_record());
-                }
-                Err(error) => {
-                    let (result_kind, structured_result) =
-                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
-                    records.push(HookTraceRecord {
-                        hook_name: descriptor.name.clone(),
-                        hook_class: descriptor.class.clone(),
-                        hook_point: hook_point.clone(),
-                        hook_order: (index + 1) as u32,
-                        result_kind,
-                        structured_result,
-                        blocked: matches!(
-                            descriptor.default_failure_policy,
-                            HookFailurePolicy::FailTurn
-                        ),
-                        elapsed_ms: 0,
-                        input_summary: Some(format!("hook executor failed: {error}")),
-                        persistence_evidence_ref: None,
-                        summary: format!(
-                            "hook execution failed under {:?}: {error}",
-                            descriptor.default_failure_policy
-                        ),
-                    });
-                    if matches!(
-                        descriptor.default_failure_policy,
-                        HookFailurePolicy::FailTurn
-                    ) {
-                        fail_turn_error = Some(format!(
-                            "hook `{}` forced turn failure at `{:?}`: {error}",
-                            descriptor.name, hook_point
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
 
-        HookDispatchOutcome {
-            trace_records: records,
-            fail_turn_error,
-        }
-    }
 
-    fn dispatch_capability_mediation_hooks(
-        &self,
-        hook_point: CapabilityMediationHookPoint,
-        envelope: &CapabilityMediationEnvelope,
-    ) -> CapabilityMediationDispatchOutcome {
-        let turn_hook_point = turn_hook_point_for_capability_mediation_hook_point(&hook_point);
-        let descriptors = self.hook_registry.list_for_hook_point(&turn_hook_point);
-        let mut records = Vec::with_capacity(descriptors.len());
-        let mut execution_results = Vec::new();
-        let mut fail_turn_error = None;
-        let mut blocked_error = None;
-
-        for (index, descriptor) in descriptors.into_iter().enumerate() {
-            match self.hook_executor.execute_capability_mediation(
-                descriptor,
-                hook_point.clone(),
-                envelope,
-            ) {
-                Ok(mut result) => {
-                    result.hook_order = (index + 1) as u32;
-                    if let HookStructuredResult::Deny(deny) = &result.structured_result {
-                        blocked_error = Some(format!(
-                            "hook `{}` blocked capability mediation: {}",
-                            descriptor.name, deny.message
-                        ));
-                    }
-                    records.push(result.to_trace_record());
-                    execution_results.push(result);
-                    if blocked_error.is_some() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let (result_kind, structured_result) =
-                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
-                    records.push(HookTraceRecord {
-                        hook_name: descriptor.name.clone(),
-                        hook_class: descriptor.class.clone(),
-                        hook_point: turn_hook_point.clone(),
-                        hook_order: (index + 1) as u32,
-                        result_kind,
-                        structured_result,
-                        blocked: matches!(
-                            descriptor.default_failure_policy,
-                            HookFailurePolicy::FailTurn
-                        ),
-                        elapsed_ms: 0,
-                        input_summary: Some(format!("hook executor failed: {error}")),
-                        persistence_evidence_ref: None,
-                        summary: format!(
-                            "hook execution failed under {:?}: {error}",
-                            descriptor.default_failure_policy
-                        ),
-                    });
-                    if matches!(
-                        descriptor.default_failure_policy,
-                        HookFailurePolicy::FailTurn
-                    ) {
-                        fail_turn_error = Some(format!(
-                            "hook `{}` forced turn failure at `{:?}`: {error}",
-                            descriptor.name, turn_hook_point
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
-
-        let arguments = if fail_turn_error.is_none() && blocked_error.is_none() {
-            apply_capability_argument_patches(
-                &hook_point,
-                &envelope.argument_summary,
-                &execution_results,
-            )
-            .unwrap_or_else(|error| {
-                fail_turn_error = Some(error);
-                normalized_arguments_from_summary(&envelope.argument_summary)
-            })
-        } else {
-            normalized_arguments_from_summary(&envelope.argument_summary)
-        };
-
-        CapabilityMediationDispatchOutcome {
-            arguments,
-            trace_records: records,
-            blocked_error,
-            fail_turn_error,
-        }
-    }
-
-    fn dispatch_planner_hooks(
-        &self,
-        hook_point: PlannerHookPoint,
-        envelope: &PlannerFactsEnvelope,
-        decision: Option<ProviderDecision>,
-        selected_tool_call: Option<ToolCall>,
-    ) -> PlannerDispatchOutcome {
-        let turn_hook_point = turn_hook_point_for_planner_hook_point(&hook_point);
-        let descriptors = self.hook_registry.list_for_hook_point(&turn_hook_point);
-        let mut records = Vec::with_capacity(descriptors.len());
-        let mut execution_results = Vec::new();
-        let mut fail_turn_error = None;
-        let mut blocked_error = None;
-
-        for (index, descriptor) in descriptors.into_iter().enumerate() {
-            match self
-                .hook_executor
-                .execute_planner(descriptor, hook_point.clone(), envelope)
-            {
-                Ok(mut result) => {
-                    result.hook_order = (index + 1) as u32;
-                    if let HookStructuredResult::Deny(deny) = &result.structured_result {
-                        blocked_error = Some(format!(
-                            "hook `{}` blocked planner mediation: {}",
-                            descriptor.name, deny.message
-                        ));
-                    }
-                    records.push(result.to_trace_record());
-                    execution_results.push(result);
-                    if blocked_error.is_some() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let (result_kind, structured_result) =
-                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
-                    records.push(HookTraceRecord {
-                        hook_name: descriptor.name.clone(),
-                        hook_class: descriptor.class.clone(),
-                        hook_point: turn_hook_point.clone(),
-                        hook_order: (index + 1) as u32,
-                        result_kind,
-                        structured_result,
-                        blocked: matches!(
-                            descriptor.default_failure_policy,
-                            HookFailurePolicy::FailTurn
-                        ),
-                        elapsed_ms: 0,
-                        input_summary: Some(format!("hook executor failed: {error}")),
-                        persistence_evidence_ref: None,
-                        summary: format!(
-                            "hook execution failed under {:?}: {error}",
-                            descriptor.default_failure_policy
-                        ),
-                    });
-                    if matches!(
-                        descriptor.default_failure_policy,
-                        HookFailurePolicy::FailTurn
-                    ) {
-                        fail_turn_error = Some(format!(
-                            "hook `{}` forced turn failure at `{:?}`: {error}",
-                            descriptor.name, turn_hook_point
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
-
-        let (decision, selected_tool_call) = if fail_turn_error.is_none() && blocked_error.is_none()
-        {
-            apply_planner_patches(
-                &hook_point,
-                decision,
-                selected_tool_call,
-                &execution_results,
-            )
-            .unwrap_or_else(|error| {
-                fail_turn_error = Some(error);
-                (None, None)
-            })
-        } else {
-            (decision, selected_tool_call)
-        };
-
-        PlannerDispatchOutcome {
-            decision,
-            selected_tool_call,
-            trace_records: records,
-            blocked_error,
-            fail_turn_error,
-        }
-    }
-
-    fn dispatch_graph_decision_hooks(
-        &self,
-        envelope: &PlannerFactsEnvelope,
-        mut decision: GraphDecision,
-    ) -> GraphDecisionDispatchOutcome {
-        let hook_point = PlannerHookPoint::GraphDecision;
-        let turn_hook_point = turn_hook_point_for_planner_hook_point(&hook_point);
-        let descriptors = self.hook_registry.list_for_hook_point(&turn_hook_point);
-        let mut records = Vec::with_capacity(descriptors.len());
-        let mut execution_results = Vec::new();
-        let mut fail_turn_error = None;
-        let mut blocked_error = None;
-
-        for (index, descriptor) in descriptors.into_iter().enumerate() {
-            match self
-                .hook_executor
-                .execute_planner(descriptor, hook_point.clone(), envelope)
-            {
-                Ok(mut result) => {
-                    result.hook_order = (index + 1) as u32;
-                    if let HookStructuredResult::Deny(deny) = &result.structured_result {
-                        blocked_error = Some(format!(
-                            "hook `{}` blocked planner graph decision: {}",
-                            descriptor.name, deny.message
-                        ));
-                    }
-                    records.push(result.to_trace_record());
-                    execution_results.push(result);
-                    if blocked_error.is_some() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let (result_kind, structured_result) =
-                        crate::agent::hooks::normalized_result_for_class(&descriptor.class);
-                    records.push(HookTraceRecord {
-                        hook_name: descriptor.name.clone(),
-                        hook_class: descriptor.class.clone(),
-                        hook_point: turn_hook_point.clone(),
-                        hook_order: (index + 1) as u32,
-                        result_kind,
-                        structured_result,
-                        blocked: matches!(
-                            descriptor.default_failure_policy,
-                            HookFailurePolicy::FailTurn
-                        ),
-                        elapsed_ms: 0,
-                        input_summary: Some(format!("hook executor failed: {error}")),
-                        persistence_evidence_ref: None,
-                        summary: format!(
-                            "hook execution failed under {:?}: {error}",
-                            descriptor.default_failure_policy
-                        ),
-                    });
-                    if matches!(
-                        descriptor.default_failure_policy,
-                        HookFailurePolicy::FailTurn
-                    ) {
-                        fail_turn_error = Some(format!(
-                            "hook `{}` forced turn failure at `{:?}`: {error}",
-                            descriptor.name, turn_hook_point
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
-
-        if fail_turn_error.is_none() && blocked_error.is_none() {
-            if let Err(error) = apply_graph_decision_patches(&mut decision, &execution_results) {
-                fail_turn_error = Some(error);
-            }
-        }
-
-        GraphDecisionDispatchOutcome {
-            decision,
-            trace_records: records,
-            blocked_error,
-            fail_turn_error,
-        }
-    }
 
     #[cfg(test)]
     pub fn inspect_capability(
