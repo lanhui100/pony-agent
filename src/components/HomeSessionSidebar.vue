@@ -446,7 +446,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                 </div>
                 <button
                   v-if="canShowMoreConversations"
-                  class="w-full px-1.5 py-1 text-left text-[12px] font-medium text-stone-500 transition hover:text-stone-900"
+                  class="w-full px-1.5 py-1 text-left text-[11px] font-normal leading-5 text-stone-500 transition hover:text-stone-900"
                   type="button"
                   data-testid="session-sidebar-show-more-conversations"
                   @click="showMoreConversations"
