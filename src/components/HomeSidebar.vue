@@ -9,8 +9,11 @@ import {
   Check,
   ChevronRight,
   Circle,
+  CircleDollarSign,
   Clock3,
   Copy,
+  Gauge,
+  Timer,
   FileText,
   Image as ImageIcon,
   Layout,
@@ -22,11 +25,9 @@ import {
   Wrench,
   Zap
 } from "lucide-vue-next";
-import { extractActiveTaskFocus } from "@/types/runtime";
 import type {
   BuildContextObservation,
   ProviderCallCacheRecord,
-  RunControlAuditSummary,
   ToolActivity,
   TraceStep,
   TraceTimelineEntry,
@@ -35,6 +36,7 @@ import type {
 import { useRuntimeStore } from "@/stores/runtime";
 import { useProviderStore } from "@/stores/providers";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
+import Tooltip from "@/components/ui/Tooltip.vue";
 
 type DetailRowTone = "default" | "muted" | "warning" | "danger";
 type InputKind = "text" | "image" | "video" | "audio";
@@ -46,6 +48,13 @@ type DetailRow = {
   tone?: DetailRowTone;
   inputKind?: InputKind;
   expandable?: boolean;
+  icon?: object;
+};
+
+type MetricDisplayItem = {
+  icon: object;
+  tooltip: string;
+  value: string;
 };
 
 type TraceDetailSection = {
@@ -72,11 +81,9 @@ const {
   firstTokenLatencyMs,
   inputTokens,
   isSubmitting,
-  latestRunControlAuditSummary,
   messages,
   outputTokens,
   phase,
-  phaseLabel,
   providerMode,
   providerModel,
   providerName,
@@ -100,51 +107,7 @@ const copiedKey = ref("");
 const expandedResultKeys = ref<string[]>([]);
 let copiedTimer: number | null = null;
 
-const phaseDotClass = computed(() => {
-  if (phase.value === "ready" || phase.value === "idle" || phase.value === "completed") {
-    return "fill-emerald-500 text-emerald-500";
-  }
-  if (phase.value === "calling_model" || phase.value === "calling_tool") {
-    return "animate-pulse fill-amber-500 text-amber-500";
-  }
-  if (phase.value === "failed") {
-    return "fill-rose-500 text-rose-500";
-  }
-  return "fill-stone-400 text-stone-400";
-});
-
 const retrievedSessionContext = computed(() => retrievedContext.value?.sessionContext ?? null);
-const retrievedRunState = computed(() => retrievedContext.value?.runState ?? null);
-const retrievedLongTermMemory = computed(() => retrievedContext.value?.longTermMemory ?? null);
-const retrievedRunPhaseRaw = computed(
-  () =>
-    retrievedRunState.value?.phase?.trim() ||
-    retrievedRunState.value?.executionCheckpointPhase?.trim() ||
-    retrievedRunState.value?.executionCheckpointStatus?.trim() ||
-    ""
-);
-
-const retrievedRunPhase = computed(() => {
-  const raw = retrievedRunPhaseRaw.value;
-  if (!raw) return "";
-  const map: Record<string, string> = {
-    ready: "等待中",
-    running: "执行中",
-    waiting_user: "等待输入",
-    paused: "已暂停",
-    completed: "已完成",
-    failed: "执行失败",
-    cancelled: "已取消",
-    idle: "空闲",
-    calling_model: "模型处理中",
-    calling_tool: "工具处理中"
-  };
-  return map[raw] ?? raw;
-});
-const longTermMemoryEntries = computed(() => retrievedLongTermMemory.value?.entries ?? []);
-const longTermMemoryPreviewEntries = computed(() => longTermMemoryEntries.value.slice(0, 3));
-const retrievedActiveTaskFocus = computed(() => extractActiveTaskFocus(longTermMemoryEntries.value)?.trim() ?? "");
-const controlStatusSummary = computed(() => buildControlStatusSummary(latestRunControlAuditSummary.value));
 const sessionStatusSummary = computed(() => {
   if (sessionOperation.value === "initializing") {
     return "正在加载最近对话…";
@@ -275,15 +238,6 @@ function formatDuration(durationSeconds?: number | null) {
   }
 
   return durationSeconds < 1 ? `${Math.round(durationSeconds * 1000)} ms` : `${durationSeconds.toFixed(2)} s`;
-}
-
-function buildControlStatusSummary(summary: RunControlAuditSummary | null) {
-  const actionSummary = summary?.actionEvidenceSummary ?? null;
-  if (!actionSummary?.summary?.trim()) {
-    return "";
-  }
-
-  return actionSummary.summary.trim();
 }
 
 function traceStateIcon(state: TraceStep["state"]) {
@@ -641,7 +595,7 @@ function formatEntryTokenSpeed(entry: TraceTimelineEntry, record?: ProviderCallC
     return "";
   }
   const value = entry.outputTokens / (activeGenerationMs / 1000);
-  return Number.isFinite(value) ? `${value.toFixed(1)} token/s` : "";
+  return Number.isFinite(value) ? `${value.toFixed(1)} t/s` : "";
 }
 
 function average(values: number[]) {
@@ -777,20 +731,100 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
   if (inputTotal != null) {
     metrics.push(`输入 ${formatInteger(inputTotal)}`);
   }
-  if (cacheTotal != null) {
-    metrics.push(`缓存 ${formatInteger(cacheTotal)}`);
-  }
   if (outputTotal != null) {
     metrics.push(`输出 ${formatInteger(outputTotal)}`);
   }
   if (speedAverage != null) {
-    metrics.push(`${speedLabel} ${speedAverage.toFixed(1)} token/s`);
+    metrics.push(`${speedLabel} ${speedAverage.toFixed(1)} t/s`);
+  }
+  if (cacheTotal != null) {
+    metrics.push(`缓存 ${formatInteger(cacheTotal)}`);
   }
   if (latencyAverage != null) {
     metrics.push(`延时 ${Math.round(latencyAverage)} ms`);
   }
 
   return metrics;
+}
+
+function buildTurnMetricItems(turn: TurnTraceRecord) {
+  const callModelEntries = turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model");
+  const perCallMetrics = callModelEntries.map((entry) => timelineMetricEntry(turn, entry, { allowTurnFallback: false }));
+  const hasPerCallMetrics = perCallMetrics.some((entry) =>
+    entry.inputTokens != null
+    || entry.cacheHitInputTokens != null
+    || entry.outputTokens != null
+    || entry.firstTokenLatencyMs != null
+    || entry.turnDurationMs != null
+  );
+
+  const inputs = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.inputTokens).filter((value): value is number => value != null) : [];
+  const caches = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.cacheHitInputTokens).filter((value): value is number => value != null) : [];
+  const outputs = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.outputTokens).filter((value): value is number => value != null) : [];
+  const latencies = hasPerCallMetrics ? perCallMetrics.map((entry) => entry.firstTokenLatencyMs).filter((value): value is number => value != null) : [];
+  const generationDurations = hasPerCallMetrics
+    ? callModelEntries
+      .map((entry, index) => activeGenerationDurationMs(perCallMetrics[index]!, timelineProviderCallRecord(turn, entry)))
+      .filter((value): value is number => value != null)
+    : [];
+
+  const items: MetricDisplayItem[] = [];
+  const inputTotal = inputs.length ? inputs.reduce((sum, value) => sum + value, 0) : turn.inputTokens ?? null;
+  const cacheTotal = caches.length ? caches.reduce((sum, value) => sum + value, 0) : providerReturnedCacheHitInputTokens(turn);
+  const outputTotal = outputs.length ? outputs.reduce((sum, value) => sum + value, 0) : turn.outputTokens ?? null;
+  const speedAverage = outputTotal != null && generationDurations.length
+    ? outputTotal / (generationDurations.reduce((sum, value) => sum + value, 0) / 1000)
+    : tokenSpeed(turn);
+  const speedLabel = latencies.length === generationDurations.length && generationDurations.length > 0
+    ? "生成速度"
+    : latencies.length === 0
+      ? "整体速度"
+      : "速度";
+  const latencyAverage = latencies.length ? average(latencies) : turn.firstTokenLatencyMs ?? null;
+
+  if (inputTotal != null) {
+    items.push({ icon: ArrowUp, tooltip: "输入", value: formatInteger(inputTotal) });
+  }
+  if (outputTotal != null) {
+    items.push({ icon: ArrowDown, tooltip: "输出", value: formatInteger(outputTotal) });
+  }
+  if (speedAverage != null) {
+    items.push({ icon: Gauge, tooltip: speedLabel, value: `${speedAverage.toFixed(1)} t/s` });
+  }
+  if (cacheTotal != null) {
+    items.push({ icon: Zap, tooltip: "缓存读取", value: formatInteger(cacheTotal) });
+  }
+  if (latencyAverage != null) {
+    items.push({ icon: Clock3, tooltip: "首 token 延时", value: `${Math.round(latencyAverage)} ms` });
+  }
+
+  return items;
+}
+
+function buildTimelineMetricItems(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+  if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+    return [];
+  }
+
+  const metricEntry = timelineMetricEntry(turn, entry);
+  const items: MetricDisplayItem[] = [];
+  if (metricEntry.inputTokens != null) {
+    items.push({ icon: ArrowUp, tooltip: "输入", value: formatInteger(metricEntry.inputTokens) });
+  }
+  if (metricEntry.outputTokens != null) {
+    items.push({ icon: ArrowDown, tooltip: "输出", value: formatInteger(metricEntry.outputTokens) });
+  }
+  const tokenSpeed = formatEntryTokenSpeed(metricEntry);
+  if (tokenSpeed) {
+    items.push({ icon: Gauge, tooltip: formatTokenSpeedLabel(metricEntry), value: tokenSpeed });
+  }
+  if (metricEntry.cacheHitInputTokens != null) {
+    items.push({ icon: Zap, tooltip: "缓存读取", value: formatInteger(metricEntry.cacheHitInputTokens) });
+  }
+  if (metricEntry.firstTokenLatencyMs != null) {
+    items.push({ icon: Clock3, tooltip: "首 token 延时", value: `${metricEntry.firstTokenLatencyMs} ms` });
+  }
+  return items;
 }
 
 function canonicalTraceTimelineKind(kind: TraceTimelineEntry["kind"]) {
@@ -806,32 +840,6 @@ function canonicalTraceTimelineKind(kind: TraceTimelineEntry["kind"]) {
     default:
       return kind;
   }
-}
-
-function timelineEntryStats(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
-  if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
-    return [];
-  }
-
-  const metricEntry = timelineMetricEntry(turn, entry);
-  const stats: string[] = [];
-  if (metricEntry.inputTokens != null) {
-    stats.push(`输入 ${formatInteger(metricEntry.inputTokens)}`);
-  }
-  if (metricEntry.cacheHitInputTokens != null) {
-    stats.push(`缓存 ${formatInteger(metricEntry.cacheHitInputTokens)}`);
-  }
-  if (metricEntry.outputTokens != null) {
-    stats.push(`输出 ${formatInteger(metricEntry.outputTokens)}`);
-  }
-  const tokenSpeed = formatEntryTokenSpeed(metricEntry);
-  if (tokenSpeed) {
-    stats.push(`${formatTokenSpeedLabel(metricEntry)} ${tokenSpeed}`);
-  }
-  if (metricEntry.firstTokenLatencyMs != null) {
-    stats.push(`延时 ${metricEntry.firstTokenLatencyMs} ms`);
-  }
-  return stats;
 }
 
 function timelineDurationText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
@@ -953,12 +961,25 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
     const metricEntry = timelineMetricEntry(turn, entry);
     pushRow(rows, "阶段", traceStateLabel(entry.state));
     pushRow(rows, "模型", formatProviderModel(entry.providerName, entry.providerModel));
-    pushRow(rows, "输入", metricEntry.inputTokens);
-    pushRow(rows, "缓存", metricEntry.cacheHitInputTokens);
-    pushRow(rows, "输出", metricEntry.outputTokens);
-    pushRow(rows, formatTokenSpeedLabel(metricEntry), formatEntryTokenSpeed(metricEntry) || null);
-    pushRow(rows, "延时", metricEntry.firstTokenLatencyMs != null ? `${metricEntry.firstTokenLatencyMs} ms` : null);
-    pushRow(rows, "耗时", metricEntry.turnDurationMs != null ? formatDurationMs(metricEntry.turnDurationMs) : null);
+    if (metricEntry.inputTokens != null) {
+      rows.push({ label: "输入", value: formatInteger(metricEntry.inputTokens), icon: ArrowUp });
+    }
+    if (metricEntry.outputTokens != null) {
+      rows.push({ label: "输出", value: formatInteger(metricEntry.outputTokens), icon: ArrowDown });
+    }
+    const speedText = formatEntryTokenSpeed(metricEntry);
+    if (speedText) {
+      rows.push({ label: formatTokenSpeedLabel(metricEntry), value: speedText, icon: Gauge });
+    }
+    if (metricEntry.cacheHitInputTokens != null) {
+      rows.push({ label: "缓存读取", value: formatInteger(metricEntry.cacheHitInputTokens), icon: Zap });
+    }
+    if (metricEntry.firstTokenLatencyMs != null) {
+      rows.push({ label: "首 token 延时", value: `${metricEntry.firstTokenLatencyMs} ms`, icon: Clock3 });
+    }
+    if (metricEntry.turnDurationMs != null) {
+      rows.push({ label: "耗时", value: formatDurationMs(metricEntry.turnDurationMs), icon: Timer });
+    }
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
   }
@@ -1091,10 +1112,11 @@ function buildToolMessageDetail(activity: ToolActivity) {
     lines.push(`耗时: ${formatDuration(activity.durationSeconds)}`);
   }
 
-  const permissionScope = activity.capabilityInvocation?.permissionFacts?.permissionScope
-    || activity.capabilityInvocation?.permissionScope;
-  const approvalMode = activity.capabilityInvocation?.permissionFacts?.approvalMode;
-  const permissionSource = activity.capabilityInvocation?.permissionFacts?.decisionSource;
+  const permissionScope = permissionScopeLabel(activity);
+  const approvalMode = approvalLabel(activity);
+  const permissionSource = permissionSourceLabel(activity);
+  const failureKind = activity.capabilityInvocation?.failureKind;
+  const failureLayer = activity.capabilityInvocation?.failureLayer;
   if (permissionScope || approvalMode || permissionSource) {
     lines.push(
       [
@@ -1105,10 +1127,66 @@ function buildToolMessageDetail(activity: ToolActivity) {
     );
   }
 
+  if (failureKind) {
+    lines.push(`失败分类: ${capabilityFailureLabel(failureKind)}`);
+  }
+
+  if (failureLayer) {
+    lines.push(`失败层级: ${failureLayer}`);
+  }
+
   return lines.join("\n\n");
 }
 
-function toolDisplayLabel(activity: ToolActivity) {
+function permissionScopeLabel(activity: ToolActivity) {
+  return (
+    activity.capabilityInvocation?.permissionFacts?.permissionScope
+    || activity.capabilityInvocation?.permissionScope
+    || ""
+  ).trim();
+}
+
+function approvalLabel(activity: ToolActivity) {
+  const facts = activity.capabilityInvocation?.permissionFacts;
+  const mode = facts?.approvalMode?.trim();
+  if (mode) {
+    return mode;
+  }
+
+  const requiresApproval = facts?.requiresApproval ?? activity.capabilityInvocation?.requiresApproval;
+  return requiresApproval ? "required" : "none";
+}
+
+function permissionSourceLabel(activity: ToolActivity) {
+  return activity.capabilityInvocation?.permissionFacts?.decisionSource
+    || activity.capabilityInvocation?.sourceKind
+    || "";
+}
+
+function capabilityFailureLabel(failureKind?: string | null) {
+  switch (failureKind) {
+    case "permission_denied":
+      return "权限拒绝 (permission_denied)";
+    case "source_unavailable":
+      return "来源不可用 (source_unavailable)";
+    case "out_of_scope":
+      return "超出作用域 (out_of_scope)";
+    case "invocation_failed":
+      return "调用失败 (invocation_failed)";
+    case "malformed_response":
+      return "响应异常 (malformed_response)";
+    case "capability_not_found":
+      return "能力不存在 (capability_not_found)";
+    default:
+      return failureKind || "";
+  }
+}
+
+function toolDisplayLabel(activity: {
+  displayNameZh?: string | null;
+  canonicalToolName?: string | null;
+  name: string;
+}) {
   return activity.displayNameZh?.trim()
     || activity.canonicalToolName?.trim()
     || activity.name;
@@ -1319,79 +1397,98 @@ watch(orderedTurnTraceSignature, () => {
         <section class="border-b border-stone-200/70 pb-2.5" data-open="true">
           <div class="flex w-full items-center justify-between gap-2 text-left" data-testid="status-panel-toggle">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
-              <ScanSearch class="h-3.5 w-3.5" />
+              <Tooltip text="状态概览">
+                <ScanSearch class="h-3.5 w-3.5" />
+              </Tooltip>
               <span>状态</span>
-              <Circle class="h-2.5 w-2.5" :class="phaseDotClass" :title="phaseLabel" />
-              <button
-                class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
-                type="button"
-                :title="`Session ID: ${sessionId}`"
-                data-testid="status-copy-session-id"
-                @click.stop="copyText('session-id', sessionId)"
-              >
-                <component :is="copiedKey === 'session-id' ? Check : Copy" class="h-3 w-3" />
-              </button>
+              <Tooltip :text="`复制 Session ID: ${sessionId}`">
+                <button
+                  class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                  type="button"
+                  data-testid="status-copy-session-id"
+                  @click.stop="copyText('session-id', sessionId)"
+                >
+                  <component :is="copiedKey === 'session-id' ? Check : Copy" class="h-3 w-3" />
+                </button>
+              </Tooltip>
             </div>
             <div class="flex items-center gap-x-3 text-[11px] leading-5 text-stone-600">
-              <span v-if="retrievedRunPhase" class="text-stone-400">{{ retrievedRunPhase }}</span>
-              <span class="inline-flex items-center gap-1" title="轮次">
-                <MessageSquareMore class="h-3 w-3 text-stone-400" />
-                {{ sessionTurnCount }}
-              </span>
-              <span class="inline-flex items-center gap-1" title="模型调用">
-                <Orbit class="h-3 w-3 text-stone-400" />
-                {{ sessionModelCallCount }}
-              </span>
-              <span class="inline-flex items-center gap-1" title="工具调用">
-                <Wrench class="h-3 w-3 text-stone-400" />
-                {{ sessionToolCallCount }}
-              </span>
+              <Tooltip text="对话轮次数">
+                <span class="inline-flex items-center gap-1">
+                  <MessageSquareMore class="h-3 w-3 text-stone-400" />
+                  {{ sessionTurnCount }}
+                </span>
+              </Tooltip>
+              <Tooltip text="模型调用次数">
+                <span class="inline-flex items-center gap-1">
+                  <Orbit class="h-3 w-3 text-stone-400" />
+                  {{ sessionModelCallCount }}
+                </span>
+              </Tooltip>
+              <Tooltip text="工具调用次数">
+                <span class="inline-flex items-center gap-1">
+                  <Wrench class="h-3 w-3 text-stone-400" />
+                  {{ sessionToolCallCount }}
+                </span>
+              </Tooltip>
             </div>
           </div>
 
           <section class="mt-1.5 space-y-1">
             <!-- Token metrics -->
             <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] leading-5 text-stone-600">
-              <span class="inline-flex items-center gap-1" title="输入">
-                <ArrowUp class="h-3 w-3 text-stone-400" />
-                <span class="text-stone-400">输入</span>
-                {{ formatCompactInteger(sessionInputTokensTotal) || "0" }}
+              <span class="inline-flex items-center gap-1 text-stone-400">
+                <CircleDollarSign class="h-3 w-3" />
+                <span>Token</span>
               </span>
-              <span class="inline-flex items-center gap-1" title="输出">
-                <ArrowDown class="h-3 w-3 text-stone-400" />
-                <span class="text-stone-400">输出</span>
-                {{ formatCompactInteger(sessionOutputTokensTotal) || "0" }}
-              </span>
-              <span class="inline-flex items-center gap-1" title="缓存读取">
-                <Zap class="h-3 w-3 text-stone-400" />
-                <span class="text-stone-400">缓存读取</span>
-                {{ formatCompactInteger(sessionCacheHitTokensTotal) || "0" }}
-                <span v-if="sessionCacheHitRatio" class="text-stone-400">· {{ sessionCacheHitRatio }}</span>
-              </span>
+              <Tooltip text="输入">
+                <span class="inline-flex items-center gap-1">
+                  <ArrowUp class="h-3 w-3 text-stone-400" />
+                  {{ formatCompactInteger(sessionInputTokensTotal) || "0" }}
+                </span>
+              </Tooltip>
+              <Tooltip text="输出">
+                <span class="inline-flex items-center gap-1">
+                  <ArrowDown class="h-3 w-3 text-stone-400" />
+                  {{ formatCompactInteger(sessionOutputTokensTotal) || "0" }}
+                </span>
+              </Tooltip>
+              <Tooltip text="缓存读取">
+                <span class="inline-flex items-center gap-1">
+                  <Zap class="h-3 w-3 text-stone-400" />
+                  {{ formatCompactInteger(sessionCacheHitTokensTotal) || "0" }}
+                  <span v-if="sessionCacheHitRatio" class="text-stone-400">· {{ sessionCacheHitRatio }}</span>
+                </span>
+              </Tooltip>
             </div>
 
             <!-- Context usage -->
             <div v-if="latestTurn" class="flex flex-wrap items-center gap-x-3 text-[11px] leading-5 text-stone-500">
               <span class="inline-flex items-center gap-1">
-                <Layout class="h-3 w-3 text-stone-400" />
+                <Tooltip text="上下文窗口用量">
+                  <Layout class="h-3 w-3 text-stone-400" />
+                </Tooltip>
                 <span class="text-stone-400">上下文</span>
-                {{ formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || "未知" }}
               </span>
-              <span
-                v-if="latestTurn.inputTokens && currentContextWindowTokens"
-                class="inline-block h-1.5 w-16 overflow-hidden rounded-full bg-stone-200"
-                title="上下文窗口用量"
-              >
+              <span class="inline-flex items-center gap-1">
                 <span
-                  class="block h-full rounded-full bg-stone-400 transition-all"
-                  :style="{ width: Math.min(100, (latestTurn.inputTokens / currentContextWindowTokens) * 100) + '%' }"
-                />
+                  v-if="latestTurn.inputTokens && currentContextWindowTokens"
+                  class="inline-block h-1.5 w-16 overflow-hidden rounded-full bg-stone-200"
+                >
+                  <span
+                    class="block h-full rounded-full bg-stone-400 transition-all"
+                    :style="{ width: Math.min(100, (latestTurn.inputTokens / currentContextWindowTokens) * 100) + '%' }"
+                  />
+                </span>
+                <Tooltip :text="`上下文 · ${formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || '未知'}`">
+                  <span>{{ formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || "未知" }}</span>
+                </Tooltip>
               </span>
             </div>
 
             <!-- Session status messages -->
             <div
-              v-if="sessionStatusSummary || controlStatusSummary || fallbackReason || error"
+              v-if="sessionStatusSummary || fallbackReason || error"
               class="border-t border-stone-200/60 pt-1"
             >
               <div class="space-y-0.5">
@@ -1401,13 +1498,6 @@ watch(orderedTurnTraceSignature, () => {
                   data-testid="status-session-summary"
                 >
                   {{ sessionStatusSummary }}
-                </div>
-                <div
-                  v-if="controlStatusSummary"
-                  class="text-[11px] leading-4 text-stone-500"
-                  data-testid="status-control-summary"
-                >
-                  {{ controlStatusSummary }}
                 </div>
                 <p
                   v-if="fallbackReason"
@@ -1451,9 +1541,14 @@ watch(orderedTurnTraceSignature, () => {
                   @click="activeTraceStepKey = activeTraceStepKey === toolPanelKey(tool.name) ? '' : toolPanelKey(tool.name)"
                 >
                   <div class="min-w-0">
-                    <div class="text-[11px] font-medium text-stone-800">{{ tool.name }}</div>
+                    <div class="text-[11px] font-medium text-stone-800">{{ tool.displayMetadata?.displayNameZh || tool.canonicalToolName || tool.name }}</div>
                     <p class="mt-0.5 text-[11px] leading-[1.3] text-stone-500">
                       {{ tool.description }}
+                    </p>
+                    <p class="mt-0.5 text-[10px] leading-[1.25] text-stone-400">
+                      {{ tool.permissionFacts?.permissionScope || "--" }}
+                      · {{ tool.permissionFacts?.approvalMode || (tool.permissionFacts?.requiresApproval ? "required" : "none") }}
+                      · {{ tool.permissionFacts?.decisionSource || "unknown" }}
                     </p>
                   </div>
                   <ChevronRight
@@ -1514,8 +1609,13 @@ watch(orderedTurnTraceSignature, () => {
                       />
                       <span class="truncate">{{ turn.title }}</span>
                     </div>
-                    <div v-if="turnMeta(turn)" class="pl-[1.125rem] text-[10px] leading-[1.15] text-stone-400">
-                      {{ turnMeta(turn) }}
+                    <div v-if="buildTurnMetricItems(turn).length" class="pl-[1.125rem] flex flex-nowrap items-center gap-x-3 text-[10px] leading-[1.15] text-stone-400">
+                      <Tooltip v-for="item in buildTurnMetricItems(turn)" :key="item.tooltip" :text="item.tooltip">
+                        <span class="inline-flex items-center gap-0.5 whitespace-nowrap">
+                          <component :is="item.icon" class="h-3 w-3" />
+                          {{ item.value }}
+                        </span>
+                      </Tooltip>
                     </div>
                   </div>
                   <div class="flex items-center gap-1">
@@ -1566,14 +1666,17 @@ watch(orderedTurnTraceSignature, () => {
                             <span class="truncate">{{ entry.label }}</span>
                           </div>
                           <div class="pl-[1.125rem] text-[10px] leading-[1.1] text-stone-400">
-                            <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                              <span
-                                v-for="stat in timelineEntryStats(turn, entry)"
-                                :key="turn.turnId + '-' + entry.id + '-' + stat"
-                                class="text-stone-400"
+                            <div class="flex flex-nowrap items-center gap-x-3">
+                              <Tooltip
+                                v-for="item in buildTimelineMetricItems(turn, entry)"
+                                :key="`${turn.turnId}-${entry.id}-${item.tooltip}`"
+                                :text="item.tooltip"
                               >
-                                {{ stat }}
-                              </span>
+                                <span class="inline-flex items-center gap-0.5 whitespace-nowrap text-stone-400">
+                                  <component :is="item.icon" class="h-3 w-3" />
+                                  {{ item.value }}
+                                </span>
+                              </Tooltip>
                             </div>
                             <div
                               v-if="timelinePreviewText(turn, entry) && activeTraceStepKey !== turnStepKey(turn.turnId, entry.id)"
@@ -1612,37 +1715,47 @@ watch(orderedTurnTraceSignature, () => {
                                 class="overflow-x-auto text-[10px] leading-[1.35]"
                               >
                                 <div class="flex min-w-0 items-start gap-2">
-                                  <span class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-stone-400">
-                                    <span>{{ row.label }}</span>
-                                    <span>:</span>
-                                  </span>
-                                  <component
-                                    v-if="row.inputKind"
-                                    :is="inputKindIcon(row.inputKind)"
-                                    class="h-3 w-3 shrink-0 text-stone-400"
-                                  />
-                                  <div
-                                    class="min-w-0"
-                                    :class="[rowToneClass(row.tone), row.multiline ? 'whitespace-pre-wrap text-left' : 'whitespace-nowrap text-left']"
-                                  >
-                                    <template v-if="row.expandable">
-                                      {{ isExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label)) ? row.value : previewResult(row.value) }}
-                                      <button
-                                        v-if="row.value.length > 240"
-                                        class="ml-2 inline-flex text-[10px] text-stone-400 transition hover:text-stone-700"
-                                        type="button"
-                                        @click.stop="toggleExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label))"
-                                      >
-                                        {{ isExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label)) ? "收起" : "显示全部" }}
-                                      </button>
-                                    </template>
-                                    <template v-else>
-                                      {{ row.value }}
-                                    </template>
+                                  <template v-if="row.icon">
+                                    <Tooltip :text="row.label">
+                                      <span class="inline-flex items-center gap-1 shrink-0 whitespace-nowrap text-stone-400">
+                                        <component :is="row.icon" class="h-3 w-3" />
+                                        <span>{{ row.value }}</span>
+                                      </span>
+                                    </Tooltip>
+                                  </template>
+                                  <template v-else>
+                                    <span class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-stone-400">
+                                      <span>{{ row.label }}</span>
+                                      <span>:</span>
+                                    </span>
+                                    <component
+                                      v-if="row.inputKind"
+                                      :is="inputKindIcon(row.inputKind)"
+                                      class="h-3 w-3 shrink-0 text-stone-400"
+                                    />
+                                    <div
+                                      class="min-w-0"
+                                      :class="[rowToneClass(row.tone), row.multiline ? 'whitespace-pre-wrap text-left' : 'whitespace-nowrap text-left']"
+                                    >
+                                      <template v-if="row.expandable">
+                                        {{ isExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label)) ? row.value : previewResult(row.value) }}
+                                        <button
+                                          v-if="row.value.length > 240"
+                                          class="ml-2 inline-flex text-[10px] text-stone-400 transition hover:text-stone-700"
+                                          type="button"
+                                          @click.stop="toggleExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label))"
+                                        >
+                                          {{ isExpandedResult(expandedResultKey(turn.turnId, entry.id, row.label)) ? "收起" : "显示全部" }}
+                                        </button>
+                                      </template>
+                                      <template v-else>
+                                        {{ row.value }}
+                                      </template>
+                                    </div>
+                                  </template>
                                   </div>
                                 </div>
                               </div>
-                            </div>
                           </section>
 
                           <template v-for="section in buildTimelineDetailSections(turn, entry)" :key="traceDetailKey(turn.turnId, entry.id, section.id)">
