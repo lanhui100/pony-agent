@@ -1669,7 +1669,7 @@ watch(orderedTurnTraceSignature, () => {
                         </div>
                       </button>
 
-                      <div class="collapsible-body">
+                      <div v-if="activeTraceStepKey === turnStepKey(turn.turnId, entry.id)" class="collapsible-body-open">
                         <div class="collapsible-content mt-1 pl-4">
                           <section>
                             <div class="space-y-1">
@@ -1807,16 +1807,16 @@ watch(orderedTurnTraceSignature, () => {
                                 </template>
                               </button>
 
-                              <div class="collapsible-body">
-                                <div class="collapsible-content mt-0">
-                                  <div
-                                    class="min-w-0 whitespace-pre-wrap break-words text-[10px] leading-[1.25] [overflow-wrap:anywhere]"
-                                    :class="rowToneClass(section.tone)"
-                                  >
-                                    {{ section.content }}
-                                  </div>
-                                </div>
-                              </div>
+              <div v-if="activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id)" class="collapsible-body-open">
+                <div class="collapsible-content mt-0">
+                  <div
+                    class="min-w-0 whitespace-pre-wrap break-words text-[10px] leading-[1.25] [overflow-wrap:anywhere]"
+                    :class="rowToneClass(section.tone)"
+                  >
+                    {{ section.content }}
+                  </div>
+                </div>
+              </div>
                             </section>
                           </template>
                         </div>
@@ -1854,5 +1854,20 @@ watch(orderedTurnTraceSignature, () => {
 .collapsible-content {
   min-height: 0;
   overflow: hidden;
+}
+
+.collapsible-body-open {
+  animation: collapseFadeIn 200ms ease-out;
+}
+
+@keyframes collapseFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>
