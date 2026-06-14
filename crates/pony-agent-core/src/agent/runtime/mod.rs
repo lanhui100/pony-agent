@@ -81,23 +81,39 @@ fn tool_result_failure_kind(
     tool_result: &crate::agent::tools::ToolResult,
 ) -> Option<CapabilityFailureKind> {
     let parsed = serde_json::from_str::<Value>(&tool_result.output).unwrap_or(Value::Null);
-    let error = parsed.get("error")?;
-    let kind = error
-        .get("kind")
-        .or_else(|| error.get("code"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if kind == "out_of_scope" {
-        return Some(CapabilityFailureKind::OutOfScope);
+    if let Some(error) = parsed.get("error") {
+        let kind = error
+            .get("kind")
+            .or_else(|| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if kind == "out_of_scope" {
+            return Some(CapabilityFailureKind::OutOfScope);
+        }
+        return Some(CapabilityFailureKind::InvocationFailed);
     }
-    if error
-        .get("message")
-        .and_then(Value::as_str)
-        .map(|message| message.contains("只允许访问当前工作区内的相对路径"))
-        .unwrap_or(false)
-    {
-        return Some(CapabilityFailureKind::OutOfScope);
+
+    if tool_result.status == "ok" {
+        if parsed.get("status").and_then(Value::as_str) == Some("partial") {
+            if let Some(first_error) = parsed
+                .get("summary")
+                .and_then(|summary| summary.get("firstError"))
+                .and_then(Value::as_object)
+            {
+                let kind = first_error
+                    .get("kind")
+                    .or_else(|| first_error.get("code"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if kind == "out_of_scope" {
+                    return Some(CapabilityFailureKind::OutOfScope);
+                }
+                return Some(CapabilityFailureKind::InvocationFailed);
+            }
+        }
+        return None;
     }
+
     Some(CapabilityFailureKind::InvocationFailed)
 }
 
@@ -5425,9 +5441,8 @@ impl AgentRuntime {
         ));
 
         let tool_result = self.tool_executor.execute(&action.tool_call);
-        let failure_kind = if tool_result.status == "ok" && !is_out_of_scope_tool_result(&tool_result)
-        {
-            tool_result_failure_kind(&tool_result)
+        let failure_kind = if let Some(failure_kind) = tool_result_failure_kind(&tool_result) {
+            Some(failure_kind)
         } else if is_out_of_scope_tool_result(&tool_result) {
             Some(CapabilityFailureKind::OutOfScope)
         } else if tool_result.status == "ok" {
@@ -5604,12 +5619,18 @@ impl AgentRuntime {
 
         for action in actions {
             let tool_result = self.tool_executor.execute(&action.tool_call);
-            let capability_failure = if tool_result.status == "ok" {
-                None
-            } else {
+            let capability_failure = tool_result_failure_kind(&tool_result).or_else(|| {
+                if is_out_of_scope_tool_result(&tool_result) {
+                    Some(CapabilityFailureKind::OutOfScope)
+                } else if tool_result.status == "ok" {
+                    None
+                } else {
+                    Some(CapabilityFailureKind::InvocationFailed)
+                }
+            });
+            if capability_failure.is_some() {
                 failure_layer = Some(SkillFailureLayer::UnderlyingCapabilityExecution);
-                Some(CapabilityFailureKind::InvocationFailed)
-            };
+            }
             capability_executions.push(CapabilityToolExecutionResult {
                 capability: Some(action.capability),
                 tool_call: action.tool_call,
@@ -7975,6 +7996,57 @@ mod tests {
         delay_ms: u64,
     }
 
+    struct PartialOutOfScopeToolExecutor;
+
+    impl ToolExecutor for PartialOutOfScopeToolExecutor {
+        fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+            let output = match call.name.as_str() {
+                "workspace_batch" | "workspace_gather_context" => json!({
+                    "status": "partial",
+                    "results": [
+                        {
+                            "index": 0,
+                            "tool": "workspace_read_file",
+                            "status": "ok",
+                            "output": { "content": "ok" }
+                        },
+                        {
+                            "index": 1,
+                            "tool": "workspace_read_file",
+                            "status": "error",
+                            "error": {
+                                "kind": "out_of_scope",
+                                "message": "只允许访问当前工作区内的相对路径。"
+                            }
+                        }
+                    ],
+                    "summary": {
+                        "text": "aggregate partial",
+                        "firstError": {
+                            "kind": "out_of_scope",
+                            "message": "只允许访问当前工作区内的相对路径。"
+                        }
+                    }
+                })
+                .to_string(),
+                _ => json!({
+                    "error": {
+                        "kind": "invocation_failed",
+                        "message": format!("unexpected tool: {}", call.name)
+                    }
+                })
+                .to_string(),
+            };
+
+            crate::agent::tools::ToolResult {
+                tool_name: call.name.clone(),
+                status: "ok".to_string(),
+                output,
+                duration_ms: 1,
+            }
+        }
+    }
+
     impl TurnPlanner for SlowPassthroughPlanner {
         fn preflight_decision(
             &self,
@@ -8053,14 +8125,27 @@ mod tests {
                     "{\"entries\":[\"Cargo.toml\",\"tauri.conf.json\",\"src/\"]}".to_string()
                 }
                 "workspace_read_file" => {
-                    "{\n  \"productName\": \"Pony Agent\",\n  \"version\": \"0.1.0\"\n}".to_string()
+                    let path = call
+                        .arguments
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if path.contains("Windows/System32") || path.contains("..") {
+                        "{\"ok\":false,\"tool\":\"workspace_read_file\",\"error\":{\"code\":\"out_of_scope\",\"message\":\"只允许访问当前工作区内的相对路径。\"}}".to_string()
+                    } else {
+                        "{\n  \"productName\": \"Pony Agent\",\n  \"version\": \"0.1.0\"\n}".to_string()
+                    }
                 }
                 other => format!("unsupported tool in test: {}", other),
             };
 
             crate::agent::tools::ToolResult {
                 tool_name: call.name.clone(),
-                status: "ok".to_string(),
+                status: if output.contains("\"error\"") {
+                    "error".to_string()
+                } else {
+                    "ok".to_string()
+                },
                 output,
                 duration_ms: 1,
             }
@@ -10479,7 +10564,7 @@ mod tests {
 
         let execution = runtime.execute_capability_tool_call(&ToolCall {
             call_id: Some("call_out_of_scope_read".to_string()),
-            name: "Read".to_string(),
+            name: "workspace_read_file".to_string(),
             arguments: json!({
                 "path": "C:/Windows/System32/drivers/etc/hosts"
             }),
@@ -10817,6 +10902,83 @@ mod tests {
             execution.capability_executions[0].failure_kind,
             Some(CapabilityFailureKind::InvocationFailed)
         );
+    }
+
+    #[test]
+    fn capability_bridge_propagates_partial_out_of_scope_from_runtime_execution_path() {
+        let runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection("http://localhost".to_string()),
+            Box::new(PartialOutOfScopeToolExecutor),
+        );
+
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_partial_batch".to_string()),
+            name: "workspace_batch".to_string(),
+            arguments: json!({ "calls": [] }),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution.failure_kind,
+            Some(CapabilityFailureKind::OutOfScope)
+        );
+        assert_eq!(execution.tool_result.status, "ok");
+        assert!(execution.tool_result.output.contains("\"status\":\"partial\""));
+    }
+
+    #[test]
+    fn skill_bridge_propagates_partial_out_of_scope_from_underlying_capability() {
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection("http://localhost".to_string()),
+            Box::new(PartialOutOfScopeToolExecutor),
+        );
+        runtime
+            .apply_skill_source_snapshot(crate::agent::capability_bridge::SkillSourceSnapshot {
+                source: crate::agent::capability_bridge::SkillSourceView {
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    display_name: "Builtin Skills".to_string(),
+                    availability:
+                        crate::agent::capability_bridge::CapabilityAvailability::Available,
+                    transport_kind: "host".to_string(),
+                    server_identity: "skills://builtin".to_string(),
+                    updated_at_ms: 1,
+                    last_ingress_observation: None,
+                },
+                skills: vec![crate::agent::capability_bridge::SkillDescriptor {
+                    skill_id: "skill:plan".to_string(),
+                    source_id: "builtin-skills".to_string(),
+                    source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
+                    label: "plan".to_string(),
+                    description: "Aggregate workspace plan".to_string(),
+                    input_schema_summary: "{\"calls\":\"array\"}".to_string(),
+                    safety_class: "".to_string(),
+                    visibility: "default".to_string(),
+                    observability_tags: vec![],
+                    requires_approval: false,
+                    host_mediated: false,
+                    permission_scope: "".to_string(),
+                    composed_capability_refs: vec!["builtin:workspace_batch".to_string()],
+                    composed_capability_kinds: vec![],
+                    executable_in_v1: false,
+                }],
+            })
+            .expect("skill snapshot should apply");
+
+        let execution = runtime.execute_skill_tool_call(&SkillInvocationRequest {
+            skill_id: "skill:plan".to_string(),
+            arguments: json!({ "calls": [] }),
+        });
+
+        assert_eq!(
+            execution.failure_layer,
+            Some(SkillFailureLayer::UnderlyingCapabilityExecution)
+        );
+        assert_eq!(
+            execution.capability_executions[0].failure_kind,
+            Some(CapabilityFailureKind::OutOfScope)
+        );
+        assert_eq!(execution.capability_executions[0].tool_result.status, "ok");
     }
 
     fn temp_marker_file_path(prefix: &str) -> PathBuf {
@@ -11568,7 +11730,7 @@ mod tests {
         assert!(result
             .tool_activities
             .iter()
-            .any(|activity| activity.name == "workspace_read_file"));
+            .any(|activity| activity.name == "Read"));
 
         let snapshot = runtime.load_session_snapshot(Some("repair-blank-tool-sync"));
         assert_eq!(
@@ -11981,7 +12143,7 @@ mod tests {
                     .map(|activities| {
                         activities
                             .iter()
-                            .any(|activity| activity.name == "workspace_read_file")
+                            .any(|activity| activity.name == "Read")
                     })
                     .unwrap_or(false)
         }));
@@ -12192,7 +12354,7 @@ mod tests {
     }
 
     #[test]
-    fn start_turn_stream_fails_with_canonical_finalize_boundary_when_tool_execution_errors() {
+    fn start_turn_stream_preserves_tool_error_activity_when_tool_execution_errors() {
         let server = MockHttpServer::start(vec![sse_decision_tool_call(
             "workspace_list_files",
             json!({"path": ".", "limit": 40}),
@@ -12237,15 +12399,10 @@ mod tests {
                 .then_some(payload.clone())
             })
             .expect("tool completed event");
-        let failed = events
+        let completed = events
             .iter()
-            .find_map(|(name, payload)| (name == "turn:failed").then_some(payload.clone()))
-            .expect("failed event");
-        let expected_error = build_tool_execution_error(
-            "workspace_list_files",
-            "tool workspace_list_files failed in test",
-        );
-
+            .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
+            .expect("completed event");
         assert_hook_boundary_alignment(
             &tool_started,
             TurnHookPoint::ToolCallStart,
@@ -12258,34 +12415,29 @@ mod tests {
             "turn.tool_call_completed",
             "tool_result_integrating",
         );
-        assert_hook_boundary_alignment(
-            &failed,
-            TurnHookPoint::TurnFinalizeEnd,
-            "turn.failed",
-            "failed",
-        );
-        assert_eq!(failed.error.as_deref(), Some(expected_error.as_str()));
         assert_eq!(
-            failed
+            completed
                 .tool_activities
                 .as_ref()
                 .map(|activities| activities.len()),
             Some(1)
         );
-        assert!(!events.iter().any(|(name, _)| name == "turn:completed"));
+        assert!(events.iter().any(|(name, _)| name == "turn:completed"));
+        assert!(!events.iter().any(|(name, _)| name == "turn:failed"));
         assert_eq!(request_bodies.len(), 1);
 
         let snapshot = runtime.load_session_snapshot(Some("stream-tool-error"));
         let persisted_trace = snapshot
             .turn_trace_history
             .last()
-            .expect("failed trace should be persisted");
-        assert_eq!(persisted_trace.phase, "failed");
-        assert_eq!(
-            persisted_trace.error.as_deref(),
-            Some(expected_error.as_str())
-        );
+            .expect("completed trace should be persisted");
+        assert_eq!(persisted_trace.phase, "completed");
+        assert_eq!(persisted_trace.error.as_deref(), None);
         assert_eq!(persisted_trace.tool_activities.len(), 1);
+        let completed_text = completed.text.as_deref().unwrap_or_default();
+        assert!(completed_text.contains("provider 在整合工具结果时失败"));
+        assert!(completed_text.contains("tool workspace_list_files failed in test"));
+        assert!(completed_text.contains("status=error"));
     }
 
     #[test]
@@ -13185,7 +13337,7 @@ mod tests {
                     .map(|activities| {
                         activities
                             .iter()
-                            .any(|activity| activity.name == "workspace_read_file")
+                            .any(|activity| activity.name == "Read")
                     })
                     .unwrap_or(false)
         }));

@@ -56,6 +56,10 @@ const MarkdownRendererStub = defineComponent({
       type: String,
       default: ""
     },
+    streaming: {
+      type: Boolean,
+      default: false
+    },
     wrapperClass: {
       type: String,
       default: ""
@@ -65,7 +69,8 @@ const MarkdownRendererStub = defineComponent({
       default: ""
     }
   },
-  template: '<div class="markdown-stub" :class="[wrapperClass, toneClass]">{{ content }}</div>'
+  template:
+    '<div class="markdown-stub" :class="[wrapperClass, toneClass]" :streaming="streaming ? \'true\' : undefined">{{ content }}</div>'
 });
 
 const ButtonStub = defineComponent({
@@ -342,6 +347,10 @@ function mountWorkspace(options?: {
       }
     }
   });
+}
+
+function findStreamingMarkdown(wrapper: ReturnType<typeof mount>) {
+  return wrapper.find('.markdown-stub[streaming="true"]');
 }
 
 describe("HomeWorkspace", () => {
@@ -712,11 +721,9 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    const streamingContent = wrapper.get(".assistant-streaming-content");
+    const streamingContent = wrapper.get('.markdown-stub[streaming="true"]');
     expect(streamingContent.text()).toContain("**正在** 输出中");
-    expect(streamingContent.findAll("span")[0]?.text()).toBe("**正在** 输出中");
     expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
-    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
   });
 
   it("fades only the latest streamed assistant delta instead of replaying the full accumulated content", async () => {
@@ -767,8 +774,8 @@ describe("HomeWorkspace", () => {
       ]
     });
     await nextTick();
-    let streamingSpans = wrapper.get(".assistant-streaming-content").findAll("span");
-    expect(streamingSpans[0]?.text()).toBe("hello");
+    let streamingContent = wrapper.get('.markdown-stub[streaming="true"]');
+    expect(streamingContent.text()).toBe("hello");
     expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
 
     runtimeStore.$patch({
@@ -791,8 +798,8 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    streamingSpans = wrapper.get(".assistant-streaming-content").findAll("span");
-    expect(streamingSpans[0]?.text()).toBe("hello");
+    streamingContent = wrapper.get('.markdown-stub[streaming="true"]');
+    expect(streamingContent.text()).toBe("hello");
     expect(wrapper.get(".assistant-streaming-fade").text()).toBe("this is a longer streamed assistant delta");
   });
 
@@ -844,8 +851,7 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
-    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
+    expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
 
     runtimeStore.$patch({
       phase: "ready",
@@ -868,7 +874,7 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(false);
+    expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
     const markdownBlock = wrapper.get(".markdown-stub");
     expect(markdownBlock.text()).toContain("**完成** 输出");
     expect(markdownBlock.classes()).toContain("text-stone-800");
@@ -901,7 +907,7 @@ describe("HomeWorkspace", () => {
 
     const wrapper = mountWorkspace();
     await nextTick();
-    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
+    expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
 
     scrollIntoViewSpy.mockClear();
     runtimeStore.$patch({
@@ -926,7 +932,7 @@ describe("HomeWorkspace", () => {
     });
     await nextTick();
 
-    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(false);
+    expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
     expect(wrapper.find(".markdown-stub").exists()).toBe(true);
     expect(scrollIntoViewSpy).not.toHaveBeenCalled();
   });
@@ -986,7 +992,7 @@ describe("HomeWorkspace", () => {
       block: "end",
       behavior: "smooth"
     });
-    expect(wrapper.find(".assistant-streaming-content").exists()).toBe(true);
+    expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
   });
 
   it("keeps auto-follow armed across small streaming content updates", async () => {
@@ -1066,8 +1072,8 @@ describe("HomeWorkspace", () => {
     await nextTick();
 
     await nextTick();
-    expect(wrapper.find(".assistant-streaming-content").text()).toContain("hello");
-    expect(wrapper.find(".assistant-streaming-content").text().length).toBeGreaterThan(5);
+    expect(findStreamingMarkdown(wrapper).text()).toContain("hello");
+    expect(findStreamingMarkdown(wrapper).text().length).toBeGreaterThan(5);
   });
 
   it("opens provider menu, selects another model, and closes afterwards", async () => {
@@ -1420,7 +1426,7 @@ describe("HomeWorkspace", () => {
     await nextTick();
 
     const disclosures = wrapper.findAll("details");
-    expect(disclosures).toHaveLength(1);
+    expect(disclosures).toHaveLength(2);
     expect(disclosures.every((node) => node.attributes("open") === undefined)).toBe(true);
 
     const toolList = wrapper.get(".conversation-tool-list");
@@ -1429,9 +1435,9 @@ describe("HomeWorkspace", () => {
     expect(wrapper.text()).toContain("1 项");
 
     const summaries = wrapper.findAll("summary");
-    expect(summaries).toHaveLength(1);
-    expect(summaries[0].text()).toContain("思考过程");
-    expect(summaries[0].html()).toContain("lucide-brain");
+    expect(summaries).toHaveLength(2);
+    expect(summaries.some((node) => node.text().includes("思考过程"))).toBe(true);
+    expect(summaries.some((node) => node.html().includes("lucide-brain"))).toBe(true);
   });
 
   it("shows reasoning placeholder for pending assistant with empty reasoning", async () => {

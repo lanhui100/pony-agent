@@ -61,6 +61,10 @@ const ModelMonitorPageStub = defineComponent({
   template: '<div data-testid="model-monitor-page-stub">model-monitor</div>'
 });
 
+const TooltipProviderStub = defineComponent({
+  template: '<div data-testid="tooltip-provider-stub"><slot /></div>'
+});
+
 function mountApp() {
   return mount(App, {
     global: {
@@ -69,7 +73,8 @@ function mountApp() {
         HomeSessionSidebar: HomeSessionSidebarStub,
         HomeWorkspace: HomeWorkspaceStub,
         ProviderConfigPage: ProviderConfigPageStub,
-        ModelMonitorPage: ModelMonitorPageStub
+        ModelMonitorPage: ModelMonitorPageStub,
+        TooltipProvider: TooltipProviderStub
       }
     }
   });
@@ -101,6 +106,7 @@ describe("App", () => {
 
     expect(wrapper.find('[data-testid="app-page-nav"]').exists()).toBe(false);
     expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("home");
+    expect(wrapper.find('[data-testid="tooltip-provider-stub"]').exists()).toBe(true);
   });
 
   it("switches between home, provider config, and model monitor from the sidebar", async () => {

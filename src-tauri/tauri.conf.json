@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devUrl": "http://127.0.0.1:4174",
+    "devUrl": "http://127.0.0.1:4176",
     "frontendDist": "../dist"
   },
   "app": {
@@ -30,15 +30,13 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/32x32.png",
+      "icons/taskbar-64.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/256x256.png",
       "icons/512x512.png",
       "icons/icon.ico",
       "icons/icon.png",
-      "icons/Square30x30Logo.png",
-      "icons/Square44x44Logo.png",
       "icons/Square71x71Logo.png",
       "icons/Square89x89Logo.png",
       "icons/Square107x107Logo.png",

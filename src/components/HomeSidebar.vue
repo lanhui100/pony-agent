@@ -945,15 +945,11 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
 
   if (kind === "call_model") {
     pushRow(rows, "模型", formatProviderModel(entry.providerName, entry.providerModel), { icon: Brain });
-    if (entry.turnDurationMs != null) {
-      rows.push({ label: "耗时", value: formatDurationMs(entry.turnDurationMs), icon: Timer });
-    }
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
   }
 
   if (kind === "call_tool") {
-    pushRow(rows, "耗时", timelineDurationText(turn, entry));
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
   }

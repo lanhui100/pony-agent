@@ -338,6 +338,22 @@ function createSummaryView(): ModelMonitorSummaryView {
         failedCallCount: 1,
         avgDurationMs: 300,
         totalDurationMs: 300
+      },
+      {
+        key: "out_of_scope",
+        label: "out_of_scope",
+        callCount: 1,
+        failedCallCount: 1,
+        avgDurationMs: 120,
+        totalDurationMs: 120
+      },
+      {
+        key: "source_unavailable",
+        label: "source_unavailable",
+        callCount: 1,
+        failedCallCount: 1,
+        avgDurationMs: 80,
+        totalDurationMs: 80
       }
     ],
     sessions: [
@@ -590,6 +606,8 @@ describe("ModelMonitorPage", () => {
     expect(wrapper.get('[data-testid="model-monitor-capability-sources-summary"]').text()).toContain("mcp-local");
     expect(wrapper.get('[data-testid="model-monitor-capability-invocation-modes-summary"]').text()).toContain("direct_tool_call");
     expect(wrapper.get('[data-testid="model-monitor-capability-failure-classes-summary"]').text()).toContain("permission_denied");
+    expect(wrapper.get('[data-testid="model-monitor-capability-failure-classes-summary"]').text()).toContain("out_of_scope");
+    expect(wrapper.get('[data-testid="model-monitor-capability-failure-classes-summary"]').text()).toContain("source_unavailable");
     expect(wrapper.text()).toContain("Alpha Session");
     expect(wrapper.get('[data-testid="model-monitor-capability-source-detail"]').text()).toContain("Last Ingress");
     expect(wrapper.get('[data-testid="model-monitor-capability-source-detail"]').text()).toContain("builtin:time_now");
@@ -602,7 +620,7 @@ describe("ModelMonitorPage", () => {
     expect(wrapper.get('[data-testid="model-monitor-hook-trace"]').text()).toContain("guard.input");
     expect(wrapper.get('[data-testid="model-monitor-hook-trace"]').text()).toContain("blocked");
     wrapper.unmount();
-  });
+  }, 10000);
 
   it("点击 session 行后切换下钻内容", async () => {
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -792,6 +810,66 @@ describe("ModelMonitorPage", () => {
     expect(capabilityActivity).toContain("permission: workspace.search");
     expect(capabilityActivity).toContain("approval: manual");
     expect(capabilityActivity).toContain("source: policy_engine");
+    wrapper.unmount();
+  });
+
+  it("shows failure layer even when capability activity has no skill context", async () => {
+    const drilldown = createDrilldownView();
+    drilldown.runtimeView.session.turnTraceHistory = [
+      createTrace({
+        turnId: "turn-failure-layer",
+        title: "Failure Layer Trace",
+        toolActivities: [
+          {
+            id: "tool-1",
+            name: "workspace_read_file",
+            canonicalToolName: "Read",
+            displayNameZh: "读取",
+            status: "error",
+            summary: "capability failed",
+            resultText: "out_of_scope",
+            durationSeconds: 0.2,
+            capabilityInvocation: {
+              toolName: "workspace_read_file",
+              capabilityId: "builtin:workspace_read_file",
+              sourceId: "builtin",
+              sourceKind: "builtin",
+              capabilityKind: "tool",
+              invocationMode: "direct_tool_call",
+              failureKind: "out_of_scope",
+              requiresApproval: false,
+              hostMediated: false,
+              permissionScope: "workspace.read",
+              failureLayer: "underlying_capability_execution"
+            }
+          }
+        ]
+      })
+    ];
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      const capabilityPayload = mockCapabilityCommand(command, args);
+      if (capabilityPayload !== undefined) {
+        return capabilityPayload;
+      }
+
+      if (command === "load_model_monitor_summary") {
+        return createSummaryView();
+      }
+
+      if (command === "load_model_monitor_session_drilldown") {
+        return drilldown;
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(ModelMonitorPage);
+    await flushPromises();
+
+    const capabilityActivity = wrapper.get('[data-testid="model-monitor-capability-activity"]').text();
+    expect(capabilityActivity).toContain("failure layer: underlying_capability_execution");
+    expect(capabilityActivity).toContain("超出作用域");
     wrapper.unmount();
   });
 

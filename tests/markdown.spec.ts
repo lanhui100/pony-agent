@@ -2,15 +2,15 @@ import { describe, expect, it } from "vitest";
 import { normalizeMarkdownSource, renderMarkdown } from "@/lib/markdown";
 
 describe("markdown rendering", () => {
-  it("renders headings, blockquotes and strong text", () => {
-    const html = renderMarkdown(["#标题", "", ">引用", "", "**加粗**"].join("\n"));
+  it("renders headings, blockquotes and strong text", async () => {
+    const html = await renderMarkdown(["#标题", "", ">引用", "", "**加粗**"].join("\n"));
 
     expect(html).toContain("<h1>标题</h1>");
     expect(html).toContain("<blockquote>");
     expect(html).toContain("<strong>加粗</strong>");
   });
 
-  it("unwraps an outer md fence without breaking inner code fences", () => {
+  it("unwraps an outer md fence without breaking inner code fences", async () => {
     const source = [
       "下面是可直接保存为 `README.md` 的内容：",
       "",
@@ -30,7 +30,7 @@ describe("markdown rendering", () => {
     ].join("\n");
 
     const normalized = normalizeMarkdownSource(source);
-    const html = renderMarkdown(source);
+    const html = await renderMarkdown(source);
 
     expect(normalized).not.toContain("```md");
     expect(normalized).toContain("```bash");
@@ -40,7 +40,7 @@ describe("markdown rendering", () => {
     expect(html).toContain("<pre><code class=\"language-bash\">npm run tauri dev");
   });
 
-  it("unwraps a plain outer fence when the body is markdown", () => {
+  it("unwraps a plain outer fence when the body is markdown", async () => {
     const source = [
       "下面是整理后的内容：",
       "",
@@ -56,7 +56,7 @@ describe("markdown rendering", () => {
     ].join("\n");
 
     const normalized = normalizeMarkdownSource(source);
-    const html = renderMarkdown(source);
+    const html = await renderMarkdown(source);
 
     expect(normalized).not.toContain("```");
     expect(html).toContain("<h1>标题</h1>");
@@ -64,10 +64,10 @@ describe("markdown rendering", () => {
     expect(html).toContain("<strong>重点</strong>");
   });
 
-  it("decodes escaped newlines before rendering markdown", () => {
+  it("decodes escaped newlines before rendering markdown", async () => {
     const source = "#标题\\n\\n>引用\\n\\n**加粗**";
     const normalized = normalizeMarkdownSource(source);
-    const html = renderMarkdown(source);
+    const html = await renderMarkdown(source);
 
     expect(normalized).toContain("# 标题");
     expect(html).toContain("<h1>标题</h1>");
@@ -75,10 +75,10 @@ describe("markdown rendering", () => {
     expect(html).toContain("<strong>加粗</strong>");
   });
 
-  it("renders json-stringified markdown content", () => {
+  it("renders json-stringified markdown content", async () => {
     const source = JSON.stringify("```md\\n# 标题\\n\\n> 引用\\n\\n**加粗**\\n```");
     const normalized = normalizeMarkdownSource(source);
-    const html = renderMarkdown(source);
+    const html = await renderMarkdown(source);
 
     expect(normalized).not.toContain("```md");
     expect(html).toContain("<h1>标题</h1>");

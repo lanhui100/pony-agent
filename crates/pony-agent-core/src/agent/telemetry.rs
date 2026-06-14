@@ -663,8 +663,8 @@ mod tests {
         assert_eq!(activities.len(), 3);
         assert_eq!(activities[0].status, "running");
         assert_eq!(activities[1].status, "planned");
-        assert_eq!(activities[1].name, "workspace.read_file");
-        assert_eq!(activities[2].name, "workspace.search_text");
+        assert_eq!(activities[1].name, "Read");
+        assert_eq!(activities[2].name, "Search");
     }
 
     #[test]
@@ -726,11 +726,11 @@ mod tests {
         let activities = tool_activities_after_result(&call, &result);
 
         assert_eq!(activities.len(), 3);
-        assert_eq!(activities[0].name, "workspace_batch");
+        assert_eq!(activities[0].name, "Plan");
         assert_eq!(activities[0].status, "done");
-        assert_eq!(activities[1].name, "workspace_read_file");
+        assert_eq!(activities[1].name, "Read");
         assert_eq!(activities[1].status, "done");
-        assert_eq!(activities[2].name, "workspace_search_text");
+        assert_eq!(activities[2].name, "Search");
         assert_eq!(activities[2].status, "error");
         assert!(activities[2]
             .result_text

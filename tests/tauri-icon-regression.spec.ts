@@ -16,13 +16,15 @@ describe("tauri icon regression", () => {
 
     expect(iconList).toEqual(
       expect.arrayContaining([
-        "icons/32x32.png",
+        "icons/taskbar-64.png",
         "icons/128x128.png",
         "icons/128x128@2x.png",
         "icons/256x256.png",
         "icons/512x512.png",
         "icons/icon.ico",
-        "icons/icon.png"
+        "icons/icon.png",
+        "icons/Square150x150Logo.png",
+        "icons/StoreLogo.png"
       ])
     );
   });
@@ -32,6 +34,7 @@ describe("tauri icon regression", () => {
 
     expect(rustSource).toContain('app.get_webview_window("main")');
     expect(rustSource).toContain("app.default_window_icon().cloned()");
-    expect(rustSource).toContain("window.set_icon(icon)?;");
+    expect(rustSource).toContain("if let Err(e) = window.set_icon(icon)");
+    expect(rustSource).toContain("tauri::image::Image::from_bytes(ICON_PNG)");
   });
 });

@@ -1047,9 +1047,14 @@ impl ToolRouter {
         let resolved = match self.resolve_workspace_entry(path) {
             Ok(value) => value,
             Err(error) => {
+                let code = if error.contains("只允许访问当前工作区内的相对路径") {
+                    "out_of_scope"
+                } else {
+                    "invalid_path"
+                };
                 return error_result(
                     TOOL_WORKSPACE_GATHER_CONTEXT,
-                    "invalid_path",
+                    code,
                     error,
                     Some("请提供工作区内存在的相对路径。".to_string()),
                 )
@@ -1400,12 +1405,6 @@ impl ToolRouter {
             "ok"
         };
         let summary = build_nested_results_summary(tool_name, &results, aggregate_status);
-        let top_level_error = summary.get("firstError").and_then(|first_error| {
-            first_error
-                .get("error")
-                .cloned()
-                .filter(|value| !value.is_null())
-        });
 
         ToolResult {
             tool_name: tool_name.to_string(),
@@ -1422,7 +1421,6 @@ impl ToolRouter {
                 "meta": meta,
                 "plan": plan,
                 "summary": summary,
-                "error": top_level_error,
                 "results": results,
             })),
             duration_ms: 0,

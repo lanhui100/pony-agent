@@ -378,6 +378,25 @@ function permissionSourceLabel(activity: ToolActivity) {
     || "unknown";
 }
 
+function capabilityFailureLabel(failureKind?: string | null) {
+  switch (failureKind) {
+    case "permission_denied":
+      return "权限拒绝 (permission_denied)";
+    case "source_unavailable":
+      return "来源不可用 (source_unavailable)";
+    case "out_of_scope":
+      return "超出作用域 (out_of_scope)";
+    case "invocation_failed":
+      return "调用失败 (invocation_failed)";
+    case "malformed_response":
+      return "响应异常 (malformed_response)";
+    case "capability_not_found":
+      return "能力不存在 (capability_not_found)";
+    default:
+      return failureKind || "ok";
+  }
+}
+
 function toolDisplayLabel(activity: ToolActivity) {
   return activity.displayNameZh?.trim()
     || activity.canonicalToolName?.trim()
@@ -643,7 +662,7 @@ onMounted(() => {
                       </div>
                       <div class="text-right text-[11px] text-stone-400">
                         <div>{{ activity.status }}</div>
-                        <div class="mt-1">{{ activity.capabilityInvocation?.failureKind || "ok" }}</div>
+                        <div class="mt-1">{{ capabilityFailureLabel(activity.capabilityInvocation?.failureKind) }}</div>
                       </div>
                     </div>
                     <div class="mt-2 text-[12px] leading-6 text-stone-300">{{ activity.summary }}</div>
@@ -652,19 +671,19 @@ onMounted(() => {
                       {{ approvalLabel(activity) }} · source: {{ permissionSourceLabel(activity) }}
                     </div>
                     <div
-                      v-if="activity.capabilityInvocation?.skillId"
+                      v-if="activity.capabilityInvocation?.skillId || activity.capabilityInvocation?.failureLayer"
                       class="mt-2 rounded-[0.65rem] border border-amber-200/30 bg-amber-100/10 px-3 py-2 text-[11px] text-amber-100"
                     >
-                      <div class="font-medium">
+                      <div v-if="activity.capabilityInvocation?.skillId" class="font-medium">
                         skill: {{ activity.capabilityInvocation?.skillId }}
                         <span class="text-amber-200/80">
                           · {{ activity.capabilityInvocation?.skillSourceId || "unknown-skill-source" }}
                         </span>
                       </div>
-                      <div class="mt-1">
+                      <div v-if="activity.capabilityInvocation?.composedCapabilityKinds?.length" class="mt-1">
                         kinds: {{ activity.capabilityInvocation?.composedCapabilityKinds?.join(", ") || "--" }}
                       </div>
-                      <div class="mt-1">
+                      <div v-if="activity.capabilityInvocation?.composedCapabilityRefs?.length" class="mt-1">
                         refs: {{ activity.capabilityInvocation?.composedCapabilityRefs?.join(", ") || "--" }}
                       </div>
                       <div class="mt-1">

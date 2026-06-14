@@ -375,7 +375,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                 :class="{ 'rotate-180': conversationOpen }"
               />
             </button>
-            <div v-if="conversationOpen" class="space-y-1.5 py-1">
+            <div v-if="conversationOpen" class="space-y-1 py-0.5">
                 <div
                   v-for="session in displayedSessions"
                   :key="session.conversationId"
@@ -385,7 +385,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                   ]"
                   @mouseleave="clearPendingDeleteSession(session)"
                 >
-                  <div class="flex items-center gap-2 px-1.5 py-1.5">
+                  <div class="flex items-center gap-2 px-1.5 py-1">
                     <button
                       class="min-w-0 flex-1 text-left"
                       type="button"
