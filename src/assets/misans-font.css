@@ -1,0 +1,30 @@
+/**
+ * MiSans font loading — Latin & Simplified Chinese (CJK)
+ *
+ * Uses subsetted woff2 files from the `misans` npm package (v4.1.0).
+ * Latin fonts are single files per weight; CJK fonts are split by
+ * unicode-range (~100 chunks per weight) for efficient loading.
+ *
+ * Loaded weights:
+ *   Regular   (330) — body text
+ *   Medium    (380) — subdued headings / heavier body emphasis
+ *   Semibold  (520) — primary headings / bold emphasis
+ *
+ * Font-family strategy:
+ *   "MiSansLatin" covers Latin characters with purpose-designed Latin glyphs.
+ *   "MiSans" covers CJK (and falls through for any remaining characters).
+ *   Stack them as: "MiSansLatin", "MiSans", <fallback>
+ *
+ * License: MiSans Fonts Intellectual Property License Agreement (Xiaomi Inc.)
+ *          Free for commercial use. See: https://hyperos.mi.com/font/en/download/
+ */
+
+/* ── Latin fonts ── */
+@import "misans/lib/Latin/MiSansLatin-Regular.min.css";
+@import "misans/lib/Latin/MiSansLatin-Medium.min.css";
+@import "misans/lib/Latin/MiSansLatin-Semibold.min.css";
+
+/* ── CJK (Simplified Chinese) fonts ── */
+@import "misans/lib/Normal/MiSans-Regular.min.css";
+@import "misans/lib/Normal/MiSans-Medium.min.css";
+@import "misans/lib/Normal/MiSans-Semibold.min.css";

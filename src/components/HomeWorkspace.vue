@@ -1446,14 +1446,14 @@ watch(isSubmitting, (submitting) => {
 
 :deep(.assistant-markdown h1),
 :deep(.assistant-markdown h2) {
-  font-weight: 700;
+  font-weight: 520;
 }
 
 :deep(.assistant-markdown h3),
 :deep(.assistant-markdown h4),
 :deep(.assistant-markdown h5),
 :deep(.assistant-markdown h6) {
-  font-weight: 600;
+  font-weight: 380;
   color: #3c3028;
 }
 
@@ -1534,7 +1534,7 @@ watch(isSubmitting, (submitting) => {
 
 :deep(.assistant-markdown .table-scroll-wrapper thead th) {
   background: rgba(244, 234, 221, 0.88);
-  font-weight: 600;
+  font-weight: 380;
   color: #56463a;
 }
 
@@ -1589,7 +1589,7 @@ watch(isSubmitting, (submitting) => {
 
 :deep(.assistant-markdown strong) {
   color: #1f1712;
-  font-weight: 700;
+  font-weight: 520;
 }
 
 :deep(.assistant-markdown del) {
@@ -1725,7 +1725,7 @@ watch(isSubmitting, (submitting) => {
 :deep(.assistant-reasoning-markdown h1),
 :deep(.assistant-reasoning-markdown h2) {
   font-size: inherit;
-  font-weight: 700;
+  font-weight: 520;
   line-height: 1;
   color: #746d64;
 }
@@ -1735,7 +1735,7 @@ watch(isSubmitting, (submitting) => {
 :deep(.assistant-reasoning-markdown h5),
 :deep(.assistant-reasoning-markdown h6) {
   font-size: inherit;
-  font-weight: 600;
+  font-weight: 380;
   line-height: 1;
   color: #746d64;
 }
