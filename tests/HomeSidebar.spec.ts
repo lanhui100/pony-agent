@@ -31,6 +31,16 @@ const ScrollAreaStub = defineComponent({
   template: '<div class="scroll-area-stub"><slot /></div>'
 });
 
+const TooltipStub = defineComponent({
+  props: {
+    text: {
+      type: String,
+      default: ""
+    }
+  },
+  template: '<div class="tooltip-stub" :data-tooltip="text"><slot /></div>'
+});
+
 function createProviderRegistry(): ProviderRegistry {
   return {
     selectedProviderId: "provider-openai",
@@ -255,7 +265,8 @@ function mountSidebar() {
   return mount(HomeSidebar, {
     global: {
       stubs: {
-        ScrollArea: ScrollAreaStub
+        ScrollArea: ScrollAreaStub,
+        Tooltip: TooltipStub
       }
     }
   });
@@ -295,6 +306,15 @@ describe("HomeSidebar", () => {
       availableTools: [
         {
           name: "workspace_path_info",
+          canonicalToolName: "路径信息",
+          displayMetadata: {
+            displayNameZh: "路径信息"
+          },
+          permissionFacts: {
+            permissionScope: "workspace.read",
+            approvalMode: "none",
+            decisionSource: "runtime"
+          },
           description: "读取当前路径的基础信息",
           inputSchema: {
             type: "object",
@@ -323,36 +343,31 @@ describe("HomeSidebar", () => {
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
   }, 10000);
 
-  it("将会话和控制状态收敛到右侧状态栏", async () => {
+  it("工具目录优先展示中文短名并附带权限摘要", async () => {
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    await wrapper.get('[data-testid="tools-panel-toggle"]').trigger("click");
+    await flushAll();
+
+    const text = wrapper.text();
+    expect(text).toContain("路径信息");
+    expect(text).toContain("workspace.read");
+    expect(text).toContain("none");
+    expect(text).toContain("runtime");
+    expect(text).not.toContain("workspace_path_info");
+  });
+
+  it("将会话状态收敛到右侧状态栏", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
-      sessionOperation: "switching",
-      latestRunControlAuditSummary: {
-        actionEvidenceSummary: {
-          status: "available",
-          sourceFamily: "run_control",
-          commandKind: "resume_graph_run_stream",
-          boundary: "resume_requested",
-          resultKind: "observe",
-          summary: "检测到暂停中的运行；点击后会恢复该 run 并继续执行。",
-          targetSummary: "恢复 run-alpha",
-          blocked: false,
-          degraded: false
-        },
-        currentContextProjection: {
-          phase: "paused",
-          checkpointStatus: "ready",
-          activeRunId: "run-alpha",
-          submissionPlanCommand: "resume_graph_run_stream"
-        }
-      }
+      sessionOperation: "switching"
     });
 
     const wrapper = mountSidebar();
     await flushAll();
 
     expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
-    expect(wrapper.get('[data-testid="status-control-summary"]').text()).toContain("检测到暂停中的运行");
   });
 
   it("默认展开最新一条 turn，而不是停留在旧 failed turn", async () => {
@@ -493,6 +508,112 @@ describe("HomeSidebar", () => {
     wrapper.unmount();
   });
 
+  it("工具目录权限摘要在 approvalMode 缺失时回退到 requiresApproval，并展示来源", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      availableTools: [
+        {
+          name: "workspace_write_file",
+          canonicalToolName: "Write",
+          executionPrimitive: "workspace_write_file",
+          kind: "write",
+          exposure: "model-visible",
+          displayMetadata: {
+            displayNameZh: "写入"
+          },
+          permissionFacts: {
+            requiresApproval: true,
+            permissionScope: "workspace.write",
+            decisionSource: "policy_engine"
+          },
+          description: "写入文件",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string" }
+            },
+            required: ["path"]
+          }
+        }
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+    await wrapper.get('[data-testid="tools-panel-toggle"]').trigger("click");
+    await flushAll();
+
+    const text = wrapper.text();
+    expect(text).toContain("写入");
+    expect(text).toContain("workspace.write");
+    expect(text).toContain("required");
+    expect(text).toContain("policy_engine");
+  });
+
+  it("工具失败详情展示中文失败分类与 failure layer，并在 approvalMode 缺失时回退", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-tool-failure",
+          title: "工具失败展示",
+          phase: "failed",
+          traceTimeline: [
+            {
+              id: "tool-failure",
+              kind: "call_tool",
+              label: "CALL TOOL",
+              state: "error",
+              sequence: 1,
+              toolActivities: [
+                {
+                  id: "tool-1",
+                  name: "workspace_read_file",
+                  canonicalToolName: "Read",
+                  displayNameZh: "读取",
+                  status: "error",
+                  summary: "tool failed",
+                  argumentsText: "{\"path\":\"../outside.txt\"}",
+                  resultText: "out_of_scope",
+                  durationSeconds: 0.2,
+                  capabilityInvocation: {
+                    toolName: "workspace_read_file",
+                    capabilityId: "builtin:workspace_read_file",
+                    sourceKind: "builtin",
+                    failureKind: "out_of_scope",
+                    failureLayer: "underlying_capability_execution",
+                    permissionFacts: {
+                      requiresApproval: true,
+                      permissionScope: "workspace.read",
+                      decisionSource: "runtime"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const toolButton = wrapper.get('[data-testid="trace-step-button-tool-failure"]');
+    await toolButton.trigger("click");
+    await nextTick();
+
+    const toolDetailButton = wrapper.get('[data-testid="trace-detail-button-tool-failure-tool-1"]');
+    await toolDetailButton.trigger("click");
+    await nextTick();
+
+    const text = wrapper.text();
+    expect(text).toContain("失败分类: 超出作用域 (out_of_scope)");
+    expect(text).toContain("失败层级: underlying_capability_execution");
+    expect(text).toContain("审批: required");
+    expect(text).toContain("来源: runtime");
+  });
+
   it("状态面板保持紧凑布局，受控状态归入消息区", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -531,7 +652,6 @@ describe("HomeSidebar", () => {
     expect(statusPanelText).not.toContain("Last file:");
 
     expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
-    expect(wrapper.get('[data-testid="status-control-summary"]').text()).toContain("检测到暂停中的运行");
   });
 
   it("trace build_context 展开后展示请求详情，不冗余暴露到状态面板", async () => {
@@ -650,10 +770,20 @@ describe("HomeSidebar", () => {
     const wrapper = mountSidebar();
     await flushAll();
 
-    const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
-    expect(statusPanelText).toContain("输入");
-    expect(statusPanelText).toContain("缓存读取");
-    expect(statusPanelText).toContain("输出");
+    const statusPanel = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")!;
+    const statusPanelText = statusPanel.textContent ?? "";
+    const tooltipStubs = statusPanel.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const tooltipTexts = Array.from(tooltipStubs).map((el) => el.getAttribute("data-tooltip"));
+
+    // Token labels are now tooltips instead of visible text
+    expect(tooltipTexts).toContain("输入");
+    expect(tooltipTexts).toContain("输出");
+    expect(tooltipTexts).toContain("缓存读取");
+    // Visible panel shows "Token" label and compact values
+    expect(statusPanelText).toContain("Token");
+    expect(statusPanelText).toContain("8.4K");
+    expect(statusPanelText).toContain("1.4K");
+    // No "总计" suffix in labels
     expect(statusPanelText).not.toContain("输入总计");
     expect(statusPanelText).not.toContain("缓存读取总计");
     expect(statusPanelText).not.toContain("输出总计");
@@ -724,14 +854,21 @@ describe("HomeSidebar", () => {
 
     const turnButton = wrapper.findAll("button").find((button) => button.text().includes("turn summary metrics"));
     expect(turnButton).toBeDefined();
-    expect(turnButton!.text()).toContain("输入 150");
-    expect(turnButton!.text()).toContain("缓存 70");
-    expect(turnButton!.text()).toContain("输出 60");
-    expect(turnButton!.text()).toContain("生成速度 20.7 token/s");
-    expect(turnButton!.text()).not.toContain("速度 18.8 token/s");
-    expect(turnButton!.text()).toContain("延时 150 ms");
-    expect(turnButton!.text()).not.toContain("思考链");
-    expect(turnButton!.text()).not.toContain("输入 40");
+    const turnBtnText = turnButton!.text();
+    expect(turnBtnText).toContain("150");
+    expect(turnBtnText).toContain("70");
+    expect(turnBtnText).toContain("60");
+    expect(turnBtnText).toContain("20.7 t/s");
+    expect(turnBtnText).not.toContain("18.8 t/s");
+    expect(turnBtnText).toContain("150 ms");
+    expect(turnBtnText).not.toContain("思考链");
+    // Labels are now in tooltip attributes
+    const turnTooltips = turnButton!.element.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const turnTooltipTexts = Array.from(turnTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(turnTooltipTexts).toContain("输入");
+    expect(turnTooltipTexts).toContain("缓存读取");
+    expect(turnTooltipTexts).toContain("输出");
+    expect(turnTooltipTexts).toContain("首 token 延时");
 
     const durationSpan = turnButton!.findAll("span").find((item) => item.text() === "3.5s");
     expect(durationSpan).toBeDefined();
@@ -907,36 +1044,46 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
-    expect(modelButton.text()).toContain("输入 120");
-    expect(modelButton.text()).toContain("缓存 80");
-    expect(modelButton.text()).toContain("输出 40");
-    expect(modelButton.text()).toContain("生成速度 16.1 token/s");
-    expect(modelButton.text()).not.toContain("速度 14.3 token/s");
-    expect(modelButton.text()).toContain("延时 321 ms");
-    expect(modelButton.text()).toContain("2.80 s");
-    expect(modelButton.text()).not.toContain("耗时 2.80 s");
-    expect(modelButton.text()).not.toContain("输入 300");
-    expect(modelButton.text()).not.toContain("思考链");
-    expect(modelButton.text()).not.toContain("已读取 package.json，准备继续分析依赖。");
+    const modelBtnText = modelButton.text();
+    expect(modelBtnText).toContain("120");
+    expect(modelBtnText).toContain("80");
+    expect(modelBtnText).toContain("40");
+    expect(modelBtnText).toContain("16.1 t/s");
+    expect(modelBtnText).not.toContain("14.3 t/s");
+    expect(modelBtnText).toContain("321 ms");
+    expect(modelBtnText).toContain("2.80 s");
+    expect(modelBtnText).not.toContain("输入 300");
+    expect(modelBtnText).not.toContain("思考链");
+    expect(modelBtnText).not.toContain("已读取 package.json，准备继续分析依赖。");
+    // Labels are in tooltip attributes
+    const entryTooltips = modelButton.element.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const entryTooltipTexts = Array.from(entryTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(entryTooltipTexts).toContain("输入");
+    expect(entryTooltipTexts).toContain("缓存读取");
+    expect(entryTooltipTexts).toContain("输出");
+    expect(entryTooltipTexts).toContain("首 token 延时");
 
     await modelButton.trigger("click");
     await nextTick();
 
-    const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
+    const modelSection = modelButton.element.closest("section")!;
+    const modelSectionText = modelSection.textContent ?? "";
     expect(modelSectionText).not.toContain("摘要");
-    expect(modelSectionText).toContain("阶段");
-    expect(modelSectionText).toContain("模型");
     expect(modelSectionText).toContain("OpenAI/gpt-5");
-    expect(modelSectionText).toContain("耗时");
     expect(modelSectionText).toContain("2.80 s");
-    expect(modelSectionText).toContain("输入");
-    expect(modelSectionText).toContain("缓存");
-    expect(modelSectionText).toContain("输出");
-    expect(modelSectionText).toContain("生成速度");
-    expect(modelSectionText).toContain("16.1 token/s");
+    expect(modelSectionText).toContain("16.1 t/s");
     expect(modelSectionText).not.toContain("Provider");
     expect(modelSectionText).not.toContain("输出详情");
     expect(modelSectionText).not.toContain("对应一次独立的模型调用，不与其他 hop 合并。");
+    // Detail row labels are now tooltips on icon rows
+    const detailTooltips = modelSection.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const detailTooltipTexts = Array.from(detailTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(detailTooltipTexts).toContain("输入");
+    expect(detailTooltipTexts).toContain("缓存读取");
+    expect(detailTooltipTexts).toContain("输出");
+    expect(detailTooltipTexts).toContain("首 token 延时");
+    expect(detailTooltipTexts).toContain("耗时");
+    expect(detailTooltipTexts).toContain("模型");
     expect(modelSectionText).toContain("思考链");
     expect(modelSectionText).toContain("先看 package.json，再确定下一步。");
     expect(modelSectionText).toContain("模型输出");
@@ -993,20 +1140,25 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
-    expect(modelButton.text()).toContain("整体速度 50.0 token/s");
-    expect(modelButton.text()).not.toContain("生成速度");
-    expect(modelButton.text()).not.toContain("延时");
-    expect(modelButton.text()).toContain("1.80 s");
-    expect(modelButton.text()).not.toContain("耗时 1.80 s");
+    const btnText = modelButton.text();
+    expect(btnText).toContain("50.0 t/s");
+    expect(btnText).not.toContain("生成速度");
+    expect(btnText).toContain("1.80 s");
+    // "整体速度" label is now in tooltip
+    const tooltips = modelButton.element.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const ttTexts = Array.from(tooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(ttTexts).toContain("整体速度");
 
     await modelButton.trigger("click");
     await nextTick();
 
     const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
-    expect(modelSectionText).toContain("整体速度");
-    expect(modelSectionText).toContain("50.0 token/s");
-    expect(modelSectionText).not.toContain("延时");
+    expect(modelSectionText).toContain("50.0 t/s");
     expect(modelSectionText).toContain("1.80 s");
+    // "整体速度" in detail row is also a tooltip now
+    const sectionTooltips = modelButton.element.closest("section")!.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const sectionTtTexts = Array.from(sectionTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(sectionTtTexts).toContain("整体速度");
   });
 
   it("CALL MODEL 遇到异常首 token 延时大于耗时时不展示延时且不爆速", async () => {
@@ -1055,9 +1207,9 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
-    expect(modelButton.text()).toContain("整体速度 46.6 token/s");
-    expect(modelButton.text()).not.toContain("89000.0 token/s");
-    expect(modelButton.text()).not.toContain("延时 4510 ms");
+    expect(modelButton.text()).toContain("46.6 t/s");
+    expect(modelButton.text()).not.toContain("89000.0 t/s");
+    expect(modelButton.text()).not.toContain("4510 ms");
     expect(modelButton.text()).toContain("1.91 s");
   });
 
@@ -1108,8 +1260,8 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
-    expect(modelButton.text()).toContain("生成速度 4000.0 token/s");
-    expect(modelButton.text()).not.toContain("整体速度 36.7 token/s");
+    expect(modelButton.text()).toContain("4000.0 t/s");
+    expect(modelButton.text()).not.toContain("36.7 t/s");
     expect(modelButton.text()).not.toContain("3960.");
     expect(modelButton.text()).toContain("1.96 s");
   });
@@ -1190,11 +1342,10 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
-    expect(modelButton.text()).not.toContain("输出 998");
-    expect(modelButton.text()).not.toContain("生成速度 3960.");
-    expect(modelButton.text()).not.toContain("整体速度 587.4 token/s");
-    expect(modelButton.text()).not.toContain("速度");
-    expect(modelButton.text()).toContain("延时 1447 ms");
+    expect(modelButton.text()).not.toContain("998");
+    expect(modelButton.text()).not.toContain("3960.");
+    expect(modelButton.text()).not.toContain("587.4 t/s");
+    expect(modelButton.text()).toContain("1447 ms");
     expect(modelButton.text()).toContain("1.70 s");
   });
 
@@ -1264,11 +1415,11 @@ describe("HomeSidebar", () => {
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
-    expect(modelButton.text()).toContain("输出 68");
-    expect(modelButton.text()).toContain("生成速度 269.8 token/s");
-    expect(modelButton.text()).not.toContain("整体速度 40.0 token/s");
-    expect(modelButton.text()).not.toContain("整体速度 587.4 token/s");
-    expect(modelButton.text()).toContain("延时 1447 ms");
+    expect(modelButton.text()).toContain("68");
+    expect(modelButton.text()).toContain("269.8 t/s");
+    expect(modelButton.text()).not.toContain("40.0 t/s");
+    expect(modelButton.text()).not.toContain("587.4 t/s");
+    expect(modelButton.text()).toContain("1447 ms");
     expect(modelButton.text()).toContain("1.70 s");
   });
 

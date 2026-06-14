@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowUp,
   AudioLines,
+  Brain,
   Check,
   ChevronRight,
   Circle,
@@ -668,21 +669,6 @@ function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry, o
   };
 }
 
-function traceStateLabel(state: TraceTimelineEntry["state"]) {
-  switch (state) {
-    case "completed":
-      return "已完成";
-    case "active":
-      return "进行中";
-    case "error":
-      return "失败";
-    case "pending":
-      return "待执行";
-    default:
-      return "";
-  }
-}
-
 function formatProviderModel(providerName?: string | null, providerModel?: string | null) {
   const provider = providerName?.trim();
   const model = providerModel?.trim();
@@ -958,27 +944,9 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   }
 
   if (kind === "call_model") {
-    const metricEntry = timelineMetricEntry(turn, entry);
-    pushRow(rows, "阶段", traceStateLabel(entry.state));
-    pushRow(rows, "模型", formatProviderModel(entry.providerName, entry.providerModel));
-    if (metricEntry.inputTokens != null) {
-      rows.push({ label: "输入", value: formatInteger(metricEntry.inputTokens), icon: ArrowUp });
-    }
-    if (metricEntry.outputTokens != null) {
-      rows.push({ label: "输出", value: formatInteger(metricEntry.outputTokens), icon: ArrowDown });
-    }
-    const speedText = formatEntryTokenSpeed(metricEntry);
-    if (speedText) {
-      rows.push({ label: formatTokenSpeedLabel(metricEntry), value: speedText, icon: Gauge });
-    }
-    if (metricEntry.cacheHitInputTokens != null) {
-      rows.push({ label: "缓存读取", value: formatInteger(metricEntry.cacheHitInputTokens), icon: Zap });
-    }
-    if (metricEntry.firstTokenLatencyMs != null) {
-      rows.push({ label: "首 token 延时", value: `${metricEntry.firstTokenLatencyMs} ms`, icon: Clock3 });
-    }
-    if (metricEntry.turnDurationMs != null) {
-      rows.push({ label: "耗时", value: formatDurationMs(metricEntry.turnDurationMs), icon: Timer });
+    pushRow(rows, "模型", formatProviderModel(entry.providerName, entry.providerModel), { icon: Brain });
+    if (entry.turnDurationMs != null) {
+      rows.push({ label: "耗时", value: formatDurationMs(entry.turnDurationMs), icon: Timer });
     }
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
