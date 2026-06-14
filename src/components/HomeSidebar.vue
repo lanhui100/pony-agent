@@ -1558,7 +1558,7 @@ watch(orderedTurnTraceSignature, () => {
                 class="collapsible-shell overflow-hidden border-b border-stone-200/70 py-1.5 last:border-b-0"
                 :data-open="activeTurnId === turn.turnId"
               >
-                <button class="flex w-full items-start justify-between gap-2 text-left" type="button" @click="toggleTurn(turn.turnId)">
+                <button class="group flex w-full items-start justify-between gap-2 text-left" type="button" @click="toggleTurn(turn.turnId)">
                   <div class="min-w-0 space-y-0.5">
                     <div class="flex items-center gap-1.5 text-[12px] font-medium text-stone-800">
                       <component
@@ -1587,7 +1587,7 @@ watch(orderedTurnTraceSignature, () => {
                       {{ turnDurationText(turn) }}
                     </span>
                     <button
-                      class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                      class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                       type="button"
                       @click.stop="copyText(turnCopyKey(turn.turnId), buildTurnCopyText(turn))"
                     >
@@ -1610,7 +1610,7 @@ watch(orderedTurnTraceSignature, () => {
                       :data-open="activeTraceStepKey === turnStepKey(turn.turnId, entry.id)"
                     >
                       <button
-                        class="flex w-full items-start justify-between gap-1.5 text-left"
+                        class="group flex w-full items-start justify-between gap-1.5 text-left"
                         type="button"
                         :data-testid="`trace-step-button-${entry.id}`"
                         @click="toggleTraceStep(turn.turnId, entry.id)"
@@ -1656,7 +1656,7 @@ watch(orderedTurnTraceSignature, () => {
                             {{ timelineDurationText(turn, entry) }}
                           </span>
                           <button
-                            class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                            class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                             type="button"
                             @click.stop="copyText(traceCopyKey(turn.turnId, entry.id), buildTimelineCopyText(turn, entry))"
                           >
@@ -1727,12 +1727,12 @@ watch(orderedTurnTraceSignature, () => {
                               v-if="section.kind === 'model'"
                               class="mt-2 border-l border-stone-200/80 pl-2"
                             >
-                              <div class="flex items-start justify-between gap-1.5 py-0.5">
+                              <div class="group flex items-start justify-between gap-1.5 py-0.5">
                                 <div class="min-w-0 text-[10px] uppercase tracking-[0.14em] text-stone-400">
                                   {{ section.label }}
                                 </div>
                                 <button
-                                  class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                                  class="invisible group-hover:visible inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                                   type="button"
                                   :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
                                   @click.stop="copyText(traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
@@ -1755,7 +1755,7 @@ watch(orderedTurnTraceSignature, () => {
                               :data-open="activeTraceDetailKey === traceDetailKey(turn.turnId, entry.id, section.id)"
                             >
                               <button
-                                class="flex w-full items-start justify-between gap-1 py-0 text-left"
+                                class="group flex w-full items-start justify-between gap-1 py-0 text-left"
                                 type="button"
                                 :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
                                 @click="toggleTraceDetail(turn.turnId, entry.id, section.id)"
@@ -1776,7 +1776,7 @@ watch(orderedTurnTraceSignature, () => {
                                       {{ section.durationText }}
                                     </span>
                                     <button
-                                      class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                                      class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                                       type="button"
                                       @click.stop="copyText(traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
                                     >
