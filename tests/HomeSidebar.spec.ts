@@ -353,7 +353,6 @@ describe("HomeSidebar", () => {
 
     expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
     expect(wrapper.get('[data-testid="status-control-summary"]').text()).toContain("检测到暂停中的运行");
-    expect(wrapper.get('[data-testid="status-control-summary"]').text()).toContain("resume_graph_run_stream");
   });
 
   it("默认展开最新一条 turn，而不是停留在旧 failed turn", async () => {
@@ -428,7 +427,114 @@ describe("HomeSidebar", () => {
     expect(latestTurnSection?.textContent ?? "").not.toContain("old failure");
   });
 
-  it("将 retrieval 全局信息归并到状态面板，并清理冗余字段", async () => {
+  it("工具条目优先展示中文短显示名，其次 canonical name", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-tool-display",
+          title: "工具展示",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "tool-step",
+              kind: "call_tool",
+              label: "CALL TOOL",
+              state: "completed",
+              sequence: 1,
+              toolActivities: [
+                {
+                  id: "tool-zh",
+                  name: "workspace_search_text",
+                  canonicalToolName: "Search",
+                  displayNameZh: "搜索",
+                  status: "done",
+                  summary: "搜索完成",
+                  argumentsText: "{\"query\":\"permission facts\"}",
+                  resultText: "命中 3 条",
+                  durationSeconds: 0.1,
+                  capabilityInvocation: {
+                    toolName: "workspace_search_text",
+                    capabilityId: "builtin:workspace_search_text",
+                    permissionFacts: {
+                      permissionScope: "workspace.read",
+                      approvalMode: "none",
+                      decisionSource: "runtime"
+                    }
+                  }
+                },
+                {
+                  id: "tool-canonical",
+                  name: "workspace_read_file",
+                  canonicalToolName: "Read",
+                  status: "done",
+                  summary: "读取完成",
+                  argumentsText: "{\"path\":\"src/stores/runtime.ts\"}",
+                  resultText: "ok",
+                  durationSeconds: 0.1
+                }
+              ]
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const text = wrapper.text();
+    expect(text).toContain("搜索");
+    expect(text).toContain("Read");
+    expect(text).not.toContain("workspace_search_text");
+    expect(text).toContain("权限: workspace.read");
+    expect(text).toContain("审批: none");
+    expect(text).toContain("来源: runtime");
+    wrapper.unmount();
+  });
+
+  it("状态面板保持紧凑布局，受控状态归入消息区", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: "switching",
+      latestRunControlAuditSummary: {
+        actionEvidenceSummary: {
+          status: "available",
+          sourceFamily: "run_control",
+          commandKind: "resume_graph_run_stream",
+          boundary: "resume_requested",
+          resultKind: "observe",
+          summary: "检测到暂停中的运行；点击后会恢复该 run 并继续执行。",
+          targetSummary: "恢复 run-alpha",
+          blocked: false,
+          degraded: false
+        },
+        currentContextProjection: {
+          phase: "paused",
+          checkpointStatus: "ready",
+          activeRunId: "run-alpha",
+          submissionPlanCommand: "resume_graph_run_stream"
+        }
+      }
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
+
+    expect(statusPanelText).not.toContain("Run phase");
+    expect(statusPanelText).not.toContain("Recent history");
+    expect(statusPanelText).not.toContain("Recent attachments");
+    expect(statusPanelText).not.toContain("Long-term memory");
+    expect(statusPanelText).not.toContain("Goal:");
+    expect(statusPanelText).not.toContain("Last file:");
+
+    expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
+    expect(wrapper.get('[data-testid="status-control-summary"]').text()).toContain("检测到暂停中的运行");
+  });
+
+  it("trace build_context 展开后展示请求详情，不冗余暴露到状态面板", async () => {
     const buildContextObservation = createBuildContextObservation();
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -486,15 +592,6 @@ describe("HomeSidebar", () => {
     const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
     const tracePanelText = wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.textContent ?? "";
 
-    expect(wrapper.get('[data-testid="retrieved-active-task"]').text()).toContain("PA-018");
-    expect(wrapper.get('[data-testid="retrieved-memory-list"]').text()).toContain("Reply in Chinese.");
-    expect(statusPanelText).toContain("运行阶段");
-    expect(statusPanelText).not.toContain("Run phase");
-    expect(statusPanelText).not.toContain("Recent history");
-    expect(statusPanelText).not.toContain("Recent attachments");
-    expect(statusPanelText).not.toContain("Long-term memory");
-    expect(statusPanelText).not.toContain("Goal:");
-    expect(statusPanelText).not.toContain("Last file:");
     expect(statusPanelText).not.toContain("legacy summary should be shadowed");
 
     expect(wrapper.find('[data-testid="turn-build-context"]').exists()).toBe(false);
@@ -555,10 +652,10 @@ describe("HomeSidebar", () => {
 
     const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
     expect(statusPanelText).toContain("输入");
-    expect(statusPanelText).toContain("缓存命中");
+    expect(statusPanelText).toContain("缓存读取");
     expect(statusPanelText).toContain("输出");
     expect(statusPanelText).not.toContain("输入总计");
-    expect(statusPanelText).not.toContain("缓存命中总计");
+    expect(statusPanelText).not.toContain("缓存读取总计");
     expect(statusPanelText).not.toContain("输出总计");
   });
 

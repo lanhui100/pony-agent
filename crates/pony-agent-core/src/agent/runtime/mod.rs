@@ -41,8 +41,8 @@ use crate::agent::telemetry::{
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
 use crate::agent::tools::{
-    builtin_tools, canonical_tool_name, default_permission_facts_for_name, ToolCall,
-    ToolDefinition, ToolExecutor, ToolRouter,
+    builtin_tools, canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
+    ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
 };
 use crate::agent::turn_flow::{
     build_failed_turn_result, build_failed_turn_result_with_hooks,
@@ -63,6 +63,43 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::OnceLock;
 use std::time::Instant;
+
+fn is_out_of_scope_tool_result(tool_result: &crate::agent::tools::ToolResult) -> bool {
+    let parsed = serde_json::from_str::<Value>(&tool_result.output).unwrap_or(Value::Null);
+    if let Some(error) = tool_error_from_output(tool_result.status.as_str(), &parsed) {
+        if error.kind == "out_of_scope" {
+            return true;
+        }
+        if error.message.contains("只允许访问当前工作区内的相对路径") {
+            return true;
+        }
+    }
+    false
+}
+
+fn tool_result_failure_kind(
+    tool_result: &crate::agent::tools::ToolResult,
+) -> Option<CapabilityFailureKind> {
+    let parsed = serde_json::from_str::<Value>(&tool_result.output).unwrap_or(Value::Null);
+    let error = parsed.get("error")?;
+    let kind = error
+        .get("kind")
+        .or_else(|| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind == "out_of_scope" {
+        return Some(CapabilityFailureKind::OutOfScope);
+    }
+    if error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(|message| message.contains("只允许访问当前工作区内的相对路径"))
+        .unwrap_or(false)
+    {
+        return Some(CapabilityFailureKind::OutOfScope);
+    }
+    Some(CapabilityFailureKind::InvocationFailed)
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5388,7 +5425,12 @@ impl AgentRuntime {
         ));
 
         let tool_result = self.tool_executor.execute(&action.tool_call);
-        let failure_kind = if tool_result.status == "ok" {
+        let failure_kind = if tool_result.status == "ok" && !is_out_of_scope_tool_result(&tool_result)
+        {
+            tool_result_failure_kind(&tool_result)
+        } else if is_out_of_scope_tool_result(&tool_result) {
+            Some(CapabilityFailureKind::OutOfScope)
+        } else if tool_result.status == "ok" {
             None
         } else {
             Some(CapabilityFailureKind::InvocationFailed)
@@ -10429,6 +10471,26 @@ mod tests {
             Some(CapabilityFailureKind::PermissionDenied)
         );
         assert!(execution.tool_result.output.contains("审批"));
+    }
+
+    #[test]
+    fn capability_bridge_propagates_out_of_scope_from_runtime_execution_path() {
+        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_out_of_scope_read".to_string()),
+            name: "Read".to_string(),
+            arguments: json!({
+                "path": "C:/Windows/System32/drivers/etc/hosts"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution.failure_kind,
+            Some(CapabilityFailureKind::OutOfScope)
+        );
+        assert!(execution.tool_result.output.contains("当前工作区内的相对路径"));
     }
 
     #[test]

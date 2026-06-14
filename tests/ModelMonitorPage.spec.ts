@@ -735,6 +735,8 @@ describe("ModelMonitorPage", () => {
           {
             id: "tool-1",
             name: "workspace_search",
+            canonicalToolName: "Search",
+            displayNameZh: "搜索",
             status: "done",
             summary: "capability execution completed",
             argumentsText: "{\"query\":\"abc\"}",
@@ -750,7 +752,13 @@ describe("ModelMonitorPage", () => {
               failureKind: null,
               requiresApproval: false,
               hostMediated: true,
-              permissionScope: "workspace.read"
+              permissionScope: "workspace.read",
+              permissionFacts: {
+                requiresApproval: true,
+                permissionScope: "workspace.search",
+                approvalMode: "manual",
+                decisionSource: "policy_engine"
+              }
             }
           }
         ]
@@ -778,9 +786,12 @@ describe("ModelMonitorPage", () => {
     await flushPromises();
 
     const capabilityActivity = wrapper.get('[data-testid="model-monitor-capability-activity"]').text();
-    expect(capabilityActivity).toContain("mcp:tool:workspace_search");
+    expect(capabilityActivity).toContain("搜索");
     expect(capabilityActivity).toContain("mcp-local");
     expect(capabilityActivity).toContain("direct_tool_call");
+    expect(capabilityActivity).toContain("permission: workspace.search");
+    expect(capabilityActivity).toContain("approval: manual");
+    expect(capabilityActivity).toContain("source: policy_engine");
     wrapper.unmount();
   });
 

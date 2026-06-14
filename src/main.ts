@@ -1,5 +1,6 @@
 import { createPinia } from "pinia";
 import { createApp } from "vue";
+import { MotionPlugin } from "motion-v";
 import App from "./App.vue";
 import "./styles.css";
 
@@ -14,4 +15,5 @@ console.info("[pony-agent][boot] mount app", {
 const app = createApp(App);
 
 app.use(createPinia());
+app.use(MotionPlugin);
 app.mount("#app");

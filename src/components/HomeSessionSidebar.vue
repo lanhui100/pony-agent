@@ -19,6 +19,7 @@ import type { ChatMessage, SessionOverview } from "@/types/runtime";
 
 const SESSION_SIDEBAR_STORAGE_KEY = "pony-agent.session-sidebar-collapsed.v1";
 const MODEL_OPEN_STORAGE_KEY = "pony-agent.session-sidebar-model-open.v1";
+const CONVERSATION_PAGE_SIZE = 5;
 
 type NavigationPage = "home" | "providers" | "model-monitor";
 
@@ -46,6 +47,8 @@ const {
 
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
 const modelOpen = ref(loadStoredBoolean(MODEL_OPEN_STORAGE_KEY, true));
+const conversationOpen = ref(true);
+const visibleConversationCount = ref(CONVERSATION_PAGE_SIZE);
 const pendingDeleteSessionId = ref<string | null>(null);
 const deletingSessionId = ref<string | null>(null);
 const menuInteractiveClass =
@@ -79,6 +82,13 @@ const visibleSessions = computed<SessionOverview[]>(() => {
     ...sessionList.value.filter((session) => session.conversationId !== sessionId.value)
   ];
 });
+
+const displayedSessions = computed<SessionOverview[]>(() =>
+  visibleSessions.value.slice(0, visibleConversationCount.value)
+);
+const canShowMoreConversations = computed(
+  () => displayedSessions.value.length < visibleSessions.value.length
+);
 
 const asideClass = computed(() =>
   collapsed.value
@@ -115,6 +125,23 @@ function toggleCollapsed() {
 function toggleModelSection() {
   modelOpen.value = !modelOpen.value;
   persistStoredBoolean(MODEL_OPEN_STORAGE_KEY, modelOpen.value);
+}
+
+function toggleConversationSection() {
+  if (conversationOpen.value) {
+    conversationOpen.value = false;
+    return;
+  }
+
+  visibleConversationCount.value = CONVERSATION_PAGE_SIZE;
+  conversationOpen.value = true;
+}
+
+function showMoreConversations() {
+  visibleConversationCount.value = Math.min(
+    visibleConversationCount.value + CONVERSATION_PAGE_SIZE,
+    visibleSessions.value.length
+  );
 }
 
 function navigate(page: NavigationPage) {
@@ -332,15 +359,25 @@ function clearPendingDeleteSession(session: SessionOverview) {
 
         <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="pr-1.5"><div class="flex flex-col gap-2">
           <section class="rounded-[0.5rem]" data-testid="session-sidebar-session-list">
-            <div class="px-1.5 py-2">
+            <button
+              class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
+              :class="[menuInteractiveClass, 'text-stone-800']"
+              type="button"
+              data-testid="session-sidebar-conversation-toggle"
+              @click="toggleConversationSection"
+            >
               <div class="flex items-center gap-2 text-[12px] font-medium text-stone-800">
                 <MessageSquareMore class="h-3.5 w-3.5" />
                 <span>对话</span>
               </div>
-            </div>
-            <div class="space-y-1.5 py-1">
+              <ChevronDown
+                class="h-4 w-4 text-stone-400 transition"
+                :class="{ 'rotate-180': conversationOpen }"
+              />
+            </button>
+            <div v-if="conversationOpen" class="space-y-1.5 py-1">
                 <div
-                  v-for="session in visibleSessions"
+                  v-for="session in displayedSessions"
                   :key="session.conversationId"
                   class="group rounded-[0.2rem]"
                   :class="[
@@ -407,6 +444,15 @@ function clearPendingDeleteSession(session: SessionOverview) {
                     </button>
                   </div>
                 </div>
+                <button
+                  v-if="canShowMoreConversations"
+                  class="w-full px-1.5 py-1 text-left text-[12px] font-medium text-stone-500 transition hover:text-stone-900"
+                  type="button"
+                  data-testid="session-sidebar-show-more-conversations"
+                  @click="showMoreConversations"
+                >
+                  显示全部
+                </button>
             </div>
           </section>
 

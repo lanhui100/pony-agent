@@ -24,7 +24,7 @@ use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
 use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
 use agent::session::SessionOverview;
-use agent::tools::ToolDefinition;
+use agent::tools::{builtin_tool_contract_views, ToolDefinitionContractView};
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
@@ -357,8 +357,8 @@ fn delete_session(
 }
 
 #[tauri::command]
-fn list_available_tools() -> Vec<ToolDefinition> {
-    agent::tools::builtin_tools()
+fn list_available_tools() -> Vec<ToolDefinitionContractView> {
+    builtin_tool_contract_views()
 }
 
 #[tauri::command]
@@ -450,6 +450,18 @@ pub fn run() {
         })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                {
+                    let taskbar_icon_path = app.path().resolve("icons/taskbar-64.png", tauri::path::BaseDirectory::Resource)?;
+                    if taskbar_icon_path.exists() {
+                        let icon_bytes = std::fs::read(&taskbar_icon_path)?;
+                        let icon = tauri::image::Image::new_owned(icon_bytes, 64, 64);
+                        window.set_icon(icon)?;
+                    } else if let Some(icon) = app.default_window_icon().cloned() {
+                        window.set_icon(icon)?;
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
                 if let Some(icon) = app.default_window_icon().cloned() {
                     window.set_icon(icon)?;
                 }

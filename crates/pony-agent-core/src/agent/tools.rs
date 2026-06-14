@@ -1394,12 +1394,18 @@ impl ToolRouter {
             })
             .collect::<Vec<_>>();
 
-        let runtime_status = if success_count > 0 || partial_count > 0 || error_count == 0 {
-            "ok"
-        } else {
+        let runtime_status = if aggregate_status == "error" {
             "error"
+        } else {
+            "ok"
         };
         let summary = build_nested_results_summary(tool_name, &results, aggregate_status);
+        let top_level_error = summary.get("firstError").and_then(|first_error| {
+            first_error
+                .get("error")
+                .cloned()
+                .filter(|value| !value.is_null())
+        });
 
         ToolResult {
             tool_name: tool_name.to_string(),
@@ -1416,6 +1422,7 @@ impl ToolRouter {
                 "meta": meta,
                 "plan": plan,
                 "summary": summary,
+                "error": top_level_error,
                 "results": results,
             })),
             duration_ms: 0,
@@ -1881,6 +1888,74 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
             }),
         },
     ]
+}
+
+fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
+    match view.execution_primitive.as_str() {
+        TOOL_TIME_NOW => 100,
+        TOOL_ECHO_INPUT => 100,
+        TOOL_WORKSPACE_LIST_FILES => 100,
+        TOOL_WORKSPACE_SEARCH_TEXT => 100,
+        TOOL_WORKSPACE_BATCH => 100,
+        TOOL_WORKSPACE_GATHER_CONTEXT => 100,
+        TOOL_WORKSPACE_READ_FILE => 40,
+        TOOL_WORKSPACE_READ_FILE_SEGMENT => 30,
+        TOOL_WORKSPACE_PATH_INFO => 20,
+        _ => 50,
+    }
+}
+
+pub fn builtin_tool_contract_views() -> Vec<ToolDefinitionContractView> {
+    let mut ordered_names: Vec<String> = Vec::new();
+    let mut deduped: std::collections::HashMap<String, ToolDefinitionContractView> =
+        std::collections::HashMap::new();
+
+    for tool in builtin_tools() {
+        let contract = tool.contract_view();
+        let key = contract.name.clone();
+        if let Some(existing) = deduped.get(&key) {
+            if contract_priority(&contract) > contract_priority(existing) {
+                deduped.insert(key, contract);
+            }
+            continue;
+        }
+
+        ordered_names.push(key.clone());
+        deduped.insert(key, contract);
+    }
+
+    ordered_names
+        .into_iter()
+        .filter_map(|name| deduped.remove(&name))
+        .collect()
+}
+
+#[cfg(test)]
+mod contract_view_tests {
+    use super::builtin_tool_contract_views;
+
+    #[test]
+    fn builtin_tool_contract_views_deduplicate_to_model_surface() {
+        let views = builtin_tool_contract_views();
+        let names = views.iter().map(|view| view.name.as_str()).collect::<Vec<_>>();
+        let primitives = views
+            .iter()
+            .map(|view| view.execution_primitive.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["Run", "Ask", "Read", "List", "Search", "Plan"]);
+        assert_eq!(
+            primitives,
+            vec![
+                "time_now",
+                "echo_input",
+                "workspace_gather_context",
+                "workspace_list_files",
+                "workspace_search_text",
+                "workspace_batch"
+            ]
+        );
+    }
 }
 
 pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {

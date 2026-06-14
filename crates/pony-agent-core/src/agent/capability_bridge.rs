@@ -73,6 +73,7 @@ impl CapabilityInvocationMode {
 pub enum CapabilityFailureKind {
     SourceUnavailable,
     PermissionDenied,
+    OutOfScope,
     MalformedResponse,
     InvocationFailed,
     CapabilityNotFound,
@@ -83,6 +84,7 @@ impl CapabilityFailureKind {
         match self {
             Self::SourceUnavailable => "source_unavailable",
             Self::PermissionDenied => "permission_denied",
+            Self::OutOfScope => "out_of_scope",
             Self::MalformedResponse => "malformed_response",
             Self::InvocationFailed => "invocation_failed",
             Self::CapabilityNotFound => "capability_not_found",
@@ -646,6 +648,10 @@ impl CapabilityRegistry {
                 "工具 `{}` 需要 host 审批或受管执行，但当前 capability 配置不满足该条件。",
                 tool_call.name
             ),
+            CapabilityFailureKind::OutOfScope => format!(
+                "工具 `{}` 访问了当前 workspace 边界之外的路径。",
+                tool_call.name
+            ),
             CapabilityFailureKind::MalformedResponse => format!(
                 "工具 `{}` 对应的 capability registry 条目不完整或来源状态异常。",
                 tool_call.name
@@ -1073,6 +1079,7 @@ fn map_capability_failure_to_skill_failure(failure: CapabilityFailureKind) -> Sk
     match failure {
         CapabilityFailureKind::SourceUnavailable => SkillFailureLayer::SourceUnavailable,
         CapabilityFailureKind::PermissionDenied => SkillFailureLayer::PermissionDenied,
+        CapabilityFailureKind::OutOfScope => SkillFailureLayer::UnderlyingCapabilityExecution,
         CapabilityFailureKind::MalformedResponse | CapabilityFailureKind::CapabilityNotFound => {
             SkillFailureLayer::MalformedComposition
         }

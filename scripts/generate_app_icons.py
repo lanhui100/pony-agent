@@ -10,12 +10,14 @@ ICON_DIR = ROOT / "src-tauri" / "icons"
 CANDIDATE_DIR = ROOT / "docs" / "design" / "icon-candidates"
 MASTER_SIZE = 1024
 UPSCALE = 4
+ICON_INSET = 24
+ICON_RADIUS = 280
 
 
 def rounded_rect_mask(size: int, radius: int) -> Image.Image:
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    inset = size * 36 // 1024
+    inset = size * ICON_INSET // 1024
     draw.rounded_rectangle((inset, inset, size - inset, size - inset), radius=radius, fill=255)
     return mask
 
@@ -58,16 +60,16 @@ def draw_background(
 
     border = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     border_draw = ImageDraw.Draw(border)
-    inset = size * 36 // 1024
+    inset = size * ICON_INSET // 1024
     border_draw.rounded_rectangle(
         (inset, inset, size - inset, size - inset),
-        radius=size * 228 // 1024,
+        radius=size * ICON_RADIUS // 1024,
         outline=edge,
         width=max(2, size * 8 // 1024),
     )
     canvas.alpha_composite(border)
 
-    mask = rounded_rect_mask(size, size * 228 // 1024)
+    mask = rounded_rect_mask(size, size * ICON_RADIUS // 1024)
     result = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     result.paste(canvas, mask=mask)
     return result
@@ -181,16 +183,16 @@ def create_icon(spec: dict[str, object]) -> Image.Image:
 
     border = Image.new("RGBA", result.size, (0, 0, 0, 0))
     border_draw = ImageDraw.Draw(border)
-    inset = working_size * 36 // 1024
+    inset = working_size * ICON_INSET // 1024
     border_draw.rounded_rectangle(
         (inset, inset, working_size - inset, working_size - inset),
-        radius=working_size * 228 // 1024,
+        radius=working_size * ICON_RADIUS // 1024,
         outline=spec["border"],
         width=max(2, working_size * 7 // 1024),
     )
     result.alpha_composite(border)
 
-    mask = rounded_rect_mask(working_size, working_size * 228 // 1024)
+    mask = rounded_rect_mask(working_size, working_size * ICON_RADIUS // 1024)
     clipped = Image.new("RGBA", result.size, (0, 0, 0, 0))
     clipped.paste(result, mask=mask)
     return clipped.resize((MASTER_SIZE, MASTER_SIZE), Image.Resampling.LANCZOS)
@@ -211,6 +213,8 @@ def export_icon_set(image: Image.Image, target_dir: Path) -> None:
         "32x32.png": 32,
         "128x128.png": 128,
         "128x128@2x.png": 256,
+        "256x256.png": 256,
+        "512x512.png": 512,
         "Square30x30Logo.png": 30,
         "Square44x44Logo.png": 44,
         "Square71x71Logo.png": 71,

@@ -120,6 +120,24 @@ function seedSidebarSessions() {
   });
 }
 
+function seedManySidebarSessions(count = 7) {
+  const runtimeStore = useRuntimeStore();
+  runtimeStore.$patch({
+    sessionId: "session-1",
+    sessionOperation: null,
+    isSubmitting: false,
+    messages: [createMessage({ content: "existing content" })],
+    sessionList: Array.from({ length: count }, (_, index) =>
+      createSession({
+        conversationId: `session-${index + 1}`,
+        title: `Session ${index + 1}`,
+        summary: `Summary ${index + 1}`,
+        updatedAtMs: new Date(`2026-06-0${Math.min(index + 1, 7)}T12:00:00+08:00`).getTime()
+      })
+    )
+  });
+}
+
 describe("HomeSessionSidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -226,6 +244,54 @@ describe("HomeSessionSidebar", () => {
     expect(otherRow).not.toContain("Other summary");
     expect(otherRow).not.toContain("3 轮");
     expect(otherRow).not.toContain("src/demo.ts");
+  });
+
+  it("shows only the first five conversations by default and expands in batches of five", async () => {
+    seedManySidebarSessions(12);
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-1"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-switch-session-5"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-switch-session-6"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="session-sidebar-show-more-conversations"]').text()).toContain("显示全部");
+
+    await wrapper.get('[data-testid="session-sidebar-show-more-conversations"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-10"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-switch-session-11"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-show-more-conversations"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="session-sidebar-show-more-conversations"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-12"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-show-more-conversations"]').exists()).toBe(false);
+  });
+
+  it("allows collapsing and reopening the conversation section", async () => {
+    seedManySidebarSessions(6);
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-1"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="session-sidebar-conversation-toggle"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-1"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-show-more-conversations"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="session-sidebar-conversation-toggle"]').trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-1"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-switch-session-5"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-switch-session-6"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-show-more-conversations"]').exists()).toBe(true);
   });
 
   it("requires a second click before deleting a session", async () => {

@@ -55,6 +55,10 @@
    `Run Control audit surface v1` 已完成 `stop / continue / resume / replay(start)` summary contract、snapshot/runtime-view/response 统一投影、普通首轮 `start_graph_run_stream` 排除、reload/hydration guardrail 与前端 summary-first explainability，当前近线主线已进一步完成 run-control 收口。
 16. 新增 `PA-044` 作为下一条基础设施边界加固候选
    本轮 agent core 审核确认：代码内依赖方向总体没有偏成 Tauri-only，但 package 边界、constructor 注入、desktop preset、workspace/storage/secret 默认值仍有回粘桌面端的风险。`PA-044` 已建立 OpenSpec change：`harden-agent-core-infrastructure-boundary`，用于把 Tauri 明确降级为 first host adapter，而不是 core ownership boundary。
+17. 工具系统规划主线已正式拆卡
+   当前已新增 `PA-045 / PA-046 / PA-047 / PA-048 / PA-049` 五张连续任务卡，分别承接工具协议、workspace 合同、权限审批、首批工具面与观测/前端呈现；其中 `PA-045` 进入 `Ready`，作为工具系统后续所有实现与 spec 的母卡。
+18. 工具系统五张 spec 卡已完成首轮文档闭环
+   `PA-045 ~ PA-049` 当前都已具备 `proposal / design / tasks / delta spec`，且每张卡都至少完成了 1 次独立智能体审核与 1 轮采纳优化；当前主要剩余统一 validate、任务板总览同步与进入实现前收口。
 
 ## 远期扩展
 
@@ -105,8 +109,8 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 ## 下一步最小动作
 
 1. 优先对 `PA-044 / harden-agent-core-infrastructure-boundary` 做一轮独立 spec 审核，确认 core/package/builder/preset/harness 边界足以防止 agent core 回粘 Tauri。
-2. 保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏，把后续基础设施扩展继续压在 stable boundary 上。
-3. 若后续继续扩展 monitor/drilldown 或 replay/control family，应新开任务承接，不在 `PA-043` 上继续叠加 scope。
+2. 对 `PA-045 ~ PA-049` 运行一轮统一 OpenSpec validate，并修补可能剩余的 spec/任务板不一致项。
+3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 
 ## 新近线候选
 
@@ -114,6 +118,8 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
    在 `PA-042 / PA-043` 已完成 summary family 收口的前提下，评估是否需要新增更细的 run-control / history-control 审计下钻，而不是回灌已关闭任务。
 2. `PA-044` agent core infrastructure boundary hardening
    在 harness 基础已成立的前提下，把 core 明确拆成可被 Tauri / HTTP-SSE / CLI / service 多端复用的基础设施边界，优先解决 package 边界、构造注入、desktop preset 与 non-Tauri harness 证明。
+3. `PA-045` tool system contract and exposure boundary
+   在 core 多端边界继续稳定的同时，优先把工具系统的模型可见协议、结果合同、暴露策略与分类体系正式写成 spec，避免后续 workspace / permission / first-wave tools 各自发明字段与命名。
 
 ## 关联入口
 

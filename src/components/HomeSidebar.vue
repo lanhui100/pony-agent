@@ -3,6 +3,8 @@ import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   AudioLines,
   Check,
   ChevronRight,
@@ -11,11 +13,14 @@ import {
   Copy,
   FileText,
   Image as ImageIcon,
+  Layout,
   LoaderCircle,
+  MessageSquareMore,
   Orbit,
   ScanSearch,
   Video,
-  Wrench
+  Wrench,
+  Zap
 } from "lucide-vue-next";
 import { extractActiveTaskFocus } from "@/types/runtime";
 import type {
@@ -95,27 +100,47 @@ const copiedKey = ref("");
 const expandedResultKeys = ref<string[]>([]);
 let copiedTimer: number | null = null;
 
-const displayModel = computed(() => {
-  const provider = providerName.value?.trim();
-  const model = providerModel.value?.trim();
-
-  if (provider && model) {
-    return `${provider}/${model}`;
+const phaseDotClass = computed(() => {
+  if (phase.value === "ready" || phase.value === "idle" || phase.value === "completed") {
+    return "fill-emerald-500 text-emerald-500";
   }
-
-  return model || provider || "";
+  if (phase.value === "calling_model" || phase.value === "calling_tool") {
+    return "animate-pulse fill-amber-500 text-amber-500";
+  }
+  if (phase.value === "failed") {
+    return "fill-rose-500 text-rose-500";
+  }
+  return "fill-stone-400 text-stone-400";
 });
 
 const retrievedSessionContext = computed(() => retrievedContext.value?.sessionContext ?? null);
 const retrievedRunState = computed(() => retrievedContext.value?.runState ?? null);
 const retrievedLongTermMemory = computed(() => retrievedContext.value?.longTermMemory ?? null);
-const retrievedRunPhase = computed(
+const retrievedRunPhaseRaw = computed(
   () =>
     retrievedRunState.value?.phase?.trim() ||
     retrievedRunState.value?.executionCheckpointPhase?.trim() ||
     retrievedRunState.value?.executionCheckpointStatus?.trim() ||
     ""
 );
+
+const retrievedRunPhase = computed(() => {
+  const raw = retrievedRunPhaseRaw.value;
+  if (!raw) return "";
+  const map: Record<string, string> = {
+    ready: "等待中",
+    running: "执行中",
+    waiting_user: "等待输入",
+    paused: "已暂停",
+    completed: "已完成",
+    failed: "执行失败",
+    cancelled: "已取消",
+    idle: "空闲",
+    calling_model: "模型处理中",
+    calling_tool: "工具处理中"
+  };
+  return map[raw] ?? raw;
+});
 const longTermMemoryEntries = computed(() => retrievedLongTermMemory.value?.entries ?? []);
 const longTermMemoryPreviewEntries = computed(() => longTermMemoryEntries.value.slice(0, 3));
 const retrievedActiveTaskFocus = computed(() => extractActiveTaskFocus(longTermMemoryEntries.value)?.trim() ?? "");
@@ -130,7 +155,7 @@ const sessionStatusSummary = computed(() => {
   }
 
   if (sessionOperation.value === "deleting") {
-    return "正在删除对话并刷新会话状态…";
+    return "正在删除对话…";
   }
 
   if (sessionError.value?.trim()) {
@@ -138,11 +163,11 @@ const sessionStatusSummary = computed(() => {
   }
 
   if (error.value?.trim()) {
-    return phaseLabel.value === "失败" ? error.value.trim() : `最近错误：${error.value.trim()}`;
+    return error.value.trim();
   }
 
   if (isSubmitting.value) {
-    return "当前轮次正在执行。";
+    return "正在等待回复…";
   }
 
   return "";
@@ -258,11 +283,7 @@ function buildControlStatusSummary(summary: RunControlAuditSummary | null) {
     return "";
   }
 
-  const details = [actionSummary.commandKind, actionSummary.boundary, actionSummary.resultKind]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .map((value) => value.trim());
-  const suffix = details.length ? ` · ${details.join(" / ")}` : "";
-  return `${actionSummary.summary.trim()}${suffix}`;
+  return actionSummary.summary.trim();
 }
 
 function traceStateIcon(state: TraceStep["state"]) {
@@ -487,6 +508,13 @@ function formatInteger(value?: number | null) {
   return value == null ? "" : value.toLocaleString("zh-CN");
 }
 
+function formatCompactInteger(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) { return ""; }
+  if (value >= 1_000_000) { return `${(value / 1_000_000).toFixed(1)}M`; }
+  if (value >= 1_000) { return `${(value / 1_000).toFixed(1)}K`; }
+  return String(value);
+}
+
 function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: number | null) {
   if (inputTokens == null) {
     return "";
@@ -497,7 +525,8 @@ function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: n
     return used;
   }
 
-  return `${used} / ${formatInteger(contextWindowTokens)} (${((inputTokens / contextWindowTokens) * 100).toFixed(1)}%)`;
+  const percentage = ((inputTokens / contextWindowTokens) * 100).toFixed(1);
+  return `已用 ${percentage}%（${used} / ${formatInteger(contextWindowTokens)}）`;
 }
 
 function readNumericValue(value: unknown) {
@@ -852,10 +881,6 @@ function callModelOutputToolEntries(turn: TurnTraceRecord, entry: TraceTimelineE
   return outputEntries;
 }
 
-function hasCallModelToolOutputs(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
-  return callModelOutputToolEntries(turn, entry).length > 0;
-}
-
 function shouldShowCallModelOutput(entry: TraceTimelineEntry) {
   return canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.state !== "active" && entry.state !== "pending";
 }
@@ -864,7 +889,7 @@ function shouldShowCallModelReasoning(entry: TraceTimelineEntry) {
   return canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.state !== "active" && entry.state !== "pending";
 }
 
-function timelinePreviewText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
+function timelinePreviewText(_turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const kind = canonicalTraceTimelineKind(entry.kind);
   if (kind === "call_tool") {
     return "";
@@ -985,7 +1010,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
     for (const activity of entry.toolActivities ?? []) {
       sections.push({
         id: activity.id,
-        label: activity.name,
+        label: toolDisplayLabel(activity),
         content: buildToolMessageDetail(activity),
         summary: activity.summary,
         kind: "tool",
@@ -1016,7 +1041,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
     for (const activity of activities) {
       sections.push({
         id: `tool-output-${toolEntry.id}-${activity.id}`,
-        label: activity.name,
+        label: toolDisplayLabel(activity),
         content: buildToolMessageDetail(activity),
         summary: activity.summary,
         kind: "tool",
@@ -1066,7 +1091,27 @@ function buildToolMessageDetail(activity: ToolActivity) {
     lines.push(`耗时: ${formatDuration(activity.durationSeconds)}`);
   }
 
+  const permissionScope = activity.capabilityInvocation?.permissionFacts?.permissionScope
+    || activity.capabilityInvocation?.permissionScope;
+  const approvalMode = activity.capabilityInvocation?.permissionFacts?.approvalMode;
+  const permissionSource = activity.capabilityInvocation?.permissionFacts?.decisionSource;
+  if (permissionScope || approvalMode || permissionSource) {
+    lines.push(
+      [
+        permissionScope ? `权限: ${permissionScope}` : null,
+        approvalMode ? `审批: ${approvalMode}` : null,
+        permissionSource ? `来源: ${permissionSource}` : null
+      ].filter(Boolean).join(" · ")
+    );
+  }
+
   return lines.join("\n\n");
+}
+
+function toolDisplayLabel(activity: ToolActivity) {
+  return activity.displayNameZh?.trim()
+    || activity.canonicalToolName?.trim()
+    || activity.name;
 }
 
 function buildTimelineCopyText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
@@ -1271,125 +1316,115 @@ watch(orderedTurnTraceSignature, () => {
   <aside class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/62">
     <ScrollArea class="min-h-0 flex-1" viewport-class="px-4 pt-10 pb-4">
       <div class="flex min-h-full flex-col gap-3">
-        <section class="border-b border-stone-200/70 pb-4" data-open="true">
-          <div class="flex w-full items-center justify-between gap-3 text-left" data-testid="status-panel-toggle">
+        <section class="border-b border-stone-200/70 pb-2.5" data-open="true">
+          <div class="flex w-full items-center justify-between gap-2 text-left" data-testid="status-panel-toggle">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <ScanSearch class="h-3.5 w-3.5" />
               <span>状态</span>
+              <Circle class="h-2.5 w-2.5" :class="phaseDotClass" :title="phaseLabel" />
+              <button
+                class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                type="button"
+                :title="`Session ID: ${sessionId}`"
+                data-testid="status-copy-session-id"
+                @click.stop="copyText('session-id', sessionId)"
+              >
+                <component :is="copiedKey === 'session-id' ? Check : Copy" class="h-3 w-3" />
+              </button>
+            </div>
+            <div class="flex items-center gap-x-3 text-[11px] leading-5 text-stone-600">
+              <span v-if="retrievedRunPhase" class="text-stone-400">{{ retrievedRunPhase }}</span>
+              <span class="inline-flex items-center gap-1" title="轮次">
+                <MessageSquareMore class="h-3 w-3 text-stone-400" />
+                {{ sessionTurnCount }}
+              </span>
+              <span class="inline-flex items-center gap-1" title="模型调用">
+                <Orbit class="h-3 w-3 text-stone-400" />
+                {{ sessionModelCallCount }}
+              </span>
+              <span class="inline-flex items-center gap-1" title="工具调用">
+                <Wrench class="h-3 w-3 text-stone-400" />
+                {{ sessionToolCallCount }}
+              </span>
             </div>
           </div>
 
-          <section class="mt-2 space-y-2">
-              <div class="grid gap-1.5 text-[12px] leading-4 text-stone-600">
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">ID</span>
-                  <span class="break-words text-right text-stone-800 [overflow-wrap:anywhere]">{{ sessionId }}</span>
-                </div>
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">阶段</span>
-                  <span class="text-right text-stone-800">{{ phaseLabel }}</span>
-                </div>
-                <div v-if="sessionStatusSummary" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">会话状态</span>
-                  <span
-                    class="break-words text-right text-stone-800 [overflow-wrap:anywhere]"
-                    data-testid="status-session-summary"
-                  >
-                    {{ sessionStatusSummary }}
-                  </span>
-                </div>
-                <div v-if="controlStatusSummary" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">控制状态</span>
-                  <span
-                    class="break-words text-right text-stone-800 [overflow-wrap:anywhere]"
-                    data-testid="status-control-summary"
-                  >
-                    {{ controlStatusSummary }}
-                  </span>
-                </div>
-                <div v-if="displayModel" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">模型</span>
-                  <span class="break-words text-right text-stone-800 [overflow-wrap:anywhere]">{{ displayModel }}</span>
-                </div>
-                <div v-if="providerProtocol" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">协议</span>
-                  <span class="text-right text-stone-800">{{ providerProtocol }}</span>
-                </div>
-                <div v-if="providerMode" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">模式</span>
-                  <span class="text-right text-stone-800">{{ providerMode }}</span>
-                </div>
-                <div v-if="latestTurn" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">上下文</span>
-                  <span class="text-right text-stone-800">
-                    {{ formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || "未知" }}
-                  </span>
-                </div>
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">输入</span>
-                  <span class="text-right text-stone-800">{{ formatInteger(sessionInputTokensTotal) || "0" }}</span>
-                </div>
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">缓存命中</span>
-                  <span class="text-right text-stone-800">
-                    {{ formatInteger(sessionCacheHitTokensTotal) || "0" }}
-                    <span v-if="sessionCacheHitRatio" class="text-stone-400">· {{ sessionCacheHitRatio }}</span>
-                  </span>
-                </div>
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">输出</span>
-                  <span class="text-right text-stone-800">{{ formatInteger(sessionOutputTokensTotal) || "0" }}</span>
-                </div>
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">轮次</span>
-                  <span class="text-right text-stone-800">{{ sessionTurnCount }}</span>
-                </div>
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">模型调用</span>
-                  <span class="text-right text-stone-800">{{ sessionModelCallCount }}</span>
-                </div>
-                <div class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">工具调用</span>
-                  <span class="text-right text-stone-800">{{ sessionToolCallCount }}</span>
-                </div>
-                <div v-if="retrievedRunPhase" class="flex items-start justify-between gap-3">
-                  <span class="text-stone-400">运行阶段</span>
-                  <span class="text-right text-stone-800">{{ retrievedRunPhase }}</span>
-                </div>
-              </div>
+          <section class="mt-1.5 space-y-1">
+            <!-- Token metrics -->
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] leading-5 text-stone-600">
+              <span class="inline-flex items-center gap-1" title="输入">
+                <ArrowUp class="h-3 w-3 text-stone-400" />
+                <span class="text-stone-400">输入</span>
+                {{ formatCompactInteger(sessionInputTokensTotal) || "0" }}
+              </span>
+              <span class="inline-flex items-center gap-1" title="输出">
+                <ArrowDown class="h-3 w-3 text-stone-400" />
+                <span class="text-stone-400">输出</span>
+                {{ formatCompactInteger(sessionOutputTokensTotal) || "0" }}
+              </span>
+              <span class="inline-flex items-center gap-1" title="缓存读取">
+                <Zap class="h-3 w-3 text-stone-400" />
+                <span class="text-stone-400">缓存读取</span>
+                {{ formatCompactInteger(sessionCacheHitTokensTotal) || "0" }}
+                <span v-if="sessionCacheHitRatio" class="text-stone-400">· {{ sessionCacheHitRatio }}</span>
+              </span>
+            </div>
 
-              <p
-                v-if="retrievedActiveTaskFocus"
-                class="break-words text-[11px] leading-4 text-stone-600 [overflow-wrap:anywhere]"
-                data-testid="retrieved-active-task"
+            <!-- Context usage -->
+            <div v-if="latestTurn" class="flex flex-wrap items-center gap-x-3 text-[11px] leading-5 text-stone-500">
+              <span class="inline-flex items-center gap-1">
+                <Layout class="h-3 w-3 text-stone-400" />
+                <span class="text-stone-400">上下文</span>
+                {{ formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || "未知" }}
+              </span>
+              <span
+                v-if="latestTurn.inputTokens && currentContextWindowTokens"
+                class="inline-block h-1.5 w-16 overflow-hidden rounded-full bg-stone-200"
+                title="上下文窗口用量"
               >
-                Active task: {{ retrievedActiveTaskFocus }}
-              </p>
-              <div
-                v-if="longTermMemoryPreviewEntries.length"
-                class="space-y-1 border-t border-stone-200/80 pt-2"
-                data-testid="retrieved-memory-list"
-              >
-                <div class="text-[10px] uppercase tracking-[0.14em] text-stone-400">Memory entries</div>
+                <span
+                  class="block h-full rounded-full bg-stone-400 transition-all"
+                  :style="{ width: Math.min(100, (latestTurn.inputTokens / currentContextWindowTokens) * 100) + '%' }"
+                />
+              </span>
+            </div>
+
+            <!-- Session status messages -->
+            <div
+              v-if="sessionStatusSummary || controlStatusSummary || fallbackReason || error"
+              class="border-t border-stone-200/60 pt-1"
+            >
+              <div class="space-y-0.5">
                 <div
-                  v-for="entry in longTermMemoryPreviewEntries"
-                  :key="`${entry.kind}:${entry.content}`"
-                  class="rounded-[0.4rem] border border-stone-200/80 bg-white/80 px-2 py-1"
+                  v-if="sessionStatusSummary"
+                  class="flex items-start gap-1.5 text-[11px] leading-4 text-stone-600"
+                  data-testid="status-session-summary"
                 >
-                  <div class="break-words text-[11px] leading-4 text-stone-700 [overflow-wrap:anywhere]">
-                    {{ entry.content }}
-                  </div>
-                  <div class="mt-0.5 text-[10px] leading-4 text-stone-400">
-                    {{ entry.kind }}
-                  </div>
+                  {{ sessionStatusSummary }}
                 </div>
+                <div
+                  v-if="controlStatusSummary"
+                  class="text-[11px] leading-4 text-stone-500"
+                  data-testid="status-control-summary"
+                >
+                  {{ controlStatusSummary }}
+                </div>
+                <p
+                  v-if="fallbackReason"
+                  class="flex items-start gap-1.5 text-[11px] leading-4 text-amber-800"
+                >
+                  <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0 text-amber-600" />
+                  <span>{{ fallbackReason }}</span>
+                </p>
+                <p
+                  v-if="error"
+                  class="flex items-start gap-1.5 text-[11px] leading-4 text-rose-700"
+                >
+                  <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0 text-rose-500" />
+                  <span>{{ error }}</span>
+                </p>
               </div>
-              <p v-if="fallbackReason" class="break-words text-[11px] leading-4 text-amber-800 [overflow-wrap:anywhere]">
-                {{ fallbackReason }}
-              </p>
-              <p v-if="error" class="break-words text-[11px] leading-4 text-rose-700 [overflow-wrap:anywhere]">
-                {{ error }}
-              </p>
+            </div>
           </section>
         </section>
 

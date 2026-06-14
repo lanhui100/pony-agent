@@ -46,3 +46,6 @@ sessions/
 *.lib
 *.a
 *.pdb
+
+__pycache__/
+nul
