@@ -442,6 +442,95 @@ fn load_stream_debug_metrics(state: State<'_, StreamDebugMetricsState>) -> Resul
     Ok(latest.clone())
 }
 
+/// Icons embedded at compile time so they don't depend on runtime path resolution.
+/// `icon.png` is a 512×512 RGBA PNG; `icon.ico` contains multiplatform frames (16–256).
+static ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
+#[cfg(target_os = "windows")]
+static ICON_ICO: &[u8] = include_bytes!("../icons/icon.ico");
+
+/// Windows-only: set BOTH ICON_SMALL (title bar) and ICON_BIG (taskbar + Alt+Tab)
+/// from the embedded icon.ico.  Tauri's set_icon() only sends ICON_SMALL.
+#[cfg(target_os = "windows")]
+fn set_taskbar_icon_win32(app: &tauri::AppHandle) {
+    use raw_window_handle::HasWindowHandle;
+
+    extern "system" {
+        fn LookupIconIdFromDirectoryEx(
+            presbits: *const u8,
+            ficon: i32,
+            cxdesired: i32,
+            cydesired: i32,
+            flags: u32,
+        ) -> i32;
+        fn CreateIconFromResourceEx(
+            presbits: *const u8,
+            dwresSize: u32,
+            ficon: i32,
+            dwver: u32,
+            cxdesired: i32,
+            cydesired: i32,
+            flags: u32,
+        ) -> isize;
+        fn SendMessageW(hwnd: isize, msg: u32, wparam: isize, lparam: isize) -> isize;
+    }
+
+    const WM_SETICON: u32 = 0x0080;
+    const ICON_BIG: isize = 1;
+    const ICON_SMALL: isize = 0;
+    const LR_DEFAULTSIZE: u32 = 0x0040;
+
+    let window = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => { eprintln!("[icon-debug] main window not found"); return; }
+    };
+    let hwnd = match window.window_handle() {
+        Ok(h) => match h.as_raw() {
+            raw_window_handle::RawWindowHandle::Win32(wh) => wh.hwnd.get() as isize,
+            _ => { eprintln!("[icon-debug] unexpected window handle type"); return; }
+        },
+        Err(e) => { eprintln!("[icon-debug] window_handle err: {e}"); return; }
+    };
+    eprintln!("[icon-debug] HWND = 0x{hwnd:x}");
+
+    unsafe {
+        // LookupIconIdFromDirectoryEx finds the best-matching icon resource
+        // entry for the default icon size (SM_CXICON × SM_CYICON).
+        let id = LookupIconIdFromDirectoryEx(
+            ICON_ICO.as_ptr(),
+            1,        // fIcon = TRUE (icon, not cursor)
+            0,        // cx=0 → use system metric
+            0,        // cy=0 → use system metric
+            LR_DEFAULTSIZE,
+        );
+        eprintln!("[icon-debug] LookupIconIdFromDirectoryEx -> ID offset {id}");
+
+        if id > 0 {
+            let data = &ICON_ICO[id as usize..];
+            let hicon = CreateIconFromResourceEx(
+                data.as_ptr(),
+                data.len() as u32,
+                1,    // fIcon
+                0x00030000, // dwVer (Windows 3.0 format)
+                0, 0, // desired size = default
+                LR_DEFAULTSIZE,
+            );
+            eprintln!("[icon-debug] HICON = {:p}", hicon as *const std::ffi::c_void);
+
+            if hicon != 0 {
+                SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon);
+                eprintln!("[icon-debug] WM_SETICON(ICON_BIG) OK (taskbar)");
+                SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon);
+                eprintln!("[icon-debug] WM_SETICON(ICON_SMALL) OK (title bar)");
+                // HICON now owned by the window
+            } else {
+                eprintln!("[icon-debug] CreateIconFromResourceEx returned NULL");
+            }
+        } else {
+            eprintln!("[icon-debug] LookupIconIdFromDirectoryEx returned {id} (no match)");
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(HostControlPlane::new())
@@ -450,21 +539,36 @@ pub fn run() {
         })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "windows")]
-                {
-                    let taskbar_icon_path = app.path().resolve("icons/taskbar-64.png", tauri::path::BaseDirectory::Resource)?;
-                    if taskbar_icon_path.exists() {
-                        let icon_bytes = std::fs::read(&taskbar_icon_path)?;
-                        let icon = tauri::image::Image::new_owned(icon_bytes, 64, 64);
-                        window.set_icon(icon)?;
-                    } else if let Some(icon) = app.default_window_icon().cloned() {
-                        window.set_icon(icon)?;
+                // === Load icon from compile-time embedded ICON_PNG ===
+                // (avoids BaseDirectory::Resource resolving to target/debug/ in dev mode)
+                match tauri::image::Image::from_bytes(ICON_PNG) {
+                    Ok(icon) => {
+                        eprintln!(
+                            "[icon-debug] Decoded embedded icon.png: {}x{}",
+                            icon.width(),
+                            icon.height()
+                        );
+                        if let Err(e) = window.set_icon(icon) {
+                            eprintln!("[icon-debug] set_icon err: {e}");
+                            // fallback
+                            if let Some(fb) = app.default_window_icon().cloned() {
+                                let _ = window.set_icon(fb);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[icon-debug] from_bytes err: {e}");
+                        if let Some(fb) = app.default_window_icon().cloned() {
+                            eprintln!("[icon-debug] fallback default {}x{}", fb.width(), fb.height());
+                            let _ = window.set_icon(fb);
+                        }
                     }
                 }
-                #[cfg(not(target_os = "windows"))]
-                if let Some(icon) = app.default_window_icon().cloned() {
-                    window.set_icon(icon)?;
-                }
+
+                // Windows: also explicitly set ICON_BIG for the taskbar,
+                // since Tauri's set_icon() only sends ICON_SMALL.
+                #[cfg(target_os = "windows")]
+                set_taskbar_icon_win32(app.handle());
             }
 
             Ok(())
@@ -512,4 +616,131 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Pony Agent");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ICON_PNG: compiled-time embedded 512×512 icon.png ──
+
+    #[test]
+    fn embedded_icon_png_decodes_to_512x512() {
+        let icon = tauri::image::Image::from_bytes(ICON_PNG)
+            .expect("ICON_PNG must be a valid PNG image decodable by Image::from_bytes");
+        assert_eq!(
+            icon.width(),
+            512,
+            "embedded ICON_PNG must be 512px wide, got {}",
+            icon.width()
+        );
+        assert_eq!(
+            icon.height(),
+            512,
+            "embedded ICON_PNG must be 512px tall, got {}",
+            icon.height()
+        );
+    }
+
+    #[test]
+    fn embedded_icon_png_is_not_empty() {
+        assert!(
+            !ICON_PNG.is_empty(),
+            "ICON_PNG must not be empty (include_bytes! should embed a real file)"
+        );
+        assert!(
+            ICON_PNG.len() > 1000,
+            "ICON_PNG size ({}) suspiciously small for a 512×512 PNG",
+            ICON_PNG.len()
+        );
+    }
+
+    // ── ICON_ICO: compiled-time embedded icon.ico (Windows-only) ──
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn embedded_ico_has_valid_header() {
+        // ICO header: 2B reserved(0) + 2B type(1) + 2B count
+        assert!(ICON_ICO.len() >= 6, "ICO file too small for header");
+        assert_eq!(ICON_ICO[0], 0, "ICO reserved byte 0 must be 0");
+        assert_eq!(ICON_ICO[1], 0, "ICO reserved byte 1 must be 0");
+        assert_eq!(ICON_ICO[2], 1, "ICO type must be 1 (icon), got {}", ICON_ICO[2]);
+        assert_eq!(ICON_ICO[3], 0, "ICO type high byte must be 0");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn embedded_ico_contains_256x256_frame() {
+        let count = u16::from_le_bytes([ICON_ICO[4], ICON_ICO[5]]);
+        assert!(count >= 1, "ICO must have at least 1 frame, has {count}");
+
+        let mut found_256 = false;
+        for i in 0..count {
+            let entry_off = 6 + (i as usize) * 16;
+            if entry_off + 16 > ICON_ICO.len() {
+                break;
+            }
+            let w = ICON_ICO[entry_off] as u32;
+            let h = ICON_ICO[entry_off + 1] as u32;
+            // In ICO, width/height of 0 means 256
+            let w = if w == 0 { 256 } else { w };
+            let h = if h == 0 { 256 } else { h };
+            if w == 256 && h == 256 {
+                found_256 = true;
+                // Validate the frame data offset + size
+                let data_size =
+                    u32::from_le_bytes(ICON_ICO[entry_off + 8..entry_off + 12].try_into().unwrap());
+                let data_off =
+                    u32::from_le_bytes(ICON_ICO[entry_off + 12..entry_off + 16].try_into().unwrap());
+                assert!(
+                    data_size > 1000,
+                    "256×256 frame data size ({data_size}) too small"
+                );
+                assert!(
+                    (data_off as usize) + (data_size as usize) <= ICON_ICO.len(),
+                    "256×256 frame data extends beyond file"
+                );
+            }
+        }
+        assert!(found_256, "ICO must contain a 256×256 frame (width=0, height=0 in ICO entry)");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn embedded_ico_has_reasonable_frame_count() {
+        let count = u16::from_le_bytes([ICON_ICO[4], ICON_ICO[5]]);
+        assert!(
+            count >= 3,
+            "ICO should have at least 3 frames for multi-res support, has {count}"
+        );
+        assert!(
+            count <= 20,
+            "ICO has {count} frames — unusually high, may be accidental"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn embedded_ico_all_entries_reference_valid_data() {
+        let count = u16::from_le_bytes([ICON_ICO[4], ICON_ICO[5]]);
+        for i in 0..count {
+            let entry_off = 6 + (i as usize) * 16;
+            if entry_off + 16 > ICON_ICO.len() {
+                panic!("Frame {i} entry truncated");
+            }
+            let data_size =
+                u32::from_le_bytes(ICON_ICO[entry_off + 8..entry_off + 12].try_into().unwrap());
+            let data_off =
+                u32::from_le_bytes(ICON_ICO[entry_off + 12..entry_off + 16].try_into().unwrap());
+            assert!(
+                data_size > 0,
+                "Frame {i} has zero data size"
+            );
+            assert!(
+                (data_off as usize) + (data_size as usize) <= ICON_ICO.len(),
+                "Frame {i} data [offset={data_off}, size={data_size}] exceeds file length {}",
+                ICON_ICO.len()
+            );
+        }
+    }
 }
