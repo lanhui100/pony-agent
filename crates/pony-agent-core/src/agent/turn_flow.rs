@@ -858,11 +858,16 @@ mod tests {
             Some(vec![TurnToolActivity {
                 id: "tool-1".to_string(),
                 name: "workspace.read_file".to_string(),
+                canonical_tool_name: Some("Read".to_string()),
+                display_name_zh: Some("读取".to_string()),
                 status: "done".to_string(),
                 summary: "read done".to_string(),
                 arguments_text: None,
                 result_text: None,
                 duration_seconds: Some(0.1),
+                parent_activity_id: None,
+                artifacts: None,
+                error: None,
                 capability_invocation: None,
             }]),
             Some(vec![ProviderCallCacheRecord::default()]),
@@ -921,11 +926,16 @@ mod tests {
         let tool_activities = vec![TurnToolActivity {
             id: "tool-1".to_string(),
             name: "workspace.read_file".to_string(),
+            canonical_tool_name: Some("Read".to_string()),
+            display_name_zh: Some("读取".to_string()),
             status: "running".to_string(),
             summary: "running".to_string(),
             arguments_text: None,
             result_text: None,
             duration_seconds: None,
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
             capability_invocation: None,
         }];
         let event_type = resolve_canonical_event_type(
@@ -948,11 +958,16 @@ mod tests {
         let tool_activities = vec![TurnToolActivity {
             id: "tool-1".to_string(),
             name: "workspace.read_file".to_string(),
+            canonical_tool_name: Some("Read".to_string()),
+            display_name_zh: Some("读取".to_string()),
             status: "done".to_string(),
             summary: "ok".to_string(),
             arguments_text: None,
             result_text: None,
             duration_seconds: Some(0.1),
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
             capability_invocation: None,
         }];
         let event_type = resolve_canonical_event_type(

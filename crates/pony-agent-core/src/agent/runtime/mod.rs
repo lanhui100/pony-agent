@@ -40,7 +40,10 @@ use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
-use crate::agent::tools::{builtin_tools, ToolCall, ToolDefinition, ToolExecutor, ToolRouter};
+use crate::agent::tools::{
+    builtin_tools, canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
+    ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
+};
 use crate::agent::turn_flow::{
     build_failed_turn_result, build_failed_turn_result_with_hooks,
     build_terminal_turn_event_envelope, emit_stream_cancelled, emit_stream_event,
@@ -60,6 +63,43 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::OnceLock;
 use std::time::Instant;
+
+fn is_out_of_scope_tool_result(tool_result: &crate::agent::tools::ToolResult) -> bool {
+    let parsed = serde_json::from_str::<Value>(&tool_result.output).unwrap_or(Value::Null);
+    if let Some(error) = tool_error_from_output(tool_result.status.as_str(), &parsed) {
+        if error.kind == "out_of_scope" {
+            return true;
+        }
+        if error.message.contains("只允许访问当前工作区内的相对路径") {
+            return true;
+        }
+    }
+    false
+}
+
+fn tool_result_failure_kind(
+    tool_result: &crate::agent::tools::ToolResult,
+) -> Option<CapabilityFailureKind> {
+    let parsed = serde_json::from_str::<Value>(&tool_result.output).unwrap_or(Value::Null);
+    let error = parsed.get("error")?;
+    let kind = error
+        .get("kind")
+        .or_else(|| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind == "out_of_scope" {
+        return Some(CapabilityFailureKind::OutOfScope);
+    }
+    if error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(|message| message.contains("只允许访问当前工作区内的相对路径"))
+        .unwrap_or(false)
+    {
+        return Some(CapabilityFailureKind::OutOfScope);
+    }
+    Some(CapabilityFailureKind::InvocationFailed)
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5385,7 +5425,12 @@ impl AgentRuntime {
         ));
 
         let tool_result = self.tool_executor.execute(&action.tool_call);
-        let failure_kind = if tool_result.status == "ok" {
+        let failure_kind = if tool_result.status == "ok" && !is_out_of_scope_tool_result(&tool_result)
+        {
+            tool_result_failure_kind(&tool_result)
+        } else if is_out_of_scope_tool_result(&tool_result) {
+            Some(CapabilityFailureKind::OutOfScope)
+        } else if tool_result.status == "ok" {
             None
         } else {
             Some(CapabilityFailureKind::InvocationFailed)
@@ -5463,6 +5508,7 @@ impl AgentRuntime {
                     requires_approval: None,
                     host_mediated: None,
                     permission_scope: None,
+                    permission_facts: Some(default_permission_facts_for_name(&tool_call.name)),
                     skill_id: execution
                         .skill
                         .as_ref()
@@ -5597,6 +5643,13 @@ fn candidate_capability_ids_for_tool_name(
     let canonical = raw.replace('.', "_");
     if canonical != raw {
         candidate_ids.push(format!("builtin:{canonical}"));
+    }
+
+    if let Some(execution_primitive) = canonical_tool_name(raw) {
+        let primitive_id = format!("builtin:{execution_primitive}");
+        if !candidate_ids.contains(&primitive_id) {
+            candidate_ids.push(primitive_id);
+        }
     }
 
     for capability in registry.list_capabilities(None, Some("tool")) {
@@ -5858,6 +5911,7 @@ fn build_blocked_capability_invocation_record(
         requires_approval: None,
         host_mediated: None,
         permission_scope: None,
+        permission_facts: Some(default_permission_facts_for_name(&tool_call.name)),
         skill_id: None,
         skill_source_id: None,
         composed_capability_refs: None,
@@ -5882,6 +5936,7 @@ fn build_blocked_skill_invocation_record(
         requires_approval: None,
         host_mediated: None,
         permission_scope: None,
+        permission_facts: Some(default_permission_facts_for_name(&tool_call.name)),
         skill_id: skill.map(|descriptor| descriptor.skill_id.clone()),
         skill_source_id: skill.map(|descriptor| descriptor.source_id.clone()),
         composed_capability_refs: skill
@@ -10419,6 +10474,26 @@ mod tests {
     }
 
     #[test]
+    fn capability_bridge_propagates_out_of_scope_from_runtime_execution_path() {
+        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+
+        let execution = runtime.execute_capability_tool_call(&ToolCall {
+            call_id: Some("call_out_of_scope_read".to_string()),
+            name: "Read".to_string(),
+            arguments: json!({
+                "path": "C:/Windows/System32/drivers/etc/hosts"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(
+            execution.failure_kind,
+            Some(CapabilityFailureKind::OutOfScope)
+        );
+        assert!(execution.tool_result.output.contains("当前工作区内的相对路径"));
+    }
+
+    #[test]
     fn capability_bridge_propagates_malformed_response_from_runtime_execution_path() {
         let mut runtime =
             build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
@@ -13206,11 +13281,16 @@ mod tests {
         let tool_activities = vec![crate::agent::telemetry::TurnToolActivity {
             id: "tool-read-file".to_string(),
             name: "workspace.read_file".to_string(),
+            canonical_tool_name: Some("Read".to_string()),
+            display_name_zh: Some("读取".to_string()),
             status: "done".to_string(),
             summary: "read file done".to_string(),
             arguments_text: Some("{\"path\":\"src/main.ts\"}".to_string()),
             result_text: Some("{\"content\":\"ok\"}".to_string()),
             duration_seconds: Some(0.2),
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
             capability_invocation: None,
         }];
 

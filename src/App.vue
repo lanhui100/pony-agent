@@ -16,6 +16,8 @@ const currentPage = ref<AppPage>("home");
 const rightSidebarOpen = ref(true);
 const providerStore = useProviderStore();
 const runtimeStore = useRuntimeStore();
+const isResizing = ref(false);
+let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 let onBeforeUnload: (() => void) | null = null;
 let onPageHide: (() => void) | null = null;
 let onVisibility: (() => void) | null = null;
@@ -28,6 +30,19 @@ function logLifecycle(event: string) {
     traces: runtimeStore.turnTraceHistory.length,
     phase: runtimeStore.phase
   });
+}
+
+function handleWindowResize() {
+  if (!isResizing.value) {
+    isResizing.value = true;
+  }
+  if (resizeTimer !== null) {
+    clearTimeout(resizeTimer);
+    resizeTimer = null;
+  }
+  resizeTimer = setTimeout(() => {
+    isResizing.value = false;
+  }, 200);
 }
 
 async function runStartupTask(label: string, task: () => Promise<unknown>) {
@@ -55,6 +70,7 @@ onMounted(async () => {
   window.addEventListener("beforeunload", onBeforeUnload);
   window.addEventListener("pagehide", onPageHide);
   document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("resize", handleWindowResize, { passive: true });
 
   await Promise.all([
     runStartupTask("providerRegistry", () => providerStore.loadRegistry()),
@@ -75,6 +91,11 @@ onBeforeUnmount(() => {
   if (onVisibility) {
     document.removeEventListener("visibilitychange", onVisibility);
   }
+  window.removeEventListener("resize", handleWindowResize);
+  if (resizeTimer !== null) {
+    clearTimeout(resizeTimer);
+    resizeTimer = null;
+  }
   logLifecycle("beforeUnmount");
 });
 
@@ -88,6 +109,7 @@ watch(rightSidebarOpen, (value) => {
 <template>
   <main
     class="h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] text-stone-900"
+    :class="{ resizing: isResizing }"
   >
     <section
       class="flex h-full min-h-0 w-full min-w-0 gap-4 py-3"

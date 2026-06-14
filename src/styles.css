@@ -40,3 +40,31 @@ select {
 #app {
   overflow-x: hidden;
 }
+
+/* --- Window resize smoothness --- */
+
+/* GPU compositing hint: main layout containers get their own layer */
+[data-testid="app-layout-shell"] {
+  will-change: width, height;
+}
+
+[data-testid="home-layout-shell"] {
+  will-change: width, height;
+}
+
+/* During window resize: enable transitions on layout properties */
+main.resizing [data-testid="app-layout-shell"] {
+  transition: gap 0.15s ease-out, padding 0.15s ease-out;
+}
+
+main.resizing [data-testid="home-layout-shell"] {
+  transition: gap 0.15s ease-out;
+}
+
+main.resizing [data-testid="workspace-content-column"] {
+  transition: max-width 0.15s ease-out;
+}
+
+main.resizing [data-testid="home-right-sidebar-shell"] {
+  transition: width 0.15s ease-out, max-width 0.15s ease-out;
+}

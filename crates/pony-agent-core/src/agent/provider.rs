@@ -1,6 +1,6 @@
 use crate::agent::config::{ProviderReasoningEffort, ResolvedProviderSelection};
 use crate::agent::input::TurnInputImage;
-use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
+use crate::agent::tools::{builtin_tool_contract_views, ToolCall, ToolDefinition, ToolResult};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -981,9 +981,9 @@ impl ProviderManager {
             "request:openai decision endpoint={} model={} safe_tools={}",
             endpoint,
             request.model,
-            tools
+            provider_tool_contract_views(tools)
                 .iter()
-                .map(|tool| openai_safe_tool_name(tool.name))
+                .map(|tool| openai_safe_tool_name(&tool.name))
                 .collect::<Vec<_>>()
                 .join(",")
         ));
@@ -1055,9 +1055,9 @@ impl ProviderManager {
             "request:openai decision-stream endpoint={} model={} safe_tools={}",
             endpoint,
             request.model,
-            tools
+            provider_tool_contract_views(tools)
                 .iter()
-                .map(|tool| openai_safe_tool_name(tool.name))
+                .map(|tool| openai_safe_tool_name(&tool.name))
                 .collect::<Vec<_>>()
                 .join(",")
         ));
@@ -1865,13 +1865,21 @@ fn to_chat_role(role: &ProviderRole) -> &'static str {
 }
 
 fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
-    tools
+    let contract_views = if tools.len() == builtin_tool_contract_views().len()
+        || tools.len() == crate::agent::tools::builtin_tools().len()
+    {
+        builtin_tool_contract_views()
+    } else {
+        tools.iter().map(|tool| tool.contract_view()).collect()
+    };
+
+    contract_views
         .iter()
         .map(|tool| {
             json!({
                 "type": "function",
                 "function": {
-                    "name": openai_safe_tool_name(tool.name),
+                    "name": openai_safe_tool_name(&tool.name),
                     "description": tool.description,
                     "parameters": tool.input_schema.clone()
                 }
@@ -1881,7 +1889,15 @@ fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
 }
 
 fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
-    tools
+    let contract_views = if tools.len() == builtin_tool_contract_views().len()
+        || tools.len() == crate::agent::tools::builtin_tools().len()
+    {
+        builtin_tool_contract_views()
+    } else {
+        tools.iter().map(|tool| tool.contract_view()).collect()
+    };
+
+    contract_views
         .iter()
         .map(|tool| {
             json!({
@@ -1891,6 +1907,14 @@ fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn provider_tool_contract_views(tools: &[ToolDefinition]) -> Vec<crate::agent::tools::ToolDefinitionContractView> {
+    if tools.len() == crate::agent::tools::builtin_tools().len() {
+        builtin_tool_contract_views()
+    } else {
+        tools.iter().map(|tool| tool.contract_view()).collect()
+    }
 }
 
 fn first_openai_message<'a>(payload: &'a Value) -> Result<&'a Value, String> {
@@ -2955,7 +2979,15 @@ fn render_tool_definitions(tools: &[ToolDefinition]) -> String {
         return "none".to_string();
     }
 
-    tools
+    let contract_views = if tools.len() == builtin_tool_contract_views().len()
+        || tools.len() == crate::agent::tools::builtin_tools().len()
+    {
+        builtin_tool_contract_views()
+    } else {
+        tools.iter().map(|tool| tool.contract_view()).collect()
+    };
+
+    contract_views
         .iter()
         .enumerate()
         .map(|(index, tool)| {
@@ -3230,6 +3262,80 @@ mod tests {
             .volatile_input_text
             .contains("Actual volatile request"));
         assert_eq!(observation.tool_count, 1);
+    }
+
+    #[test]
+    fn openai_tools_payload_uses_product_tool_surface_for_builtin_tools() {
+        let payload = openai_tools_payload(&crate::agent::tools::builtin_tools());
+        let names = payload
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("function")
+                    .and_then(|value| value.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "Run".to_string(),
+                "Ask".to_string(),
+                "Read".to_string(),
+                "List".to_string(),
+                "Search".to_string(),
+                "Plan".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn anthropic_tools_payload_uses_product_tool_surface_for_builtin_tools() {
+        let payload = anthropic_tools_payload(&crate::agent::tools::builtin_tools());
+        let names = payload
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "Run".to_string(),
+                "Ask".to_string(),
+                "Read".to_string(),
+                "List".to_string(),
+                "Search".to_string(),
+                "Plan".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn render_tool_definitions_uses_product_tool_surface_for_builtin_tools() {
+        let rendered = render_tool_definitions(&crate::agent::tools::builtin_tools());
+
+        for tool_name in ["Run", "Ask", "Read", "List", "Search", "Plan"] {
+            assert!(
+                rendered.contains(&format!("] {}", tool_name)),
+                "missing tool heading for {tool_name}: {rendered}"
+            );
+        }
+
+        for legacy_name in [
+            "time_now",
+            "echo_input",
+            "workspace_list_files",
+            "workspace_gather_context",
+            "workspace_search_text",
+            "workspace_batch",
+        ] {
+            assert!(
+                !rendered.contains(&format!("] {}", legacy_name)),
+                "legacy tool heading leaked into rendered definitions: {legacy_name}"
+            );
+        }
     }
 
     #[test]

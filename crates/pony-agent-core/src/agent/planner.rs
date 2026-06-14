@@ -5,7 +5,7 @@ use crate::agent::graph::{
 };
 use crate::agent::provider::ProviderDecision;
 use crate::agent::session::TurnHistoryMessage;
-use crate::agent::tools::{ToolCall, ToolPlan, ToolPlanStep};
+use crate::agent::tools::{model_visible_tool_name, ToolCall, ToolPlan, ToolPlanStep};
 use serde_json::json;
 
 const MAX_LOCAL_BATCH_PATHS: usize = 6;
@@ -165,7 +165,8 @@ impl LocalTurnPlanner {
         explicit_path_count: usize,
     ) -> bool {
         let local_has_explicit_plan = local_tool_call.plan.is_some();
-        let local_is_multi_path = local_tool_call.name == "workspace_batch"
+        let local_is_multi_path = local_tool_call.name == "Plan"
+            || local_tool_call.name == "workspace_batch"
             || local_tool_call.arguments.get("paths").is_some();
         let provider_is_single_path = provider_tool_call.arguments.get("paths").is_none();
 
@@ -195,7 +196,7 @@ impl LocalTurnPlanner {
         if contains_any(&lowered, &["time", "时间", "几点", "timestamp"]) {
             return Some(ToolCall {
                 call_id: None,
-                name: "time_now".to_string(),
+                name: model_visible_tool_name("time_now").to_string(),
                 arguments: json!({}),
                 plan: None,
             });
@@ -207,7 +208,7 @@ impl LocalTurnPlanner {
         ) {
             return Some(ToolCall {
                 call_id: None,
-                name: "workspace_list_files".to_string(),
+                name: model_visible_tool_name("workspace_list_files").to_string(),
                 arguments: json!({
                     "path": referenced_path.unwrap_or_else(|| ".".to_string()),
                     "limit": 60,
@@ -223,7 +224,7 @@ impl LocalTurnPlanner {
                 if let Some(path) = referenced_path.clone() {
                     return Some(ToolCall {
                         call_id: None,
-                        name: "workspace_gather_context".to_string(),
+                        name: model_visible_tool_name("workspace_gather_context").to_string(),
                         arguments: json!({
                             "path": path,
                             "query": query,
@@ -236,7 +237,7 @@ impl LocalTurnPlanner {
 
                 return Some(ToolCall {
                     call_id: None,
-                    name: "workspace_search_text".to_string(),
+                    name: model_visible_tool_name("workspace_search_text").to_string(),
                     arguments: json!({
                         "query": query,
                         "path": ".",
@@ -268,7 +269,7 @@ impl LocalTurnPlanner {
                 if let Some(path) = referenced_path {
                     return Some(ToolCall {
                         call_id: None,
-                        name: "workspace_gather_context".to_string(),
+                        name: model_visible_tool_name("workspace_gather_context").to_string(),
                         arguments: json!({
                             "path": path,
                             "query": query,
@@ -281,7 +282,7 @@ impl LocalTurnPlanner {
 
                 return Some(ToolCall {
                     call_id: None,
-                    name: "workspace_search_text".to_string(),
+                    name: model_visible_tool_name("workspace_search_text").to_string(),
                     arguments: json!({
                         "query": query,
                         "path": ".",
@@ -317,7 +318,7 @@ impl LocalTurnPlanner {
             ) {
                 return Some(ToolCall {
                     call_id: None,
-                    name: "workspace_gather_context".to_string(),
+                    name: model_visible_tool_name("workspace_gather_context").to_string(),
                     arguments: json!({
                         "path": path,
                         "lineCount": 80,
@@ -329,7 +330,7 @@ impl LocalTurnPlanner {
 
             return Some(ToolCall {
                 call_id: None,
-                name: "workspace_gather_context".to_string(),
+                name: model_visible_tool_name("workspace_gather_context").to_string(),
                 arguments: json!({
                     "path": path,
                     "lineCount": 80,
@@ -389,7 +390,7 @@ impl LocalTurnPlanner {
                     arguments["query"] = json!(query);
                 }
                 json!({
-                    "name": "workspace_gather_context",
+                    "name": model_visible_tool_name("workspace_gather_context"),
                     "arguments": arguments,
                 })
             })
@@ -399,7 +400,7 @@ impl LocalTurnPlanner {
             .take(MAX_LOCAL_BATCH_PATHS)
             .enumerate()
             .map(|(index, path)| ToolPlanStep {
-                name: "workspace_gather_context".to_string(),
+                name: model_visible_tool_name("workspace_gather_context").to_string(),
                 arguments: json!({
                     "path": path,
                     "query": search_query.clone(),
@@ -412,7 +413,7 @@ impl LocalTurnPlanner {
 
         Some(ToolCall {
             call_id: None,
-            name: "workspace_batch".to_string(),
+            name: model_visible_tool_name("workspace_batch").to_string(),
             arguments: json!({
                 "parallel": true,
                 "continueOnError": true,
@@ -848,7 +849,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(call.name, "Read");
         assert_eq!(
             call.arguments
                 .get("path")
@@ -868,7 +869,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(call.name, "Read");
         assert_eq!(
             call.arguments
                 .get("path")
@@ -885,7 +886,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(call.name, "Read");
         assert_eq!(
             call.arguments
                 .get("query")
@@ -905,7 +906,7 @@ mod tests {
         let call = LocalTurnPlanner::infer_local_tool_call("ToolRouter 在哪里定义？", &[])
             .expect("tool call");
 
-        assert_eq!(call.name, "workspace_search_text");
+        assert_eq!(call.name, "Search");
         assert_eq!(
             call.arguments
                 .get("query")
@@ -922,7 +923,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(call.name, "Read");
         assert_eq!(
             call.arguments
                 .get("path")
@@ -945,7 +946,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_batch");
+        assert_eq!(call.name, "Plan");
         assert!(call.plan.is_some());
         assert!(call.arguments.get("toolPlan").is_none());
         let calls = call
@@ -956,7 +957,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|entry| {
             entry.get("name").and_then(serde_json::Value::as_str)
-                == Some("workspace_gather_context")
+                == Some("Read")
         }));
     }
 
@@ -968,7 +969,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_batch");
+        assert_eq!(call.name, "Plan");
         assert!(call.plan.is_some());
         assert!(call.arguments.get("toolPlan").is_none());
         let calls = call
@@ -994,7 +995,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_gather_context");
+        assert_eq!(call.name, "Read");
         assert_eq!(
             call.arguments
                 .get("path")
@@ -1017,7 +1018,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "workspace_batch");
+        assert_eq!(call.name, "Plan");
         let calls = call
             .arguments
             .get("calls")
@@ -1046,7 +1047,7 @@ mod tests {
             )
             .expect("selected tool call");
 
-        assert_eq!(call.name, "workspace_batch");
+        assert_eq!(call.name, "Plan");
         assert!(call.plan.is_some());
         assert!(call.arguments.get("calls").is_some());
     }

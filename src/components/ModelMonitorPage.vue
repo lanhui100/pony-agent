@@ -8,6 +8,7 @@ import type {
   ModelMonitorSessionDrilldownView,
   ModelMonitorSessionRow,
   ModelMonitorSummaryView,
+  ToolActivity,
   TraceTimelineEntry,
   TurnTraceRecord
 } from "@/types/runtime";
@@ -354,6 +355,36 @@ function hookResultSummary(record: HookTraceRecord) {
   return parts.join(" · ");
 }
 
+function permissionScopeLabel(activity: ToolActivity) {
+  return activity.capabilityInvocation?.permissionFacts?.permissionScope
+    || activity.capabilityInvocation?.permissionScope
+    || "--";
+}
+
+function approvalLabel(activity: ToolActivity) {
+  const facts = activity.capabilityInvocation?.permissionFacts;
+  const mode = facts?.approvalMode?.trim();
+  if (mode) {
+    return mode;
+  }
+
+  const requiresApproval = facts?.requiresApproval ?? activity.capabilityInvocation?.requiresApproval;
+  return requiresApproval ? "required" : "none";
+}
+
+function permissionSourceLabel(activity: ToolActivity) {
+  return activity.capabilityInvocation?.permissionFacts?.decisionSource
+    || activity.capabilityInvocation?.sourceKind
+    || "unknown";
+}
+
+function toolDisplayLabel(activity: ToolActivity) {
+  return activity.displayNameZh?.trim()
+    || activity.canonicalToolName?.trim()
+    || activity.capabilityInvocation?.capabilityId
+    || activity.name;
+}
+
 function toErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
@@ -603,7 +634,7 @@ onMounted(() => {
                     <div class="flex items-start justify-between gap-3">
                       <div>
                         <div class="text-sm font-medium text-white">
-                          {{ activity.capabilityInvocation?.capabilityId || activity.name }}
+                          {{ toolDisplayLabel(activity) }}
                         </div>
                         <div class="mt-1 text-[12px] text-stone-300">
                           {{ activity.capabilityInvocation?.sourceId || "unknown-source" }} ·
@@ -617,8 +648,8 @@ onMounted(() => {
                     </div>
                     <div class="mt-2 text-[12px] leading-6 text-stone-300">{{ activity.summary }}</div>
                     <div class="mt-2 text-[11px] text-stone-400">
-                      permission: {{ activity.capabilityInvocation?.permissionScope || "--" }} · approval:
-                      {{ activity.capabilityInvocation?.requiresApproval ? "required" : "no" }}
+                      permission: {{ permissionScopeLabel(activity) }} · approval:
+                      {{ approvalLabel(activity) }} · source: {{ permissionSourceLabel(activity) }}
                     </div>
                     <div
                       v-if="activity.capabilityInvocation?.skillId"

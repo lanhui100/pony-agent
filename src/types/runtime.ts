@@ -92,17 +92,41 @@ export type AttachmentMeta = AttachmentReference;
 export type ToolActivity = {
   id: string;
   name: string;
+  canonicalToolName?: string | null;
+  displayNameZh?: string | null;
   status: "planned" | "running" | "done" | "error";
   summary: string;
   argumentsText?: string | null;
   resultText?: string | null;
   durationSeconds?: number | null;
+  parentActivityId?: string | null;
+  artifacts?: Array<Record<string, unknown>> | null;
+  error?: Record<string, unknown> | null;
   capabilityInvocation?: CapabilityInvocationRecord | null;
+};
+
+export type ToolPermissionFacts = {
+  requiresApproval?: boolean | null;
+  permissionScope?: string | null;
+  hostMediated?: boolean | null;
+  permissionProfile?: string | null;
+  approvalMode?: string | null;
+  decisionSource?: string | null;
+};
+
+export type ToolDisplayMetadata = {
+  displayNameZh?: string | null;
 };
 
 export type AvailableTool = {
   name: string;
+  canonicalToolName: string;
+  executionPrimitive: string;
   description: string;
+  kind: string;
+  exposure: string;
+  displayMetadata: ToolDisplayMetadata;
+  permissionFacts: ToolPermissionFacts;
   inputSchema: {
     type?: string;
     properties?: Record<string, { type?: string; description?: string }>;
@@ -118,6 +142,7 @@ export type CapabilityInvocationMode = "direct_tool_call" | "read_only_fetch" | 
 export type CapabilityFailureKind =
   | "source_unavailable"
   | "permission_denied"
+  | "out_of_scope"
   | "malformed_response"
   | "invocation_failed"
   | "capability_not_found";
@@ -148,6 +173,7 @@ export type CapabilityInvocationRecord = {
   requiresApproval?: boolean | null;
   hostMediated?: boolean | null;
   permissionScope?: string | null;
+  permissionFacts?: ToolPermissionFacts | null;
   skillId?: string | null;
   skillSourceId?: string | null;
   composedCapabilityRefs?: string[] | null;
@@ -174,6 +200,8 @@ export type CapabilityView = {
   sourceKind: CapabilitySourceKind;
   kind: CapabilityKind;
   label: string;
+  canonicalToolName?: string | null;
+  displayNameZh?: string | null;
   description: string;
   invocationMode: CapabilityInvocationMode;
   inputSchemaSummary: string;
@@ -183,6 +211,7 @@ export type CapabilityView = {
   requiresApproval: boolean;
   hostMediated: boolean;
   permissionScope: string;
+  permissionFacts?: ToolPermissionFacts | null;
 };
 
 export type SkillSourceView = {

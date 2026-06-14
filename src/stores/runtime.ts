@@ -477,7 +477,16 @@ function cloneHookTraceRecords(hookTraceRecords?: HookTraceRecord[] | null): Hoo
 function cloneToolActivities(toolActivities?: ToolActivity[] | null) {
   return (toolActivities ?? []).map((tool) => ({
     ...tool,
-    capabilityInvocation: tool.capabilityInvocation ? { ...tool.capabilityInvocation } : null
+    artifacts: tool.artifacts ? tool.artifacts.map((artifact) => ({ ...artifact })) : null,
+    error: tool.error ? { ...tool.error } : null,
+    capabilityInvocation: tool.capabilityInvocation
+      ? {
+          ...tool.capabilityInvocation,
+          permissionFacts: tool.capabilityInvocation.permissionFacts
+            ? { ...tool.capabilityInvocation.permissionFacts }
+            : null
+        }
+      : null
   }));
 }
 
@@ -1813,8 +1822,19 @@ function shouldAcceptTurnEvent(
 
 const defaultAvailableTools: AvailableTool[] = [
   {
-    name: "time.now",
+    name: "Run",
+    canonicalToolName: "Run",
+    executionPrimitive: "time_now",
     description: "返回当前本机 UNIX 时间戳，适合最小时间查询与运行时校验。",
+    kind: "execute",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "运行" },
+    permissionFacts: {
+      requiresApproval: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
     inputSchema: {
       type: "object",
       properties: {},
@@ -1822,8 +1842,19 @@ const defaultAvailableTools: AvailableTool[] = [
     }
   },
   {
-    name: "echo.input",
+    name: "Ask",
+    canonicalToolName: "Ask",
+    executionPrimitive: "echo_input",
     description: "把传入的 text 原样返回，适合验证工具调用链路与参数透传。",
+    kind: "interactive",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "提问" },
+    permissionFacts: {
+      requiresApproval: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -1837,23 +1868,21 @@ const defaultAvailableTools: AvailableTool[] = [
     }
   },
   {
-    name: "workspace.read_file",
-    description: "读取当前工作区内的文本文件全文预览，需要传入相对路径。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: {
-          type: "string",
-          description: "当前工作区内的相对文件路径"
-        }
-      },
-      required: ["path"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "workspace.read_file_segment",
-    description: "按行读取当前工作区文件片段，更适合大文件局部排查与定点观察。",
+    name: "Read",
+    canonicalToolName: "Read",
+    executionPrimitive: "workspace_gather_context",
+    description: "围绕一个路径自动聚合上下文，适合默认读取文件、目录和局部线索的首选入口。",
+    kind: "read",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "读取" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -1861,13 +1890,17 @@ const defaultAvailableTools: AvailableTool[] = [
           type: "string",
           description: "当前工作区内的相对文件路径"
         },
-        startLine: {
+        query: {
+          type: "string",
+          description: "可选查询词，用于在聚合上下文时补充相关搜索结果"
+        },
+        limit: {
           type: "integer",
-          description: "从第几行开始读取，最小值为 1"
+          description: "最多聚合多少个路径，默认使用运行时内置上限"
         },
         lineCount: {
           type: "integer",
-          description: "读取多少行，默认 40"
+          description: "读取文件片段时的目标行数"
         }
       },
       required: ["path"],
@@ -1875,8 +1908,57 @@ const defaultAvailableTools: AvailableTool[] = [
     }
   },
   {
-    name: "workspace.list_files",
+    name: "Search",
+    canonicalToolName: "Search",
+    executionPrimitive: "workspace_search_text",
+    description: "在当前工作区内递归搜索文本内容，返回命中路径、行号和预览片段。",
+    kind: "search",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "搜索" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "要搜索的关键字或文本片段"
+        },
+        path: {
+          type: "string",
+          description: "可选相对路径，用于缩小搜索范围"
+        },
+        limit: {
+          type: "integer",
+          description: "最多返回多少条命中结果"
+        }
+      },
+      required: ["query"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "List",
+    canonicalToolName: "List",
+    executionPrimitive: "workspace_list_files",
     description: "列出当前工作区目录中的文件与子目录，可指定相对路径和返回条数。",
+    kind: "read",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "列表" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -1889,6 +1971,42 @@ const defaultAvailableTools: AvailableTool[] = [
           description: "最多返回多少个条目，默认 40"
         }
       },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Plan",
+    canonicalToolName: "Plan",
+    executionPrimitive: "workspace_batch",
+    description: "批量执行多个子工具调用，可并发收集上下文，适合结构化计划和复合探索。",
+    kind: "composite",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "计划" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        calls: {
+          type: "array",
+          description: "待执行的子调用数组"
+        },
+        parallel: {
+          type: "boolean",
+          description: "是否并发执行子调用"
+        },
+        continueOnError: {
+          type: "boolean",
+          description: "子调用失败后是否继续执行剩余步骤"
+        }
+      },
+      required: ["calls"],
       additionalProperties: false
     }
   }
@@ -1932,20 +2050,23 @@ function canonicalizeBuiltinCapabilityName(toolName: string) {
 
 function createCapabilities() {
   return defaultAvailableTools.map((tool): CapabilityView => ({
-    capabilityId: `builtin:${canonicalizeBuiltinCapabilityName(tool.name)}`,
+    capabilityId: `builtin:${canonicalizeBuiltinCapabilityName(tool.executionPrimitive)}`,
     sourceId: "builtin-tools",
     sourceKind: "builtin",
     kind: "tool",
-    label: canonicalizeBuiltinCapabilityName(tool.name),
+    label: canonicalizeBuiltinCapabilityName(tool.executionPrimitive),
+    canonicalToolName: tool.canonicalToolName,
+    displayNameZh: tool.displayMetadata.displayNameZh ?? null,
     description: tool.description,
     invocationMode: "direct_tool_call",
     inputSchemaSummary: tool.inputSchema.type ?? "object",
     safetyClass: "host_tool",
     visibility: "default",
     observabilityTags: ["builtin", "tool"],
-    requiresApproval: false,
-    hostMediated: true,
-    permissionScope: "workspace"
+    requiresApproval: tool.permissionFacts.requiresApproval ?? false,
+    hostMediated: tool.permissionFacts.hostMediated ?? false,
+    permissionScope: tool.permissionFacts.permissionScope ?? "--",
+    permissionFacts: { ...tool.permissionFacts }
   }));
 }
 
@@ -4751,84 +4872,86 @@ export const useRuntimeStore = defineStore("runtime", {
         const failedRunId = this.activeRunId;
         const failedNodeId = this.visibleNodeId;
 
-        // Yield to browser
-        window.setTimeout(() => {
-          // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
-          this.phase = resolveRuntimePhaseFromEvent(payload, "failed");
-          this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
-          this.traceSteps = payload.traceSteps ?? this.traceSteps;
-          this.toolActivities = terminalToolActivities;
-          this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
-          this.providerName = payload.providerName ?? this.providerName;
-          this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
-          this.providerModel = payload.providerModel ?? this.providerModel;
-          this.providerSource = payload.providerSource ?? this.providerSource;
-          this.providerMode = payload.providerMode ?? this.providerMode;
-          this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
-          this.inputTokens = payload.inputTokens ?? this.inputTokens;
-          this.outputTokens = payload.outputTokens ?? this.outputTokens;
-          this.totalTokens = payload.totalTokens ?? this.totalTokens;
-          this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-
-          const traceTimeline = resolveEventTraceTimeline(payload, () =>
-            buildFallbackRuntimeTraceTimeline({
-              turnId: payload.turnId,
-              eventType: payload.eventType,
-              messages: this.messages,
-              phase: "failed",
-              assistantMessage,
-              toolActivities: terminalToolActivities,
-              providerPatch: {
-                providerName: payload.providerName ?? this.providerName,
-                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-                providerModel: payload.providerModel ?? this.providerModel,
-                providerSource: payload.providerSource ?? this.providerSource,
-                providerMode: payload.providerMode ?? this.providerMode
-              },
-              terminalState: "error",
-              fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-              error: payload.error ?? DEFAULT_FAILED_TURN_ERROR,
-              inputTokens: payload.inputTokens ?? this.inputTokens,
-              cacheHitInputTokens,
-              reasoningTokens,
-              outputTokens: payload.outputTokens ?? this.outputTokens,
-              totalTokens: payload.totalTokens ?? this.totalTokens,
-              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-              turnDurationMs: payload.turnDurationMs ?? null
-            })
-          );
-          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
-          this.syncToolMessages(payload.turnId, payload.toolActivities);
-          this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-            eventId: payload.eventId ?? null,
-            eventType: payload.eventType ?? null,
-            eventVersion: payload.eventVersion ?? null,
-            sequence: payload.sequence ?? null,
-            emittedAtMs: payload.emittedAtMs ?? null,
+        // Keep terminal UI state consistent even before deferred trace work runs.
+        this.phase = resolveRuntimePhaseFromEvent(payload, "failed");
+        this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
+        this.traceSteps = payload.traceSteps ?? this.traceSteps;
+        this.toolActivities = terminalToolActivities;
+        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+        this.providerName = payload.providerName ?? this.providerName;
+        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+        this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerSource = payload.providerSource ?? this.providerSource;
+        this.providerMode = payload.providerMode ?? this.providerMode;
+        this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        this.inputTokens = payload.inputTokens ?? this.inputTokens;
+        this.outputTokens = payload.outputTokens ?? this.outputTokens;
+        this.totalTokens = payload.totalTokens ?? this.totalTokens;
+        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+        this.isSubmitting = false;
+        this.activeTurnId = null;
+        this.activeRunId = null;
+        const failedTraceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            eventType: payload.eventType,
+            messages: this.messages,
             phase: "failed",
-            traceSteps: payload.traceSteps ?? this.traceSteps,
+            assistantMessage,
             toolActivities: terminalToolActivities,
-            providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
-            providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-            providerName: payload.providerName ?? this.providerName,
-            providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-            providerModel: payload.providerModel ?? this.providerModel,
-            providerSource: payload.providerSource ?? this.providerSource,
-            providerMode: payload.providerMode ?? this.providerMode,
-            buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
-            hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
+            providerPatch: {
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              providerSource: payload.providerSource ?? this.providerSource,
+              providerMode: payload.providerMode ?? this.providerMode
+            },
+            terminalState: "error",
             fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+            error: payload.error ?? DEFAULT_FAILED_TURN_ERROR,
             inputTokens: payload.inputTokens ?? this.inputTokens,
+            cacheHitInputTokens,
+            reasoningTokens,
             outputTokens: payload.outputTokens ?? this.outputTokens,
             totalTokens: payload.totalTokens ?? this.totalTokens,
             firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-            ...cacheHitInputTokenPatch,
-            ...reasoningTokenPatch,
-            ...turnDurationPatch,
-            error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
-          });
-          this.isSubmitting = false;
-          this.activeTurnId = null;
+            turnDurationMs: payload.turnDurationMs ?? null
+          })
+        );
+        this.commitTurnTraceTimeline(payload.turnId, failedTraceTimeline, {
+          eventId: payload.eventId ?? null,
+          eventType: payload.eventType ?? null,
+          eventVersion: payload.eventVersion ?? null,
+          sequence: payload.sequence ?? null,
+          emittedAtMs: payload.emittedAtMs ?? null,
+          phase: "failed",
+          traceSteps: payload.traceSteps ?? this.traceSteps,
+          toolActivities: terminalToolActivities,
+          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
+          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+          providerName: payload.providerName ?? this.providerName,
+          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+          providerModel: payload.providerModel ?? this.providerModel,
+          providerSource: payload.providerSource ?? this.providerSource,
+          providerMode: payload.providerMode ?? this.providerMode,
+          buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
+          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
+          fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+          inputTokens: payload.inputTokens ?? this.inputTokens,
+          outputTokens: payload.outputTokens ?? this.outputTokens,
+          totalTokens: payload.totalTokens ?? this.totalTokens,
+          firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+          ...cacheHitInputTokenPatch,
+          ...reasoningTokenPatch,
+          ...turnDurationPatch,
+          error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
+        }, false);
+
+        // Yield to browser
+        window.setTimeout(() => {
+          // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
+          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+          this.syncToolMessages(payload.turnId, payload.toolActivities, false);
 
           // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
           runLowPriorityTurnWork(() => {
@@ -4890,76 +5013,78 @@ export const useRuntimeStore = defineStore("runtime", {
         const cancelledRunId = this.activeRunId;
         const cancelledNodeId = this.visibleNodeId;
 
+        // Keep terminal UI state consistent even before deferred trace work runs.
+        this.phase = resolveRuntimePhaseFromEvent(payload, "cancelled");
+        this.error = null;
+        this.traceSteps = cancelledTraceSteps;
+        this.toolActivities = terminalToolActivities;
+        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+        this.providerName = payload.providerName ?? this.providerName;
+        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+        this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerSource = payload.providerSource ?? this.providerSource;
+        this.providerMode = payload.providerMode ?? this.providerMode;
+        this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        this.isSubmitting = false;
+        this.activeTurnId = null;
+        this.activeRunId = null;
+        const cancelledTraceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            eventType: payload.eventType,
+            messages: this.messages,
+            phase: "cancelled",
+            assistantMessage,
+            toolActivities: terminalToolActivities,
+            providerPatch: {
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              providerSource: payload.providerSource ?? this.providerSource,
+              providerMode: payload.providerMode ?? this.providerMode
+            },
+            terminalState: "cancelled",
+            fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+            error: payload.error ?? "stopped_by_user",
+            inputTokens: payload.inputTokens ?? null,
+            cacheHitInputTokens: cancelledCacheHitInputTokens,
+            reasoningTokens: cancelledReasoningTokens,
+            outputTokens: payload.outputTokens ?? null,
+            totalTokens: payload.totalTokens ?? null,
+            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+            turnDurationMs: payload.turnDurationMs ?? null
+          })
+        );
+        this.commitTurnTraceTimeline(payload.turnId, cancelledTraceTimeline, {
+          eventId: payload.eventId ?? null,
+          eventType: payload.eventType ?? null,
+          eventVersion: payload.eventVersion ?? null,
+          sequence: payload.sequence ?? null,
+          emittedAtMs: payload.emittedAtMs ?? null,
+          phase: "cancelled",
+          traceSteps: cancelledTraceSteps,
+          toolActivities: terminalToolActivities,
+          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
+          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+          providerName: payload.providerName ?? this.providerName,
+          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+          providerModel: payload.providerModel ?? this.providerModel,
+          providerSource: payload.providerSource ?? this.providerSource,
+          providerMode: payload.providerMode ?? this.providerMode,
+          buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
+          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
+          fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+          ...cacheHitInputTokenPatch,
+          ...reasoningTokenPatch,
+          ...turnDurationPatch,
+          error: payload.error ?? "stopped_by_user"
+        }, false);
+
         // Yield to browser
         window.setTimeout(() => {
           // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
-          this.phase = resolveRuntimePhaseFromEvent(payload, "cancelled");
-          this.error = null;
-          this.traceSteps = cancelledTraceSteps;
-          this.toolActivities = terminalToolActivities;
-          this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
-          this.providerName = payload.providerName ?? this.providerName;
-          this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
-          this.providerModel = payload.providerModel ?? this.providerModel;
-          this.providerSource = payload.providerSource ?? this.providerSource;
-          this.providerMode = payload.providerMode ?? this.providerMode;
-          this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
-
-          const traceTimeline = resolveEventTraceTimeline(payload, () =>
-            buildFallbackRuntimeTraceTimeline({
-              turnId: payload.turnId,
-              eventType: payload.eventType,
-              messages: this.messages,
-              phase: "cancelled",
-              assistantMessage,
-              toolActivities: terminalToolActivities,
-              providerPatch: {
-                providerName: payload.providerName ?? this.providerName,
-                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-                providerModel: payload.providerModel ?? this.providerModel,
-                providerSource: payload.providerSource ?? this.providerSource,
-                providerMode: payload.providerMode ?? this.providerMode
-              },
-              terminalState: "cancelled",
-              fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-              error: payload.error ?? "stopped_by_user",
-              inputTokens: payload.inputTokens ?? null,
-              cacheHitInputTokens: cancelledCacheHitInputTokens,
-              reasoningTokens: cancelledReasoningTokens,
-              outputTokens: payload.outputTokens ?? null,
-              totalTokens: payload.totalTokens ?? null,
-              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
-              turnDurationMs: payload.turnDurationMs ?? null
-            })
-          );
-          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens);
-          this.syncToolMessages(payload.turnId, payload.toolActivities);
-          this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
-            eventId: payload.eventId ?? null,
-            eventType: payload.eventType ?? null,
-            eventVersion: payload.eventVersion ?? null,
-            sequence: payload.sequence ?? null,
-            emittedAtMs: payload.emittedAtMs ?? null,
-            phase: "cancelled",
-            traceSteps: cancelledTraceSteps,
-            toolActivities: terminalToolActivities,
-            providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
-            providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-            providerName: payload.providerName ?? this.providerName,
-            providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-            providerModel: payload.providerModel ?? this.providerModel,
-            providerSource: payload.providerSource ?? this.providerSource,
-            providerMode: payload.providerMode ?? this.providerMode,
-            buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
-            hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-            fallbackReason: payload.fallbackReason ?? this.fallbackReason,
-            ...cacheHitInputTokenPatch,
-            ...reasoningTokenPatch,
-            ...turnDurationPatch,
-            error: payload.error ?? "stopped_by_user"
-          });
-          this.isSubmitting = false;
-          this.activeTurnId = null;
+          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+          this.syncToolMessages(payload.turnId, payload.toolActivities, false);
 
           // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
           runLowPriorityTurnWork(() => {

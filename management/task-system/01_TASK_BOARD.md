@@ -20,16 +20,26 @@
 
 ## Ready
 
+- `PA-045` 工具系统协议、暴露策略与结果合同
+  说明：收口模型可见工具与内部执行原语的分层、统一 `ToolDefinition / ToolCall / ToolResult / ToolFailureKind` 合同、工具分类体系，以及 `model-visible / internal / deferred` 暴露策略；这是后续 workspace、权限、首批工具面与前端呈现的母卡。
 - `PA-044` agent core 多端基础设施边界加固
   说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
 
 ## In Progress
 
-- 暂无
+- `PA-046` agent workspace 合同与路径边界
+  说明：workspace、canonicalize、display path、path repair 与 host seam 的正式合同已完成 spec、独立审核、采纳优化与 strict validate，当前进入实现前承接阶段。
+- `PA-047` 工具权限事实、审批语义与失败归一化
+  说明：统一 permission envelope、结构化失败语义与分层交换面已完成 spec、独立审核、采纳优化与 strict validate，当前进入实现前承接阶段。
+- `PA-048` 首批基础工具面与旧工具映射收口
+  说明：首批 8 个产品级工具、三层命名模型、兼容别名生命周期与 `Plan/Ask` 合同已完成 spec、独立审核、采纳优化与 strict validate，当前进入实现前承接阶段。
+- `PA-049` 工具观测读面、前端呈现与迁移验收
+  说明：统一展示字段、状态语义、`display_name_zh`、`artifacts/child_results` 容器与迁移兼容要求已完成 spec、独立审核、采纳优化与 strict validate，当前进入实现前承接阶段。
 
 ## Review
 
-- 暂无
+- `PA-045` 工具系统协议、暴露策略与结果合同
+  说明：母合同已完成 spec、独立审核、采纳优化与 strict validate，当前作为 `PA-046 ~ PA-049` 的实现前母合同保留在 review 阶段。
 
 ## Blocked
 

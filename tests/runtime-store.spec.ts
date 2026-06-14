@@ -981,11 +981,36 @@ describe("runtime session resilience", () => {
               {
                 id: "tool-read-entry",
                 name: "workspace.read_file",
+                canonicalToolName: "Read",
+                displayNameZh: "读取",
                 status: "done",
                 summary: "已读取 src/main.ts",
                 argumentsText: "{\"path\":\"src/main.ts\"}",
                 resultText: "import { createApp } from 'vue';",
-                durationSeconds: 2
+                durationSeconds: 2,
+                parentActivityId: null,
+                artifacts: [{ kind: "snippet", path: "src/main.ts" }],
+                error: null,
+                capabilityInvocation: {
+                  toolName: "workspace.read_file",
+                  capabilityId: "builtin:workspace_read_file",
+                  sourceId: "builtin-tools",
+                  sourceKind: "builtin",
+                  capabilityKind: "tool",
+                  invocationMode: "direct_tool_call",
+                  failureKind: null,
+                  requiresApproval: false,
+                  hostMediated: false,
+                  permissionScope: "workspace.read",
+                  permissionFacts: {
+                    requiresApproval: false,
+                    permissionScope: "workspace.read",
+                    hostMediated: false,
+                    permissionProfile: "builtin",
+                    approvalMode: "none",
+                    decisionSource: "runtime"
+                  }
+                }
               }
             ],
             traceTimeline: [
@@ -1015,6 +1040,19 @@ describe("runtime session resilience", () => {
     expect(store.messages[2]?.toolName).toBe("workspace.read_file");
     expect(store.messages[2]?.detail).toContain("参数");
     expect(store.messages[2]?.detail).toContain("结果");
+    expect(store.turnTraceHistory[0]?.toolActivities[0]?.canonicalToolName).toBe("Read");
+    expect(store.turnTraceHistory[0]?.toolActivities[0]?.displayNameZh).toBe("读取");
+    expect(store.turnTraceHistory[0]?.toolActivities[0]?.artifacts).toEqual([
+      { kind: "snippet", path: "src/main.ts" }
+    ]);
+    expect(store.turnTraceHistory[0]?.toolActivities[0]?.capabilityInvocation?.permissionFacts).toEqual({
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      permissionProfile: "builtin",
+      approvalMode: "none",
+      decisionSource: "runtime"
+    });
   });
 
   it("prefers backend snapshot trace history over stale persisted runtime trace cache", () => {
@@ -1454,8 +1492,33 @@ describe("runtime session resilience", () => {
               {
                 id: "tool-1",
                 name: "workspace.read_file",
+                canonicalToolName: "Read",
+                displayNameZh: "读取",
                 status: "running",
-                summary: "Reading workspace"
+                summary: "Reading workspace",
+                parentActivityId: null,
+                artifacts: [{ kind: "pending", path: "README.md" }],
+                error: null,
+                capabilityInvocation: {
+                  toolName: "workspace.read_file",
+                  capabilityId: "builtin:workspace_read_file",
+                  sourceId: "builtin-tools",
+                  sourceKind: "builtin",
+                  capabilityKind: "tool",
+                  invocationMode: "direct_tool_call",
+                  failureKind: null,
+                  requiresApproval: false,
+                  hostMediated: false,
+                  permissionScope: "workspace.read",
+                  permissionFacts: {
+                    requiresApproval: false,
+                    permissionScope: "workspace.read",
+                    hostMediated: false,
+                    permissionProfile: "builtin",
+                    approvalMode: "none",
+                    decisionSource: "runtime"
+                  }
+                }
               }
             ],
             updatedAtMs: 2200
@@ -1488,6 +1551,10 @@ describe("runtime session resilience", () => {
     expect(store.providerModel).toBe("gpt-5");
     expect(store.turnTraceHistory[0]?.turnId).toBe("turn-running");
     expect(store.turnTraceHistory[0]?.phase).toBe("calling_tool");
+    expect(store.toolActivities[0]?.canonicalToolName).toBe("Read");
+    expect(store.toolActivities[0]?.displayNameZh).toBe("读取");
+    expect(store.toolActivities[0]?.capabilityInvocation?.permissionFacts?.permissionScope).toBe("workspace.read");
+    expect(store.turnTraceHistory[0]?.toolActivities[0]?.artifacts).toEqual([{ kind: "pending", path: "README.md" }]);
 
     await store.stopTurn();
 
@@ -1931,7 +1998,29 @@ describe("runtime session resilience", () => {
     const source = await store.inspectCapabilitySource("builtin-tools");
 
     expect(store.capabilitySources.map((item) => item.sourceId)).toEqual(["builtin-tools"]);
-    expect(store.capabilities.some((item) => item.capabilityId === "builtin:time_now")).toBe(true);
+    expect(store.capabilities.map((item) => item.capabilityId)).toEqual([
+      "builtin:time_now",
+      "builtin:echo_input",
+      "builtin:workspace_gather_context",
+      "builtin:workspace_search_text",
+      "builtin:workspace_list_files",
+      "builtin:workspace_batch"
+    ]);
+    expect(store.capabilities.find((item) => item.capabilityId === "builtin:workspace_gather_context")).toMatchObject({
+      canonicalToolName: "Read",
+      displayNameZh: "读取",
+      requiresApproval: false,
+      hostMediated: false,
+      permissionScope: "workspace.read",
+      permissionFacts: {
+        requiresApproval: false,
+        permissionScope: "workspace.read",
+        hostMediated: false,
+        approvalMode: "none",
+        decisionSource: "runtime",
+        permissionProfile: "builtin"
+      }
+    });
     expect(capability?.capabilityId).toBe("builtin:time_now");
     expect(source?.sourceId).toBe("builtin-tools");
   });
@@ -4936,6 +5025,70 @@ describe("runtime session resilience", () => {
       "cancelled",
       "cancelled"
     ]);
+
+    nowSpy.mockRestore();
+  });
+
+  it("ignores stale failed and cancelled terminal events after a newer turn is active", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9090);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stale-old" },
+          turnId: "9090"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "stale-terminal-session",
+      draftMessage: "first request",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+    store.$patch({
+      activeTurnId: "newer-turn",
+      activeRunId: "newer-run",
+      isSubmitting: true,
+      phase: "calling_model"
+    });
+
+    eventHandlers.get("turn:failed")?.({
+      payload: {
+        turnId: "9090",
+        text: "old failed event",
+        error: "old failure"
+      }
+    });
+    eventHandlers.get("turn:cancelled")?.({
+      payload: {
+        turnId: "9090",
+        text: "old cancelled event",
+        error: "old cancelled"
+      }
+    });
+
+    expect(store.activeTurnId).toBe("newer-turn");
+    expect(store.activeRunId).toBe("newer-run");
+    expect(store.isSubmitting).toBe(true);
+    expect(store.phase).toBe("calling_model");
+    expect(store.error).toBeNull();
 
     nowSpy.mockRestore();
   });

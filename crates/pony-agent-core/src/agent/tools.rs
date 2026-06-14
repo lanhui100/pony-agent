@@ -29,6 +29,150 @@ const DEFAULT_SEGMENT_LINES: usize = 80;
 const DEFAULT_LIST_LIMIT: usize = 40;
 const SUMMARY_ITEM_LIMIT: usize = 3;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Read,
+    Search,
+    Write,
+    Execute,
+    Plan,
+    Interactive,
+    Composite,
+    External,
+}
+
+impl ToolKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Search => "search",
+            Self::Write => "write",
+            Self::Execute => "execute",
+            Self::Plan => "plan",
+            Self::Interactive => "interactive",
+            Self::Composite => "composite",
+            Self::External => "external",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExposure {
+    ModelVisible,
+    Internal,
+    Deferred,
+}
+
+impl ToolExposure {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ModelVisible => "model_visible",
+            Self::Internal => "internal",
+            Self::Deferred => "deferred",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDisplayMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name_zh: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_approval: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_mediated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_source: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolError {
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceContext {
+    pub root: PathBuf,
+    pub display_name: String,
+    pub writable: bool,
+    pub default_shell_cwd: PathBuf,
+    pub policy: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDefinitionContractView {
+    pub name: String,
+    pub canonical_tool_name: String,
+    pub execution_primitive: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub kind: String,
+    pub exposure: String,
+    pub display_metadata: ToolDisplayMetadata,
+    pub permission_facts: ToolPermissionFacts,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallContractView {
+    pub call_id: Option<String>,
+    pub name: String,
+    pub canonical_tool_name: String,
+    pub execution_primitive: String,
+    pub arguments: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ToolPlan>,
+    pub kind: String,
+    pub exposure: String,
+    pub display_metadata: ToolDisplayMetadata,
+    pub permission_facts: ToolPermissionFacts,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultContractView {
+    pub tool_name: String,
+    pub canonical_tool_name: String,
+    pub execution_primitive: String,
+    pub status: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolError>,
+    #[serde(default)]
+    pub child_results: Vec<Value>,
+    #[serde(default)]
+    pub artifacts: Vec<Value>,
+    pub duration_ms: u64,
+    pub display_metadata: ToolDisplayMetadata,
+    pub permission_facts: ToolPermissionFacts,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {
@@ -91,6 +235,21 @@ impl ToolRouter {
 
     pub fn with_workspace_root(workspace_root: PathBuf) -> Self {
         Self { workspace_root }
+    }
+
+    pub fn workspace_context(&self) -> WorkspaceContext {
+        WorkspaceContext {
+            root: self.workspace_root.clone(),
+            display_name: self
+                .workspace_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("workspace")
+                .to_string(),
+            writable: true,
+            default_shell_cwd: self.workspace_root.clone(),
+            policy: "workspace_root".to_string(),
+        }
     }
 
     pub fn execute(&self, call: &ToolCall) -> ToolResult {
@@ -1235,12 +1394,18 @@ impl ToolRouter {
             })
             .collect::<Vec<_>>();
 
-        let runtime_status = if success_count > 0 || partial_count > 0 || error_count == 0 {
-            "ok"
-        } else {
+        let runtime_status = if aggregate_status == "error" {
             "error"
+        } else {
+            "ok"
         };
         let summary = build_nested_results_summary(tool_name, &results, aggregate_status);
+        let top_level_error = summary.get("firstError").and_then(|first_error| {
+            first_error
+                .get("error")
+                .cloned()
+                .filter(|value| !value.is_null())
+        });
 
         ToolResult {
             tool_name: tool_name.to_string(),
@@ -1257,6 +1422,7 @@ impl ToolRouter {
                 "meta": meta,
                 "plan": plan,
                 "summary": summary,
+                "error": top_level_error,
                 "results": results,
             })),
             duration_ms: 0,
@@ -1461,6 +1627,74 @@ impl ToolExecutor for ToolRouter {
     }
 }
 
+impl ToolDefinition {
+    pub fn contract_view(&self) -> ToolDefinitionContractView {
+        ToolDefinitionContractView {
+            name: model_visible_tool_name(self.name).to_string(),
+            canonical_tool_name: product_canonical_tool_name(self.name).to_string(),
+            execution_primitive: canonical_tool_name(self.name)
+                .unwrap_or(self.name)
+                .to_string(),
+            description: self.description.to_string(),
+            input_schema: self.input_schema.clone(),
+            kind: tool_kind_for_name(self.name).as_str().to_string(),
+            exposure: tool_exposure_for_name(self.name).as_str().to_string(),
+            display_metadata: tool_display_metadata_for_name(self.name),
+            permission_facts: default_permission_facts_for_name(self.name),
+        }
+    }
+}
+
+impl ToolCall {
+    pub fn contract_view(&self) -> ToolCallContractView {
+        ToolCallContractView {
+            call_id: self.call_id.clone(),
+            name: model_visible_tool_name(&self.name).to_string(),
+            canonical_tool_name: product_canonical_tool_name(&self.name).to_string(),
+            execution_primitive: canonical_tool_name(&self.name)
+                .unwrap_or(self.name.as_str())
+                .to_string(),
+            arguments: self.arguments.clone(),
+            plan: self.plan.clone(),
+            kind: tool_kind_for_name(&self.name).as_str().to_string(),
+            exposure: tool_exposure_for_name(&self.name).as_str().to_string(),
+            display_metadata: tool_display_metadata_for_name(&self.name),
+            permission_facts: default_permission_facts_for_name(&self.name),
+        }
+    }
+}
+
+impl ToolResult {
+    pub fn contract_view(&self) -> ToolResultContractView {
+        let parsed = parse_tool_output(&self.output);
+        let summary = tool_result_summary_text(self, &parsed);
+        ToolResultContractView {
+            tool_name: model_visible_tool_name(&self.tool_name).to_string(),
+            canonical_tool_name: product_canonical_tool_name(&self.tool_name).to_string(),
+            execution_primitive: canonical_tool_name(&self.tool_name)
+                .unwrap_or(self.tool_name.as_str())
+                .to_string(),
+            status: self.status.clone(),
+            summary,
+            data: parsed
+                .is_object()
+                .then_some(parsed.clone())
+                .or_else(|| Some(Value::String(self.output.clone()))),
+            error: tool_error_from_output(&self.status, &parsed),
+            child_results: parsed
+                .get("results")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            artifacts: extract_tool_artifacts(&parsed),
+            duration_ms: self.duration_ms,
+            display_metadata: tool_display_metadata_for_name(&self.tool_name),
+            permission_facts: permission_facts_from_output(&parsed)
+                .unwrap_or_else(|| default_permission_facts_for_name(&self.tool_name)),
+        }
+    }
+}
+
 pub fn builtin_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -1656,8 +1890,82 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
     ]
 }
 
-fn canonical_tool_name(name: &str) -> Option<&'static str> {
+fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
+    match view.execution_primitive.as_str() {
+        TOOL_TIME_NOW => 100,
+        TOOL_ECHO_INPUT => 100,
+        TOOL_WORKSPACE_LIST_FILES => 100,
+        TOOL_WORKSPACE_SEARCH_TEXT => 100,
+        TOOL_WORKSPACE_BATCH => 100,
+        TOOL_WORKSPACE_GATHER_CONTEXT => 100,
+        TOOL_WORKSPACE_READ_FILE => 40,
+        TOOL_WORKSPACE_READ_FILE_SEGMENT => 30,
+        TOOL_WORKSPACE_PATH_INFO => 20,
+        _ => 50,
+    }
+}
+
+pub fn builtin_tool_contract_views() -> Vec<ToolDefinitionContractView> {
+    let mut ordered_names: Vec<String> = Vec::new();
+    let mut deduped: std::collections::HashMap<String, ToolDefinitionContractView> =
+        std::collections::HashMap::new();
+
+    for tool in builtin_tools() {
+        let contract = tool.contract_view();
+        let key = contract.name.clone();
+        if let Some(existing) = deduped.get(&key) {
+            if contract_priority(&contract) > contract_priority(existing) {
+                deduped.insert(key, contract);
+            }
+            continue;
+        }
+
+        ordered_names.push(key.clone());
+        deduped.insert(key, contract);
+    }
+
+    ordered_names
+        .into_iter()
+        .filter_map(|name| deduped.remove(&name))
+        .collect()
+}
+
+#[cfg(test)]
+mod contract_view_tests {
+    use super::builtin_tool_contract_views;
+
+    #[test]
+    fn builtin_tool_contract_views_deduplicate_to_model_surface() {
+        let views = builtin_tool_contract_views();
+        let names = views.iter().map(|view| view.name.as_str()).collect::<Vec<_>>();
+        let primitives = views
+            .iter()
+            .map(|view| view.execution_primitive.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["Run", "Ask", "Read", "List", "Search", "Plan"]);
+        assert_eq!(
+            primitives,
+            vec![
+                "time_now",
+                "echo_input",
+                "workspace_gather_context",
+                "workspace_list_files",
+                "workspace_search_text",
+                "workspace_batch"
+            ]
+        );
+    }
+}
+
+pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
     match name {
+        "Run" => Some(TOOL_TIME_NOW),
+        "Ask" => Some(TOOL_ECHO_INPUT),
+        "List" => Some(TOOL_WORKSPACE_LIST_FILES),
+        "Read" => Some(TOOL_WORKSPACE_GATHER_CONTEXT),
+        "Search" => Some(TOOL_WORKSPACE_SEARCH_TEXT),
+        "Plan" => Some(TOOL_WORKSPACE_BATCH),
         TOOL_TIME_NOW | "time.now" => Some(TOOL_TIME_NOW),
         TOOL_ECHO_INPUT | "echo.input" => Some(TOOL_ECHO_INPUT),
         TOOL_WORKSPACE_LIST_FILES | "workspace.list_files" => Some(TOOL_WORKSPACE_LIST_FILES),
@@ -1672,6 +1980,91 @@ fn canonical_tool_name(name: &str) -> Option<&'static str> {
             Some(TOOL_WORKSPACE_GATHER_CONTEXT)
         }
         _ => None,
+    }
+}
+
+pub fn model_visible_tool_name(name: &str) -> &'static str {
+    match canonical_tool_name(name).unwrap_or(name) {
+        TOOL_TIME_NOW => "Run",
+        TOOL_ECHO_INPUT => "Ask",
+        TOOL_WORKSPACE_LIST_FILES => "List",
+        TOOL_WORKSPACE_READ_FILE | TOOL_WORKSPACE_READ_FILE_SEGMENT => "Read",
+        TOOL_WORKSPACE_PATH_INFO => "List",
+        TOOL_WORKSPACE_SEARCH_TEXT => "Search",
+        TOOL_WORKSPACE_BATCH => "Plan",
+        TOOL_WORKSPACE_GATHER_CONTEXT => "Read",
+        _ => "Run",
+    }
+}
+
+pub fn product_canonical_tool_name(name: &str) -> &'static str {
+    model_visible_tool_name(name)
+}
+
+pub fn tool_kind_for_name(name: &str) -> ToolKind {
+    match canonical_tool_name(name).unwrap_or(name) {
+        TOOL_WORKSPACE_READ_FILE
+        | TOOL_WORKSPACE_READ_FILE_SEGMENT
+        | TOOL_WORKSPACE_PATH_INFO
+        | TOOL_WORKSPACE_GATHER_CONTEXT => ToolKind::Read,
+        TOOL_WORKSPACE_SEARCH_TEXT => ToolKind::Search,
+        TOOL_WORKSPACE_LIST_FILES => ToolKind::Read,
+        TOOL_WORKSPACE_BATCH => ToolKind::Composite,
+        TOOL_ECHO_INPUT => ToolKind::Interactive,
+        TOOL_TIME_NOW => ToolKind::Execute,
+        _ => ToolKind::External,
+    }
+}
+
+pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
+    match canonical_tool_name(name).unwrap_or(name) {
+        TOOL_WORKSPACE_BATCH
+        | TOOL_WORKSPACE_GATHER_CONTEXT
+        | TOOL_WORKSPACE_LIST_FILES
+        | TOOL_WORKSPACE_READ_FILE
+        | TOOL_WORKSPACE_READ_FILE_SEGMENT
+        | TOOL_WORKSPACE_SEARCH_TEXT
+        | TOOL_ECHO_INPUT
+        | TOOL_TIME_NOW => ToolExposure::ModelVisible,
+        TOOL_WORKSPACE_PATH_INFO => ToolExposure::Deferred,
+        _ => ToolExposure::Internal,
+    }
+}
+
+pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
+    let display_name_zh = match model_visible_tool_name(name) {
+        "Read" => Some("读取".to_string()),
+        "Search" => Some("搜索".to_string()),
+        "List" => Some("列表".to_string()),
+        "Plan" => Some("计划".to_string()),
+        "Ask" => Some("提问".to_string()),
+        "Run" => Some("运行".to_string()),
+        "Write" => Some("写入".to_string()),
+        "Edit" => Some("编辑".to_string()),
+        _ => None,
+    };
+    ToolDisplayMetadata { display_name_zh }
+}
+
+pub fn default_permission_facts_for_name(name: &str) -> ToolPermissionFacts {
+    let scope = match canonical_tool_name(name).unwrap_or(name) {
+        TOOL_WORKSPACE_LIST_FILES
+        | TOOL_WORKSPACE_READ_FILE
+        | TOOL_WORKSPACE_READ_FILE_SEGMENT
+        | TOOL_WORKSPACE_PATH_INFO
+        | TOOL_WORKSPACE_SEARCH_TEXT
+        | TOOL_WORKSPACE_GATHER_CONTEXT
+        | TOOL_WORKSPACE_BATCH => Some("workspace.read".to_string()),
+        TOOL_TIME_NOW | TOOL_ECHO_INPUT => None,
+        _ => None,
+    };
+    ToolPermissionFacts {
+        requires_approval: Some(false),
+        permission_scope: scope,
+        host_mediated: Some(false),
+        permission_profile: Some("builtin".to_string()),
+        approval_mode: Some("none".to_string()),
+        decision_source: Some("runtime".to_string()),
     }
 }
 
@@ -1814,6 +2207,80 @@ fn error_result(tool_name: &str, code: &str, message: String, hint: Option<Strin
         })),
         duration_ms: 0,
     }
+}
+
+fn tool_result_summary_text(result: &ToolResult, parsed: &Value) -> String {
+    parsed
+        .get("summary")
+        .and_then(|summary| summary.get("text"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            parsed
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| format!("Tool `{}` finished with status `{}`.", result.tool_name, result.status))
+}
+
+pub(crate) fn tool_error_from_output(status: &str, parsed: &Value) -> Option<ToolError> {
+    if status == "ok" {
+        return None;
+    }
+
+    let error = parsed.get("error")?;
+    Some(ToolError {
+        kind: error
+            .get("kind")
+            .or_else(|| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool_error")
+            .to_string(),
+        message: error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Tool execution failed.")
+            .to_string(),
+        details: error.get("details").cloned(),
+        retryable: error.get("retryable").and_then(Value::as_bool),
+        source: error.get("source").and_then(Value::as_str).map(ToString::to_string),
+    })
+}
+
+fn permission_facts_from_output(parsed: &Value) -> Option<ToolPermissionFacts> {
+    let permission = parsed.get("permission")?;
+    Some(ToolPermissionFacts {
+        requires_approval: permission.get("requiresApproval").and_then(Value::as_bool),
+        permission_scope: permission
+            .get("permissionScope")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        host_mediated: permission.get("hostMediated").and_then(Value::as_bool),
+        permission_profile: permission
+            .get("permissionProfile")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        approval_mode: permission
+            .get("approvalMode")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        decision_source: permission
+            .get("decisionSource")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    })
+}
+
+fn extract_tool_artifacts(parsed: &Value) -> Vec<Value> {
+    let Some(path) = parsed.get("path").cloned() else {
+        return Vec::new();
+    };
+    vec![json!({
+        "kind": "path",
+        "value": path,
+    })]
 }
 
 fn aborted_result(tool_name: &str, code: &str, message: String) -> ToolResult {

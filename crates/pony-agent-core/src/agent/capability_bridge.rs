@@ -1,5 +1,7 @@
 use crate::agent::telemetry::CapabilityInvocationRecord;
-use crate::agent::tools::{builtin_tools, ToolCall, ToolDefinition, ToolResult};
+use crate::agent::tools::{
+    builtin_tools, canonical_tool_name, ToolCall, ToolDefinition, ToolPermissionFacts, ToolResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +73,7 @@ impl CapabilityInvocationMode {
 pub enum CapabilityFailureKind {
     SourceUnavailable,
     PermissionDenied,
+    OutOfScope,
     MalformedResponse,
     InvocationFailed,
     CapabilityNotFound,
@@ -81,6 +84,7 @@ impl CapabilityFailureKind {
         match self {
             Self::SourceUnavailable => "source_unavailable",
             Self::PermissionDenied => "permission_denied",
+            Self::OutOfScope => "out_of_scope",
             Self::MalformedResponse => "malformed_response",
             Self::InvocationFailed => "invocation_failed",
             Self::CapabilityNotFound => "capability_not_found",
@@ -338,6 +342,23 @@ impl CapabilityToolExecutionResult {
                 .capability
                 .as_ref()
                 .map(|capability| capability.permission_scope.clone()),
+            permission_facts: self.capability.as_ref().map(|capability| ToolPermissionFacts {
+                requires_approval: Some(capability.requires_approval),
+                permission_scope: Some(capability.permission_scope.clone()),
+                host_mediated: Some(capability.host_mediated),
+                permission_profile: Some("capability_registry".to_string()),
+                approval_mode: Some(if capability.requires_approval {
+                    if capability.host_mediated {
+                        "host_mediated"
+                    } else {
+                        "approval_required"
+                    }
+                } else {
+                    "none"
+                }
+                .to_string()),
+                decision_source: Some("capability_registry".to_string()),
+            }),
             skill_id: skill.map(|descriptor| descriptor.skill_id.clone()),
             skill_source_id: skill.map(|descriptor| descriptor.source_id.clone()),
             composed_capability_refs: skill
@@ -625,6 +646,10 @@ impl CapabilityRegistry {
             ),
             CapabilityFailureKind::PermissionDenied => format!(
                 "工具 `{}` 需要 host 审批或受管执行，但当前 capability 配置不满足该条件。",
+                tool_call.name
+            ),
+            CapabilityFailureKind::OutOfScope => format!(
+                "工具 `{}` 访问了当前 workspace 边界之外的路径。",
                 tool_call.name
             ),
             CapabilityFailureKind::MalformedResponse => format!(
@@ -1054,6 +1079,7 @@ fn map_capability_failure_to_skill_failure(failure: CapabilityFailureKind) -> Sk
     match failure {
         CapabilityFailureKind::SourceUnavailable => SkillFailureLayer::SourceUnavailable,
         CapabilityFailureKind::PermissionDenied => SkillFailureLayer::PermissionDenied,
+        CapabilityFailureKind::OutOfScope => SkillFailureLayer::UnderlyingCapabilityExecution,
         CapabilityFailureKind::MalformedResponse | CapabilityFailureKind::CapabilityNotFound => {
             SkillFailureLayer::MalformedComposition
         }
@@ -1100,6 +1126,13 @@ fn candidate_builtin_capability_ids(tool_name: &str) -> Vec<String> {
     let canonical = raw.replace('.', "_");
     if canonical != raw {
         candidates.push(format!("builtin:{canonical}"));
+    }
+
+    if let Some(execution_primitive) = canonical_tool_name(raw) {
+        let primitive_id = format!("builtin:{execution_primitive}");
+        if !candidates.iter().any(|candidate| candidate == &primitive_id) {
+            candidates.push(primitive_id);
+        }
     }
 
     candidates
@@ -1217,6 +1250,69 @@ mod tests {
             })
             .expect("dotted tool call should resolve");
         assert_eq!(dotted.capability.capability_id, "builtin:time_now");
+    }
+
+    #[test]
+    fn registry_resolves_model_visible_tool_names_to_builtin_capabilities() {
+        let registry = CapabilityRegistry::new();
+
+        let read = registry
+            .resolve_tool_call(&ToolCall {
+                call_id: None,
+                name: "Read".to_string(),
+                arguments: serde_json::json!({ "path": "src/main.rs" }),
+                plan: None,
+            })
+            .expect("Read tool call should resolve");
+        assert_eq!(read.capability.capability_id, "builtin:workspace_gather_context");
+
+        let search = registry
+            .resolve_tool_call(&ToolCall {
+                call_id: None,
+                name: "Search".to_string(),
+                arguments: serde_json::json!({ "query": "ToolCall", "path": "." }),
+                plan: None,
+            })
+            .expect("Search tool call should resolve");
+        assert_eq!(search.capability.capability_id, "builtin:workspace_search_text");
+
+        let list = registry
+            .resolve_tool_call(&ToolCall {
+                call_id: None,
+                name: "List".to_string(),
+                arguments: serde_json::json!({ "path": "." }),
+                plan: None,
+            })
+            .expect("List tool call should resolve");
+        assert_eq!(list.capability.capability_id, "builtin:workspace_list_files");
+
+        let plan = registry
+            .resolve_tool_call(&ToolCall {
+                call_id: None,
+                name: "Plan".to_string(),
+                arguments: serde_json::json!({ "calls": [] }),
+                plan: None,
+            })
+            .expect("Plan tool call should resolve");
+        assert_eq!(plan.capability.capability_id, "builtin:workspace_batch");
+    }
+
+    #[test]
+    fn registry_rejects_unknown_or_case_mismatched_model_visible_tool_names() {
+        let registry = CapabilityRegistry::new();
+
+        for name in ["read", "READ", "Browse", "workspace.Read"] {
+            let result = registry.resolve_tool_call(&ToolCall {
+                call_id: None,
+                name: name.to_string(),
+                arguments: serde_json::json!({}),
+                plan: None,
+            });
+            assert!(
+                matches!(result, Err(CapabilityFailureKind::CapabilityNotFound)),
+                "unexpectedly resolved alias `{name}`"
+            );
+        }
     }
 
     #[test]
