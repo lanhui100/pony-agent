@@ -149,6 +149,31 @@ OpenSpec 入口见：
 - 目录结构
 - 关键原则
 
+## Rust 编译约定
+
+### target 目录槽位（防重复构建产物）
+
+工作区采用"分目录"策略，不同命令写入独立的 target 目录，避免互相阻塞和产物膨胀：
+
+| 用途 | 命令 | target 目录 |
+|------|------|-------------|
+| tauri dev | `npm run dev:tauri` | `target/`（主构建，长期保留） |
+| type-check | `npm run cargo:check:shared` | `target-check/`（light 可清） |
+| 跑全部测试 | `npm run cargo:test:shared` | `target-test/`（light 可清） |
+| 精确跑单测 | `npm run cargo:test:exact -- --lib <test_name>` | `target-test-exact-a/` |
+| 精确跑单测(b) | `npm run cargo:test:exact:b -- --lib <test_name>` | `target-test-exact-b/` |
+| 精确跑单测(c) | `npm run cargo:test:exact:c -- --lib <test_name>` | `target-test-exact-c/` |
+
+**硬性规则：**
+- 所有 cargo 操作必须通过上述 npm script 执行，使用固定槽位目录
+- **禁止**手工创建 `target-codex-*`、`target-test-session-*` 等一次性目录——这是历史 target 膨胀的根因
+- 不要直接运行 `cargo check` 或 `cargo test`，它们会写入 `target/` 污染 dev 构建缓存
+
+### 清理积压
+
+- `npm run clean:tauri:light` — 清理 check/test 目录（安全，仅清可重建的）
+- `npm run clean:tauri:deep` — 额外清理 `target/`（触发全量重编译，慎用）
+
 ## Tauri Dev 注意
 
 - `tauri dev` 出现 `rustc` 属于正常现象；Tauri 会通过 `cargo` 调用 Rust 编译器进行开发构建。

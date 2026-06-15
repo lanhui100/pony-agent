@@ -66,9 +66,12 @@ foreach ($processId in $launcherPids | Sort-Object -Unique) {
 
 Start-Sleep -Seconds 1
 
-$env:CARGO_BUILD_JOBS = "2"
-$env:CARGO_INCREMENTAL = "1"
-$env:CARGO_PROFILE_DEV_DEBUG = "0"
+# 编译调优（jobs / incremental / debug）统一由工作区 .cargo/config.toml 提供，
+# 这里不再重复设置，避免两处漂移。
+# 显式设置 CARGO_TARGET_DIR 为 target/，与 .cargo/config.toml 的 [build] target-dir 保持一致。
+# 双重保障：即使 cargo 未读取到配置文件、或工作路径异常，tauri dev 的编译产物也一定落入 target/，
+# 不会因为从 src-tauri/ 或其它子目录触发而意外创建 src-tauri/target/ 等重复目录。
+$env:CARGO_TARGET_DIR = "$workspace\target"
 $env:PATH = "$HOME\.cargo\bin;$env:PATH"
 
 $npmBin = Join-Path $workspace 'node_modules\.bin'

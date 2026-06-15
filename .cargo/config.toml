@@ -1,0 +1,45 @@
+# pony-agent 工作区 cargo 配置
+#
+# ── target 目录策略（防重复构建产物）──────────────────────────────────────
+# 工作区采用"分目录"策略，避免不同命令之间因 cargo 锁冲突而互相阻塞，
+# 同时通过 profile 调优控制 target 体积：
+#
+#   用途              target 目录        说明                      清理方式
+#   ────────────────  ─────────────────  ───────────────────────  ──────────────
+#   tauri dev / run   target/            主构建目录，长期保留       clean:tauri:deep
+#   cargo check       target-check/      仅 type-check 产物        clean:tauri:light
+#   cargo test        target-test/       包含测试编译产物           clean:tauri:light
+#   cargo test:exact  target-test-exact-*/  隔离精确测试槽位        clean:tauri:light
+#   (各种临时会话)    target-codex-*/    曾有的膨胀根因，已禁止     clean:tauri:light
+#
+# 所有 npm script 通过 --target-dir 显式指向各自的槽位，override 下方默认值。
+# ⚠️ 不要手工新建 target-codex-* / target-test-session-* 等一次性目录，
+#    这是历史 target 目录膨胀的根因。始终复用上述固定槽位。
+#
+# 定期清理积压：
+#   npm run clean:tauri:light  —— 清理 check/test 目录，释放 1-2 GB
+#   npm run clean:tauri:deep   —— 额外清理 target/，触发全量重编译
+#
+# ── 默认 target 目录 ──────────────────────────────────────────────────
+# 设为 "target" 让所有未指定 --target-dir 的 cargo 命令（含直调）统一落入
+# 工作区根的 target/，避免在 src-tauri/ 或 crates/*/ 下意外生成重复目录。
+# npm script 中的显式 --target-dir 会优先覆盖此默认值。
+# (start-tauri-dev.ps1 也会设置同名环境变量，二重保障。)
+
+[build]
+target-dir = "target"
+# 限制并发编译任务数，降低 tauri dev 时的 CPU/IO 峰值。
+# 与 start-tauri-dev.ps1 里的 CARGO_BUILD_JOBS=2 保持一致。
+jobs = 2
+
+[profile.dev]
+# 开启增量编译，加快 dev 迭代速度。
+incremental = true
+# 关闭 debug 符号（用 0 而非默认 true），显著减小 target 体积。
+# 与 start-tauri-dev.ps1 里的 CARGO_PROFILE_DEV_DEBUG=0 保持一致。
+debug = 0
+
+[profile.test]
+incremental = true
+# test profile 默认 debug=2（完整符号），这里显式设为 0 节省空间
+debug = 0

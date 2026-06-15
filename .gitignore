@@ -1,5 +1,6 @@
 node_modules/
 dist/
+coverage/
 hermes/
 claude-code-sourcemap/
 codex-openai/
@@ -7,9 +8,10 @@ reasonix-esengine/
 
 src-tauri/target/
 src-tauri/target-codex-*/
-src-tauri/gen/
-src-tauri/target-test*/
+src-tauri/target-check/
+src-tauri/target-check-*/
 src-tauri/target-check-tests*/
+src-tauri/target-test*/
 
 .DS_Store
 Thumbs.db
@@ -25,8 +27,9 @@ desktop.ini
 .cargo-target-*/
 .omo/
 empty.stdin
-src-tauri/target-check/
 src-tauri/.pony-agent/
+tmp/
+outputs/
 tmp-*.png
 tmp-*.log
 target/
