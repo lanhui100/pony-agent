@@ -1,20 +1,20 @@
 # PA-048 首批基础工具面与旧工具映射收口
 
 ## 状态
-- Status: `In Progress`
+- Status: `Done`
 - Priority: `P1`
 - Owner: `Codex`
 
 ## OpenSpec Change
-- 活跃路径：
-  [first-wave-tool-surface-and-legacy-mapping](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/first-wave-tool-surface-and-legacy-mapping>)
+- 已归档：
+  [2026-06-15-first-wave-tool-surface-and-legacy-mapping](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-15-first-wave-tool-surface-and-legacy-mapping>)
 
 ## Delta Spec
-- 活跃路径：
-  `openspec/changes/first-wave-tool-surface-and-legacy-mapping/specs/first-wave-tool-surface/spec.md`
+- 已同步并归档：
+  `openspec/changes/archive/2026-06-15-first-wave-tool-surface-and-legacy-mapping/specs/first-wave-tool-surface/spec.md`
 
 ## Canonical Spec
-- 待实现并归档后同步到：
+- 已同步到：
   `openspec/specs/first-wave-tool-surface/spec.md`
 
 ## Spec 状态
@@ -47,24 +47,15 @@
 - 至少完成一轮独立 spec review，并根据采纳意见优化文档
 
 ## 当前进展
-- 已创建 OpenSpec change：
-  [first-wave-tool-surface-and-legacy-mapping](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/first-wave-tool-surface-and-legacy-mapping>)
-- 已完成本卡第一版 OpenSpec artifact 草案：
-  - `proposal.md`
-  - `design.md`
-  - `tasks.md`
-  - `specs/first-wave-tool-surface/spec.md`
-- 已完成至少一轮独立智能体 spec review，并采纳意见收紧一轮文档
-- 已沉淀 review 记录：
-  - [2026-06-13-pa048-spec-review.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-13-pa048-spec-review.md>)
-- 已完成 OpenSpec strict validate：
-  - `npm run openspec -- validate first-wave-tool-surface-and-legacy-mapping --type change --strict --json --no-interactive`
+- 已完成实现、测试、实现态审核与一轮采纳调优
+- 已完成 OpenSpec strict validate，并已将 delta spec 同步到 canonical spec
+- 已完成 change 归档与任务系统收口
 
 ## 下一步动作
-将本卡冻结的产品级工具清单继续输入实现排序与前端展示合同落地。
+已完成，无后续动作；后续若扩展第二批工具面，应以新 change 承接。
 
 ## 当前卡点
-- 暂无。`PA-045 ~ PA-047` 已可作为本卡前置母合同使用。
+- 暂无。当前已完成归档与收口。
 
 ## 断点续跑提示
 继续前先看：

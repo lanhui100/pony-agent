@@ -1,20 +1,20 @@
 # PA-045 收口工具系统协议、暴露策略与结果合同
 
 ## 状态
-- Status: `Review`
+- Status: `Done`
 - Priority: `P1`
 - Owner: `Codex`
 
 ## OpenSpec Change
-- 活跃路径：
-  [tool-system-contract-and-exposure-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/tool-system-contract-and-exposure-boundary>)
+- 已归档：
+  [2026-06-15-tool-system-contract-and-exposure-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-15-tool-system-contract-and-exposure-boundary>)
 
 ## Delta Spec
-- 活跃路径：
-  `openspec/changes/tool-system-contract-and-exposure-boundary/specs/tool-system-contract/spec.md`
+- 已同步并归档：
+  `openspec/changes/archive/2026-06-15-tool-system-contract-and-exposure-boundary/specs/tool-system-contract/spec.md`
 
 ## Canonical Spec
-- 待实现并归档后同步到：
+- 已同步到：
   `openspec/specs/tool-system-contract/spec.md`
 
 ## Spec 状态
@@ -63,30 +63,15 @@
 - 至少完成一轮独立 spec review，并根据采纳意见优化文档
 
 ## 当前进展
-- 已完成任务拆分，确定 `PA-045 / PA-046 / PA-047 / PA-048 / PA-049` 五张连续任务卡
-- 已创建 OpenSpec change：
-  [tool-system-contract-and-exposure-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/tool-system-contract-and-exposure-boundary>)
-- 已确认当前仓库存在可复用底座：`ToolRouter / ToolPlan / capability bridge / telemetry / workspace root injection`
-- 已完成本卡第一版 OpenSpec artifact 草案：
-  - `proposal.md`
-  - `design.md`
-  - `tasks.md`
-  - `specs/tool-system-contract/spec.md`
-- 已完成一轮独立智能体 spec review，并已采纳高优先级意见：
-  - 明确三层标识模型：`name / canonical_tool_name / execution_primitive`
-  - 为 `deferred` 暴露策略补最小生命周期规则
-  - 为 `ToolResult` 增加 `child_results` 并限制 `artifacts` 语义
-  - 为 `ToolResult.error` 补最小结构字段
-  - 将审批/权限字段收口为 `policy_metadata` 占位，并明确正式语义由 `PA-047` 承接
-  - 补工具命名约束与 `Read -> workspace_*` 最小映射示例
-- 已完成 OpenSpec strict validate：
-  - `npm run openspec -- validate tool-system-contract-and-exposure-boundary --type change --strict --json --no-interactive`
+- 已完成实现、测试、实现态审核与一轮采纳调优
+- 已完成 OpenSpec strict validate，并已将 delta spec 同步到 canonical spec
+- 已完成 change 归档与任务系统收口
 
 ## 下一步动作
-在进入实现前，将本卡继续作为 `PA-046 ~ PA-049` 的母合同进行统一引用与实现排序。
+已完成，无后续动作；后续若继续演进工具协议，应以新 change 承接。
 
 ## 当前卡点
-- 暂无。当前已完成 review 与 strict validate，剩余动作转为实现期承接。
+- 暂无。当前已完成归档与收口。
 
 ## 断点续跑提示
 继续前先看：

@@ -1,20 +1,20 @@
 # PA-046 定义 agent workspace 合同与路径边界
 
 ## 状态
-- Status: `In Progress`
+- Status: `Done`
 - Priority: `P1`
 - Owner: `Codex`
 
 ## OpenSpec Change
-- 活跃路径：
-  [agent-workspace-contract-and-path-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/agent-workspace-contract-and-path-boundary>)
+- 已归档：
+  [2026-06-15-agent-workspace-contract-and-path-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-15-agent-workspace-contract-and-path-boundary>)
 
 ## Delta Spec
-- 活跃路径：
-  `openspec/changes/agent-workspace-contract-and-path-boundary/specs/agent-workspace-contract/spec.md`
+- 已同步并归档：
+  `openspec/changes/archive/2026-06-15-agent-workspace-contract-and-path-boundary/specs/agent-workspace-contract/spec.md`
 
 ## Canonical Spec
-- 待实现并归档后同步到：
+- 已同步到：
   `openspec/specs/agent-workspace-contract/spec.md`
 
 ## Spec 状态
@@ -49,24 +49,15 @@
 - 至少完成一轮独立 spec review，并根据采纳意见优化文档
 
 ## 当前进展
-- 已创建 OpenSpec change：
-  [agent-workspace-contract-and-path-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/agent-workspace-contract-and-path-boundary>)
-- 已完成本卡第一版 OpenSpec artifact 草案：
-  - `proposal.md`
-  - `design.md`
-  - `tasks.md`
-  - `specs/agent-workspace-contract/spec.md`
-- 已完成至少一轮独立智能体 spec review，并采纳意见收紧一轮文档
-- 已沉淀 review 记录：
-  - [2026-06-13-pa046-spec-review.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-13-pa046-spec-review.md>)
-- 已完成 OpenSpec strict validate：
-  - `npm run openspec -- validate agent-workspace-contract-and-path-boundary --type change --strict --json --no-interactive`
+- 已完成实现、测试、实现态审核与一轮采纳调优
+- 已完成 OpenSpec strict validate，并已将 delta spec 同步到 canonical spec
+- 已完成 change 归档与任务系统收口
 
 ## 下一步动作
-把本卡的 workspace 合同继续作为 `PA-047 ~ PA-049` 的共同前置依赖使用，并准备进入实现拆分。
+已完成，无后续动作；后续若扩展多 workspace 或 host workspace policy，应以新 change 承接。
 
 ## 当前卡点
-- 暂无。当前已完成 strict validate，剩余为实现承接。
+- 暂无。当前已完成归档与收口。
 
 ## 断点续跑提示
 继续前先看：
