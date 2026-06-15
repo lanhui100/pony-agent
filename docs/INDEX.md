@@ -54,6 +54,7 @@
 
 - [OpenSpec 根目录](C:/Users/HUAWEI/Documents/pony-agent/openspec)
 - [复杂任务交付 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/spec-driven-delivery/spec.md)
+- [第二波工具面 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/second-wave-tool-surface/spec.md)
 - [OpenSpec 归档目录](C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive)
 
 ## 9. 路线图
@@ -71,3 +72,4 @@
 - 想理解 session control 这一轮已经收口了什么：先看 `docs/architecture/session-control-plane-and-audit-surface.md`，再看 `PA-042 / PA-043` canonical specs
 - 想保持工程质量：看“规范”
 - 想推进复杂开发任务：看“OpenSpec”
+- 想看第二波 builtin 工具面收口范围：先看 `openspec/specs/second-wave-tool-surface/spec.md`，再看 `PA-050 ~ PA-054` 与对应审核/收口日志

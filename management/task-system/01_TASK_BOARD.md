@@ -36,6 +36,17 @@
 
 ## Done
 
+- `PA-054` 桥接能力入口：`MCP Resource / ToolSearch`
+  说明：已完成 `MCP Resource / ToolSearch` 的最小 builtin 入口、capability mediation 接线、registry alias/limit/空结果/错误路径回归、前端 capability fallback 对齐，以及 `tool_router_regression` / core 全量 / E2E / smoke 验证。
+- `PA-053` 外部读取与知识获取：`WebFetch / WebSearch`
+  说明：已完成 `WebFetch / WebSearch` 的真实 builtin 实现、HTTP 成功/非 2xx 结构化结果、解析测试、宿主层回归、前端能力目录同步，以及 core / regression / E2E / smoke 验证。
+- `PA-052` 代码库探索增强：`Glob / Grep`
+  说明：已完成 `workspace_glob_files` 与 `workspace_search_text.regex` 增强、前端 fallback 对齐、边界回归与宿主层验证，并与第二波工具面保持一致。
+- `PA-051` 工具缺口收口：`Edit / Write / Run`
+  说明：已完成 `workspace_write_file / workspace_edit_file / workspace_run_command`，补齐权限事实、高风险命令拒绝、结构化错误与宿主层回归，并通过全量前端、core、regression、smoke 与 E2E 验证。
+- `PA-050` 第二批基础工具能力与实现顺序
+  说明：已完成第二波工具面 spec、任务拆分、`opencode / deepseek-v4-flash` 审核采纳、canonical spec 同步与 OpenSpec 归档；对应实现卡 `PA-051 ~ PA-054` 已全部完成并验证。
+
 - `PA-049` 工具观测读面、前端呈现与迁移验收
   说明：已完成实现、单测/e2e/tauri smoke、OpenSpec validate 与收口同步。
 - `PA-048` 首批基础工具面与旧工具映射收口
