@@ -24,6 +24,10 @@
 - [PA-042 验收审计](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-05-pa042-acceptance-audit.md)
 - [PA-043 验收审计](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-05-pa043-acceptance-audit.md)
 
+## 2.5 性能与诊断
+
+- [Turn 完成时 UI 冻结：根因诊断与解决路径](C:/Users/HUAWEI/Documents/pony-agent/docs/analysis/turn-completion-ui-freeze-diagnosis-2026-06-16.md)
+
 ## 3. 决策记录
 
 - [决策记录索引](C:/Users/HUAWEI/Documents/pony-agent/docs/decisions/README.md)
