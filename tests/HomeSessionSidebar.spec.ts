@@ -579,6 +579,20 @@ describe("HomeSessionSidebar", () => {
     expect(deleteSessionSpy).toHaveBeenCalledWith("session-other");
   });
 
+  it("routes back to the home workspace before creating a new session", async () => {
+    seedSidebarSessions();
+
+    const runtimeStore = useRuntimeStore();
+    const createSessionSpy = vi.spyOn(runtimeStore, "createSession").mockResolvedValue();
+    const wrapper = mountSidebar("providers");
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-new-chat"]').trigger("click");
+
+    expect(wrapper.emitted("navigate")).toEqual([["home"]]);
+    expect(createSessionSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("does not render the legacy sidebar history control surface", async () => {
     seedSidebarSessions();
 

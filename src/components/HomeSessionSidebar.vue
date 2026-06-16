@@ -148,6 +148,15 @@ function navigate(page: NavigationPage) {
   emit("navigate", page);
 }
 
+function createNewSession() {
+  pendingDeleteSessionId.value = null;
+  if (props.currentPage !== "home") {
+    navigate("home");
+  }
+
+  void runtimeStore.createSession();
+}
+
 function openSessionHistory(conversationId: string) {
   pendingDeleteSessionId.value = null;
   if (props.currentPage !== "home") {
@@ -290,7 +299,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
           :disabled="!canCreateSession"
           :title="createSessionTitle"
           data-testid="session-sidebar-new-chat-collapsed"
-          @click="runtimeStore.createSession()"
+          @click="createNewSession"
         >
           <Plus class="h-4 w-4" />
         </button>
@@ -350,7 +359,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
             :disabled="!canCreateSession"
             :title="createSessionTitle"
             data-testid="session-sidebar-new-chat"
-            @click="runtimeStore.createSession()"
+            @click="createNewSession"
           >
             <Plus class="h-3.5 w-3.5" />
             <span>新对话</span>

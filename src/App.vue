@@ -120,45 +120,60 @@ watch(rightSidebarOpen, (value) => {
         <HomeSessionSidebar :current-page="currentPage" @navigate="currentPage = $event" />
 
         <section class="min-h-0 min-w-0 flex-1">
-          <div
-            v-if="currentPage === 'home'"
-            :class="rightSidebarOpen ? 'gap-4' : 'gap-0'"
-            class="relative flex h-full min-h-0 min-w-0 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
-            data-testid="home-layout-shell"
+          <Transition
+            mode="out-in"
+            enter-active-class="transition-all duration-300 ease-out"
+            enter-from-class="translate-y-2 opacity-0"
+            enter-to-class="translate-y-0 opacity-100"
+            leave-active-class="transition-all duration-200 ease-in"
+            leave-from-class="translate-y-0 opacity-100"
+            leave-to-class="-translate-y-1 opacity-0"
           >
-            <div class="min-h-0 min-w-0 flex-1">
-              <HomeWorkspace />
-            </div>
             <div
-              :class="
-                rightSidebarOpen
-                  ? 'max-h-[70rem] opacity-100 translate-x-0 lg:w-[20rem] lg:max-h-none xl:w-[21rem]'
-                  : 'pointer-events-none max-h-0 opacity-0 translate-x-6 lg:w-0 lg:max-h-none'
-              "
-              class="min-h-0 min-w-0 shrink-0 overflow-hidden transition-[width,max-height,opacity,transform] duration-300 ease-out"
-              :data-open="rightSidebarOpen ? 'true' : 'false'"
-              data-testid="home-right-sidebar-shell"
+              v-if="currentPage === 'home'"
+              key="page-home"
+              :class="rightSidebarOpen ? 'gap-4' : 'gap-0'"
+              class="relative flex h-full min-h-0 min-w-0 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
+              data-testid="home-layout-shell"
             >
-              <div class="h-full min-h-0 min-w-0 lg:w-[20rem] xl:w-[21rem]">
-                <HomeSidebar />
+              <div class="min-h-0 min-w-0 flex-1">
+                <HomeWorkspace />
               </div>
+              <div
+                :class="
+                  rightSidebarOpen
+                    ? 'max-h-[70rem] opacity-100 translate-x-0 lg:w-[20rem] lg:max-h-none xl:w-[21rem]'
+                    : 'pointer-events-none max-h-0 opacity-0 translate-x-6 lg:w-0 lg:max-h-none'
+                "
+                class="min-h-0 min-w-0 shrink-0 overflow-hidden transition-[width,max-height,opacity,transform] duration-300 ease-out"
+                :data-open="rightSidebarOpen ? 'true' : 'false'"
+                data-testid="home-right-sidebar-shell"
+              >
+                <div class="h-full min-h-0 min-w-0 lg:w-[20rem] xl:w-[21rem]">
+                  <HomeSidebar />
+                </div>
+              </div>
+              <button
+                type="button"
+                class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:bg-[#f7e3bf] hover:text-stone-900"
+                :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+                :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+                :data-open="rightSidebarOpen ? 'true' : 'false'"
+                data-testid="workspace-right-sidebar-toggle"
+                @click="rightSidebarOpen = !rightSidebarOpen"
+              >
+                <PanelRightClose v-if="rightSidebarOpen" class="h-4 w-4" />
+                <PanelRightOpen v-else class="h-4 w-4" />
+              </button>
             </div>
-            <button
-              type="button"
-              class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:bg-[#f7e3bf] hover:text-stone-900"
-              :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
-              :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
-              :data-open="rightSidebarOpen ? 'true' : 'false'"
-              data-testid="workspace-right-sidebar-toggle"
-              @click="rightSidebarOpen = !rightSidebarOpen"
-            >
-              <PanelRightClose v-if="rightSidebarOpen" class="h-4 w-4" />
-              <PanelRightOpen v-else class="h-4 w-4" />
-            </button>
-          </div>
 
-          <ProviderConfigPage v-else-if="currentPage === 'providers'" class="h-full" />
-          <ModelMonitorPage v-else class="h-full" />
+            <ProviderConfigPage
+              v-else-if="currentPage === 'providers'"
+              key="page-providers"
+              class="h-full"
+            />
+            <ModelMonitorPage v-else key="page-model-monitor" class="h-full" />
+          </Transition>
         </section>
       </section>
     </main>
