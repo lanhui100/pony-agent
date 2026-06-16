@@ -930,6 +930,10 @@ impl AgentRuntime {
         self.sessions.list_sessions()
     }
 
+    pub fn load_turn_traces(&self, session_id: &str) -> Vec<TurnTraceRecord> {
+        self.sessions.load_turn_traces(session_id)
+    }
+
     pub fn load_session_snapshot(&mut self, session_id: Option<&str>) -> SessionSnapshot {
         self.load_session_snapshot_at(session_id, None)
     }
@@ -8794,6 +8798,7 @@ mod tests {
             provider_name: "test-openai".to_string(),
             protocol: crate::agent::provider::ProviderProtocol::OpenAi,
             base_url,
+            auth_type: crate::agent::provider::ProviderAuthType::Auto,
             api_key_env_var: "TEST_API_KEY".to_string(),
             api_key: Some("test-key".to_string()),
             model: "gpt-5.4".to_string(),
@@ -8817,6 +8822,7 @@ mod tests {
             provider_name: "deepseek".to_string(),
             protocol: crate::agent::provider::ProviderProtocol::OpenAi,
             base_url,
+            auth_type: crate::agent::provider::ProviderAuthType::Auto,
             api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
             api_key: Some("test-key".to_string()),
             model: "deepseek-v4-flash".to_string(),

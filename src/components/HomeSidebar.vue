@@ -159,9 +159,16 @@ const liveTraceTurn = computed<TurnTraceRecord | null>(() => {
     return null;
   }
 
-  const latestUserMessage = [...messages.value]
-    .reverse()
-    .find((message) => message.turnId === turnId && message.role === "user");
+  // Backward search instead of full reverse+find — avoids copying the entire array
+  const allMessages = messages.value;
+  let latestUserMessage: typeof allMessages[number] | undefined;
+  for (let i = allMessages.length - 1; i >= 0; i--) {
+    const msg = allMessages[i]!;
+    if (msg.turnId === turnId && msg.role === "user") {
+      latestUserMessage = msg;
+      break;
+    }
+  }
 
   return {
     turnId,
@@ -203,18 +210,39 @@ const currentContextWindowTokens = computed(
   () => retrievedSessionContext.value?.contextWindowTokens ?? providerStore.currentModel?.capabilities?.contextWindowTokens ?? null
 );
 const sessionTurnCount = computed(() => orderedTurnTraces.value.length);
-const sessionModelCallCount = computed(() =>
-  orderedTurnTraces.value.reduce(
-    (sum, turn) => sum + turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model").length,
-    0
-  )
-);
-const sessionToolCallCount = computed(() =>
-  orderedTurnTraces.value.reduce(
-    (sum, turn) => sum + turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_tool").length,
-    0
-  )
-);
+// Cached timeline per turn — computed once per orderedTurnTraces change,
+// shared by all consumers (template v-for, session stats, metric helpers).
+const turnTimelineCache = computed(() => {
+  const cache = new Map<string, TraceTimelineEntry[]>();
+  for (const turn of orderedTurnTraces.value) {
+    cache.set(turn.turnId, turnTimeline(turn));
+  }
+  return cache;
+});
+const sessionModelCallCount = computed(() => {
+  const cache = turnTimelineCache.value;
+  let sum = 0;
+  for (const entries of cache.values()) {
+    for (const entry of entries) {
+      if (canonicalTraceTimelineKind(entry.kind) === "call_model") {
+        sum++;
+      }
+    }
+  }
+  return sum;
+});
+const sessionToolCallCount = computed(() => {
+  const cache = turnTimelineCache.value;
+  let sum = 0;
+  for (const entries of cache.values()) {
+    for (const entry of entries) {
+      if (canonicalTraceTimelineKind(entry.kind) === "call_tool") {
+        sum++;
+      }
+    }
+  }
+  return sum;
+});
 const sessionInputTokensTotal = computed(() =>
   orderedTurnTraces.value.reduce((sum, turn) => sum + (turn.inputTokens ?? 0), 0)
 );
@@ -231,6 +259,12 @@ const sessionCacheHitRatio = computed(() => {
 
   return `${((sessionCacheHitTokensTotal.value / sessionInputTokensTotal.value) * 100).toFixed(1)}%`;
 });
+
+// Reads from the pre-computed cache when available (during rendering),
+// falls back to direct computation (for non-cached turns).
+function getCachedTimeline(turn: TurnTraceRecord): TraceTimelineEntry[] {
+  return turnTimelineCache.value.get(turn.turnId) ?? turnTimeline(turn);
+}
 
 function formatDuration(durationSeconds?: number | null) {
   if (durationSeconds == null) {
@@ -259,6 +293,7 @@ function traceStateIcon(state: TraceStep["state"]) {
 function turnTimeline(turn: TurnTraceRecord) {
   if (turn.traceTimeline?.length) {
     const normalized: TraceTimelineEntry[] = [];
+    let lastModelIndex = -1;
     for (const entry of turn.traceTimeline) {
       const kind = canonicalTraceTimelineKind(entry.kind);
       if (kind === "prepare_retrieval") {
@@ -266,11 +301,13 @@ function turnTimeline(turn: TurnTraceRecord) {
       }
       if (kind !== "return_result") {
         normalized.push({ ...entry, kind });
+        if (kind === "call_model") {
+          lastModelIndex = normalized.length - 1;
+        }
         continue;
       }
 
-      const reverseModelIndex = [...normalized].reverse().findIndex((candidate) => candidate.kind === "call_model");
-      if (reverseModelIndex === -1) {
+      if (lastModelIndex === -1) {
         normalized.push({
           ...entry,
           id: `model-${entry.sequence}`,
@@ -278,12 +315,12 @@ function turnTimeline(turn: TurnTraceRecord) {
           label: "CALL MODEL #1",
           text: entry.state === "completed" ? entry.text ?? null : null
         });
+        lastModelIndex = normalized.length - 1;
         continue;
       }
 
-      const modelIndex = normalized.length - 1 - reverseModelIndex;
-      const modelEntry = normalized[modelIndex];
-      normalized[modelIndex] = {
+      const modelEntry = normalized[lastModelIndex];
+      normalized[lastModelIndex] = {
         ...modelEntry,
         kind: "call_model",
         state: entry.state ?? modelEntry.state,
@@ -608,7 +645,7 @@ function average(values: number[]) {
 }
 
 function timelineCallModelIndex(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
-  return turnTimeline(turn)
+  return getCachedTimeline(turn)
     .filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model")
     .findIndex((candidate) => candidate.id === entry.id);
 }
@@ -625,7 +662,7 @@ function timelineProviderCallRecord(turn: TurnTraceRecord, entry: TraceTimelineE
 function timelineMetricEntry(turn: TurnTraceRecord, entry: TraceTimelineEntry, options: { allowTurnFallback?: boolean } = {}): TraceTimelineEntry {
   const record = timelineProviderCallRecord(turn, entry);
   const allowTurnFallback = options.allowTurnFallback ?? true;
-  const callModelEntries = turnTimeline(turn).filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model");
+  const callModelEntries = getCachedTimeline(turn).filter((candidate) => canonicalTraceTimelineKind(candidate.kind) === "call_model");
   const useTurnFallback = allowTurnFallback && callModelEntries.length === 1 && callModelEntries[0]?.id === entry.id;
 
   if (record) {
@@ -679,7 +716,7 @@ function formatProviderModel(providerName?: string | null, providerModel?: strin
 }
 
 function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
-  const callModelEntries = turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model");
+  const callModelEntries = getCachedTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model");
   const perCallMetrics = callModelEntries.map((entry) => timelineMetricEntry(turn, entry, { allowTurnFallback: false }));
   const hasPerCallMetrics = perCallMetrics.some((entry) =>
     entry.inputTokens != null
@@ -733,7 +770,7 @@ function buildTurnAggregateMetrics(turn: TurnTraceRecord) {
 }
 
 function buildTurnMetricItems(turn: TurnTraceRecord) {
-  const callModelEntries = turnTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model");
+  const callModelEntries = getCachedTimeline(turn).filter((entry) => canonicalTraceTimelineKind(entry.kind) === "call_model");
   const perCallMetrics = callModelEntries.map((entry) => timelineMetricEntry(turn, entry, { allowTurnFallback: false }));
   const hasPerCallMetrics = perCallMetrics.some((entry) =>
     entry.inputTokens != null
@@ -848,7 +885,7 @@ function timelineDurationText(turn: TurnTraceRecord, entry: TraceTimelineEntry) 
 }
 
 function timelineEntryIndex(turn: TurnTraceRecord, entryId: string) {
-  return turnTimeline(turn).findIndex((candidate) => candidate.id === entryId);
+  return getCachedTimeline(turn).findIndex((candidate) => candidate.id === entryId);
 }
 
 function callModelOutputToolEntries(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
@@ -856,7 +893,7 @@ function callModelOutputToolEntries(turn: TurnTraceRecord, entry: TraceTimelineE
     return [];
   }
 
-  const timeline = turnTimeline(turn);
+  const timeline = getCachedTimeline(turn);
   const entryIndex = timelineEntryIndex(turn, entry.id);
   if (entryIndex === -1) {
     return [];
@@ -1236,7 +1273,7 @@ function buildTurnCopyText(turn: TurnTraceRecord) {
     parts.push(`耗时: ${durationText}`);
   }
 
-  turnTimeline(turn).forEach((entry) => {
+  getCachedTimeline(turn).forEach((entry) => {
     parts.push(buildTimelineCopyText(turn, entry));
   });
 
@@ -1369,10 +1406,10 @@ watch(sessionId, () => {
   expandedResultKeys.value = [];
 });
 
+// Signature only tracks turnId list — the watch below only needs to react
+// to turn additions/removals, not to status/timeline updates within a turn.
 const orderedTurnTraceSignature = computed(() =>
-  orderedTurnTraces.value
-    .map((turn) => `${turn.turnId}:${turn.updatedAt}:${turn.phase}:${turn.traceTimeline?.length ?? 0}`)
-    .join("|")
+  orderedTurnTraces.value.map((turn) => turn.turnId).join("|")
 );
 
 watch(orderedTurnTraceSignature, () => {
@@ -1635,7 +1672,7 @@ watch(orderedTurnTraceSignature, () => {
                     </p>
 
                     <section
-                      v-for="entry in turnTimeline(turn)"
+                      v-for="entry in getCachedTimeline(turn)"
                       :key="entry.id"
                       class="collapsible-shell overflow-hidden py-0.5"
                       :data-open="activeTraceStepKey === turnStepKey(turn.turnId, entry.id)"

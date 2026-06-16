@@ -24,6 +24,7 @@ use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
 use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
 use agent::session::SessionOverview;
+use agent::session::TurnTraceRecord;
 use agent::tools::{builtin_tool_contract_views, ToolDefinitionContractView};
 use serde_json::{json, Value};
 use std::sync::Mutex;
@@ -217,6 +218,14 @@ fn save_provider_registry_without_env_sync(
 #[tauri::command]
 fn list_sessions(control_plane: State<'_, HostControlPlane>) -> Vec<SessionOverview> {
     control_plane.list_sessions()
+}
+
+#[tauri::command]
+fn load_session_traces(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+) -> Vec<TurnTraceRecord> {
+    control_plane.load_session_traces(&session_id)
 }
 
 #[tauri::command]
@@ -576,6 +585,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_check,
             list_sessions,
+            load_session_traces,
             load_model_monitor_summary,
             load_model_monitor_session_drilldown,
             load_history_graph,

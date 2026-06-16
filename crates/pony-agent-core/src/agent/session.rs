@@ -511,15 +511,15 @@ pub struct SessionStore {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedStore {
-    sessions: SessionMap,
+    pub(crate) sessions: SessionMap,
     #[serde(default)]
-    attachment_assets: AttachmentAssetMap,
+    pub(crate) attachment_assets: AttachmentAssetMap,
     #[serde(default)]
-    session_attachment_index: SessionAttachmentIndex,
+    pub(crate) session_attachment_index: SessionAttachmentIndex,
     #[serde(default)]
-    mcp_source_snapshots: HashMap<String, McpSourceSnapshot>,
+    pub(crate) mcp_source_snapshots: HashMap<String, McpSourceSnapshot>,
     #[serde(default)]
-    skill_source_snapshots: HashMap<String, SkillSourceSnapshot>,
+    pub(crate) skill_source_snapshots: HashMap<String, SkillSourceSnapshot>,
 }
 
 pub struct FileSessionBackend {
@@ -533,7 +533,15 @@ pub struct MemorySessionBackend {
 
 impl SessionStore {
     pub fn new() -> Self {
-        Self::with_backend(Box::new(FileSessionBackend::new(default_storage_path())))
+        use super::sqlite_session::{default_sqlite_path, SqliteSessionBackend};
+
+        let sqlite_path = default_sqlite_path();
+        // Ensure the parent directory exists for SQLite
+        if let Some(parent) = sqlite_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let backend: Box<dyn SessionBackend> = Box::new(SqliteSessionBackend::new(sqlite_path));
+        Self::with_backend(backend)
     }
 
     #[cfg(test)]
@@ -1298,6 +1306,13 @@ impl SessionStore {
                 .then_with(|| left.conversation_id.cmp(&right.conversation_id))
         });
         sessions
+    }
+
+    pub fn load_turn_traces(&self, session_id: &str) -> Vec<TurnTraceRecord> {
+        self.sessions
+            .get(session_id)
+            .map(|session| session.turn_trace_history.clone())
+            .unwrap_or_default()
     }
 
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {

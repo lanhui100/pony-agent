@@ -164,7 +164,10 @@ type PersistedRuntimeState = {
   phase: RuntimePhase;
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
-  turnTraceHistory: TurnTraceRecord[];
+  // turnTraceHistory is no longer persisted to localStorage — trace data is
+  // already stored on the backend (sessions.json) and loaded via Tauri commands.
+  // The field remains optional for backward-compatible reads of old cache data.
+  turnTraceHistory?: TurnTraceRecord[];
   sessionSummary: string;
   providerRequestedName: string;
   providerName: string;
@@ -385,26 +388,29 @@ function cloneTraceTimeline(traceTimeline?: TraceTimelineEntry[] | null): TraceT
   }));
 
   const folded: TraceTimelineEntry[] = [];
+  let lastModelIndex = -1;
   for (const entry of normalized) {
     if (entry.kind !== "return_result") {
       folded.push(entry);
+      if (entry.kind === "call_model") {
+        lastModelIndex = folded.length - 1;
+      }
       continue;
     }
 
-    const reverseModelIndex = [...folded].reverse().findIndex((candidate) => candidate.kind === "call_model");
-    if (reverseModelIndex === -1) {
+    if (lastModelIndex === -1) {
       folded.push({
         ...entry,
         id: `model-${entry.sequence}`,
         kind: "call_model",
         label: "CALL MODEL #1"
       });
+      lastModelIndex = folded.length - 1;
       continue;
     }
 
-    const modelIndex = folded.length - 1 - reverseModelIndex;
-    const modelEntry = folded[modelIndex];
-    folded[modelIndex] = {
+    const modelEntry = folded[lastModelIndex];
+    folded[lastModelIndex] = {
       ...modelEntry,
       state: entry.state ?? modelEntry.state,
       text: entry.text ?? modelEntry.text ?? null,
@@ -1185,7 +1191,9 @@ function resolveTerminalToolActivities(
 
 function deriveTraceTimelineFromLegacyTrace(turn: TurnTraceRecord) {
   if (turn.traceTimeline?.length) {
-    return cloneTraceTimeline(turn.traceTimeline);
+    // Caller (normalizeTurnTraceRecord) wraps this in cloneTraceTimeline,
+    // so we return the raw reference here to avoid a redundant deep clone.
+    return turn.traceTimeline;
   }
 
   const timeline: TraceTimelineEntry[] = [];
@@ -2834,6 +2842,7 @@ function buildSessionOverviewFromPersistedState(
   conversationId: string,
   state: PersistedRuntimeState
 ): SessionOverview {
+  const legacyTraceHistory = state.turnTraceHistory ?? [];
   return {
     conversationId,
     title: buildSessionTitleFromMessages(state.messages),
@@ -2841,9 +2850,9 @@ function buildSessionOverviewFromPersistedState(
     turnCount: state.messages.filter((message) => message.role === "user").length,
     lastReferencedFile: null,
     updatedAtMs:
-      state.turnTraceHistory.length > 0
-        ? state.turnTraceHistory[state.turnTraceHistory.length - 1].updatedAt
-        : 0
+      legacyTraceHistory.length > 0
+        ? legacyTraceHistory[legacyTraceHistory.length - 1]!.updatedAt
+        : Date.now()
   };
 }
 
@@ -3428,7 +3437,7 @@ export const useRuntimeStore = defineStore("runtime", {
         phase: this.phase,
         messages: this.messages,
         attachmentAssets: this.attachmentAssets,
-        turnTraceHistory: this.turnTraceHistory,
+        // turnTraceHistory intentionally excluded — trace data lives on the backend
         sessionSummary: this.sessionSummary,
         providerRequestedName: this.providerRequestedName,
         providerName: this.providerName,
@@ -3524,8 +3533,8 @@ export const useRuntimeStore = defineStore("runtime", {
         runControlAuditSummary: null,
         lastReferencedFile: null,
         updatedAtMs:
-          persisted && persisted.turnTraceHistory.length > 0
-            ? persisted.turnTraceHistory[persisted.turnTraceHistory.length - 1].updatedAt
+          persisted?.turnTraceHistory?.length
+            ? persisted.turnTraceHistory[persisted.turnTraceHistory.length - 1]!.updatedAt
             : Date.now()
       } satisfies SessionSnapshot;
 
@@ -4261,22 +4270,24 @@ export const useRuntimeStore = defineStore("runtime", {
         return;
       }
 
+      // Pass raw values — normalizeTurnTraceRecord handles all deep cloning internally,
+      // so pre-cloning here would result in redundant double-clones.
       this.turnTraceHistory.push(normalizeTurnTraceRecord({
         turnId,
         title: patch.title ?? "未命名轮次",
         phase: patch.phase ?? this.phase,
-        traceSteps: cloneTraceSteps(patch.traceSteps),
-        traceTimeline: cloneTraceTimeline(patch.traceTimeline),
-        toolActivities: cloneToolActivities(patch.toolActivities),
-        providerCallRecords: cloneProviderCallRecords(patch.providerCallRecords),
-        hookTraceRecords: cloneHookTraceRecords(patch.hookTraceRecords),
+        traceSteps: patch.traceSteps ?? [],
+        traceTimeline: patch.traceTimeline ?? [],
+        toolActivities: patch.toolActivities ?? [],
+        providerCallRecords: patch.providerCallRecords ?? [],
+        hookTraceRecords: patch.hookTraceRecords ?? [],
         providerRequestedName: patch.providerRequestedName ?? null,
         providerName: patch.providerName ?? null,
         providerProtocol: patch.providerProtocol ?? null,
         providerModel: patch.providerModel ?? null,
         providerSource: patch.providerSource ?? null,
         providerMode: patch.providerMode ?? null,
-        buildContextObservation: cloneBuildContextObservation(patch.buildContextObservation),
+        buildContextObservation: patch.buildContextObservation ?? null,
         sessionSummary: patch.sessionSummary ?? "",
         fallbackReason: patch.fallbackReason ?? null,
         error: patch.error ?? null,
@@ -4330,24 +4341,13 @@ export const useRuntimeStore = defineStore("runtime", {
         ...patch,
         traceTimeline: this.traceTimeline
       }, persist);
+      // Lightweight debug log — full buildCacheTelemetryDebugSnapshot is already
+      // called in STAGE 1 of each terminal event handler (completed/failed/cancelled),
+      // so we avoid the redundant expensive computation here.
       debugLog("cache-telemetry:trace-committed", {
+        turnId,
         phase: patch.phase ?? this.phase,
-        ...buildCacheTelemetryDebugSnapshot(
-          {
-            turnId,
-            eventType: patch.eventType ?? undefined,
-            eventId: patch.eventId ?? undefined,
-            sequence: patch.sequence ?? undefined,
-            inputTokens: patch.inputTokens ?? undefined,
-            cacheHitInputTokens: patch.cacheHitInputTokens ?? undefined,
-            outputTokens: patch.outputTokens ?? undefined,
-            totalTokens: patch.totalTokens ?? undefined,
-            providerCallRecords: patch.providerCallRecords,
-            traceTimeline: this.traceTimeline
-          },
-          this.traceTimeline,
-          this.turnTraceHistory.find((trace) => trace.turnId === turnId) ?? null
-        )
+        traceTimelineLength: this.traceTimeline.length
       });
     },
     updateActiveTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
@@ -4360,14 +4360,17 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       const traceTimeline = cloneTraceTimeline(this.traceTimeline);
-      const reverseModelIndex = [...traceTimeline]
-        .reverse()
-        .findIndex((entry) => canonicalizeTraceTimelineKind(entry.kind) === "call_model");
-      if (reverseModelIndex === -1) {
+      let modelIndex = -1;
+      for (let i = traceTimeline.length - 1; i >= 0; i--) {
+        if (canonicalizeTraceTimelineKind(traceTimeline[i]!.kind) === "call_model") {
+          modelIndex = i;
+          break;
+        }
+      }
+      if (modelIndex === -1) {
         return;
       }
 
-      const modelIndex = traceTimeline.length - 1 - reverseModelIndex;
       const modelEntry = traceTimeline[modelIndex]!;
       traceTimeline[modelIndex] = {
         ...modelEntry,

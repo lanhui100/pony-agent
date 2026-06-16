@@ -1493,6 +1493,11 @@ impl HostControlPlane {
         runtime.list_sessions()
     }
 
+    pub fn load_session_traces(&self, session_id: &str) -> Vec<TurnTraceRecord> {
+        let runtime = self.runtime.lock().expect("runtime lock poisoned");
+        runtime.load_turn_traces(session_id)
+    }
+
     pub fn load_model_monitor_summary(
         &self,
         query: ModelMonitorSummaryQuery,
@@ -3607,6 +3612,7 @@ mod tests {
     use crate::agent::config::{
         ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
     };
+    use crate::agent::provider::ProviderAuthType;
     use crate::agent::context::DefaultTurnContextBuilder;
     use crate::agent::graph::{
         GraphDecisionKind, GraphDecisionReason, GraphRunEventKind, GraphRunPhase,
@@ -3962,6 +3968,7 @@ mod tests {
             provider_name: "test-openai".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url,
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "TEST_API_KEY".to_string(),
             api_key: Some("test-key".to_string()),
             model: "gpt-5.4".to_string(),

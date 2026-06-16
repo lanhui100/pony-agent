@@ -1129,12 +1129,10 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.error).toBeNull();
 
     const persisted = readPersistedSessions().sessions["session-trace-truth"] as {
-      turnTraceHistory: TurnTraceRecord[];
+      turnTraceHistory?: TurnTraceRecord[];
     };
-    expect(persisted.turnTraceHistory).toHaveLength(1);
-    expect(persisted.turnTraceHistory[0]?.title).toBe("canonical trace");
-    expect(persisted.turnTraceHistory[0]?.phase).toBe("completed");
-    expect(persisted.turnTraceHistory[0]?.outputTokens).toBe(42);
+    // turnTraceHistory is no longer persisted to localStorage — it lives on the backend.
+    expect(persisted.turnTraceHistory).toBeUndefined();
   });
 
   it("does not restore canonical failed runtime phase from raw persisted trace without terminal envelope", async () => {
@@ -2121,7 +2119,9 @@ describe("runtime session resilience", () => {
         summary: "Browser summary",
         turnCount: 1,
         lastReferencedFile: null,
-        updatedAtMs: 4000
+        // turnTraceHistory is no longer persisted to localStorage, so updatedAtMs
+        // falls back to Date.now() (mocked to 4242) instead of trace's updatedAt (4000).
+        updatedAtMs: 4242
       }
     ]);
     expect(Object.keys(readPersistedSessions().sessions)).toEqual(["browser-current"]);
