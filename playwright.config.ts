@@ -9,7 +9,8 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: 1,
-  reporter: [["list"]],
+  outputDir: "test-results/playwright",
+  reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
   use: {
     baseURL: "http://127.0.0.1:4175",
     trace: "on-first-retry",

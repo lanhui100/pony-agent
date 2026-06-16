@@ -66,6 +66,21 @@ foreach ($processId in $launcherPids | Sort-Object -Unique) {
 
 Start-Sleep -Seconds 1
 
+# ── 端口清理：强制释放 Vite dev server 端口 ──────────────────────────
+# 上一个 tauri dev 退出后，Vite 进程可能残留并继续占用 4176 端口。
+# 命令行模式匹配会漏掉它（进程名是 node.exe，不包含 "tauri" 或 "npm run dev"），
+# 这里通过端口号直杀，保证 beforeDevCommand 中的 vite 能正常启动。
+$portPid = $null
+$portConn = Get-NetTCPConnection -LocalPort 4176 -ErrorAction SilentlyContinue
+if ($portConn -and $portConn.State -in @("Listen", "Established", "Bound")) {
+  $portPid = $portConn.OwningProcess
+}
+if ($portPid) {
+  $procName = (Get-Process -Id $portPid -ErrorAction SilentlyContinue).ProcessName
+  Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
+  Write-Host "[port] freed port 4176 (killed $procName PID $portPid)"
+}
+
 # 编译调优（jobs / incremental / debug）统一由工作区 .cargo/config.toml 提供，
 # 这里不再重复设置，避免两处漂移。
 # 显式设置 CARGO_TARGET_DIR 为 target/，与 .cargo/config.toml 的 [build] target-dir 保持一致。

@@ -15,6 +15,12 @@ $blockedPathPatterns = @(
   '^target-codex-[^/]+(?:/|$)',
   '^target-check[^/]*(?:/|$)',
   '^target-test[^/]*(?:/|$)',
+  '^coverage(?:/|$)',
+  '^dist(?:/|$)',
+  '^outputs(?:/|$)',
+  '^playwright-report(?:/|$)',
+  '^test-results(?:/|$)',
+  '^tmp(?:/|$)',
   '^attachments(?:/|$)',
   '^sessions(?:/|$)'
 )

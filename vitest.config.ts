@@ -14,9 +14,13 @@ export default defineConfig({
     environment: "jsdom",
     include: ["tests/**/*.spec.ts"],
     exclude: ["tests/e2e/**"],
+    outputFile: {
+      json: "test-results/vitest/results.json"
+    },
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary"],
+      reportsDirectory: "coverage/vitest",
       include: [
         "src/App.vue",
         "src/components/HomeWorkspace.vue",

@@ -8,8 +8,8 @@ param(
 )
 
 $targetMap = @{
-  "check" = "target-check"
-  "test" = "target-test"
+  check = "target-check"
+  test = "target-test"
   "exact-a" = "target-test-exact-a"
   "exact-b" = "target-test-exact-b"
   "exact-c" = "target-test-exact-c"
@@ -20,7 +20,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $root "src-tauri/Cargo.toml"
 
 if (-not $CargoArgs -or $CargoArgs.Count -eq 0) {
-  Write-Error "Missing cargo subcommand. Pass 'check' or 'test' followed by any extra cargo arguments."
+  Write-Error "Missing cargo subcommand. Pass 'check' or 'test' followed by extra cargo arguments."
   exit 1
 }
 
