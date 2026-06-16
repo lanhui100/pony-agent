@@ -117,6 +117,14 @@ fn tool_result_failure_kind(
     Some(CapabilityFailureKind::InvocationFailed)
 }
 
+fn is_registry_resource_tool_name(name: &str) -> bool {
+    matches!(canonical_tool_name(name), Some("mcp_resource_read"))
+}
+
+fn is_registry_tool_search_name(name: &str) -> bool {
+    matches!(canonical_tool_name(name), Some("tool_search"))
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnInput {
@@ -5572,6 +5580,40 @@ impl AgentRuntime {
                 mediation.trace_records,
             );
         }
+        if is_registry_resource_tool_name(&tool_call.name) {
+            let mediated_tool_call = ToolCall {
+                arguments: mediation.arguments,
+                ..tool_call.clone()
+            };
+            let (tool_result, invocation_record) =
+                self.execute_resource_registry_tool_call(&mediated_tool_call);
+            let mut hook_trace_records = mediation.trace_records;
+            hook_trace_records.push(build_observe_hook_trace_record(
+                "capability.resolve.observe",
+                TurnHookPoint::CapabilityResolve,
+                1,
+                format!("capability mediation resolved registry resource tool `{}`", tool_call.name),
+                Some(format!("tool={}", tool_call.name)),
+            ));
+            return (tool_result, invocation_record, hook_trace_records);
+        }
+        if is_registry_tool_search_name(&tool_call.name) {
+            let mediated_tool_call = ToolCall {
+                arguments: mediation.arguments,
+                ..tool_call.clone()
+            };
+            let (tool_result, invocation_record) =
+                self.execute_tool_search_registry_tool_call(&mediated_tool_call);
+            let mut hook_trace_records = mediation.trace_records;
+            hook_trace_records.push(build_observe_hook_trace_record(
+                "capability.resolve.observe",
+                TurnHookPoint::CapabilityResolve,
+                1,
+                format!("capability mediation resolved registry discovery tool `{}`", tool_call.name),
+                Some(format!("tool={}", tool_call.name)),
+            ));
+            return (tool_result, invocation_record, hook_trace_records);
+        }
         let execution = self.execute_capability_tool_call(&ToolCall {
             arguments: mediation.arguments,
             ..tool_call.clone()
@@ -5581,6 +5623,254 @@ impl AgentRuntime {
         hook_trace_records
             .push(self.build_capability_resolution_trace_record(tool_call, &execution));
         (execution.tool_result, invocation_record, hook_trace_records)
+    }
+
+    fn execute_resource_registry_tool_call(
+        &self,
+        tool_call: &ToolCall,
+    ) -> (
+        crate::agent::tools::ToolResult,
+        crate::agent::telemetry::CapabilityInvocationRecord,
+    ) {
+        let Some(capability_id) = tool_call
+            .arguments
+            .get("capabilityId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            let tool_result = crate::agent::tools::ToolResult {
+                tool_name: tool_call.name.clone(),
+                status: "error".to_string(),
+                output: json!({
+                    "ok": false,
+                    "tool": tool_call.name,
+                    "error": {
+                        "code": "missing_capability_id",
+                        "message": "缺少必填参数 `capabilityId`。"
+                    }
+                })
+                .to_string(),
+                duration_ms: 0,
+            };
+            return (
+                tool_result,
+                build_blocked_capability_invocation_record(
+                    tool_call,
+                    "registry resource call missing capabilityId",
+                ),
+            );
+        };
+
+        let arguments = tool_call
+            .arguments
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let request = crate::agent::capability_bridge::CapabilityInvocationRequest {
+            capability_id: capability_id.to_string(),
+            arguments: arguments.clone(),
+        };
+
+        let result = match self.capability_registry.resolve_invocation(&request) {
+            Ok(crate::agent::capability_bridge::CapabilityBridgeAction::Resource(action)) => self
+                .capability_registry
+                .resource_fetch_success_result(action, arguments),
+            Ok(_) => self.capability_registry.resource_fetch_failure_result(
+                &request,
+                CapabilityFailureKind::MalformedResponse,
+            ),
+            Err(failure_kind) => self
+                .capability_registry
+                .resource_fetch_failure_result(&request, failure_kind),
+        };
+
+        let failure_kind = result.failure_kind.clone();
+        let invocation_record = crate::agent::telemetry::CapabilityInvocationRecord {
+            tool_name: tool_call.name.clone(),
+            capability_id: result
+                .capability
+                .as_ref()
+                .map(|capability| capability.capability_id.clone())
+                .or_else(|| Some(result.requested_capability_id.clone())),
+            source_id: result
+                .capability
+                .as_ref()
+                .map(|capability| capability.source_id.clone()),
+            source_kind: result
+                .capability
+                .as_ref()
+                .map(|capability| capability.source_kind.as_str().to_string()),
+            capability_kind: Some("resource".to_string()),
+            invocation_mode: Some("read_only_fetch".to_string()),
+            failure_kind: failure_kind.as_ref().map(|kind| kind.as_str().to_string()),
+            requires_approval: result.capability.as_ref().map(|capability| capability.requires_approval),
+            host_mediated: result.capability.as_ref().map(|capability| capability.host_mediated),
+            permission_scope: result
+                .capability
+                .as_ref()
+                .map(|capability| capability.permission_scope.clone()),
+            permission_facts: result.capability.as_ref().map(|capability| {
+                crate::agent::tools::ToolPermissionFacts {
+                    requires_approval: Some(capability.requires_approval),
+                    permission_scope: Some(capability.permission_scope.clone()),
+                    host_mediated: Some(capability.host_mediated),
+                    permission_profile: Some(if capability.source_kind.as_str() == "mcp" {
+                        "mcp".to_string()
+                    } else {
+                        "builtin".to_string()
+                    }),
+                    approval_mode: Some("none".to_string()),
+                    decision_source: Some("runtime".to_string()),
+                }
+            }),
+            skill_id: None,
+            skill_source_id: None,
+            composed_capability_refs: None,
+            composed_capability_kinds: None,
+            failure_layer: None,
+        };
+
+        let tool_result = crate::agent::tools::ToolResult {
+            tool_name: tool_call.name.clone(),
+            status: if failure_kind.is_none() { "ok".to_string() } else { "error".to_string() },
+            output: serde_json::to_string_pretty(&json!({
+                "ok": failure_kind.is_none(),
+                "tool": tool_call.name,
+                "requestedCapabilityId": result.requested_capability_id,
+                "capability": result.capability.as_ref().map(|capability| {
+                    json!({
+                        "capabilityId": capability.capability_id,
+                        "sourceId": capability.source_id,
+                        "kind": capability.kind.as_str(),
+                        "label": capability.label,
+                        "permissionScope": capability.permission_scope
+                    })
+                }),
+                "arguments": result.arguments,
+                "content": result.content,
+                "error": failure_kind.as_ref().map(|kind| {
+                    json!({
+                        "code": kind.as_str(),
+                        "message": match kind {
+                            CapabilityFailureKind::CapabilityNotFound => "未找到对应的 MCP resource capability。".to_string(),
+                            CapabilityFailureKind::SourceUnavailable => "对应的 MCP resource source 当前不可用。".to_string(),
+                            CapabilityFailureKind::PermissionDenied => "当前 MCP resource capability 需要额外审批或受管执行。".to_string(),
+                            CapabilityFailureKind::OutOfScope => "MCP resource 请求超出了当前允许范围。".to_string(),
+                            CapabilityFailureKind::MalformedResponse => "MCP resource capability 返回了不完整或异常的结构。".to_string(),
+                            CapabilityFailureKind::InvocationFailed => "MCP resource capability 执行失败。".to_string(),
+                        }
+                    })
+                }),
+                "summary": {
+                    "text": if failure_kind.is_none() {
+                        "已完成 MCP resource 读取入口调用。"
+                    } else {
+                        "MCP resource 读取入口调用失败。"
+                    }
+                }
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            duration_ms: 0,
+        };
+
+        (tool_result, invocation_record)
+    }
+
+    fn execute_tool_search_registry_tool_call(
+        &self,
+        tool_call: &ToolCall,
+    ) -> (
+        crate::agent::tools::ToolResult,
+        crate::agent::telemetry::CapabilityInvocationRecord,
+    ) {
+        let query = tool_call
+            .arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        let source_id = tool_call
+            .arguments
+            .get("sourceId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let limit = tool_call
+            .arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, 20) as usize)
+            .unwrap_or(8);
+
+        let normalized_query = query.to_ascii_lowercase();
+        let candidates = self
+            .capability_registry
+            .list_capabilities(source_id, Some("tool"))
+            .into_iter()
+            .filter(|capability| {
+                if normalized_query.is_empty() {
+                    return true;
+                }
+                let label = capability.label.to_ascii_lowercase();
+                let description = capability.description.to_ascii_lowercase();
+                let capability_id = capability.capability_id.to_ascii_lowercase();
+                label.contains(&normalized_query)
+                    || description.contains(&normalized_query)
+                    || capability_id.contains(&normalized_query)
+            })
+            .take(limit)
+            .map(|capability| {
+                json!({
+                    "capabilityId": capability.capability_id,
+                    "label": capability.label,
+                    "description": capability.description,
+                    "sourceId": capability.source_id,
+                    "sourceKind": capability.source_kind.as_str(),
+                    "invocationMode": capability.invocation_mode.as_str(),
+                    "permissionScope": capability.permission_scope
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let invocation_record = crate::agent::telemetry::CapabilityInvocationRecord {
+            tool_name: tool_call.name.clone(),
+            capability_id: None,
+            source_id: source_id.map(ToString::to_string),
+            source_kind: None,
+            capability_kind: Some("tool".to_string()),
+            invocation_mode: Some("discovery".to_string()),
+            failure_kind: None,
+            requires_approval: Some(false),
+            host_mediated: Some(false),
+            permission_scope: Some("capability.discovery".to_string()),
+            permission_facts: Some(default_permission_facts_for_name(&tool_call.name)),
+            skill_id: None,
+            skill_source_id: None,
+            composed_capability_refs: None,
+            composed_capability_kinds: None,
+            failure_layer: None,
+        };
+
+        let tool_result = crate::agent::tools::ToolResult {
+            tool_name: tool_call.name.clone(),
+            status: "ok".to_string(),
+            output: serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "tool": tool_call.name,
+                "query": query,
+                "sourceId": source_id,
+                "candidateCount": candidates.len(),
+                "candidates": candidates,
+                "summary": {
+                    "text": format!("已返回 {} 个工具候选。", candidates.len())
+                }
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            duration_ms: 0,
+        };
+
+        (tool_result, invocation_record)
     }
 
     fn execute_skill_tool_call(
@@ -5912,7 +6202,18 @@ fn blocked_tool_result(tool_call: &ToolCall, error: &str) -> crate::agent::tools
     crate::agent::tools::ToolResult {
         tool_name: tool_call.name.clone(),
         status: "error".to_string(),
-        output: error.to_string(),
+        output: serde_json::to_string_pretty(&json!({
+            "ok": false,
+            "tool": tool_call.name,
+            "error": {
+                "code": "hook_blocked",
+                "message": error,
+            },
+            "summary": {
+                "text": format!("工具 `{}` 被 hook 阻止执行。", tool_call.name)
+            }
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
         duration_ms: 0,
     }
 }
@@ -13807,5 +14108,411 @@ mod tests {
             second_replayed,
             json!([{ "type": "reasoning", "text": "need Cargo.toml content before answering" }])
         );
+    }
+
+    #[test]
+    fn registry_resource_tool_returns_structured_resource_result() {
+        let mut runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-resource".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Resource MCP".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://resource".to_string(),
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Resource],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:resource:repo-index".to_string(),
+                source_id: "mcp-resource".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Resource,
+                label: "repo_index".to_string(),
+                description: "Repository index".to_string(),
+                invocation_mode: crate::agent::capability_bridge::CapabilityInvocationMode::ReadOnlyFetch,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "read_only".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "resource".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: None,
+            name: "MCPResource".to_string(),
+            arguments: json!({
+                "capabilityId": "mcp:resource:repo-index",
+                "arguments": { "path": "src" }
+            }),
+            plan: None,
+        });
+
+        assert_eq!(tool_result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&tool_result.output).expect("resource tool output json");
+        assert_eq!(
+            payload.get("requestedCapabilityId").and_then(Value::as_str),
+            Some("mcp:resource:repo-index")
+        );
+        assert_eq!(
+            invocation_record.capability_id.as_deref(),
+            Some("mcp:resource:repo-index")
+        );
+        assert_eq!(invocation_record.capability_kind.as_deref(), Some("resource"));
+        assert_eq!(invocation_record.invocation_mode.as_deref(), Some("read_only_fetch"));
+    }
+
+    #[test]
+    fn registry_resource_tool_accepts_canonical_and_dotted_aliases() {
+        let mut runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-resource".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Resource MCP".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://resource".to_string(),
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Resource],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:resource:repo-index".to_string(),
+                source_id: "mcp-resource".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Resource,
+                label: "repo_index".to_string(),
+                description: "Repository index".to_string(),
+                invocation_mode: crate::agent::capability_bridge::CapabilityInvocationMode::ReadOnlyFetch,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "read_only".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "resource".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        for tool_name in ["mcp_resource_read", "mcp.resource_read"] {
+            let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
+                call_id: None,
+                name: tool_name.to_string(),
+                arguments: json!({
+                    "capabilityId": "mcp:resource:repo-index",
+                    "arguments": { "path": "src" }
+                }),
+                plan: None,
+            });
+
+            assert_eq!(tool_result.status, "ok");
+            assert_eq!(
+                invocation_record.capability_id.as_deref(),
+                Some("mcp:resource:repo-index")
+            );
+        }
+    }
+
+    #[test]
+    fn registry_resource_tool_requires_capability_id() {
+        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+
+        let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: None,
+            name: "MCPResource".to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(tool_result.status, "error");
+        let payload = serde_json::from_str::<Value>(&tool_result.output).expect("resource error output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("missing_capability_id")
+        );
+        assert_eq!(invocation_record.failure_kind.as_deref(), Some("hook_blocked"));
+    }
+
+    #[test]
+    fn registry_resource_tool_returns_not_found_error_for_unknown_capability() {
+        let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+
+        let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: None,
+            name: "MCPResource".to_string(),
+            arguments: json!({
+                "capabilityId": "mcp:resource:missing"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(tool_result.status, "error");
+        let payload = serde_json::from_str::<Value>(&tool_result.output).expect("resource missing output json");
+        assert_eq!(
+            payload.get("requestedCapabilityId").and_then(Value::as_str),
+            Some("mcp:resource:missing")
+        );
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("capability_not_found")
+        );
+        assert_eq!(
+            invocation_record.failure_kind.as_deref(),
+            Some("capability_not_found")
+        );
+    }
+
+    #[test]
+    fn tool_search_returns_registry_tool_candidates() {
+        let mut runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Tools MCP".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://tools".to_string(),
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:workspace-search".to_string(),
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "workspace_search".to_string(),
+                description: "Search workspace files".to_string(),
+                invocation_mode: crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: None,
+            name: "ToolSearch".to_string(),
+            arguments: json!({
+                "query": "workspace",
+                "sourceId": "mcp-tools",
+                "limit": 5
+            }),
+            plan: None,
+        });
+
+        assert_eq!(tool_result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&tool_result.output).expect("tool search output json");
+        assert_eq!(payload.get("candidateCount").and_then(Value::as_u64), Some(1));
+        let candidates = payload
+            .get("candidates")
+            .and_then(Value::as_array)
+            .expect("tool search candidates array");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].get("capabilityId").and_then(Value::as_str),
+            Some("mcp:tool:workspace-search")
+        );
+        assert_eq!(
+            candidates[0].get("sourceId").and_then(Value::as_str),
+            Some("mcp-tools")
+        );
+        assert_eq!(
+            candidates[0].get("permissionScope").and_then(Value::as_str),
+            Some("workspace.read")
+        );
+        assert_eq!(invocation_record.capability_kind.as_deref(), Some("tool"));
+        assert_eq!(invocation_record.invocation_mode.as_deref(), Some("discovery"));
+        assert_eq!(
+            invocation_record.permission_scope.as_deref(),
+            Some("capability.discovery")
+        );
+    }
+
+    #[test]
+    fn tool_search_returns_empty_candidates_when_no_match_or_filtered_out() {
+        let mut runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Tools MCP".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://tools".to_string(),
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:workspace-search".to_string(),
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "workspace_search".to_string(),
+                description: "Search workspace files".to_string(),
+                invocation_mode: crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        let (tool_result, _, _) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: None,
+            name: "ToolSearch".to_string(),
+            arguments: json!({
+                "query": "python",
+                "sourceId": "other-tools",
+                "limit": 5
+            }),
+            plan: None,
+        });
+
+        assert_eq!(tool_result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&tool_result.output).expect("tool search empty output json");
+        assert_eq!(payload.get("candidateCount").and_then(Value::as_u64), Some(0));
+        assert_eq!(
+            payload
+                .get("candidates")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn tool_search_clamps_limit_to_twenty() {
+        let mut runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        let capabilities = (0..25)
+            .map(|index| crate::agent::capability_bridge::CapabilityView {
+                capability_id: format!("mcp:tool:item-{index}"),
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: format!("item_{index}"),
+                description: format!("Item {index}"),
+                invocation_mode: crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            })
+            .collect::<Vec<_>>();
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Tools MCP".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://tools".to_string(),
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities,
+        });
+
+        let (tool_result, _, _) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: None,
+            name: "ToolSearch".to_string(),
+            arguments: json!({
+                "limit": 999
+            }),
+            plan: None,
+        });
+
+        assert_eq!(tool_result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&tool_result.output).expect("tool search limited output json");
+        assert_eq!(payload.get("candidateCount").and_then(Value::as_u64), Some(20));
+        assert_eq!(
+            payload
+                .get("candidates")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn tool_search_accepts_canonical_and_dotted_aliases() {
+        let mut runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+        runtime.apply_mcp_source_snapshot(crate::agent::capability_bridge::McpSourceSnapshot {
+            source: crate::agent::capability_bridge::CapabilitySourceView {
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                display_name: "Tools MCP".to_string(),
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
+                transport_kind: "stdio".to_string(),
+                server_identity: "mcp://tools".to_string(),
+                declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Tool],
+                permission_profile: "host-mediated".to_string(),
+                updated_at_ms: 1,
+                last_ingress_observation: None,
+            },
+            capabilities: vec![crate::agent::capability_bridge::CapabilityView {
+                capability_id: "mcp:tool:workspace-search".to_string(),
+                source_id: "mcp-tools".to_string(),
+                source_kind: crate::agent::capability_bridge::CapabilitySourceKind::Mcp,
+                kind: crate::agent::capability_bridge::CapabilityKind::Tool,
+                label: "workspace_search".to_string(),
+                description: "Search workspace files".to_string(),
+                invocation_mode: crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+                input_schema_summary: "{}".to_string(),
+                safety_class: "host_tool".to_string(),
+                visibility: "default".to_string(),
+                observability_tags: vec!["mcp".to_string(), "tool".to_string()],
+                requires_approval: false,
+                host_mediated: true,
+                permission_scope: "workspace.read".to_string(),
+            }],
+        });
+
+        for tool_name in ["tool_search", "tool.search"] {
+            let (tool_result, _, _) = runtime.execute_registered_tool_call(&ToolCall {
+                call_id: None,
+                name: tool_name.to_string(),
+                arguments: json!({
+                    "query": "workspace",
+                    "sourceId": "mcp-tools",
+                    "limit": 5
+                }),
+                plan: None,
+            });
+
+            assert_eq!(tool_result.status, "ok");
+            let payload = serde_json::from_str::<Value>(&tool_result.output).expect("tool search output json");
+            assert_eq!(payload.get("candidateCount").and_then(Value::as_u64), Some(1));
+        }
     }
 }

@@ -3286,6 +3286,13 @@ mod tests {
                 "Read".to_string(),
                 "List".to_string(),
                 "Search".to_string(),
+                "Glob".to_string(),
+                "WebFetch".to_string(),
+                "WebSearch".to_string(),
+                "MCPResource".to_string(),
+                "ToolSearch".to_string(),
+                "Write".to_string(),
+                "Edit".to_string(),
                 "Plan".to_string()
             ]
         );
@@ -3307,6 +3314,13 @@ mod tests {
                 "Read".to_string(),
                 "List".to_string(),
                 "Search".to_string(),
+                "Glob".to_string(),
+                "WebFetch".to_string(),
+                "WebSearch".to_string(),
+                "MCPResource".to_string(),
+                "ToolSearch".to_string(),
+                "Write".to_string(),
+                "Edit".to_string(),
                 "Plan".to_string()
             ]
         );
@@ -3316,7 +3330,21 @@ mod tests {
     fn render_tool_definitions_uses_product_tool_surface_for_builtin_tools() {
         let rendered = render_tool_definitions(&crate::agent::tools::builtin_tools());
 
-        for tool_name in ["Run", "Ask", "Read", "List", "Search", "Plan"] {
+        for tool_name in [
+            "Run",
+            "Ask",
+            "Read",
+            "List",
+            "Search",
+            "Glob",
+            "WebFetch",
+            "WebSearch",
+            "MCPResource",
+            "ToolSearch",
+            "Write",
+            "Edit",
+            "Plan",
+        ] {
             assert!(
                 rendered.contains(&format!("] {}", tool_name)),
                 "missing tool heading for {tool_name}: {rendered}"
@@ -3329,6 +3357,14 @@ mod tests {
             "workspace_list_files",
             "workspace_gather_context",
             "workspace_search_text",
+            "workspace_glob_files",
+            "web_fetch_url",
+            "web_search_query",
+            "mcp_resource_read",
+            "tool_search",
+            "workspace_write_file",
+            "workspace_edit_file",
+            "workspace_run_command",
             "workspace_batch",
         ] {
             assert!(

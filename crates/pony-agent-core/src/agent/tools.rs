@@ -4,9 +4,12 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::thread;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
+use reqwest::blocking::Client;
 
 const TOOL_TIME_NOW: &str = "time_now";
 const TOOL_ECHO_INPUT: &str = "echo_input";
@@ -15,8 +18,16 @@ const TOOL_WORKSPACE_READ_FILE: &str = "workspace_read_file";
 const TOOL_WORKSPACE_READ_FILE_SEGMENT: &str = "workspace_read_file_segment";
 const TOOL_WORKSPACE_PATH_INFO: &str = "workspace_path_info";
 const TOOL_WORKSPACE_SEARCH_TEXT: &str = "workspace_search_text";
+const TOOL_WORKSPACE_GLOB_FILES: &str = "workspace_glob_files";
 const TOOL_WORKSPACE_BATCH: &str = "workspace_batch";
 const TOOL_WORKSPACE_GATHER_CONTEXT: &str = "workspace_gather_context";
+const TOOL_WORKSPACE_WRITE_FILE: &str = "workspace_write_file";
+const TOOL_WORKSPACE_EDIT_FILE: &str = "workspace_edit_file";
+const TOOL_WORKSPACE_RUN_COMMAND: &str = "workspace_run_command";
+const TOOL_WEB_FETCH_URL: &str = "web_fetch_url";
+const TOOL_WEB_SEARCH_QUERY: &str = "web_search_query";
+const TOOL_MCP_RESOURCE_READ: &str = "mcp_resource_read";
+const TOOL_TOOL_SEARCH: &str = "tool_search";
 
 const MAX_FULL_READ_BYTES: u64 = 120_000;
 const MAX_SEARCH_FILE_BYTES: u64 = 1_000_000;
@@ -28,6 +39,9 @@ const MAX_SEGMENT_LINES: usize = 400;
 const DEFAULT_SEGMENT_LINES: usize = 80;
 const DEFAULT_LIST_LIMIT: usize = 40;
 const SUMMARY_ITEM_LIMIT: usize = 3;
+const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000;
+const MAX_RUN_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_WEB_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -268,6 +282,24 @@ impl ToolRouter {
             Some(TOOL_WORKSPACE_READ_FILE_SEGMENT) => self.read_file_segment(call),
             Some(TOOL_WORKSPACE_PATH_INFO) => self.path_info(call),
             Some(TOOL_WORKSPACE_SEARCH_TEXT) => self.search_text(call),
+            Some(TOOL_WORKSPACE_GLOB_FILES) => self.glob_files(call),
+            Some(TOOL_WORKSPACE_WRITE_FILE) => self.write_file(call),
+            Some(TOOL_WORKSPACE_EDIT_FILE) => self.edit_file(call),
+            Some(TOOL_WORKSPACE_RUN_COMMAND) => self.run_command(call),
+            Some(TOOL_WEB_FETCH_URL) => self.web_fetch(call),
+            Some(TOOL_WEB_SEARCH_QUERY) => self.web_search(call),
+            Some(TOOL_MCP_RESOURCE_READ) => error_result(
+                TOOL_MCP_RESOURCE_READ,
+                "deferred_to_registry",
+                "MCPResource 由 capability registry 代理执行。".to_string(),
+                Some("请通过 runtime 注册工具执行入口调用该工具。".to_string()),
+            ),
+            Some(TOOL_TOOL_SEARCH) => error_result(
+                TOOL_TOOL_SEARCH,
+                "deferred_to_registry",
+                "ToolSearch 由 capability registry 代理执行。".to_string(),
+                Some("请通过 runtime 注册工具执行入口调用该工具。".to_string()),
+            ),
             Some(TOOL_WORKSPACE_GATHER_CONTEXT) => self.gather_context(call),
             Some(TOOL_WORKSPACE_BATCH) if allow_batch => self.batch(call),
             Some(TOOL_WORKSPACE_BATCH) => error_result(
@@ -324,6 +356,583 @@ impl ToolRouter {
             tool_name: TOOL_ECHO_INPUT.to_string(),
             status: "ok".to_string(),
             output: format!("echo_input 返回：{}", text),
+            duration_ms: 0,
+        }
+    }
+
+    fn write_file(&self, call: &ToolCall) -> ToolResult {
+        let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WORKSPACE_WRITE_FILE,
+                "missing_argument",
+                "缺少必填参数 `path`。".to_string(),
+                Some("参数示例：{\"path\":\"src/demo.txt\",\"content\":\"hello\"}".to_string()),
+            );
+        };
+        let Some(content) = call.arguments.get("content").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WORKSPACE_WRITE_FILE,
+                "missing_argument",
+                "缺少必填参数 `content`。".to_string(),
+                Some("参数示例：{\"path\":\"src/demo.txt\",\"content\":\"hello\"}".to_string()),
+            );
+        };
+
+        let overwrite = call
+            .arguments
+            .get("overwrite")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
+        let relative_path = path.trim();
+        if relative_path.is_empty() {
+            return error_result(
+                TOOL_WORKSPACE_WRITE_FILE,
+                "empty_path",
+                "参数 `path` 不能为空字符串。".to_string(),
+                Some("请传入工作区内的相对文件路径。".to_string()),
+            );
+        }
+
+        let target = match self.prepare_workspace_file_path(relative_path) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(TOOL_WORKSPACE_WRITE_FILE, "invalid_path", error, None)
+            }
+        };
+
+        let existed_before = target.exists();
+        if existed_before && !overwrite {
+            return error_result(
+                TOOL_WORKSPACE_WRITE_FILE,
+                "file_exists",
+                format!(
+                    "目标文件已存在：{}。",
+                    self.display_workspace_relative(&target)
+                ),
+                Some("如需覆盖，请显式传入 {\"overwrite\": true}。".to_string()),
+            );
+        }
+
+        if let Some(parent) = target.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                return error_result(
+                    TOOL_WORKSPACE_WRITE_FILE,
+                    "create_parent_failed",
+                    format!("创建父目录失败：{}。", error),
+                    Some("请确认目标目录在当前工作区内且进程有写权限。".to_string()),
+                );
+            }
+        }
+
+        if let Err(error) = fs::write(&target, content) {
+            return error_result(
+                TOOL_WORKSPACE_WRITE_FILE,
+                "write_failed",
+                format!("写入文件失败：{}。", error),
+                Some("请确认目标文件可写，且当前进程有写权限。".to_string()),
+            );
+        }
+
+        ToolResult {
+            tool_name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+            status: "ok".to_string(),
+            output: json_string(json!({
+                "ok": true,
+                "path": self.display_workspace_relative(&target),
+                "absolutePath": target.display().to_string(),
+                "bytesWritten": content.len(),
+                "overwroteExisting": existed_before,
+                "summary": {
+                    "text": format!("已写入文件 {}。", self.display_workspace_relative(&target))
+                },
+                "permission": {
+                    "requiresApproval": false,
+                    "permissionScope": "workspace.write",
+                    "hostMediated": false,
+                    "permissionProfile": "builtin",
+                    "approvalMode": "none",
+                    "decisionSource": "runtime"
+                }
+            })),
+            duration_ms: 0,
+        }
+    }
+
+    fn edit_file(&self, call: &ToolCall) -> ToolResult {
+        let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "missing_argument",
+                "缺少必填参数 `path`。".to_string(),
+                Some(
+                    "参数示例：{\"path\":\"src/demo.txt\",\"oldText\":\"foo\",\"newText\":\"bar\"}"
+                        .to_string(),
+                ),
+            );
+        };
+        let Some(old_text) = call.arguments.get("oldText").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "missing_argument",
+                "缺少必填参数 `oldText`。".to_string(),
+                Some(
+                    "参数示例：{\"path\":\"src/demo.txt\",\"oldText\":\"foo\",\"newText\":\"bar\"}"
+                        .to_string(),
+                ),
+            );
+        };
+        let Some(new_text) = call.arguments.get("newText").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "missing_argument",
+                "缺少必填参数 `newText`。".to_string(),
+                Some(
+                    "参数示例：{\"path\":\"src/demo.txt\",\"oldText\":\"foo\",\"newText\":\"bar\"}"
+                        .to_string(),
+                ),
+            );
+        };
+
+        if old_text.is_empty() {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "empty_old_text",
+                "参数 `oldText` 不能为空字符串。".to_string(),
+                Some("请提供需要被替换的原始文本。".to_string()),
+            );
+        }
+
+        let replace_all = call
+            .arguments
+            .get("replaceAll")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let target = match self.resolve_workspace_path(path) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(TOOL_WORKSPACE_EDIT_FILE, "invalid_path", error, None)
+            }
+        };
+
+        let original = match fs::read_to_string(&target) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(
+                    TOOL_WORKSPACE_EDIT_FILE,
+                    "read_failed",
+                    format!("读取文件失败：{}。", error),
+                    Some("请确认目标文件存在且为可读文本文件。".to_string()),
+                )
+            }
+        };
+
+        let match_count = original.matches(old_text).count();
+        if match_count == 0 {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "no_match",
+                format!(
+                    "在文件 {} 中没有找到 `oldText`。",
+                    self.display_workspace_relative(&target)
+                ),
+                Some("请先读取文件确认原始文本，再执行编辑。".to_string()),
+            );
+        }
+        if match_count > 1 && !replace_all {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "multiple_matches",
+                format!(
+                    "在文件 {} 中找到 {} 处匹配；未显式允许批量替换。",
+                    self.display_workspace_relative(&target),
+                    match_count
+                ),
+                Some("如需全部替换，请传入 {\"replaceAll\": true}。".to_string()),
+            );
+        }
+
+        let updated = if replace_all {
+            original.replace(old_text, new_text)
+        } else {
+            original.replacen(old_text, new_text, 1)
+        };
+
+        if let Err(error) = fs::write(&target, updated.as_bytes()) {
+            return error_result(
+                TOOL_WORKSPACE_EDIT_FILE,
+                "write_failed",
+                format!("写回文件失败：{}。", error),
+                Some("请确认目标文件可写，且当前进程有写权限。".to_string()),
+            );
+        }
+
+        ToolResult {
+            tool_name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+            status: "ok".to_string(),
+            output: json_string(json!({
+                "ok": true,
+                "path": self.display_workspace_relative(&target),
+                "absolutePath": target.display().to_string(),
+                "matchCount": match_count,
+                "replacedCount": if replace_all { match_count } else { 1 },
+                "replaceAll": replace_all,
+                "summary": {
+                    "text": format!("已编辑文件 {}。", self.display_workspace_relative(&target))
+                },
+                "permission": {
+                    "requiresApproval": false,
+                    "permissionScope": "workspace.write",
+                    "hostMediated": false,
+                    "permissionProfile": "builtin",
+                    "approvalMode": "none",
+                    "decisionSource": "runtime"
+                }
+            })),
+            duration_ms: 0,
+        }
+    }
+
+    fn run_command(&self, call: &ToolCall) -> ToolResult {
+        let Some(command) = call.arguments.get("command").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WORKSPACE_RUN_COMMAND,
+                "missing_argument",
+                "缺少必填参数 `command`。".to_string(),
+                Some("参数示例：{\"command\":\"git status\",\"cwd\":\".\",\"timeoutMs\":5000}".to_string()),
+            );
+        };
+
+        let command = command.trim();
+        if command.is_empty() {
+            return error_result(
+                TOOL_WORKSPACE_RUN_COMMAND,
+                "empty_command",
+                "参数 `command` 不能为空字符串。".to_string(),
+                Some("请提供要执行的命令文本。".to_string()),
+            );
+        }
+
+        if let Some(reason) = denied_run_command_reason(command) {
+            return error_result(
+                TOOL_WORKSPACE_RUN_COMMAND,
+                "command_denied",
+                reason,
+                Some("请改用只读、非破坏性的工作区内命令。".to_string()),
+            );
+        }
+
+        let cwd_input = call
+            .arguments
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or(".");
+        let cwd = match self.resolve_workspace_dir(cwd_input) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(TOOL_WORKSPACE_RUN_COMMAND, "invalid_cwd", error, None)
+            }
+        };
+        let timeout_ms = call
+            .arguments
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, MAX_RUN_TIMEOUT_MS))
+            .unwrap_or(DEFAULT_RUN_TIMEOUT_MS);
+
+        let mut child = match spawn_workspace_command(command, &cwd) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(
+                    TOOL_WORKSPACE_RUN_COMMAND,
+                    "spawn_failed",
+                    format!("启动命令失败：{}。", error),
+                    Some("请确认命令语法正确，且当前环境存在对应可执行文件。".to_string()),
+                )
+            }
+        };
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let output = loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => match child.wait_with_output() {
+                    Ok(value) => break Ok(value),
+                    Err(error) => {
+                        break Err(error_result(
+                            TOOL_WORKSPACE_RUN_COMMAND,
+                            "wait_failed",
+                            format!("等待命令输出失败：{}。", error),
+                            Some("请重试，或缩短命令输出与执行时长。".to_string()),
+                        ))
+                    }
+                },
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Err(error_result(
+                            TOOL_WORKSPACE_RUN_COMMAND,
+                            "timeout",
+                            format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
+                            Some("请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()),
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => {
+                    break Err(error_result(
+                        TOOL_WORKSPACE_RUN_COMMAND,
+                        "wait_failed",
+                        format!("轮询命令状态失败：{}。", error),
+                        Some("请重试，或更换更简单的命令。".to_string()),
+                    ))
+                }
+            }
+        };
+
+        let output = match output {
+            Ok(value) => value,
+            Err(result) => return result,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code();
+        let succeeded = output.status.success();
+        let error_payload = (!succeeded).then(|| {
+            json!({
+                "code": "non_zero_exit",
+                "message": format!(
+                    "命令执行完成，但退出码为 {}。",
+                    exit_code.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
+                ),
+                "exitCode": exit_code
+            })
+        });
+
+        ToolResult {
+            tool_name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            status: if succeeded {
+                "ok".to_string()
+            } else {
+                "error".to_string()
+            },
+            output: json_string(json!({
+                "ok": succeeded,
+                "cwd": self.display_workspace_relative(&cwd),
+                "absoluteCwd": cwd.display().to_string(),
+                "command": command,
+                "timeoutMs": timeout_ms,
+                "exitCode": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "error": error_payload,
+                "summary": {
+                    "text": format!(
+                        "命令在 {} 执行完成，退出码为 {}。",
+                        self.display_workspace_relative(&cwd),
+                        exit_code.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
+                    )
+                },
+                "permission": {
+                    "requiresApproval": false,
+                    "permissionScope": "workspace.execute",
+                    "hostMediated": false,
+                    "permissionProfile": "builtin",
+                    "approvalMode": "none",
+                    "decisionSource": "runtime"
+                }
+            })),
+            duration_ms: 0,
+        }
+    }
+
+    fn web_fetch(&self, call: &ToolCall) -> ToolResult {
+        let Some(url) = call.arguments.get("url").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WEB_FETCH_URL,
+                "missing_argument",
+                "缺少必填参数 `url`。".to_string(),
+                Some("参数示例：{\"url\":\"https://example.com\",\"timeoutMs\":15000}".to_string()),
+            );
+        };
+        let url = url.trim();
+        if !is_http_url(url) {
+            return error_result(
+                TOOL_WEB_FETCH_URL,
+                "invalid_url",
+                "只允许抓取 http/https URL。".to_string(),
+                Some("请传入以 http:// 或 https:// 开头的地址。".to_string()),
+            );
+        }
+
+        let timeout_ms = call
+            .arguments
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, 60_000))
+            .unwrap_or(DEFAULT_WEB_TIMEOUT_MS);
+
+        let client = match build_web_client(timeout_ms) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(TOOL_WEB_FETCH_URL, "client_build_failed", error, None)
+            }
+        };
+
+        let response = match client.get(url).send() {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(
+                    TOOL_WEB_FETCH_URL,
+                    "request_failed",
+                    format!("抓取 URL 失败：{}。", error),
+                    Some("请确认目标地址可访问，或稍后重试。".to_string()),
+                )
+            }
+        };
+
+        let status = response.status();
+        let final_url = response.url().to_string();
+        let body = match response.text() {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(
+                    TOOL_WEB_FETCH_URL,
+                    "read_body_failed",
+                    format!("读取响应正文失败：{}。", error),
+                    Some("请确认目标地址返回的是可读取文本内容。".to_string()),
+                )
+            }
+        };
+
+        ToolResult {
+            tool_name: TOOL_WEB_FETCH_URL.to_string(),
+            status: if status.is_success() {
+                "ok".to_string()
+            } else {
+                "error".to_string()
+            },
+            output: json_string(json!({
+                "ok": status.is_success(),
+                "url": final_url,
+                "statusCode": status.as_u16(),
+                "contentPreview": preview_text(&body, 2000),
+                "contentLength": body.len(),
+                "error": (!status.is_success()).then(|| json!({
+                    "code": "http_error",
+                    "message": format!("抓取 URL 返回非成功状态码 {}。", status.as_u16()),
+                    "hint": "请确认目标地址可访问，或检查服务端响应状态。"
+                })),
+                "summary": {
+                    "text": format!("已抓取 URL {}，状态码 {}。", url, status.as_u16())
+                }
+            })),
+            duration_ms: 0,
+        }
+    }
+
+    fn web_search(&self, call: &ToolCall) -> ToolResult {
+        let Some(query) = call.arguments.get("query").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WEB_SEARCH_QUERY,
+                "missing_argument",
+                "缺少必填参数 `query`。".to_string(),
+                Some("参数示例：{\"query\":\"rust reqwest tutorial\",\"limit\":5}".to_string()),
+            );
+        };
+        let query = query.trim();
+        if query.is_empty() {
+            return error_result(
+                TOOL_WEB_SEARCH_QUERY,
+                "empty_query",
+                "参数 `query` 不能为空字符串。".to_string(),
+                Some("请提供外部搜索关键词。".to_string()),
+            );
+        }
+
+        let limit = call
+            .arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, 10) as usize)
+            .unwrap_or(5);
+        let timeout_ms = call
+            .arguments
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, 60_000))
+            .unwrap_or(DEFAULT_WEB_TIMEOUT_MS);
+
+        let encoded_query = query.replace(' ', "+");
+        let url = format!("https://duckduckgo.com/html/?q={encoded_query}");
+        self.execute_web_search_request(query, limit, timeout_ms, &url)
+    }
+
+    fn execute_web_search_request(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout_ms: u64,
+        url: &str,
+    ) -> ToolResult {
+        let client = match build_web_client(timeout_ms) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(TOOL_WEB_SEARCH_QUERY, "client_build_failed", error, None)
+            }
+        };
+
+        let response = match client.get(url).send() {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(
+                    TOOL_WEB_SEARCH_QUERY,
+                    "request_failed",
+                    format!("执行外部搜索失败：{}。", error),
+                    Some("请确认当前网络可访问外部搜索页面，或稍后重试。".to_string()),
+                )
+            }
+        };
+
+        let status = response.status();
+        let body = match response.text() {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(
+                    TOOL_WEB_SEARCH_QUERY,
+                    "read_body_failed",
+                    format!("读取搜索结果失败：{}。", error),
+                    Some("请确认搜索结果页面可读取。".to_string()),
+                )
+            }
+        };
+
+        let results = extract_duckduckgo_results(&body, limit);
+
+        ToolResult {
+            tool_name: TOOL_WEB_SEARCH_QUERY.to_string(),
+            status: if status.is_success() {
+                "ok".to_string()
+            } else {
+                "error".to_string()
+            },
+            output: json_string(json!({
+                "ok": status.is_success(),
+                "query": query,
+                "statusCode": status.as_u16(),
+                "resultCount": results.len(),
+                "results": results,
+                "error": (!status.is_success()).then(|| json!({
+                    "code": "http_error",
+                    "message": format!("外部搜索返回非成功状态码 {}。", status.as_u16()),
+                    "hint": "请稍后重试，或检查外部搜索页面是否可访问。"
+                })),
+                "summary": {
+                    "text": format!("已完成外部搜索 `{}`，返回 {} 条结果。", query, results.len())
+                }
+            })),
             duration_ms: 0,
         }
     }
@@ -606,6 +1215,97 @@ impl ToolRouter {
         }
     }
 
+    fn glob_files(&self, call: &ToolCall) -> ToolResult {
+        let pattern = call
+            .arguments
+            .get("pattern")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if pattern.is_empty() {
+            return error_result(
+                TOOL_WORKSPACE_GLOB_FILES,
+                "missing_argument",
+                "缺少必填参数 `pattern`。".to_string(),
+                Some("参数示例：{\"pattern\":\"src/**/*.rs\",\"path\":\".\",\"limit\":50}".to_string()),
+            );
+        }
+
+        let relative_dir = call
+            .arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or(".")
+            .trim();
+        let limit = call
+            .arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|value| value.clamp(1, 200) as usize)
+            .unwrap_or(50);
+
+        let root_entry = match self.resolve_workspace_entry(relative_dir) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(TOOL_WORKSPACE_GLOB_FILES, "invalid_path", error, None)
+            }
+        };
+
+        let mut files = if root_entry.is_file() {
+            vec![root_entry.clone()]
+        } else if root_entry.is_dir() {
+            let mut collected = Vec::new();
+            if let Err(error) =
+                collect_files_recursively(&root_entry, &mut collected, MAX_SEARCH_FILES)
+            {
+                return error_result(
+                    TOOL_WORKSPACE_GLOB_FILES,
+                    "walk_failed",
+                    format!("遍历目录失败：{}。", error),
+                    Some("请缩小 path 范围后重试。".to_string()),
+                );
+            }
+            collected
+        } else {
+            return error_result(
+                TOOL_WORKSPACE_GLOB_FILES,
+                "unsupported_path_kind",
+                format!(
+                    "当前路径类型不支持路径模式匹配：{}。",
+                    self.display_workspace_relative(&root_entry)
+                ),
+                Some("请传入工作区内的文件或目录路径。".to_string()),
+            );
+        };
+        files.sort();
+
+        let mut matches = Vec::new();
+        for file_path in files {
+            if matches.len() >= limit {
+                break;
+            }
+            let relative = self.display_workspace_relative(&file_path);
+            if path_matches_filter(&relative, pattern) {
+                matches.push(json!({
+                    "path": relative,
+                    "kind": "file"
+                }));
+            }
+        }
+
+        ToolResult {
+            tool_name: TOOL_WORKSPACE_GLOB_FILES.to_string(),
+            status: "ok".to_string(),
+            output: json_string(json!({
+                "pattern": pattern,
+                "path": self.display_workspace_relative(&root_entry),
+                "matchCount": matches.len(),
+                "matches": matches,
+            })),
+            duration_ms: 0,
+        }
+    }
+
     fn search_text(&self, call: &ToolCall) -> ToolResult {
         let Some(query) = call.arguments.get("query").and_then(Value::as_str) else {
             return error_result(
@@ -646,6 +1346,11 @@ impl ToolRouter {
             .get("ignoreCase")
             .and_then(Value::as_bool)
             .unwrap_or(true);
+        let regex_mode = call
+            .arguments
+            .get("regex")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let file_filter = call
             .arguments
             .get("filePattern")
@@ -739,7 +1444,12 @@ impl ToolRouter {
                 } else {
                     line.to_string()
                 };
-                if haystack.contains(&normalized_query) {
+                let matched = if regex_mode {
+                    wildcard_match(&haystack, &normalized_query)
+                } else {
+                    haystack.contains(&normalized_query)
+                };
+                if matched {
                     matches.push(json!({
                         "path": relative,
                         "line": index + 1,
@@ -761,6 +1471,7 @@ impl ToolRouter {
                 "path": searched_path,
                 "pathKind": path_kind,
                 "ignoreCase": ignore_case,
+                "regex": regex_mode,
                 "filePattern": file_filter,
                 "scannedFiles": scanned_files,
                 "skippedUnreadableFiles": skipped_unreadable,
@@ -1451,6 +2162,38 @@ impl ToolRouter {
         Ok(canonical)
     }
 
+    fn prepare_workspace_file_path(&self, raw_path: &str) -> Result<PathBuf, String> {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return Err("文件路径不能为空。".to_string());
+        }
+
+        let input = PathBuf::from(trimmed);
+        let candidate = if input.is_absolute() {
+            input
+        } else {
+            self.workspace_root.join(trimmed)
+        };
+
+        let root = self.canonical_workspace_root();
+        let parent = candidate.parent().unwrap_or(&self.workspace_root);
+        let existing_ancestor = existing_workspace_ancestor_path(parent)
+            .ok_or_else(|| format!("无法解析目标父目录 {}。", parent.display()))?;
+        let canonical_ancestor = existing_ancestor
+            .canonicalize()
+            .map_err(|error| format!("无法解析目标父目录 {}：{}", existing_ancestor.display(), error))?;
+
+        if !is_within_root(&root, &canonical_ancestor) {
+            return Err("只允许写入当前工作区内的相对路径。".to_string());
+        }
+
+        let relative_suffix = candidate
+            .strip_prefix(&existing_ancestor)
+            .map_err(|_| "无法计算工作区内的目标路径后缀。".to_string())?;
+
+        Ok(canonical_ancestor.join(relative_suffix))
+    }
+
     fn resolve_workspace_entry(&self, raw_path: &str) -> Result<PathBuf, String> {
         let trimmed = if raw_path.trim().is_empty() {
             "."
@@ -1811,12 +2554,195 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                         "type": "boolean",
                         "description": "是否忽略大小写，默认 true"
                     },
+                    "regex": {
+                        "type": "boolean",
+                        "description": "是否按增强模式匹配 query；当前 v1 使用通配符式匹配，默认 false"
+                    },
                     "filePattern": {
                         "type": "string",
                         "description": "可选的路径子串过滤，例如 .rs 或 src/agent"
                     }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_WORKSPACE_GLOB_FILES,
+            description: "按路径 pattern 递归匹配工作区内文件，适合大代码库中的文件发现。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "要匹配的路径模式，例如 src/*.rs 或 *tool*"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "搜索起点目录，默认为 ."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回多少条路径命中，默认 50"
+                    }
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_WEB_FETCH_URL,
+            description: "抓取指定 http/https URL 的正文内容预览，不承担搜索排序职责。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "要抓取的 http/https URL"
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "请求超时毫秒数，默认 15000"
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_WEB_SEARCH_QUERY,
+            description: "执行外部搜索并返回结构化结果列表，不把抓取和搜索混为一个工具。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "外部搜索关键词"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回多少条搜索结果，默认 5"
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "请求超时毫秒数，默认 15000"
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_MCP_RESOURCE_READ,
+            description: "通过 capability registry 读取指定 MCP 资源 capability 的只读内容，不混入普通工具执行。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "capabilityId": {
+                        "type": "string",
+                        "description": "目标 resource capability id，例如 mcp:resource:repo-index"
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "传给 resource capability 的结构化参数"
+                    }
+                },
+                "required": ["capabilityId"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_TOOL_SEARCH,
+            description: "搜索 capability registry 中可用的工具候选，作为 deferred / dynamic tool discovery 入口。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "可选查询词；为空时返回默认候选列表"
+                    },
+                    "sourceId": {
+                        "type": "string",
+                        "description": "可选 source id，用于缩小 discovery 范围"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回多少条候选，默认 8"
+                    }
+                },
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_WORKSPACE_WRITE_FILE,
+            description: "在当前工作区内新建或整文件覆写文本文件，可控制是否允许覆盖现有文件。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "当前工作区内的相对文件路径"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "要写入文件的完整文本内容"
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "是否允许覆盖已存在文件，默认 true"
+                    }
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_WORKSPACE_EDIT_FILE,
+            description: "在当前工作区内按 oldText/newText 对文本文件做受控替换；默认只允许单一匹配。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "当前工作区内的相对文件路径"
+                    },
+                    "oldText": {
+                        "type": "string",
+                        "description": "需要被替换的原始文本"
+                    },
+                    "newText": {
+                        "type": "string",
+                        "description": "替换后的新文本"
+                    },
+                    "replaceAll": {
+                        "type": "boolean",
+                        "description": "是否允许替换全部匹配，默认 false"
+                    }
+                },
+                "required": ["path", "oldText", "newText"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_WORKSPACE_RUN_COMMAND,
+            description: "在当前工作区内受控执行命令，返回 cwd、timeout、exitCode、stdout 和 stderr。",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "要执行的命令文本"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "执行命令时的工作区内相对目录，默认 ."
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "命令超时毫秒数，默认 10000，最大 120000"
+                    }
+                },
+                "required": ["command"],
                 "additionalProperties": false
             }),
         },
@@ -1890,10 +2816,18 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
 
 fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
     match view.execution_primitive.as_str() {
-        TOOL_TIME_NOW => 100,
+        TOOL_TIME_NOW => 10,
         TOOL_ECHO_INPUT => 100,
         TOOL_WORKSPACE_LIST_FILES => 100,
         TOOL_WORKSPACE_SEARCH_TEXT => 100,
+        TOOL_WORKSPACE_GLOB_FILES => 100,
+        TOOL_WEB_FETCH_URL => 100,
+        TOOL_WEB_SEARCH_QUERY => 100,
+        TOOL_MCP_RESOURCE_READ => 100,
+        TOOL_TOOL_SEARCH => 100,
+        TOOL_WORKSPACE_WRITE_FILE => 100,
+        TOOL_WORKSPACE_EDIT_FILE => 100,
+        TOOL_WORKSPACE_RUN_COMMAND => 100,
         TOOL_WORKSPACE_BATCH => 100,
         TOOL_WORKSPACE_GATHER_CONTEXT => 100,
         TOOL_WORKSPACE_READ_FILE => 40,
@@ -1941,15 +2875,39 @@ mod contract_view_tests {
             .map(|view| view.execution_primitive.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(names, vec!["Run", "Ask", "Read", "List", "Search", "Plan"]);
+        assert_eq!(
+            names,
+            vec![
+                "Run",
+                "Ask",
+                "Read",
+                "List",
+                "Search",
+                "Glob",
+                "WebFetch",
+                "WebSearch",
+                "MCPResource",
+                "ToolSearch",
+                "Write",
+                "Edit",
+                "Plan"
+            ]
+        );
         assert_eq!(
             primitives,
             vec![
-                "time_now",
+                "workspace_run_command",
                 "echo_input",
                 "workspace_gather_context",
                 "workspace_list_files",
                 "workspace_search_text",
+                "workspace_glob_files",
+                "web_fetch_url",
+                "web_search_query",
+                "mcp_resource_read",
+                "tool_search",
+                "workspace_write_file",
+                "workspace_edit_file",
                 "workspace_batch"
             ]
         );
@@ -1958,11 +2916,18 @@ mod contract_view_tests {
 
 pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
     match name {
-        "Run" => Some(TOOL_TIME_NOW),
+        "Run" => Some(TOOL_WORKSPACE_RUN_COMMAND),
         "Ask" => Some(TOOL_ECHO_INPUT),
         "List" => Some(TOOL_WORKSPACE_LIST_FILES),
         "Read" => Some(TOOL_WORKSPACE_GATHER_CONTEXT),
         "Search" => Some(TOOL_WORKSPACE_SEARCH_TEXT),
+        "Glob" => Some(TOOL_WORKSPACE_GLOB_FILES),
+        "WebFetch" => Some(TOOL_WEB_FETCH_URL),
+        "WebSearch" => Some(TOOL_WEB_SEARCH_QUERY),
+        "MCPResource" => Some(TOOL_MCP_RESOURCE_READ),
+        "ToolSearch" => Some(TOOL_TOOL_SEARCH),
+        "Write" => Some(TOOL_WORKSPACE_WRITE_FILE),
+        "Edit" => Some(TOOL_WORKSPACE_EDIT_FILE),
         "Plan" => Some(TOOL_WORKSPACE_BATCH),
         TOOL_TIME_NOW | "time.now" => Some(TOOL_TIME_NOW),
         TOOL_ECHO_INPUT | "echo.input" => Some(TOOL_ECHO_INPUT),
@@ -1973,6 +2938,14 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
         }
         TOOL_WORKSPACE_PATH_INFO | "workspace.path_info" => Some(TOOL_WORKSPACE_PATH_INFO),
         TOOL_WORKSPACE_SEARCH_TEXT | "workspace.search_text" => Some(TOOL_WORKSPACE_SEARCH_TEXT),
+        TOOL_WORKSPACE_GLOB_FILES | "workspace.glob_files" => Some(TOOL_WORKSPACE_GLOB_FILES),
+        TOOL_WEB_FETCH_URL | "web.fetch_url" => Some(TOOL_WEB_FETCH_URL),
+        TOOL_WEB_SEARCH_QUERY | "web.search_query" => Some(TOOL_WEB_SEARCH_QUERY),
+        TOOL_MCP_RESOURCE_READ | "mcp.resource_read" => Some(TOOL_MCP_RESOURCE_READ),
+        TOOL_TOOL_SEARCH | "tool.search" => Some(TOOL_TOOL_SEARCH),
+        TOOL_WORKSPACE_WRITE_FILE | "workspace.write_file" => Some(TOOL_WORKSPACE_WRITE_FILE),
+        TOOL_WORKSPACE_EDIT_FILE | "workspace.edit_file" => Some(TOOL_WORKSPACE_EDIT_FILE),
+        TOOL_WORKSPACE_RUN_COMMAND | "workspace.run_command" => Some(TOOL_WORKSPACE_RUN_COMMAND),
         TOOL_WORKSPACE_BATCH | "workspace.batch" => Some(TOOL_WORKSPACE_BATCH),
         TOOL_WORKSPACE_GATHER_CONTEXT | "workspace.gather_context" => {
             Some(TOOL_WORKSPACE_GATHER_CONTEXT)
@@ -1983,12 +2956,20 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
 
 pub fn model_visible_tool_name(name: &str) -> &'static str {
     match canonical_tool_name(name).unwrap_or(name) {
+        TOOL_WORKSPACE_RUN_COMMAND => "Run",
         TOOL_TIME_NOW => "Run",
         TOOL_ECHO_INPUT => "Ask",
         TOOL_WORKSPACE_LIST_FILES => "List",
         TOOL_WORKSPACE_READ_FILE | TOOL_WORKSPACE_READ_FILE_SEGMENT => "Read",
         TOOL_WORKSPACE_PATH_INFO => "List",
         TOOL_WORKSPACE_SEARCH_TEXT => "Search",
+        TOOL_WORKSPACE_GLOB_FILES => "Glob",
+        TOOL_WEB_FETCH_URL => "WebFetch",
+        TOOL_WEB_SEARCH_QUERY => "WebSearch",
+        TOOL_MCP_RESOURCE_READ => "MCPResource",
+        TOOL_TOOL_SEARCH => "ToolSearch",
+        TOOL_WORKSPACE_WRITE_FILE => "Write",
+        TOOL_WORKSPACE_EDIT_FILE => "Edit",
         TOOL_WORKSPACE_BATCH => "Plan",
         TOOL_WORKSPACE_GATHER_CONTEXT => "Read",
         _ => "Run",
@@ -2004,12 +2985,16 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_WORKSPACE_READ_FILE
         | TOOL_WORKSPACE_READ_FILE_SEGMENT
         | TOOL_WORKSPACE_PATH_INFO
-        | TOOL_WORKSPACE_GATHER_CONTEXT => ToolKind::Read,
-        TOOL_WORKSPACE_SEARCH_TEXT => ToolKind::Search,
+        | TOOL_WORKSPACE_GATHER_CONTEXT
+        | TOOL_WORKSPACE_GLOB_FILES
+        | TOOL_WEB_FETCH_URL
+        | TOOL_MCP_RESOURCE_READ => ToolKind::Read,
+        TOOL_WORKSPACE_SEARCH_TEXT | TOOL_WEB_SEARCH_QUERY | TOOL_TOOL_SEARCH => ToolKind::Search,
+        TOOL_WORKSPACE_WRITE_FILE | TOOL_WORKSPACE_EDIT_FILE => ToolKind::Write,
         TOOL_WORKSPACE_LIST_FILES => ToolKind::Read,
         TOOL_WORKSPACE_BATCH => ToolKind::Composite,
         TOOL_ECHO_INPUT => ToolKind::Interactive,
-        TOOL_TIME_NOW => ToolKind::Execute,
+        TOOL_TIME_NOW | TOOL_WORKSPACE_RUN_COMMAND => ToolKind::Execute,
         _ => ToolKind::External,
     }
 }
@@ -2021,9 +3006,17 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_WORKSPACE_LIST_FILES
         | TOOL_WORKSPACE_READ_FILE
         | TOOL_WORKSPACE_READ_FILE_SEGMENT
+        | TOOL_WORKSPACE_GLOB_FILES
         | TOOL_WORKSPACE_SEARCH_TEXT
+        | TOOL_WEB_FETCH_URL
+        | TOOL_WEB_SEARCH_QUERY
+        | TOOL_MCP_RESOURCE_READ
+        | TOOL_WORKSPACE_WRITE_FILE
+        | TOOL_WORKSPACE_EDIT_FILE
+        | TOOL_WORKSPACE_RUN_COMMAND
         | TOOL_ECHO_INPUT
         | TOOL_TIME_NOW => ToolExposure::ModelVisible,
+        TOOL_TOOL_SEARCH => ToolExposure::Deferred,
         TOOL_WORKSPACE_PATH_INFO => ToolExposure::Deferred,
         _ => ToolExposure::Internal,
     }
@@ -2034,6 +3027,11 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         "Read" => Some("读取".to_string()),
         "Search" => Some("搜索".to_string()),
         "List" => Some("列表".to_string()),
+        "Glob" => Some("匹配".to_string()),
+        "WebFetch" => Some("抓取".to_string()),
+        "WebSearch" => Some("外搜".to_string()),
+        "MCPResource" => Some("资源".to_string()),
+        "ToolSearch" => Some("找工具".to_string()),
         "Plan" => Some("计划".to_string()),
         "Ask" => Some("提问".to_string()),
         "Run" => Some("运行".to_string()),
@@ -2050,9 +3048,16 @@ pub fn default_permission_facts_for_name(name: &str) -> ToolPermissionFacts {
         | TOOL_WORKSPACE_READ_FILE
         | TOOL_WORKSPACE_READ_FILE_SEGMENT
         | TOOL_WORKSPACE_PATH_INFO
+        | TOOL_WORKSPACE_GLOB_FILES
         | TOOL_WORKSPACE_SEARCH_TEXT
+        | TOOL_WEB_FETCH_URL
+        | TOOL_WEB_SEARCH_QUERY
+        | TOOL_MCP_RESOURCE_READ
         | TOOL_WORKSPACE_GATHER_CONTEXT
         | TOOL_WORKSPACE_BATCH => Some("workspace.read".to_string()),
+        TOOL_TOOL_SEARCH => Some("capability.discovery".to_string()),
+        TOOL_WORKSPACE_WRITE_FILE | TOOL_WORKSPACE_EDIT_FILE => Some("workspace.write".to_string()),
+        TOOL_WORKSPACE_RUN_COMMAND => Some("workspace.execute".to_string()),
         TOOL_TIME_NOW | TOOL_ECHO_INPUT => None,
         _ => None,
     };
@@ -2188,6 +3193,195 @@ fn wildcard_match(input: &str, pattern: &str) -> bool {
     }
 
     true
+}
+
+fn denied_run_command_reason(command: &str) -> Option<String> {
+    let normalized = command.trim().to_lowercase();
+    let tokens = normalized
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        return None;
+    }
+
+    if is_rm_destructive_command(&tokens) {
+        return Some("命令包含高风险删除模式 `rm -rf`，当前 runtime 已拒绝执行。".to_string());
+    }
+    if is_git_reset_hard_command(&tokens) {
+        return Some("命令包含高风险片段 `git reset --hard`，当前 runtime 已拒绝执行。".to_string());
+    }
+    if is_git_clean_force_command(&tokens) {
+        return Some("命令包含高风险片段 `git clean -fd`，当前 runtime 已拒绝执行。".to_string());
+    }
+
+    let deny_markers = [
+        "remove-item",
+        " del ",
+        "erase ",
+        "rmdir /s",
+        "mkfs",
+        "shutdown",
+        "reboot",
+        "halt",
+        "poweroff",
+        "diskpart",
+    ];
+
+    let padded = format!(" {normalized} ");
+    deny_markers
+        .iter()
+        .find(|marker| padded.contains(**marker))
+        .map(|marker| format!("命令包含高风险片段 `{marker}`，当前 runtime 已拒绝执行。"))
+        .or_else(|| {
+            if is_windows_format_command(&tokens) {
+                Some("命令包含高风险磁盘格式化模式 `format <drive>`，当前 runtime 已拒绝执行。".to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn is_rm_destructive_command(tokens: &[&str]) -> bool {
+    if tokens.first().copied() != Some("rm") {
+        return false;
+    }
+    let mut has_recursive = false;
+    let mut has_force = false;
+    for token in tokens.iter().skip(1) {
+        if let Some(flags) = token.strip_prefix('-') {
+            has_recursive |= flags.contains('r');
+            has_force |= flags.contains('f');
+        }
+    }
+    has_recursive && has_force
+}
+
+fn is_git_reset_hard_command(tokens: &[&str]) -> bool {
+    if tokens.first().copied() != Some("git") {
+        return false;
+    }
+    let has_reset = tokens.contains(&"reset");
+    let has_hard = tokens.iter().any(|token| *token == "--hard" || *token == "-h");
+    has_reset && has_hard
+}
+
+fn is_git_clean_force_command(tokens: &[&str]) -> bool {
+    if tokens.first().copied() != Some("git") {
+        return false;
+    }
+    if !tokens.contains(&"clean") {
+        return false;
+    }
+    tokens.iter().any(|token| {
+        if let Some(flags) = token.strip_prefix('-') {
+            flags.contains('f') && flags.contains('d')
+        } else {
+            false
+        }
+    })
+}
+
+fn is_windows_format_command(tokens: &[&str]) -> bool {
+    if tokens.first().copied() != Some("format") {
+        return false;
+    }
+    tokens.iter().skip(1).any(|token| {
+        token.len() == 2
+            && token.ends_with(':')
+            && token
+                .chars()
+                .next()
+                .map(|value| value.is_ascii_alphabetic())
+                .unwrap_or(false)
+    })
+}
+
+fn is_http_url(url: &str) -> bool {
+    let normalized = url.trim().to_lowercase();
+    normalized.starts_with("http://") || normalized.starts_with("https://")
+}
+
+fn build_web_client(timeout_ms: u64) -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|error| format!("创建 HTTP 客户端失败：{}。", error))
+}
+
+fn extract_duckduckgo_results(body: &str, limit: usize) -> Vec<Value> {
+    let mut results = Vec::new();
+    for line in body.lines() {
+        if results.len() >= limit {
+            break;
+        }
+        if let Some(href_index) = line.find("result__a") {
+            let snippet = preview_text(line, 240);
+            let line_slice = &line[href_index..];
+            let url = line_slice
+                .split("href=\"")
+                .nth(1)
+                .and_then(|value| value.split('"').next())
+                .unwrap_or("")
+                .to_string();
+            let title = strip_html_tags(line_slice);
+            if !url.is_empty() || !title.is_empty() {
+                results.push(json!({
+                    "url": url,
+                    "title": title,
+                    "snippet": snippet
+                }));
+            }
+        }
+    }
+    results
+}
+
+fn strip_html_tags(input: &str) -> String {
+    let mut output = String::new();
+    let mut inside_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => inside_tag = true,
+            '>' => inside_tag = false,
+            _ if !inside_tag => output.push(ch),
+            _ => {}
+        }
+    }
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn spawn_workspace_command(command: &str, cwd: &Path) -> std::io::Result<std::process::Child> {
+    if cfg!(windows) {
+        Command::new("cmd")
+            .arg("/C")
+            .arg(command)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    } else {
+        Command::new("sh")
+            .arg("-lc")
+            .arg(command)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    }
+}
+
+fn existing_workspace_ancestor_path(path: &Path) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+        current = candidate.parent();
+    }
+    None
 }
 
 fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
@@ -2627,6 +3821,8 @@ fn read_file_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_workspace() -> PathBuf {
@@ -2637,6 +3833,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pony-agent-tools-test-{}", unique));
         fs::create_dir_all(&dir).expect("create temp workspace");
         dir
+    }
+
+    fn serve_single_http_response(status_line: &str, body: &str, content_type: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test http server");
+        let address = listener.local_addr().expect("read test server addr");
+        let status_line = status_line.to_string();
+        let body = body.to_string();
+        let content_type = content_type.to_string();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write test response");
+            stream.flush().expect("flush test response");
+        });
+
+        format!("http://{}", address)
     }
 
     #[test]
@@ -2872,6 +4092,79 @@ mod tests {
     }
 
     #[test]
+    fn glob_files_matches_paths_by_pattern() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
+        fs::write(workspace.join("src/agent/tools.rs"), "pub fn demo() {}\n").expect("write tools");
+        fs::write(workspace.join("src/agent/context.rs"), "pub struct AgentContext;\n")
+            .expect("write context");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GLOB_FILES.to_string(),
+            arguments: json!({
+                "pattern": "src/agent/*.rs",
+                "path": ".",
+                "limit": 10
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("glob output json");
+        assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(2));
+    }
+
+    #[test]
+    fn glob_files_respects_limit() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
+        fs::write(workspace.join("src/agent/tools.rs"), "pub fn demo() {}\n").expect("write tools");
+        fs::write(workspace.join("src/agent/context.rs"), "pub struct AgentContext;\n")
+            .expect("write context");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GLOB_FILES.to_string(),
+            arguments: json!({
+                "pattern": "src/agent/*.rs",
+                "path": ".",
+                "limit": 1
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("glob output json");
+        assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn search_text_supports_regex_like_wildcard_mode() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "alpha beta gamma\n").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
+            arguments: json!({
+                "query": "*beta*",
+                "path": "demo.txt",
+                "regex": true
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
+        assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(payload.get("regex").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
     fn gather_context_search_file_includes_segment_even_without_match() {
         let workspace = temp_workspace();
         fs::write(
@@ -3054,5 +4347,489 @@ mod tests {
 
         assert_eq!(result.status, "error");
         assert!(result.output.contains("多个缺扩展名候选文件"));
+    }
+
+    #[test]
+    fn write_file_creates_new_file_in_workspace() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+            arguments: json!({
+                "path": "notes/demo.txt",
+                "content": "hello pony"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("write output json");
+        assert_eq!(payload.get("path").and_then(Value::as_str), Some("notes/demo.txt"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("notes/demo.txt")).expect("read written file"),
+            "hello pony"
+        );
+    }
+
+    #[test]
+    fn write_file_respects_overwrite_false_for_existing_file() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "original").expect("write original");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+            arguments: json!({
+                "path": "demo.txt",
+                "content": "changed",
+                "overwrite": false
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("write output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("file_exists")
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("demo.txt")).expect("read original"),
+            "original"
+        );
+    }
+
+    #[test]
+    fn edit_file_requires_replace_all_for_multiple_matches() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "foo\nfoo\n").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+            arguments: json!({
+                "path": "demo.txt",
+                "oldText": "foo",
+                "newText": "bar"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("edit output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("multiple_matches")
+        );
+    }
+
+    #[test]
+    fn edit_file_replaces_all_matches_when_enabled() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "foo\nfoo\n").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+            arguments: json!({
+                "path": "demo.txt",
+                "oldText": "foo",
+                "newText": "bar",
+                "replaceAll": true
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(
+            fs::read_to_string(workspace.join("demo.txt")).expect("read edited file"),
+            "bar\nbar\n"
+        );
+    }
+
+    #[test]
+    fn edit_file_returns_no_match_when_old_text_missing() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "alpha\nbeta\n").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+            arguments: json!({
+                "path": "demo.txt",
+                "oldText": "missing",
+                "newText": "gamma"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("edit output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("no_match")
+        );
+    }
+
+    #[test]
+    fn run_command_returns_stdout_and_exit_code() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "echo hello",
+                "cwd": ".",
+                "timeoutMs": 5000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(payload.get("exitCode").and_then(Value::as_i64), Some(0));
+        assert!(payload
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("hello"));
+    }
+
+    #[test]
+    fn run_command_denies_high_risk_commands() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "rm -rf ."
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("command_denied")
+        );
+    }
+
+    #[test]
+    fn run_command_denies_rm_with_split_flags() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "rm -r -f ."
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("command_denied")
+        );
+    }
+
+    #[test]
+    fn run_command_returns_error_for_non_zero_exit_code() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let command = if cfg!(windows) { "exit /b 7" } else { "exit 7" };
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": command
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(payload.get("exitCode").and_then(Value::as_i64), Some(7));
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("non_zero_exit")
+        );
+    }
+
+    #[test]
+    fn batch_rejects_nested_workspace_batch_calls() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({
+                "calls": [
+                    {
+                        "name": "workspace_batch",
+                        "arguments": {
+                            "calls": [
+                                {
+                                    "name": "workspace_list_files",
+                                    "arguments": { "path": "." }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("nested_batch_not_allowed")
+        );
+    }
+
+    #[test]
+    fn web_fetch_rejects_non_http_urls() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WEB_FETCH_URL.to_string(),
+            arguments: json!({
+                "url": "file:///etc/passwd"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("invalid_url")
+        );
+    }
+
+    #[test]
+    fn web_search_rejects_empty_query() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WEB_SEARCH_QUERY.to_string(),
+            arguments: json!({
+                "query": "   "
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web search output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("empty_query")
+        );
+    }
+
+    #[test]
+    fn web_fetch_returns_success_payload_for_http_response() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let url = serve_single_http_response(
+            "HTTP/1.1 200 OK",
+            "<html><body><h1>Hello Pony</h1><p>Fetch success path.</p></body></html>",
+            "text/html; charset=utf-8",
+        );
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WEB_FETCH_URL.to_string(),
+            arguments: json!({
+                "url": url,
+                "timeoutMs": 5000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch success output json");
+        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(200));
+        assert!(payload.get("url").and_then(Value::as_str).unwrap_or("").starts_with("http://127.0.0.1:"));
+        assert!(
+            payload
+                .get("contentPreview")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Hello Pony")
+        );
+        assert!(payload.get("error").is_none() || payload.get("error") == Some(&Value::Null));
+    }
+
+    #[test]
+    fn web_search_returns_results_for_http_success_page() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let html = r#"
+        <html>
+          <body>
+            <a class="result__a" href="https://example.com/pony-agent">Pony Agent Search Result</a>
+            <a class="result__a" href="https://example.com/phase-d">Phase D Tool Search</a>
+          </body>
+        </html>
+        "#;
+        let search_url =
+            serve_single_http_response("HTTP/1.1 200 OK", html, "text/html; charset=utf-8");
+
+        let result = router.execute_web_search_request("pony agent", 5, 5000, &search_url);
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web search success output json");
+        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(200));
+        assert_eq!(payload.get("resultCount").and_then(Value::as_u64), Some(2));
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .expect("web search results array");
+        assert_eq!(
+            results[0].get("url").and_then(Value::as_str),
+            Some("https://example.com/pony-agent")
+        );
+        assert!(results[0]
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("Pony Agent Search Result"));
+    }
+
+    #[test]
+    fn web_fetch_returns_structured_http_error_for_non_2xx_response() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let url = serve_single_http_response(
+            "HTTP/1.1 404 Not Found",
+            "<html><body>missing</body></html>",
+            "text/html; charset=utf-8",
+        );
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WEB_FETCH_URL.to_string(),
+            arguments: json!({
+                "url": url,
+                "timeoutMs": 5000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch http error output json");
+        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(404));
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("http_error")
+        );
+        assert!(payload
+            .get("contentPreview")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("missing"));
+    }
+
+    #[test]
+    fn web_search_returns_structured_http_error_for_non_2xx_response() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let search_url = serve_single_http_response(
+            "HTTP/1.1 503 Service Unavailable",
+            "<html><body>search unavailable</body></html>",
+            "text/html; charset=utf-8",
+        );
+
+        let result = router.execute_web_search_request("pony agent", 5, 5000, &search_url);
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web search http error output json");
+        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(503));
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("http_error")
+        );
+        assert_eq!(payload.get("resultCount").and_then(Value::as_u64), Some(0));
+    }
+
+    #[test]
+    fn extract_duckduckgo_results_parses_anchor_rows() {
+        let html = r#"
+        <html>
+          <body>
+            <a class="result__a" href="https://example.com/page-1">Example Result One</a>
+            <a class="result__a" href="https://example.com/page-2">Example Result Two</a>
+          </body>
+        </html>
+        "#;
+
+        let results = extract_duckduckgo_results(html, 5);
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].get("url").and_then(Value::as_str),
+            Some("https://example.com/page-1")
+        );
+        assert!(results[0]
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("Example Result One"));
     }
 }
