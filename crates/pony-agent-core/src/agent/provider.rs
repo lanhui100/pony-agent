@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::time::Duration;
 use std::time::Instant;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderProtocol {
     OpenAi,
@@ -94,6 +94,12 @@ pub struct ProviderRequestObservation {
     pub volatile_input_text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_refresh_reason: Option<ContextRefreshReason>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction_scope_sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_carry_mode: Option<ConversationCarryMode>,
 }
 
 impl ProviderRequestObservation {
@@ -102,6 +108,9 @@ impl ProviderRequestObservation {
             && self.semi_stable_context_text.is_empty()
             && self.volatile_input_text.is_empty()
             && self.prefix_mutation_reasons.is_empty()
+            && self.context_refresh_reason.is_none()
+            && self.instruction_scope_sources.is_empty()
+            && self.conversation_carry_mode.is_none()
     }
 }
 
@@ -122,6 +131,12 @@ pub struct BuildContextObservation {
     pub volatile_input_text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_refresh_reason: Option<ContextRefreshReason>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction_scope_sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_carry_mode: Option<ConversationCarryMode>,
     pub request_messages_text: String,
     pub tool_definitions_text: String,
 }
@@ -137,6 +152,31 @@ pub enum PrefixMutationReason {
     TruncationNoteChanged,
     HistoryBoundaryShifted,
     NativeTranscriptBoundaryShifted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRefreshReason {
+    InitialBuild,
+    SessionSummaryChanged,
+    RunGoalChanged,
+    LongTermMemoryChanged,
+    PlannerSkillsChanged,
+    ImageNoteChanged,
+    TruncationNoteChanged,
+    HistoryBoundaryShifted,
+    NativeTranscriptBoundaryShifted,
+    WorkspaceScopeChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationCarryMode {
+    FullReplay,
+    ProviderNativeTranscriptReplay,
+    ProviderContinuationPreferred,
+    ProviderContinuationFallbackReplay,
+    CompactedReplay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +227,9 @@ pub fn build_context_observation(
         semi_stable_context_text: observation.semi_stable_context_text,
         volatile_input_text: observation.volatile_input_text,
         prefix_mutation_reasons: observation.prefix_mutation_reasons,
+        context_refresh_reason: observation.context_refresh_reason,
+        instruction_scope_sources: observation.instruction_scope_sources,
+        conversation_carry_mode: observation.conversation_carry_mode,
         request_messages_text,
         tool_definitions_text: render_tool_definitions(tools),
     }
@@ -746,7 +789,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
-        _assistant_message: Option<&Value>,
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
@@ -759,7 +802,7 @@ impl ProviderManager {
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+                "messages": anthropic_messages_with_tool_result(request, assistant_message, tool_call, tool_result),
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "tools": anthropic_tools_payload(tools),
@@ -778,24 +821,31 @@ impl ProviderManager {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let reasoning_content = extract_anthropic_thinking_text(&content);
+        let reasoning_content_value = extract_anthropic_thinking_value(&content);
         let tool_call = extract_anthropic_tool_call(&content);
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("anthropic tool follow-up missing text or tool call".to_string());
         }
         let assistant_message = match tool_call.as_ref() {
-            Some(tool_call) => Some(provider_native_assistant_tool_call_message(
-                text_if_present(&output_text),
-                None,
-                tool_call,
+            Some(tool_call) => Some(
+                provider_native_assistant_tool_call_message_with_reasoning_value(
+                    text_if_present(&output_text),
+                    reasoning_content_value.as_ref(),
+                    tool_call,
+                ),
+            ),
+            None => Some(provider_native_assistant_message_with_reasoning_value(
+                &output_text,
+                reasoning_content_value.as_ref(),
             )),
-            None => Some(provider_native_assistant_message(&output_text)),
         };
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
             tool_call,
-            reasoning_content: None,
-            reasoning_content_value: None,
+            reasoning_content,
+            reasoning_content_value,
             assistant_message,
             provider_source: "provider_followup_sync".to_string(),
             provider_mode: "live".to_string(),
@@ -811,7 +861,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
-        _assistant_message: Option<&Value>,
+        assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
         on_delta: &mut F,
@@ -828,7 +878,7 @@ impl ProviderManager {
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_messages_with_tool_result(request, tool_call, tool_result),
+                "messages": anthropic_messages_with_tool_result(request, assistant_message, tool_call, tool_result),
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": true,
@@ -951,27 +1001,39 @@ impl ProviderManager {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let reasoning_content = extract_anthropic_thinking_text(&content);
+        let reasoning_content_value = extract_anthropic_thinking_value(&content);
         let tool_call = extract_anthropic_tool_call(&content);
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("anthropic stream follow-up missing text or tool call".to_string());
+        }
+        if let Some(reasoning) = reasoning_content.clone() {
+            if !reasoning.is_empty() {
+                on_delta(ProviderStreamChunk::Reasoning(reasoning));
+            }
         }
         if !output_text.is_empty() {
             on_delta(ProviderStreamChunk::Text(output_text.clone()));
         }
         let assistant_message = match tool_call.as_ref() {
-            Some(tool_call) => Some(provider_native_assistant_tool_call_message(
-                text_if_present(&output_text),
-                None,
-                tool_call,
+            Some(tool_call) => Some(
+                provider_native_assistant_tool_call_message_with_reasoning_value(
+                    text_if_present(&output_text),
+                    reasoning_content_value.as_ref(),
+                    tool_call,
+                ),
+            ),
+            None => Some(provider_native_assistant_message_with_reasoning_value(
+                &output_text,
+                reasoning_content_value.as_ref(),
             )),
-            None => Some(provider_native_assistant_message(&output_text)),
         };
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
             tool_call,
-            reasoning_content: None,
-            reasoning_content_value: None,
+            reasoning_content,
+            reasoning_content_value,
             assistant_message,
             provider_source: "provider_followup_stream".to_string(),
             provider_mode: "live".to_string(),
@@ -1201,12 +1263,26 @@ impl ProviderManager {
             .ok_or_else(|| "anthropic 返回中缺少 content".to_string())?;
 
         let output_text = extract_anthropic_text_blocks(content);
+        let reasoning_content = extract_anthropic_thinking_text(content);
+        let reasoning_content_value = extract_anthropic_thinking_value(content);
         Ok(ProviderDecision {
             output_text: output_text.clone(),
             tool_call: extract_anthropic_tool_call(content),
-            reasoning_content: None,
-            reasoning_content_value: None,
-            assistant_message: None,
+            reasoning_content,
+            reasoning_content_value: reasoning_content_value.clone(),
+            assistant_message: match extract_anthropic_tool_call(content).as_ref() {
+                Some(tool_call) => Some(
+                    provider_native_assistant_tool_call_message_with_reasoning_value(
+                        text_if_present(&output_text),
+                        reasoning_content_value.as_ref(),
+                        tool_call,
+                    ),
+                ),
+                None => Some(provider_native_assistant_message_with_reasoning_value(
+                    &output_text,
+                    reasoning_content_value.as_ref(),
+                )),
+            },
             provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -1864,10 +1940,10 @@ fn is_deepseek_provider(config: &ResolvedProviderSelection) -> bool {
 
 fn reasoning_effort_label(effort: &ProviderReasoningEffort) -> &'static str {
     return match effort {
-        ProviderReasoningEffort::Minimal => "minimal",
         ProviderReasoningEffort::Low => "low",
         ProviderReasoningEffort::Medium => "medium",
         ProviderReasoningEffort::High => "high",
+        ProviderReasoningEffort::Max => "max",
     };
 
     #[cfg(any())]
@@ -1945,7 +2021,9 @@ fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn provider_tool_contract_views(tools: &[ToolDefinition]) -> Vec<crate::agent::tools::ToolDefinitionContractView> {
+fn provider_tool_contract_views(
+    tools: &[ToolDefinition],
+) -> Vec<crate::agent::tools::ToolDefinitionContractView> {
     if tools.len() == crate::agent::tools::builtin_tools().len() {
         builtin_tool_contract_views()
     } else {
@@ -2168,6 +2246,39 @@ fn extract_anthropic_text_blocks(content: &[Value]) -> String {
         .map(str::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn extract_anthropic_thinking_value(content: &[Value]) -> Option<Value> {
+    let blocks = content
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(Value::as_str) != Some("thinking") {
+                return None;
+            }
+
+            let thinking = block
+                .get("thinking")
+                .and_then(Value::as_str)
+                .or_else(|| block.get("text").and_then(Value::as_str))?;
+
+            Some(json!({
+                "type": "thinking",
+                "thinking": thinking
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(Value::Array(blocks))
+    }
+}
+
+fn extract_anthropic_thinking_text(content: &[Value]) -> Option<String> {
+    extract_anthropic_thinking_value(content)
+        .as_ref()
+        .and_then(extract_reasoning_text_from_value)
 }
 
 fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
@@ -2611,20 +2722,47 @@ fn escape_json_fragment(text: &str) -> String {
 
 fn anthropic_messages_with_tool_result(
     request: &ProviderRequest,
+    assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Vec<Value> {
     let mut messages = anthropic_user_messages(request);
+    let mut assistant_content = Vec::new();
+
+    if let Some(reasoning_value) =
+        assistant_message.and_then(|message| message.get("reasoning_content"))
+    {
+        assistant_content.extend(anthropic_reasoning_blocks(reasoning_value));
+    }
+
+    if let Some(text) = assistant_message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        assistant_content.push(json!({
+            "type": "text",
+            "text": text
+        }));
+    }
+
+    if assistant_content.is_empty() {
+        assistant_content.push(json!({
+            "type": "text",
+            "text": ""
+        }));
+    }
+
+    assistant_content.push(json!({
+        "type": "tool_use",
+        "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+        "name": tool_call.name.clone(),
+        "input": tool_call.arguments.clone()
+    }));
+
     messages.push(json!({
         "role": "assistant",
-        "content": [
-            {
-                "type": "tool_use",
-                "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
-                "name": tool_call.name.clone(),
-                "input": tool_call.arguments.clone()
-            }
-        ]
+        "content": assistant_content
     }));
 
     messages.push(json!({
@@ -2640,6 +2778,39 @@ fn anthropic_messages_with_tool_result(
     }));
 
     messages
+}
+
+fn anthropic_reasoning_blocks(reasoning_value: &Value) -> Vec<Value> {
+    match reasoning_value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                if item.get("type").and_then(Value::as_str) == Some("thinking") {
+                    return Some(item.clone());
+                }
+
+                extract_reasoning_text_from_value(item).map(|text| {
+                    json!({
+                        "type": "thinking",
+                        "thinking": text,
+                    })
+                })
+            })
+            .collect(),
+        Value::String(text) if !text.trim().is_empty() => vec![json!({
+            "type": "thinking",
+            "thinking": text
+        })],
+        _ => extract_reasoning_text_from_value(reasoning_value)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| {
+                vec![json!({
+                    "type": "thinking",
+                    "thinking": text
+                })]
+            })
+            .unwrap_or_default(),
+    }
 }
 
 #[allow(dead_code)]
@@ -3071,6 +3242,9 @@ fn derive_input_request_observation(messages: &[ProviderMessage]) -> ProviderReq
         ),
         volatile_input_text: render_input_messages(&messages[volatile_input_start..]),
         prefix_mutation_reasons: Vec::new(),
+        context_refresh_reason: None,
+        instruction_scope_sources: Vec::new(),
+        conversation_carry_mode: None,
     }
 }
 
@@ -3097,6 +3271,9 @@ fn derive_native_request_observation(messages: &[Value]) -> ProviderRequestObser
         ),
         volatile_input_text: render_native_messages(&messages[volatile_input_start..]),
         prefix_mutation_reasons: Vec::new(),
+        context_refresh_reason: None,
+        instruction_scope_sources: Vec::new(),
+        conversation_carry_mode: None,
     }
 }
 
@@ -3339,7 +3516,12 @@ mod tests {
         let payload = anthropic_tools_payload(&crate::agent::tools::builtin_tools());
         let names = payload
             .iter()
-            .filter_map(|entry| entry.get("name").and_then(Value::as_str).map(str::to_string))
+            .filter_map(|entry| {
+                entry
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -3422,6 +3604,9 @@ mod tests {
                 semi_stable_context_text: "semi-stable context".to_string(),
                 volatile_input_text: "actual request".to_string(),
                 prefix_mutation_reasons: vec![PrefixMutationReason::SessionSummaryChanged],
+                context_refresh_reason: None,
+                instruction_scope_sources: Vec::new(),
+                conversation_carry_mode: None,
             },
             temperature: 0.2,
             max_output_tokens: 1024,
@@ -3500,6 +3685,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: true,
                 supports_reasoning: false,
+                ..Default::default()
             },
         };
 
@@ -3541,6 +3727,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: true,
                 supports_reasoning: true,
+                ..Default::default()
             },
         };
 
@@ -3582,6 +3769,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: true,
                 supports_reasoning: true,
+                ..Default::default()
             },
         };
 
@@ -3703,6 +3891,67 @@ mod tests {
             messages[1].get("reasoning_content"),
             Some(&structured_reasoning)
         );
+    }
+
+    #[test]
+    fn anthropic_tool_followup_replays_reasoning_content_as_thinking_blocks() {
+        let tool_call = ToolCall {
+            call_id: Some("toolu_reasoning".to_string()),
+            name: "List".to_string(),
+            arguments: json!({ "path": "." }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "List".to_string(),
+            status: "ok".to_string(),
+            output: "README.md\nsrc".to_string(),
+            duration_ms: 0,
+        };
+        let request = ProviderRequest {
+            model: "deepseek-v4-flash".to_string(),
+            input: vec![ProviderMessage {
+                role: ProviderRole::User,
+                content: "当前文件夹下有哪些文件？".to_string(),
+            }],
+            images: vec![],
+            native_messages: vec![],
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 1024,
+        };
+        let assistant_message = json!({
+            "role": "assistant",
+            "content": "我先列出当前目录。",
+            "reasoning_content": [
+                {
+                    "type": "thinking",
+                    "thinking": "先调用目录列表工具。"
+                }
+            ]
+        });
+
+        let messages = anthropic_messages_with_tool_result(
+            &request,
+            Some(&assistant_message),
+            &tool_call,
+            &tool_result,
+        );
+
+        let assistant_content = messages[1]
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("assistant content should be blocks");
+        assert_eq!(
+            assistant_content[0].get("type").and_then(Value::as_str),
+            Some("thinking")
+        );
+        assert_eq!(
+            assistant_content[0].get("thinking").and_then(Value::as_str),
+            Some("先调用目录列表工具。")
+        );
+        assert!(assistant_content
+            .iter()
+            .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")));
     }
 
     #[test]
@@ -3997,6 +4246,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
             },
         };
         let manager = ProviderManager::new(config);

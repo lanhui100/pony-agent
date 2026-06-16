@@ -23,7 +23,6 @@
   说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
 
 ## In Progress
-
 - 暂无
 
 ## Review
@@ -46,6 +45,8 @@
   说明：已完成 `workspace_write_file / workspace_edit_file / workspace_run_command`，补齐权限事实、高风险命令拒绝、结构化错误与宿主层回归，并通过全量前端、core、regression、smoke 与 E2E 验证。
 - `PA-050` 第二批基础工具能力与实现顺序
   说明：已完成第二波工具面 spec、任务拆分、`opencode / deepseek-v4-flash` 审核采纳、canonical spec 同步与 OpenSpec 归档；对应实现卡 `PA-051 ~ PA-054` 已全部完成并验证。
+- `PA-056` 上下文构建与缓存命中策略重构
+  说明：已完成 layered context 实现、`context_refresh_reason / instruction_scope_sources / conversation_carry_mode` 观测落点、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash-free` 代码审核与一轮采纳调优。
 
 - `PA-049` 工具观测读面、前端呈现与迁移验收
   说明：已完成实现、单测/e2e/tauri smoke、OpenSpec validate 与收口同步。

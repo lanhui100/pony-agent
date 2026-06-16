@@ -3,8 +3,8 @@ use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::graph::GraphRun;
 use crate::agent::input::TurnInputImage;
 use crate::agent::provider::{
-    PrefixMutationReason, ProviderManager, ProviderMessage, ProviderRequest,
-    ProviderRequestObservation, ProviderRole,
+    ContextRefreshReason, ConversationCarryMode, PrefixMutationReason, ProviderManager,
+    ProviderMessage, ProviderRequest, ProviderRequestObservation, ProviderRole,
 };
 use crate::agent::session::{
     AttachmentAsset, LongTermMemoryRecord, SessionSnapshot, TurnHistoryMessage,
@@ -153,6 +153,47 @@ pub trait TurnContextBuilder: Send {
 
 pub struct DefaultTurnContextBuilder;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayeredTurnContext {
+    #[serde(default)]
+    pub tool_context: Vec<String>,
+    #[serde(default)]
+    pub base_system_messages: Vec<ProviderMessage>,
+    #[serde(default)]
+    pub runtime_fact_messages: Vec<ProviderMessage>,
+    #[serde(default)]
+    pub project_instruction_messages: Vec<ProviderMessage>,
+    #[serde(default)]
+    pub memory_messages: Vec<ProviderMessage>,
+    #[serde(default)]
+    pub conversation_carry_messages: Vec<ProviderMessage>,
+    #[serde(default)]
+    pub volatile_input_messages: Vec<ProviderMessage>,
+    #[serde(default)]
+    pub volatile_input_observation_text: String,
+    #[serde(default)]
+    pub native_base_system_messages: Vec<Value>,
+    #[serde(default)]
+    pub native_runtime_fact_messages: Vec<Value>,
+    #[serde(default)]
+    pub native_project_instruction_messages: Vec<Value>,
+    #[serde(default)]
+    pub native_memory_messages: Vec<Value>,
+    #[serde(default)]
+    pub native_conversation_carry_messages: Vec<Value>,
+    #[serde(default)]
+    pub native_volatile_input_messages: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_refresh_reason: Option<ContextRefreshReason>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruction_scope_sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_carry_mode: Option<ConversationCarryMode>,
+}
+
 struct SemistableContextSection {
     note: String,
     prefix_mutation_reasons: Vec<PrefixMutationReason>,
@@ -183,182 +224,11 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         retrieved: &RetrievedContextState,
         planner_skills: &[SkillDescriptor],
     ) -> ProviderRequest {
-        let current_user_message =
-            ProviderMessage::user(retrieved.turn_context.user_message.clone());
-        let input_budget_tokens = input_budget_tokens(provider);
-        let raw_history = retrieved
-            .session_context
-            .recent_history
-            .iter()
-            .filter_map(to_provider_history_message)
-            .collect::<Vec<_>>();
-        let image_note = image_capability_note(provider, retrieved);
-        let capability_note = provider_capability_note(provider);
-        let stable_prefix_text = render_provider_messages_for_observation(&[
-            ProviderMessage::system(BASE_SYSTEM_PROMPT),
-            ProviderMessage::developer(capability_note.clone()),
-        ]);
-        let base_semistable_context = provider_semistable_context_note(
-            graph_name,
-            retrieved,
-            planner_skills,
-            image_note.as_deref(),
-            None,
-            None,
-        );
-        let reserved_messages = [
-            ProviderMessage::system(BASE_SYSTEM_PROMPT),
-            ProviderMessage::developer(capability_note.clone()),
-            ProviderMessage::developer(base_semistable_context.note.clone()),
-            current_user_message.clone(),
-        ];
-        let (history_messages, history_truncated_count) =
-            truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens);
-        let history_truncation_note = truncation_note(history_truncated_count, "history messages");
-        let semi_stable_context = provider_semistable_context_note(
-            graph_name,
-            retrieved,
-            planner_skills,
-            image_note.as_deref(),
-            history_truncation_note.as_deref(),
-            Some(PrefixMutationReason::HistoryBoundaryShifted),
-        );
-        let history_observation_text = render_provider_messages_for_observation(&history_messages);
-        let volatile_input_text = render_turn_input_for_observation(
-            &retrieved.turn_context.user_message,
-            &retrieved.turn_context.images,
-        );
-
-        let mut messages = vec![
-            ProviderMessage::system(BASE_SYSTEM_PROMPT),
-            ProviderMessage::developer(capability_note.clone()),
-            ProviderMessage::developer(semi_stable_context.note.clone()),
-        ];
-        messages.extend(history_messages);
-        messages.push(current_user_message);
-
-        let (native_messages, semi_stable_native_context_note) =
-            if provider.requires_provider_native_tool_flow() {
-                let base_native_context = provider_semistable_context_note(
-                    graph_name,
-                    retrieved,
-                    planner_skills,
-                    image_note.as_deref(),
-                    None,
-                    None,
-                );
-                let reserved_native_messages = [
-                    json!({
-                        "role": "system",
-                        "content": BASE_SYSTEM_PROMPT,
-                    }),
-                    json!({
-                        "role": "system",
-                        "content": capability_note.clone(),
-                    }),
-                    json!({
-                        "role": "system",
-                        "content": base_native_context.note,
-                    }),
-                    json!({
-                        "role": "user",
-                        "content": retrieved.turn_context.user_message.clone()
-                    }),
-                ];
-                let (native_transcript, native_truncated_count) = truncate_native_messages(
-                    retrieved.transcript.provider_native_messages.clone(),
-                    &reserved_native_messages,
-                    input_budget_tokens,
-                );
-                let native_transcript_note = truncation_note(
-                    native_truncated_count,
-                    "provider-native transcript messages",
-                );
-                let semi_stable_native_context_note = provider_semistable_context_note(
-                    graph_name,
-                    retrieved,
-                    planner_skills,
-                    image_note.as_deref(),
-                    native_transcript_note.as_deref(),
-                    Some(PrefixMutationReason::NativeTranscriptBoundaryShifted),
-                );
-                let mut transcript = vec![
-                    json!({
-                        "role": "system",
-                        "content": BASE_SYSTEM_PROMPT,
-                    }),
-                    json!({
-                        "role": "system",
-                        "content": capability_note.clone(),
-                    }),
-                    json!({
-                        "role": "system",
-                        "content": semi_stable_native_context_note.note.clone(),
-                    }),
-                ];
-                transcript.extend(native_transcript);
-                transcript.push(json!({
-                    "role": "user",
-                    "content": if retrieved.turn_context.images.is_empty() {
-                        Value::String(retrieved.turn_context.user_message.clone())
-                    } else {
-                        Value::Array(openai_user_content_blocks(
-                            &retrieved.turn_context.user_message,
-                            &retrieved.turn_context.images,
-                        ))
-                    }
-                }));
-                (transcript, semi_stable_native_context_note)
-            } else {
-                (
-                    Vec::new(),
-                    SemistableContextSection {
-                        note: String::new(),
-                        prefix_mutation_reasons: Vec::new(),
-                    },
-                )
-            };
-        let observation = if provider.requires_provider_native_tool_flow() {
-            let native_transcript_slice = native_messages
-                .iter()
-                .skip(3)
-                .take(native_messages.len().saturating_sub(4))
-                .cloned()
-                .collect::<Vec<_>>();
-            ProviderRequestObservation {
-                stable_prefix_text: render_native_messages_for_observation(&[
-                    json!({
-                        "role": "system",
-                        "content": BASE_SYSTEM_PROMPT,
-                    }),
-                    json!({
-                        "role": "system",
-                        "content": capability_note.clone(),
-                    }),
-                ]),
-                semi_stable_context_text: join_non_empty_sections(&[
-                    render_native_messages_for_observation(&[json!({
-                        "role": "system",
-                        "content": semi_stable_native_context_note.note,
-                    })]),
-                    render_native_messages_for_observation(&native_transcript_slice),
-                ]),
-                volatile_input_text,
-                prefix_mutation_reasons: semi_stable_native_context_note.prefix_mutation_reasons,
-            }
-        } else {
-            ProviderRequestObservation {
-                stable_prefix_text,
-                semi_stable_context_text: join_non_empty_sections(&[
-                    render_provider_messages_for_observation(&[ProviderMessage::developer(
-                        semi_stable_context.note,
-                    )]),
-                    history_observation_text,
-                ]),
-                volatile_input_text,
-                prefix_mutation_reasons: semi_stable_context.prefix_mutation_reasons,
-            }
-        };
+        let layered_context =
+            build_layered_turn_context(graph_name, provider, retrieved, planner_skills);
+        let messages = flatten_layered_input_messages(&layered_context);
+        let native_messages = flatten_layered_native_messages(&layered_context);
+        let observation = build_request_observation_from_layered_context(&layered_context);
 
         ProviderRequest {
             model: provider.model().to_string(),
@@ -394,6 +264,245 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
             provider_mode.unwrap_or("unknown"),
             focus,
         )
+    }
+}
+
+fn build_layered_turn_context(
+    graph_name: &str,
+    provider: &ProviderManager,
+    retrieved: &RetrievedContextState,
+    planner_skills: &[SkillDescriptor],
+) -> LayeredTurnContext {
+    let current_user_message = ProviderMessage::user(retrieved.turn_context.user_message.clone());
+    let base_system_messages = vec![ProviderMessage::system(BASE_SYSTEM_PROMPT)];
+    let runtime_fact_messages = vec![ProviderMessage::developer(provider_capability_note(
+        provider,
+    ))];
+    let instruction_scope_sources = applicable_instruction_sources(retrieved);
+    let input_budget_tokens = input_budget_tokens(provider);
+    let raw_history = retrieved
+        .session_context
+        .recent_history
+        .iter()
+        .filter_map(to_provider_history_message)
+        .collect::<Vec<_>>();
+    let image_note = image_capability_note(provider, retrieved);
+    let base_semistable_context = provider_semistable_context_note(
+        graph_name,
+        retrieved,
+        planner_skills,
+        image_note.as_deref(),
+        None,
+        None,
+    );
+    let reserved_messages = [
+        base_system_messages[0].clone(),
+        runtime_fact_messages[0].clone(),
+        ProviderMessage::developer(base_semistable_context.note.clone()),
+        current_user_message.clone(),
+    ];
+    let (history_messages, history_truncated_count) =
+        truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens);
+    let history_truncation_note = truncation_note(history_truncated_count, "history messages");
+    let project_instruction_messages = vec![ProviderMessage::developer(
+        provider_semistable_context_note(
+            graph_name,
+            retrieved,
+            planner_skills,
+            image_note.as_deref(),
+            history_truncation_note.as_deref(),
+            Some(PrefixMutationReason::HistoryBoundaryShifted),
+        )
+        .note,
+    )];
+    let memory_messages = build_memory_messages(retrieved);
+    let conversation_carry_messages = history_messages;
+    let volatile_input_messages = vec![current_user_message];
+    let volatile_input_observation_text = render_turn_input_for_observation(
+        &retrieved.turn_context.user_message,
+        &retrieved.turn_context.images,
+    );
+    let mut prefix_mutation_reasons = collect_prefix_mutation_reasons(
+        retrieved,
+        planner_skills,
+        image_note.as_deref(),
+        history_truncation_note.as_deref(),
+        provider.requires_provider_native_tool_flow(),
+    );
+    let mut native_base_system_messages = Vec::new();
+    let mut native_runtime_fact_messages = Vec::new();
+    let mut native_project_instruction_messages = Vec::new();
+    let mut native_memory_messages = Vec::new();
+    let mut native_conversation_carry_messages = Vec::new();
+    let mut native_volatile_input_messages = Vec::new();
+    let conversation_carry_mode = if provider.requires_provider_native_tool_flow() {
+        let reserved_native_messages = [
+            json!({
+                "role": "system",
+                "content": BASE_SYSTEM_PROMPT,
+            }),
+            json!({
+                "role": "system",
+                "content": provider_capability_note(provider),
+            }),
+            json!({
+                "role": "system",
+                "content": project_instruction_messages[0].content.clone(),
+            }),
+            json!({
+                "role": "user",
+                "content": retrieved.turn_context.user_message.clone()
+            }),
+        ];
+        let (native_transcript, native_truncated_count) = truncate_native_messages(
+            retrieved.transcript.provider_native_messages.clone(),
+            &reserved_native_messages,
+            input_budget_tokens,
+        );
+        let native_transcript_note = truncation_note(
+            native_truncated_count,
+            "provider-native transcript messages",
+        );
+        let native_project_note = provider_semistable_context_note(
+            graph_name,
+            retrieved,
+            planner_skills,
+            image_note.as_deref(),
+            native_transcript_note.as_deref(),
+            Some(PrefixMutationReason::NativeTranscriptBoundaryShifted),
+        );
+        prefix_mutation_reasons = dedupe_prefix_mutation_reasons(join_prefix_mutation_reasons(&[
+            prefix_mutation_reasons,
+            native_project_note.prefix_mutation_reasons,
+        ]));
+        native_base_system_messages = vec![json!({
+            "role": "system",
+            "content": BASE_SYSTEM_PROMPT,
+        })];
+        native_runtime_fact_messages = vec![json!({
+            "role": "system",
+            "content": provider_capability_note(provider),
+        })];
+        native_project_instruction_messages = vec![json!({
+            "role": "system",
+            "content": native_project_note.note,
+        })];
+        native_memory_messages = build_native_memory_messages(retrieved);
+        native_conversation_carry_messages = native_transcript;
+        native_volatile_input_messages = vec![json!({
+            "role": "user",
+            "content": if retrieved.turn_context.images.is_empty() {
+                Value::String(retrieved.turn_context.user_message.clone())
+            } else {
+                Value::Array(openai_user_content_blocks(
+                    &retrieved.turn_context.user_message,
+                    &retrieved.turn_context.images,
+                ))
+            }
+        })];
+        ConversationCarryMode::ProviderNativeTranscriptReplay
+    } else {
+        ConversationCarryMode::FullReplay
+    };
+
+    LayeredTurnContext {
+        tool_context: planner_skills
+            .iter()
+            .map(|skill| skill.label.clone())
+            .collect(),
+        base_system_messages,
+        runtime_fact_messages,
+        project_instruction_messages,
+        memory_messages,
+        conversation_carry_messages,
+        volatile_input_messages,
+        volatile_input_observation_text,
+        native_base_system_messages,
+        native_runtime_fact_messages,
+        native_project_instruction_messages,
+        native_memory_messages,
+        native_conversation_carry_messages,
+        native_volatile_input_messages,
+        prefix_mutation_reasons: dedupe_prefix_mutation_reasons(prefix_mutation_reasons),
+        context_refresh_reason: derive_context_refresh_reason(retrieved, planner_skills),
+        instruction_scope_sources,
+        conversation_carry_mode: Some(conversation_carry_mode),
+    }
+}
+
+fn flatten_layered_input_messages(context: &LayeredTurnContext) -> Vec<ProviderMessage> {
+    let mut messages = Vec::new();
+    messages.extend(context.base_system_messages.clone());
+    messages.extend(context.runtime_fact_messages.clone());
+    messages.extend(context.project_instruction_messages.clone());
+    messages.extend(context.memory_messages.clone());
+    messages.extend(context.conversation_carry_messages.clone());
+    messages.extend(context.volatile_input_messages.clone());
+    messages
+}
+
+fn flatten_layered_native_messages(context: &LayeredTurnContext) -> Vec<Value> {
+    let mut messages = Vec::new();
+    messages.extend(context.native_base_system_messages.clone());
+    messages.extend(context.native_runtime_fact_messages.clone());
+    messages.extend(context.native_project_instruction_messages.clone());
+    messages.extend(context.native_memory_messages.clone());
+    messages.extend(context.native_conversation_carry_messages.clone());
+    messages.extend(context.native_volatile_input_messages.clone());
+    messages
+}
+
+fn build_request_observation_from_layered_context(
+    context: &LayeredTurnContext,
+) -> ProviderRequestObservation {
+    let stable_prefix_text = if !context.native_base_system_messages.is_empty()
+        || !context.native_runtime_fact_messages.is_empty()
+    {
+        render_native_messages_for_observation(
+            &[
+                context.native_base_system_messages.clone(),
+                context.native_runtime_fact_messages.clone(),
+            ]
+            .concat(),
+        )
+    } else {
+        render_provider_messages_for_observation(
+            &[
+                context.base_system_messages.clone(),
+                context.runtime_fact_messages.clone(),
+            ]
+            .concat(),
+        )
+    };
+    let semi_stable_context_text = if !context.native_project_instruction_messages.is_empty()
+        || !context.native_conversation_carry_messages.is_empty()
+    {
+        join_non_empty_sections(&[
+            render_native_messages_for_observation(&context.native_project_instruction_messages),
+            render_native_messages_for_observation(&context.native_memory_messages),
+            render_native_messages_for_observation(&context.native_conversation_carry_messages),
+        ])
+    } else {
+        join_non_empty_sections(&[
+            render_provider_messages_for_observation(&context.project_instruction_messages),
+            render_provider_messages_for_observation(&context.memory_messages),
+            render_provider_messages_for_observation(&context.conversation_carry_messages),
+        ])
+    };
+    let volatile_input_text = if !context.native_volatile_input_messages.is_empty() {
+        render_native_messages_for_observation(&context.native_volatile_input_messages)
+    } else {
+        context.volatile_input_observation_text.clone()
+    };
+
+    ProviderRequestObservation {
+        stable_prefix_text,
+        semi_stable_context_text,
+        volatile_input_text,
+        prefix_mutation_reasons: context.prefix_mutation_reasons.clone(),
+        context_refresh_reason: context.context_refresh_reason.clone(),
+        instruction_scope_sources: context.instruction_scope_sources.clone(),
+        conversation_carry_mode: context.conversation_carry_mode.clone(),
     }
 }
 
@@ -512,18 +621,139 @@ fn provider_semistable_context_note(
         reasons.push(PrefixMutationReason::ImageNoteChanged);
     }
 
-    if let Some(note) = truncation_note {
-        notes.push(note.to_string());
-        reasons.push(PrefixMutationReason::TruncationNoteChanged);
-        if let Some(boundary_reason) = boundary_reason {
-            reasons.push(boundary_reason);
+        if let Some(note) = truncation_note {
+            notes.push(note.to_string());
+            reasons.push(PrefixMutationReason::TruncationNoteChanged);
+            if let Some(boundary_reason) = boundary_reason {
+                reasons.push(boundary_reason);
+            }
         }
-    }
 
     SemistableContextSection {
         note: notes.join(" "),
         prefix_mutation_reasons: dedupe_prefix_mutation_reasons(reasons),
     }
+}
+
+fn build_memory_messages(retrieved: &RetrievedContextState) -> Vec<ProviderMessage> {
+    if retrieved.long_term_memory.entries.is_empty() {
+        return Vec::new();
+    }
+
+    let summary = retrieved
+        .long_term_memory
+        .summary
+        .as_deref()
+        .unwrap_or("Long-term memory entries are attached to this retrieval snapshot.");
+    vec![ProviderMessage::developer(format!(
+        "Long-term memory status: {}. {}",
+        retrieved.long_term_memory.status, summary
+    ))]
+}
+
+fn build_native_memory_messages(retrieved: &RetrievedContextState) -> Vec<Value> {
+    if retrieved.long_term_memory.entries.is_empty() {
+        return Vec::new();
+    }
+
+    let summary = retrieved
+        .long_term_memory
+        .summary
+        .as_deref()
+        .unwrap_or("Long-term memory entries are attached to this retrieval snapshot.");
+    vec![json!({
+        "role": "system",
+        "content": format!(
+            "Long-term memory status: {}. {}",
+            retrieved.long_term_memory.status, summary
+        )
+    })]
+}
+
+fn derive_context_refresh_reason(
+    retrieved: &RetrievedContextState,
+    planner_skills: &[SkillDescriptor],
+) -> Option<ContextRefreshReason> {
+    if retrieved.session_context.turn_count <= 1 {
+        return Some(ContextRefreshReason::InitialBuild);
+    }
+
+    if !planner_skills.is_empty() {
+        return Some(ContextRefreshReason::PlannerSkillsChanged);
+    }
+
+    if !retrieved.long_term_memory.entries.is_empty() {
+        return Some(ContextRefreshReason::LongTermMemoryChanged);
+    }
+
+    if retrieved.run_state.goal.is_some() {
+        return Some(ContextRefreshReason::RunGoalChanged);
+    }
+
+    None
+}
+
+fn applicable_instruction_sources(retrieved: &RetrievedContextState) -> Vec<String> {
+    let mut sources = vec!["thread://base-system".to_string()];
+    if let Some(path) = retrieved.session_context.last_referenced_file.as_deref() {
+        sources.push(format!("workspace://{}", normalize_instruction_path(path)));
+    }
+    dedupe_instruction_sources(sources)
+}
+
+fn normalize_instruction_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn dedupe_instruction_sources(sources: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for source in sources {
+        if !deduped.contains(&source) {
+            deduped.push(source);
+        }
+    }
+    deduped
+}
+
+fn collect_prefix_mutation_reasons(
+    retrieved: &RetrievedContextState,
+    planner_skills: &[SkillDescriptor],
+    image_note: Option<&str>,
+    history_truncation_note: Option<&str>,
+    provider_native_tool_flow: bool,
+) -> Vec<PrefixMutationReason> {
+    let mut reasons = vec![PrefixMutationReason::SessionSummaryChanged];
+
+    if retrieved.run_state.goal.is_some() {
+        reasons.push(PrefixMutationReason::RunGoalChanged);
+    }
+
+    if !retrieved.long_term_memory.entries.is_empty() {
+        reasons.push(PrefixMutationReason::LongTermMemoryChanged);
+    }
+
+    if !planner_skills.is_empty() {
+        reasons.push(PrefixMutationReason::PlannerSkillsChanged);
+    }
+
+    if image_note.is_some() {
+        reasons.push(PrefixMutationReason::ImageNoteChanged);
+    }
+
+    if history_truncation_note.is_some() {
+        reasons.push(PrefixMutationReason::TruncationNoteChanged);
+        reasons.push(if provider_native_tool_flow {
+            PrefixMutationReason::NativeTranscriptBoundaryShifted
+        } else {
+            PrefixMutationReason::HistoryBoundaryShifted
+        });
+    }
+
+    dedupe_prefix_mutation_reasons(reasons)
+}
+
+fn join_prefix_mutation_reasons(groups: &[Vec<PrefixMutationReason>]) -> Vec<PrefixMutationReason> {
+    groups.iter().flatten().cloned().collect()
 }
 
 fn render_planner_skills_note(planner_skills: &[SkillDescriptor]) -> String {
@@ -1310,6 +1540,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: true,
                 supports_reasoning: false,
+                ..Default::default()
             },
         );
         let mut session = session_snapshot(
@@ -1381,6 +1612,11 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("recent history question"));
+        assert!(request
+            .observation
+            .instruction_scope_sources
+            .iter()
+            .any(|source| source.starts_with("thread://")));
         assert_eq!(
             request.observation.prefix_mutation_reasons,
             vec![
@@ -1417,6 +1653,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
             },
         );
         let session = session_snapshot(
@@ -1455,6 +1692,10 @@ mod tests {
             .contains("native assistant context"));
         assert!(request
             .observation
+            .conversation_carry_mode
+            .is_some());
+        assert!(request
+            .observation
             .volatile_input_text
             .contains("current volatile request"));
         assert!(!request
@@ -1483,6 +1724,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
             },
         );
         let session = session_snapshot(
@@ -1517,6 +1759,94 @@ mod tests {
     }
 
     #[test]
+    fn build_request_places_memory_layers_in_both_normalized_and_native_requests() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-5.4",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(8192),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+                ..Default::default()
+            },
+        );
+        let mut session = session_snapshot(Vec::new(), Vec::new(), None);
+        session.long_term_memory_entries = vec![LongTermMemoryRecord {
+            kind: "user_preference".to_string(),
+            content: "Reply in Chinese.".to_string(),
+            source: "explicit_user_message".to_string(),
+            updated_at_ms: 10,
+        }];
+        session.provider_native_transcript = vec![json!({
+            "role": "user",
+            "content": "native user"
+        })];
+
+        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let normalized_request = builder.build_request("graph-a", &provider, &retrieved, &[]);
+        assert!(normalized_request
+            .observation
+            .semi_stable_context_text
+            .contains("Long-term memory status: available."));
+
+        let reasoning_provider = provider_manager(
+            "gpt-5.4",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(8192),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: true,
+                ..Default::default()
+            },
+        );
+        let native_request = builder.build_request("graph-a", &reasoning_provider, &retrieved, &[]);
+        assert!(
+            !native_request.native_messages.is_empty(),
+            "native request should keep memory layer in native messages"
+        );
+        assert!(
+            serde_json::to_string(&native_request.native_messages)
+                .expect("serialize native messages")
+                .contains("Long-term memory status: available.")
+        );
+    }
+
+    #[test]
+    fn build_request_refresh_reason_is_none_for_plain_followup_without_special_state() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-4.1-mini",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(8192),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+        );
+        let session = session_snapshot(
+            vec![TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "previous turn".to_string(),
+                attachments: Vec::new(),
+            }],
+            Vec::new(),
+            None,
+        );
+        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
+
+        assert!(request.observation.context_refresh_reason.is_none());
+    }
+
+    #[test]
     fn build_request_keeps_image_and_truncation_notes_out_of_stable_prefix() {
         let builder = DefaultTurnContextBuilder;
         let provider = provider_manager(
@@ -1528,6 +1858,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: false,
+                ..Default::default()
             },
         );
         let session = session_snapshot(
@@ -1598,6 +1929,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: true,
                 supports_reasoning: false,
+                ..Default::default()
             },
         );
         let session = session_snapshot(
@@ -1653,6 +1985,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
             },
         );
         let session = session_snapshot(Vec::new(), Vec::new(), Some("artifacts/screenshot.png"));
@@ -1691,6 +2024,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
             },
         );
         let session = session_snapshot(
@@ -1726,6 +2060,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
             },
         );
         let session = session_snapshot(
@@ -1781,6 +2116,7 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
             },
         );
         let session = session_snapshot(Vec::new(), Vec::new(), None);

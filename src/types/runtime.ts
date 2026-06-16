@@ -298,6 +298,25 @@ export type PrefixMutationReason =
   | "history_boundary_shifted"
   | "native_transcript_boundary_shifted";
 
+export type ContextRefreshReason =
+  | "initial_build"
+  | "session_summary_changed"
+  | "run_goal_changed"
+  | "long_term_memory_changed"
+  | "planner_skills_changed"
+  | "image_note_changed"
+  | "truncation_note_changed"
+  | "history_boundary_shifted"
+  | "native_transcript_boundary_shifted"
+  | "workspace_scope_changed";
+
+export type ConversationCarryMode =
+  | "full_replay"
+  | "provider_native_transcript_replay"
+  | "provider_continuation_preferred"
+  | "provider_continuation_fallback_replay"
+  | "compacted_replay";
+
 export type ProviderRequestKind = "initial_request" | "tool_followup";
 export type ProviderLatencyKind = "provider_stream" | "buffered_response" | "unknown";
 
@@ -329,6 +348,9 @@ export type BuildContextObservation = {
   semiStableContextText: string;
   volatileInputText: string;
   prefixMutationReasons?: PrefixMutationReason[];
+  contextRefreshReason?: ContextRefreshReason | null;
+  instructionScopeSources?: string[];
+  conversationCarryMode?: ConversationCarryMode | null;
   requestMessagesText: string;
   toolDefinitionsText: string;
 };

@@ -846,6 +846,19 @@ function buildTimelineMetricItems(turn: TurnTraceRecord, entry: TraceTimelineEnt
   if (metricEntry.firstTokenLatencyMs != null) {
     items.push({ icon: Clock3, tooltip: "首 token 延时", value: `${metricEntry.firstTokenLatencyMs} ms` });
   }
+  const durationMs =
+    metricEntry.durationMs ??
+    (typeof entry.durationMs === "number"
+      ? entry.durationMs
+      : typeof entry.turnDurationMs === "number"
+        ? entry.turnDurationMs
+        : null) ??
+    (typeof metricEntry.durationSeconds === "number"
+      ? Math.round(metricEntry.durationSeconds * 1000)
+      : null);
+  if (durationMs != null && durationMs > 0) {
+    items.push({ icon: Clock3, tooltip: "耗时", value: formatDuration(durationMs / 1000) });
+  }
   return items;
 }
 

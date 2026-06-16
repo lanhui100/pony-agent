@@ -152,6 +152,11 @@ function createBuildContextObservation(
     volatileInputText:
       overrides.volatileInputText ??
       "user: continue PA-025 with the latest screenshot",
+    prefixMutationReasons: overrides.prefixMutationReasons ?? [],
+    contextRefreshReason: overrides.contextRefreshReason ?? "initial_build",
+    instructionScopeSources:
+      overrides.instructionScopeSources ?? ["thread://base-system", "workspace://src/App.vue"],
+    conversationCarryMode: overrides.conversationCarryMode ?? "full_replay",
     requestMessagesText:
       overrides.requestMessagesText ??
       "system: summarize retrieval state\nuser: continue PA-025\nassistant: acknowledged",

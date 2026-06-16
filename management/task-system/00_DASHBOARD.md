@@ -59,6 +59,8 @@
    当前已完成 `PA-045 / PA-046 / PA-047 / PA-048 / PA-049` 五张连续任务卡，分别承接工具协议、workspace 合同、权限审批、首批工具面与观测/前端呈现；五卡均已完成实现、验证、归档与任务系统收口。
 18. 工具系统五张 spec 卡已完成首轮文档闭环
    `PA-045 ~ PA-049` 当前都已具备 `proposal / design / tasks / delta spec`，并已同步到 `openspec/specs/` 后归档到 `openspec/changes/archive/2026-06-15-*`；每张卡都完成了独立智能体审核、采纳优化、strict validate 与归档收口。
+19. `PA-056` 已完成首轮架构与实现收口
+   当前已完成 context layering、memory/project/carry 分层实现、观测字段落点、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash-free` 代码审核与一轮采纳调优；后续若继续推进，应转入 instruction scope 真 source 枚举与 continuation/compaction 深化。
 
 ## 远期扩展
 
@@ -120,6 +122,8 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
    在 harness 基础已成立的前提下，把 core 明确拆成可被 Tauri / HTTP-SSE / CLI / service 多端复用的基础设施边界，优先解决 package 边界、构造注入、desktop preset 与 non-Tauri harness 证明。
 3. `PA-045` tool system contract and exposure boundary
    在 core 多端边界继续稳定的同时，优先把工具系统的模型可见协议、结果合同、暴露策略与分类体系正式写成 spec，避免后续 workspace / permission / first-wave tools 各自发明字段与命名。
+4. `PA-056` context assembly and cache strategy
+   在 `PA-025 / PA-029` 已经提供第一版上下文观测与缓存 telemetry 的基础上，把 system prompt、runtime facts、project instructions、conversation carry 与长期记忆扩展点正式统一到同一套上下文分层架构中。
 
 ## 关联入口
 

@@ -144,6 +144,10 @@ function createBuildContextObservation(
     stablePrefixText: partial.stablePrefixText ?? "system: stable system rule",
     semiStableContextText: partial.semiStableContextText ?? "developer: retrieval summary",
     volatileInputText: partial.volatileInputText ?? "user: stream request",
+    prefixMutationReasons: partial.prefixMutationReasons ?? [],
+    contextRefreshReason: partial.contextRefreshReason ?? "initial_build",
+    instructionScopeSources: partial.instructionScopeSources ?? ["thread://base-system"],
+    conversationCarryMode: partial.conversationCarryMode ?? "full_replay",
     requestMessagesText: partial.requestMessagesText ?? "system: runtime check\nuser: stream request",
     toolDefinitionsText: partial.toolDefinitionsText ?? "workspace.read_file(path: string)"
   };

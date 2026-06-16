@@ -725,6 +725,9 @@ mod tests {
             semi_stable_context_text: "ctx".to_string(),
             volatile_input_text: "input".to_string(),
             prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
             request_messages_text: "messages".to_string(),
             tool_definitions_text: String::new(),
         };
@@ -771,6 +774,9 @@ mod tests {
             semi_stable_context_text: "ctx".to_string(),
             volatile_input_text: "input".to_string(),
             prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
             request_messages_text: "messages".to_string(),
             tool_definitions_text: "tools".to_string(),
         };
@@ -817,6 +823,9 @@ mod tests {
             semi_stable_context_text: "ctx".to_string(),
             volatile_input_text: "input".to_string(),
             prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
             request_messages_text: "messages".to_string(),
             tool_definitions_text: "tools".to_string(),
         };
@@ -907,6 +916,9 @@ mod tests {
             semi_stable_context_text: "ctx".to_string(),
             volatile_input_text: "input".to_string(),
             prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
             request_messages_text: "messages".to_string(),
             tool_definitions_text: "tools".to_string(),
         };

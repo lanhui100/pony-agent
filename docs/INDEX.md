@@ -27,6 +27,7 @@
 ## 2.5 性能与诊断
 
 - [Turn 完成时 UI 冻结：根因诊断与解决路径](C:/Users/HUAWEI/Documents/pony-agent/docs/analysis/turn-completion-ui-freeze-diagnosis-2026-06-16.md)
+- [上下文构建与缓存策略 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/context-assembly-and-cache-strategy/spec.md)
 
 ## 3. 决策记录
 
@@ -53,12 +54,16 @@
 - [项目总控面板](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/00_DASHBOARD.md)
 - [任务板](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
 - [PA-018 验收审计](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md)
+- [PA-056 任务卡](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-056-redesign-context-assembly-and-cache-strategy.md)
+- [PA-056 Spec 审核](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-16-pa056-spec-review.md)
+- [PA-056 Code 审核](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-16-pa056-code-review.md)
 
 ## 8. OpenSpec
 
 - [OpenSpec 根目录](C:/Users/HUAWEI/Documents/pony-agent/openspec)
 - [复杂任务交付 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/spec-driven-delivery/spec.md)
 - [第二波工具面 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/second-wave-tool-surface/spec.md)
+- [上下文构建与缓存策略 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/context-assembly-and-cache-strategy/spec.md)
 - [OpenSpec 归档目录](C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive)
 
 ## 9. 路线图
