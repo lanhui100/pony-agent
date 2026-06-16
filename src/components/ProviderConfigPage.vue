@@ -25,6 +25,7 @@ import {
   useProviderStore
 } from "@/stores/providers";
 import type {
+  ProviderAuthType,
   ProviderCapabilityPresetId,
   ProviderConfig,
   ProviderModelCapabilityDeclaration,
@@ -39,6 +40,7 @@ type ProviderFormState = {
   name: string;
   protocol: ProviderProtocol;
   baseUrl: string;
+  authType: ProviderAuthType;
   apiKeyValue: string;
 };
 
@@ -91,6 +93,7 @@ const providerForm = reactive<ProviderFormState>({
   name: "",
   protocol: "openai",
   baseUrl: "https://api.openai.com/v1",
+  authType: "auto",
   apiKeyValue: ""
 });
 
@@ -286,6 +289,17 @@ function defaultBaseUrlFor(protocol: ProviderProtocol) {
   return protocol === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1";
 }
 
+function authTypeLabel(authType: ProviderAuthType): string {
+  switch (authType) {
+    case "auto":
+      return "自动";
+    case "bearer":
+      return "Bearer Token";
+    case "x-api-key":
+      return "x-api-key";
+  }
+}
+
 function findProvider(providerId: string | null) {
   if (!providerId) {
     return null;
@@ -307,6 +321,7 @@ function resetProviderForm() {
   providerForm.name = "";
   providerForm.protocol = "openai";
   providerForm.baseUrl = defaultBaseUrlFor("openai");
+  providerForm.authType = "auto";
   providerForm.apiKeyValue = "";
 }
 
@@ -314,6 +329,7 @@ function fillProviderForm(provider: ProviderConfig) {
   providerForm.name = provider.name;
   providerForm.protocol = provider.protocol;
   providerForm.baseUrl = provider.baseUrl;
+  providerForm.authType = provider.authType;
   providerForm.apiKeyValue = provider.apiKeyValue;
 }
 
@@ -556,6 +572,7 @@ async function saveProviderForm() {
   providerStore.updateProviderField(providerId, "name", name);
   providerStore.updateProviderField(providerId, "protocol", providerForm.protocol);
   providerStore.updateProviderField(providerId, "baseUrl", baseUrl);
+  providerStore.updateProviderField(providerId, "authType", providerForm.authType);
   providerStore.updateProviderField(providerId, "apiKeyValue", providerForm.apiKeyValue.trim());
 
   await providerStore.saveRegistry();
@@ -999,6 +1016,19 @@ watch(
                       @update:model-value="providerForm.baseUrl = $event"
                     />
                   </label>
+
+                  <label v-if="providerForm.protocol === 'anthropic'" class="space-y-1 text-[11px] text-stone-500">
+                    <span>认证方式</span>
+                    <select
+                      :value="providerForm.authType"
+                      class="config-select"
+                      @change="providerForm.authType = ($event.target as HTMLSelectElement).value as ProviderAuthType"
+                    >
+                      <option value="auto">自动（x-api-key）</option>
+                      <option value="bearer">Bearer Token</option>
+                      <option value="x-api-key">x-api-key</option>
+                    </select>
+                  </label>
                 </div>
 
                 <div class="mt-3 rounded-[0.45rem] bg-white/72 px-3.5 py-3">
@@ -1040,6 +1070,10 @@ watch(
                       <div>
                         <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Base URL</div>
                         <div class="mt-1 break-words text-stone-900">{{ detailProvider.baseUrl }}</div>
+                      </div>
+                      <div v-if="detailProvider.protocol === 'anthropic'">
+                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">认证方式</div>
+                        <div class="mt-1 text-stone-900">{{ authTypeLabel(detailProvider.authType) }}</div>
                       </div>
                     </div>
                   </section>

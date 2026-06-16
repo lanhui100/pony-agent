@@ -1,5 +1,7 @@
 export type ProviderProtocol = "openai" | "anthropic";
 
+export type ProviderAuthType = "auto" | "bearer" | "x-api-key";
+
 export type ProviderReasoningEffort = "minimal" | "low" | "medium" | "high";
 
 export type ProviderCapabilityPresetId =
@@ -48,6 +50,7 @@ export type ProviderConfig = {
   name: string;
   protocol: ProviderProtocol;
   baseUrl: string;
+  authType: ProviderAuthType;
   apiKeyEnvVar: string;
   apiKeyValue: string;
   apiKeyPresent: boolean;
