@@ -1932,15 +1932,15 @@ describe("runtime session resilience", () => {
       }
       if (command === "inspect_capability") {
         expect(payload).toEqual({
-          capabilityId: "builtin:time_now"
+          capabilityId: "builtin:workspace_run_command"
         });
         return {
-          capabilityId: "builtin:time_now",
+          capabilityId: "builtin:workspace_run_command",
           sourceId: "builtin-tools",
           sourceKind: "builtin",
           kind: "tool",
-          label: "time_now",
-          description: "返回当前本机 UNIX 时间戳",
+          label: "workspace_run_command",
+          description: "在当前工作区内受控执行命令",
           invocationMode: "direct_tool_call",
           inputSchemaSummary: "object",
           safetyClass: "host_tool",
@@ -1975,12 +1975,12 @@ describe("runtime session resilience", () => {
       sourceId: "builtin-tools",
       kind: "tool"
     });
-    const capability = await store.inspectCapability("builtin:time_now");
+    const capability = await store.inspectCapability("builtin:workspace_run_command");
     const source = await store.inspectCapabilitySource("builtin-tools");
 
     expect(store.capabilitySources).toHaveLength(1);
     expect(store.capabilities.map((item) => item.capabilityId)).toEqual(["builtin:time_now"]);
-    expect(capability?.capabilityId).toBe("builtin:time_now");
+    expect(capability?.capabilityId).toBe("builtin:workspace_run_command");
     expect(source?.sourceId).toBe("builtin-tools");
   });
 
@@ -1994,16 +1994,23 @@ describe("runtime session resilience", () => {
       sourceId: "builtin-tools",
       kind: "tool"
     });
-    const capability = await store.inspectCapability("builtin:time_now");
+    const capability = await store.inspectCapability("builtin:workspace_run_command");
     const source = await store.inspectCapabilitySource("builtin-tools");
 
     expect(store.capabilitySources.map((item) => item.sourceId)).toEqual(["builtin-tools"]);
     expect(store.capabilities.map((item) => item.capabilityId)).toEqual([
-      "builtin:time_now",
+      "builtin:workspace_run_command",
       "builtin:echo_input",
       "builtin:workspace_gather_context",
       "builtin:workspace_search_text",
       "builtin:workspace_list_files",
+      "builtin:workspace_glob_files",
+      "builtin:web_fetch_url",
+      "builtin:web_search_query",
+      "builtin:mcp_resource_read",
+      "builtin:tool_search",
+      "builtin:workspace_write_file",
+      "builtin:workspace_edit_file",
       "builtin:workspace_batch"
     ]);
     expect(store.capabilities.find((item) => item.capabilityId === "builtin:workspace_gather_context")).toMatchObject({
@@ -2021,8 +2028,59 @@ describe("runtime session resilience", () => {
         permissionProfile: "builtin"
       }
     });
-    expect(capability?.capabilityId).toBe("builtin:time_now");
+    expect(capability?.capabilityId).toBe("builtin:workspace_run_command");
     expect(source?.sourceId).toBe("builtin-tools");
+  });
+
+  it("keeps second-wave builtin capability defaults aligned with product tool metadata", async () => {
+    const store = useRuntimeStore();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockRejectedValue(new Error("capability bridge offline"));
+
+    await store.fetchAvailableTools();
+    await store.fetchCapabilities({
+      sourceId: "builtin-tools",
+      kind: "tool"
+    });
+
+    expect(
+      store.availableTools.map((tool) => ({
+        name: tool.name,
+        exposure: tool.exposure,
+        executionPrimitive: tool.executionPrimitive
+      }))
+    ).toEqual(
+      expect.arrayContaining([
+        {
+          name: "MCPResource",
+          exposure: "model_visible",
+          executionPrimitive: "mcp_resource_read"
+        },
+        {
+          name: "ToolSearch",
+          exposure: "deferred",
+          executionPrimitive: "tool_search"
+        }
+      ])
+    );
+
+    expect(
+      store.capabilities.find((item) => item.capabilityId === "builtin:mcp_resource_read")
+    ).toMatchObject({
+      canonicalToolName: "MCPResource",
+      displayNameZh: "资源"
+    });
+    expect(
+      store.capabilities.find((item) => item.capabilityId === "builtin:tool_search")
+    ).toMatchObject({
+      canonicalToolName: "ToolSearch",
+      displayNameZh: "找工具",
+      permissionScope: "capability.discovery",
+      permissionFacts: {
+        permissionScope: "capability.discovery"
+      }
+    });
   });
 
   it("creates a transient browser-preview session while keeping the previous session persisted", async () => {

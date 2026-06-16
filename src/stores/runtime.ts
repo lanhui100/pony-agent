@@ -1824,20 +1824,36 @@ const defaultAvailableTools: AvailableTool[] = [
   {
     name: "Run",
     canonicalToolName: "Run",
-    executionPrimitive: "time_now",
-    description: "返回当前本机 UNIX 时间戳，适合最小时间查询与运行时校验。",
+    executionPrimitive: "workspace_run_command",
+    description: "在当前工作区内受控执行命令，返回 cwd、timeout、exitCode、stdout 和 stderr。",
     kind: "execute",
     exposure: "model_visible",
     displayMetadata: { displayNameZh: "运行" },
     permissionFacts: {
       requiresApproval: false,
+      permissionScope: "workspace.execute",
+      hostMediated: false,
       approvalMode: "none",
       decisionSource: "runtime",
       permissionProfile: "builtin"
     },
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        command: {
+          type: "string",
+          description: "要执行的命令文本"
+        },
+        cwd: {
+          type: "string",
+          description: "执行命令时的工作区内相对目录，默认 ."
+        },
+        timeoutMs: {
+          type: "integer",
+          description: "命令超时毫秒数，默认 10000，最大 120000"
+        }
+      },
+      required: ["command"],
       additionalProperties: false
     }
   },
@@ -1937,6 +1953,10 @@ const defaultAvailableTools: AvailableTool[] = [
         limit: {
           type: "integer",
           description: "最多返回多少条命中结果"
+        },
+        regex: {
+          type: "boolean",
+          description: "是否按增强模式匹配 query；当前 v1 使用通配符式匹配，默认 false"
         }
       },
       required: ["query"],
@@ -1971,6 +1991,253 @@ const defaultAvailableTools: AvailableTool[] = [
           description: "最多返回多少个条目，默认 40"
         }
       },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Glob",
+    canonicalToolName: "Glob",
+    executionPrimitive: "workspace_glob_files",
+    description: "按路径 pattern 递归匹配工作区内文件，适合大代码库中的文件发现。",
+    kind: "read",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "匹配" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "capability.discovery",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        pattern: {
+          type: "string",
+          description: "要匹配的路径模式，例如 src/*.rs 或 *tool*"
+        },
+        path: {
+          type: "string",
+          description: "搜索起点目录，默认为 ."
+        },
+        limit: {
+          type: "integer",
+          description: "最多返回多少条路径命中，默认 50"
+        }
+      },
+      required: ["pattern"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "WebFetch",
+    canonicalToolName: "WebFetch",
+    executionPrimitive: "web_fetch_url",
+    description: "抓取指定 http/https URL 的正文内容预览，不承担搜索排序职责。",
+    kind: "read",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "抓取" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "要抓取的 http/https URL"
+        },
+        timeoutMs: {
+          type: "integer",
+          description: "请求超时毫秒数，默认 15000"
+        }
+      },
+      required: ["url"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "WebSearch",
+    canonicalToolName: "WebSearch",
+    executionPrimitive: "web_search_query",
+    description: "执行外部搜索并返回结构化结果列表，不把抓取和搜索混为一个工具。",
+    kind: "search",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "外搜" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "外部搜索关键词"
+        },
+        limit: {
+          type: "integer",
+          description: "最多返回多少条搜索结果，默认 5"
+        },
+        timeoutMs: {
+          type: "integer",
+          description: "请求超时毫秒数，默认 15000"
+        }
+      },
+      required: ["query"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "MCPResource",
+    canonicalToolName: "MCPResource",
+    executionPrimitive: "mcp_resource_read",
+    description: "通过 capability registry 读取指定 MCP 资源 capability 的只读内容，不混入普通工具执行。",
+    kind: "read",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "资源" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.read",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        capabilityId: {
+          type: "string",
+          description: "目标 resource capability id，例如 mcp:resource:repo-index"
+        },
+        arguments: {
+          type: "object",
+          description: "传给 resource capability 的结构化参数"
+        }
+      },
+      required: ["capabilityId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "ToolSearch",
+    canonicalToolName: "ToolSearch",
+    executionPrimitive: "tool_search",
+    description: "搜索 capability registry 中可用的工具候选，作为 deferred / dynamic tool discovery 入口。",
+    kind: "search",
+    exposure: "deferred",
+    displayMetadata: { displayNameZh: "找工具" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "capability.discovery",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "可选查询词；为空时返回默认候选列表"
+        },
+        sourceId: {
+          type: "string",
+          description: "可选 source id，用于缩小 discovery 范围"
+        },
+        limit: {
+          type: "integer",
+          description: "最多返回多少条候选，默认 8"
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Write",
+    canonicalToolName: "Write",
+    executionPrimitive: "workspace_write_file",
+    description: "在当前工作区内新建或整文件覆写文本文件，可控制是否允许覆盖现有文件。",
+    kind: "write",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "写入" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.write",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "当前工作区内的相对文件路径"
+        },
+        content: {
+          type: "string",
+          description: "要写入文件的完整文本内容"
+        },
+        overwrite: {
+          type: "boolean",
+          description: "是否允许覆盖已存在文件，默认 true"
+        }
+      },
+      required: ["path", "content"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "Edit",
+    canonicalToolName: "Edit",
+    executionPrimitive: "workspace_edit_file",
+    description: "在当前工作区内按 oldText/newText 对文本文件做受控替换；默认只允许单一匹配。",
+    kind: "write",
+    exposure: "model_visible",
+    displayMetadata: { displayNameZh: "编辑" },
+    permissionFacts: {
+      requiresApproval: false,
+      permissionScope: "workspace.write",
+      hostMediated: false,
+      approvalMode: "none",
+      decisionSource: "runtime",
+      permissionProfile: "builtin"
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "当前工作区内的相对文件路径"
+        },
+        oldText: {
+          type: "string",
+          description: "需要被替换的原始文本"
+        },
+        newText: {
+          type: "string",
+          description: "替换后的新文本"
+        },
+        replaceAll: {
+          type: "boolean",
+          description: "是否允许替换全部匹配，默认 false"
+        }
+      },
+      required: ["path", "oldText", "newText"],
       additionalProperties: false
     }
   },
@@ -4266,7 +4533,10 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     async fetchAvailableTools() {
       if (this.availableTools.length > 0 && isTauriAvailable()) {
-        const hasDefaultOnly = this.availableTools.every((tool, index) => tool.name === defaultAvailableTools[index]?.name);
+        const defaultToolNames = new Set(defaultAvailableTools.map((tool) => tool.name));
+        const hasDefaultOnly =
+          this.availableTools.length === defaultAvailableTools.length &&
+          this.availableTools.every((tool) => defaultToolNames.has(tool.name));
         if (!hasDefaultOnly) {
           return;
         }

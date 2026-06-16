@@ -14,7 +14,6 @@ import {
   Clock3,
   Copy,
   Gauge,
-  Timer,
   FileText,
   Image as ImageIcon,
   Layout,
@@ -810,6 +809,9 @@ function buildTimelineMetricItems(turn: TurnTraceRecord, entry: TraceTimelineEnt
   if (metricEntry.firstTokenLatencyMs != null) {
     items.push({ icon: Clock3, tooltip: "首 token 延时", value: `${metricEntry.firstTokenLatencyMs} ms` });
   }
+  if (metricEntry.turnDurationMs != null) {
+    items.push({ icon: Clock3, tooltip: "耗时", value: formatDurationMs(metricEntry.turnDurationMs) });
+  }
   return items;
 }
 
@@ -886,7 +888,18 @@ function shouldShowCallModelReasoning(entry: TraceTimelineEntry) {
 function timelinePreviewText(_turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const kind = canonicalTraceTimelineKind(entry.kind);
   if (kind === "call_tool") {
-    return "";
+    const labels = (entry.toolActivities ?? [])
+      .map((activity) => {
+        const permissionBits = [
+          permissionScopeLabel(activity) ? `权限: ${permissionScopeLabel(activity)}` : "",
+          approvalLabel(activity) ? `审批: ${approvalLabel(activity)}` : "",
+          permissionSourceLabel(activity) ? `来源: ${permissionSourceLabel(activity)}` : ""
+        ].filter(Boolean).join(" · ");
+
+        return [toolDisplayLabel(activity), permissionBits].filter(Boolean).join(" · ");
+      })
+      .filter((label, index, labelsList) => !!label && labelsList.indexOf(label) === index);
+    return labels.join(" · ");
   }
 
   if (kind === "call_model") {
@@ -945,6 +958,7 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
 
   if (kind === "call_model") {
     pushRow(rows, "模型", formatProviderModel(entry.providerName, entry.providerModel), { icon: Brain });
+    pushRow(rows, "耗时", timelineDurationText(turn, entry), { icon: Clock3 });
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
   }
@@ -1258,8 +1272,25 @@ function toggleTurn(turnId: string) {
 
 function toggleTraceStep(turnId: string, stepId: string) {
   const key = `${turnId}:${stepId}`;
-  activeTraceStepKey.value = activeTraceStepKey.value === key ? "" : key;
+  if (activeTraceStepKey.value === key) {
+    activeTraceStepKey.value = "";
+    activeTraceDetailKey.value = "";
+    return;
+  }
+
+  activeTraceStepKey.value = key;
   activeTraceDetailKey.value = "";
+
+  const turn = orderedTurnTraces.value.find((item) => item.turnId === turnId);
+  const entry = turnTimeline(turn ?? ({} as TurnTraceRecord)).find((item) => item.id === stepId);
+  if (!turn || !entry || canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+    return;
+  }
+
+  const firstToolDetail = buildTimelineDetailSections(turn, entry).find((section) => section.kind === "tool");
+  if (firstToolDetail) {
+    activeTraceDetailKey.value = traceDetailKey(turnId, stepId, firstToolDetail.id);
+  }
 }
 
 function toggleTraceDetail(turnId: string, stepId: string, detailId: string) {

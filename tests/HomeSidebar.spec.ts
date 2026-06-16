@@ -438,6 +438,9 @@ describe("HomeSidebar", () => {
 
     expect(latestTurnSection?.getAttribute("data-open")).toBe("true");
     expect(oldTurnSection?.getAttribute("data-open")).not.toBe("true");
+    const latestModelButton = wrapper.get('[data-testid="trace-step-button-model-new"]');
+    await latestModelButton.trigger("click");
+    await nextTick();
     expect(latestTurnSection?.textContent ?? "").toContain("这是最新成功轮次");
     expect(latestTurnSection?.textContent ?? "").not.toContain("old failure");
   });
