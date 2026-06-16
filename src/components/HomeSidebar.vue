@@ -846,9 +846,6 @@ function buildTimelineMetricItems(turn: TurnTraceRecord, entry: TraceTimelineEnt
   if (metricEntry.firstTokenLatencyMs != null) {
     items.push({ icon: Clock3, tooltip: "首 token 延时", value: `${metricEntry.firstTokenLatencyMs} ms` });
   }
-  if (metricEntry.turnDurationMs != null) {
-    items.push({ icon: Clock3, tooltip: "耗时", value: formatDurationMs(metricEntry.turnDurationMs) });
-  }
   return items;
 }
 
@@ -995,7 +992,6 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
 
   if (kind === "call_model") {
     pushRow(rows, "模型", formatProviderModel(entry.providerName, entry.providerModel), { icon: Brain });
-    pushRow(rows, "耗时", timelineDurationText(turn, entry), { icon: Clock3 });
     pushRow(rows, "错误", entry.error, { multiline: true, tone: "danger" });
     return rows;
   }
