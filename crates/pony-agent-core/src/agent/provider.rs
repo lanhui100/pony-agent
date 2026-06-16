@@ -18,6 +18,21 @@ pub enum ProviderProtocol {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderAuthType {
+    Auto,
+    Bearer,
+    #[serde(rename = "x-api-key")]
+    XApiKey,
+}
+
+impl Default for ProviderAuthType {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderRole {
     System,
@@ -1248,21 +1263,26 @@ impl ProviderManager {
         let client = build_http_client(Duration::from_secs(45))?;
         let started_at = Instant::now();
 
-        let response = client
-            .post(endpoint)
-            .header(
-                "x-api-key",
-                self.config
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-            )
-            .header("anthropic-version", "2023-06-01")
-            .json(body)
-            .send()
-            .map_err(|error| {
-                format_request_error("调用 provider 失败", &error, started_at.elapsed())
-            })?;
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .ok_or_else(|| "provider 缺少 API Key".to_string())?;
+
+        let mut request = client.post(endpoint);
+        match resolve_anthropic_auth_type(&self.config) {
+            ProviderAuthType::Bearer => {
+                request = request.bearer_auth(api_key);
+            }
+            ProviderAuthType::XApiKey | ProviderAuthType::Auto => {
+                request = request
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01");
+            }
+        }
+        let response = request.json(body).send().map_err(|error| {
+            format_request_error("调用 provider 失败", &error, started_at.elapsed())
+        })?;
 
         let status = response.status();
         let text = response.text().map_err(|error| {
@@ -1751,6 +1771,22 @@ fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelecti
     }
 
     body
+}
+
+/// Resolves the effective auth type for anthropic-protocol requests.
+///
+/// `Auto` derives from the protocol: anthropic → x-api-key, openai → bearer.
+/// This allows providers like SenseNova that expose an Anthropic-compatible
+/// endpoint but require `Authorization: Bearer` instead of `x-api-key`.
+fn resolve_anthropic_auth_type(config: &ResolvedProviderSelection) -> ProviderAuthType {
+    match &config.auth_type {
+        ProviderAuthType::Auto => match config.protocol {
+            ProviderProtocol::Anthropic => ProviderAuthType::XApiKey,
+            ProviderProtocol::OpenAi => ProviderAuthType::Bearer,
+        },
+        ProviderAuthType::Bearer => ProviderAuthType::Bearer,
+        ProviderAuthType::XApiKey => ProviderAuthType::XApiKey,
+    }
 }
 
 fn with_anthropic_request_options(mut body: Value, config: &ResolvedProviderSelection) -> Value {
@@ -3450,6 +3486,7 @@ mod tests {
             provider_name: "openai".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "https://api.openai.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "OPENAI_API_KEY".to_string(),
             api_key: Some("test".to_string()),
             model: "gpt-4.1-mini".to_string(),
@@ -3490,6 +3527,7 @@ mod tests {
             provider_name: "deepseek".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "https://api.deepseek.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
             api_key: Some("test".to_string()),
             model: "deepseek-v4-pro".to_string(),
@@ -3530,6 +3568,7 @@ mod tests {
             provider_name: "anthropic".to_string(),
             protocol: ProviderProtocol::Anthropic,
             base_url: "https://api.anthropic.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
             api_key: Some("test".to_string()),
             model: "claude-3-7-sonnet-latest".to_string(),
@@ -3944,6 +3983,7 @@ mod tests {
             provider_name: "ppx".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "http://127.0.0.1:1/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "PPX_API_KEY".to_string(),
             api_key: Some("test".to_string()),
             model: "gpt-5.4".to_string(),

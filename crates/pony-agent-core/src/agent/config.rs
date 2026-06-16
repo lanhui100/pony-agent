@@ -1,4 +1,4 @@
-use crate::agent::provider::ProviderProtocol;
+use crate::agent::provider::{ProviderAuthType, ProviderProtocol};
 use crate::agent::secret_store::{default_secret_store, SecretStore};
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,8 @@ pub struct ProviderConfigView {
     pub name: String,
     pub protocol: ProviderProtocol,
     pub base_url: String,
+    #[serde(default)]
+    pub auth_type: ProviderAuthType,
     pub api_key_env_var: String,
     pub api_key_value: String,
     pub api_key_present: bool,
@@ -155,6 +157,8 @@ struct ProviderConfigStorage {
     name: String,
     protocol: ProviderProtocol,
     base_url: String,
+    #[serde(default)]
+    auth_type: ProviderAuthType,
     api_key_env_var: String,
     #[serde(default)]
     secret_ref: String,
@@ -176,6 +180,7 @@ pub struct ResolvedProviderSelection {
     pub provider_name: String,
     pub protocol: ProviderProtocol,
     pub base_url: String,
+    pub auth_type: ProviderAuthType,
     pub api_key_env_var: String,
     pub api_key: Option<String>,
     pub model: String,
@@ -291,6 +296,7 @@ impl ProviderRegistryStore {
             provider_name: provider.name.clone(),
             protocol: provider.protocol.clone(),
             base_url: provider.base_url.clone(),
+            auth_type: provider.auth_type.clone(),
             api_key_env_var: provider.api_key_env_var.clone(),
             api_key: resolve_provider_api_key(provider, self.secret_store.as_ref()),
             model: model.model.clone(),
@@ -351,6 +357,7 @@ fn storage_from_view(view: ProviderRegistryView) -> ProviderRegistryStorage {
                     name,
                     protocol,
                     base_url,
+                    auth_type,
                     api_key_env_var: _,
                     api_key_value,
                     api_key_present: _,
@@ -365,6 +372,7 @@ fn storage_from_view(view: ProviderRegistryView) -> ProviderRegistryStorage {
                     name,
                     protocol,
                     base_url,
+                    auth_type,
                     api_key_value,
                     models,
                     selected_model_id,
@@ -404,6 +412,7 @@ fn build_view_from_storage(
                     name: provider.name,
                     protocol: provider.protocol,
                     base_url: provider.base_url,
+                    auth_type: provider.auth_type.clone(),
                     api_key_env_var: provider.api_key_env_var,
                     api_key_present,
                     api_key_value,
@@ -619,6 +628,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
             name: "ppx".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "https://api.psydo.top/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "PPX_API_KEY".to_string(),
             secret_ref: default_secret_ref("provider-ppx"),
             api_key_value: String::new(),
@@ -640,6 +650,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
             name: "openai".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "https://api.openai.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "OPENAI_API_KEY".to_string(),
             secret_ref: default_secret_ref("provider-openai"),
             api_key_value: String::new(),
@@ -661,6 +672,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
             name: "openrouter".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "https://openrouter.ai/api/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "OPENROUTER_API_KEY".to_string(),
             secret_ref: default_secret_ref("provider-openrouter"),
             api_key_value: String::new(),
@@ -685,6 +697,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
             name: "deepseek".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "https://api.deepseek.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
             secret_ref: default_secret_ref("provider-deepseek"),
             api_key_value: String::new(),
@@ -709,6 +722,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
             name: "anthropic".to_string(),
             protocol: ProviderProtocol::Anthropic,
             base_url: "https://api.anthropic.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
             secret_ref: default_secret_ref("provider-anthropic"),
             api_key_value: String::new(),

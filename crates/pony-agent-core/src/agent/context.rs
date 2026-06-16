@@ -1077,6 +1077,7 @@ mod tests {
     use crate::agent::graph::{
         GraphDecision, GraphDecisionKind, GraphDecisionReason, GraphRun, GraphRunPhase,
     };
+    use crate::agent::provider::ProviderAuthType;
     use crate::agent::provider::ProviderProtocol;
 
     fn provider_manager(
@@ -1089,6 +1090,7 @@ mod tests {
             provider_name: "test-provider".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "https://example.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "TEST_PROVIDER_API_KEY".to_string(),
             api_key: Some("test".to_string()),
             model: model.to_string(),

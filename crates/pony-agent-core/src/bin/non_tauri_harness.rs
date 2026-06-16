@@ -5,7 +5,7 @@ use pony_agent_core::agent::control_plane::{
     HostControlPlaneBuilder, RunTurnCommand, StartGraphRunStreamCommand, StartTurnStreamCommand,
 };
 use pony_agent_core::agent::graph::GraphRunStore;
-use pony_agent_core::agent::provider::ProviderProtocol;
+use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::runtime::{AgentRuntimeBuilder, TurnInput, TurnStreamEvent};
 use pony_agent_core::agent::session::{FileSessionBackend, SessionStore};
 use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
@@ -29,6 +29,7 @@ impl ProviderSelectionResolver for StaticResolver {
             provider_name: "non-tauri-mock".to_string(),
             protocol: ProviderProtocol::OpenAi,
             base_url: "http://127.0.0.1:1/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
             api_key_env_var: "NON_TAURI_MOCK_API_KEY".to_string(),
             api_key: None,
             model: "non-tauri-mock-model".to_string(),
