@@ -21,7 +21,7 @@ describe("provider capability layering", () => {
 
     expect(declaration.capabilityPreset).toBe("auto");
     expect(declaration.capabilities.supportsReasoning).toBe(true);
-    expect(declaration.capabilities.contextWindowTokens).toBe(128000);
+    expect(declaration.capabilities.contextWindowTokens).toBe(256000);
   });
 
   it("normalizes user policy separately from capabilities", () => {
@@ -70,7 +70,7 @@ describe("provider capability layering", () => {
       model: "gpt-4.1-mini",
       capabilityPreset: "open-ai-chat",
       temperature: 0.2,
-      maxOutputTokens: 8192,
+      maxOutputTokens: 64000,
     });
     expect(model.capabilities.supportsImageInput).toBe(true);
   });

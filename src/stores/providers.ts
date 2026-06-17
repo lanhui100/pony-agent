@@ -1,19 +1,22 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 import type {
+  ProviderAuthType,
   ProviderCapabilityPresetId,
-  ProviderModelIdentity,
-  ProviderModelCapabilityDeclaration,
   ProviderConfig,
   ProviderModelCapabilities,
+  ProviderModelCapabilityDeclaration,
   ProviderModelConfig,
+  ProviderModelIdentity,
   ProviderModelUserPolicy,
-  ProviderReasoningEffort,
   ProviderProtocol,
+  ProviderProtocolEndpoint,
+  ProviderReasoningEffort,
   ProviderRegistry,
 } from "@/types/provider";
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 
 type CapabilityFactCatalogEntry = {
   protocol?: ProviderProtocol;
@@ -49,13 +52,49 @@ const CAPABILITY_CATALOG: CapabilityFactCatalogEntry[] = [
   },
 ];
 
+export function defaultBaseUrlFor(protocol: ProviderProtocol) {
+  return protocol === "anthropic"
+    ? "https://api.anthropic.com/v1"
+    : "https://api.openai.com/v1";
+}
+
+function defaultAuthTypeFor(protocol: ProviderProtocol): ProviderAuthType {
+  return protocol === "anthropic" ? "x-api-key" : "bearer";
+}
+
+function createDefaultEndpoint(
+  protocol: ProviderProtocol,
+  overrides: Partial<ProviderProtocolEndpoint> = {},
+): ProviderProtocolEndpoint {
+  return {
+    protocol,
+    enabled: false,
+    baseUrl: defaultBaseUrlFor(protocol),
+    authType: defaultAuthTypeFor(protocol),
+    ...overrides,
+  };
+}
+
+function getDefaultEndpoints(): ProviderProtocolEndpoint[] {
+  return [
+    createDefaultEndpoint("openai", { enabled: true, authType: "auto" }),
+    createDefaultEndpoint("anthropic"),
+  ];
+}
+
 export function createDefaultCapabilities(): ProviderModelCapabilities {
   return {
-    contextWindowTokens: null,
+    contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
     supportsTools: true,
     supportsStreaming: true,
-    supportsImageInput: false,
     supportsReasoning: false,
+    supportsImageInput: false,
+    supportsVideoInput: false,
+    supportsAudioInput: false,
+    supportsTextOutput: true,
+    supportsImageOutput: false,
+    supportsVideoOutput: false,
+    supportsAudioOutput: false,
   };
 }
 
@@ -122,6 +161,15 @@ function inferCapabilityPreset(
   return "auto";
 }
 
+function createCapabilities(
+  overrides: Partial<ProviderModelCapabilities>,
+): ProviderModelCapabilities {
+  return {
+    ...createDefaultCapabilities(),
+    ...overrides,
+  };
+}
+
 function capabilitiesForPreset(
   preset: Exclude<ProviderCapabilityPresetId, "custom">,
   protocol: ProviderProtocol,
@@ -129,66 +177,51 @@ function capabilitiesForPreset(
 ): ProviderModelCapabilities {
   const inferredPreset =
     preset === "auto" ? inferCapabilityPreset(protocol, modelIdValue) : preset;
+  const lower = modelIdValue.toLowerCase();
 
   switch (inferredPreset) {
     case "open-ai-chat":
       return createCapabilities({
-        contextWindowTokens: 128000,
-        supportsTools: true,
-        supportsStreaming: true,
-        supportsImageInput: true,
         supportsReasoning: false,
+        supportsImageInput: true,
+        supportsTextOutput: true,
       });
     case "open-ai-reasoning":
       return createCapabilities({
-        contextWindowTokens: 128000,
-        supportsTools: true,
-        supportsStreaming: true,
-        supportsImageInput: false,
         supportsReasoning: true,
+        supportsTextOutput: true,
       });
     case "anthropic-thinking":
       return createCapabilities({
-        contextWindowTokens: 200000,
-        supportsTools: true,
-        supportsStreaming: true,
-        supportsImageInput: true,
         supportsReasoning: true,
+        supportsImageInput: true,
+        supportsTextOutput: true,
       });
     case "deepseek-chat":
       return createCapabilities({
-        contextWindowTokens: 128000,
-        supportsTools: true,
-        supportsStreaming: true,
-        supportsImageInput: false,
         supportsReasoning: false,
+        supportsTextOutput: true,
       });
     case "deepseek-reasoner":
       return createCapabilities({
-        contextWindowTokens: 128000,
-        supportsTools: true,
-        supportsStreaming: true,
-        supportsImageInput: false,
         supportsReasoning: true,
+        supportsTextOutput: true,
       });
     case "auto":
       return createCapabilities({
-        contextWindowTokens: protocol === "anthropic" ? 200000 : 128000,
-        supportsTools: true,
-        supportsStreaming: true,
-        supportsImageInput:
-          modelIdValue.toLowerCase().includes("gpt-4.1") ||
-          modelIdValue.toLowerCase().includes("claude") ||
-          modelIdValue.toLowerCase().includes("vision"),
         supportsReasoning:
-          modelIdValue.toLowerCase().includes("gpt-5") ||
-          modelIdValue.toLowerCase().includes("o1") ||
-          modelIdValue.toLowerCase().includes("o3") ||
-          modelIdValue.toLowerCase().includes("reason") ||
-          modelIdValue.toLowerCase().includes("claude-3-7") ||
-          modelIdValue.toLowerCase().includes("deepseek-r1") ||
-          modelIdValue.toLowerCase().includes("deepseek-reasoner") ||
-          modelIdValue.toLowerCase().includes("deepseek-v4-pro"),
+          lower.includes("gpt-5") ||
+          lower.includes("o1") ||
+          lower.includes("o3") ||
+          lower.includes("reason") ||
+          lower.includes("claude-3-7") ||
+          lower.includes("deepseek-r1") ||
+          lower.includes("deepseek-reasoner") ||
+          lower.includes("deepseek-v4-pro"),
+        supportsImageInput:
+          lower.includes("gpt-4.1") ||
+          lower.includes("claude") ||
+          lower.includes("vision"),
       });
     default:
       return capabilitiesForPreset("auto", protocol, modelIdValue);
@@ -213,30 +246,6 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
-function createEmptyModel(): ProviderModelConfig {
-  return buildProviderModelConfig(
-    {
-      id: createId("model"),
-      name: "",
-      model: "",
-    },
-    {
-      capabilityPreset: "auto",
-      capabilities: createDefaultCapabilities(),
-    },
-    createDefaultModelUserPolicy(),
-  );
-}
-
-function createCapabilities(
-  overrides: Partial<ProviderModelCapabilities>,
-): ProviderModelCapabilities {
-  return {
-    ...createDefaultCapabilities(),
-    ...overrides,
-  };
-}
-
 function deriveEnvVarName(providerName: string) {
   const envName = providerName
     .trim()
@@ -247,71 +256,109 @@ function deriveEnvVarName(providerName: string) {
   return envName ? `${envName}_API_KEY` : "CUSTOM_PROVIDER_API_KEY";
 }
 
-function createEmptyProvider(): ProviderConfig {
-  const model = createEmptyModel();
-  const name = "new-provider";
-
-  return {
-    id: createId("provider"),
-    name,
-    protocol: "openai",
-    baseUrl: "https://api.openai.com/v1",
-    authType: "auto",
-    apiKeyEnvVar: deriveEnvVarName(name),
-    apiKeyValue: "",
-    apiKeyPresent: false,
-    models: [model],
-    selectedModelId: model.id,
-  };
-}
-
-function createPresetProvider(
-  id: string,
-  name: string,
-  protocol: ProviderProtocol,
-  baseUrl: string,
-  modelName: string,
-  modelIdValue: string,
-): ProviderConfig {
-  const modelId = createId("model");
-  const declaration = resolveCapabilityDeclaration(
-    protocol,
-    modelIdValue,
-    inferCapabilityPreset(protocol, modelIdValue),
-    null,
-  );
-
-  return {
-    id,
-    name,
-    protocol,
-    baseUrl,
-    authType: "auto",
-    apiKeyEnvVar: deriveEnvVarName(name),
-    apiKeyValue: "",
-    apiKeyPresent: false,
-    models: [
-      buildProviderModelConfig(
-        {
-          id: modelId,
-          name: modelName,
-          model: modelIdValue,
-        },
-        declaration,
-        {
-          ...createDefaultModelUserPolicy(),
-          temperature: 0.2,
-        },
-      ),
-    ],
-    selectedModelId: modelId,
-  };
-}
-
 function normalizeReasoningEffort(
   value: ProviderReasoningEffort | null | undefined,
 ): ProviderReasoningEffort | null {
-  return value ?? null;
+  switch (value) {
+    case "low":
+    case "medium":
+    case "high":
+    case "max":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function normalizeProtocolArray(
+  supportedProtocols: ProviderProtocol[] | null | undefined,
+  endpoints: ProviderProtocolEndpoint[],
+  legacyProtocol: ProviderProtocol,
+) {
+  const fromList = (supportedProtocols ?? []).filter(
+    (value, index, list) =>
+      (value === "openai" || value === "anthropic") &&
+      list.indexOf(value) === index,
+  );
+  const fromEndpoints = endpoints
+    .filter((item) => item.enabled)
+    .map((item) => item.protocol);
+  const merged = [...new Set([...fromList, ...fromEndpoints])];
+  return merged.length ? merged : [legacyProtocol];
+}
+
+function normalizeEndpoints(
+  provider: Pick<
+    ProviderConfig,
+    "protocol" | "baseUrl" | "authType"
+  > &
+    Partial<Pick<ProviderConfig, "endpoints" | "supportedProtocols">>,
+): ProviderProtocolEndpoint[] {
+  const defaults = getDefaultEndpoints();
+  const entries = defaults.map((defaultEntry) => {
+    const existing = provider.endpoints?.find(
+      (item) => item.protocol === defaultEntry.protocol,
+    );
+    if (existing) {
+      return {
+        protocol: defaultEntry.protocol,
+        enabled: Boolean(existing.enabled),
+        baseUrl: existing.baseUrl?.trim() || defaultEntry.baseUrl,
+        authType: existing.authType ?? defaultEntry.authType,
+      };
+    }
+
+    const enabled =
+      provider.supportedProtocols?.includes(defaultEntry.protocol) ??
+      provider.protocol === defaultEntry.protocol;
+    const baseUrl =
+      provider.protocol === defaultEntry.protocol && provider.baseUrl?.trim()
+        ? provider.baseUrl.trim()
+        : defaultEntry.baseUrl;
+    const authType =
+      provider.protocol === defaultEntry.protocol
+        ? provider.authType ?? defaultEntry.authType
+        : defaultEntry.authType;
+
+    return {
+      ...defaultEntry,
+      enabled,
+      baseUrl,
+      authType,
+    };
+  });
+
+  return entries;
+}
+
+function getProviderProtocol(provider: ProviderConfig, model?: ProviderModelConfig | null) {
+  if (model?.protocol) {
+    return model.protocol;
+  }
+
+  const supported = provider.supportedProtocols.find((item) =>
+    provider.endpoints.some((endpoint) => endpoint.protocol === item && endpoint.enabled),
+  );
+  return supported ?? provider.protocol;
+}
+
+function normalizeCapabilitiesForPersistence(
+  capabilities: ProviderModelCapabilities,
+): ProviderModelCapabilities {
+  return {
+    contextWindowTokens:
+      normalizeNullablePositiveInteger(capabilities.contextWindowTokens) ??
+      DEFAULT_CONTEXT_WINDOW_TOKENS,
+    supportsTools: capabilities.supportsTools ?? true,
+    supportsStreaming: capabilities.supportsStreaming ?? true,
+    supportsReasoning: capabilities.supportsReasoning,
+    supportsImageInput: capabilities.supportsImageInput,
+    supportsVideoInput: capabilities.supportsVideoInput,
+    supportsAudioInput: capabilities.supportsAudioInput,
+    supportsImageOutput: capabilities.supportsImageOutput,
+    supportsVideoOutput: capabilities.supportsVideoOutput,
+    supportsAudioOutput: capabilities.supportsAudioOutput,
+  };
 }
 
 export function resolveCapabilityDeclaration(
@@ -323,7 +370,9 @@ export function resolveCapabilityDeclaration(
   if (preset !== "custom") {
     return {
       capabilityPreset: preset,
-      capabilities: capabilitiesForPreset(preset, protocol, modelIdValue),
+      capabilities: normalizeCapabilitiesForPersistence(
+        capabilitiesForPreset(preset, protocol, modelIdValue),
+      ),
     };
   }
 
@@ -331,32 +380,30 @@ export function resolveCapabilityDeclaration(
 
   return {
     capabilityPreset: preset,
-    capabilities: {
+    capabilities: normalizeCapabilitiesForPersistence({
+      ...normalized,
       contextWindowTokens: normalizeNullablePositiveInteger(
         normalized.contextWindowTokens,
       ),
-      supportsTools: normalized.supportsTools,
-      supportsStreaming: normalized.supportsStreaming,
-      supportsImageInput: normalized.supportsImageInput,
-      supportsReasoning: normalized.supportsReasoning,
-    },
+    }),
   };
 }
 
 export function resolveModelCapabilityDeclaration(
   model: Pick<
     ProviderModelConfig,
-    "model" | "capabilityPreset" | "capabilities"
+    "model" | "capabilityPreset" | "capabilities" | "protocol"
   >,
   protocol: ProviderProtocol,
 ): ProviderModelCapabilityDeclaration {
+  const resolvedProtocol = model.protocol ?? protocol;
   const capabilityPreset = normalizeCapabilityPresetId(
     model.capabilityPreset,
-    protocol,
+    resolvedProtocol,
     model.model,
   );
   return resolveCapabilityDeclaration(
-    protocol,
+    resolvedProtocol,
     model.model,
     capabilityPreset,
     model.capabilities,
@@ -374,8 +421,10 @@ export function resolveModelUserPolicy(
   capabilities: ProviderModelCapabilities,
 ): ProviderModelUserPolicy {
   return {
-    temperature: model.temperature,
-    maxOutputTokens: model.maxOutputTokens,
+    temperature: model.temperature ?? 0,
+    maxOutputTokens:
+      normalizeNullablePositiveInteger(model.maxOutputTokens) ??
+      DEFAULT_MAX_OUTPUT_TOKENS,
     reasoningEffort: capabilities.supportsReasoning
       ? normalizeReasoningEffort(model.reasoningEffort)
       : null,
@@ -392,15 +441,109 @@ export function buildProviderModelConfig(
 ): ProviderModelConfig {
   return {
     ...identity,
+    protocol: identity.protocol ?? null,
     ...declaration,
     ...userPolicy,
   };
 }
 
-function normalizeModel(
-  model: ProviderModelConfig,
+function createEmptyModel(): ProviderModelConfig {
+  return buildProviderModelConfig(
+    {
+      id: createId("model"),
+      name: "",
+      model: "",
+      protocol: "openai",
+    },
+    {
+      capabilityPreset: "custom",
+      capabilities: createDefaultCapabilities(),
+    },
+    createDefaultModelUserPolicy(),
+  );
+}
+
+function createEmptyProvider(): ProviderConfig {
+  const model = createEmptyModel();
+  const name = "new-provider";
+  const endpoints = getDefaultEndpoints();
+
+  return {
+    id: createId("provider"),
+    name,
+    protocol: "openai",
+    baseUrl: endpoints[0]?.baseUrl ?? defaultBaseUrlFor("openai"),
+    authType: "auto",
+    supportedProtocols: ["openai"],
+    endpoints,
+    apiKeyEnvVar: deriveEnvVarName(name),
+    apiKeyValue: "",
+    apiKeyPresent: false,
+    models: [model],
+    selectedModelId: model.id,
+  };
+}
+
+function createPresetProvider(
+  id: string,
+  name: string,
   protocol: ProviderProtocol,
+  baseUrl: string,
+  modelName: string,
+  modelIdValue: string,
+): ProviderConfig {
+  const modelId = createId("model");
+  const endpoints = getDefaultEndpoints().map((item) =>
+    item.protocol === protocol
+      ? {
+          ...item,
+          enabled: true,
+          baseUrl,
+          authType: "auto" as ProviderAuthType,
+        }
+      : item,
+  );
+
+  return {
+    id,
+    name,
+    protocol,
+    baseUrl,
+    authType: "auto",
+    supportedProtocols: [protocol],
+    endpoints,
+    apiKeyEnvVar: deriveEnvVarName(name),
+    apiKeyValue: "",
+    apiKeyPresent: false,
+    models: [
+      buildProviderModelConfig(
+        {
+          id: modelId,
+          name: modelName,
+          model: modelIdValue,
+          protocol,
+        },
+        resolveCapabilityDeclaration(
+          protocol,
+          modelIdValue,
+          inferCapabilityPreset(protocol, modelIdValue),
+          null,
+        ),
+        {
+          ...createDefaultModelUserPolicy(),
+          temperature: 0.2,
+        },
+      ),
+    ],
+    selectedModelId: modelId,
+  };
+}
+
+function normalizeModel(
+  provider: ProviderConfig,
+  model: ProviderModelConfig,
 ): ProviderModelConfig {
+  const protocol = getProviderProtocol(provider, model);
   const declaration = resolveModelCapabilityDeclaration(model, protocol);
   const userPolicy = resolveModelUserPolicy(model, declaration.capabilities);
 
@@ -409,10 +552,38 @@ function normalizeModel(
       id: model.id,
       name: model.name,
       model: model.model,
+      protocol,
     },
     declaration,
     userPolicy,
   );
+}
+
+function normalizeProvider(provider: ProviderConfig): ProviderConfig {
+  const endpoints = normalizeEndpoints(provider);
+  const supportedProtocols = normalizeProtocolArray(
+    provider.supportedProtocols,
+    endpoints,
+    provider.protocol,
+  );
+  const primaryProtocol = supportedProtocols[0] ?? provider.protocol;
+  const primaryEndpoint =
+    endpoints.find((item) => item.protocol === primaryProtocol) ?? endpoints[0];
+
+  const baseProvider: ProviderConfig = {
+    ...provider,
+    protocol: primaryProtocol,
+    baseUrl: primaryEndpoint?.baseUrl ?? defaultBaseUrlFor(primaryProtocol),
+    authType: primaryEndpoint?.authType ?? "auto",
+    supportedProtocols,
+    endpoints,
+  };
+
+  return {
+    ...baseProvider,
+    apiKeyEnvVar: deriveEnvVarName(baseProvider.name),
+    models: baseProvider.models.map((model) => normalizeModel(baseProvider, model)),
+  };
 }
 
 function createBrowserRegistry(): ProviderRegistry {
@@ -442,7 +613,7 @@ function createBrowserRegistry(): ProviderRegistry {
   );
 
   return {
-    providers: [ppx, deepseek, openrouter],
+    providers: [ppx, deepseek, openrouter].map(normalizeProvider),
     selectedProviderId: ppx.id,
   };
 }
@@ -527,12 +698,7 @@ export const useProviderStore = defineStore("providers", {
         );
         this.registry = {
           ...registry,
-          providers: registry.providers.map((provider) => ({
-            ...provider,
-            models: provider.models.map((model) =>
-              normalizeModel(model, provider.protocol),
-            ),
-          })),
+          providers: registry.providers.map(normalizeProvider),
         };
         this.syncReasoningEffortFromCurrentModel();
       } catch (error) {
@@ -547,13 +713,7 @@ export const useProviderStore = defineStore("providers", {
         return;
       }
 
-      this.registry.providers = this.registry.providers.map((provider) => ({
-        ...provider,
-        apiKeyEnvVar: deriveEnvVarName(provider.name),
-        models: provider.models.map((model) =>
-          normalizeModel(model, provider.protocol),
-        ),
-      }));
+      this.registry.providers = this.registry.providers.map(normalizeProvider);
 
       this.saving = true;
       this.error = null;
@@ -574,12 +734,7 @@ export const useProviderStore = defineStore("providers", {
         );
         this.registry = {
           ...registry,
-          providers: registry.providers.map((provider) => ({
-            ...provider,
-            models: provider.models.map((model) =>
-              normalizeModel(model, provider.protocol),
-            ),
-          })),
+          providers: registry.providers.map(normalizeProvider),
         };
         this.syncReasoningEffortFromCurrentModel();
         this.notice = "提供商配置已保存；敏感密钥已写入应用密钥存储。";
@@ -625,7 +780,6 @@ export const useProviderStore = defineStore("providers", {
       }
 
       const provider = createEmptyProvider();
-
       this.registry.providers.push(provider);
       this.registry.selectedProviderId = provider.id;
       return provider.id;
@@ -670,7 +824,19 @@ export const useProviderStore = defineStore("providers", {
         return;
       }
 
-      const model = createEmptyModel();
+      const protocol = provider.supportedProtocols[0] ?? provider.protocol;
+      const model = buildProviderModelConfig(
+        {
+          ...createEmptyModel(),
+          id: createId("model"),
+          protocol,
+        },
+        {
+          capabilityPreset: "custom",
+          capabilities: createDefaultCapabilities(),
+        },
+        createDefaultModelUserPolicy(),
+      );
       provider.models.push(model);
       provider.selectedModelId = model.id;
     },
@@ -682,8 +848,7 @@ export const useProviderStore = defineStore("providers", {
         return;
       }
 
-      const normalizedPayload = normalizeModel(payload, provider.protocol);
-
+      const normalizedPayload = normalizeModel(provider, payload);
       const index = provider.models.findIndex(
         (item) => item.id === normalizedPayload.id,
       );

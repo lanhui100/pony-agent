@@ -2,7 +2,7 @@ export type ProviderProtocol = "openai" | "anthropic";
 
 export type ProviderAuthType = "auto" | "bearer" | "x-api-key";
 
-export type ProviderReasoningEffort = "minimal" | "low" | "medium" | "high";
+export type ProviderReasoningEffort = "low" | "medium" | "high" | "max";
 
 export type ProviderCapabilityPresetId =
   | "auto"
@@ -13,12 +13,25 @@ export type ProviderCapabilityPresetId =
   | "deepseek-reasoner"
   | "custom";
 
+export type ProviderProtocolEndpoint = {
+  protocol: ProviderProtocol;
+  enabled: boolean;
+  baseUrl: string;
+  authType: ProviderAuthType;
+};
+
 export type ProviderModelCapabilities = {
   contextWindowTokens: number | null;
-  supportsTools: boolean;
-  supportsStreaming: boolean;
-  supportsImageInput: boolean;
+  supportsTools?: boolean;
+  supportsStreaming?: boolean;
   supportsReasoning: boolean;
+  supportsImageInput: boolean;
+  supportsVideoInput: boolean;
+  supportsAudioInput: boolean;
+  supportsTextOutput: boolean;
+  supportsImageOutput: boolean;
+  supportsVideoOutput: boolean;
+  supportsAudioOutput: boolean;
 };
 
 export type ProviderModelCapabilityDeclaration = {
@@ -39,6 +52,7 @@ export type ProviderModelIdentity = {
   id: string;
   name: string;
   model: string;
+  protocol?: ProviderProtocol | null;
 };
 
 export type ProviderModelConfig = ProviderModelIdentity &
@@ -51,6 +65,8 @@ export type ProviderConfig = {
   protocol: ProviderProtocol;
   baseUrl: string;
   authType: ProviderAuthType;
+  supportedProtocols: ProviderProtocol[];
+  endpoints: ProviderProtocolEndpoint[];
   apiKeyEnvVar: string;
   apiKeyValue: string;
   apiKeyPresent: boolean;
