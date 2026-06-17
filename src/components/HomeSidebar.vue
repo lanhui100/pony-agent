@@ -511,13 +511,12 @@ function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: n
     return "";
   }
 
-  const used = formatInteger(inputTokens);
   if (contextWindowTokens == null || contextWindowTokens <= 0) {
-    return used;
+    return formatCompactInteger(inputTokens);
   }
 
   const percentage = ((inputTokens / contextWindowTokens) * 100).toFixed(1);
-  return `已用 ${percentage}%（${used} / ${formatInteger(contextWindowTokens)}）`;
+  return `已用 ${percentage}%（${formatCompactInteger(inputTokens)} / ${formatCompactInteger(contextWindowTokens)}）`;
 }
 
 function readNumericValue(value: unknown) {
