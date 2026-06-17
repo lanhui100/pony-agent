@@ -285,6 +285,8 @@ export type TraceTimelineEntry = {
   outputTokens?: number | null;
   totalTokens?: number | null;
   firstTokenLatencyMs?: number | null;
+  durationMs?: number | null;
+  durationSeconds?: number | null;
   turnDurationMs?: number | null;
 };
 
@@ -483,6 +485,8 @@ export type ChatMessage = {
   modelName?: string | null;
   tokenCount?: number | null;
   toolName?: string | null;
+  canonicalToolName?: string | null;
+  displayNameZh?: string | null;
   detail?: string | null;
   durationSeconds?: number | null;
 };

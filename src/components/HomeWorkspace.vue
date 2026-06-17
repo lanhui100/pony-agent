@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   ArrowUp,
@@ -36,6 +36,7 @@ type CheckpointRollbackAction = "transcript_only" | "transcript_and_workspace";
 
 const runtimeStore = useRuntimeStore();
 const providerStore = useProviderStore();
+const runtimeStoreSessionList = storeToRefs(runtimeStore).sessionList;
 
 const {
   conversationCheckpointEntries,
@@ -45,7 +46,8 @@ const {
   latestGraphRunSubmissionPlan,
   latestRunControlAuditSummary,
   messages,
-  sessionOperation
+  sessionOperation,
+  turnTraceHistory
 } = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
 
@@ -68,12 +70,12 @@ const stopRequested = ref(false);
 const checkpointPickerOpen = ref(false);
 const forkSummaryOpenForNodeId = ref<string | null>(null);
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
-const streamSnapshotTextByMessageId = reactive<Record<string, string>>({});
-const streamSnapshotReasoningByMessageId = reactive<Record<string, string>>({});
-const streamFadeTextByMessageId = reactive<Record<string, string>>({});
-const streamFadeKeyByMessageId = reactive<Record<string, number>>({});
-const streamReasoningFadeTextByMessageId = reactive<Record<string, string>>({});
-const streamReasoningFadeKeyByMessageId = reactive<Record<string, number>>({});
+const streamSnapshotTextByMessageId = shallowReactive<Record<string, string>>({});
+const streamSnapshotReasoningByMessageId = shallowReactive<Record<string, string>>({});
+const streamFadeTextByMessageId = shallowReactive<Record<string, string>>({});
+const streamFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
+const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string>>({});
+const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
 const AUTO_SCROLL_THRESHOLD_PX = 160;
 const STREAM_FADE_MIN_CHARS = 24;
 const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
@@ -305,7 +307,17 @@ const turns = computed<TurnBucket[]>(() => {
   return Array.from(buckets.values());
 });
 
-const isEmptyWorkspace = computed(() => turns.value.length === 0);
+const hasVisibleHistorySession = computed(() =>
+  runtimeStoreSessionList.value.some((session) => session.conversationId === runtimeStore.sessionId)
+);
+const isEmptyWorkspace = computed(() => turns.value.length === 0 && !hasVisibleHistorySession.value);
+const latestFailedTrace = computed(() => {
+  const traces = [...turnTraceHistory.value].reverse();
+  return traces.find((trace) => trace.phase === "failed" || Boolean(trace.error)) ?? null;
+});
+const shouldShowFailureState = computed(
+  () => turns.value.length === 0 && hasVisibleHistorySession.value && latestFailedTrace.value != null
+);
 
 const checkpointEntries = computed(() => conversationCheckpointEntries.value ?? []);
 
@@ -386,10 +398,43 @@ function isIncrementalStreamingAppend(previous: string, next: string) {
   return next.length > previous.length && next.startsWith(previous);
 }
 
-let lastCleanupMessageCount = 0;
+let lastCleanupAssistantSignature = "";
 
-function syncStreamingPresentationState() {
+function syncPresentationMapValue<T extends string | number>(
+  map: Record<string, T>,
+  messageId: string,
+  nextValue: T
+) {
+  if (map[messageId] !== nextValue) {
+    map[messageId] = nextValue;
+  }
+}
+
+function cleanupStreamingPresentationState(activeMessageIds: Set<string>, assistantSignature: string) {
+  if (assistantSignature === lastCleanupAssistantSignature) {
+    return;
+  }
+  lastCleanupAssistantSignature = assistantSignature;
+  for (const map of [
+    streamSnapshotTextByMessageId,
+    streamSnapshotReasoningByMessageId,
+    streamFadeTextByMessageId,
+    streamFadeKeyByMessageId,
+    streamReasoningFadeTextByMessageId,
+    streamReasoningFadeKeyByMessageId,
+  ]) {
+    for (const messageId of Object.keys(map)) {
+      if (!activeMessageIds.has(messageId)) {
+        delete map[messageId];
+      }
+    }
+  }
+}
+
+function syncStreamingPresentationState(source = "unknown") {
+  const syncStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
   const activeMessageIds = new Set<string>();
+  const activeAssistantSignatureParts: string[] = [];
   let pendingAssistantCount = 0;
 
   for (const message of messages.value) {
@@ -398,14 +443,11 @@ function syncStreamingPresentationState() {
     }
 
     activeMessageIds.add(message.id);
+    activeAssistantSignatureParts.push(message.id);
     const nextReasoning = assistantReasoning(message);
     const nextText = message.content;
 
     if (message.status !== "pending") {
-      streamSnapshotTextByMessageId[message.id] = nextText;
-      streamSnapshotReasoningByMessageId[message.id] = nextReasoning;
-      streamFadeTextByMessageId[message.id] = "";
-      streamReasoningFadeTextByMessageId[message.id] = "";
       continue;
     }
 
@@ -416,7 +458,11 @@ function syncStreamingPresentationState() {
     const appendedText = isIncrementalStreamingAppend(previousText, nextText)
       ? nextText.slice(previousText.length)
       : "";
-    streamFadeTextByMessageId[message.id] = appendedText.length >= STREAM_FADE_MIN_CHARS ? appendedText : "";
+    syncPresentationMapValue(
+      streamFadeTextByMessageId,
+      message.id,
+      appendedText.length >= STREAM_FADE_MIN_CHARS ? appendedText : ""
+    );
     if (!(message.id in streamFadeKeyByMessageId)) {
       streamFadeKeyByMessageId[message.id] = 0;
     }
@@ -427,8 +473,11 @@ function syncStreamingPresentationState() {
     const appendedReasoning = isIncrementalStreamingAppend(previousReasoning, nextReasoning)
       ? nextReasoning.slice(previousReasoning.length)
       : "";
-    streamReasoningFadeTextByMessageId[message.id] =
-      appendedReasoning.length >= STREAM_FADE_MIN_CHARS ? appendedReasoning : "";
+    syncPresentationMapValue(
+      streamReasoningFadeTextByMessageId,
+      message.id,
+      appendedReasoning.length >= STREAM_FADE_MIN_CHARS ? appendedReasoning : ""
+    );
     if (!(message.id in streamReasoningFadeKeyByMessageId)) {
       streamReasoningFadeKeyByMessageId[message.id] = 0;
     }
@@ -437,31 +486,28 @@ function syncStreamingPresentationState() {
         (streamReasoningFadeKeyByMessageId[message.id] ?? 0) + 1;
     }
 
-    streamSnapshotTextByMessageId[message.id] = nextText;
-    streamSnapshotReasoningByMessageId[message.id] = nextReasoning;
+    syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
+    syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, nextReasoning);
   }
 
-  // Lazy cleanup: only purge stale entries when message count changes.
-  // During steady-state streaming, the set of messages stays constant so
-  // cleanup is unnecessary — avoids 6 × Object.keys() per delta.
-  if (messages.value.length !== lastCleanupMessageCount) {
-    lastCleanupMessageCount = messages.value.length;
-    for (const map of [
-      streamSnapshotTextByMessageId,
-      streamSnapshotReasoningByMessageId,
-      streamFadeTextByMessageId,
-      streamFadeKeyByMessageId,
-      streamReasoningFadeTextByMessageId,
-      streamReasoningFadeKeyByMessageId,
-    ]) {
-      for (const messageId of Object.keys(map)) {
-        if (!activeMessageIds.has(messageId)) {
-          delete map[messageId];
-        }
+  const activeAssistantSignature = activeAssistantSignatureParts.join("|");
+  if (pendingAssistantCount === 0) {
+    for (const message of messages.value) {
+      if (message.role !== "assistant") {
+        continue;
       }
+      syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, message.content);
+      syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, assistantReasoning(message));
+      syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
+      syncPresentationMapValue(streamReasoningFadeTextByMessageId, message.id, "");
     }
   }
+  cleanupStreamingPresentationState(activeMessageIds, activeAssistantSignature);
+
+  const syncDurationMs = Math.round(((typeof performance !== "undefined" ? performance.now() : Date.now()) - syncStartAt) * 100) / 100;
   updateStreamDebugReveal({
+    syncSource: source,
+    syncDurationMs,
     pendingAssistantCount,
     maxTextBacklog: 0,
     maxReasoningBacklog: 0,
@@ -914,10 +960,11 @@ function handleTimelineUserScrollIntent() {
 }
 
 onMounted(() => {
+  lastCleanupAssistantSignature = "";
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
   }
-  syncStreamingPresentationState();
+  syncStreamingPresentationState("mounted");
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("keydown", handleWindowKeydown);
   handleTimelineViewportScroll();
@@ -961,7 +1008,7 @@ watch(latestTurnSignature, () => {
 }, { flush: "pre" });
 
 watch(latestTurnSignature, () => {
-  syncStreamingPresentationState();
+  syncStreamingPresentationState("latest-turn-signature:post");
   const behavior: ScrollBehavior = pendingStreamAutoFollow ? "smooth" : "auto";
   streamAutoFollowEnabled.value = pendingStreamAutoFollow;
 
@@ -977,7 +1024,7 @@ watch(showReasoningContent, (value) => {
 });
 
 watch(isSubmitting, (submitting) => {
-  syncStreamingPresentationState();
+  syncStreamingPresentationState("is-submitting");
   if (!submitting) {
     stopRequested.value = false;
   }

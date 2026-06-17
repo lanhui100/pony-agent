@@ -1276,12 +1276,17 @@ function normalizeTurnTraceRecord(trace: TurnTraceRecord): TurnTraceRecord {
 }
 
 function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  return new Promise<void>((resolve) => safeSetTimeout(() => resolve(), ms));
 }
 
 function waitForNextPaint() {
   return new Promise<void>((resolve) => {
-    window.requestAnimationFrame(() => resolve());
+    const browserWindow = resolveBrowserWindow();
+    if (!browserWindow || typeof browserWindow.requestAnimationFrame !== "function") {
+      resolve();
+      return;
+    }
+    browserWindow.requestAnimationFrame(() => resolve());
   });
 }
 
@@ -1290,13 +1295,20 @@ const LOW_PRIORITY_TURN_WORK_IDLE_TIMEOUT_MS = 2500;
 const OUTPUT_END_PERSIST_DELAY_MS = 1200;
 
 function runLowPriorityTurnWork(callback: () => void) {
-  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+  const browserWindow = resolveBrowserWindow();
+  if (!browserWindow || typeof browserWindow.requestAnimationFrame !== "function") {
     callback();
     return;
   }
 
-  window.setTimeout(() => {
-    const requestIdleCallback = (window as Window & {
+  safeSetTimeout(() => {
+    const idleWindow = resolveBrowserWindow();
+    if (!idleWindow) {
+      callback();
+      return;
+    }
+
+    const requestIdleCallback = (idleWindow as Window & {
       requestIdleCallback?: (handler: IdleRequestCallback, options?: IdleRequestOptions) => number;
     }).requestIdleCallback;
 
@@ -1307,8 +1319,21 @@ function runLowPriorityTurnWork(callback: () => void) {
       return;
     }
 
-    window.setTimeout(callback, 0);
+    safeSetTimeout(callback, 0);
   }, LOW_PRIORITY_TURN_WORK_DELAY_MS);
+}
+
+function resolveBrowserWindow(): Window | null {
+  return typeof window === "undefined" ? null : window;
+}
+
+function safeSetTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout> {
+  const browserWindow = resolveBrowserWindow();
+  if (browserWindow) {
+    return browserWindow.setTimeout(callback, delay);
+  }
+
+  return globalThis.setTimeout(callback, delay);
 }
 
 function buildAssistantModelLabel(providerName?: string | null, modelName?: string | null) {
@@ -3003,6 +3028,8 @@ function buildToolMessagesFromTrace(trace: TurnTraceRecord | null | undefined, t
     content: tool.resultText ?? "",
     status: toolStatusToMessageStatus(tool.status),
     toolName: tool.name,
+    canonicalToolName: tool.canonicalToolName ?? null,
+    displayNameZh: tool.displayNameZh ?? null,
     detail: buildToolMessageDetail(tool),
     durationSeconds: tool.durationSeconds ?? null
   }));
@@ -4418,12 +4445,15 @@ export const useRuntimeStore = defineStore("runtime", {
       );
 
       const finalText = payload.text?.trim();
-      if (finalText) {
+      if (finalText && payload.text !== assistantMessage.content) {
         assistantMessage.content = payload.text ?? assistantMessage.content;
       }
-      assistantMessage.reasoningContent = normalizeReasoningContent(
+      const nextReasoningContent = normalizeReasoningContent(
         payload.reasoningContent ?? assistantMessage.reasoningContent ?? null
       );
+      if (nextReasoningContent !== assistantMessage.reasoningContent) {
+        assistantMessage.reasoningContent = nextReasoningContent;
+      }
       assistantMessage.status = "done";
       assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
@@ -4483,6 +4513,8 @@ export const useRuntimeStore = defineStore("runtime", {
           existingMessage.content = nextContent;
           existingMessage.status = toolStatusToMessageStatus(tool.status);
           existingMessage.toolName = tool.name;
+          existingMessage.canonicalToolName = tool.canonicalToolName ?? null;
+          existingMessage.displayNameZh = tool.displayNameZh ?? null;
           existingMessage.detail = nextDetail;
           existingMessage.durationSeconds = tool.durationSeconds ?? null;
           if (persist) {
@@ -4498,6 +4530,8 @@ export const useRuntimeStore = defineStore("runtime", {
           content: nextContent,
           status: toolStatusToMessageStatus(tool.status),
           toolName: tool.name,
+          canonicalToolName: tool.canonicalToolName ?? null,
+          displayNameZh: tool.displayNameZh ?? null,
           detail: nextDetail,
           durationSeconds: tool.durationSeconds ?? null
         });
@@ -4979,12 +5013,15 @@ export const useRuntimeStore = defineStore("runtime", {
         );
 
         const finalText = payload.text?.trim();
-        if (finalText) {
+        if (finalText && payload.text !== assistantMessage.content) {
           assistantMessage.content = payload.text ?? assistantMessage.content;
         }
-        assistantMessage.reasoningContent = normalizeReasoningContent(
+        const nextReasoningContent = normalizeReasoningContent(
           payload.reasoningContent ?? assistantMessage.reasoningContent ?? null
         );
+        if (nextReasoningContent !== assistantMessage.reasoningContent) {
+          assistantMessage.reasoningContent = nextReasoningContent;
+        }
         assistantMessage.status = "done";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
@@ -5007,6 +5044,7 @@ export const useRuntimeStore = defineStore("runtime", {
 
         // Yield to browser — let Vue flush reactivity + DOM for chat area
         window.setTimeout(() => {
+          const stage2StartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           // ===== STAGE 2 (setTimeout 0): Trace + metadata + UI unlock =====
           this.phase = completedPhase === "completed" ? "ready" : completedPhase;
           this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -5023,8 +5061,14 @@ export const useRuntimeStore = defineStore("runtime", {
           this.outputTokens = payload.outputTokens ?? this.outputTokens;
           this.totalTokens = payload.totalTokens ?? this.totalTokens;
           this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+          const tokenStatsStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+          const tokenStatsDurationMs =
+            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - tokenStatsStartAt) * 100)) / 100;
+          const toolMessagesStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           this.syncToolMessages(payload.turnId, payload.toolActivities, false);
+          const toolMessagesDurationMs =
+            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - toolMessagesStartAt) * 100)) / 100;
           this.isSubmitting = false;
           this.activeTurnId = null;
 
@@ -5054,6 +5098,7 @@ export const useRuntimeStore = defineStore("runtime", {
               turnDurationMs: payload.turnDurationMs ?? null
             })
           );
+          const traceCommitStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
             eventId: payload.eventId ?? null,
             eventType: payload.eventType ?? null,
@@ -5083,6 +5128,17 @@ export const useRuntimeStore = defineStore("runtime", {
             ...turnDurationPatch,
             error: null
           }, false);
+          const traceCommitDurationMs =
+            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - traceCommitStartAt) * 100)) / 100;
+          const stage2DurationMs =
+            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - stage2StartAt) * 100)) / 100;
+          debugLog("perf:turn-completed-stage2", {
+            turnId: payload.turnId,
+            stage2DurationMs,
+            tokenStatsDurationMs,
+            toolMessagesDurationMs,
+            traceCommitDurationMs
+          });
 
           // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
           runLowPriorityTurnWork(() => {
