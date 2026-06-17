@@ -322,14 +322,18 @@ impl ToolRouter {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
+        let local_now = chrono::Local::now();
+        let local_iso = local_now.format("%Y-%m-%d %H:%M:%S %z").to_string();
+        let timezone = local_now.format("%z").to_string();
 
         ToolResult {
             tool_name: TOOL_TIME_NOW.to_string(),
             status: "ok".to_string(),
-            output: format!(
-                "当前 UNIX 时间戳（秒）是 {}。如需本地格式化时间，可在下一阶段补充 chrono/time 支持。",
-                unix_seconds
-            ),
+            output: json_string(json!({
+                "unixTimestampSeconds": unix_seconds,
+                "localIso": local_iso,
+                "timezone": timezone,
+            })),
             duration_ms: 0,
         }
     }
@@ -3910,6 +3914,53 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pony-agent-tools-test-{}", unique));
         fs::create_dir_all(&dir).expect("create temp workspace");
         dir
+    }
+
+    #[test]
+    fn time_now_returns_unix_timestamp_and_local_iso() {
+        let router = ToolRouter::with_workspace_root(temp_workspace());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_TIME_NOW.to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("time_now output should be json");
+        let unix_ts = payload
+            .get("unixTimestampSeconds")
+            .and_then(Value::as_u64)
+            .expect("unixTimestampSeconds should exist");
+        assert!(
+            unix_ts > 1_700_000_000,
+            "unix timestamp should be reasonable: {}",
+            unix_ts
+        );
+        let local_iso = payload
+            .get("localIso")
+            .and_then(Value::as_str)
+            .expect("localIso should exist");
+        assert!(
+            local_iso.contains("2026"),
+            "localIso should contain current year: {}",
+            local_iso
+        );
+        assert!(
+            local_iso.len() > 16,
+            "localIso should be a full datetime string"
+        );
+        let tz = payload
+            .get("timezone")
+            .and_then(Value::as_str)
+            .expect("timezone should exist");
+        assert!(
+            tz.len() >= 3,
+            "timezone offset should be present: {}",
+            tz
+        );
     }
 
     fn serve_single_http_response(status_line: &str, body: &str, content_type: &str) -> String {
