@@ -703,6 +703,51 @@ impl SessionStore {
         snapshot
     }
 
+    pub fn append_failed_turn(
+        &mut self,
+        session_id: Option<&str>,
+        user_message: &str,
+        assistant_message: &str,
+        mut trace: TurnTraceRecord,
+    ) -> SessionSnapshot {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        {
+            let session = self.ensure_session(&session_key);
+            ensure_history_graph(session);
+            prepare_session_for_new_turn(session);
+            session.history.push(TurnHistoryMessage {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+                attachments: Vec::new(),
+            });
+            session.history.push(TurnHistoryMessage {
+                role: "assistant".to_string(),
+                content: assistant_message.to_string(),
+                attachments: Vec::new(),
+            });
+            trace.updated_at = now_timestamp_ms();
+            session.turn_trace_history.push(trace);
+            if session.history.len() > DEFAULT_HISTORY_LIMIT {
+                let keep_from = session.history.len() - DEFAULT_HISTORY_LIMIT;
+                session.history.drain(..keep_from);
+            }
+            if session.turn_trace_history.len() > DEFAULT_HISTORY_LIMIT {
+                let keep_from = session.turn_trace_history.len() - DEFAULT_HISTORY_LIMIT;
+                session.turn_trace_history = session.turn_trace_history[keep_from..].to_vec();
+            }
+            refresh_session_metadata(session, true);
+            commit_history_node_from_live_state(
+                session,
+                classify_turn_node_kind(assistant_message),
+                None,
+            );
+        }
+
+        let snapshot = self.snapshot_for_session(&session_key);
+        self.save_to_backend();
+        snapshot
+    }
+
     pub fn record_turn_trace(
         &mut self,
         session_id: Option<&str>,

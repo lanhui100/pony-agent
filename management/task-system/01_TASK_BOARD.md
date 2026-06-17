@@ -46,7 +46,7 @@
 - `PA-050` 第二批基础工具能力与实现顺序
   说明：已完成第二波工具面 spec、任务拆分、`opencode / deepseek-v4-flash` 审核采纳、canonical spec 同步与 OpenSpec 归档；对应实现卡 `PA-051 ~ PA-054` 已全部完成并验证。
 - `PA-056` 上下文构建与缓存命中策略重构
-  说明：已完成 layered context 实现、`context_refresh_reason / instruction_scope_sources / conversation_carry_mode` 观测落点、显式 `Coding / Work` 配置闭环、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash-free` 代码审核与一轮采纳调优。
+  说明：已完成 layered context 实现、`context_refresh_reason / instruction_scope_sources / conversation_carry_mode` 观测落点、显式 `Coding / Work` 配置闭环、`BASE_SYSTEM_PROMPT` 中文语义恢复、小窗口 domain profile 跳过、runtime teardown 稳定性修复、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash` 代码审核与 follow-up 调优。
 
 - `PA-049` 工具观测读面、前端呈现与迁移验收
   说明：已完成实现、单测/e2e/tauri smoke、OpenSpec validate 与收口同步。

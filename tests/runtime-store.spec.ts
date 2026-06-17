@@ -3824,6 +3824,100 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("keeps terminal assistant payload stable when output_end and completed carry the same content", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9090);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "resolve_graph_run_submission_plan") {
+        return { command: "start_graph_run_stream", runId: null };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stable-terminal" },
+          turnId: "9090"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const store = useRuntimeStore();
+    store.$patch({
+      sessionId: "session-stable-terminal",
+      draftMessage: "stream request",
+      phase: "idle",
+      messages: [],
+      turnTraceHistory: []
+    });
+
+    await store.submitTurn();
+
+    eventHandlers.get("turn:output_end")?.({
+      payload: {
+        turnId: "9090",
+        eventId: "event-turn-output-end-9090",
+        eventType: "turn.output_end",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 1200,
+        text: "final answer",
+        reasoningContent: "stable reasoning",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        outputTokens: 9
+      }
+    });
+
+    await flushMicrotasks();
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "9090",
+        eventId: "event-turn-completed-9090",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 3,
+        emittedAtMs: 1500,
+        text: "final answer",
+        reasoningContent: "stable reasoning",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        outputTokens: 9,
+        traceSteps: store.traceSteps,
+        toolActivities: []
+      }
+    });
+
+    await flushDeferredTurnWork();
+    await flushMicrotasks();
+
+    const assistant = store.messages.find((message) => message.role === "assistant");
+    expect(assistant?.content).toBe("final answer");
+    expect(assistant?.reasoningContent).toBe("stable reasoning");
+    expect(assistant?.status).toBe("done");
+    nowSpy.mockRestore();
+  });
+
   it("defers persistence for delta stream updates instead of flushing every chunk immediately", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(7070);

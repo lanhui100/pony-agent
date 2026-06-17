@@ -211,6 +211,15 @@
 - 根据本轮任务类型临时插入 profile 内段落
 - 用半稳定状态驱动 base prompt 条件分支
 
+### 3.1 实现收紧说明
+
+本轮实现最终采用了更缓存友好的收紧版本：
+
+- `BASE_SYSTEM_PROMPT` 保留稳定身份、协作约束与默认中文回复语义
+- `coding / work` domain profile 改为短文本块，而不是长篇风格说明
+- 对小上下文窗口 provider，允许跳过 domain profile 注入，以避免稳定前缀挤压有效历史窗口
+- 对未知 `workspace_mode` 保留安全 fallback 到 `coding`，但增加显式可观测提示
+
 若后续需要把模板从 Rust 常量迁移到外部文件，也应保持：
 
 - profile 标识稳定

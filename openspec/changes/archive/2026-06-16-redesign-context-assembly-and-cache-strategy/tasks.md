@@ -47,3 +47,4 @@
 - [x] 6.5 打通显式 `workspace_mode` 配置主链：`AppSettings -> Tauri commands -> frontend settings store -> submitTurn -> TurnContext -> domain profile`
 - [x] 6.6 在左侧边栏尾部补设置入口，并新增 `Coding / Work` 设置面板
 - [x] 6.7 补最小回归：settings store、settings 页面切换、sidebar 设置入口、`workspaceMode` 提交链路
+- [x] 6.8 根据实现 follow-up 审核收紧 prompt 与运行时细节：恢复中文默认语义、压缩 profile 文本、为小上下文窗口跳过 domain profile，并修复前端 runtime teardown 异步错误

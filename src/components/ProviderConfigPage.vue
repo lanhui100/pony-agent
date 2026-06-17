@@ -221,15 +221,6 @@ const providerEnabledProtocols = computed(() =>
   endpointOrder.filter((protocol) => providerForm.endpoints[protocol].enabled),
 );
 
-const availableModelProtocols = computed(() => {
-  if (isEditing.value && isProviderEntity.value) {
-    return providerEnabledProtocols.value;
-  }
-
-  const provider = detailProvider.value;
-  return provider?.supportedProtocols?.length ? provider.supportedProtocols : ["openai"];
-});
-
 const canDeleteProvider = computed(
   () =>
     isProviderEntity.value &&

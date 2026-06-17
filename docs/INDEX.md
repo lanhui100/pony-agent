@@ -58,6 +58,7 @@
 - [PA-056 任务卡](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-056-redesign-context-assembly-and-cache-strategy.md)
 - [PA-056 Spec 审核](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-16-pa056-spec-review.md)
 - [PA-056 Code 审核](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-16-pa056-code-review.md)
+- [PA-056 Code 审核 Follow-up](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-17-pa056-code-review-followup.md)
 - [PA-056 本轮收口日志](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/99_LOGS/2026-06-17-pa056-workspace-mode-closeout.md)
 
 ## 8. OpenSpec

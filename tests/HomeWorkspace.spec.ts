@@ -937,6 +937,66 @@ describe("HomeWorkspace", () => {
     expect(scrollIntoViewSpy).not.toHaveBeenCalled();
   });
 
+  it("cleans up stale streaming state when assistant message ids change without changing message count", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-old",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello this is a longer streamed assistant delta",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('.markdown-stub[streaming="true"]').text()).toBe("");
+    expect(wrapper.get(".assistant-streaming-fade").text()).toBe("hello this is a longer streamed assistant delta");
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-2",
+          role: "user",
+          content: "换一轮"
+        }),
+        createMessage({
+          id: "assistant-new",
+          turnId: "turn-2",
+          role: "assistant",
+          content: "**完成** 输出",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        })
+      ],
+      phase: "ready",
+      isSubmitting: false
+    });
+    await nextTick();
+
+    expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
+    const markdownBlocks = wrapper.findAll(".markdown-stub");
+    const finalAssistantBlock = markdownBlocks.find((node) => node.text().includes("**完成** 输出"));
+    expect(finalAssistantBlock).toBeDefined();
+    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
+  });
+
   it("requests scroll follow-up when streaming content grows", async () => {
     const runtimeStore = useRuntimeStore();
 

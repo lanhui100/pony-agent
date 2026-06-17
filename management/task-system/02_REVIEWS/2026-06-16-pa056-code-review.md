@@ -14,7 +14,7 @@
 ## 审核方式
 
 - 使用 `opencode run`
-- 模型：`opencode/deepseek-v4-flash-free`
+- 模型：`deepseek/deepseek-v4-flash`
 - 方式：3 轮独立只读代码审核
   - 实现正确性与分层语义
   - 兼容性、回归风险与观测一致性
@@ -68,3 +68,8 @@
   [.tmp/pa056-code-review-3.jsonl](/C:/Users/HUAWEI/Documents/pony-agent/.tmp/pa056-code-review-3.jsonl)
 - 当前 diff：
   [.tmp/pa056-current.diff](/C:/Users/HUAWEI/Documents/pony-agent/.tmp/pa056-current.diff)
+
+## 2026-06-17 Follow-up
+
+- 后续补强与二次采纳见：
+  [2026-06-17-pa056-code-review-followup.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-17-pa056-code-review-followup.md>)

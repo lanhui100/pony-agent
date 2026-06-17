@@ -1280,6 +1280,7 @@ impl HostControlPlane {
                     prepared.input.session_id.as_deref(),
                     Some(&run),
                     checkpoint.as_ref(),
+                    prepared.input.workspace_mode.as_deref(),
                 )
                 .session_context
                 .summary;
@@ -1297,6 +1298,7 @@ impl HostControlPlane {
                 prepared.input.session_id.as_deref(),
                 &turn_result,
                 checkpoint.as_ref(),
+                prepared.input.workspace_mode.as_deref(),
             );
             let decision_outcome = runtime.decide_graph_after_turn_with_planner(
                 &run,
@@ -1304,6 +1306,7 @@ impl HostControlPlane {
                 prepared.input.session_id.as_deref(),
                 &turn_result,
                 checkpoint.as_ref(),
+                prepared.input.workspace_mode.as_deref(),
                 self.graph_planner.as_ref(),
             )?;
             let decision = decision_outcome.decision;
@@ -2574,6 +2577,7 @@ impl HostControlPlane {
             query.node_id.as_deref(),
             run.as_ref(),
             checkpoint.as_ref(),
+            None,
         );
 
         SessionRuntimeView {
@@ -2700,6 +2704,7 @@ impl HostControlPlane {
             query.node_id.as_deref(),
             run.as_ref(),
             checkpoint.as_ref(),
+            None,
         )
     }
 
@@ -2731,6 +2736,7 @@ impl HostControlPlane {
                 resolved_session_id.as_deref(),
                 run.as_ref(),
                 turn.as_ref(),
+                None,
             ))
         } else {
             None
@@ -2853,6 +2859,7 @@ impl HostControlPlane {
                 input.session_id.as_deref(),
                 &turn_result,
                 None,
+                input.workspace_mode.as_deref(),
             );
             let decision_outcome = runtime.decide_graph_after_turn_with_planner(
                 &run,
@@ -2860,6 +2867,7 @@ impl HostControlPlane {
                 input.session_id.as_deref(),
                 &turn_result,
                 None,
+                input.workspace_mode.as_deref(),
                 self.graph_planner.as_ref(),
             )?;
             let decision = decision_outcome.decision;

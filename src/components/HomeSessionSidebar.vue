@@ -58,6 +58,9 @@ const menuInteractiveClass =
 const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
 
 const hasPersistableCurrentSession = computed(() => hasPersistableMessages(messages.value));
+const hasVisibleCurrentSession = computed(() =>
+  sessionList.value.some((session) => session.conversationId === sessionId.value)
+);
 const canCreateSession = computed(
   () => !isSubmitting.value && !sessionOperation.value && hasPersistableCurrentSession.value
 );
@@ -68,7 +71,7 @@ const createSessionTitle = computed(() =>
 );
 
 const visibleSessions = computed<SessionOverview[]>(() => {
-  if (hasPersistableCurrentSession.value) {
+  if (hasVisibleCurrentSession.value) {
     return sessionList.value;
   }
 
@@ -209,7 +212,7 @@ function hasPersistableMessages(sessionMessages: ChatMessage[]) {
 }
 
 function isTransientSession(session: SessionOverview) {
-  return session.conversationId === sessionId.value && !hasPersistableCurrentSession.value;
+  return session.conversationId === sessionId.value && !hasVisibleCurrentSession.value;
 }
 
 function canDeleteSession(session: SessionOverview) {

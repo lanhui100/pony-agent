@@ -59,10 +59,10 @@
    当前已完成 `PA-045 / PA-046 / PA-047 / PA-048 / PA-049` 五张连续任务卡，分别承接工具协议、workspace 合同、权限审批、首批工具面与观测/前端呈现；五卡均已完成实现、验证、归档与任务系统收口。
 18. 工具系统五张 spec 卡已完成首轮文档闭环
    `PA-045 ~ PA-049` 当前都已具备 `proposal / design / tasks / delta spec`，并已同步到 `openspec/specs/` 后归档到 `openspec/changes/archive/2026-06-15-*`；每张卡都完成了独立智能体审核、采纳优化、strict validate 与归档收口。
-19. `PA-056` 已完成首轮架构与实现收口
-   当前已完成 context layering、memory/project/carry 分层实现、观测字段落点、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash-free` 代码审核与一轮采纳调优；后续若继续推进，应转入 instruction scope 真 source 枚举与 continuation/compaction 深化。
-20. `PA-056` 已补齐显式 `Coding / Work` 配置闭环
-   当前已新增独立 `AppSettings`、Tauri settings 命令、前端设置 store、左侧边栏尾部设置入口、`SettingsPanel` 与 `workspaceMode -> TurnContext -> domain profile` 主链透传；后续其它全栈配置项可以沿这条配置面继续扩展，而不必再重复改造上下文主路径。
+19. `PA-056` 已完成架构、实现与 6 月 17 日 follow-up 收口
+   当前已完成 context layering、memory/project/carry 分层实现、观测字段落点、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash` 代码审核与一轮 follow-up 采纳调优；后续若继续推进，应转入 instruction scope 真 source 枚举与 continuation/compaction 深化。
+20. `PA-056` 已补齐显式 `Coding / Work` 配置与 prompt 收紧闭环
+   当前已新增独立 `AppSettings`、Tauri settings 命令、前端设置 store、左侧边栏尾部设置入口、`SettingsPanel` 与 `workspaceMode -> TurnContext -> domain profile` 主链透传，并已补 `BASE_SYSTEM_PROMPT` 中文默认语义恢复、小窗口 domain profile 跳过和 `runtime.ts` teardown 稳定性修复；后续其它全栈配置项可以沿这条配置面继续扩展，而不必再重复改造上下文主路径。
 
 ## 远期扩展
 

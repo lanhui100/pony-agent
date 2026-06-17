@@ -2,10 +2,36 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import { chromium } from "playwright";
 
-const SMOKE_URL = "http://127.0.0.1:4176/";
+const PREVIEW_HOST = "127.0.0.1";
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function findAvailablePort(host) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+
+    server.once("error", reject);
+    server.listen(0, host, () => {
+      const address = server.address();
+
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("Failed to resolve preview port")));
+        return;
+      }
+
+      const { port } = address;
+      server.close((closeError) => {
+        if (closeError) {
+          reject(closeError);
+          return;
+        }
+
+        resolve(port);
+      });
+    });
+  });
 }
 
 async function waitForPort(host, port, timeoutMs) {
@@ -35,10 +61,12 @@ async function waitForPort(host, port, timeoutMs) {
 }
 
 async function main() {
+  const previewPort = await findAvailablePort(PREVIEW_HOST);
+  const smokeUrl = `http://${PREVIEW_HOST}:${previewPort}/`;
   const previewProcess = process.platform === "win32"
     ? spawn(
       "cmd.exe",
-      ["/d", "/s", "/c", "npm run preview -- --host 127.0.0.1 --port 4176"],
+      ["/d", "/s", "/c", `npm run preview -- --host ${PREVIEW_HOST} --port ${previewPort}`],
       {
         cwd: process.cwd(),
         stdio: "inherit"
@@ -46,7 +74,7 @@ async function main() {
     )
     : spawn(
       "npm",
-      ["run", "preview", "--", "--host", "127.0.0.1", "--port", "4176"],
+      ["run", "preview", "--", "--host", PREVIEW_HOST, "--port", String(previewPort)],
       {
         cwd: process.cwd(),
         stdio: "inherit"
@@ -54,7 +82,7 @@ async function main() {
     );
 
   try {
-    await waitForPort("127.0.0.1", 4176, 60_000);
+    await waitForPort(PREVIEW_HOST, previewPort, 60_000);
 
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
@@ -71,7 +99,7 @@ async function main() {
       pageErrors.push(String(err));
     });
 
-    await page.goto(SMOKE_URL, { waitUntil: "networkidle" });
+    await page.goto(smokeUrl, { waitUntil: "networkidle" });
     await page.waitForTimeout(2500);
 
     const bodyText = await page.locator("body").innerText();
@@ -99,6 +127,20 @@ async function main() {
     await browser.close();
   } finally {
     previewProcess.kill("SIGTERM");
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        resolve();
+      };
+
+      previewProcess.once("exit", finish);
+      setTimeout(finish, 5_000);
+    });
   }
 }
 

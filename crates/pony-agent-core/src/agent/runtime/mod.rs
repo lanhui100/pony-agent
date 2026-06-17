@@ -952,8 +952,9 @@ impl AgentRuntime {
         session_id: Option<&str>,
         run: Option<&GraphRun>,
         checkpoint: Option<&ExecutionCheckpoint>,
+        workspace_mode: Option<&str>,
     ) -> RetrievedContextState {
-        self.inspect_retrieved_context_at(session_id, None, run, checkpoint)
+        self.inspect_retrieved_context_at(session_id, None, run, checkpoint, workspace_mode)
     }
 
     pub fn inspect_retrieved_context_at(
@@ -962,6 +963,7 @@ impl AgentRuntime {
         node_id: Option<&str>,
         run: Option<&GraphRun>,
         checkpoint: Option<&ExecutionCheckpoint>,
+        workspace_mode: Option<&str>,
     ) -> RetrievedContextState {
         let snapshot = self.load_session_snapshot_at(session_id, node_id);
         let inspection_user_message = snapshot
@@ -974,7 +976,7 @@ impl AgentRuntime {
         self.context_builder.retrieve_context_state(
             inspection_user_message,
             &[],
-            None,
+            workspace_mode,
             &snapshot,
             run,
             checkpoint,
@@ -989,12 +991,13 @@ impl AgentRuntime {
         session_id: Option<&str>,
         result: &TurnResult,
         checkpoint: Option<&ExecutionCheckpoint>,
+        workspace_mode: Option<&str>,
     ) -> GraphTurnHandoff {
         let snapshot = self.load_session_snapshot(session_id);
         let retrieved = self.context_builder.retrieve_context_state(
             &result.user_message,
             &[],
-            None,
+            workspace_mode,
             &snapshot,
             run,
             checkpoint,
@@ -1010,8 +1013,16 @@ impl AgentRuntime {
         session_id: Option<&str>,
         result: &TurnResult,
         checkpoint: Option<&ExecutionCheckpoint>,
+        workspace_mode: Option<&str>,
     ) -> GraphDecision {
-        let handoff = self.build_graph_turn_handoff(None, turn_id, session_id, result, checkpoint);
+        let handoff = self.build_graph_turn_handoff(
+            None,
+            turn_id,
+            session_id,
+            result,
+            checkpoint,
+            workspace_mode,
+        );
         self.graph.decide_after_turn(&handoff)
     }
 
@@ -1023,10 +1034,17 @@ impl AgentRuntime {
         session_id: Option<&str>,
         result: &TurnResult,
         checkpoint: Option<&ExecutionCheckpoint>,
+        workspace_mode: Option<&str>,
         planner: &dyn GraphPlanner,
     ) -> Result<PlannerGraphDecisionDispatchOutcome, String> {
-        let handoff =
-            self.build_graph_turn_handoff(Some(run), turn_id, session_id, result, checkpoint);
+        let handoff = self.build_graph_turn_handoff(
+            Some(run),
+            turn_id,
+            session_id,
+            result,
+            checkpoint,
+            workspace_mode,
+        );
         let decision = self
             .graph
             .decide_after_turn_with_planner(run, &handoff, planner);
@@ -1115,11 +1133,12 @@ impl AgentRuntime {
             input.node_id.as_deref(),
             &input.history,
         );
+        let workspace_mode = input.workspace_mode.as_deref();
         let provider = self.resolve_provider(input);
         let preliminary_retrieved = self.context_builder.retrieve_context_state(
             &user_message,
             &[],
-            input.workspace_mode.as_deref(),
+            workspace_mode,
             &session,
             None,
             None,
@@ -1134,7 +1153,7 @@ impl AgentRuntime {
             self.context_builder.retrieve_context_state(
                 &user_message,
                 &effective_images,
-                input.workspace_mode.as_deref(),
+                workspace_mode,
                 &session,
                 None,
                 None,
@@ -1682,6 +1701,7 @@ impl AgentRuntime {
         token_usage: Option<&TokenUsage>,
         provider_native_transcript: Option<Vec<Value>>,
         attachments: Vec<SessionAttachment>,
+        workspace_mode: Option<&str>,
     ) -> PersistedTurnOutcome {
         let updated_session = self.sessions.append_turn(
             session_id,
@@ -1693,7 +1713,7 @@ impl AgentRuntime {
         let retrieved = self.context_builder.retrieve_context_state(
             user_message,
             &[],
-            None,
+            workspace_mode,
             &updated_session,
             None,
             None,
@@ -2013,6 +2033,7 @@ impl AgentRuntime {
         user_message: &str,
         provider_meta: Option<&ProviderEventMeta>,
         attachments: Vec<SessionAttachment>,
+        workspace_mode: Option<&str>,
     ) -> PersistedTurnOutcome {
         self.persist_turn_outcome(
             session_id,
@@ -2025,6 +2046,7 @@ impl AgentRuntime {
             None,
             None,
             attachments,
+            workspace_mode,
         )
     }
 
@@ -2079,22 +2101,18 @@ impl AgentRuntime {
         turn_duration_ms: Option<u64>,
         error: String,
     ) {
-        self.persist_turn_trace_with_provider_calls_and_hooks(
-            session_id,
-            turn_id,
+        let trace_timeline = build_persisted_trace_timeline(
             user_message,
             "failed",
-            trace_steps,
-            tool_activities,
-            provider_call_records,
-            hook_trace_records,
             provider_meta,
-            provider_source,
-            provider_mode,
-            build_context_observation,
+            provider_source.as_deref(),
+            provider_mode.as_deref(),
+            build_context_observation.as_ref(),
+            &tool_activities,
             None,
             None,
-            fallback_reason,
+            fallback_reason.as_deref(),
+            Some(error.as_str()),
             None,
             None,
             None,
@@ -2102,8 +2120,45 @@ impl AgentRuntime {
             None,
             first_token_latency_ms,
             turn_duration_ms,
-            None,
-            Some(error),
+        );
+        self.sessions.append_failed_turn(
+            session_id,
+            user_message,
+            &error,
+            TurnTraceRecord {
+                turn_id: turn_id.to_string(),
+                session_id: session_id.map(str::to_string),
+                event_id: None,
+                event_type: None,
+                event_version: None,
+                sequence: None,
+                emitted_at_ms: None,
+                title: build_turn_trace_title(user_message),
+                phase: "failed".to_string(),
+                trace_steps,
+                trace_timeline,
+                tool_activities,
+                provider_call_records,
+                hook_trace_records,
+                provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+                provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+                provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+                provider_model: provider_meta.map(|meta| meta.model.clone()),
+                provider_source,
+                provider_mode,
+                build_context_observation,
+                session_summary: Some(error.clone()),
+                fallback_reason,
+                error: Some(error),
+                input_tokens: None,
+                cache_hit_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                first_token_latency_ms,
+                turn_duration_ms,
+                updated_at: 0,
+            },
         );
     }
 
@@ -2203,6 +2258,7 @@ impl AgentRuntime {
             user_message,
             provider_meta,
             attachments,
+            None,
         );
         self.update_execution_checkpoint(
             control,
@@ -3069,6 +3125,7 @@ impl AgentRuntime {
                 accumulated_token_usage.as_ref(),
                 native_transcript_for_tool_turn(user_message, &hop_records, &response),
                 attachments,
+                input.workspace_mode.as_deref(),
             );
             emit_stream_event(
                 sink,
@@ -3806,6 +3863,7 @@ impl AgentRuntime {
             token_usage.as_ref(),
             provider_native_transcript,
             attachments,
+            input.workspace_mode.as_deref(),
         );
         let turn_duration_ms = Some(turn_started_at.elapsed().as_millis() as u64);
         let checkpoint_hook_outcome =
@@ -5161,6 +5219,7 @@ impl AgentRuntime {
                 provider.requires_provider_native_tool_flow(),
             ),
             attachments,
+            input.workspace_mode.as_deref(),
         );
         emit_stream_event(
             sink,
@@ -11611,12 +11670,14 @@ mod tests {
             Some("graph-session"),
             &result,
             Some(&checkpoint),
+            None,
         );
         let decision = runtime.decide_graph_after_turn(
             Some("turn-graph"),
             Some("graph-session"),
             &result,
             Some(&checkpoint),
+            None,
         );
 
         assert_eq!(handoff.turn_id.as_deref(), Some("turn-graph"));
@@ -13802,6 +13863,7 @@ mod tests {
         let retrieved = runtime.inspect_retrieved_context_at(
             Some("runtime-history"),
             Some(historical_node_id.as_str()),
+            None,
             None,
             None,
         );

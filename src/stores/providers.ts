@@ -355,6 +355,7 @@ function normalizeCapabilitiesForPersistence(
     supportsImageInput: capabilities.supportsImageInput,
     supportsVideoInput: capabilities.supportsVideoInput,
     supportsAudioInput: capabilities.supportsAudioInput,
+    supportsTextOutput: capabilities.supportsTextOutput ?? true,
     supportsImageOutput: capabilities.supportsImageOutput,
     supportsVideoOutput: capabilities.supportsVideoOutput,
     supportsAudioOutput: capabilities.supportsAudioOutput,

@@ -89,18 +89,30 @@
   - 前端设置 store 与左侧边栏尾部设置入口
   - `SettingsPanel` 模式切换 UI
   - `workspaceMode -> TurnInput -> TurnContext -> domain profile` 透传主链
-- 已完成 3 轮 `opencode / deepseek-v4-flash-free` 独立代码审核，并采纳高收益意见完成一轮代码调优：
+- 已完成 3 轮 `opencode / deepseek-v4-flash` 独立代码审核，并采纳高收益意见完成一轮代码调优：
   [2026-06-16-pa056-code-review.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-16-pa056-code-review.md>)
+- 已完成 2026-06-17 follow-up 收紧：
+  - 恢复 `BASE_SYSTEM_PROMPT` 中文默认行为
+  - 压缩 `BASE_SYSTEM_PROMPT / coding / work` profile 文本体积
+  - 为 `<8192` context window 跳过 domain profile 注入
+  - 为未知 `workspace_mode` 增加显式 fallback 提示
+  - 为 turn 主运行链补齐 `workspace_mode` 透传
+  - 修复 `runtime.ts` 在测试 teardown 后访问 `window` 的异步错误
+  - 审核记录：
+    [2026-06-17-pa056-code-review-followup.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-17-pa056-code-review-followup.md>)
 - 已完成 canonical spec 同步与 OpenSpec change 归档收口
 - 已完成实现态验证：
   - `cargo check -p pony-agent-core --lib`
-  - `cargo test -p pony-agent-core build_request_ -- --nocapture`
-  - `npm exec vitest -- run tests/runtime-store.spec.ts tests/HomeSidebar.spec.ts`
+  - `cargo test -p pony-agent-core build_request_ --message-format short -- --nocapture`
+  - `cargo test -p pony-agent-core retrieve_context_state --message-format short -- --nocapture`
+  - `cargo run -p pony-agent-core --bin non_tauri_harness`
+  - `npm exec vitest -- run tests/runtime-store.spec.ts tests/HomeSidebar.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts tests/settings.store.spec.ts`
 - 已完成本轮显式模式闭环验证：
   - `npm run cargo:check -- -p pony-agent-core --lib`
   - `npx vitest run tests/settings.store.spec.ts`
   - `npx vitest run tests/App.spec.ts tests/HomeSessionSidebar.spec.ts tests/settings.store.spec.ts`
   - `npx vitest run tests/runtime-store.spec.ts -t "forwards workspace mode to start_graph_run_stream input payload"`
+  - `npm run test:tauri:smoke`
 
 ## 下一步动作
 1. 后续如继续推进，应把全局设置从当前 `workspaceMode` 扩展为正式的可组合配置面，并补 `backend type / surface / layout` 等同层能力
@@ -123,3 +135,4 @@
 - [protocol_v1.md](/C:/Users/HUAWEI/Documents/pony-agent/codex-openai/codex-rs/docs/protocol_v1.md)
 - [default.md](/C:/Users/HUAWEI/Documents/pony-agent/codex-openai/codex-rs/protocol/src/prompts/base_instructions/default.md)
 - [SPEC.md](/C:/Users/HUAWEI/Documents/pony-agent/reasonix-esengine/docs/SPEC.md)
+- [2026-06-17-pa056-workspace-mode-closeout.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/99_LOGS/2026-06-17-pa056-workspace-mode-closeout.md>)
