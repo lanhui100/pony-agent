@@ -1477,34 +1477,36 @@ watch(orderedTurnTraceSignature, () => {
 
           <section class="mt-1.5 space-y-1">
             <!-- Token metrics -->
-            <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] leading-5 text-stone-600">
+            <div class="flex items-center justify-between text-[11px] leading-5 text-stone-600">
               <span class="inline-flex items-center gap-1 text-stone-400">
                 <CircleDollarSign class="h-3 w-3" />
                 <span>Token</span>
               </span>
-              <Tooltip text="输入">
-                <span class="inline-flex items-center gap-1">
-                  <ArrowUp class="h-3 w-3 text-stone-400" />
-                  {{ formatCompactInteger(sessionInputTokensTotal) || "0" }}
-                </span>
-              </Tooltip>
-              <Tooltip text="输出">
-                <span class="inline-flex items-center gap-1">
-                  <ArrowDown class="h-3 w-3 text-stone-400" />
-                  {{ formatCompactInteger(sessionOutputTokensTotal) || "0" }}
-                </span>
-              </Tooltip>
-              <Tooltip text="缓存读取">
-                <span class="inline-flex items-center gap-1">
-                  <Zap class="h-3 w-3 text-stone-400" />
-                  {{ formatCompactInteger(sessionCacheHitTokensTotal) || "0" }}
-                  <span v-if="sessionCacheHitRatio" class="text-stone-400">· {{ sessionCacheHitRatio }}</span>
-                </span>
-              </Tooltip>
+              <span class="inline-flex items-center gap-3">
+                <Tooltip text="输入">
+                  <span class="inline-flex items-center gap-1">
+                    <ArrowUp class="h-3 w-3 text-stone-400" />
+                    {{ formatCompactInteger(sessionInputTokensTotal) || "0" }}
+                  </span>
+                </Tooltip>
+                <Tooltip text="输出">
+                  <span class="inline-flex items-center gap-1">
+                    <ArrowDown class="h-3 w-3 text-stone-400" />
+                    {{ formatCompactInteger(sessionOutputTokensTotal) || "0" }}
+                  </span>
+                </Tooltip>
+                <Tooltip text="缓存读取">
+                  <span class="inline-flex items-center gap-1">
+                    <Zap class="h-3 w-3 text-stone-400" />
+                    {{ formatCompactInteger(sessionCacheHitTokensTotal) || "0" }}
+                    <span v-if="sessionCacheHitRatio" class="text-stone-400">· {{ sessionCacheHitRatio }}</span>
+                  </span>
+                </Tooltip>
+              </span>
             </div>
 
             <!-- Context usage -->
-            <div v-if="latestTurn" class="flex flex-wrap items-center gap-x-3 text-[11px] leading-5 text-stone-500">
+            <div v-if="latestTurn" class="flex items-center justify-between text-[11px] leading-5 text-stone-500">
               <span class="inline-flex items-center gap-1">
                 <Tooltip text="上下文窗口用量">
                   <Layout class="h-3 w-3 text-stone-400" />
