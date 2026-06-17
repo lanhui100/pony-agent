@@ -227,6 +227,7 @@
 
 - 这也意味着当前的 turn 内工具 hop 上限、follow-up stream、provider-native transcript 完整性，都属于 `turn runtime` 的职责。
 - 当前默认允许单个 turn 内最多 `1024` 次连续工具 hop；如需针对更强 agentic 模型继续放宽，可通过环境变量 `PONY_AGENT_MAX_TOOL_HOPS_PER_TURN` 覆盖，允许范围为 `1..=4096`。
+- 当前默认允许单个 turn 内最多 `12` 次 tool follow-up；如需进一步放宽或收紧，可通过环境变量 `PONY_AGENT_MAX_TOOL_FOLLOWUPS_PER_TURN` 覆盖，允许范围为 `1..=32`。
 - 这不是在把 `turn` 和 `run` 混为一谈，而是在承认现代 agentic 模型的“单轮收口”本身就可能很长；`run/graph` 不应该被拿来补偿一个尚未完成的 turn。
 - 未来 graph 层不应拿“再开下一轮”去补偿“当前 turn 没收完整”的问题，否则会污染 session、trace、streaming 语义。
 
