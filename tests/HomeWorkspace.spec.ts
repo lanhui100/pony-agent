@@ -1125,7 +1125,7 @@ describe("HomeWorkspace", () => {
 
     await reasoningTrigger.trigger("click");
     await nextTick();
-    expect(wrapper.text()).toContain("minimal");
+    expect(wrapper.text()).toContain("极高");
 
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await nextTick();
@@ -1145,7 +1145,7 @@ describe("HomeWorkspace", () => {
     await reasoningTrigger.trigger("click");
     await nextTick();
 
-    const highButton = wrapper.findAll("button").find((node) => node.text().includes("high"));
+    const highButton = wrapper.findAll("button").find((node) => node.text().includes("高"));
     expect(highButton).toBeDefined();
 
     await highButton?.trigger("click");
@@ -1153,7 +1153,7 @@ describe("HomeWorkspace", () => {
 
     expect(setReasoningSpy).toHaveBeenCalledWith("high");
     expect(providerStore.currentReasoningEffort).toBe("high");
-    expect(wrapper.text()).not.toContain("minimal");
+    expect(wrapper.text()).not.toContain("极高");
 
     await reasoningTrigger.trigger("click");
     await nextTick();

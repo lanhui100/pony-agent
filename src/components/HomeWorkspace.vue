@@ -188,17 +188,30 @@ const reasoningLabel = computed(() => {
   }
 
   return providerStore.currentReasoningEffort
-    ? `思考 ${providerStore.currentReasoningEffort}`
+    ? `思考 ${reasoningEffortLabelZh(providerStore.currentReasoningEffort)}`
     : "思考 默认";
 });
 
 const reasoningOptions: Array<{ label: string; value: ProviderReasoningEffort | null }> = [
   { label: "默认", value: null },
-  { label: "minimal", value: "minimal" },
-  { label: "low", value: "low" },
-  { label: "medium", value: "medium" },
-  { label: "high", value: "high" }
+  { label: "低", value: "low" },
+  { label: "中", value: "medium" },
+  { label: "高", value: "high" },
+  { label: "极高", value: "max" }
 ];
+
+function reasoningEffortLabelZh(value: ProviderReasoningEffort) {
+  switch (value) {
+    case "low":
+      return "低";
+    case "medium":
+      return "中";
+    case "high":
+      return "高";
+    case "max":
+      return "极高";
+  }
+}
 
 const composerAction = computed<{
   kind: ComposerActionKind;
