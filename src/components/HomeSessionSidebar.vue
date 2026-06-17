@@ -373,7 +373,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
       <template v-else>
         <div class="mt-4 flex items-center justify-between gap-2" data-testid="session-sidebar-actions">
           <button
-            class="inline-flex h-8 items-center gap-2 px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
+            class="flex w-full h-8 items-center gap-2 px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
             :class="menuInteractiveClass"
             type="button"
             :disabled="!canCreateSession"
