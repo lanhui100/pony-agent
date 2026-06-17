@@ -5049,4 +5049,316 @@ mod tests {
             .unwrap_or("")
             .contains("Example Result One"));
     }
+
+    // ── workspace_read_file ─────────────────────────────────────────
+
+    #[test]
+    fn read_file_returns_file_content() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("hello.txt"), "Hello Pony Agent!\n").expect("write file");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({ "path": "hello.txt" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        assert!(result.output.contains("Hello Pony Agent!"));
+    }
+
+    #[test]
+    fn read_file_rejects_missing_path_argument() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("missing_argument")
+        );
+    }
+
+    #[test]
+    fn read_file_rejects_path_traversal() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({ "path": "../../../etc/passwd" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("invalid_path")
+        );
+    }
+
+    #[test]
+    fn read_file_rejects_nonexistent_file() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({ "path": "does-not-exist.txt" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        // canonicalize fails first → invalid_path (not metadata_failed)
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("invalid_path")
+        );
+    }
+
+    #[test]
+    fn read_file_rejects_file_too_large() {
+        let workspace = temp_workspace();
+        let large = vec![b'X'; 120_001];
+        fs::write(workspace.join("large.bin"), &large).expect("write large file");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({ "path": "large.bin" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("file_too_large")
+        );
+    }
+
+    #[test]
+    fn read_file_rejects_non_utf8_content() {
+        let workspace = temp_workspace();
+        // Write invalid UTF-8 bytes that fs::read_to_string will reject
+        let bad_bytes = [0xFF, 0xFE, 0x00, 0x68, 0x69];
+        fs::write(workspace.join("binary.bin"), &bad_bytes).expect("write binary file");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({ "path": "binary.bin" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("read_failed")
+        );
+    }
+
+    // ── workspace_path_info ─────────────────────────────────────────
+
+    #[test]
+    fn path_info_returns_file_metadata() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("info.txt"), "metadata test").expect("write file");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_PATH_INFO.to_string(),
+            arguments: json!({ "path": "info.txt" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("path_info output should be json");
+        assert_eq!(
+            payload.get("kind").and_then(Value::as_str),
+            Some("file")
+        );
+        assert!(payload.get("sizeBytes").and_then(Value::as_u64).unwrap_or(0) > 0);
+        assert!(payload.get("modifiedUnixSeconds").and_then(Value::as_u64).is_some());
+        assert_eq!(payload.get("childCount"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn path_info_returns_directory_metadata() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("subdir")).expect("create subdir");
+        fs::write(workspace.join("subdir/a.txt"), "a").expect("write a");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_PATH_INFO.to_string(),
+            arguments: json!({ "path": "subdir" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("path_info output should be json");
+        assert_eq!(
+            payload.get("kind").and_then(Value::as_str),
+            Some("directory")
+        );
+        assert_eq!(payload.get("childCount").and_then(Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn path_info_rejects_invalid_path() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_PATH_INFO.to_string(),
+            arguments: json!({ "path": "../../../etc" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("invalid_path")
+        );
+    }
+
+    // ── workspace_list_files ────────────────────────────────────────
+
+    #[test]
+    fn list_files_returns_directory_entries() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("alpha.txt"), "alpha").expect("write alpha");
+        fs::create_dir_all(workspace.join("beta")).expect("create beta dir");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_LIST_FILES.to_string(),
+            arguments: json!({ "path": "." }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        assert!(result.output.contains("alpha.txt"));
+        assert!(result.output.contains("beta/"));
+    }
+
+    #[test]
+    fn list_files_respects_limit() {
+        let workspace = temp_workspace();
+        for i in 0..5 {
+            fs::write(workspace.join(format!("file-{i}.txt")), &format!("{i}"))
+                .expect("write file");
+        }
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_LIST_FILES.to_string(),
+            arguments: json!({ "path": ".", "limit": 2 }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        assert!(result.output.contains("当前展示前 2 个"));
+    }
+
+    #[test]
+    fn list_files_rejects_path_traversal() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_LIST_FILES.to_string(),
+            arguments: json!({ "path": "../../../etc" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("invalid_path")
+        );
+    }
+
+    #[test]
+    fn list_files_rejects_nonexistent_directory() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_LIST_FILES.to_string(),
+            arguments: json!({ "path": "nonexistent-dir" }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("error output should be json");
+        // canonicalize fails first → invalid_path (not read_failed;
+        // read_failed would require an existing directory with denied
+        // read permission, which is platform-specific to test)
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str),
+            Some("invalid_path")
+        );
+    }
 }
