@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 
-use super::session::{
-    FileSessionBackend, PersistedStore, SessionBackend, SessionState,
-};
+use super::session::{FileSessionBackend, PersistedStore, SessionBackend, SessionState};
 
 /// SQLite-backed session storage.
 ///
 /// Stores each session as an individual row with a JSON blob, enabling:
-/// - Incremental updates (only write changed sessions)
+/// - Incremental upserts (write only the sessions that exist in the store)
 /// - Concurrent access safety via SQLite's WAL mode
 /// - Future query capabilities for trace data, history graphs, etc.
 ///
@@ -19,11 +18,21 @@ use super::session::{
 /// sessions(conversation_id PK, title, updated_at_ms, session_data)
 /// store_metadata(key PK, value)
 /// ```
+///
+/// The backend keeps a single pooled `Connection` behind a `Mutex`. This is
+/// critical for the turn hot path: `save_store` is invoked many times per turn
+/// (append_turn, record_turn_trace, annotate terminal events, hook traces, …),
+/// so opening a fresh connection — re-running `PRAGMA journal_mode=WAL`,
+/// `CREATE TABLE IF NOT EXISTS`, fsync-ing the WAL header — on every save made
+/// each save cost tens of milliseconds and churned the WAL. Reusing one
+/// connection turns those repeated saves into cheap in-process transactions.
 pub struct SqliteSessionBackend {
     db_path: PathBuf,
     attachment_root: PathBuf,
     /// Path to the legacy JSON file, used for one-time migration.
     legacy_json_path: Option<PathBuf>,
+    /// Lazily opened, then reused for the lifetime of the backend.
+    connection: Mutex<Option<Connection>>,
 }
 
 impl SqliteSessionBackend {
@@ -43,18 +52,32 @@ impl SqliteSessionBackend {
             db_path,
             attachment_root,
             legacy_json_path,
+            connection: Mutex::new(None),
         }
     }
 
-    fn open_connection(&self) -> Result<Connection, String> {
-        let conn = Connection::open(&self.db_path).map_err(|e| format!("open db: {e}"))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA busy_timeout=5000;",
-        )
-        .map_err(|e| format!("pragma: {e}"))?;
-        Ok(conn)
+    /// Returns the pooled connection, opening and initializing it on first use.
+    ///
+    /// `journal_mode=WAL` is a persistent database property, so it is set once
+    /// when the connection is first created rather than on every write.
+    /// `wal_autocheckpoint` keeps the `-wal` file bounded so it does not grow
+    /// unbounded across the many saves issued during a turn.
+    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Option<Connection>>, String> {
+        let mut slot = self.connection.lock().map_err(|e| format!("lock: {e}"))?;
+        if slot.is_none() {
+            let conn = Connection::open(&self.db_path).map_err(|e| format!("open db: {e}"))?;
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA busy_timeout=5000;
+                 PRAGMA wal_autocheckpoint=1000;",
+            )
+            .map_err(|e| format!("pragma: {e}"))?;
+            self.ensure_schema(&conn)?;
+            self.migrate_from_json(&conn)?;
+            *slot = Some(conn);
+        }
+        Ok(slot)
     }
 
     fn ensure_schema(&self, conn: &Connection) -> Result<(), String> {
@@ -110,11 +133,23 @@ impl SqliteSessionBackend {
 
     fn write_full_store(&self, conn: &Connection, store: &PersistedStore) -> Result<(), String> {
         // Use unchecked_transaction since save_store takes &self (not &mut).
-        // This is safe because we own the connection (opened fresh each time).
-        let tx = conn.unchecked_transaction()
+        // This is safe because the pooled connection is only mutated through
+        // the pooled lock guard held by the caller.
+        let tx = conn
+            .unchecked_transaction()
             .map_err(|e| format!("begin tx: {e}"))?;
 
-        // Upsert sessions — scoped to drop the statement before commit
+        let existing_session_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT conversation_id FROM sessions")
+                .map_err(|e| format!("prepare session scan: {e}"))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("query session scan: {e}"))?;
+            rows.filter_map(Result::ok).collect()
+        };
+
+        // Upsert current sessions — scoped to drop the statement before commit
         {
             let mut stmt = tx
                 .prepare(
@@ -124,22 +159,43 @@ impl SqliteSessionBackend {
                 .map_err(|e| format!("prepare session insert: {e}"))?;
 
             for (id, session) in &store.sessions {
-                let data = serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
-                stmt.execute(params![id, session.title, session.updated_at_ms as i64, data])
-                    .map_err(|e| format!("insert session: {e}"))?;
+                let data = serde_json::to_string(session)
+                    .map_err(|e| format!("serialize session: {e}"))?;
+                stmt.execute(params![
+                    id,
+                    session.title,
+                    session.updated_at_ms as i64,
+                    data
+                ])
+                .map_err(|e| format!("insert session: {e}"))?;
             }
         }
 
-        // Remove sessions that are no longer in the store
-        if store.sessions.is_empty() {
-            tx.execute("DELETE FROM sessions", [])
-                .map_err(|e| format!("clear sessions: {e}"))?;
+        // Remove sessions that are no longer present in the store.
+        {
+            let removed_ids = existing_session_ids
+                .into_iter()
+                .filter(|id| !store.sessions.contains_key(id))
+                .collect::<Vec<_>>();
+            if !removed_ids.is_empty() {
+                let mut delete_stmt = tx
+                    .prepare("DELETE FROM sessions WHERE conversation_id = ?1")
+                    .map_err(|e| format!("prepare session delete: {e}"))?;
+                for id in removed_ids {
+                    delete_stmt
+                        .execute(params![id])
+                        .map_err(|e| format!("delete session: {e}"))?;
+                }
+            }
         }
 
         // Upsert metadata — scoped to drop the statement before commit
         {
             let metadata_entries: [(&str, Option<String>); 4] = [
-                ("attachment_assets", serde_json::to_string(&store.attachment_assets).ok()),
+                (
+                    "attachment_assets",
+                    serde_json::to_string(&store.attachment_assets).ok(),
+                ),
                 (
                     "session_attachment_index",
                     serde_json::to_string(&store.session_attachment_index).ok(),
@@ -195,9 +251,9 @@ impl SessionBackend for SqliteSessionBackend {
             self.db_path.display()
         );
 
-        let conn = self.open_connection().ok()?;
-        self.ensure_schema(&conn).ok()?;
-        self.migrate_from_json(&conn).ok()?;
+        // Initialize (and migrate) the pooled connection, then borrow it.
+        let mut slot = self.connection().ok()?;
+        let conn = slot.as_mut().expect("connection initialized");
 
         // Read all sessions
         let mut stmt = conn
@@ -218,10 +274,10 @@ impl SessionBackend for SqliteSessionBackend {
             })
             .collect();
 
-        let attachment_assets = self.read_metadata(&conn, "attachment_assets");
-        let session_attachment_index = self.read_metadata(&conn, "session_attachment_index");
-        let mcp_source_snapshots = self.read_metadata(&conn, "mcp_source_snapshots");
-        let skill_source_snapshots = self.read_metadata(&conn, "skill_source_snapshots");
+        let attachment_assets = self.read_metadata(conn, "attachment_assets");
+        let session_attachment_index = self.read_metadata(conn, "session_attachment_index");
+        let mcp_source_snapshots = self.read_metadata(conn, "mcp_source_snapshots");
+        let skill_source_snapshots = self.read_metadata(conn, "skill_source_snapshots");
 
         Some(PersistedStore {
             sessions,
@@ -233,20 +289,18 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn save_store(&self, store: &PersistedStore) {
-        let Ok(conn) = self.open_connection() else {
-            return;
+        // Borrow the pooled connection; never panic the caller on a write error
+        // — the turn loop must stay alive even if persistence hiccups.
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(e) => {
+                eprintln!("[pony-agent][session] SQLite open error: {e}");
+                return;
+            }
         };
-        if self.ensure_schema(&conn).is_err() {
-            return;
-        }
+        let conn = slot.as_ref().expect("connection initialized");
 
-        eprintln!(
-            "[pony-agent][session] saving {} sessions to SQLite {}",
-            store.sessions.len(),
-            self.db_path.display()
-        );
-
-        if let Err(e) = self.write_full_store(&conn, store) {
+        if let Err(e) = self.write_full_store(conn, store) {
             eprintln!("[pony-agent][session] SQLite save error: {e}");
         }
     }
@@ -268,12 +322,25 @@ pub fn default_sqlite_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use super::super::session::HistoryCursor;
     use super::*;
     use std::fs;
 
+    fn unique_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sqlite-test-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     #[test]
     fn roundtrip_empty_store() {
-        let dir = std::env::temp_dir().join(format!("sqlite-test-{}", std::process::id()));
+        let dir = unique_dir("empty");
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test.db");
 
@@ -283,6 +350,55 @@ mod tests {
 
         let loaded = backend.load_store().unwrap();
         assert!(loaded.sessions.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn minimal_session(id: &str, title: &str, updated_at_ms: u64) -> SessionState {
+        SessionState {
+            conversation_id: id.to_string(),
+            title: title.to_string(),
+            summary: String::new(),
+            history: Vec::new(),
+            provider_native_transcript: Vec::new(),
+            turn_trace_history: Vec::new(),
+            long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            turn_count: 0,
+            last_referenced_file: None,
+            updated_at_ms,
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: HistoryCursor::default(),
+        }
+    }
+
+    #[test]
+    fn removes_sessions_missing_from_latest_store_snapshot() {
+        let dir = unique_dir("delete");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("delete.db");
+
+        let backend = SqliteSessionBackend::new(db_path);
+
+        let mut store = PersistedStore::default();
+        store
+            .sessions
+            .insert("s1".to_string(), minimal_session("s1", "first", 1000));
+        store
+            .sessions
+            .insert("s2".to_string(), minimal_session("s2", "second", 2000));
+        backend.save_store(&store);
+
+        store.sessions.remove("s1");
+        backend.save_store(&store);
+
+        let loaded = backend.load_store().unwrap();
+        assert_eq!(loaded.sessions.len(), 1);
+        assert!(!loaded.sessions.contains_key("s1"));
+        assert_eq!(loaded.sessions["s2"].title, "second");
 
         fs::remove_dir_all(&dir).ok();
     }

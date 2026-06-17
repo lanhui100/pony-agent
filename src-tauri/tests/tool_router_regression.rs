@@ -269,8 +269,11 @@ fn glob_files_returns_repo_matches() {
     let workspace = temp_workspace();
     fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
     fs::write(workspace.join("src/agent/tools.rs"), "pub fn demo() {}\n").expect("write tools");
-    fs::write(workspace.join("src/agent/context.rs"), "pub struct AgentContext;\n")
-        .expect("write context");
+    fs::write(
+        workspace.join("src/agent/context.rs"),
+        "pub struct AgentContext;\n",
+    )
+    .expect("write context");
     let router = ToolRouter::with_workspace_root(workspace.clone());
 
     let result = router.execute(&ToolCall {
@@ -296,8 +299,11 @@ fn glob_files_respects_limit() {
     let workspace = temp_workspace();
     fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
     fs::write(workspace.join("src/agent/tools.rs"), "pub fn demo() {}\n").expect("write tools");
-    fs::write(workspace.join("src/agent/context.rs"), "pub struct AgentContext;\n")
-        .expect("write context");
+    fs::write(
+        workspace.join("src/agent/context.rs"),
+        "pub struct AgentContext;\n",
+    )
+    .expect("write context");
     let router = ToolRouter::with_workspace_root(workspace.clone());
 
     let result = router.execute(&ToolCall {

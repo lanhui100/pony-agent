@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
+const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 256000;
+const DEFAULT_MODERN_MAX_OUTPUT_TOKENS: u32 = 64000;
 
 struct CapabilityCatalogEntry {
     protocol: Option<&'static str>,
@@ -18,10 +20,10 @@ struct CapabilityCatalogEntry {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderReasoningEffort {
-    Minimal,
     Low,
     Medium,
     High,
+    Max,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +84,16 @@ pub struct ProviderModelCapabilities {
     pub supports_image_input: bool,
     #[serde(default)]
     pub supports_reasoning: bool,
+    #[serde(default)]
+    pub supports_video_input: bool,
+    #[serde(default)]
+    pub supports_audio_input: bool,
+    #[serde(default)]
+    pub supports_image_output: bool,
+    #[serde(default)]
+    pub supports_video_output: bool,
+    #[serde(default)]
+    pub supports_audio_output: bool,
 }
 
 impl Default for ProviderModelCapabilities {
@@ -92,8 +104,23 @@ impl Default for ProviderModelCapabilities {
             supports_streaming: true,
             supports_image_input: false,
             supports_reasoning: false,
+            supports_video_input: false,
+            supports_audio_input: false,
+            supports_image_output: false,
+            supports_video_output: false,
+            supports_audio_output: false,
         }
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProtocolEndpoint {
+    pub protocol: ProviderProtocol,
+    pub enabled: bool,
+    pub base_url: String,
+    #[serde(default)]
+    pub auth_type: ProviderAuthType,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -110,6 +137,8 @@ pub struct ProviderModelConfig {
     pub reasoning_effort: Option<ProviderReasoningEffort>,
     #[serde(default)]
     pub reasoning_budget_tokens: Option<u32>,
+    #[serde(default)]
+    pub protocol: Option<ProviderProtocol>,
     #[serde(default)]
     pub capabilities: ProviderModelCapabilities,
 }
@@ -140,6 +169,10 @@ pub struct ProviderConfigView {
     pub api_key_env_var: String,
     pub api_key_value: String,
     pub api_key_present: bool,
+    #[serde(default)]
+    pub supported_protocols: Vec<ProviderProtocol>,
+    #[serde(default)]
+    pub endpoints: Vec<ProviderProtocolEndpoint>,
     pub models: Vec<ProviderModelConfig>,
     pub selected_model_id: Option<String>,
 }
@@ -164,6 +197,10 @@ struct ProviderConfigStorage {
     secret_ref: String,
     #[serde(default)]
     api_key_value: String,
+    #[serde(default)]
+    supported_protocols: Vec<ProviderProtocol>,
+    #[serde(default)]
+    endpoints: Vec<ProviderProtocolEndpoint>,
     models: Vec<ProviderModelConfig>,
     selected_model_id: Option<String>,
 }
@@ -361,6 +398,8 @@ fn storage_from_view(view: ProviderRegistryView) -> ProviderRegistryStorage {
                     api_key_env_var: _,
                     api_key_value,
                     api_key_present: _,
+                    supported_protocols,
+                    endpoints,
                     models,
                     selected_model_id,
                 } = provider;
@@ -374,6 +413,8 @@ fn storage_from_view(view: ProviderRegistryView) -> ProviderRegistryStorage {
                     base_url,
                     auth_type,
                     api_key_value,
+                    supported_protocols,
+                    endpoints,
                     models,
                     selected_model_id,
                 }
@@ -416,6 +457,8 @@ fn build_view_from_storage(
                     api_key_env_var: provider.api_key_env_var,
                     api_key_present,
                     api_key_value,
+                    supported_protocols: provider.supported_protocols,
+                    endpoints: provider.endpoints,
                     models: provider.models,
                     selected_model_id: provider.selected_model_id,
                 }
@@ -525,6 +568,109 @@ fn default_registry() -> ProviderRegistryStorage {
     }
 }
 
+fn default_protocol_endpoint(protocol: &ProviderProtocol) -> ProviderProtocolEndpoint {
+    ProviderProtocolEndpoint {
+        protocol: protocol.clone(),
+        enabled: false,
+        base_url: default_base_url(protocol).to_string(),
+        auth_type: match protocol {
+            ProviderProtocol::Anthropic => ProviderAuthType::XApiKey,
+            ProviderProtocol::OpenAi => ProviderAuthType::Auto,
+        },
+    }
+}
+
+fn normalize_provider_endpoints(
+    protocol: &ProviderProtocol,
+    base_url: &str,
+    auth_type: &ProviderAuthType,
+    supported_protocols: &[ProviderProtocol],
+    endpoints: &[ProviderProtocolEndpoint],
+) -> Vec<ProviderProtocolEndpoint> {
+    let mut normalized = vec![
+        default_protocol_endpoint(&ProviderProtocol::OpenAi),
+        default_protocol_endpoint(&ProviderProtocol::Anthropic),
+    ];
+
+    for entry in &mut normalized {
+        if let Some(existing) = endpoints
+            .iter()
+            .find(|item| item.protocol == entry.protocol)
+        {
+            entry.enabled = existing.enabled;
+            entry.base_url = if existing.base_url.trim().is_empty() {
+                default_base_url(&entry.protocol).to_string()
+            } else {
+                existing.base_url.clone()
+            };
+            entry.auth_type = existing.auth_type.clone();
+        }
+    }
+
+    for item in &mut normalized {
+        if &item.protocol == protocol {
+            item.enabled = true;
+            item.base_url = if base_url.trim().is_empty() {
+                default_base_url(protocol).to_string()
+            } else {
+                base_url.to_string()
+            };
+            item.auth_type = auth_type.clone();
+        }
+        if supported_protocols
+            .iter()
+            .any(|value| value == &item.protocol)
+        {
+            item.enabled = true;
+        }
+    }
+
+    normalized
+}
+
+fn normalize_supported_protocols(
+    protocol: &ProviderProtocol,
+    supported_protocols: &[ProviderProtocol],
+    endpoints: &[ProviderProtocolEndpoint],
+) -> Vec<ProviderProtocol> {
+    let mut list = Vec::new();
+
+    for item in supported_protocols {
+        if !list.iter().any(|existing| existing == item) {
+            list.push(item.clone());
+        }
+    }
+
+    for item in endpoints.iter().filter(|entry| entry.enabled) {
+        if !list.iter().any(|existing| existing == &item.protocol) {
+            list.push(item.protocol.clone());
+        }
+    }
+
+    if list.is_empty() {
+        list.push(protocol.clone());
+    }
+
+    list
+}
+
+fn resolve_model_protocol(
+    provider_protocol: &ProviderProtocol,
+    supported_protocols: &[ProviderProtocol],
+    model_protocol: Option<&ProviderProtocol>,
+) -> ProviderProtocol {
+    if let Some(protocol) = model_protocol {
+        if supported_protocols.iter().any(|value| value == protocol) {
+            return protocol.clone();
+        }
+    }
+
+    supported_protocols
+        .first()
+        .cloned()
+        .unwrap_or_else(|| provider_protocol.clone())
+}
+
 fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistryStorage {
     if storage.providers.is_empty() {
         return default_registry();
@@ -539,6 +685,29 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
         }
         if provider.base_url.trim().is_empty() {
             provider.base_url = default_base_url(&provider.protocol).to_string();
+        }
+        provider.endpoints = normalize_provider_endpoints(
+            &provider.protocol,
+            &provider.base_url,
+            &provider.auth_type,
+            &provider.supported_protocols,
+            &provider.endpoints,
+        );
+        provider.supported_protocols = normalize_supported_protocols(
+            &provider.protocol,
+            &provider.supported_protocols,
+            &provider.endpoints,
+        );
+        if let Some(primary_protocol) = provider.supported_protocols.first().cloned() {
+            provider.protocol = primary_protocol.clone();
+            if let Some(primary_endpoint) = provider
+                .endpoints
+                .iter()
+                .find(|item| item.protocol == primary_protocol)
+            {
+                provider.base_url = primary_endpoint.base_url.clone();
+                provider.auth_type = primary_endpoint.auth_type.clone();
+            }
         }
         provider.api_key_env_var = derive_env_var_name(&provider.name);
         if provider.secret_ref.trim().is_empty() {
@@ -558,6 +727,7 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
                 ),
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
+                protocol: Some(provider.protocol.clone()),
                 capabilities: default_model_capabilities(
                     &provider.protocol,
                     default_model(&provider.protocol),
@@ -574,21 +744,28 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             if model.model.trim().is_empty() {
                 model.model = default_model(&provider.protocol).to_string();
             }
+            let model_protocol = resolve_model_protocol(
+                &provider.protocol,
+                &provider.supported_protocols,
+                model.protocol.as_ref(),
+            );
             if model.max_output_tokens == 0
                 || model.max_output_tokens == LEGACY_DEFAULT_MAX_OUTPUT_TOKENS
+                || model.max_output_tokens == DEFAULT_MAX_OUTPUT_TOKENS
             {
-                model.max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS;
+                model.max_output_tokens = DEFAULT_MODERN_MAX_OUTPUT_TOKENS;
             }
             if model.reasoning_budget_tokens == Some(0) {
                 model.reasoning_budget_tokens = None;
             }
             let declaration = resolve_model_capability_declaration(
-                &provider.protocol,
+                &model_protocol,
                 &model.model,
                 &model.capability_preset,
                 model.capabilities.clone(),
             );
             let user_policy = normalize_model_user_policy(model, &declaration.capabilities);
+            model.protocol = Some(model_protocol);
             model.capability_preset = declaration.capability_preset;
             model.capabilities = declaration.capabilities;
             model.temperature = user_policy.temperature;
@@ -642,8 +819,19 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
+                protocol: Some(ProviderProtocol::OpenAi),
                 capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "gpt-5.4"),
             }],
+            supported_protocols: vec![ProviderProtocol::OpenAi],
+            endpoints: vec![
+                ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://api.psydo.top/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                },
+                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+            ],
         },
         ProviderConfigStorage {
             id: "provider-openai".to_string(),
@@ -664,8 +852,19 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::OpenAiChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
+                protocol: Some(ProviderProtocol::OpenAi),
                 capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "gpt-4.1-mini"),
             }],
+            supported_protocols: vec![ProviderProtocol::OpenAi],
+            endpoints: vec![
+                ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                },
+                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+            ],
         },
         ProviderConfigStorage {
             id: "provider-openrouter".to_string(),
@@ -686,11 +885,22 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::OpenAiChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
+                protocol: Some(ProviderProtocol::OpenAi),
                 capabilities: default_model_capabilities(
                     &ProviderProtocol::OpenAi,
                     "openai/gpt-4.1-mini",
                 ),
             }],
+            supported_protocols: vec![ProviderProtocol::OpenAi],
+            endpoints: vec![
+                ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://openrouter.ai/api/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                },
+                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+            ],
         },
         ProviderConfigStorage {
             id: "provider-deepseek".to_string(),
@@ -711,11 +921,22 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::DeepseekChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
+                protocol: Some(ProviderProtocol::OpenAi),
                 capabilities: default_model_capabilities(
                     &ProviderProtocol::OpenAi,
                     "deepseek-v4-flash",
                 ),
             }],
+            supported_protocols: vec![ProviderProtocol::OpenAi],
+            endpoints: vec![
+                ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://api.deepseek.com/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                },
+                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+            ],
         },
         ProviderConfigStorage {
             id: "provider-anthropic".to_string(),
@@ -736,11 +957,22 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::AnthropicThinking,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
+                protocol: Some(ProviderProtocol::Anthropic),
                 capabilities: default_model_capabilities(
                     &ProviderProtocol::Anthropic,
                     "claude-3-7-sonnet-latest",
                 ),
             }],
+            supported_protocols: vec![ProviderProtocol::Anthropic],
+            endpoints: vec![
+                default_protocol_endpoint(&ProviderProtocol::OpenAi),
+                ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::Anthropic,
+                    enabled: true,
+                    base_url: "https://api.anthropic.com/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                },
+            ],
         },
     ]
 }
@@ -790,45 +1022,67 @@ fn preset_model_capabilities(
 
     match inferred_preset {
         ProviderCapabilityPreset::OpenAiChat => ProviderModelCapabilities {
-            context_window_tokens: Some(128_000),
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
             supports_image_input: true,
             supports_reasoning: false,
+            supports_video_input: false,
+            supports_audio_input: false,
+            supports_image_output: false,
+            supports_video_output: false,
+            supports_audio_output: false,
         },
         ProviderCapabilityPreset::OpenAiReasoning => ProviderModelCapabilities {
-            context_window_tokens: Some(128_000),
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
             supports_image_input: false,
             supports_reasoning: true,
+            supports_video_input: false,
+            supports_audio_input: false,
+            supports_image_output: false,
+            supports_video_output: false,
+            supports_audio_output: false,
         },
         ProviderCapabilityPreset::AnthropicThinking => ProviderModelCapabilities {
-            context_window_tokens: Some(200_000),
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
             supports_image_input: true,
             supports_reasoning: true,
+            supports_video_input: false,
+            supports_audio_input: false,
+            supports_image_output: false,
+            supports_video_output: false,
+            supports_audio_output: false,
         },
         ProviderCapabilityPreset::DeepseekChat => ProviderModelCapabilities {
-            context_window_tokens: Some(128_000),
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
             supports_image_input: false,
             supports_reasoning: false,
+            supports_video_input: false,
+            supports_audio_input: false,
+            supports_image_output: false,
+            supports_video_output: false,
+            supports_audio_output: false,
         },
         ProviderCapabilityPreset::DeepseekReasoner => ProviderModelCapabilities {
-            context_window_tokens: Some(128_000),
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
             supports_image_input: false,
             supports_reasoning: true,
+            supports_video_input: false,
+            supports_audio_input: false,
+            supports_image_output: false,
+            supports_video_output: false,
+            supports_audio_output: false,
         },
         ProviderCapabilityPreset::Auto => ProviderModelCapabilities {
-            context_window_tokens: Some(match protocol {
-                ProviderProtocol::Anthropic => 200_000,
-                ProviderProtocol::OpenAi => 128_000,
-            }),
+            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             supports_tools: true,
             supports_streaming: true,
             supports_image_input: lower.contains("gpt-4.1")
@@ -842,6 +1096,11 @@ fn preset_model_capabilities(
                 || lower.contains("deepseek-r1")
                 || lower.contains("deepseek-reasoner")
                 || lower.contains("deepseek-v4-pro"),
+            supports_video_input: false,
+            supports_audio_input: false,
+            supports_image_output: false,
+            supports_video_output: false,
+            supports_audio_output: false,
         },
         ProviderCapabilityPreset::Custom => ProviderModelCapabilities::default(),
     }
@@ -894,6 +1153,11 @@ fn normalize_model_capabilities(
             supports_streaming: capabilities.supports_streaming,
             supports_image_input: capabilities.supports_image_input,
             supports_reasoning: capabilities.supports_reasoning,
+            supports_video_input: capabilities.supports_video_input,
+            supports_audio_input: capabilities.supports_audio_input,
+            supports_image_output: capabilities.supports_image_output,
+            supports_video_output: capabilities.supports_video_output,
+            supports_audio_output: capabilities.supports_audio_output,
         };
     }
 
@@ -902,12 +1166,22 @@ fn normalize_model_capabilities(
         && !capabilities.supports_tools
         && !capabilities.supports_streaming
         && !capabilities.supports_image_input
-        && !capabilities.supports_reasoning;
+        && !capabilities.supports_reasoning
+        && !capabilities.supports_video_input
+        && !capabilities.supports_audio_input
+        && !capabilities.supports_image_output
+        && !capabilities.supports_video_output
+        && !capabilities.supports_audio_output;
     let looks_like_implicit_defaults = capabilities.context_window_tokens.is_none()
         && capabilities.supports_tools
         && capabilities.supports_streaming
         && !capabilities.supports_image_input
-        && !capabilities.supports_reasoning;
+        && !capabilities.supports_reasoning
+        && !capabilities.supports_video_input
+        && !capabilities.supports_audio_input
+        && !capabilities.supports_image_output
+        && !capabilities.supports_video_output
+        && !capabilities.supports_audio_output;
 
     if looks_like_legacy_empty || looks_like_implicit_defaults {
         return defaults;

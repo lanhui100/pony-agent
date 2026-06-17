@@ -1,3 +1,4 @@
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -9,7 +10,6 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
-use reqwest::blocking::Client;
 
 const TOOL_TIME_NOW: &str = "time_now";
 const TOOL_ECHO_INPUT: &str = "echo_input";
@@ -344,12 +344,47 @@ impl ToolRouter {
             .to_string();
 
         if text.is_empty() {
-            return error_result(
-                TOOL_ECHO_INPUT,
-                "missing_argument",
-                "缺少必填参数 `text`。".to_string(),
-                Some("参数示例：{\"text\":\"hello\"}".to_string()),
-            );
+            let fallback = call
+                .arguments
+                .get("question")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+
+            let Some(fallback) = fallback else {
+                return error_result(
+                    TOOL_ECHO_INPUT,
+                    "missing_argument",
+                    "缺少必填参数 `text`，且未提供 fallback `question`。".to_string(),
+                    Some(
+                        "参数示例：{\"text\":\"请确认是否继续\"} 或 {\"question\":\"请确认下一步要执行什么？\"}"
+                            .to_string(),
+                    ),
+                );
+            };
+
+            return ToolResult {
+                tool_name: TOOL_ECHO_INPUT.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_ECHO_INPUT,
+                    "mode": "fallback_clarification",
+                    "prompt": fallback,
+                    "summary": {
+                        "text": fallback
+                    },
+                    "permission": {
+                        "requiresApproval": false,
+                        "permissionScope": "workspace.read",
+                        "hostMediated": false,
+                        "permissionProfile": "builtin",
+                        "approvalMode": "none",
+                        "decisionSource": "runtime"
+                    }
+                })),
+                duration_ms: 0,
+            };
         }
 
         ToolResult {
@@ -600,7 +635,10 @@ impl ToolRouter {
                 TOOL_WORKSPACE_RUN_COMMAND,
                 "missing_argument",
                 "缺少必填参数 `command`。".to_string(),
-                Some("参数示例：{\"command\":\"git status\",\"cwd\":\".\",\"timeoutMs\":5000}".to_string()),
+                Some(
+                    "参数示例：{\"command\":\"git status\",\"cwd\":\".\",\"timeoutMs\":5000}"
+                        .to_string(),
+                ),
             );
         };
 
@@ -723,6 +761,7 @@ impl ToolRouter {
                 "cwd": self.display_workspace_relative(&cwd),
                 "absoluteCwd": cwd.display().to_string(),
                 "command": command,
+                "delegateTool": "run_shell",
                 "timeoutMs": timeout_ms,
                 "exitCode": exit_code,
                 "stdout": stdout,
@@ -1227,7 +1266,10 @@ impl ToolRouter {
                 TOOL_WORKSPACE_GLOB_FILES,
                 "missing_argument",
                 "缺少必填参数 `pattern`。".to_string(),
-                Some("参数示例：{\"pattern\":\"src/**/*.rs\",\"path\":\".\",\"limit\":50}".to_string()),
+                Some(
+                    "参数示例：{\"pattern\":\"src/**/*.rs\",\"path\":\".\",\"limit\":50}"
+                        .to_string(),
+                ),
             );
         }
 
@@ -1768,7 +1810,7 @@ impl ToolRouter {
                     code,
                     error,
                     Some("请提供工作区内存在的相对路径。".to_string()),
-                )
+                );
             }
         };
 
@@ -2179,9 +2221,13 @@ impl ToolRouter {
         let parent = candidate.parent().unwrap_or(&self.workspace_root);
         let existing_ancestor = existing_workspace_ancestor_path(parent)
             .ok_or_else(|| format!("无法解析目标父目录 {}。", parent.display()))?;
-        let canonical_ancestor = existing_ancestor
-            .canonicalize()
-            .map_err(|error| format!("无法解析目标父目录 {}：{}", existing_ancestor.display(), error))?;
+        let canonical_ancestor = existing_ancestor.canonicalize().map_err(|error| {
+            format!(
+                "无法解析目标父目录 {}：{}",
+                existing_ancestor.display(),
+                error
+            )
+        })?;
 
         if !is_within_root(&root, &canonical_ancestor) {
             return Err("只允许写入当前工作区内的相对路径。".to_string());
@@ -2864,12 +2910,18 @@ pub fn builtin_tool_contract_views() -> Vec<ToolDefinitionContractView> {
 
 #[cfg(test)]
 mod contract_view_tests {
-    use super::builtin_tool_contract_views;
+    use super::{
+        builtin_tool_contract_views, canonical_tool_name, model_visible_tool_name,
+        product_canonical_tool_name, TOOL_WORKSPACE_RUN_COMMAND,
+    };
 
     #[test]
     fn builtin_tool_contract_views_deduplicate_to_model_surface() {
         let views = builtin_tool_contract_views();
-        let names = views.iter().map(|view| view.name.as_str()).collect::<Vec<_>>();
+        let names = views
+            .iter()
+            .map(|view| view.name.as_str())
+            .collect::<Vec<_>>();
         let primitives = views
             .iter()
             .map(|view| view.execution_primitive.as_str())
@@ -2910,6 +2962,16 @@ mod contract_view_tests {
                 "workspace_edit_file",
                 "workspace_batch"
             ]
+        );
+    }
+
+    #[test]
+    fn canonical_tool_name_keeps_run_as_product_name_but_allows_internal_run_shell() {
+        assert_eq!(canonical_tool_name("Run"), Some(TOOL_WORKSPACE_RUN_COMMAND));
+        assert_eq!(model_visible_tool_name(TOOL_WORKSPACE_RUN_COMMAND), "Run");
+        assert_eq!(
+            product_canonical_tool_name(TOOL_WORKSPACE_RUN_COMMAND),
+            "Run"
         );
     }
 }
@@ -3211,7 +3273,9 @@ fn denied_run_command_reason(command: &str) -> Option<String> {
         return Some("命令包含高风险删除模式 `rm -rf`，当前 runtime 已拒绝执行。".to_string());
     }
     if is_git_reset_hard_command(&tokens) {
-        return Some("命令包含高风险片段 `git reset --hard`，当前 runtime 已拒绝执行。".to_string());
+        return Some(
+            "命令包含高风险片段 `git reset --hard`，当前 runtime 已拒绝执行。".to_string(),
+        );
     }
     if is_git_clean_force_command(&tokens) {
         return Some("命令包含高风险片段 `git clean -fd`，当前 runtime 已拒绝执行。".to_string());
@@ -3237,7 +3301,10 @@ fn denied_run_command_reason(command: &str) -> Option<String> {
         .map(|marker| format!("命令包含高风险片段 `{marker}`，当前 runtime 已拒绝执行。"))
         .or_else(|| {
             if is_windows_format_command(&tokens) {
-                Some("命令包含高风险磁盘格式化模式 `format <drive>`，当前 runtime 已拒绝执行。".to_string())
+                Some(
+                    "命令包含高风险磁盘格式化模式 `format <drive>`，当前 runtime 已拒绝执行。"
+                        .to_string(),
+                )
             } else {
                 None
             }
@@ -3264,7 +3331,9 @@ fn is_git_reset_hard_command(tokens: &[&str]) -> bool {
         return false;
     }
     let has_reset = tokens.contains(&"reset");
-    let has_hard = tokens.iter().any(|token| *token == "--hard" || *token == "-h");
+    let has_hard = tokens
+        .iter()
+        .any(|token| *token == "--hard" || *token == "-h");
     has_reset && has_hard
 }
 
@@ -3414,7 +3483,12 @@ fn tool_result_summary_text(result: &ToolResult, parsed: &Value) -> String {
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
         })
-        .unwrap_or_else(|| format!("Tool `{}` finished with status `{}`.", result.tool_name, result.status))
+        .unwrap_or_else(|| {
+            format!(
+                "Tool `{}` finished with status `{}`.",
+                result.tool_name, result.status
+            )
+        })
 }
 
 pub(crate) fn tool_error_from_output(status: &str, parsed: &Value) -> Option<ToolError> {
@@ -3437,7 +3511,10 @@ pub(crate) fn tool_error_from_output(status: &str, parsed: &Value) -> Option<Too
             .to_string(),
         details: error.get("details").cloned(),
         retryable: error.get("retryable").and_then(Value::as_bool),
-        source: error.get("source").and_then(Value::as_str).map(ToString::to_string),
+        source: error
+            .get("source")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
     })
 }
 
@@ -4096,8 +4173,11 @@ mod tests {
         let workspace = temp_workspace();
         fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
         fs::write(workspace.join("src/agent/tools.rs"), "pub fn demo() {}\n").expect("write tools");
-        fs::write(workspace.join("src/agent/context.rs"), "pub struct AgentContext;\n")
-            .expect("write context");
+        fs::write(
+            workspace.join("src/agent/context.rs"),
+            "pub struct AgentContext;\n",
+        )
+        .expect("write context");
         let router = ToolRouter::with_workspace_root(workspace);
 
         let result = router.execute(&ToolCall {
@@ -4121,8 +4201,11 @@ mod tests {
         let workspace = temp_workspace();
         fs::create_dir_all(workspace.join("src/agent")).expect("create agent dir");
         fs::write(workspace.join("src/agent/tools.rs"), "pub fn demo() {}\n").expect("write tools");
-        fs::write(workspace.join("src/agent/context.rs"), "pub struct AgentContext;\n")
-            .expect("write context");
+        fs::write(
+            workspace.join("src/agent/context.rs"),
+            "pub struct AgentContext;\n",
+        )
+        .expect("write context");
         let router = ToolRouter::with_workspace_root(workspace);
 
         let result = router.execute(&ToolCall {
@@ -4366,7 +4449,10 @@ mod tests {
 
         assert_eq!(result.status, "ok");
         let payload = serde_json::from_str::<Value>(&result.output).expect("write output json");
-        assert_eq!(payload.get("path").and_then(Value::as_str), Some("notes/demo.txt"));
+        assert_eq!(
+            payload.get("path").and_then(Value::as_str),
+            Some("notes/demo.txt")
+        );
         assert_eq!(
             fs::read_to_string(workspace.join("notes/demo.txt")).expect("read written file"),
             "hello pony"
@@ -4503,7 +4589,12 @@ mod tests {
         });
 
         assert_eq!(result.status, "ok");
+        assert_eq!(result.tool_name, TOOL_WORKSPACE_RUN_COMMAND);
         let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(
+            payload.get("delegateTool").and_then(Value::as_str),
+            Some("run_shell")
+        );
         assert_eq!(payload.get("exitCode").and_then(Value::as_i64), Some(0));
         assert!(payload
             .get("stdout")
@@ -4511,6 +4602,74 @@ mod tests {
             .unwrap_or("")
             .to_lowercase()
             .contains("hello"));
+    }
+
+    #[test]
+    fn ask_returns_fallback_clarification_when_text_missing() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_ECHO_INPUT.to_string(),
+            arguments: json!({
+                "question": "请确认要继续执行哪一步？"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload =
+            serde_json::from_str::<Value>(&result.output).expect("ask fallback output json");
+        assert_eq!(
+            payload.get("mode").and_then(Value::as_str),
+            Some("fallback_clarification")
+        );
+        assert_eq!(
+            payload.get("prompt").and_then(Value::as_str),
+            Some("请确认要继续执行哪一步？")
+        );
+    }
+
+    #[test]
+    fn ask_keeps_plain_text_output_for_normal_echo_path() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_ECHO_INPUT.to_string(),
+            arguments: json!({
+                "text": "hello"
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.output, "echo_input 返回：hello");
+    }
+
+    #[test]
+    fn ask_returns_error_when_text_and_question_both_missing() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_ECHO_INPUT.to_string(),
+            arguments: json!({}),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("ask error output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("missing_argument")
+        );
     }
 
     #[test]
@@ -4667,7 +4826,8 @@ mod tests {
         });
 
         assert_eq!(result.status, "error");
-        let payload = serde_json::from_str::<Value>(&result.output).expect("web search output json");
+        let payload =
+            serde_json::from_str::<Value>(&result.output).expect("web search output json");
         assert_eq!(
             payload
                 .get("error")
@@ -4698,16 +4858,19 @@ mod tests {
         });
 
         assert_eq!(result.status, "ok");
-        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch success output json");
+        let payload =
+            serde_json::from_str::<Value>(&result.output).expect("web fetch success output json");
         assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(200));
-        assert!(payload.get("url").and_then(Value::as_str).unwrap_or("").starts_with("http://127.0.0.1:"));
-        assert!(
-            payload
-                .get("contentPreview")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .contains("Hello Pony")
-        );
+        assert!(payload
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .starts_with("http://127.0.0.1:"));
+        assert!(payload
+            .get("contentPreview")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("Hello Pony"));
         assert!(payload.get("error").is_none() || payload.get("error") == Some(&Value::Null));
     }
 
@@ -4729,7 +4892,8 @@ mod tests {
         let result = router.execute_web_search_request("pony agent", 5, 5000, &search_url);
 
         assert_eq!(result.status, "ok");
-        let payload = serde_json::from_str::<Value>(&result.output).expect("web search success output json");
+        let payload =
+            serde_json::from_str::<Value>(&result.output).expect("web search success output json");
         assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(200));
         assert_eq!(payload.get("resultCount").and_then(Value::as_u64), Some(2));
         let results = payload
@@ -4768,7 +4932,8 @@ mod tests {
         });
 
         assert_eq!(result.status, "error");
-        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch http error output json");
+        let payload = serde_json::from_str::<Value>(&result.output)
+            .expect("web fetch http error output json");
         assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(404));
         assert_eq!(
             payload
@@ -4797,7 +4962,8 @@ mod tests {
         let result = router.execute_web_search_request("pony agent", 5, 5000, &search_url);
 
         assert_eq!(result.status, "error");
-        let payload = serde_json::from_str::<Value>(&result.output).expect("web search http error output json");
+        let payload = serde_json::from_str::<Value>(&result.output)
+            .expect("web search http error output json");
         assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(503));
         assert_eq!(
             payload

@@ -956,8 +956,7 @@ mod tests {
             .expect("batch calls");
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|entry| {
-            entry.get("name").and_then(serde_json::Value::as_str)
-                == Some("Read")
+            entry.get("name").and_then(serde_json::Value::as_str) == Some("Read")
         }));
     }
 

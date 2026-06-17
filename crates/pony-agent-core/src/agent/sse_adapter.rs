@@ -96,7 +96,10 @@ impl TurnEventSink for BufferingSseTurnEventSink {
 /// data: <json>
 ///
 /// ```
-pub fn format_sse_event(name: &str, payload: &TurnStreamEvent) -> Result<String, serde_json::Error> {
+pub fn format_sse_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Result<String, serde_json::Error> {
     let data = serde_json::to_string(payload)?;
     let id = payload.event_id.as_deref().unwrap_or(&payload.turn_id);
 
@@ -180,8 +183,7 @@ mod tests {
             session_summary: None,
         };
 
-        let frame = format_sse_event("turn:delta", &payload)
-            .expect("serialization should succeed");
+        let frame = format_sse_event("turn:delta", &payload).expect("serialization should succeed");
 
         assert!(frame.starts_with("event: turn:delta\nid: turn-123:1\n"));
         assert!(frame.contains(
@@ -208,6 +210,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
+                    workspace_mode: None,
                     session_id: Some("sse-test".to_string()),
                     node_id: None,
                     history: Vec::new(),

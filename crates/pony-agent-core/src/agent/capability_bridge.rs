@@ -342,23 +342,28 @@ impl CapabilityToolExecutionResult {
                 .capability
                 .as_ref()
                 .map(|capability| capability.permission_scope.clone()),
-            permission_facts: self.capability.as_ref().map(|capability| ToolPermissionFacts {
-                requires_approval: Some(capability.requires_approval),
-                permission_scope: Some(capability.permission_scope.clone()),
-                host_mediated: Some(capability.host_mediated),
-                permission_profile: Some("capability_registry".to_string()),
-                approval_mode: Some(if capability.requires_approval {
-                    if capability.host_mediated {
-                        "host_mediated"
-                    } else {
-                        "approval_required"
-                    }
-                } else {
-                    "none"
-                }
-                .to_string()),
-                decision_source: Some("capability_registry".to_string()),
-            }),
+            permission_facts: self
+                .capability
+                .as_ref()
+                .map(|capability| ToolPermissionFacts {
+                    requires_approval: Some(capability.requires_approval),
+                    permission_scope: Some(capability.permission_scope.clone()),
+                    host_mediated: Some(capability.host_mediated),
+                    permission_profile: Some("capability_registry".to_string()),
+                    approval_mode: Some(
+                        if capability.requires_approval {
+                            if capability.host_mediated {
+                                "host_mediated"
+                            } else {
+                                "approval_required"
+                            }
+                        } else {
+                            "none"
+                        }
+                        .to_string(),
+                    ),
+                    decision_source: Some("capability_registry".to_string()),
+                }),
             skill_id: skill.map(|descriptor| descriptor.skill_id.clone()),
             skill_source_id: skill.map(|descriptor| descriptor.source_id.clone()),
             composed_capability_refs: skill
@@ -1130,7 +1135,10 @@ fn candidate_builtin_capability_ids(tool_name: &str) -> Vec<String> {
 
     if let Some(execution_primitive) = canonical_tool_name(raw) {
         let primitive_id = format!("builtin:{execution_primitive}");
-        if !candidates.iter().any(|candidate| candidate == &primitive_id) {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate == &primitive_id)
+        {
             candidates.push(primitive_id);
         }
     }
@@ -1264,7 +1272,10 @@ mod tests {
                 plan: None,
             })
             .expect("Read tool call should resolve");
-        assert_eq!(read.capability.capability_id, "builtin:workspace_gather_context");
+        assert_eq!(
+            read.capability.capability_id,
+            "builtin:workspace_gather_context"
+        );
 
         let search = registry
             .resolve_tool_call(&ToolCall {
@@ -1274,7 +1285,10 @@ mod tests {
                 plan: None,
             })
             .expect("Search tool call should resolve");
-        assert_eq!(search.capability.capability_id, "builtin:workspace_search_text");
+        assert_eq!(
+            search.capability.capability_id,
+            "builtin:workspace_search_text"
+        );
 
         let list = registry
             .resolve_tool_call(&ToolCall {
@@ -1284,7 +1298,10 @@ mod tests {
                 plan: None,
             })
             .expect("List tool call should resolve");
-        assert_eq!(list.capability.capability_id, "builtin:workspace_list_files");
+        assert_eq!(
+            list.capability.capability_id,
+            "builtin:workspace_list_files"
+        );
 
         let plan = registry
             .resolve_tool_call(&ToolCall {

@@ -954,6 +954,7 @@ mod tests {
                 user_message: "继续完成任务".to_string(),
                 images: Vec::new(),
                 references_image: false,
+                workspace_mode: None,
             },
             session_context: SessionContext {
                 conversation_id: "session-1".to_string(),

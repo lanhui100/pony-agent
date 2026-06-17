@@ -176,6 +176,7 @@ fn turn_input(message: &str, session_id: &str) -> TurnInput {
         provider_id: None,
         model_id: None,
         reasoning_effort: None,
+        workspace_mode: None,
         session_id: Some(session_id.to_string()),
         node_id: None,
         history: Vec::new(),
