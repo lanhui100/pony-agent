@@ -83,6 +83,12 @@
   - `context_refresh_reason / instruction_scope_sources / conversation_carry_mode`
   - normalized/native request observation 对齐
   - native memory layer 注入与长期记忆去重
+- 已完成 `coding / work` 显式模式闭环：
+  - 独立 `AppSettings` 持久化
+  - Tauri `load_app_settings / save_app_settings`
+  - 前端设置 store 与左侧边栏尾部设置入口
+  - `SettingsPanel` 模式切换 UI
+  - `workspaceMode -> TurnInput -> TurnContext -> domain profile` 透传主链
 - 已完成 3 轮 `opencode / deepseek-v4-flash-free` 独立代码审核，并采纳高收益意见完成一轮代码调优：
   [2026-06-16-pa056-code-review.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-16-pa056-code-review.md>)
 - 已完成 canonical spec 同步与 OpenSpec change 归档收口
@@ -90,11 +96,17 @@
   - `cargo check -p pony-agent-core --lib`
   - `cargo test -p pony-agent-core build_request_ -- --nocapture`
   - `npm exec vitest -- run tests/runtime-store.spec.ts tests/HomeSidebar.spec.ts`
+- 已完成本轮显式模式闭环验证：
+  - `npm run cargo:check -- -p pony-agent-core --lib`
+  - `npx vitest run tests/settings.store.spec.ts`
+  - `npx vitest run tests/App.spec.ts tests/HomeSessionSidebar.spec.ts tests/settings.store.spec.ts`
+  - `npx vitest run tests/runtime-store.spec.ts -t "forwards workspace mode to start_graph_run_stream input payload"`
 
 ## 下一步动作
-1. 后续如继续推进，应把 `instruction_scope_sources` 从当前最小落点升级为真实的 workspace / `AGENT.md` source 枚举与 diff 检测
-2. 后续如推进 provider continuation / compaction，应把 `conversation_carry_mode` 的未来变体真正接通
-3. 后续如继续收紧缓存诊断，可把 `context_refresh_reason` 从“主因”提升为更强的 diff-based 机制
+1. 后续如继续推进，应把全局设置从当前 `workspaceMode` 扩展为正式的可组合配置面，并补 `backend type / surface / layout` 等同层能力
+2. 后续如继续推进，应把 `instruction_scope_sources` 从当前最小落点升级为真实的 workspace / `AGENT.md` source 枚举与 diff 检测
+3. 后续如推进 provider continuation / compaction，应把 `conversation_carry_mode` 的未来变体真正接通
+4. 后续如继续收紧缓存诊断，可把 `context_refresh_reason` 从“主因”提升为更强的 diff-based 机制
 
 ## 当前卡点
 - 暂无
@@ -104,6 +116,9 @@
 
 - [PA-025](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-025-build-context-and-cache-friendly-prompt-boundary.md>)
 - [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/context.rs)
+- [app_settings.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/app_settings.rs)
+- [SettingsPanel.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/SettingsPanel.vue)
+- [settings.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/settings.ts)
 - [provider.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/provider.rs)
 - [protocol_v1.md](/C:/Users/HUAWEI/Documents/pony-agent/codex-openai/codex-rs/docs/protocol_v1.md)
 - [default.md](/C:/Users/HUAWEI/Documents/pony-agent/codex-openai/codex-rs/protocol/src/prompts/base_instructions/default.md)

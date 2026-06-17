@@ -61,6 +61,8 @@
    `PA-045 ~ PA-049` 当前都已具备 `proposal / design / tasks / delta spec`，并已同步到 `openspec/specs/` 后归档到 `openspec/changes/archive/2026-06-15-*`；每张卡都完成了独立智能体审核、采纳优化、strict validate 与归档收口。
 19. `PA-056` 已完成首轮架构与实现收口
    当前已完成 context layering、memory/project/carry 分层实现、观测字段落点、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash-free` 代码审核与一轮采纳调优；后续若继续推进，应转入 instruction scope 真 source 枚举与 continuation/compaction 深化。
+20. `PA-056` 已补齐显式 `Coding / Work` 配置闭环
+   当前已新增独立 `AppSettings`、Tauri settings 命令、前端设置 store、左侧边栏尾部设置入口、`SettingsPanel` 与 `workspaceMode -> TurnContext -> domain profile` 主链透传；后续其它全栈配置项可以沿这条配置面继续扩展，而不必再重复改造上下文主路径。
 
 ## 远期扩展
 
@@ -113,6 +115,7 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 1. 优先对 `PA-044 / harden-agent-core-infrastructure-boundary` 做一轮独立 spec 审核，确认 core/package/builder/preset/harness 边界足以防止 agent core 回粘 Tauri。
 2. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049`。
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
+4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。
 
 ## 新近线候选
 

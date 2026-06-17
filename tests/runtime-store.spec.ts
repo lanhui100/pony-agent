@@ -19,6 +19,7 @@ import type {
   TurnTraceRecord
 } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useSettingsStore } from "@/stores/settings";
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -2503,6 +2504,54 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("forwards workspace mode to start_graph_run_stream input payload", async () => {
+    const store = useRuntimeStore();
+    const settingsStore = useSettingsStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8282);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        expect(payload).toEqual({
+          turnId: "8282",
+          runId: null,
+          goal: "new request",
+          input: expect.objectContaining({
+            message: "new request",
+            workspaceMode: "work"
+          })
+        });
+        return {
+          run: { id: "run-workspace-mode" },
+          turnId: "8282"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    settingsStore.$patch({
+      settings: {
+        workspaceMode: "work"
+      }
+    });
+    store.$patch({
+      sessionId: "workspace-mode-session",
+      draftMessage: "new request",
+      phase: "idle",
+      messages: []
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    nowSpy.mockRestore();
+  });
+
   it("prefers retrievedContext.runState when continuing an existing graph run", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8383);
@@ -3517,8 +3566,7 @@ describe("runtime session resilience", () => {
     expect(store.streamDebugTextCharsReceived).toBe(0);
     expect(store.streamDebugTextCharsFlushed).toBe(0);
 
-    expect(store.traceTimeline.find((entry) => entry.kind === "build_context")?.buildContextObservation).toEqual(startedObservation);
-    expect(store.traceTimeline.find((entry) => entry.kind === "build_context")?.buildContextObservation).not.toBe(startedObservation);
+    expect(store.traceTimeline.find((entry) => entry.kind === "build_context")?.buildContextObservation).toBeNull();
     expect(store.traceTimeline.map((entry) => entry.kind)).toEqual([
       "input",
       "prepare_retrieval",

@@ -1,22 +1,25 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { TooltipProvider } from "reka-ui";
-import { PanelRightClose, PanelRightOpen } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight } from "lucide-vue-next";
 import HomeSidebar from "@/components/HomeSidebar.vue";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
 import ProviderConfigPage from "@/components/ProviderConfigPage.vue";
+import SettingsPanel from "@/components/SettingsPanel.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useSettingsStore } from "@/stores/settings";
 
-type AppPage = "home" | "providers" | "model-monitor";
+type AppPage = "home" | "providers" | "model-monitor" | "settings";
 
 const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "pony-agent.ui.right-sidebar-open";
 const currentPage = ref<AppPage>("home");
 const rightSidebarOpen = ref(true);
 const providerStore = useProviderStore();
 const runtimeStore = useRuntimeStore();
+const settingsStore = useSettingsStore();
 const isResizing = ref(false);
 let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 let onBeforeUnload: (() => void) | null = null;
@@ -75,6 +78,7 @@ onMounted(async () => {
 
   await Promise.all([
     runStartupTask("providerRegistry", () => providerStore.loadRegistry()),
+    runStartupTask("appSettings", () => settingsStore.loadSettings()),
     runStartupTask("health", () => runtimeStore.fetchHealth()),
     runStartupTask("availableTools", () => runtimeStore.fetchAvailableTools()),
     runStartupTask("turnEvents", () => runtimeStore.initializeTurnEvents())
@@ -155,21 +159,26 @@ watch(rightSidebarOpen, (value) => {
               </div>
               <button
                 type="button"
-                class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:bg-[#f7e3bf] hover:text-stone-900"
+                class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
                 :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
                 :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
                 :data-open="rightSidebarOpen ? 'true' : 'false'"
                 data-testid="workspace-right-sidebar-toggle"
                 @click="rightSidebarOpen = !rightSidebarOpen"
               >
-                <PanelRightClose v-if="rightSidebarOpen" class="h-4 w-4" />
-                <PanelRightOpen v-else class="h-4 w-4" />
+                <ChevronRight v-if="rightSidebarOpen" class="h-4 w-4" />
+                <ChevronLeft v-else class="h-4 w-4" />
               </button>
             </div>
 
             <ProviderConfigPage
               v-else-if="currentPage === 'providers'"
               key="page-providers"
+              class="h-full"
+            />
+            <SettingsPanel
+              v-else-if="currentPage === 'settings'"
+              key="page-settings"
               class="h-full"
             />
             <ModelMonitorPage v-else key="page-model-monitor" class="h-full" />

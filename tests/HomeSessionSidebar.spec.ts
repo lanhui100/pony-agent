@@ -422,7 +422,7 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.emitted("navigate")).toBeUndefined();
   });
 
-  it("renders provider config and model monitor inside model management", async () => {
+  it("renders provider config, model monitor, and settings inside model management", async () => {
     seedSidebarSessions();
 
     const wrapper = mountSidebar();
@@ -430,6 +430,7 @@ describe("HomeSessionSidebar", () => {
 
     expect(wrapper.get('[data-testid="session-sidebar-nav-providers"]').text()).toContain("配置");
     expect(wrapper.get('[data-testid="session-sidebar-nav-model-monitor"]').text()).toContain("监控");
+    expect(wrapper.get('[data-testid="session-sidebar-nav-settings"]').text()).toContain("设置");
   });
 
   it("keeps the top brand entry and no longer renders a separate home item", async () => {
@@ -484,6 +485,7 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.find('[data-testid="session-sidebar-home-collapsed"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-sidebar-nav-providers-collapsed"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-settings-collapsed"]').exists()).toBe(true);
     expect(wrapper.text()).not.toContain("主页");
   });
 
@@ -536,8 +538,9 @@ describe("HomeSessionSidebar", () => {
 
     await wrapper.get('[data-testid="session-sidebar-nav-providers-collapsed"]').trigger("click");
     await wrapper.get('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').trigger("click");
+    await wrapper.get('[data-testid="session-sidebar-nav-settings-collapsed"]').trigger("click");
 
-    expect(wrapper.emitted("navigate")).toEqual([["providers"], ["model-monitor"]]);
+    expect(wrapper.emitted("navigate")).toEqual([["providers"], ["model-monitor"], ["settings"]]);
   });
 
   it("toggles model management open state and persists it", async () => {

@@ -39,7 +39,11 @@
 
 ## 6. Implementation Bridge
 
+- [x] 6.0 在实现前定义 `BaseSystemPromptBuilder` contract、profile selection policy 与切换时的 cache-boundary 行为
 - [x] 6.1 在 `context.rs` 中引入 layered context 数据结构，替代继续直接扁平拼接 `messages`
 - [x] 6.2 修改 `TurnContextBuilder`，把现有 `BASE_SYSTEM_PROMPT / semistable context / history / user input` 映射到正式分层
 - [x] 6.3 修改 `provider.rs` 中 request observation 的来源，使其直接消费 layered context
 - [x] 6.4 为 `context_refresh_reason / instruction_scope_sources / conversation_carry_mode` 补齐观测字段和落点
+- [x] 6.5 打通显式 `workspace_mode` 配置主链：`AppSettings -> Tauri commands -> frontend settings store -> submitTurn -> TurnContext -> domain profile`
+- [x] 6.6 在左侧边栏尾部补设置入口，并新增 `Coding / Work` 设置面板
+- [x] 6.7 补最小回归：settings store、settings 页面切换、sidebar 设置入口、`workspaceMode` 提交链路

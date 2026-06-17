@@ -12,11 +12,134 @@ use crate::agent::session::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const BASE_SYSTEM_PROMPT: &str =
-    "You are Pony Agent. Reply in Chinese and use tools when workspace inspection is needed.";
+const BASE_SYSTEM_PROMPT: &str = r#"You are Pony Agent, an AI agent that collaborates with the user inside a shared workspace.
+
+# Core Collaboration Values
+
+1. Understand the user's latest request and solve it directly.
+2. Prefer correct execution over speculation — verify before claiming.
+3. Respect the existing codebase, project structure, and local conventions.
+4. Preserve safety, reversibility, and clarity while making progress.
+5. Keep the user informed with concise progress updates during longer work.
+
+# Communication
+
+- Be concise, clear, and concrete. Your user is a collaborator — write for a teammate who stepped away and is catching up.
+- During longer work, send short progress updates that explain what you are doing now.
+- In explanations, optimize for usefulness rather than exhaustiveness.
+- Distinguish clearly between observed facts, assumptions, and recommendations.
+- If blocked by ambiguity with non-obvious consequences, pause and surface the decision clearly.
+- Never add preamble fluff ("Sure!", "Great question!"). Just start working.
+
+# Tool Use Fundamentals
+
+- Use tools to verify facts whenever the information may be stale, external, or environment-specific.
+- Prefer fast local inspection tools for workspace exploration. Prefer primary sources for technical questions and official sources for policy questions.
+- If current information could have changed, verify it instead of relying on memory.
+- Do not claim to have done work that you have not actually done.
+- Call independent tools in parallel whenever possible. Do not sequence reads that can be issued together.
+
+# Runtime Composition Rule
+
+This base prompt is intentionally stable. Environment details, workspace memory, session memory, git snapshots, tool schemas, active domain profile instructions, and temporary reminders are injected as separate later blocks rather than rewritten into this base prompt."#;
 const SESSION_CONTEXT_HISTORY_LIMIT: usize = 12;
 const SESSION_CONTEXT_ATTACHMENT_LIMIT: usize = 8;
 const TRANSCRIPT_CONTEXT_MESSAGE_LIMIT: usize = 24;
+const CODING_DOMAIN_PROFILE_PROMPT: &str = r#"Active domain profile: coding.
+
+# Working Style
+
+- Focus on code, architecture, debugging, tooling, tests, and implementation.
+- Read the surrounding context before making non-trivial changes. Understand existing patterns before adding new code — respect file-level conventions, type choices, and naming styles.
+- Prefer existing patterns over inventing new abstractions. Make the smallest change that fully solves the problem.
+- When the task is implementation, continue through execution, verification, and handoff unless the user explicitly asks to stop earlier.
+
+# Code Change Discipline
+
+- Fix root causes, not surface symptoms. A five-line fix at the right layer beats a fifty-line patch at the wrong layer.
+- Never use `as any`, `@ts-ignore`, `@ts-expect-error`, or equivalent type-unsafe escapes — fix the type properly.
+- Never add inline comments that restate the obvious ("Assigns value to variable"). Add comments only when code is not self-explanatory and understanding would otherwise take non-trivial parsing.
+- Do not fix unrelated bugs or tests. You may briefly note them, but stay scoped to the task.
+- Keep edits minimal. Do not rename variables, symbols, or files unless the task explicitly requires it.
+- Default to ASCII. Only introduce Unicode when the file already uses it and there is justification.
+- After editing a file, do not re-read it unless a tool result indicates the edit failed.
+
+# Output Format for Code
+
+- For explanations, use precise file and code references: `src/app.ts:42`, `crates/core/src/agent.rs`.
+- Use inline code (backticks) for identifiers, paths, and commands.
+- For code changes, lead with a concise explanation of what changed and why, then summarize per-file. Do not dump full file contents — reference paths.
+- For reviews, prioritize: bugs, risks, behavioral regressions, and missing tests. Present findings first (ordered by severity with file/line references), then open questions.
+- Use fenced code blocks only when showing actual code is essential. Prefer diff-style summaries for changes.
+
+# Tool Priority for Coding
+
+- **Search**: Prefer `rg` (ripgrep) or equivalent dedicated search tools for content search. Use glob/file-tree tools for file discovery.
+- **Read**: Use dedicated Read tool — never use shell commands (`cat`, `head`, `tail`) for file reading.
+- **Edit**: Use dedicated Edit/Write tools — never use `sed`, `awk`, or shell redirection for file editing.
+- **Shell**: Use for running builds, tests, git operations, and development servers only. Never use shell for file I/O.
+- **Plan/Todo**: Use for multi-step tasks (2+ steps). Keep steps atomic and verifiable.
+
+# Verification for Code
+
+- After making changes, run targeted tests first (closest to the changed code), then type-checkers and linters, then the broader test suite if fast enough.
+- If a test fails due to your changes, fix it immediately. If pre-existing, note it but do not fix.
+- When a build step exists and is fast enough, run it to confirm no regressions.
+- If you cannot verify a change (no tests, no build), state what you did and what risks remain.
+- Iterate up to 3 times on formatting, then call out remaining issues to the user.
+
+# Editing Safety
+
+- Do not revert existing changes you did not make unless explicitly requested.
+- Never use `git reset --hard`, `git checkout --`, or `rm -rf` unless specifically authorized.
+- Do not amend a commit unless explicitly requested.
+- If you notice unexpected changes you did not make, STOP and ask how to proceed.
+- You may be in a dirty worktree — work alongside user changes, do not revert them."#;
+const WORK_DOMAIN_PROFILE_PROMPT: &str = r#"Active domain profile: work.
+
+# Working Style
+
+- Focus on knowledge work, writing, analysis, planning, operations, documentation, research, and workflow execution.
+- Gather sources and context first before synthesizing conclusions. Do not generate claims you have not verified.
+- Prefer structured synthesis, clear decisions, and action-oriented outputs.
+- When the task is research or planning, gather evidence first and clearly separate facts, inferences, and recommendations.
+- Avoid unnecessary engineering detail unless it directly serves the result. Optimize for the reader's comprehension, not for technical completeness.
+
+# Analysis Discipline
+
+- Distinguish clearly between: (a) observed facts from tool output or source material, (b) inferences or interpretations you draw, and (c) recommendations or next steps.
+- When confronted with contradictory information, note the discrepancy and evaluate which source is more reliable. Do not silently discard either piece.
+- For planning tasks, break work into logically ordered phases with clear dependencies and verification criteria.
+
+# Output Format for Knowledge Work
+
+- **Match shape to purpose**: Use prose for explanations, enumerated lists for multi-point findings, and tables for comparative data. Do not default to bullet-spray for everything.
+- **Headings**: Use hierarchical headings (`#` / `##` / `###`) for structured documents. Keep them descriptive and concise.
+- For analysis, lead with the key finding or recommendation, then support with evidence.
+- For writing, optimize for scanability: short paragraphs, signposted transitions, and concrete examples.
+- Cite sources explicitly when referencing external information: mention the source title, author, and date. Do not generate URLs unless you are confident they are correct.
+- For reviews of written work, prioritize: structural issues, logical gaps, unsupported claims, and clarity problems.
+
+# Tool Priority for Knowledge Work
+
+- **Search**: Prefer web search and dedicated knowledge-retrieval tools for gathering external information. Use workspace search for project context.
+- **Read**: Use dedicated Read tool for documents, web pages, and files. Prefer web fetch for online content.
+- **Write**: Use dedicated Write tool for creating documents and reports.
+- **Shell**: Use for workspace operations and running scripts as needed. Prefer declarative tools over shell for most operations.
+- **Plan/Todo**: Use for multi-phase analysis or planning tasks. Keep phases outcome-oriented.
+
+# Verification for Knowledge Work
+
+- For factual claims: verify against source material. If a source is not accessible, mark the claim as unverified.
+- For analysis: review your reasoning chain for logical gaps before presenting.
+- For writing: after completing a document, re-read it for clarity, structure, and correctness.
+- If you cannot verify an important fact, state that explicitly and suggest how to find the information.
+
+# Writing Quality
+
+- Use plain, direct language. Avoid jargon, hedge words, and empty intensifiers.
+- Structure documents so the reader can scan: clear headings, signposted transitions, and a brief summary of conclusions at the top for longer pieces.
+- For action-oriented outputs (plans, proposals, specs), include concrete next steps with owners or timelines where known."#;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +148,7 @@ pub struct TurnContext {
     #[serde(default)]
     pub images: Vec<TurnInputImage>,
     pub references_image: bool,
+    pub workspace_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -113,6 +237,7 @@ impl RetrievedContextState {
 pub struct ContextStateQuery<'a> {
     pub user_message: &'a str,
     pub images: &'a [TurnInputImage],
+    pub workspace_mode: Option<&'a str>,
     pub session: &'a SessionSnapshot,
     pub run: Option<&'a GraphRun>,
     pub checkpoint: Option<&'a ExecutionCheckpoint>,
@@ -129,6 +254,7 @@ pub trait TurnContextBuilder: Send {
         &self,
         user_message: &str,
         images: &[TurnInputImage],
+        workspace_mode: Option<&str>,
         session: &SessionSnapshot,
         run: Option<&GraphRun>,
         checkpoint: Option<&ExecutionCheckpoint>,
@@ -163,6 +289,8 @@ pub struct LayeredTurnContext {
     #[serde(default)]
     pub runtime_fact_messages: Vec<ProviderMessage>,
     #[serde(default)]
+    pub domain_profile_messages: Vec<ProviderMessage>,
+    #[serde(default)]
     pub project_instruction_messages: Vec<ProviderMessage>,
     #[serde(default)]
     pub memory_messages: Vec<ProviderMessage>,
@@ -176,6 +304,8 @@ pub struct LayeredTurnContext {
     pub native_base_system_messages: Vec<Value>,
     #[serde(default)]
     pub native_runtime_fact_messages: Vec<Value>,
+    #[serde(default)]
+    pub native_domain_profile_messages: Vec<Value>,
     #[serde(default)]
     pub native_project_instruction_messages: Vec<Value>,
     #[serde(default)]
@@ -204,6 +334,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         &self,
         user_message: &str,
         images: &[TurnInputImage],
+        workspace_mode: Option<&str>,
         session: &SessionSnapshot,
         run: Option<&GraphRun>,
         checkpoint: Option<&ExecutionCheckpoint>,
@@ -211,6 +342,7 @@ impl TurnContextBuilder for DefaultTurnContextBuilder {
         DefaultContextStateRetriever.retrieve(ContextStateQuery {
             user_message,
             images,
+            workspace_mode,
             session,
             run,
             checkpoint,
@@ -278,6 +410,8 @@ fn build_layered_turn_context(
     let runtime_fact_messages = vec![ProviderMessage::developer(provider_capability_note(
         provider,
     ))];
+    let domain_profile_prompt = infer_domain_profile_prompt(graph_name, &retrieved.turn_context);
+    let domain_profile_messages = vec![ProviderMessage::developer(domain_profile_prompt)];
     let instruction_scope_sources = applicable_instruction_sources(retrieved);
     let input_budget_tokens = input_budget_tokens(provider);
     let raw_history = retrieved
@@ -298,6 +432,7 @@ fn build_layered_turn_context(
     let reserved_messages = [
         base_system_messages[0].clone(),
         runtime_fact_messages[0].clone(),
+        domain_profile_messages[0].clone(),
         ProviderMessage::developer(base_semistable_context.note.clone()),
         current_user_message.clone(),
     ];
@@ -331,6 +466,7 @@ fn build_layered_turn_context(
     );
     let mut native_base_system_messages = Vec::new();
     let mut native_runtime_fact_messages = Vec::new();
+    let mut native_domain_profile_messages = Vec::new();
     let mut native_project_instruction_messages = Vec::new();
     let mut native_memory_messages = Vec::new();
     let mut native_conversation_carry_messages = Vec::new();
@@ -344,6 +480,10 @@ fn build_layered_turn_context(
             json!({
                 "role": "system",
                 "content": provider_capability_note(provider),
+            }),
+            json!({
+                "role": "system",
+                "content": domain_profile_messages[0].content.clone(),
             }),
             json!({
                 "role": "system",
@@ -383,6 +523,10 @@ fn build_layered_turn_context(
             "role": "system",
             "content": provider_capability_note(provider),
         })];
+        native_domain_profile_messages = vec![json!({
+            "role": "system",
+            "content": domain_profile_messages[0].content.clone(),
+        })];
         native_project_instruction_messages = vec![json!({
             "role": "system",
             "content": native_project_note.note,
@@ -412,6 +556,7 @@ fn build_layered_turn_context(
             .collect(),
         base_system_messages,
         runtime_fact_messages,
+        domain_profile_messages,
         project_instruction_messages,
         memory_messages,
         conversation_carry_messages,
@@ -419,6 +564,7 @@ fn build_layered_turn_context(
         volatile_input_observation_text,
         native_base_system_messages,
         native_runtime_fact_messages,
+        native_domain_profile_messages,
         native_project_instruction_messages,
         native_memory_messages,
         native_conversation_carry_messages,
@@ -434,6 +580,7 @@ fn flatten_layered_input_messages(context: &LayeredTurnContext) -> Vec<ProviderM
     let mut messages = Vec::new();
     messages.extend(context.base_system_messages.clone());
     messages.extend(context.runtime_fact_messages.clone());
+    messages.extend(context.domain_profile_messages.clone());
     messages.extend(context.project_instruction_messages.clone());
     messages.extend(context.memory_messages.clone());
     messages.extend(context.conversation_carry_messages.clone());
@@ -445,6 +592,7 @@ fn flatten_layered_native_messages(context: &LayeredTurnContext) -> Vec<Value> {
     let mut messages = Vec::new();
     messages.extend(context.native_base_system_messages.clone());
     messages.extend(context.native_runtime_fact_messages.clone());
+    messages.extend(context.native_domain_profile_messages.clone());
     messages.extend(context.native_project_instruction_messages.clone());
     messages.extend(context.native_memory_messages.clone());
     messages.extend(context.native_conversation_carry_messages.clone());
@@ -457,11 +605,13 @@ fn build_request_observation_from_layered_context(
 ) -> ProviderRequestObservation {
     let stable_prefix_text = if !context.native_base_system_messages.is_empty()
         || !context.native_runtime_fact_messages.is_empty()
+        || !context.native_domain_profile_messages.is_empty()
     {
         render_native_messages_for_observation(
             &[
                 context.native_base_system_messages.clone(),
                 context.native_runtime_fact_messages.clone(),
+                context.native_domain_profile_messages.clone(),
             ]
             .concat(),
         )
@@ -470,6 +620,7 @@ fn build_request_observation_from_layered_context(
             &[
                 context.base_system_messages.clone(),
                 context.runtime_fact_messages.clone(),
+                context.domain_profile_messages.clone(),
             ]
             .concat(),
         )
@@ -506,6 +657,18 @@ fn build_request_observation_from_layered_context(
     }
 }
 
+fn infer_domain_profile_prompt(_graph_name: &str, turn_context: &TurnContext) -> &'static str {
+    if let Some(workspace_mode) = turn_context.workspace_mode.as_deref() {
+        match workspace_mode {
+            "work" => return WORK_DOMAIN_PROFILE_PROMPT,
+            "coding" => return CODING_DOMAIN_PROFILE_PROMPT,
+            _ => {}
+        }
+    }
+
+    CODING_DOMAIN_PROFILE_PROMPT
+}
+
 impl ContextStateRetriever for DefaultContextStateRetriever {
     fn retrieve(&self, query: ContextStateQuery<'_>) -> RetrievedContextState {
         let recent_history =
@@ -531,6 +694,7 @@ impl ContextStateRetriever for DefaultContextStateRetriever {
                 user_message: query.user_message.to_string(),
                 images: query.images.to_vec(),
                 references_image,
+                workspace_mode: query.workspace_mode.map(str::to_string),
             },
             session_context: SessionContext {
                 conversation_id: query.session.conversation_id.clone(),
@@ -621,13 +785,13 @@ fn provider_semistable_context_note(
         reasons.push(PrefixMutationReason::ImageNoteChanged);
     }
 
-        if let Some(note) = truncation_note {
-            notes.push(note.to_string());
-            reasons.push(PrefixMutationReason::TruncationNoteChanged);
-            if let Some(boundary_reason) = boundary_reason {
-                reasons.push(boundary_reason);
-            }
+    if let Some(note) = truncation_note {
+        notes.push(note.to_string());
+        reasons.push(PrefixMutationReason::TruncationNoteChanged);
+        if let Some(boundary_reason) = boundary_reason {
+            reasons.push(boundary_reason);
         }
+    }
 
     SemistableContextSection {
         note: notes.join(" "),
@@ -1477,6 +1641,7 @@ mod tests {
                 mime_type: "image/png".to_string(),
                 name: Some("diagram.png".to_string()),
             }],
+            None,
             &session,
             Some(&sample_run()),
             Some(&sample_checkpoint()),
@@ -1515,7 +1680,7 @@ mod tests {
             },
         ];
 
-        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let retrieved = builder.retrieve_context_state("continue", &[], None, &session, None, None);
 
         assert_eq!(retrieved.long_term_memory.status, "available");
         assert_eq!(retrieved.long_term_memory.entries.len(), 2);
@@ -1573,6 +1738,7 @@ mod tests {
                 mime_type: "image/png".to_string(),
                 name: Some("diagram.png".to_string()),
             }],
+            None,
             &session,
             Some(&sample_run()),
             Some(&sample_checkpoint()),
@@ -1668,6 +1834,7 @@ mod tests {
         let retrieved = builder.retrieve_context_state(
             "current volatile request",
             &[],
+            None,
             &session,
             Some(&sample_run()),
             Some(&sample_checkpoint()),
@@ -1690,10 +1857,7 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("native assistant context"));
-        assert!(request
-            .observation
-            .conversation_carry_mode
-            .is_some());
+        assert!(request.observation.conversation_carry_mode.is_some());
         assert!(request
             .observation
             .volatile_input_text
@@ -1736,8 +1900,14 @@ mod tests {
             None,
         );
 
-        let retrieved =
-            builder.retrieve_context_state("current volatile request", &[], &session, None, None);
+        let retrieved = builder.retrieve_context_state(
+            "current volatile request",
+            &[],
+            None,
+            &session,
+            None,
+            None,
+        );
         let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
 
         assert!(request
@@ -1785,7 +1955,7 @@ mod tests {
             "content": "native user"
         })];
 
-        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let retrieved = builder.retrieve_context_state("continue", &[], None, &session, None, None);
         let normalized_request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         assert!(normalized_request
             .observation
@@ -1809,11 +1979,9 @@ mod tests {
             !native_request.native_messages.is_empty(),
             "native request should keep memory layer in native messages"
         );
-        assert!(
-            serde_json::to_string(&native_request.native_messages)
-                .expect("serialize native messages")
-                .contains("Long-term memory status: available.")
-        );
+        assert!(serde_json::to_string(&native_request.native_messages)
+            .expect("serialize native messages")
+            .contains("Long-term memory status: available."));
     }
 
     #[test]
@@ -1840,7 +2008,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let retrieved = builder.retrieve_context_state("continue", &[], None, &session, None, None);
         let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
 
         assert!(request.observation.context_refresh_reason.is_none());
@@ -1881,6 +2049,7 @@ mod tests {
         let retrieved = builder.retrieve_context_state(
             "Please inspect this screenshot",
             &[],
+            None,
             &session,
             None,
             None,
@@ -1924,7 +2093,7 @@ mod tests {
             "gpt-4.1-mini",
             32,
             ProviderModelCapabilities {
-                context_window_tokens: Some(260),
+                context_window_tokens: Some(1700),
                 supports_tools: true,
                 supports_streaming: true,
                 supports_image_input: true,
@@ -1959,7 +2128,7 @@ mod tests {
             None,
         );
 
-        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let retrieved = builder.retrieve_context_state("continue", &[], None, &session, None, None);
         let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let joined = request
             .input
@@ -1993,6 +2162,7 @@ mod tests {
         let retrieved = builder.retrieve_context_state(
             "Please inspect this screenshot and explain the error",
             &[],
+            None,
             &session,
             None,
             None,
@@ -2019,7 +2189,7 @@ mod tests {
             "gpt-5.4",
             32,
             ProviderModelCapabilities {
-                context_window_tokens: Some(260),
+                context_window_tokens: Some(1700),
                 supports_tools: true,
                 supports_streaming: true,
                 supports_image_input: false,
@@ -2038,7 +2208,7 @@ mod tests {
             None,
         );
 
-        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let retrieved = builder.retrieve_context_state("continue", &[], None, &session, None, None);
         let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let serialized = serde_json::to_string(&request.native_messages)
             .expect("native messages should serialize");
@@ -2055,7 +2225,7 @@ mod tests {
             "gpt-5.4",
             32,
             ProviderModelCapabilities {
-                context_window_tokens: Some(340),
+                context_window_tokens: Some(1700),
                 supports_tools: true,
                 supports_streaming: true,
                 supports_image_input: false,
@@ -2093,7 +2263,7 @@ mod tests {
             None,
         );
 
-        let retrieved = builder.retrieve_context_state("continue", &[], &session, None, None);
+        let retrieved = builder.retrieve_context_state("continue", &[], None, &session, None, None);
         let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let serialized = serde_json::to_string(&request.native_messages)
             .expect("native messages should serialize");
@@ -2121,7 +2291,7 @@ mod tests {
         );
         let session = session_snapshot(Vec::new(), Vec::new(), None);
         let retrieved =
-            builder.retrieve_context_state("请继续规划下一步", &[], &session, None, None);
+            builder.retrieve_context_state("请继续规划下一步", &[], None, &session, None, None);
         let request = builder.build_request(
             "graph-a",
             &provider,
@@ -2139,5 +2309,79 @@ mod tests {
             .observation
             .prefix_mutation_reasons
             .contains(&PrefixMutationReason::PlannerSkillsChanged));
+    }
+
+    #[test]
+    fn explicit_workspace_mode_overrides_default_domain_profile() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-4.1-mini",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(8192),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+        );
+        let session = session_snapshot(Vec::new(), Vec::new(), None);
+
+        let retrieved = builder.retrieve_context_state(
+            "Please implement and debug this bug in the repo",
+            &[],
+            Some("work"),
+            &session,
+            None,
+            None,
+        );
+        let request = builder.build_request("runtime-agent", &provider, &retrieved, &[]);
+
+        assert!(request
+            .observation
+            .stable_prefix_text
+            .contains("Active domain profile: work."));
+        assert!(!request
+            .observation
+            .stable_prefix_text
+            .contains("Active domain profile: coding."));
+    }
+
+    #[test]
+    fn domain_profile_defaults_to_coding_in_stable_prefix() {
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "gpt-4.1-mini",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(8192),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+        );
+        let session = session_snapshot(Vec::new(), Vec::new(), None);
+
+        let retrieved = builder.retrieve_context_state(
+            "Please write a planning memo for the next milestone",
+            &[],
+            None,
+            &session,
+            None,
+            None,
+        );
+        let request = builder.build_request("research-workflow", &provider, &retrieved, &[]);
+
+        assert!(request
+            .observation
+            .stable_prefix_text
+            .contains("Active domain profile: coding."));
+        assert!(!request
+            .observation
+            .semi_stable_context_text
+            .contains("Active domain profile: coding."));
     }
 }

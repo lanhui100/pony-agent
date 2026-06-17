@@ -41,6 +41,18 @@ Pony Agent SHALL support at least a `coding` profile and a `work` profile for ba
 - **WHEN** a thread selects a profile
 - **THEN** the selected base-system profile SHALL remain stable for that thread unless an explicit mode switch occurs
 
+#### Scenario: Explicit workspace mode overrides inference
+
+- **WHEN** an explicit thread or app-level workspace mode is configured as `coding` or `work`
+- **THEN** profile selection SHALL prefer that explicit mode over heuristic inference
+- **AND** any heuristic detection SHALL be used only as fallback when no explicit mode is present
+
+#### Scenario: Explicit mode flows through submission and context retrieval
+
+- **WHEN** the user submits a turn after selecting a workspace mode in the product UI
+- **THEN** the selected mode SHALL be persisted in app settings, included in turn submission payloads, and available to context retrieval/building
+- **AND** the resulting request assembly SHALL use the matching domain profile block
+
 ### Requirement: Runtime Facts Are Separate From Base System
 
 Runtime environment facts SHALL be modeled separately from the base system.

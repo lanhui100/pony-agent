@@ -44,6 +44,14 @@ const HomeSessionSidebarStub = defineComponent({
             onClick: () => emit("navigate", "model-monitor")
           },
           "go-model-monitor"
+        ),
+        h(
+          "button",
+          {
+            "data-testid": "stub-nav-settings",
+            onClick: () => emit("navigate", "settings")
+          },
+          "go-settings"
         )
       ]);
   }
@@ -61,6 +69,10 @@ const ModelMonitorPageStub = defineComponent({
   template: '<div data-testid="model-monitor-page-stub">model-monitor</div>'
 });
 
+const SettingsPanelStub = defineComponent({
+  template: '<div data-testid="settings-panel-stub">settings</div>'
+});
+
 const TooltipProviderStub = defineComponent({
   template: '<div data-testid="tooltip-provider-stub"><slot /></div>'
 });
@@ -74,6 +86,7 @@ function mountApp() {
         HomeWorkspace: HomeWorkspaceStub,
         ProviderConfigPage: ProviderConfigPageStub,
         ModelMonitorPage: ModelMonitorPageStub,
+        SettingsPanel: SettingsPanelStub,
         TooltipProvider: TooltipProviderStub
       }
     }
@@ -109,7 +122,7 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="tooltip-provider-stub"]').exists()).toBe(true);
   });
 
-  it("switches between home, provider config, and model monitor from the sidebar", async () => {
+  it("switches between home, provider config, model monitor, and settings from the sidebar", async () => {
     const wrapper = mountApp();
 
     await wrapper.get('[data-testid="stub-nav-providers"]').trigger("click");
@@ -126,6 +139,14 @@ describe("App", () => {
 
     await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
     expect(wrapper.find('[data-testid="model-monitor-page-stub"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="stub-nav-settings"]').trigger("click");
+    expect(wrapper.find('[data-testid="settings-panel-stub"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
+    expect(wrapper.find('[data-testid="settings-panel-stub"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
   });
 

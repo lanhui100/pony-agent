@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke, safeListen } from "@/lib/tauri";
 import { useProviderStore } from "@/stores/providers";
+import { useSettingsStore } from "@/stores/settings";
 import { deriveGraphRunFromRunState, extractActiveTaskFocus, normalizeGraphRunPhase } from "../types/runtime";
 import type {
   AttachmentAsset,
@@ -383,7 +384,12 @@ function cloneTraceTimeline(traceTimeline?: TraceTimelineEntry[] | null): TraceT
   const normalized = (traceTimeline ?? []).map((entry): TraceTimelineEntry => ({
     ...entry,
     kind: canonicalizeTraceTimelineKind(entry.kind),
-    buildContextObservation: cloneBuildContextObservation(entry.buildContextObservation),
+    // buildContextObservation is intentionally stripped here — it contains the
+    // full prompt text (often 50-100KB+) per entry. The backend already persists
+    // it, and the frontend never reads it back from stored timeline entries.
+    // Keeping it would cause N × deep-clone on every terminal event, blocking
+    // the main thread and freezing the page at turn end.
+    buildContextObservation: null,
     toolActivities: cloneToolActivities(entry.toolActivities)
   }));
 
@@ -1122,7 +1128,10 @@ function createTimelineEntry(
     providerModel: patch.providerModel ?? null,
     providerSource: patch.providerSource ?? null,
     providerMode: patch.providerMode ?? null,
-    buildContextObservation: cloneBuildContextObservation(patch.buildContextObservation),
+    // buildContextObservation is intentionally not stored on timeline entries —
+    // it contains the full prompt text (50-100KB+) and cloneTraceTimeline strips
+    // it anyway. The top-level observation on TurnTraceRecord is the canonical source.
+    buildContextObservation: null,
     toolActivities: cloneToolActivities(patch.toolActivities),
     text: patch.text ?? null,
     reasoningContent: patch.reasoningContent ?? null,
@@ -1833,7 +1842,7 @@ const defaultAvailableTools: AvailableTool[] = [
     name: "Run",
     canonicalToolName: "Run",
     executionPrimitive: "workspace_run_command",
-    description: "在当前工作区内受控执行命令，返回 cwd、timeout、exitCode、stdout 和 stderr。",
+    description: "在当前工作区内受控执行命令，并委托到内部 RunShell 执行能力；稳定返回 cwd、timeout、exitCode、stdout 和 stderr。",
     kind: "execute",
     exposure: "model_visible",
     displayMetadata: { displayNameZh: "运行" },
@@ -1869,7 +1878,7 @@ const defaultAvailableTools: AvailableTool[] = [
     name: "Ask",
     canonicalToolName: "Ask",
     executionPrimitive: "echo_input",
-    description: "把传入的 text 原样返回，适合验证工具调用链路与参数透传。",
+    description: "向用户或宿主请求澄清、确认或补充输入；无宿主中介时会回落为受控澄清提示。",
     kind: "interactive",
     exposure: "model_visible",
     displayMetadata: { displayNameZh: "提问" },
@@ -1884,10 +1893,13 @@ const defaultAvailableTools: AvailableTool[] = [
       properties: {
         text: {
           type: "string",
-          description: "需要原样回显的文本"
+          description: "需要向用户展示或确认的文本"
+        },
+        question: {
+          type: "string",
+          description: "当 text 缺失时，用于 fallback 的澄清问题"
         }
       },
-      required: ["text"],
       additionalProperties: false
     }
   },
@@ -2142,7 +2154,7 @@ const defaultAvailableTools: AvailableTool[] = [
     name: "ToolSearch",
     canonicalToolName: "ToolSearch",
     executionPrimitive: "tool_search",
-    description: "搜索 capability registry 中可用的工具候选，作为 deferred / dynamic tool discovery 入口。",
+    description: "搜索 capability registry 中可用的工具候选，返回结构化候选项，作为 deferred / dynamic tool discovery 入口。",
     kind: "search",
     exposure: "deferred",
     displayMetadata: { displayNameZh: "找工具" },
@@ -2253,7 +2265,7 @@ const defaultAvailableTools: AvailableTool[] = [
     name: "Plan",
     canonicalToolName: "Plan",
     executionPrimitive: "workspace_batch",
-    description: "批量执行多个子工具调用，可并发收集上下文，适合结构化计划和复合探索。",
+    description: "表达计划并驱动受控的复合子调用执行；通过 ToolPlan 与 child_results 暴露计划和执行细节。",
     kind: "composite",
     exposure: "model_visible",
     displayMetadata: { displayNameZh: "计划" },
@@ -5513,6 +5525,7 @@ export const useRuntimeStore = defineStore("runtime", {
     async submitTurn(options?: { images?: TurnInputImage[] }) {
       await this.initializeTurnEvents();
       const providerStore = useProviderStore();
+      const settingsStore = useSettingsStore();
       const images = (options?.images ?? []).map((image) => ({ ...image }));
       const message = this.draftMessage.trim();
       const providerMessage = buildProviderUserMessage(message, images);
@@ -5523,6 +5536,7 @@ export const useRuntimeStore = defineStore("runtime", {
         providerId: providerStore.currentProvider?.id ?? null,
         modelId: providerStore.currentModel?.id ?? null,
         reasoningEffort: providerStore.currentReasoningEffort ?? null,
+        workspaceMode: settingsStore.workspaceMode,
         sessionId: this.sessionId,
         nodeId: this.visibleNodeId,
         history: buildTurnHistory(this.messages),

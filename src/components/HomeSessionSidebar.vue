@@ -9,6 +9,8 @@ import {
   LoaderCircle,
   MessageSquareMore,
   Plus,
+  Server,
+  Settings,
   Settings2,
   Trash2
 } from "lucide-vue-next";
@@ -21,7 +23,7 @@ const SESSION_SIDEBAR_STORAGE_KEY = "pony-agent.session-sidebar-collapsed.v1";
 const MODEL_OPEN_STORAGE_KEY = "pony-agent.session-sidebar-model-open.v1";
 const CONVERSATION_PAGE_SIZE = 5;
 
-type NavigationPage = "home" | "providers" | "model-monitor";
+type NavigationPage = "home" | "providers" | "model-monitor" | "settings";
 
 const props = withDefaults(
   defineProps<{
@@ -52,7 +54,7 @@ const visibleConversationCount = ref(CONVERSATION_PAGE_SIZE);
 const pendingDeleteSessionId = ref<string | null>(null);
 const deletingSessionId = ref<string | null>(null);
 const menuInteractiveClass =
-  "rounded-[0.2rem] transition-colors hover:bg-[#f6dfb8] hover:text-stone-900";
+  "rounded-[0.2rem] transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900";
 const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
 
 const hasPersistableCurrentSession = computed(() => hasPersistableMessages(messages.value));
@@ -268,7 +270,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
         </button>
 
         <button
-          class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[0.35rem] bg-transparent text-stone-500 transition hover:text-stone-900"
+          class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[0.35rem] bg-transparent text-stone-500 transition hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
           type="button"
           data-testid="session-sidebar-collapse"
           @click="toggleCollapsed"
@@ -347,6 +349,21 @@ function clearPendingDeleteSession(session: SessionOverview) {
           @click="navigate('model-monitor')"
         >
           <Activity class="h-4 w-4" />
+        </button>
+
+        <button
+          class="mt-auto inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
+          :class="
+            props.currentPage === 'settings'
+              ? 'bg-[#f7e3bf] text-stone-900'
+              : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
+          "
+          type="button"
+          title="设置"
+          data-testid="session-sidebar-nav-settings-collapsed"
+          @click="navigate('settings')"
+        >
+          <Settings class="h-4 w-4" />
         </button>
       </div>
 
@@ -479,7 +496,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
               @click="toggleModelSection"
             >
               <div class="flex items-center gap-2 text-[12px] font-medium text-stone-800">
-                <Settings2 class="h-3.5 w-3.5" />
+                <Server class="h-3.5 w-3.5" />
                 <span>模型管理</span>
               </div>
               <ChevronDown class="h-4 w-4 text-stone-400 transition" :class="{ 'rotate-180': modelOpen }" />
@@ -511,19 +528,31 @@ function clearPendingDeleteSession(session: SessionOverview) {
                 type="button"
                 data-testid="session-sidebar-nav-model-monitor"
                 @click="navigate('model-monitor')"
-              >
+                >
                 <Activity class="h-3 w-3" />
                 <span class="text-[12px] leading-4">模型监控</span>
               </button>
+
             </div>
           </section>
-
-          <section
-            v-if="collapsed"
-            class="hidden"
-            aria-hidden="true"
-          />
         </div></ScrollArea>
+
+          <div class="mt-auto pt-2">
+            <button
+              class="flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
+              :class="
+                props.currentPage === 'settings'
+                  ? menuSelectedClass
+                  : `${menuInteractiveClass} text-stone-800`
+              "
+              type="button"
+              data-testid="session-sidebar-nav-settings"
+              @click="navigate('settings')"
+            >
+              <Settings class="h-3.5 w-3.5" />
+              <span class="text-[12px] font-bold leading-4">设置</span>
+            </button>
+          </div>
       </template>
     </div>
   </aside>

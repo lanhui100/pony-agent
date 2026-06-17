@@ -1,6 +1,7 @@
 pub use pony_agent_core::agent;
 mod tauri_adapter;
 
+use agent::app_settings::{AppSettings, AppSettingsStore};
 use agent::capability_bridge::{CapabilitySourceView, CapabilityView, SkillDescriptor};
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
 use agent::context::RetrievedContextState;
@@ -213,6 +214,16 @@ fn save_provider_registry_without_env_sync(
     registry: ProviderRegistryView,
 ) -> Result<ProviderRegistryView, String> {
     ProviderRegistryStore::new().save_view_without_env_sync(registry)
+}
+
+#[tauri::command]
+fn load_app_settings() -> AppSettings {
+    AppSettingsStore::new().load_view()
+}
+
+#[tauri::command]
+fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
+    AppSettingsStore::new().save_view(settings)
 }
 
 #[tauri::command]
@@ -490,14 +501,23 @@ fn set_taskbar_icon_win32(app: &tauri::AppHandle) {
 
     let window = match app.get_webview_window("main") {
         Some(w) => w,
-        None => { eprintln!("[icon-debug] main window not found"); return; }
+        None => {
+            eprintln!("[icon-debug] main window not found");
+            return;
+        }
     };
     let hwnd = match window.window_handle() {
         Ok(h) => match h.as_raw() {
             raw_window_handle::RawWindowHandle::Win32(wh) => wh.hwnd.get() as isize,
-            _ => { eprintln!("[icon-debug] unexpected window handle type"); return; }
+            _ => {
+                eprintln!("[icon-debug] unexpected window handle type");
+                return;
+            }
         },
-        Err(e) => { eprintln!("[icon-debug] window_handle err: {e}"); return; }
+        Err(e) => {
+            eprintln!("[icon-debug] window_handle err: {e}");
+            return;
+        }
     };
     eprintln!("[icon-debug] HWND = 0x{hwnd:x}");
 
@@ -506,9 +526,9 @@ fn set_taskbar_icon_win32(app: &tauri::AppHandle) {
         // entry for the default icon size (SM_CXICON × SM_CYICON).
         let id = LookupIconIdFromDirectoryEx(
             ICON_ICO.as_ptr(),
-            1,        // fIcon = TRUE (icon, not cursor)
-            0,        // cx=0 → use system metric
-            0,        // cy=0 → use system metric
+            1, // fIcon = TRUE (icon, not cursor)
+            0, // cx=0 → use system metric
+            0, // cy=0 → use system metric
             LR_DEFAULTSIZE,
         );
         eprintln!("[icon-debug] LookupIconIdFromDirectoryEx -> ID offset {id}");
@@ -518,12 +538,16 @@ fn set_taskbar_icon_win32(app: &tauri::AppHandle) {
             let hicon = CreateIconFromResourceEx(
                 data.as_ptr(),
                 data.len() as u32,
-                1,    // fIcon
+                1,          // fIcon
                 0x00030000, // dwVer (Windows 3.0 format)
-                0, 0, // desired size = default
+                0,
+                0, // desired size = default
                 LR_DEFAULTSIZE,
             );
-            eprintln!("[icon-debug] HICON = {:p}", hicon as *const std::ffi::c_void);
+            eprintln!(
+                "[icon-debug] HICON = {:p}",
+                hicon as *const std::ffi::c_void
+            );
 
             if hicon != 0 {
                 SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon);
@@ -568,7 +592,11 @@ pub fn run() {
                     Err(e) => {
                         eprintln!("[icon-debug] from_bytes err: {e}");
                         if let Some(fb) = app.default_window_icon().cloned() {
-                            eprintln!("[icon-debug] fallback default {}x{}", fb.width(), fb.height());
+                            eprintln!(
+                                "[icon-debug] fallback default {}x{}",
+                                fb.width(),
+                                fb.height()
+                            );
                             let _ = window.set_icon(fb);
                         }
                     }
@@ -605,6 +633,7 @@ pub fn run() {
             inspect_capability_source,
             list_skills,
             inspect_skill,
+            load_app_settings,
             load_provider_registry,
             run_turn,
             start_graph_run,
@@ -621,6 +650,7 @@ pub fn run() {
             inspect_host,
             record_stream_debug_metrics,
             load_stream_debug_metrics,
+            save_app_settings,
             save_provider_registry,
             save_provider_registry_without_env_sync
         ])
@@ -674,7 +704,11 @@ mod tests {
         assert!(ICON_ICO.len() >= 6, "ICO file too small for header");
         assert_eq!(ICON_ICO[0], 0, "ICO reserved byte 0 must be 0");
         assert_eq!(ICON_ICO[1], 0, "ICO reserved byte 1 must be 0");
-        assert_eq!(ICON_ICO[2], 1, "ICO type must be 1 (icon), got {}", ICON_ICO[2]);
+        assert_eq!(
+            ICON_ICO[2], 1,
+            "ICO type must be 1 (icon), got {}",
+            ICON_ICO[2]
+        );
         assert_eq!(ICON_ICO[3], 0, "ICO type high byte must be 0");
     }
 
@@ -700,8 +734,9 @@ mod tests {
                 // Validate the frame data offset + size
                 let data_size =
                     u32::from_le_bytes(ICON_ICO[entry_off + 8..entry_off + 12].try_into().unwrap());
-                let data_off =
-                    u32::from_le_bytes(ICON_ICO[entry_off + 12..entry_off + 16].try_into().unwrap());
+                let data_off = u32::from_le_bytes(
+                    ICON_ICO[entry_off + 12..entry_off + 16].try_into().unwrap(),
+                );
                 assert!(
                     data_size > 1000,
                     "256×256 frame data size ({data_size}) too small"
@@ -712,7 +747,10 @@ mod tests {
                 );
             }
         }
-        assert!(found_256, "ICO must contain a 256×256 frame (width=0, height=0 in ICO entry)");
+        assert!(
+            found_256,
+            "ICO must contain a 256×256 frame (width=0, height=0 in ICO entry)"
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -742,10 +780,7 @@ mod tests {
                 u32::from_le_bytes(ICON_ICO[entry_off + 8..entry_off + 12].try_into().unwrap());
             let data_off =
                 u32::from_le_bytes(ICON_ICO[entry_off + 12..entry_off + 16].try_into().unwrap());
-            assert!(
-                data_size > 0,
-                "Frame {i} has zero data size"
-            );
+            assert!(data_size > 0, "Frame {i} has zero data size");
             assert!(
                 (data_off as usize) + (data_size as usize) <= ICON_ICO.len(),
                 "Frame {i} data [offset={data_off}, size={data_size}] exceeds file length {}",

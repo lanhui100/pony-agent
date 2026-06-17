@@ -1,3 +1,4 @@
+pub mod app_settings;
 pub mod capability_bridge;
 pub mod config;
 pub mod context;

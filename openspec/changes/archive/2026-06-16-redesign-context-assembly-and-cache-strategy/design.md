@@ -119,6 +119,67 @@
 - 任务推进方式
 - 验证/审阅要求
 
+### 1.1 BaseSystemPromptBuilder Contract
+
+`BASE_SYSTEM_PROMPT` 不应继续以“单个静态字符串常量直接塞入请求”的方式演进，而应升级为显式的 `BaseSystemPromptBuilder` 或等价构建单元。
+
+建议 contract：
+
+- 输入仅包含 `base_system_profile` 与少量稳定 policy 开关
+- 输出为稳定、可复用、可观测的 `Base System` 文本块
+- 输出顺序 SHALL 固定，避免因为条件分支打乱段落顺序
+
+明确禁止读取或拼入以下动态来源：
+
+- `session summary`
+- `run goal`
+- `execution checkpoint`
+- `active cwd`
+- `target_paths`
+- `planner_skills` 摘要
+- `temporary diagnostics`
+
+这样做的目的，是把 `Base System` 从“当前实现里的 prompt 起始字符串”提升为“稳定前缀中的正式层”，使其缓存行为可预测。
+
+### 1.2 Profile Selection And Switching
+
+`coding / work` profile 的选择规则需要在实现前显式化。
+
+建议：
+
+- 线程创建时确定默认 profile
+- 若入口本身已区分 coding / work surface，则以入口默认值为准
+- 若入口未区分，则由 thread/session 级配置决定
+- 单轮用户请求 SHALL NOT 隐式切换 profile
+
+切换规则：
+
+- profile 切换必须是显式事件
+- profile 切换 SHALL 被视为 `Base System` 边界变化
+- profile 切换默认属于允许的 cache-reset 点
+- 切换事件 SHALL 产出可观测的 `context_refresh_reason`
+
+### 1.3 显式模式优先于启发式
+
+本轮实现补充一条更强约束：
+
+- 若线程级或应用级已存在显式 `workspace_mode`
+- 则 profile 选择 SHALL 优先使用该显式值
+- 只有在显式值缺失时，才允许退回到 `graph name / user message` 等启发式判断
+
+这样做的原因是：
+
+- 启发式虽然可作为迁移期 fallback，但它本身不稳定
+- 显式模式更符合缓存友好目标，也更适合作为后续可扩展全局配置面的第一项
+
+本轮同时把显式模式接入到：
+
+- 本地 `AppSettings` 持久化
+- Tauri `load/save_app_settings`
+- 前端设置 store
+- 左侧边栏尾部设置入口与设置面板
+- `submitTurn -> TurnInput.workspaceMode -> TurnContext.workspace_mode -> domain profile`
+
 ### 2. 环境信息位置
 
 环境信息不应全部塞进 `Base System`。
@@ -132,6 +193,29 @@
 
 - 为了适配不同 OS / surface 重建整个 base system
 - coding/work profile 与环境事实交叉乘法爆炸
+
+### 3. 模板组织方式
+
+`Base System` 模板应按“稳定骨架 + 固定顺序段落”组织，而不是把所有内容混在一个难以维护的长字符串中。
+
+建议组织方式：
+
+- 保留顶层 profile 模板：`coding` / `work`
+- 每个 profile 内部允许拆成固定段落片段
+- 片段拼装顺序 SHALL 固定
+- 片段选择规则 SHALL 只依赖稳定 profile 或低频 policy
+
+建议避免：
+
+- 根据 OS / shell / workspace 动态改写 base system 正文
+- 根据本轮任务类型临时插入 profile 内段落
+- 用半稳定状态驱动 base prompt 条件分支
+
+若后续需要把模板从 Rust 常量迁移到外部文件，也应保持：
+
+- profile 标识稳定
+- 段落顺序稳定
+- 相同 profile 在相同 policy 下输出字节级尽量稳定
 
 ## AGENT.md 与 Workspace Instructions
 
