@@ -266,7 +266,7 @@ function debugLog(event: string, payload?: Record<string, unknown>) {
     payload: payload ?? {},
     ts: new Date().toISOString()
   };
-  console.info("[pony-agent][runtime]", message);
+  console.info(`[pony-agent][runtime] ${JSON.stringify(message)}`);
 }
 
 function errorLog(event: string, payload?: Record<string, unknown>) {
@@ -275,7 +275,7 @@ function errorLog(event: string, payload?: Record<string, unknown>) {
     payload: payload ?? {},
     ts: new Date().toISOString()
   };
-  console.error("[pony-agent][runtime]", message);
+  console.error(`[pony-agent][runtime] ${JSON.stringify(message)}`);
 }
 
 const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
@@ -2578,11 +2578,11 @@ function restorePhaseFromTurnHistory(
   messages: ChatMessage[],
   turnTraceHistory: TurnTraceRecord[]
 ): RuntimePhase {
+  const latestTurnPhase = normalizeRuntimePhaseValue(turnTraceHistory[turnTraceHistory.length - 1]?.phase);
   if (messages.length === 0) {
-    return "idle";
+    return latestTurnPhase ?? "idle";
   }
 
-  const latestTurnPhase = normalizeRuntimePhaseValue(turnTraceHistory[turnTraceHistory.length - 1]?.phase);
   if (!latestTurnPhase) {
     return "ready";
   }
@@ -2964,6 +2964,28 @@ function traceReasoningContent(trace?: TurnTraceRecord | null) {
   return null;
 }
 
+function traceErrorDetail(trace?: TurnTraceRecord | null) {
+  if (!trace) {
+    return null;
+  }
+
+  const topLevelError = trace.error?.trim();
+  if (topLevelError) {
+    return topLevelError;
+  }
+
+  const timelineError = [...(trace.traceTimeline ?? [])]
+    .reverse()
+    .find((entry) => entry.error?.trim())
+    ?.error?.trim();
+  if (timelineError) {
+    return timelineError;
+  }
+
+  const sessionSummary = trace.sessionSummary?.trim();
+  return sessionSummary || null;
+}
+
 function traceModelLabel(trace?: TurnTraceRecord | null) {
   const topLevelLabel = buildAssistantModelLabel(trace?.providerName, trace?.providerModel);
   if (topLevelLabel) {
@@ -3109,16 +3131,20 @@ function hydrateMessagesFromHistory(
     }
 
     restoredHistoryIndex += 1;
+    const restoredErrorDetail = restoredMessage?.errorDetail ?? null;
+    const traceError = traceErrorDetail(currentTrace);
+    const hasErrorState = restoredMessage?.status === "error" || currentTrace?.phase === "failed" || Boolean(traceError);
     messages.push({
       id: restoredMessage?.id ?? `history-assistant-${turnIndex}`,
       turnId: currentTurnId,
       role: "assistant",
       content: item.content,
       attachments: [],
-      status: "done",
+      status: hasErrorState ? "error" : "done",
       reasoningContent: restoredMessage?.reasoningContent ?? traceReasoningContent(currentTrace),
       tokenCount: restoredMessage?.tokenCount ?? currentTrace?.outputTokens ?? null,
-      modelName: restoredMessage?.modelName ?? traceModelLabel(currentTrace)
+      modelName: restoredMessage?.modelName ?? traceModelLabel(currentTrace),
+      errorDetail: restoredErrorDetail || traceError
     });
     appendToolMessagesForTurn(currentTurnId, currentTrace);
     currentTurnId = null;
@@ -4375,7 +4401,8 @@ export const useRuntimeStore = defineStore("runtime", {
       patch: Partial<Omit<TurnTraceRecord, "turnId" | "updatedAt">> & { updatedAt?: number } = {},
       persist = true
     ) {
-      this.traceTimeline = cloneTraceTimeline(traceTimeline);
+      // resolveEventTraceTimeline/buildFallbackRuntimeTraceTimeline already return a fresh timeline snapshot.
+      this.traceTimeline = traceTimeline;
       this.upsertTurnTrace(turnId, {
         ...patch,
         traceTimeline: this.traceTimeline
@@ -4503,41 +4530,78 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       const activeTools = toolActivities.filter((tool) => tool.status !== "planned");
+      const existingMessagesById = new Map<string, ChatMessage>();
+      for (const message of this.messages) {
+        if (message.role === "tool" && message.turnId === turnId) {
+          existingMessagesById.set(message.id, message);
+        }
+      }
+      const pendingMessages: ChatMessage[] = [];
+      let didMutate = false;
+
       for (const tool of activeTools) {
         const messageId = `tool-${turnId}-${tool.id}`;
-        const existingMessage = this.messages.find((item) => item.id === messageId && item.role === "tool");
+        const existingMessage = existingMessagesById.get(messageId);
         const nextContent = tool.resultText ?? "";
         const nextDetail = buildToolMessageDetail(tool);
+        const nextStatus = toolStatusToMessageStatus(tool.status);
+        const nextDurationSeconds = tool.durationSeconds ?? null;
+        const nextCanonicalToolName = tool.canonicalToolName ?? null;
+        const nextDisplayNameZh = tool.displayNameZh ?? null;
 
         if (existingMessage) {
-          existingMessage.content = nextContent;
-          existingMessage.status = toolStatusToMessageStatus(tool.status);
-          existingMessage.toolName = tool.name;
-          existingMessage.canonicalToolName = tool.canonicalToolName ?? null;
-          existingMessage.displayNameZh = tool.displayNameZh ?? null;
-          existingMessage.detail = nextDetail;
-          existingMessage.durationSeconds = tool.durationSeconds ?? null;
-          if (persist) {
-            this.persistHistory();
+          if (existingMessage.content !== nextContent) {
+            existingMessage.content = nextContent;
+            didMutate = true;
+          }
+          if (existingMessage.status !== nextStatus) {
+            existingMessage.status = nextStatus;
+            didMutate = true;
+          }
+          if (existingMessage.toolName !== tool.name) {
+            existingMessage.toolName = tool.name;
+            didMutate = true;
+          }
+          if (existingMessage.canonicalToolName !== nextCanonicalToolName) {
+            existingMessage.canonicalToolName = nextCanonicalToolName;
+            didMutate = true;
+          }
+          if (existingMessage.displayNameZh !== nextDisplayNameZh) {
+            existingMessage.displayNameZh = nextDisplayNameZh;
+            didMutate = true;
+          }
+          if (existingMessage.detail !== nextDetail) {
+            existingMessage.detail = nextDetail;
+            didMutate = true;
+          }
+          if (existingMessage.durationSeconds !== nextDurationSeconds) {
+            existingMessage.durationSeconds = nextDurationSeconds;
+            didMutate = true;
           }
           continue;
         }
 
-        this.messages.push({
+        pendingMessages.push({
           id: messageId,
           turnId,
           role: "tool",
           content: nextContent,
-          status: toolStatusToMessageStatus(tool.status),
+          status: nextStatus,
           toolName: tool.name,
-          canonicalToolName: tool.canonicalToolName ?? null,
-          displayNameZh: tool.displayNameZh ?? null,
+          canonicalToolName: nextCanonicalToolName,
+          displayNameZh: nextDisplayNameZh,
           detail: nextDetail,
-          durationSeconds: tool.durationSeconds ?? null
+          durationSeconds: nextDurationSeconds
         });
-        if (persist) {
-          this.persistHistory();
-        }
+        didMutate = true;
+      }
+
+      if (pendingMessages.length > 0) {
+        this.messages.push(...pendingMessages);
+      }
+
+      if (persist && didMutate) {
+        this.persistHistory();
       }
     },
     setDraftMessage(message: string) {
@@ -5046,21 +5110,19 @@ export const useRuntimeStore = defineStore("runtime", {
         window.setTimeout(() => {
           const stage2StartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           // ===== STAGE 2 (setTimeout 0): Trace + metadata + UI unlock =====
-          this.phase = completedPhase === "completed" ? "ready" : completedPhase;
-          this.traceSteps = payload.traceSteps ?? this.traceSteps;
-          this.toolActivities = terminalToolActivities;
-          this.sessionSummary = payload.sessionSummary ?? this.sessionSummary;
-          this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
-          this.providerName = payload.providerName ?? this.providerName;
-          this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
-          this.providerModel = payload.providerModel ?? this.providerModel;
-          this.providerSource = payload.providerSource ?? this.providerSource;
-          this.providerMode = payload.providerMode ?? this.providerMode;
-          this.fallbackReason = payload.fallbackReason ?? null;
-          this.inputTokens = payload.inputTokens ?? this.inputTokens;
-          this.outputTokens = payload.outputTokens ?? this.outputTokens;
-          this.totalTokens = payload.totalTokens ?? this.totalTokens;
-          this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+          const nextPhase = completedPhase === "completed" ? "ready" : completedPhase;
+          const nextTraceSteps = payload.traceSteps ?? this.traceSteps;
+          const nextSessionSummary = payload.sessionSummary ?? this.sessionSummary;
+          const nextProviderRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+          const nextProviderName = payload.providerName ?? this.providerName;
+          const nextProviderProtocol = payload.providerProtocol ?? this.providerProtocol;
+          const nextProviderModel = payload.providerModel ?? this.providerModel;
+          const nextProviderSource = payload.providerSource ?? this.providerSource;
+          const nextProviderMode = payload.providerMode ?? this.providerMode;
+          const nextInputTokens = payload.inputTokens ?? this.inputTokens;
+          const nextOutputTokens = payload.outputTokens ?? this.outputTokens;
+          const nextTotalTokens = payload.totalTokens ?? this.totalTokens;
+          const nextFirstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
           const tokenStatsStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
           const tokenStatsDurationMs =
@@ -5069,8 +5131,6 @@ export const useRuntimeStore = defineStore("runtime", {
           this.syncToolMessages(payload.turnId, payload.toolActivities, false);
           const toolMessagesDurationMs =
             Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - toolMessagesStartAt) * 100)) / 100;
-          this.isSubmitting = false;
-          this.activeTurnId = null;
 
           const traceTimeline = resolveEventTraceTimeline(payload, () =>
             buildFallbackRuntimeTraceTimeline({
@@ -5081,20 +5141,20 @@ export const useRuntimeStore = defineStore("runtime", {
               assistantMessage,
               toolActivities: terminalToolActivities,
               providerPatch: {
-                providerName: payload.providerName ?? this.providerName,
-                providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-                providerModel: payload.providerModel ?? this.providerModel,
-                providerSource: payload.providerSource ?? this.providerSource,
-                providerMode: payload.providerMode ?? this.providerMode
+                providerName: nextProviderName,
+                providerProtocol: nextProviderProtocol,
+                providerModel: nextProviderModel,
+                providerSource: nextProviderSource,
+                providerMode: nextProviderMode
               },
               terminalState: "completed",
               fallbackReason: payload.fallbackReason ?? null,
-              inputTokens: payload.inputTokens ?? this.inputTokens,
+              inputTokens: nextInputTokens,
               cacheHitInputTokens,
               reasoningTokens,
-              outputTokens: payload.outputTokens ?? this.outputTokens,
-              totalTokens: payload.totalTokens ?? this.totalTokens,
-              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+              outputTokens: nextOutputTokens,
+              totalTokens: nextTotalTokens,
+              firstTokenLatencyMs: nextFirstTokenLatencyMs,
               turnDurationMs: payload.turnDurationMs ?? null
             })
           );
@@ -5106,23 +5166,23 @@ export const useRuntimeStore = defineStore("runtime", {
             sequence: payload.sequence ?? null,
             emittedAtMs: payload.emittedAtMs ?? null,
             phase: "completed",
-            traceSteps: payload.traceSteps ?? this.traceSteps,
+            traceSteps: nextTraceSteps,
             toolActivities: terminalToolActivities,
             providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
-            providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
-            providerName: payload.providerName ?? this.providerName,
-            providerProtocol: payload.providerProtocol ?? this.providerProtocol,
-            providerModel: payload.providerModel ?? this.providerModel,
-            providerSource: payload.providerSource ?? this.providerSource,
-            providerMode: payload.providerMode ?? this.providerMode,
+            providerRequestedName: nextProviderRequestedName,
+            providerName: nextProviderName,
+            providerProtocol: nextProviderProtocol,
+            providerModel: nextProviderModel,
+            providerSource: nextProviderSource,
+            providerMode: nextProviderMode,
             buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
             hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
-            sessionSummary: payload.sessionSummary ?? this.sessionSummary,
+            sessionSummary: nextSessionSummary,
             fallbackReason: payload.fallbackReason ?? null,
-            inputTokens: payload.inputTokens ?? this.inputTokens,
-            outputTokens: payload.outputTokens ?? this.outputTokens,
-            totalTokens: payload.totalTokens ?? this.totalTokens,
-            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+            inputTokens: nextInputTokens,
+            outputTokens: nextOutputTokens,
+            totalTokens: nextTotalTokens,
+            firstTokenLatencyMs: nextFirstTokenLatencyMs,
             ...cacheHitInputTokenPatch,
             ...reasoningTokenPatch,
             ...turnDurationPatch,
@@ -5130,14 +5190,40 @@ export const useRuntimeStore = defineStore("runtime", {
           }, false);
           const traceCommitDurationMs =
             Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - traceCommitStartAt) * 100)) / 100;
+          this.$patch((state) => {
+            state.phase = nextPhase;
+            state.traceSteps = nextTraceSteps;
+            state.toolActivities = terminalToolActivities;
+            state.sessionSummary = nextSessionSummary;
+            state.providerRequestedName = nextProviderRequestedName;
+            state.providerName = nextProviderName;
+            state.providerProtocol = nextProviderProtocol;
+            state.providerModel = nextProviderModel;
+            state.providerSource = nextProviderSource;
+            state.providerMode = nextProviderMode;
+            state.fallbackReason = payload.fallbackReason ?? null;
+            state.inputTokens = nextInputTokens;
+            state.outputTokens = nextOutputTokens;
+            state.totalTokens = nextTotalTokens;
+            state.firstTokenLatencyMs = nextFirstTokenLatencyMs;
+            state.isSubmitting = false;
+            state.activeTurnId = null;
+          });
           const stage2DurationMs =
             Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - stage2StartAt) * 100)) / 100;
+          const turnToolMessageCount = this.messages.filter(
+            (message) => message.turnId === payload.turnId && message.role === "tool"
+          ).length;
           debugLog("perf:turn-completed-stage2", {
             turnId: payload.turnId,
             stage2DurationMs,
             tokenStatsDurationMs,
             toolMessagesDurationMs,
-            traceCommitDurationMs
+            traceCommitDurationMs,
+            messagesCount: this.messages.length,
+            turnToolMessageCount,
+            traceTimelineLength: this.traceTimeline.length,
+            turnTraceHistoryLength: this.turnTraceHistory.length
           });
 
           // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====

@@ -2101,6 +2101,8 @@ impl AgentRuntime {
         turn_duration_ms: Option<u64>,
         error: String,
     ) {
+        let error_message = error;
+        let assistant_message = error_message.clone();
         let trace_timeline = build_persisted_trace_timeline(
             user_message,
             "failed",
@@ -2112,7 +2114,7 @@ impl AgentRuntime {
             None,
             None,
             fallback_reason.as_deref(),
-            Some(error.as_str()),
+            Some(error_message.as_str()),
             None,
             None,
             None,
@@ -2124,7 +2126,7 @@ impl AgentRuntime {
         self.sessions.append_failed_turn(
             session_id,
             user_message,
-            &error,
+            &assistant_message,
             TurnTraceRecord {
                 turn_id: turn_id.to_string(),
                 session_id: session_id.map(str::to_string),
@@ -2147,9 +2149,9 @@ impl AgentRuntime {
                 provider_source,
                 provider_mode,
                 build_context_observation,
-                session_summary: Some(error.clone()),
+                session_summary: Some(error_message.clone()),
                 fallback_reason,
-                error: Some(error),
+                error: Some(error_message),
                 input_tokens: None,
                 cache_hit_input_tokens: None,
                 reasoning_tokens: None,

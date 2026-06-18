@@ -10,6 +10,7 @@ import {
   GitFork,
   History,
   LoaderCircle,
+  Copy,
   RotateCcw,
   Square,
   UserRound,
@@ -51,10 +52,27 @@ const {
 } = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
 
+function isTransientSessionOverview(session: {
+  title?: string | null;
+  summary: string;
+  turnCount: number;
+  updatedAtMs: number;
+  lastReferencedFile?: string | null;
+}) {
+  return (
+    session.title === "新对话" &&
+    session.summary === "发送第一条消息后保存到历史" &&
+    session.turnCount === 0 &&
+    session.updatedAtMs === 0 &&
+    session.lastReferencedFile == null
+  );
+}
+
 const providerMenuOpen = ref(false);
 const hoveredProviderId = ref<string | null>(null);
 const reasoningMenuOpen = ref(false);
 const showReasoningContent = ref(false);
+const copiedErrorDetailKey = ref<string | null>(null);
 const providerMenuRef = ref<HTMLElement | null>(null);
 const reasoningMenuRef = ref<HTMLElement | null>(null);
 const checkpointPickerMenuRef = ref<HTMLElement | null>(null);
@@ -304,20 +322,55 @@ const turns = computed<TurnBucket[]>(() => {
     buckets.set(message.turnId, bucket);
   }
 
+  if (buckets.size === 0 && hasVisibleHistorySession.value && latestFailedTrace.value) {
+    const failedTrace = latestFailedTrace.value;
+    const errorSummary = latestFailedTraceSummary.value;
+    buckets.set(failedTrace.turnId, {
+      turnId: failedTrace.turnId,
+      user: null,
+      assistant: {
+        id: `failed-trace-${failedTrace.turnId}`,
+        turnId: failedTrace.turnId,
+        role: "assistant",
+        content: errorSummary,
+        status: "error",
+        modelName: failedTrace.providerName && failedTrace.providerModel
+          ? `${failedTrace.providerName}/${failedTrace.providerModel}`
+          : failedTrace.providerName ?? failedTrace.providerModel ?? null,
+        errorDetail: errorSummary
+      },
+      tools: []
+    });
+  }
+
   return Array.from(buckets.values());
 });
 
 const hasVisibleHistorySession = computed(() =>
-  runtimeStoreSessionList.value.some((session) => session.conversationId === runtimeStore.sessionId)
+  runtimeStoreSessionList.value.some(
+    (session) =>
+      session.conversationId === runtimeStore.sessionId &&
+      !isTransientSessionOverview(session)
+  )
 );
 const isEmptyWorkspace = computed(() => turns.value.length === 0 && !hasVisibleHistorySession.value);
 const latestFailedTrace = computed(() => {
   const traces = [...turnTraceHistory.value].reverse();
   return traces.find((trace) => trace.phase === "failed" || Boolean(trace.error)) ?? null;
 });
-const shouldShowFailureState = computed(
-  () => turns.value.length === 0 && hasVisibleHistorySession.value && latestFailedTrace.value != null
-);
+const latestFailedTraceSummary = computed(() => {
+  const trace = latestFailedTrace.value;
+  if (!trace) {
+    return "";
+  }
+
+  return (
+    trace.error?.trim() ||
+    trace.sessionSummary?.trim() ||
+    trace.traceTimeline?.find((entry) => entry.error?.trim())?.error?.trim() ||
+    "运行失败"
+  );
+});
 
 const checkpointEntries = computed(() => conversationCheckpointEntries.value ?? []);
 
@@ -399,6 +452,7 @@ function isIncrementalStreamingAppend(previous: string, next: string) {
 }
 
 let lastCleanupAssistantSignature = "";
+let lastSettledAssistantSignature = "";
 
 function syncPresentationMapValue<T extends string | number>(
   map: Record<string, T>,
@@ -407,6 +461,23 @@ function syncPresentationMapValue<T extends string | number>(
 ) {
   if (map[messageId] !== nextValue) {
     map[messageId] = nextValue;
+  }
+}
+
+function clearStreamingPresentationState(activeMessageIds: Set<string>) {
+  for (const map of [
+    streamSnapshotTextByMessageId,
+    streamSnapshotReasoningByMessageId,
+    streamFadeTextByMessageId,
+    streamFadeKeyByMessageId,
+    streamReasoningFadeTextByMessageId,
+    streamReasoningFadeKeyByMessageId,
+  ]) {
+    for (const messageId of activeMessageIds) {
+      if (messageId in map) {
+        delete map[messageId];
+      }
+    }
   }
 }
 
@@ -435,7 +506,7 @@ function syncStreamingPresentationState(source = "unknown") {
   const syncStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
   const activeMessageIds = new Set<string>();
   const activeAssistantSignatureParts: string[] = [];
-  let pendingAssistantCount = 0;
+  const pendingAssistants: ChatMessage[] = [];
 
   for (const message of messages.value) {
     if (message.role !== "assistant") {
@@ -444,14 +515,38 @@ function syncStreamingPresentationState(source = "unknown") {
 
     activeMessageIds.add(message.id);
     activeAssistantSignatureParts.push(message.id);
+    if (message.status === "pending") {
+      pendingAssistants.push(message);
+    }
+  }
+
+  const activeAssistantSignature = activeAssistantSignatureParts.join("|");
+  if (pendingAssistants.length === 0) {
+    if (activeAssistantSignature !== lastSettledAssistantSignature) {
+      clearStreamingPresentationState(activeMessageIds);
+      lastSettledAssistantSignature = activeAssistantSignature;
+    }
+    cleanupStreamingPresentationState(activeMessageIds, activeAssistantSignature);
+
+    const syncDurationMs = Math.round(((typeof performance !== "undefined" ? performance.now() : Date.now()) - syncStartAt) * 100) / 100;
+    updateStreamDebugReveal({
+      syncSource: source,
+      syncDurationMs,
+      pendingAssistantCount: 0,
+      maxTextBacklog: 0,
+      maxReasoningBacklog: 0,
+      currentTextBacklog: 0,
+      currentReasoningBacklog: 0,
+      revealLoopActive: false,
+      autoScrollQueued: scrollQueued.value
+    });
+    return;
+  }
+
+  lastSettledAssistantSignature = "";
+  for (const message of pendingAssistants) {
     const nextReasoning = assistantReasoning(message);
     const nextText = message.content;
-
-    if (message.status !== "pending") {
-      continue;
-    }
-
-    pendingAssistantCount += 1;
     const previousText = streamSnapshotTextByMessageId[message.id] ?? "";
     const previousReasoning = streamSnapshotReasoningByMessageId[message.id] ?? "";
 
@@ -490,25 +585,13 @@ function syncStreamingPresentationState(source = "unknown") {
     syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, nextReasoning);
   }
 
-  const activeAssistantSignature = activeAssistantSignatureParts.join("|");
-  if (pendingAssistantCount === 0) {
-    for (const message of messages.value) {
-      if (message.role !== "assistant") {
-        continue;
-      }
-      syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, message.content);
-      syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, assistantReasoning(message));
-      syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
-      syncPresentationMapValue(streamReasoningFadeTextByMessageId, message.id, "");
-    }
-  }
   cleanupStreamingPresentationState(activeMessageIds, activeAssistantSignature);
 
   const syncDurationMs = Math.round(((typeof performance !== "undefined" ? performance.now() : Date.now()) - syncStartAt) * 100) / 100;
   updateStreamDebugReveal({
     syncSource: source,
     syncDurationMs,
-    pendingAssistantCount,
+    pendingAssistantCount: pendingAssistants.length,
     maxTextBacklog: 0,
     maxReasoningBacklog: 0,
     currentTextBacklog: 0,
@@ -647,6 +730,34 @@ function assistantTone(message: ChatMessage | null) {
   }
 
   return "text-stone-800";
+}
+
+function assistantErrorDetail(message: ChatMessage | null) {
+  if (!message) {
+    return "";
+  }
+
+  return message.errorDetail?.trim() || message.content.trim();
+}
+
+function assistantErrorCopyKey(turnId: string) {
+  return `assistant-error-${turnId}`;
+}
+
+function copyErrorDetail(turnId: string, text: string) {
+  copiedErrorDetailKey.value = assistantErrorCopyKey(turnId);
+
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(text);
+  }
+
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => {
+      if (copiedErrorDetailKey.value === assistantErrorCopyKey(turnId)) {
+        copiedErrorDetailKey.value = null;
+      }
+    }, 1200);
+  }
 }
 
 function toolStatusIcon(message: ChatMessage) {
@@ -961,6 +1072,7 @@ function handleTimelineUserScrollIntent() {
 
 onMounted(() => {
   lastCleanupAssistantSignature = "";
+  lastSettledAssistantSignature = "";
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
   }
@@ -1003,19 +1115,22 @@ watch(
   { flush: "post" }
 );
 
-watch(latestTurnSignature, () => {
-  pendingStreamAutoFollow = streamAutoFollowEnabled.value || isTimelineNearBottom();
-}, { flush: "pre" });
-
-watch(latestTurnSignature, () => {
-  syncStreamingPresentationState("latest-turn-signature:post");
-  const behavior: ScrollBehavior = pendingStreamAutoFollow ? "smooth" : "auto";
-  streamAutoFollowEnabled.value = pendingStreamAutoFollow;
-
-  if (streamAutoFollowEnabled.value) {
-    queueScrollToLatestTurn(behavior);
+watch(latestTurnSignature, (signature, previousSignature) => {
+  if (signature === previousSignature) {
+    return;
   }
-}, { flush: "post" });
+
+  pendingStreamAutoFollow = streamAutoFollowEnabled.value || isTimelineNearBottom();
+  void nextTick().then(() => {
+    syncStreamingPresentationState("latest-turn-signature:post");
+    const behavior: ScrollBehavior = pendingStreamAutoFollow ? "smooth" : "auto";
+    streamAutoFollowEnabled.value = pendingStreamAutoFollow;
+
+    if (streamAutoFollowEnabled.value) {
+      queueScrollToLatestTurn(behavior);
+    }
+  });
+}, { flush: "pre" });
 
 watch(showReasoningContent, (value) => {
   if (typeof window !== "undefined") {
@@ -1047,7 +1162,7 @@ watch(isSubmitting, (submitting) => {
           data-testid="workspace-empty-state"
         >
           <h2 class="text-[28px] font-medium tracking-[-0.04em] text-stone-500">
-            需要我帮你做什么？
+            我能帮你做些什么？
           </h2>
         </section>
         <section v-for="turn in turns" :key="turn.turnId" class="space-y-3">
@@ -1181,6 +1296,37 @@ watch(isSubmitting, (submitting) => {
                 {{ assistantDisplayFadeContent(turn.assistant) }}
               </span>
             </div>
+            <details
+              v-if="turn.assistant?.status === 'error' && assistantErrorDetail(turn.assistant)"
+              class="conversation-disclosure conversation-error-panel mt-3 group"
+            >
+              <summary class="conversation-disclosure-summary text-rose-700">
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-rose-300 text-[11px] leading-none text-rose-600">!</span>
+                  <span>错误详情</span>
+                </div>
+                <div class="ml-auto flex items-center gap-1">
+                  <button
+                    class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-rose-400 transition hover:bg-rose-50 hover:text-rose-600"
+                    type="button"
+                    :data-testid="`workspace-error-copy-${turn.turnId}`"
+                    @click.stop="copyErrorDetail(turn.turnId, assistantErrorDetail(turn.assistant))"
+                  >
+                    <component
+                      :is="copiedErrorDetailKey === assistantErrorCopyKey(turn.turnId) ? Check : Copy"
+                      class="h-3 w-3"
+                    />
+                  </button>
+                  <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-rose-400" />
+                </div>
+              </summary>
+              <div
+                class="mt-2 whitespace-pre-wrap break-words rounded-[0.7rem] border border-rose-200/80 bg-rose-50/70 px-3 py-2 text-[12px] leading-5 text-rose-900"
+                data-testid="workspace-error-detail"
+              >
+                {{ assistantErrorDetail(turn.assistant) }}
+              </div>
+            </details>
 
             <div
               v-if="turn.assistant && checkpointEntryForTurn(turn.turnId) && !checkpointEntryForTurn(turn.turnId)?.isLatest"

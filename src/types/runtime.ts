@@ -489,6 +489,7 @@ export type ChatMessage = {
   displayNameZh?: string | null;
   detail?: string | null;
   durationSeconds?: number | null;
+  errorDetail?: string | null;
 };
 
 export type HookClass = "observe" | "guard" | "transform" | "side_effect";

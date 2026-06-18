@@ -179,7 +179,80 @@ function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
     modelName: partial.modelName ?? null,
     toolName: partial.toolName ?? null,
     detail: partial.detail ?? null,
-    durationSeconds: partial.durationSeconds ?? null
+    durationSeconds: partial.durationSeconds ?? null,
+    errorDetail: partial.errorDetail ?? null
+  };
+}
+
+function createTrace(
+  partial: Partial<{
+    turnId: string;
+    phase: "idle" | "ready" | "calling_model" | "calling_tool" | "completed" | "cancelled" | "failed";
+    error: string | null;
+    sessionSummary: string | null;
+    toolActivities: Array<{ id: string; name: string; status: string }>;
+  }> = {}
+) {
+  return {
+    turnId: partial.turnId ?? "turn-1",
+    sessionId: "session-current",
+    eventId: null,
+    eventType: null,
+    eventVersion: null,
+    sequence: null,
+    emittedAtMs: null,
+    title: "failed turn",
+    phase: partial.phase ?? "failed",
+    traceSteps: [],
+    traceTimeline: [
+      {
+        id: "timeline-1",
+        kind: "return",
+        label: "RETURN",
+        state: partial.phase ?? "failed",
+        sequence: 1,
+        provider_requested_name: null,
+        provider_name: null,
+        provider_protocol: null,
+        provider_model: null,
+        provider_source: null,
+        provider_mode: null,
+        build_context_observation: null,
+        tool_activities: partial.toolActivities ?? [],
+        text: null,
+        reasoning_content: null,
+        fallback_reason: null,
+        error: partial.error ?? null,
+        input_tokens: null,
+        cache_hit_input_tokens: null,
+        reasoning_tokens: null,
+        output_tokens: null,
+        total_tokens: null,
+        first_token_latency_ms: null,
+        turn_duration_ms: null
+      }
+    ],
+    toolActivities: partial.toolActivities ?? [],
+    providerCallRecords: [],
+    hookTraceRecords: [],
+    providerRequestedName: null,
+    providerName: null,
+    providerProtocol: null,
+    providerModel: null,
+    providerSource: null,
+    providerMode: null,
+    buildContextObservation: null,
+    sessionSummary: partial.sessionSummary ?? "failure summary",
+    fallbackReason: null,
+    error: partial.error ?? null,
+    inputTokens: null,
+    cacheHitInputTokens: null,
+    reasoningTokens: null,
+    outputTokens: null,
+    totalTokens: null,
+    firstTokenLatencyMs: null,
+    turnDurationMs: null,
+    updatedAt: 1000
   };
 }
 
@@ -429,7 +502,106 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.get('[data-testid="workspace-empty-state"]').text()).toContain("需要我帮你做什么？");
+    expect(wrapper.get('[data-testid="workspace-empty-state"]').text()).toContain("我能帮你做些什么？");
+  });
+
+  it("keeps the welcome empty state after createSession inserts a transient session overview", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-transient",
+      sessionOperation: null,
+      phase: "idle",
+      error: null,
+      messages: [],
+      sessionList: [
+        {
+          conversationId: "session-transient",
+          title: "新对话",
+          summary: "发送第一条消息后保存到历史",
+          turnCount: 0,
+          lastReferencedFile: null,
+          updatedAtMs: 0
+        }
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="workspace-empty-state"]').text()).toContain("我能帮你做些什么？");
+  });
+
+  it("shows a failure summary when a saved session has failed trace history but no transcript", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-failed-history",
+      sessionOperation: null,
+      phase: "failed",
+      error: null,
+      messages: [],
+      sessionList: [
+        {
+          conversationId: "session-failed-history",
+          title: "失败的历史",
+          summary: "失败摘要",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 1000
+        }
+      ],
+      turnTraceHistory: [
+        createTrace({
+          turnId: "turn-failed",
+          phase: "failed",
+          error: "tool chain exploded",
+          sessionSummary: "失败摘要",
+          toolActivities: [
+            {
+              id: "tool-1",
+              name: "workspace_search",
+              status: "error"
+            } as never
+          ]
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.text()).toContain("tool chain exploded");
+    expect(wrapper.get('[data-testid="workspace-error-detail"]').text()).toContain("tool chain exploded");
+    expect(wrapper.get('[data-testid="workspace-error-copy-turn-failed"]').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("需要我帮你做什么？");
+  });
+
+  it("renders error assistant details in a collapsible message block", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "assistant-error",
+          turnId: "turn-error",
+          role: "assistant",
+          content: "请求失败",
+          status: "error",
+          modelName: "OpenAI/GPT-5",
+          errorDetail: "stack line 1\nstack line 2"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.text()).toContain("错误详情");
+    await wrapper.find("summary").trigger("click");
+    await nextTick();
+    expect(wrapper.get('[data-testid="workspace-error-detail"]').text()).toContain("stack line 1");
+    expect(wrapper.get('[data-testid="workspace-error-copy-turn-error"]').exists()).toBe(true);
   });
 
   it("shows a resume CTA when the next submission will resume a paused run", async () => {

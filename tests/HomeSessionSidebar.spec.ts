@@ -173,6 +173,34 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.get('[data-testid="session-delete-session-transient"]').attributes("disabled")).toBeDefined();
   });
 
+  it("keeps a saved failed session visible instead of treating it as transient", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-failed-history",
+      sessionList: [
+        createSession({
+          conversationId: "session-failed-history",
+          title: "失败历史",
+          summary: "hook failed",
+          turnCount: 1,
+          updatedAtMs: 1000
+        })
+      ],
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: []
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.text()).not.toContain("未保存");
+    expect(wrapper.find('[data-testid="session-switch-session-failed-history"]').exists()).toBe(true);
+    expect(
+      wrapper.get('[data-testid="session-delete-session-failed-history"]').attributes("disabled")
+    ).toBeUndefined();
+  });
+
   it("disables switching and deletion during a session operation", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({

@@ -692,7 +692,7 @@ impl SessionStore {
             refresh_session_metadata(session, true);
             commit_history_node_from_live_state(
                 session,
-                classify_turn_node_kind(assistant_message),
+                HistoryNodeKind::TurnCommitted,
                 None,
             );
         }
@@ -6928,6 +6928,100 @@ mod tests {
                 .persistence_evidence_ref
                 .as_deref(),
             Some("trace://turn-failed-terminal/finalize")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_backend_roundtrip_persists_failed_turn_into_visible_history() {
+        let path = temp_sessions_path();
+        let backend = Box::new(FileSessionBackend::new(path.clone()));
+        let mut store = SessionStore::with_backend(backend);
+
+        store.append_failed_turn(
+            Some("failed-visible-history"),
+            "请继续排查 session 跳转问题",
+            "hook blocked finalize",
+            TurnTraceRecord {
+                turn_id: "turn-failed-visible-history".to_string(),
+                session_id: Some("failed-visible-history".to_string()),
+                event_id: None,
+                event_type: None,
+                event_version: None,
+                sequence: None,
+                emitted_at_ms: None,
+                title: "failed visible history".to_string(),
+                phase: "failed".to_string(),
+                trace_steps: vec![TurnTraceStep {
+                    id: "step-return".to_string(),
+                    label: "Return result".to_string(),
+                    state: "failed".to_string(),
+                }],
+                trace_timeline: vec![TraceTimelineEntry {
+                    id: "return-1".to_string(),
+                    kind: "return".to_string(),
+                    label: "RETURN RESULT".to_string(),
+                    state: "failed".to_string(),
+                    sequence: 1,
+                    provider_requested_name: None,
+                    provider_name: None,
+                    provider_protocol: None,
+                    provider_model: None,
+                    provider_source: None,
+                    provider_mode: None,
+                    build_context_observation: None,
+                    tool_activities: Vec::new(),
+                    text: Some("hook blocked finalize".to_string()),
+                    reasoning_content: None,
+                    fallback_reason: None,
+                    error: Some("hook blocked finalize".to_string()),
+                    input_tokens: None,
+                    cache_hit_input_tokens: None,
+                    reasoning_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                    first_token_latency_ms: None,
+                    turn_duration_ms: None,
+                }],
+                tool_activities: Vec::new(),
+                provider_call_records: Vec::new(),
+                hook_trace_records: Vec::new(),
+                provider_requested_name: None,
+                provider_name: None,
+                provider_protocol: None,
+                provider_model: None,
+                provider_source: None,
+                provider_mode: None,
+                build_context_observation: None,
+                session_summary: Some("hook blocked finalize".to_string()),
+                fallback_reason: None,
+                error: Some("hook blocked finalize".to_string()),
+                input_tokens: None,
+                cache_hit_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                first_token_latency_ms: None,
+                turn_duration_ms: None,
+                updated_at: 0,
+            },
+        );
+
+        let mut reloaded =
+            SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+        let snapshot = reloaded.snapshot(Some("failed-visible-history"), &[]);
+
+        assert_eq!(snapshot.turn_count, 1);
+        assert_eq!(snapshot.history.len(), 2);
+        assert_eq!(snapshot.history[0].role, "user");
+        assert_eq!(snapshot.history[0].content, "请继续排查 session 跳转问题");
+        assert_eq!(snapshot.history[1].role, "assistant");
+        assert_eq!(snapshot.history[1].content, "hook blocked finalize");
+        assert_eq!(snapshot.turn_trace_history.len(), 1);
+        assert_eq!(
+            snapshot.turn_trace_history[0].error.as_deref(),
+            Some("hook blocked finalize")
         );
 
         let _ = fs::remove_file(path);

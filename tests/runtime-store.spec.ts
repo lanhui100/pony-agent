@@ -48,7 +48,8 @@ function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
     modelName: partial.modelName ?? null,
     toolName: partial.toolName ?? null,
     detail: partial.detail ?? null,
-    durationSeconds: partial.durationSeconds ?? null
+    durationSeconds: partial.durationSeconds ?? null,
+    errorDetail: partial.errorDetail ?? null
   };
 }
 
@@ -729,6 +730,58 @@ describe("runtime session resilience", () => {
     expect(store.sessionList).toEqual([]);
   });
 
+  it("restores failed phase for a saved session that only has failed trace history", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "session-failed-legacy",
+      title: "Failed legacy session",
+      summary: "legacy failed summary",
+      history: [],
+      turnTraceHistory: [
+        createTrace({
+          turnId: "turn-failed",
+          phase: "failed",
+          error: "legacy failed trace",
+          eventId: "turn-failed:1",
+          eventType: "turn.failed",
+          eventVersion: "turn-event-v1",
+          sequence: 1,
+          emittedAtMs: 1000
+        })
+      ],
+      turnCount: 0,
+      updatedAtMs: 1000
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(snapshot);
+      }
+
+      if (command === "list_sessions") {
+        return [
+          {
+            conversationId: "session-failed-legacy",
+            title: "Failed legacy session",
+            summary: "legacy failed summary",
+            turnCount: 0,
+            lastReferencedFile: null,
+            updatedAtMs: 1000
+          }
+        ] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState("session-failed-legacy");
+
+    expect(store.phase).toBe("failed");
+    expect(store.messages).toEqual([]);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.error).toBe("legacy failed trace");
+  });
+
   it("restores session state and cache when delete_session fails", async () => {
     const store = useRuntimeStore();
     const targetMessages = [
@@ -1226,6 +1279,54 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory).toHaveLength(1);
     expect(store.turnTraceHistory[0]?.eventType).toBe("turn.failed");
     expect(store.phase).toBe("failed");
+  });
+
+  it("hydrates failed assistant history entries with error semantics and detail", async () => {
+    const store = useRuntimeStore();
+    const failedTrace = createTrace({
+      turnId: "turn-hydrated-failed",
+      phase: "failed",
+      eventId: "turn-hydrated-failed:3",
+      eventType: "turn.failed",
+      eventVersion: "turn-event-v1",
+      sequence: 3,
+      emittedAtMs: 3003,
+      error: "hydrated failed stack",
+      providerName: "OpenAI",
+      providerModel: "gpt-5",
+      updatedAt: 3003
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(
+          createSnapshot({
+            conversationId: "session-hydrated-failed",
+            summary: "hydrated failed summary",
+            history: [
+              { role: "user", content: "hydrated failed question" },
+              { role: "assistant", content: "hydrated failed answer" }
+            ],
+            turnTraceHistory: [failedTrace],
+            turnCount: 1,
+            updatedAtMs: 3003
+          })
+        );
+      }
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState("session-hydrated-failed");
+
+    const assistantMessage = store.messages.find((message) => message.role === "assistant");
+    expect(assistantMessage).toBeTruthy();
+    expect(assistantMessage?.status).toBe("error");
+    expect(assistantMessage?.content).toBe("hydrated failed answer");
+    expect(assistantMessage?.errorDetail).toBe("hydrated failed stack");
+    expect(assistantMessage?.modelName).toBe("OpenAI/gpt-5");
   });
 
   it("preserves attachment asset lifecycle metadata from snapshots and supports local filtering", () => {
