@@ -121,7 +121,9 @@ if ($Mode -eq "pre-commit") {
     if ($hasCore -or $hasTauri) {
       Write-Host ""
       Write-Host "[pony-agent] Version auto-bump: detecting changed components..." -ForegroundColor Cyan
-      & $bumpScript -AutoDetect -Stage
+      # Force pwsh (PowerShell 7+) — Windows PowerShell chokes on the
+      # Unicode box-drawing characters used in bump-version.ps1 output.
+      & "pwsh" -NoProfile -File $bumpScript -AutoDetect -Stage
       if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
         Write-Host "[pony-agent] Warning: version bump exited with code $LASTEXITCODE" -ForegroundColor Yellow
       }
