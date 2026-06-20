@@ -646,30 +646,16 @@ impl ProviderManager {
                                 tool_result,
                             )
                         }) {
-                            Ok(response) => response,
+                            Ok(response) => Ok(response),
                             Err(sync_error) => {
                                 provider_log(format!(
-                                    "followup:stream-local-fallback protocol=openai provider={} model={} reason={}",
+                                    "followup:stream-error protocol=openai provider={} model={} reason={}",
                                     self.config.provider_name, request.model, sync_error
                                 ));
-                                local_tool_followup_fallback_response(
-                                    request,
-                                    tool_call,
-                                    tool_result,
-                                    sync_error,
-                                )
+                                Err(sync_error)
                             }
                         };
-                        response.provider_source = "provider_followup_stream_sync_fallback".to_string();
-                        response.fallback_reason = Some(match response.fallback_reason.take() {
-                            Some(existing) => format!(
-                                "stream_followup_failed: {}; {}",
-                                stream_error,
-                                existing
-                            ),
-                            None => stream_error,
-                        });
-                        Ok(response)
+                        response
                     }
                 }
             }

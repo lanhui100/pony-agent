@@ -1,6 +1,6 @@
 [package]
 name = "pony-agent-core"
-version = "0.1.9"
+version = "0.1.11"
 edition = "2021"
 
 [lib]
@@ -23,6 +23,8 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["linux-native-sync-persistent"] }
+
+
 
 
 
