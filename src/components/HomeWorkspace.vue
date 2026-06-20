@@ -16,7 +16,7 @@ import {
   UserRound,
   Wrench
 } from "lucide-vue-next";
-import type { ProviderReasoningEffort } from "@/types/provider";
+import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
 import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
@@ -74,6 +74,7 @@ const reasoningMenuOpen = ref(false);
 const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
 const providerMenuRef = ref<HTMLElement | null>(null);
+const modelSubmenuStyle = ref<Record<string, string>>({ top: '0' });
 const reasoningMenuRef = ref<HTMLElement | null>(null);
 const checkpointPickerMenuRef = ref<HTMLElement | null>(null);
 const forkSummaryMenuRef = ref<HTMLElement | null>(null);
@@ -939,12 +940,57 @@ function toggleProviderMenu() {
   providerMenuOpen.value = !providerMenuOpen.value;
 
   if (providerMenuOpen.value) {
-    hoveredProviderId.value = currentProvider.value?.id ?? providerStore.providers[0]?.id ?? null;
+    const initialId = currentProvider.value?.id ?? providerStore.providers[0]?.id ?? null;
+    hoveredProviderId.value = initialId;
     reasoningMenuOpen.value = false;
+
+    // Adjust initial submenu position after DOM renders
+    if (initialId) {
+      nextTick(() => {
+        const buttonEl = providerMenuRef.value?.querySelector<HTMLElement>(
+          `[data-provider-id="${initialId}"]`
+        );
+        const provider = providerStore.providers.find((p) => p.id === initialId);
+        if (provider && buttonEl) {
+          adjustModelSubmenuPosition(provider, buttonEl);
+        }
+      });
+    }
     return;
   }
 
   hoveredProviderId.value = null;
+}
+
+function adjustModelSubmenuPosition(provider: ProviderConfig, button: HTMLElement) {
+  const buttonRect = button.getBoundingClientRect();
+  const viewportHeight = window.innerHeight;
+
+  // Estimate submenu height from its content
+  const modelCount = provider.models?.length ?? 0;
+  const captionHeight = 28;
+  const itemHeight = 30;
+  const padding = 12;
+  const estimatedHeight = captionHeight + (modelCount > 0 ? modelCount * itemHeight + padding : itemHeight);
+
+  const spaceBelow = viewportHeight - buttonRect.bottom - 8;
+
+  if (estimatedHeight > spaceBelow) {
+    const overflow = estimatedHeight - spaceBelow;
+    modelSubmenuStyle.value = { top: `-${overflow}px` };
+  } else {
+    modelSubmenuStyle.value = { top: '0' };
+  }
+}
+
+function onProviderEnter(provider: ProviderConfig, event: MouseEvent) {
+  hoveredProviderId.value = provider.id;
+  adjustModelSubmenuPosition(provider, event.currentTarget as HTMLElement);
+}
+
+function onProviderFocus(provider: ProviderConfig, event: FocusEvent) {
+  hoveredProviderId.value = provider.id;
+  adjustModelSubmenuPosition(provider, event.currentTarget as HTMLElement);
 }
 
 function toggleReasoningMenu() {
@@ -1494,40 +1540,46 @@ watch(isSubmitting, (submitting) => {
             >
               <div class="composer-menu-caption">提供商</div>
               <div class="composer-menu-divider"></div>
-              <div class="relative py-0.5">
-                <button
+              <div class="py-0.5">
+                <div
                   v-for="provider in providerStore.providers"
                   :key="provider.id"
-                  class="composer-menu-item"
-                  type="button"
-                  @mouseenter="hoveredProviderId = provider.id"
-                  @focus="hoveredProviderId = provider.id"
+                  class="relative"
                 >
-                  <span class="truncate">{{ provider.name }}</span>
-                  <div class="flex items-center gap-2">
-                    <Check v-if="currentProvider?.id === provider.id" class="h-3.5 w-3.5 text-stone-700" />
-                    <ChevronDown class="h-3.5 w-3.5 -rotate-90 text-stone-400" />
-                  </div>
-                </button>
-                <div
-                  v-if="hoveredProviderId"
-                  class="composer-menu-panel absolute left-full top-0 ml-1 min-w-[14rem]"
-                >
-              <div class="composer-menu-caption">模型</div>
-                  <div class="composer-menu-divider"></div>
                   <button
-                    v-for="model in providerStore.providers.find((provider) => provider.id === hoveredProviderId)?.models ?? []"
-                    :key="model.id"
                     class="composer-menu-item"
                     type="button"
-                    @click="selectModel(hoveredProviderId, model.id)"
+                    :data-provider-id="provider.id"
+                    @mouseenter="onProviderEnter(provider, $event)"
+                    @focus="onProviderFocus(provider, $event)"
                   >
-                    <span class="truncate">{{ model.name }}</span>
-                    <Check
-                      v-if="currentProvider?.id === hoveredProviderId && currentModel?.id === model.id"
-                      class="h-3.5 w-3.5 text-stone-700"
-                    />
+                    <span class="truncate">{{ provider.name }}</span>
+                    <div class="flex items-center gap-2">
+                      <Check v-if="currentProvider?.id === provider.id" class="h-3.5 w-3.5 text-stone-700" />
+                      <ChevronDown class="h-3.5 w-3.5 -rotate-90 text-stone-400" />
+                    </div>
                   </button>
+                  <div
+                    v-if="hoveredProviderId === provider.id"
+                    class="composer-menu-panel absolute left-full ml-1 min-w-[14rem]"
+                    :style="modelSubmenuStyle"
+                  >
+                    <div class="composer-menu-caption">模型</div>
+                    <div class="composer-menu-divider"></div>
+                    <button
+                      v-for="model in provider.models ?? []"
+                      :key="model.id"
+                      class="composer-menu-item"
+                      type="button"
+                      @click="selectModel(provider.id, model.id)"
+                    >
+                      <span class="truncate">{{ model.name }}</span>
+                      <Check
+                        v-if="currentProvider?.id === provider.id && currentModel?.id === model.id"
+                        class="h-3.5 w-3.5 text-stone-700"
+                      />
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
