@@ -23,6 +23,7 @@
   说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
 
 ## In Progress
+
 - 暂无
 
 ## Review
@@ -35,6 +36,9 @@
 
 ## Done
 
+- `PA-057` 前端飞行记录仪与卡顿诊断体系
+  说明：已完成前端 flight recorder、stall 检测、Tauri/SQLite 持久化与导出、主链路埋点、启动冻结分析与修复。已提交 `f6aab80`。OpenSpec change 已归档。
+  
 - `PA-054` 桥接能力入口：`MCP Resource / ToolSearch`
   说明：已完成 `MCP Resource / ToolSearch` 的最小 builtin 入口、capability mediation 接线、registry alias/limit/空结果/错误路径回归、前端 capability fallback 对齐，以及 `tool_router_regression` / core 全量 / E2E / smoke 验证。
 - `PA-053` 外部读取与知识获取：`WebFetch / WebSearch`

@@ -63,6 +63,8 @@
    当前已完成 context layering、memory/project/carry 分层实现、观测字段落点、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash` 代码审核与一轮 follow-up 采纳调优；后续若继续推进，应转入 instruction scope 真 source 枚举与 continuation/compaction 深化。
 20. `PA-056` 已补齐显式 `Coding / Work` 配置与 prompt 收紧闭环
    当前已新增独立 `AppSettings`、Tauri settings 命令、前端设置 store、左侧边栏尾部设置入口、`SettingsPanel` 与 `workspaceMode -> TurnContext -> domain profile` 主链透传，并已补 `BASE_SYSTEM_PROMPT` 中文默认语义恢复、小窗口 domain profile 跳过和 `runtime.ts` teardown 稳定性修复；后续其它全栈配置项可以沿这条配置面继续扩展，而不必再重复改造上下文主路径。
+21. `PA-057` 已完成前端 flight recorder 与卡顿诊断体系
+    当前已完成前端 `frontend-flight-recorder.ts`（ring buffer、stall 检测、flush 退避）、Rust 端 `frontend_diagnostics.rs`（SQLite 持久化 + async spawn_blocking）、host 层集成（6 个 Tauri command）、主链路埋点激活及`npm run dev`启动冻结分析与修复；已提交 `f6aab80`，OpenSpec change 已归档。
 
 ## 远期扩展
 
@@ -116,6 +118,7 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 2. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049`。
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。
+5. 前端卡顿定位现已具备 flight recorder 证据链（`PA-057` 已完成），后续性能优化可以基于 `frontend-diagnostics.db` 中的 stall 快照和 trace 事件进行数据分析，而不是再靠手动复现。
 
 ## 新近线候选
 
@@ -127,6 +130,8 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
    在 core 多端边界继续稳定的同时，优先把工具系统的模型可见协议、结果合同、暴露策略与分类体系正式写成 spec，避免后续 workspace / permission / first-wave tools 各自发明字段与命名。
 4. `PA-056` context assembly and cache strategy
    在 `PA-025 / PA-029` 已经提供第一版上下文观测与缓存 telemetry 的基础上，把 system prompt、runtime facts、project instructions、conversation carry 与长期记忆扩展点正式统一到同一套上下文分层架构中。
+5. 前端卡顿根因定位
+    PA-057 已交付完整的前端 flight recorder 与 stall 诊断体系。后续可通过分析 frontend-diagnostics.db 中的 rAF gap / timer drift / longtask 数据定位剩余卡顿。
 
 ## 关联入口
 
