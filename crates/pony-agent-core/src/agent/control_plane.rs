@@ -3650,6 +3650,7 @@ mod tests {
     use super::*;
     use crate::agent::config::{
         ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
+        ThinkingParamPattern,
     };
     use crate::agent::context::DefaultTurnContextBuilder;
     use crate::agent::graph::{
@@ -4023,6 +4024,7 @@ mod tests {
                 supports_reasoning: true,
                 ..Default::default()
             },
+            thinking_param_pattern: ThinkingParamPattern::EffortStandard,
         }
     }
 

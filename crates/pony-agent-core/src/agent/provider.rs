@@ -1,4 +1,6 @@
-use crate::agent::config::{ProviderReasoningEffort, ResolvedProviderSelection};
+use crate::agent::config::{
+    ProviderReasoningEffort, ResolvedProviderSelection, ThinkingParamPattern,
+};
 use crate::agent::input::TurnInputImage;
 use crate::agent::tools::{builtin_tool_contract_views, ToolCall, ToolDefinition, ToolResult};
 use reqwest::blocking::Client;
@@ -1834,16 +1836,39 @@ fn openai_usage_extracts_cache_hit_and_reasoning_tokens() {
 }
 
 fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelection) -> Value {
-    if openai_requires_thinking_mode(config) {
+    if thinking_param_needs_thinking_toggle(config) {
         body["thinking"] = json!({
             "type": "enabled"
         });
     }
 
-    if config.capabilities.supports_reasoning {
-        if let Some(effort) = config.reasoning_effort.as_ref() {
-            body["reasoning_effort"] = Value::String(reasoning_effort_label(effort).to_string());
+    match config.thinking_param_pattern {
+        ThinkingParamPattern::EffortWithNone => {
+            let effort = config
+                .reasoning_effort
+                .as_ref()
+                .map(deepseek_reasoning_effort_label)
+                .unwrap_or("medium");
+            body["reasoning_effort"] = Value::String(effort.to_string());
         }
+        ThinkingParamPattern::EffortStandard => {
+            if let Some(effort) = config.reasoning_effort.as_ref() {
+                body["reasoning_effort"] =
+                    Value::String(reasoning_effort_label(effort).to_string());
+            }
+        }
+        ThinkingParamPattern::AnthropicThinking => {
+            if let Some(budget) = config
+                .reasoning_budget_tokens
+                .filter(|b| *b > 0)
+            {
+                body["thinking"] = json!({
+                    "type": "enabled",
+                    "budget_tokens": budget
+                });
+            }
+        }
+        ThinkingParamPattern::None | ThinkingParamPattern::ThinkingToggle => {}
     }
 
     body
@@ -1884,7 +1909,7 @@ fn apply_openai_tool_capability(
     config: &ResolvedProviderSelection,
 ) -> Value {
     let supports_tools = config.capabilities.supports_tools && !tools.is_empty();
-    let supports_tool_choice = openai_supports_tool_choice(config);
+    let supports_tool_choice = thinking_param_supports_tool_choice(config);
 
     if supports_tools {
         if !supports_tool_choice {
@@ -1918,24 +1943,12 @@ fn apply_anthropic_tool_capability(
     body
 }
 
-fn openai_requires_thinking_mode(config: &ResolvedProviderSelection) -> bool {
-    config.capabilities.supports_reasoning && is_deepseek_provider(config)
+fn thinking_param_needs_thinking_toggle(config: &ResolvedProviderSelection) -> bool {
+    config.thinking_param_pattern == ThinkingParamPattern::ThinkingToggle
 }
 
-fn openai_supports_tool_choice(config: &ResolvedProviderSelection) -> bool {
-    !openai_requires_thinking_mode(config)
-}
-
-fn is_deepseek_provider(config: &ResolvedProviderSelection) -> bool {
-    let requested = config.requested_name.to_lowercase();
-    let provider = config.provider_name.to_lowercase();
-    let base_url = config.base_url.to_lowercase();
-    let model = config.model.to_lowercase();
-
-    requested.contains("deepseek")
-        || provider.contains("deepseek")
-        || base_url.contains("deepseek")
-        || model.contains("deepseek")
+fn thinking_param_supports_tool_choice(config: &ResolvedProviderSelection) -> bool {
+    config.thinking_param_pattern != ThinkingParamPattern::ThinkingToggle
 }
 
 fn reasoning_effort_label(effort: &ProviderReasoningEffort) -> &'static str {
@@ -1967,6 +1980,15 @@ fn reasoning_effort_label(effort: &ProviderReasoningEffort) -> &'static str {
         );
     }
     // */
+}
+
+fn deepseek_reasoning_effort_label(effort: &ProviderReasoningEffort) -> &'static str {
+    match effort {
+        ProviderReasoningEffort::Low => "low",
+        ProviderReasoningEffort::Medium => "medium",
+        ProviderReasoningEffort::High => "high",
+        ProviderReasoningEffort::Max => "high",
+    }
 }
 
 fn to_chat_role(role: &ProviderRole) -> &'static str {
@@ -2165,13 +2187,41 @@ fn merge_openai_stream_tool_calls(
         }
 
         if let Some(function) = item.get("function") {
+            // 只在 name 非空时覆盖。ppx 等 provider 可能在后续 chunk 中发送空 name，
+            // 导致之前已经正确设置的 name 被覆盖。
             if let Some(name) = function.get("name").and_then(Value::as_str) {
-                partial.name = Some(name.to_string());
+                if !name.is_empty() {
+                    partial.name = Some(name.to_string());
+                }
             }
 
             if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
                 partial.arguments.push_str(arguments);
             }
+        }
+
+        // 诊断：当 tool call item 包含 arguments 但缺少 function.name 时，
+        // 说明 provider 返回了非标准格式，打印原始 delta 用于排查。
+        let has_arguments = item.get("arguments").is_some()
+            || item
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .is_some();
+        let has_name_via_function = item
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+            .map_or(false, |n| !n.is_empty());
+        let has_name_direct = item
+            .get("name")
+            .and_then(Value::as_str)
+            .map_or(false, |n| !n.is_empty());
+        if has_arguments && !has_name_via_function && !has_name_direct {
+            provider_log(format!(
+                "provider:sse-tool-call-missing-name index={} item_preview={}",
+                index,
+                preview_text(&item.to_string(), 400)
+            ));
         }
     }
 }
@@ -3687,6 +3737,7 @@ mod tests {
                 supports_reasoning: false,
                 ..Default::default()
             },
+            thinking_param_pattern: ThinkingParamPattern::None,
         };
 
         let body = apply_openai_tool_capability(
@@ -3707,7 +3758,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_reasoning_removes_openai_tool_choice_but_keeps_tools() {
+    fn deepseek_v4_keeps_openai_tool_choice() {
         let config = ResolvedProviderSelection {
             requested_name: "deepseek".to_string(),
             provider_name: "deepseek".to_string(),
@@ -3729,6 +3780,7 @@ mod tests {
                 supports_reasoning: true,
                 ..Default::default()
             },
+            thinking_param_pattern: ThinkingParamPattern::EffortWithNone,
         };
 
         let body = apply_openai_tool_capability(
@@ -3744,7 +3796,7 @@ mod tests {
             &config,
         );
 
-        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tool_choice").is_some());
         assert!(body.get("tools").is_some());
     }
 
@@ -3771,6 +3823,7 @@ mod tests {
                 supports_reasoning: true,
                 ..Default::default()
             },
+            thinking_param_pattern: ThinkingParamPattern::AnthropicThinking,
         };
 
         let body = apply_anthropic_tool_capability(
@@ -4241,13 +4294,14 @@ mod tests {
             reasoning_effort: None,
             reasoning_budget_tokens: None,
             capabilities: ProviderModelCapabilities {
-                context_window_tokens: Some(128_000),
+                context_window_tokens: Some(200_000),
                 supports_tools: true,
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
                 ..Default::default()
             },
+            thinking_param_pattern: ThinkingParamPattern::EffortStandard,
         };
         let manager = ProviderManager::new(config);
         let request = ProviderRequest {

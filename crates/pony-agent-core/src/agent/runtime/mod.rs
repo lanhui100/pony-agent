@@ -6787,6 +6787,23 @@ fn normalize_tool_directive(
         });
     }
 
+    // 诊断：name 为空时，将完整的 assistant_message 原始数据和 tool_call 字段全部打印出来，
+    // 用于排查 provider 返回的原始响应结构。
+    if let Some(ref raw_msg) = assistant_message {
+        runtime_log(format!(
+            "turn:tool-call-empty-name call_id={:?} arguments={} raw_assistant_message={}",
+            tool_call.call_id,
+            tool_call.arguments,
+            preview_text(&raw_msg.to_string(), 800),
+        ));
+    } else {
+        runtime_log(format!(
+            "turn:tool-call-empty-name call_id={:?} arguments={} raw_assistant_message=none",
+            tool_call.call_id,
+            tool_call.arguments,
+        ));
+    }
+
     let repaired_name = infer_tool_name_from_arguments(&tool_call.arguments).ok_or_else(|| {
         format!(
             "provider 返回了缺少工具名的 tool call，且当前无法根据参数自动修复；arguments={}",
@@ -6820,6 +6837,16 @@ fn normalize_tool_directive(
 
 fn infer_tool_name_from_arguments(arguments: &Value) -> Option<String> {
     let object = arguments.as_object()?;
+
+    // Plan 类型：参数包含 calls 数组（用于批量并行执行子调用）
+    if object
+        .get("calls")
+        .and_then(Value::as_array)
+        .map_or(false, |calls| !calls.is_empty())
+    {
+        return Some("Plan".to_string());
+    }
+
     let path = object
         .get("path")
         .and_then(Value::as_str)
@@ -8295,6 +8322,7 @@ mod tests {
     use super::*;
     use crate::agent::config::{
         ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
+        ThinkingParamPattern,
     };
     use crate::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
     use crate::agent::hooks::{
@@ -8926,6 +8954,7 @@ mod tests {
                 supports_reasoning: true,
                 ..Default::default()
             },
+            thinking_param_pattern: ThinkingParamPattern::EffortStandard,
         }
     }
 
@@ -8951,6 +8980,7 @@ mod tests {
                 supports_reasoning: true,
                 ..Default::default()
             },
+            thinking_param_pattern: ThinkingParamPattern::EffortWithNone,
         }
     }
 

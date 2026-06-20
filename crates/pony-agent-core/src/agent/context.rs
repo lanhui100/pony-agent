@@ -1393,7 +1393,9 @@ fn to_provider_history_message(message: &TurnHistoryMessage) -> Option<ProviderM
 mod tests {
     use super::*;
     use crate::agent::capability_bridge::{CapabilityKind, SkillDescriptor, SkillSourceKind};
-    use crate::agent::config::{ProviderModelCapabilities, ResolvedProviderSelection};
+    use crate::agent::config::{
+        ProviderModelCapabilities, ResolvedProviderSelection, ThinkingParamPattern,
+    };
     use crate::agent::graph::{
         GraphDecision, GraphDecisionKind, GraphDecisionReason, GraphRun, GraphRunPhase,
     };
@@ -1419,6 +1421,7 @@ mod tests {
             reasoning_effort: None,
             reasoning_budget_tokens: None,
             capabilities,
+            thinking_param_pattern: ThinkingParamPattern::None,
         })
     }
 

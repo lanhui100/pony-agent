@@ -211,6 +211,21 @@ struct ProviderRegistryStorage {
     selected_provider_id: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThinkingParamPattern {
+    /// No thinking-related parameters.
+    None,
+    /// Standard reasoning_effort: low/medium/high/max (OpenAI, e.g., GPT-5, o1, o3).
+    EffortStandard,
+    /// reasoning_effort: low/medium/high/none (DeepSeek V4, Volcano Engine).
+    /// "none" explicitly disables thinking.
+    EffortWithNone,
+    /// thinking: { type: "enabled/disabled" } (legacy DeepSeek reasoner R1).
+    ThinkingToggle,
+    /// Anthropic thinking block with budget_tokens.
+    AnthropicThinking,
+}
+
 #[derive(Clone)]
 pub struct ResolvedProviderSelection {
     pub requested_name: String,
@@ -226,6 +241,7 @@ pub struct ResolvedProviderSelection {
     pub reasoning_effort: Option<ProviderReasoningEffort>,
     pub reasoning_budget_tokens: Option<u32>,
     pub capabilities: ProviderModelCapabilities,
+    pub thinking_param_pattern: ThinkingParamPattern,
 }
 
 pub trait ProviderSelectionResolver: Send {
@@ -342,6 +358,11 @@ impl ProviderRegistryStore {
             reasoning_effort: model.reasoning_effort.clone(),
             reasoning_budget_tokens: model.reasoning_budget_tokens,
             capabilities: model.capabilities.clone(),
+            thinking_param_pattern: resolve_thinking_param_pattern(
+                &model.capability_preset,
+                &provider.protocol,
+                &model.model,
+            ),
         }
     }
 
@@ -1006,6 +1027,47 @@ fn infer_capability_preset(
     }
 
     ProviderCapabilityPreset::Auto
+}
+
+fn is_deepseek_v4_by_model(model_name: &str) -> bool {
+    let lower = model_name.to_ascii_lowercase();
+    lower.contains("deepseek-v4") || lower.contains("v4-flash") || lower.contains("v4-pro")
+}
+
+fn resolve_thinking_param_pattern(
+    preset: &ProviderCapabilityPreset,
+    protocol: &ProviderProtocol,
+    model_name: &str,
+) -> ThinkingParamPattern {
+    match preset {
+        ProviderCapabilityPreset::OpenAiChat => ThinkingParamPattern::None,
+        ProviderCapabilityPreset::OpenAiReasoning => ThinkingParamPattern::EffortStandard,
+        ProviderCapabilityPreset::AnthropicThinking => ThinkingParamPattern::AnthropicThinking,
+        ProviderCapabilityPreset::DeepseekChat => ThinkingParamPattern::EffortWithNone,
+        ProviderCapabilityPreset::DeepseekReasoner => {
+            if is_deepseek_v4_by_model(model_name) {
+                ThinkingParamPattern::EffortWithNone
+            } else {
+                ThinkingParamPattern::ThinkingToggle
+            }
+        }
+        ProviderCapabilityPreset::Auto | ProviderCapabilityPreset::Custom => {
+            let lower = model_name.to_ascii_lowercase();
+            if !lower.contains("deepseek") {
+                if matches!(protocol, ProviderProtocol::Anthropic) {
+                    ThinkingParamPattern::AnthropicThinking
+                } else if preset == &ProviderCapabilityPreset::Auto {
+                    ThinkingParamPattern::None
+                } else {
+                    ThinkingParamPattern::None
+                }
+            } else if is_deepseek_v4_by_model(model_name) {
+                ThinkingParamPattern::EffortWithNone
+            } else {
+                ThinkingParamPattern::ThinkingToggle
+            }
+        }
+    }
 }
 
 fn preset_model_capabilities(
