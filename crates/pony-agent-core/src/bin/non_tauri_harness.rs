@@ -38,6 +38,7 @@ impl ProviderSelectionResolver for StaticResolver {
             reasoning_effort: None,
             reasoning_budget_tokens: None,
             capabilities: ProviderModelCapabilities::default(),
+            thinking_param_pattern: crate::agent::config::ThinkingParamPattern::None,
         }
     }
 }
