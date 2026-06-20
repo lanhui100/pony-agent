@@ -2193,6 +2193,7 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
     let id = tool_call
         .get("id")
         .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
         .map(str::to_string);
     let function = tool_call.get("function")?;
     let name = openai_original_tool_name(function.get("name").and_then(Value::as_str)?);
@@ -2227,7 +2228,9 @@ fn merge_openai_stream_tool_calls(
         let partial = tool_calls.entry(index).or_default();
 
         if let Some(id) = item.get("id").and_then(Value::as_str) {
-            partial.id = Some(id.to_string());
+            if !id.is_empty() {
+                partial.id = Some(id.to_string());
+            }
         }
 
         if let Some(function) = item.get("function") {
@@ -2434,7 +2437,12 @@ fn openai_assistant_message_for_tool_result(
         })
         .unwrap_or_default();
 
-    if filtered_tool_calls.is_empty() {
+    if filtered_tool_calls.is_empty()
+        || tool_call
+            .call_id
+            .as_deref()
+            .map_or(true, |id| id.is_empty())
+    {
         return provider_native_assistant_tool_call_message_with_reasoning_value(
             normalized.get("content").and_then(Value::as_str),
             normalized.get("reasoning_content"),
