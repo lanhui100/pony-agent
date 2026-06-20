@@ -617,55 +617,62 @@ impl ProviderManager {
         }
 
         match self.config.protocol {
-            ProviderProtocol::OpenAi => match self.send_openai_tool_followup_stream_request(
-                request,
-                tools,
-                accumulated_messages,
-                assistant_message,
-                tool_call,
-                tool_result,
-                &mut on_delta,
-            ) {
-                Ok(response) => Ok(response),
-                Err(stream_error) => {
-                    provider_log(format!(
-                        "followup:stream-fallback protocol=openai provider={} model={} reason={}",
-                        self.config.provider_name, request.model, stream_error
-                    ));
-                    let mut response = match self.send_openai_tool_followup_request(
+            ProviderProtocol::OpenAi => {
+                let stream_result = retry_followup(|| {
+                    self.send_openai_tool_followup_stream_request(
                         request,
                         tools,
                         accumulated_messages,
                         assistant_message,
                         tool_call,
                         tool_result,
-                    ) {
-                        Ok(response) => response,
-                        Err(sync_error) => {
-                            provider_log(format!(
-                                "followup:stream-local-fallback protocol=openai provider={} model={} reason={}",
-                                self.config.provider_name, request.model, sync_error
-                            ));
-                            local_tool_followup_fallback_response(
+                        &mut on_delta,
+                    )
+                });
+                match stream_result {
+                    Ok(response) => Ok(response),
+                    Err(stream_error) => {
+                        provider_log(format!(
+                            "followup:stream-fallback protocol=openai provider={} model={} reason={}",
+                            self.config.provider_name, request.model, stream_error
+                        ));
+                        let mut response = match retry_followup(|| {
+                            self.send_openai_tool_followup_request(
                                 request,
+                                tools,
+                                accumulated_messages,
+                                assistant_message,
                                 tool_call,
                                 tool_result,
-                                sync_error,
                             )
-                        }
-                    };
-                    response.provider_source = "provider_followup_stream_sync_fallback".to_string();
-                    response.fallback_reason = Some(match response.fallback_reason.take() {
-                        Some(existing) => format!(
-                            "stream_followup_failed: {}; {}",
-                            preview_text(&stream_error, 160),
-                            existing
-                        ),
-                        None => stream_error,
-                    });
-                    Ok(response)
+                        }) {
+                            Ok(response) => response,
+                            Err(sync_error) => {
+                                provider_log(format!(
+                                    "followup:stream-local-fallback protocol=openai provider={} model={} reason={}",
+                                    self.config.provider_name, request.model, sync_error
+                                ));
+                                local_tool_followup_fallback_response(
+                                    request,
+                                    tool_call,
+                                    tool_result,
+                                    sync_error,
+                                )
+                            }
+                        };
+                        response.provider_source = "provider_followup_stream_sync_fallback".to_string();
+                        response.fallback_reason = Some(match response.fallback_reason.take() {
+                            Some(existing) => format!(
+                                "stream_followup_failed: {}; {}",
+                                stream_error,
+                                existing
+                            ),
+                            None => stream_error,
+                        });
+                        Ok(response)
+                    }
                 }
-            },
+            }
             ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_stream_request(
                 request,
                 tools,
@@ -2651,6 +2658,55 @@ const OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS: usize = 12_000;
 const OPENAI_TOOL_RESULT_HEAD_CHARS: usize = 4_500;
 const OPENAI_TOOL_RESULT_TAIL_CHARS: usize = 2_500;
 const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
+const FOLLOWUP_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+fn extract_provider_error_detail(err: &str) -> String {
+    // Error format: "provider 返回错误状态：{status}；耗时={ms}ms；响应正文：{body}"
+    // Extract error.message from response body JSON: {"error":{"message":"..."}}
+    if let Some(body_start) = err.find("响应正文：") {
+        let body = &err[body_start + "响应正文：".len()..];
+        if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+            if let Some(msg) = parsed
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+            {
+                if !msg.is_empty() {
+                    return msg.to_string();
+                }
+            }
+        }
+    }
+    preview_text(err, 240)
+}
+
+fn retry_followup<F>(mut operation: F) -> Result<ProviderResponse, String>
+where
+    F: FnMut() -> Result<ProviderResponse, String>,
+{
+    let mut last_error = String::new();
+    for attempt in 1..=FOLLOWUP_RETRY_MAX_ATTEMPTS {
+        if attempt > 1 {
+            let delay_ms = std::cmp::min(500 * (1 << (attempt - 2)), 8000);
+            provider_log(format!(
+                "followup:retry attempt={}/{} delay={}ms",
+                attempt, FOLLOWUP_RETRY_MAX_ATTEMPTS, delay_ms
+            ));
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+        match operation() {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                last_error = extract_provider_error_detail(&err);
+                provider_log(format!(
+                    "followup:retry attempt={}/{} failed error_detail={}",
+                    attempt, FOLLOWUP_RETRY_MAX_ATTEMPTS, last_error
+                ));
+            }
+        }
+    }
+    Err(last_error)
+}
 
 fn openai_followup_tool_result_message(tool_call: &ToolCall, tool_result: &ToolResult) -> Value {
     json!({
