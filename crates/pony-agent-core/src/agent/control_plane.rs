@@ -8,6 +8,11 @@ use crate::agent::execution_control::{
     execution_checkpoint_contract_version, refresh_execution_checkpoint_projection,
     ExecutionCheckpoint, ExecutionControlRegistry, StopTurnResponse,
 };
+use crate::agent::frontend_diagnostics::{
+    default_frontend_diagnostics_sqlite_path, FrontendDiagnosticsStore, FrontendStallSnapshot,
+    FrontendTraceAppendCommand, FrontendTraceExportPayload, FrontendTraceQuery,
+    FrontendTraceQueryResult,
+};
 use crate::agent::graph::{
     GraphDecision, GraphRun, GraphRunCheckpoint, GraphRunControlBoundaryEvidence, GraphRunEvent,
     GraphRunPhase, GraphRunStopReason, GraphRunStore, GraphRunner, GraphTurnHandoff,
@@ -738,6 +743,7 @@ pub struct HostControlPlane {
     graph_runner: GraphRunner,
     graph_planner: Box<dyn GraphPlanner>,
     capability_registry: Mutex<CapabilityRegistry>,
+    frontend_diagnostics: FrontendDiagnosticsStore,
 }
 
 pub struct HostControlPlaneBuilder {
@@ -807,6 +813,7 @@ impl HostControlPlaneBuilder {
                 .graph_planner
                 .unwrap_or_else(|| Box::new(DefaultGraphPlanner)),
             capability_registry: Mutex::new(capability_registry),
+            frontend_diagnostics: FrontendDiagnosticsStore::new(default_frontend_diagnostics_sqlite_path()),
         }
     }
 }
@@ -848,6 +855,30 @@ impl HostControlPlane {
             graph_engine: runtime.graph_engine().to_string(),
             graph_contract_version: runtime.graph_contract_version().to_string(),
         }
+    }
+
+    pub fn append_frontend_trace_events(&self, command: FrontendTraceAppendCommand) -> Result<(), String> {
+        self.frontend_diagnostics.append(command)
+    }
+
+    pub fn query_frontend_trace_window(&self, query: FrontendTraceQuery) -> Result<FrontendTraceQueryResult, String> {
+        self.frontend_diagnostics.query_window(query)
+    }
+
+    pub fn query_frontend_stall_snapshots(&self, query: FrontendTraceQuery) -> Result<Vec<FrontendStallSnapshot>, String> {
+        self.frontend_diagnostics.query_stall_snapshots(query)
+    }
+
+    pub fn clear_frontend_trace_before(&self, ts_wall_ms: i64) -> Result<(), String> {
+        self.frontend_diagnostics.clear_before(ts_wall_ms)
+    }
+
+    pub fn export_frontend_trace_json(&self, query: FrontendTraceQuery) -> Result<FrontendTraceExportPayload, String> {
+        self.frontend_diagnostics.export_json(query)
+    }
+
+    pub fn export_frontend_trace_chrome_trace(&self, query: FrontendTraceQuery) -> Result<FrontendTraceExportPayload, String> {
+        self.frontend_diagnostics.export_chrome_trace(query)
     }
 
     pub fn list_capability_sources(&self) -> Vec<CapabilitySourceView> {

@@ -1221,6 +1221,118 @@ export type HostInspectionSnapshot = {
   runs?: GraphRun[] | null;
 };
 
+export type FrontendTraceValue = string | number | boolean | null;
+
+export type FrontendTraceData = Record<string, FrontendTraceValue>;
+
+export type FrontendTraceEventKind =
+  | "span"
+  | "instant"
+  | "counter"
+  | "sample"
+  | "stall"
+  | "snapshot";
+
+export type FrontendTraceScope = "global" | "pre-session" | "session" | "turn";
+
+export type FrontendStallLevel = "light" | "medium" | "heavy";
+
+export type FrontendTraceEvent = {
+  id?: number | null;
+  seq: number;
+  tsWallMs: number;
+  tsPerfMs: number;
+  sessionId: string | null;
+  turnId: string | null;
+  scope: FrontendTraceScope;
+  category: string;
+  name: string;
+  kind: FrontendTraceEventKind;
+  durationMs?: number | null;
+  stallLevel?: FrontendStallLevel | null;
+  triggerKind?: string | null;
+  data?: FrontendTraceData | null;
+  truncated?: boolean;
+};
+
+export type FrontendStallSnapshot = {
+  id?: number | null;
+  sessionId: string | null;
+  turnId: string | null;
+  tsWallMs: number;
+  tsPerfMs: number;
+  stallLevel: FrontendStallLevel;
+  triggerKind: string;
+  stallGapMs: number;
+  snapshot: FrontendTraceData;
+  truncated?: boolean;
+};
+
+export type FrontendTraceQuery = {
+  sessionId?: string | null;
+  turnId?: string | null;
+  fromWallMs?: number | null;
+  toWallMs?: number | null;
+  limit?: number | null;
+  cursor?: string | null;
+};
+
+export type FrontendTraceQueryResult = {
+  events: FrontendTraceEvent[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+};
+
+export type FrontendStallSnapshotQuery = {
+  sessionId?: string | null;
+  turnId?: string | null;
+  fromWallMs?: number | null;
+  toWallMs?: number | null;
+  limit?: number | null;
+};
+
+export type FrontendTraceExportFormat = "json" | "chrome-trace";
+
+export type FrontendTraceExportPayload = {
+  format: FrontendTraceExportFormat;
+  fileName: string;
+  content: string;
+  truncated: boolean;
+  eventCount: number;
+  snapshotCount: number;
+  fromWallMs?: number | null;
+  toWallMs?: number | null;
+};
+
+export type FrontendRecorderCapabilitySnapshot = {
+  tauriAvailable: boolean;
+  persistenceAvailable: boolean;
+  performanceObserverAvailable: boolean;
+  longtaskAvailable: boolean;
+  requestIdleCallbackAvailable: boolean;
+  initializedAtMs: number;
+};
+
+export type FrontendRecorderStats = {
+  initialized: boolean;
+  activeSessionId: string | null;
+  activeTurnId: string | null;
+  seq: number;
+  bufferedEventCount: number;
+  bufferedSnapshotCount: number;
+  flushCount: number;
+  flushFailureCount: number;
+  droppedEventCount: number;
+  droppedSnapshotCount: number;
+  stallCount: number;
+  lastStallGapMs: number | null;
+  lastFlushDurationMs: number | null;
+  lastFlushAtMs: number | null;
+  lastError: string | null;
+  lastExportAtMs: number | null;
+};
+
 export function normalizeGraphRunPhase(phase?: string | null): GraphRunPhase | null {
   const normalized = phase?.trim().toLowerCase() ?? "";
   if (

@@ -18,6 +18,7 @@ import type {
   SessionRuntimeView,
   TurnTraceRecord
 } from "@/types/runtime";
+import { __resetFrontendFlightRecorderForTests } from "@/lib/frontend-flight-recorder";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useSettingsStore } from "@/stores/settings";
 
@@ -448,6 +449,7 @@ function flushDeferredTurnWork() {
 describe("runtime session resilience", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetFrontendFlightRecorderForTests();
     window.localStorage.clear();
     vi.spyOn(console, "info").mockImplementation(() => {});
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
@@ -1498,6 +1500,83 @@ describe("runtime session resilience", () => {
     expect(store.sessionError).toBeNull();
     expect(store.messages).toEqual([]);
     expect(store.sessionList).toEqual([]);
+  });
+
+  it("records segmented frontend diagnostics during initializeSessions", async () => {
+    const store = useRuntimeStore();
+    vi.useFakeTimers();
+    try {
+      tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+        if (command === "health_check") {
+          return {
+            appName: "Pony Agent",
+            appVersion: "dev-preview",
+            runtime: "tauri",
+            graphEngine: "graph-runtime",
+            graphContractVersion: "v1"
+          };
+        }
+
+        if (command === "list_sessions") {
+          return [
+            {
+              conversationId: "session-latest",
+              title: "Latest session",
+              summary: "Latest summary",
+              turnCount: 1,
+              lastReferencedFile: null,
+              updatedAtMs: 2000
+            }
+          ] satisfies SessionOverview[];
+        }
+
+        if (command === "load_session_runtime_view") {
+          return createSessionRuntimeView(
+            createSnapshot({
+              conversationId: "session-latest",
+              title: "Latest session",
+              summary: "Latest summary",
+              history: [
+                { role: "user", content: "最近一次问题" },
+                { role: "assistant", content: "最近一次回复" }
+              ],
+              turnTraceHistory: [createTrace({ turnId: "turn-latest", updatedAt: 2000 })],
+              turnCount: 1,
+              updatedAtMs: 2000
+            }),
+            {
+              historyNodes: [createHistoryNode({ nodeId: "node-1", turnId: "turn-latest" })],
+              historyBranches: [createHistoryBranch({ branchId: "branch-main", headNodeId: "node-1" })]
+            }
+          );
+        }
+
+        if (command === "append_frontend_trace_events") {
+          return undefined;
+        }
+
+        throw new Error(`unexpected command: ${command}`);
+      });
+
+      await store.fetchHealth();
+      await store.initializeSessions();
+      await vi.advanceTimersByTimeAsync(500);
+      await Promise.resolve();
+
+      const appendCall = tauriMocks.mockSafeInvoke.mock.calls.find(
+        ([command]) => command === "append_frontend_trace_events"
+      );
+      const payload = appendCall?.[1] as
+        | { events?: Array<{ category: string; name: string }> }
+        | undefined;
+      const eventNames = (payload?.events ?? []).map((event) => `${event.category}:${event.name}`);
+      expect(eventNames).toContain("runtime.session:load-session-catalog");
+      expect(eventNames).toContain("runtime.session:load-session-state");
+      expect(eventNames).toContain("runtime.session:apply-session-snapshot");
+      expect(eventNames).toContain("runtime.session:initialize-sessions");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("restores the active turn from an execution checkpoint during initialization", async () => {
@@ -6014,5 +6093,26 @@ describe("runtime session resilience", () => {
     });
 
     expect(store.conversationCheckpointEntries).toEqual([]);
+  });
+
+  it("initializes frontend recorder state on health fetch", async () => {
+    const store = useRuntimeStore();
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "health_check") {
+        return {
+          appName: "Pony Agent",
+          appVersion: "0.1.1",
+          runtime: "desktop",
+          graphEngine: "graph",
+          graphContractVersion: "v1"
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.fetchHealth();
+
+    expect(store.frontendRecorderCapability?.tauriAvailable).toBe(true);
+    expect(store.frontendRecorderStats.initialized).toBe(true);
   });
 });

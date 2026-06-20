@@ -22,6 +22,10 @@ use agent::control_plane::{
     SwitchHistoryBranchCommand, SwitchHistoryBranchResponse,
 };
 use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
+use agent::frontend_diagnostics::{
+    FrontendStallSnapshot, FrontendTraceAppendCommand, FrontendTraceEvent,
+    FrontendTraceExportPayload, FrontendTraceQuery, FrontendTraceQueryResult,
+};
 use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
 use agent::session::SessionOverview;
@@ -564,6 +568,135 @@ fn set_taskbar_icon_win32(app: &tauri::AppHandle) {
     }
 }
 
+// ── Frontend Diagnostics (async + spawn_blocking to avoid main-thread SQLite I/O) ──
+
+#[tauri::command]
+async fn append_frontend_trace_events(
+    app: AppHandle,
+    events: Vec<FrontendTraceEvent>,
+    stall_snapshots: Vec<FrontendStallSnapshot>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let control_plane = app.state::<HostControlPlane>();
+        control_plane.append_frontend_trace_events(FrontendTraceAppendCommand {
+            events,
+            stall_snapshots,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
+#[tauri::command]
+async fn query_frontend_trace_window(
+    app: AppHandle,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    from_wall_ms: Option<i64>,
+    to_wall_ms: Option<i64>,
+    limit: Option<u32>,
+    cursor: Option<String>,
+) -> Result<FrontendTraceQueryResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let control_plane = app.state::<HostControlPlane>();
+        control_plane.query_frontend_trace_window(FrontendTraceQuery {
+            session_id,
+            turn_id,
+            from_wall_ms,
+            to_wall_ms,
+            limit,
+            cursor,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
+#[tauri::command]
+async fn query_frontend_stall_snapshots(
+    app: AppHandle,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    from_wall_ms: Option<i64>,
+    to_wall_ms: Option<i64>,
+    limit: Option<u32>,
+) -> Result<Vec<FrontendStallSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let control_plane = app.state::<HostControlPlane>();
+        control_plane.query_frontend_stall_snapshots(FrontendTraceQuery {
+            session_id,
+            turn_id,
+            from_wall_ms,
+            to_wall_ms,
+            limit,
+            cursor: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
+#[tauri::command]
+async fn clear_frontend_trace_before(
+    app: AppHandle,
+    ts_wall_ms: i64,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let control_plane = app.state::<HostControlPlane>();
+        control_plane.clear_frontend_trace_before(ts_wall_ms)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
+#[tauri::command]
+async fn export_frontend_trace_json(
+    app: AppHandle,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    from_wall_ms: Option<i64>,
+    to_wall_ms: Option<i64>,
+    limit: Option<u32>,
+) -> Result<FrontendTraceExportPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let control_plane = app.state::<HostControlPlane>();
+        control_plane.export_frontend_trace_json(FrontendTraceQuery {
+            session_id,
+            turn_id,
+            from_wall_ms,
+            to_wall_ms,
+            limit,
+            cursor: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
+#[tauri::command]
+async fn export_frontend_trace_chrome_trace(
+    app: AppHandle,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    from_wall_ms: Option<i64>,
+    to_wall_ms: Option<i64>,
+    limit: Option<u32>,
+) -> Result<FrontendTraceExportPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let control_plane = app.state::<HostControlPlane>();
+        control_plane.export_frontend_trace_chrome_trace(FrontendTraceQuery {
+            session_id,
+            turn_id,
+            from_wall_ms,
+            to_wall_ms,
+            limit,
+            cursor: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(HostControlPlane::new())
@@ -650,6 +783,12 @@ pub fn run() {
             inspect_host,
             record_stream_debug_metrics,
             load_stream_debug_metrics,
+            append_frontend_trace_events,
+            query_frontend_trace_window,
+            query_frontend_stall_snapshots,
+            clear_frontend_trace_before,
+            export_frontend_trace_json,
+            export_frontend_trace_chrome_trace,
             save_app_settings,
             save_provider_registry,
             save_provider_registry_without_env_sync

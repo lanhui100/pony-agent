@@ -5,6 +5,7 @@ import { mount } from "@vue/test-utils";
 import App from "@/App.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useSettingsStore } from "@/stores/settings";
 
 const HomeSidebarStub = defineComponent({
   template: '<div data-testid="home-sidebar-stub">home-sidebar</div>'
@@ -94,14 +95,33 @@ function mountApp() {
 }
 
 describe("App", () => {
+  let requestAnimationFrameSpy: ReturnType<typeof vi.spyOn>;
+  let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     setActivePinia(createPinia());
     window.localStorage.clear();
     vi.spyOn(console, "info").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
+    requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation(((callback: FrameRequestCallback) => {
+        callback(performance.now());
+        return 1;
+      }) as typeof window.requestAnimationFrame);
+    setTimeoutSpy = vi
+      .spyOn(window, "setTimeout")
+      .mockImplementation(((handler: TimerHandler) => {
+        if (typeof handler === "function") {
+          handler();
+        }
+        return 1;
+      }) as typeof window.setTimeout);
 
     const providerStore = useProviderStore();
     vi.spyOn(providerStore, "loadRegistry").mockResolvedValue();
+    const settingsStore = useSettingsStore();
+    vi.spyOn(settingsStore, "loadSettings").mockResolvedValue();
 
     const runtimeStore = useRuntimeStore();
     vi.spyOn(runtimeStore, "fetchHealth").mockResolvedValue();
@@ -208,14 +228,16 @@ describe("App", () => {
   it("keeps rendering even if one startup task fails", async () => {
     const providerStore = useProviderStore();
     vi.spyOn(providerStore, "loadRegistry").mockRejectedValueOnce(new Error("registry exploded"));
+    const runtimeStore = useRuntimeStore();
+    const initializeSessionsSpy = vi.spyOn(runtimeStore, "initializeSessions").mockResolvedValue();
 
     const wrapper = mountApp();
-    await nextTick();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalled());
 
     expect(wrapper.find('[data-testid="home-session-sidebar-stub"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
     expect(console.error).toHaveBeenCalled();
+    expect(initializeSessionsSpy).toHaveBeenCalled();
   });
 
   it("records each startup failure separately without causing a blank screen", async () => {
@@ -244,6 +266,85 @@ describe("App", () => {
       expect.stringContaining("sessions"),
       expect.objectContaining({ error: expect.any(String) })
     );
+  });
+
+  it("keeps the mounted startup path observable even when the first task hangs later", async () => {
+    const runtimeStore = useRuntimeStore();
+    vi.spyOn(runtimeStore, "initializeTurnEvents").mockImplementation(
+      () => new Promise(() => {})
+    );
+
+    const wrapper = mountApp();
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="home-session-sidebar-stub"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
+    expect(console.info).toHaveBeenCalledWith(
+      expect.stringContaining("[pony-agent][app] mounted"),
+      expect.any(Object)
+    );
+  });
+
+  it("runs startup tasks in phased order instead of firing all tauri boot work at once", async () => {
+    const callOrder: string[] = [];
+    const providerStore = useProviderStore();
+    const settingsStore = useSettingsStore();
+    const runtimeStore = useRuntimeStore();
+
+    vi.spyOn(runtimeStore, "fetchHealth").mockImplementation(async () => {
+      callOrder.push("health");
+    });
+    vi.spyOn(runtimeStore, "initializeTurnEvents").mockImplementation(async () => {
+      callOrder.push("turnEvents");
+    });
+    vi.spyOn(settingsStore, "loadSettings").mockImplementation(async () => {
+      callOrder.push("appSettings");
+    });
+    vi.spyOn(providerStore, "loadRegistry").mockImplementation(async () => {
+      callOrder.push("providerRegistry");
+    });
+    vi.spyOn(runtimeStore, "fetchAvailableTools").mockImplementation(async () => {
+      callOrder.push("availableTools");
+    });
+    vi.spyOn(runtimeStore, "initializeSessions").mockImplementation(async () => {
+      callOrder.push("sessions");
+    });
+
+    mountApp();
+    await vi.waitFor(() =>
+      expect(callOrder).toEqual([
+        "turnEvents",
+        "health",
+        "appSettings",
+        "providerRegistry",
+        "availableTools",
+        "sessions"
+      ])
+    );
+  });
+
+  it("yields between phased startup tasks so mount does not monopolize the main thread", async () => {
+    const runtimeStore = useRuntimeStore();
+    const providerStore = useProviderStore();
+    const settingsStore = useSettingsStore();
+
+    const fetchHealthSpy = vi.spyOn(runtimeStore, "fetchHealth").mockResolvedValue();
+    const initTurnEventsSpy = vi.spyOn(runtimeStore, "initializeTurnEvents").mockResolvedValue();
+    const loadSettingsSpy = vi.spyOn(settingsStore, "loadSettings").mockResolvedValue();
+    const loadRegistrySpy = vi.spyOn(providerStore, "loadRegistry").mockResolvedValue();
+    const fetchToolsSpy = vi.spyOn(runtimeStore, "fetchAvailableTools").mockResolvedValue();
+    const initSessionsSpy = vi.spyOn(runtimeStore, "initializeSessions").mockResolvedValue();
+
+    mountApp();
+    await vi.waitFor(() => expect(initSessionsSpy).toHaveBeenCalled());
+
+    expect(requestAnimationFrameSpy.mock.calls.length).toBeGreaterThanOrEqual(6);
+    expect(setTimeoutSpy.mock.calls.length).toBeGreaterThanOrEqual(6);
+    expect(initTurnEventsSpy.mock.invocationCallOrder[0]).toBeLessThan(fetchHealthSpy.mock.invocationCallOrder[0]);
+    expect(fetchHealthSpy.mock.invocationCallOrder[0]).toBeLessThan(loadSettingsSpy.mock.invocationCallOrder[0]);
+    expect(loadSettingsSpy.mock.invocationCallOrder[0]).toBeLessThan(loadRegistrySpy.mock.invocationCallOrder[0]);
+    expect(loadRegistrySpy.mock.invocationCallOrder[0]).toBeLessThan(fetchToolsSpy.mock.invocationCallOrder[0]);
+    expect(fetchToolsSpy.mock.invocationCallOrder[0]).toBeLessThan(initSessionsSpy.mock.invocationCallOrder[0]);
   });
 
   it("registers lifecycle listeners on mount and cleans them up on unmount", () => {

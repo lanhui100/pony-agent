@@ -3,6 +3,10 @@ import { createPinia, setActivePinia } from "pinia";
 import { defineComponent, h, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
+import {
+  __resetFrontendFlightRecorderForTests,
+  injectFrontendDiagnosticStall
+} from "@/lib/frontend-flight-recorder";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import type { ProviderReasoningEffort, ProviderRegistry } from "@/types/provider";
@@ -27,6 +31,16 @@ vi.mock("@/lib/tauri", () => ({
   safeListen: tauriMocks.mockSafeListen,
   isTauriAvailable: tauriMocks.mockIsTauriAvailable
 }));
+
+vi.mock("@/lib/frontend-flight-recorder", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/frontend-flight-recorder")>(
+    "@/lib/frontend-flight-recorder"
+  );
+  return {
+    ...actual,
+    injectFrontendDiagnosticStall: vi.fn(() => 1800)
+  };
+});
 
 const scrollToBottomSpy = vi.fn();
 const viewportScrollToSpy = vi.fn();
@@ -429,6 +443,7 @@ function findStreamingMarkdown(wrapper: ReturnType<typeof mount>) {
 describe("HomeWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetFrontendFlightRecorderForTests();
     window.localStorage.clear();
     setActivePinia(createPinia());
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
@@ -503,6 +518,23 @@ describe("HomeWorkspace", () => {
     await nextTick();
 
     expect(wrapper.get('[data-testid="workspace-empty-state"]').text()).toContain("我能帮你做些什么？");
+  });
+
+  it("skips the initial auto-scroll work for an empty workspace", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "idle",
+      error: null,
+      messages: []
+    });
+
+    mountWorkspace();
+    await nextTick();
+
+    expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+    expect(viewportScrollToSpy).not.toHaveBeenCalled();
+    expect(scrollToBottomSpy).not.toHaveBeenCalled();
   });
 
   it("keeps the welcome empty state after createSession inserts a transient session overview", async () => {
@@ -872,6 +904,7 @@ describe("HomeWorkspace", () => {
 
     const wrapper = mountWorkspace();
     await nextTick();
+    scrollIntoViewSpy.mockClear();
 
     runtimeStore.$patch({
       messages: [
@@ -1216,14 +1249,12 @@ describe("HomeWorkspace", () => {
         })
       ]
     });
-    await nextTick();
-
-    scrollIntoViewSpy.mockClear();
-    await nextTick();
-    expect(scrollIntoViewSpy).toHaveBeenCalledWith({
-      block: "end",
-      behavior: "smooth"
-    });
+    await vi.waitFor(() =>
+      expect(scrollIntoViewSpy).toHaveBeenCalledWith({
+        block: "end",
+        behavior: "smooth"
+      })
+    );
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
   });
 
@@ -1255,6 +1286,7 @@ describe("HomeWorkspace", () => {
 
     const wrapper = mountWorkspace();
     await nextTick();
+    scrollIntoViewSpy.mockClear();
 
     runtimeStore.$patch({
       messages: [
@@ -1274,14 +1306,12 @@ describe("HomeWorkspace", () => {
         })
       ]
     });
-    await nextTick();
-
-    scrollIntoViewSpy.mockClear();
-    await nextTick();
-    expect(scrollIntoViewSpy).toHaveBeenCalledWith({
-      block: "end",
-      behavior: "smooth"
-    });
+    await vi.waitFor(() =>
+      expect(scrollIntoViewSpy).toHaveBeenCalledWith({
+        block: "end",
+        behavior: "smooth"
+      })
+    );
 
     runtimeStore.$patch({
       messages: [
@@ -1306,6 +1336,30 @@ describe("HomeWorkspace", () => {
     await nextTick();
     expect(findStreamingMarkdown(wrapper).text()).toContain("hello");
     expect(findStreamingMarkdown(wrapper).text().length).toBeGreaterThan(5);
+  });
+
+  it("支持从 workspace 手动注入 stall smoke", async () => {
+    vi.useFakeTimers();
+    const runtimeStore = useRuntimeStore();
+    const refreshSpy = vi.spyOn(runtimeStore, "refreshFrontendRecorderStats");
+
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      isSubmitting: false,
+      error: null,
+      messages: []
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    await wrapper.get('[data-testid="workspace-stall-smoke"]').trigger("click");
+    await vi.runAllTimersAsync();
+
+    expect(injectFrontendDiagnosticStall).toHaveBeenCalledWith(1800, "workspace-stall-smoke");
+    expect(refreshSpy).toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it("opens provider menu, selects another model, and closes afterwards", async () => {

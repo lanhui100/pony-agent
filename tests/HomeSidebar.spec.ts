@@ -3,6 +3,10 @@ import { createPinia, setActivePinia } from "pinia";
 import { defineComponent, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import HomeSidebar from "@/components/HomeSidebar.vue";
+import {
+  __resetFrontendFlightRecorderForTests,
+  injectFrontendDiagnosticStall
+} from "@/lib/frontend-flight-recorder";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import type { ProviderRegistry } from "@/types/provider";
@@ -26,6 +30,16 @@ vi.mock("@/lib/tauri", () => ({
   safeListen: tauriMocks.mockSafeListen,
   isTauriAvailable: tauriMocks.mockIsTauriAvailable
 }));
+
+vi.mock("@/lib/frontend-flight-recorder", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/frontend-flight-recorder")>(
+    "@/lib/frontend-flight-recorder"
+  );
+  return {
+    ...actual,
+    injectFrontendDiagnosticStall: vi.fn(() => 1800)
+  };
+});
 
 const ScrollAreaStub = defineComponent({
   template: '<div class="scroll-area-stub"><slot /></div>'
@@ -284,6 +298,7 @@ function countOccurrences(text: string, needle: string) {
 describe("HomeSidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetFrontendFlightRecorderForTests();
     window.localStorage.clear();
     setActivePinia(createPinia());
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
@@ -361,6 +376,81 @@ describe("HomeSidebar", () => {
     expect(text).toContain("none");
     expect(text).toContain("runtime");
     expect(text).not.toContain("workspace_path_info");
+  });
+
+  it("显示 recorder 摘要并支持导出前端 trace", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      frontendRecorderStats: {
+        initialized: true,
+        activeSessionId: "graph-session",
+        activeTurnId: "turn-1",
+        seq: 3,
+        bufferedEventCount: 0,
+        bufferedSnapshotCount: 0,
+        flushCount: 1,
+        flushFailureCount: 0,
+        droppedEventCount: 2,
+        droppedSnapshotCount: 1,
+        stallCount: 4,
+        lastStallGapMs: 620,
+        lastFlushDurationMs: 18,
+        lastFlushAtMs: 1000,
+        lastError: null,
+        lastExportAtMs: null
+      },
+      turnTraceHistory: [createTraceRecord({ turnId: "turn-1", updatedAt: 2000 })]
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "export_frontend_trace_json") {
+        return {
+          format: "json",
+          fileName: "frontend-trace.json",
+          content: "{\"events\":[]}",
+          truncated: false,
+          eventCount: 0,
+          snapshotCount: 0,
+          fromWallMs: null,
+          toWallMs: null
+        };
+      }
+      return null;
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    expect(wrapper.text()).toContain("Recorder");
+    expect(wrapper.text()).toContain("stall 4");
+    expect(wrapper.text()).toContain("drop 3");
+
+    const exportButton = wrapper.findAll("button").find((button) => button.text().includes("导出 JSON"));
+    expect(exportButton).toBeTruthy();
+    await exportButton!.trigger("click");
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith(
+      "export_frontend_trace_json",
+      expect.objectContaining({
+        sessionId: "graph-session",
+        turnId: "turn-1"
+      })
+    );
+  });
+
+  it("支持手动注入 stall smoke 以便采集前端卡顿证据", async () => {
+    vi.useFakeTimers();
+    const runtimeStore = useRuntimeStore();
+    const refreshSpy = vi.spyOn(runtimeStore, "refreshFrontendRecorderStats");
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    await wrapper.get('[data-testid="frontend-stall-smoke"]').trigger("click");
+    await vi.runAllTimersAsync();
+
+    expect(injectFrontendDiagnosticStall).toHaveBeenCalledWith(1800, "sidebar-stall-smoke");
+    expect(refreshSpy).toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it("将会话状态收敛到右侧状态栏", async () => {

@@ -70,7 +70,7 @@ impl SqliteSessionBackend {
                 "PRAGMA journal_mode=WAL;
                  PRAGMA synchronous=NORMAL;
                  PRAGMA busy_timeout=5000;
-                 PRAGMA wal_autocheckpoint=1000;",
+                 PRAGMA wal_autocheckpoint=256;",
             )
             .map_err(|e| format!("pragma: {e}"))?;
             self.ensure_schema(&conn)?;
@@ -302,6 +302,10 @@ impl SessionBackend for SqliteSessionBackend {
 
         if let Err(e) = self.write_full_store(conn, store) {
             eprintln!("[pony-agent][session] SQLite save error: {e}");
+        }
+
+        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+            eprintln!("[pony-agent][session] SQLite checkpoint error: {e}");
         }
     }
 

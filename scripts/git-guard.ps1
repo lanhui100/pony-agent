@@ -107,4 +107,26 @@ if ($violations.Count -gt 0) {
   exit 1
 }
 
+# ---------------------------------------------------------------------------
+# Version auto-bump (pre-commit only)
+# ---------------------------------------------------------------------------
+# When committing to core or tauri, auto-bump the patch version of the
+# corresponding component so every commit carries a unique version number.
+if ($Mode -eq "pre-commit") {
+  $bumpScript = Join-Path $PSScriptRoot "bump-version.ps1"
+  if (Test-Path -LiteralPath $bumpScript) {
+    $hasCore  = ($stagedPaths | Where-Object { $_ -match '^crates/pony-agent-core/' }).Count -gt 0
+    $hasTauri = ($stagedPaths | Where-Object { $_ -match '^src-tauri/' -or $_ -match '^src/' }).Count -gt 0
+
+    if ($hasCore -or $hasTauri) {
+      Write-Host ""
+      Write-Host "[pony-agent] Version auto-bump: detecting changed components..." -ForegroundColor Cyan
+      & $bumpScript -AutoDetect -Stage
+      if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
+        Write-Host "[pony-agent] Warning: version bump exited with code $LASTEXITCODE" -ForegroundColor Yellow
+      }
+    }
+  }
+}
+
 exit 0

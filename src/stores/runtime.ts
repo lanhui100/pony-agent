@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke, safeListen } from "@/lib/tauri";
+import { initFrontendFlightRecorder } from "@/lib/frontend-flight-recorder";
 import { useProviderStore } from "@/stores/providers";
 import { useSettingsStore } from "@/stores/settings";
 import { deriveGraphRunFromRunState, extractActiveTaskFocus, normalizeGraphRunPhase } from "../types/runtime";
@@ -4627,6 +4628,7 @@ export const useRuntimeStore = defineStore("runtime", {
             };
         this.health = payload;
         this.phase = "completed";
+        initFrontendFlightRecorder();
         debugLog("health:ok", {
           runtime: payload.runtime,
           graph: payload.graphEngine
