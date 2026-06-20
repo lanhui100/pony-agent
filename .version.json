@@ -113,16 +113,28 @@
           "from": "0.1.6"
         }
       ]
+    },
+    {
+      "commit": "21d6d83",
+      "bumps": [
+        {
+          "component": "core",
+          "segment": "patch",
+          "to": "0.1.8",
+          "from": "0.1.7"
+        }
+      ],
+      "timestamp": "2026-06-20T22:48:56+08:00"
     }
   ],
-  "lastBump": "2026-06-20T22:37:02+08:00",
+  "lastBump": "2026-06-20T22:48:56+08:00",
   "tauri": {
     "patch": 3,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 7,
+    "patch": 8,
     "minor": 1,
     "major": 0
   }
