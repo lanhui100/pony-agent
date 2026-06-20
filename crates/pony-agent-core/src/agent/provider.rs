@@ -2661,49 +2661,10 @@ const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
 const FOLLOWUP_RETRY_MAX_ATTEMPTS: u32 = 5;
 
 fn extract_provider_error_detail(err: &str) -> String {
-    // Error format: "provider 返回错误状态：{status}；耗时={ms}ms；响应正文：{body}"
+    // 透传错误响应正文给前端，由前端根据 JSON 结构自适应展示
     if let Some(body_start) = err.find("响应正文：") {
         let body = &err[body_start + "响应正文：".len()..];
-        if let Ok(parsed) = serde_json::from_str::<Value>(body) {
-            // Try multiple error JSON formats:
-            // 1. {"error": {"message": "...", "type": "...", "code": ...}}
-            // 2. {"error": {"type": "...", "message": "..."}}
-            // 3. {"error": "..."}
-            // 4. {"message": "..."}
-            if let Some(error_obj) = parsed.get("error") {
-                let msg = error_obj
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .filter(|m| !m.is_empty());
-                if let Some(message) = msg {
-                    let mut parts: Vec<String> = vec![message.to_string()];
-                    if let Some(t) = error_obj.get("type").and_then(Value::as_str) {
-                        if !t.is_empty() {
-                            parts.push(format!("类型: {}", t));
-                        }
-                    }
-                    if let Some(code_val) = error_obj.get("code") {
-                        let code_str = code_val.as_str().unwrap_or("");
-                        let code_num = code_val.as_u64().map(|n| n.to_string()).unwrap_or_default();
-                        let code = if !code_str.is_empty() { code_str } else { &code_num };
-                        if !code.is_empty() {
-                            parts.push(format!("编码: {}", code));
-                        }
-                    }
-                    return parts.join(" | ");
-                }
-                if let Some(msg) = error_obj.as_str().filter(|m| !m.is_empty()) {
-                    return msg.to_string();
-                }
-            }
-            if let Some(msg) = parsed.get("message").and_then(Value::as_str) {
-                if !msg.is_empty() {
-                    return msg.to_string();
-                }
-            }
-            // If known JSON structure matched but no message found, return body preview
-            return preview_text(body, 400);
-        }
+        return format!("{}", preview_text(body, 400));
     }
     preview_text(err, 240)
 }
