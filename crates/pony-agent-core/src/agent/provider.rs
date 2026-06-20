@@ -706,12 +706,10 @@ impl ProviderManager {
                 .call_id
                 .clone()
                 .unwrap_or_else(|| "tool_call_local".to_string());
-            let preview = json!({ "tool_call_id": tool_call_id, "messages_count": messages.len() });
             provider_log(format!(
-                "request:openai followup-sync tool_call_id={} messages={} preview={}",
+                "request:openai followup-sync tool_call_id={} messages={}",
                 tool_call_id,
                 messages.len(),
-                preview_json(&preview, 500)
             ));
         }
         let body = with_openai_request_options(
@@ -727,6 +725,10 @@ impl ProviderManager {
             &self.config,
         );
         let body = apply_openai_tool_capability(body, tools, &self.config);
+        provider_log(format!(
+            "request:openai followup-sync body_preview={}",
+            preview_json(&body, 1600)
+        ));
         let payload = self.post_openai_json(&endpoint, &body)?;
         let message = first_openai_message(&payload)?;
         let output_text = extract_openai_message_text(message).unwrap_or_default();
@@ -785,12 +787,10 @@ impl ProviderManager {
                 .call_id
                 .clone()
                 .unwrap_or_else(|| "tool_call_local".to_string());
-            let preview = json!({ "tool_call_id": tool_call_id, "messages_count": messages.len() });
             provider_log(format!(
-                "request:openai followup-stream tool_call_id={} messages={} preview={}",
+                "request:openai followup-stream tool_call_id={} messages={}",
                 tool_call_id,
                 messages.len(),
-                preview_json(&preview, 500)
             ));
         }
         let body = with_openai_request_options(
@@ -809,6 +809,10 @@ impl ProviderManager {
             &self.config,
         );
         let body = apply_openai_tool_capability(body, tools, &self.config);
+        provider_log(format!(
+            "request:openai followup-stream body_preview={}",
+            preview_json(&body, 1600)
+        ));
 
         self.stream_openai_request(&endpoint, &body, request, on_delta)
     }
@@ -1204,6 +1208,13 @@ impl ProviderManager {
         )?;
         let output_text = message.output_text.clone();
         let tool_call = message.tool_call.clone();
+        if let Some(ref tc) = tool_call {
+            provider_log(format!(
+                "decision:stream-tool-call name={} call_id={}",
+                tc.name,
+                tc.call_id.as_deref().unwrap_or("(none)")
+            ));
+        }
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("openai streamed decision missing text or tool call".to_string());
         }
@@ -1862,6 +1873,13 @@ fn openai_usage_extracts_cache_hit_and_reasoning_tokens() {
 }
 
 fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelection) -> Value {
+    provider_log(format!(
+        "with_openai_request_options pattern={:?} supports_reasoning={} reasoning_effort={:?}",
+        config.thinking_param_pattern,
+        config.capabilities.supports_reasoning,
+        config.reasoning_effort,
+    ));
+
     if thinking_param_needs_thinking_toggle(config) {
         body["thinking"] = json!({
             "type": "enabled"

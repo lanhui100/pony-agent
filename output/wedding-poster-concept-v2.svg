@@ -1,0 +1,64 @@
+<svg width="1600" height="2400" viewBox="0 0 1600 2400" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="80" y1="60" x2="1510" y2="2330" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FAF3EA"/>
+      <stop offset="0.52" stop-color="#F3E2CF"/>
+      <stop offset="1" stop-color="#E4C4A0"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="469" y1="496" x2="1139" y2="1639" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8E5D24"/>
+      <stop offset="0.52" stop-color="#E9C98D"/>
+      <stop offset="1" stop-color="#9D6527"/>
+    </linearGradient>
+    <radialGradient id="mist" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(812 1131) rotate(90) scale(877 690)">
+      <stop offset="0" stop-color="#FFFDF9" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#FFFDF9" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="176" y="214" width="1248" height="1974" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="30"/>
+      <feGaussianBlur stdDeviation="42"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.45 0 0 0 0 0.28 0 0 0 0 0.1 0 0 0 0.2 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_1_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_1_1" result="shape"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="2400" fill="url(#bg)"/>
+  <circle cx="1240" cy="314" r="240" fill="#FFF4E7" fill-opacity="0.7"/>
+  <circle cx="336" cy="2088" r="280" fill="#F0D4B0" fill-opacity="0.42"/>
+  <circle cx="812" cy="1131" r="690" fill="url(#mist)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="260" y="298" width="1080" height="1790" rx="26" fill="#FFF9F2"/>
+    <rect x="290" y="328" width="1020" height="1730" rx="14" stroke="#D3A56B" stroke-width="2" stroke-opacity="0.7"/>
+  </g>
+
+  <text x="800" y="500" text-anchor="middle" fill="#9E6C33" font-size="28" font-family="'Times New Roman','Georgia',serif" letter-spacing="14">WEDDING CONCEPT POSTER</text>
+
+  <circle cx="696" cy="830" r="182" stroke="url(#gold)" stroke-width="10"/>
+  <circle cx="904" cy="830" r="182" stroke="url(#gold)" stroke-width="10"/>
+  <circle cx="696" cy="830" r="197" stroke="#DDB77B" stroke-width="2" stroke-dasharray="3 14" opacity="0.8"/>
+  <circle cx="904" cy="830" r="197" stroke="#DDB77B" stroke-width="2" stroke-dasharray="3 14" opacity="0.8"/>
+
+  <path d="M800 711C800 711 758 768 758 823C758 890 800 928 800 928C800 928 842 890 842 823C842 768 800 711 800 711Z" fill="#C48B46" fill-opacity="0.18"/>
+  <path d="M800 720C800 720 772 771 772 821C772 875 800 907 800 907C800 907 828 875 828 821C828 771 800 720 800 720Z" fill="#C78E48"/>
+
+  <text x="800" y="980" text-anchor="middle" fill="url(#gold)" font-size="286" font-family="'STSong','SimSun','Noto Serif SC',serif" letter-spacing="18">囍</text>
+
+  <text x="800" y="1185" text-anchor="middle" fill="#704922" font-size="180" font-family="'STSong','SimSun','Noto Serif SC',serif" letter-spacing="24">婚</text>
+  <text x="800" y="1292" text-anchor="middle" fill="#A97942" font-size="40" font-family="'Microsoft YaHei','Noto Sans SC',sans-serif" letter-spacing="11">两枚戒指相扣成一个完整的誓言</text>
+
+  <line x1="522" y1="1380" x2="1078" y2="1380" stroke="#D4AA73" stroke-width="1.8"/>
+
+  <text x="800" y="1512" text-anchor="middle" fill="#8D5D2D" font-size="52" font-family="'Times New Roman','Georgia',serif" letter-spacing="10">LOVE IS NOT LOOKING AT EACH OTHER</text>
+  <text x="800" y="1588" text-anchor="middle" fill="#8D5D2D" font-size="52" font-family="'Times New Roman','Georgia',serif" letter-spacing="10">BUT LOOKING TOGETHER IN THE SAME DIRECTION</text>
+
+  <text x="800" y="1750" text-anchor="middle" fill="#684526" font-size="88" font-family="'STSong','SimSun','Noto Serif SC',serif" letter-spacing="12">我们结婚啦</text>
+  <text x="800" y="1830" text-anchor="middle" fill="#A87B46" font-size="36" font-family="'Microsoft YaHei','Noto Sans SC',sans-serif" letter-spacing="8">以爱为盟 以岁月为证</text>
+
+  <text x="800" y="1980" text-anchor="middle" fill="#83572C" font-size="34" font-family="'Times New Roman','Georgia',serif" letter-spacing="9">2026.10.01  /  MR. &amp; MRS.</text>
+  <text x="800" y="2050" text-anchor="middle" fill="#BC8E57" font-size="24" font-family="'Microsoft YaHei','Noto Sans SC',sans-serif" letter-spacing="7">CELEBRATING THE BEGINNING OF FOREVER</text>
+</svg>
