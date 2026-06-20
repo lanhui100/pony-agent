@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
+  AlertTriangle,
   ArrowUp,
   Brain,
   Bot,
@@ -1348,12 +1349,12 @@ watch(isSubmitting, (submitting) => {
             >
               <summary class="conversation-disclosure-summary text-rose-700">
                 <div class="flex min-w-0 items-center gap-2">
-                  <span class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-rose-300 text-[11px] leading-none text-rose-600">!</span>
+                  <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-rose-500" />
                   <span>错误详情</span>
                 </div>
                 <div class="ml-auto flex items-center gap-1">
                   <button
-                    class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-rose-400 transition hover:bg-rose-50 hover:text-rose-600"
+                    class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-rose-50 hover:text-rose-600"
                     type="button"
                     :data-testid="`workspace-error-copy-${turn.turnId}`"
                     @click.stop="copyErrorDetail(turn.turnId, assistantErrorDetail(turn.assistant))"
@@ -1363,11 +1364,11 @@ watch(isSubmitting, (submitting) => {
                       class="h-3 w-3"
                     />
                   </button>
-                  <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-rose-400" />
+                  <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
                 </div>
               </summary>
               <div
-                class="mt-2 whitespace-pre-wrap break-words rounded-[0.7rem] border border-rose-200/80 bg-rose-50/70 px-3 py-2 text-[12px] leading-5 text-rose-900"
+                class="whitespace-pre-wrap break-words px-3 py-2 text-[11px] leading-4 text-rose-900"
                 data-testid="workspace-error-detail"
               >
                 {{ assistantErrorDetail(turn.assistant) }}

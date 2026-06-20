@@ -125,10 +125,6 @@ const sessionStatusSummary = computed(() => {
     return sessionError.value.trim();
   }
 
-  if (error.value?.trim()) {
-    return error.value.trim();
-  }
-
   if (isSubmitting.value) {
     return "正在等待回复…";
   }
