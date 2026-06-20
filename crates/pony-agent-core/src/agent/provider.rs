@@ -701,6 +701,19 @@ impl ProviderManager {
             tool_call,
             tool_result,
         ));
+        {
+            let tool_call_id = tool_call
+                .call_id
+                .clone()
+                .unwrap_or_else(|| "tool_call_local".to_string());
+            let preview = json!({ "tool_call_id": tool_call_id, "messages_count": messages.len() });
+            provider_log(format!(
+                "request:openai followup-sync tool_call_id={} messages={} preview={}",
+                tool_call_id,
+                messages.len(),
+                preview_json(&preview, 500)
+            ));
+        }
         let body = with_openai_request_options(
             json!({
                 "model": request.model,
@@ -767,6 +780,19 @@ impl ProviderManager {
             tool_call,
             tool_result,
         ));
+        {
+            let tool_call_id = tool_call
+                .call_id
+                .clone()
+                .unwrap_or_else(|| "tool_call_local".to_string());
+            let preview = json!({ "tool_call_id": tool_call_id, "messages_count": messages.len() });
+            provider_log(format!(
+                "request:openai followup-stream tool_call_id={} messages={} preview={}",
+                tool_call_id,
+                messages.len(),
+                preview_json(&preview, 500)
+            ));
+        }
         let body = with_openai_request_options(
             json!({
                 "model": request.model,
