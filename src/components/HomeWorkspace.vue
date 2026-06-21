@@ -926,6 +926,7 @@ async function confirmRollback(turnId: string, action: CheckpointRollbackAction)
 
     if (isFirstTurn) {
       runtimeStore.$patch({ messages: [], turnTraceHistory: [] });
+      runtimeStore.persistHistory();
     } else if (isSynthetic) {
       const turnIndex = turns.value.findIndex((t) => t.turnId === turnId);
       const previousTurn = turnIndex > 0 ? turns.value[turnIndex - 1] : null;
@@ -942,6 +943,7 @@ async function confirmRollback(turnId: string, action: CheckpointRollbackAction)
             messages: messages.value.slice(0, lastMsgIdx + 1),
             turnTraceHistory: []
           });
+          runtimeStore.persistHistory();
         }
       }
     } else {
