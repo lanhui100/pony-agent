@@ -126,8 +126,28 @@ let pendingScrollBehavior: ScrollBehavior = "auto";
 let scheduledScrollRequestId = 0;
 let programmaticScrollUntilMs = 0;
 const streamAutoFollowEnabled = ref(true);
+let contentResizeObserver: ResizeObserver | null = null;
 
 function updateStreamDebugReveal(_patch: Record<string, unknown>) {
+}
+
+function setupContentResizeObserver() {
+  teardownContentResizeObserver();
+  const contentColumn = workspaceContentColumnRef.value;
+  if (!contentColumn || typeof ResizeObserver === "undefined") return;
+
+  contentResizeObserver = new ResizeObserver(() => {
+    if (!streamAutoFollowEnabled.value || scrollQueued.value) return;
+    queueScrollToLatestTurn("smooth");
+  });
+  contentResizeObserver.observe(contentColumn);
+}
+
+function teardownContentResizeObserver() {
+  if (contentResizeObserver) {
+    contentResizeObserver.disconnect();
+    contentResizeObserver = null;
+  }
 }
 
 const currentModelSupportsReasoning = computed(
@@ -1345,6 +1365,7 @@ onMounted(() => {
   window.addEventListener("keydown", handleWindowKeydown);
   window.addEventListener("resize", updateFloatingUiPositions);
   handleTimelineViewportScroll();
+  setupContentResizeObserver();
   queueScrollToLatestTurn("auto");
 });
 
@@ -1361,6 +1382,8 @@ onBeforeUnmount(() => {
   if (scrollAfterPaintFrameId.value != null) {
     window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
   }
+
+  teardownContentResizeObserver();
 });
 
 watch(
