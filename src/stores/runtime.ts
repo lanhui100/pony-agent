@@ -3239,13 +3239,56 @@ export const useRuntimeStore = defineStore("runtime", {
       return state.historyCursorMode !== "live";
     },
     conversationCheckpointEntries(state): ConversationCheckpointEntry[] {
-      return buildConversationCheckpointEntries(
+      const entries = buildConversationCheckpointEntries(
         state.historyNodes,
         state.historyBranches,
         state.activeBranchId,
         state.visibleNodeId,
         state.branchHeadNodeId
       );
+
+      // Synthesize entries for completed turns in messages that lack history nodes.
+      // This ensures rollback buttons work even before backend checkpoints arrive.
+      const coveredTurnIds = new Set(entries.map((e) => e.turnId));
+      const turnUserContent = new Map<string, string>();
+      for (const msg of state.messages) {
+        if (msg.role === "user" && msg.content && !turnUserContent.has(msg.turnId)) {
+          turnUserContent.set(msg.turnId, msg.content);
+        }
+      }
+
+      const allTurnIds = [...turnUserContent.keys()];
+      let hasSynthetic = false;
+
+      for (let index = 0; index < allTurnIds.length; index++) {
+        const turnId = allTurnIds[index]!;
+        if (coveredTurnIds.has(turnId)) continue;
+
+        entries.push({
+          nodeId: `synthetic-${turnId}`,
+          turnId,
+          branchId: state.activeBranchId ?? "branch-main",
+          summary: turnUserContent.get(turnId)!.slice(0, 120) || turnId,
+          createdAtMs: Date.now() - (allTurnIds.length - index),
+          isLatest: false,
+          isVisible: false,
+          workspaceRollbackCapable: false,
+          availableModes: ["transcript_only"],
+          forkTargets: []
+        });
+        hasSynthetic = true;
+      }
+
+      if (hasSynthetic) {
+        entries.sort((left, right) => right.createdAtMs - left.createdAtMs);
+        const hasRealLatest =
+          state.branchHeadNodeId != null && entries.some((e) => e.nodeId === state.branchHeadNodeId);
+        if (!hasRealLatest && entries.length > 0) {
+          entries[0] = { ...entries[0], isLatest: true };
+        }
+      }
+
+      return entries;
     }
   },
   actions: {
