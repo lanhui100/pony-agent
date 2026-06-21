@@ -636,7 +636,7 @@ impl ProviderManager {
                             "followup:stream-fallback protocol=openai provider={} model={} reason={}",
                             self.config.provider_name, request.model, stream_error
                         ));
-                        let mut response = match retry_followup(|| {
+                        let response = match retry_followup(|| {
                             self.send_openai_tool_followup_request(
                                 request,
                                 tools,
