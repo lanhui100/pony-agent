@@ -27,6 +27,13 @@ import { useRuntimeStore } from "@/stores/runtime";
 import Button from "@/components/ui/Button.vue";
 import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
+import {
+  PopoverClose,
+  PopoverContent,
+  PopoverPortal,
+  PopoverRoot,
+  PopoverTrigger
+} from "reka-ui";
 
 type TurnBucket = {
   turnId: string;
@@ -83,17 +90,11 @@ const reasoningMenuOpen = ref(false);
 const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
 const copiedAssistantTurnId = ref<string | null>(null);
-const rollbackConfirm = ref<{ turnId: string; nodeId: string | null; action: CheckpointRollbackAction } | null>(null);
-const rollbackConfirmMenuRef = ref<HTMLElement | null>(null);
-const rollbackConfirmAnchorEl = ref<HTMLElement | null>(null);
-const rollbackConfirmAnchorRect = ref<DOMRect | null>(null);
 const workspaceContentColumnRef = ref<HTMLElement | null>(null);
-const rollbackConfirmStyle = ref<Record<string, string | undefined>>({});
 const rollbackInFlight = ref<{ turnId: string; action: CheckpointRollbackAction } | null>(null);
 const rollbackProgressStyle = ref<Record<string, string | undefined>>({});
 const optimisticRollbackTurnId = ref<string | null>(null);
 const forkInFlightNodeId = ref<string | null>(null);
-let rollbackDismissTimer: ReturnType<typeof setTimeout> | null = null;
 const providerMenuRef = ref<HTMLElement | null>(null);
 const modelSubmenuStyle = ref<Record<string, string>>({ top: '0' });
 const reasoningMenuRef = ref<HTMLElement | null>(null);
@@ -826,43 +827,6 @@ function checkpointModeForPickerEntry(entry: ConversationCheckpointEntry): Histo
   return entry.workspaceRollbackCapable ? "transcript_and_workspace" : "transcript_only";
 }
 
-function requestRollbackConfirm(turnId: string, action: CheckpointRollbackAction, event?: MouseEvent) {
-  if (isSubmitting.value || sessionOperation.value || rollbackInFlight.value) return;
-  const entry = checkpointEntryForTurn(turnId);
-  if (!entry) {
-    return;
-  }
-  rollbackConfirmAnchorEl.value = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-  rollbackConfirmAnchorRect.value = rollbackConfirmAnchorEl.value?.getBoundingClientRect() ?? null;
-
-  if (import.meta.env.DEV) {
-    console.log("[debug-rollback] requestRollbackConfirm:", {
-      turnId,
-      action,
-      hasAnchor: !!rollbackConfirmAnchorEl.value,
-      anchorTagName: rollbackConfirmAnchorEl.value?.tagName,
-      anchorClassName: rollbackConfirmAnchorEl.value?.className,
-      anchorRect: rollbackConfirmAnchorRect.value
-        ? { left: rollbackConfirmAnchorRect.value.left, top: rollbackConfirmAnchorRect.value.top, width: rollbackConfirmAnchorRect.value.width, height: rollbackConfirmAnchorRect.value.height }
-        : null,
-      entryNodeId: entry?.nodeId
-    });
-  }
-
-  rollbackConfirm.value = { turnId, nodeId: entry?.nodeId ?? null, action };
-  if (rollbackConfirmAnchorRect.value) {
-    rollbackConfirmStyle.value = {
-      position: "fixed",
-      left: `${rollbackConfirmAnchorRect.value.left + (rollbackConfirmAnchorRect.value.width / 2)}px`,
-      top: `${Math.max(12, rollbackConfirmAnchorRect.value.top - 8)}px`,
-      transform: "translate(-50%, -100%)"
-    };
-  } else {
-    rollbackConfirmStyle.value = {};
-  }
-  void nextTick().then(() => window.requestAnimationFrame(() => updateRollbackConfirmPosition()));
-}
-
 function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | null) {
   const entryNodeId = fallbackNodeId ?? checkpointEntryForTurn(turnId)?.nodeId ?? null;
   if (!entryNodeId) {
@@ -871,60 +835,6 @@ function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | 
 
   const entryNode = historyNodeById.value.get(entryNodeId) ?? null;
   return entryNode?.parentNodeId?.trim() || entryNodeId;
-}
-
-function updateRollbackConfirmPosition() {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  const popover = rollbackConfirmMenuRef.value;
-  const contentColumn = workspaceContentColumnRef.value;
-  const anchor = rollbackConfirmAnchorEl.value;
-  if (
-    !popover ||
-    !contentColumn ||
-    typeof popover.getBoundingClientRect !== "function" ||
-    typeof contentColumn.getBoundingClientRect !== "function"
-  ) {
-    rollbackConfirmStyle.value = {};
-    return;
-  }
-
-  const anchorRect = anchor && typeof anchor.getBoundingClientRect === "function"
-    ? anchor.getBoundingClientRect()
-    : rollbackConfirmAnchorRect.value;
-  if (!anchorRect) {
-    rollbackConfirmStyle.value = {};
-    return;
-  }
-  const popoverRect = popover.getBoundingClientRect();
-  const columnRect = contentColumn.getBoundingClientRect();
-  const desiredLeft = anchorRect.left + (anchorRect.width / 2) - (popoverRect.width / 2);
-  const minLeft = columnRect.left + 12;
-  const maxLeft = columnRect.right - popoverRect.width - 12;
-  const left = Math.min(Math.max(desiredLeft, minLeft), Math.max(minLeft, maxLeft));
-  const top = Math.max(12, anchorRect.top - popoverRect.height - 8);
-
-  if (import.meta.env.DEV) {
-    console.log("[debug-rollback] popover:", {
-      anchorRect: { left: anchorRect.left, top: anchorRect.top, width: anchorRect.width, height: anchorRect.height },
-      popoverRect: { left: popoverRect.left, top: popoverRect.top, width: popoverRect.width, height: popoverRect.height },
-      columnRect: { left: columnRect.left, top: columnRect.top, right: columnRect.right, width: columnRect.width },
-      desiredLeft,
-      minLeft,
-      maxLeft,
-      left,
-      top,
-      style: { position: "fixed", left: `${left}px`, top: `${top}px` }
-    });
-  }
-
-  rollbackConfirmStyle.value = {
-    position: "fixed",
-    left: `${left}px`,
-    top: `${top}px`
-  };
 }
 
 function updateRollbackProgressPosition() {
@@ -982,48 +892,42 @@ function updateRollbackProgressPosition() {
 }
 
 function updateFloatingUiPositions() {
-  updateRollbackConfirmPosition();
   updateRollbackProgressPosition();
 }
 
-async function confirmRollback() {
-  const pending = rollbackConfirm.value;
-  if (!pending) return;
+async function confirmRollback(turnId: string, action: CheckpointRollbackAction) {
   if (rollbackInFlight.value) return;
-  rollbackConfirm.value = null;
-  rollbackConfirmAnchorEl.value = null;
 
-  // Resolve nodeId: prefer pre-resolved, fallback to fresh lookup
-  const nodeId = resolveRollbackCheckoutNodeId(pending.turnId, pending.nodeId);
+  const entry = checkpointEntryForTurn(turnId);
+  const nodeId = resolveRollbackCheckoutNodeId(turnId, entry?.nodeId ?? null);
 
   if (!nodeId) {
-    console.warn("[rollback] Cannot resolve parent nodeId for turn", pending.turnId);
+    console.warn("[rollback] Cannot resolve parent nodeId for turn", turnId);
     return;
   }
 
   // Source turn message: the one the user clicked on
-  const sourceTurn = turns.value.find(t => t.turnId === pending.turnId);
+  const sourceTurn = turns.value.find(t => t.turnId === turnId);
   const userContent = sourceTurn?.user?.content ?? "";
 
   try {
     forkSummaryOpenForNodeId.value = null;
     checkpointPickerOpen.value = false;
-    optimisticRollbackTurnId.value = pending.turnId;
-    rollbackInFlight.value = { turnId: pending.turnId, action: pending.action };
+    optimisticRollbackTurnId.value = turnId;
+    rollbackInFlight.value = { turnId, action };
     updateRollbackProgressPosition();
     void nextTick().then(() => updateRollbackProgressPosition());
 
     const isSynthetic = nodeId.startsWith("synthetic-");
     const isFirstTurn =
       isSynthetic
-        ? turns.value.findIndex((t) => t.turnId === pending.turnId) <= 0
-        : nodeId === pending.nodeId;
+        ? turns.value.findIndex((t) => t.turnId === turnId) <= 0
+        : nodeId === entry?.nodeId;
 
     if (isFirstTurn) {
       runtimeStore.$patch({ messages: [], turnTraceHistory: [] });
     } else if (isSynthetic) {
-      // Synthetic rollback to previous turn: truncate messages manually
-      const turnIndex = turns.value.findIndex((t) => t.turnId === pending.turnId);
+      const turnIndex = turns.value.findIndex((t) => t.turnId === turnId);
       const previousTurn = turnIndex > 0 ? turns.value[turnIndex - 1] : null;
       if (previousTurn) {
         let lastMsgIdx = -1;
@@ -1042,43 +946,24 @@ async function confirmRollback() {
       }
     } else {
       await Promise.all([
-        runtimeStore.checkoutHistoryNode(nodeId, pending.action, pending.turnId),
+        runtimeStore.checkoutHistoryNode(nodeId, action, turnId),
         new Promise<void>(resolve => setTimeout(resolve, 350))
       ]);
     }
   } catch (err) {
     optimisticRollbackTurnId.value = null;
     rollbackInFlight.value = null;
-    rollbackConfirmAnchorRect.value = null;
     console.error("[rollback] checkoutHistoryNode failed:", err);
     return;
   }
 
   optimisticRollbackTurnId.value = null;
   rollbackInFlight.value = null;
-  rollbackConfirmAnchorRect.value = null;
 
   // Hydrate draft with the clicked turn's user message (the source of rollback)
   const nextDraft = userContent;
   draftMessage.value = nextDraft;
   runtimeStore.setDraftMessage(nextDraft);
-}
-
-function scheduleCancelRollback() {
-  if (rollbackDismissTimer) clearTimeout(rollbackDismissTimer);
-  rollbackDismissTimer = setTimeout(() => {
-    rollbackConfirm.value = null;
-    rollbackConfirmAnchorEl.value = null;
-    rollbackConfirmAnchorRect.value = null;
-    rollbackDismissTimer = null;
-  }, 260);
-}
-
-function clearRollbackDismiss() {
-  if (rollbackDismissTimer) {
-    clearTimeout(rollbackDismissTimer);
-    rollbackDismissTimer = null;
-  }
 }
 
 function rollbackProgressLabel() {
@@ -1369,12 +1254,6 @@ function handleClickOutside(event: MouseEvent) {
   if (forkSummaryMenuRef.value && target && !forkSummaryMenuRef.value.contains(target)) {
     forkSummaryOpenForNodeId.value = null;
   }
-
-  if (rollbackConfirmMenuRef.value && target && !rollbackConfirmMenuRef.value.contains(target)) {
-    rollbackConfirm.value = null;
-    rollbackConfirmAnchorEl.value = null;
-    rollbackConfirmAnchorRect.value = null;
-  }
 }
 
 function isTimelineNearBottom() {
@@ -1500,10 +1379,6 @@ watch(
   { flush: "post" }
 );
 
-watch(rollbackConfirm, () => {
-  void nextTick().then(() => updateRollbackConfirmPosition());
-}, { flush: "post" });
-
 watch(rollbackInFlight, () => {
   void nextTick().then(() => updateRollbackProgressPosition());
 }, { flush: "post" });
@@ -1584,29 +1459,57 @@ watch(isSubmitting, (submitting) => {
               <div
                 class="message-action-bar relative self-start mt-1.5 flex items-center gap-1.5"
                 data-testid="workspace-user-checkpoint-actions"
-                @mouseleave="scheduleCancelRollback"
-                @mouseenter="clearRollbackDismiss"
               >
-                <button
-                  class="checkpoint-icon-button"
-                  type="button"
-                  :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight"
-                  :title="isSubmitting ? '运行中暂不可撤回' : '仅撤回对话'"
-                  @click="requestRollbackConfirm(turn.turnId, 'transcript_only', $event)"
-                >
-                  <History class="h-3.5 w-3.5" />
-                  <span class="sr-only">仅撤回对话</span>
-                </button>
-                <button
-                  class="checkpoint-icon-button"
-                  type="button"
-                  :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight"
-                  :title="isSubmitting ? '运行中暂不可撤回' : '撤回对话和修改'"
-                  @click="requestRollbackConfirm(turn.turnId, 'transcript_and_workspace', $event)"
-                >
-                  <RotateCcw class="h-3.5 w-3.5" />
-                  <span class="sr-only">撤回对话和修改</span>
-                </button>
+                <PopoverRoot>
+                  <PopoverTrigger as-child>
+                    <button
+                      class="checkpoint-icon-button"
+                      type="button"
+                      :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight"
+                      :title="isSubmitting ? '运行中暂不可撤回' : '仅撤回对话'"
+                    >
+                      <History class="h-3.5 w-3.5" />
+                      <span class="sr-only">仅撤回对话</span>
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverPortal>
+                    <PopoverContent side="top" align="center" :side-offset="6" class="z-50 rounded-[0.3rem] border border-stone-200/70 bg-white/97 px-2.5 py-1.5 shadow-md backdrop-blur">
+                      <div class="flex items-center gap-1 text-nowrap">
+                        <span class="text-[11px] leading-none text-stone-400 select-none">确认仅撤回对话？</span>
+                        <PopoverClose as-child>
+                          <button type="button" class="inline-flex items-center justify-center w-5 h-5 rounded-[0.25rem] text-rose-500 hover:bg-rose-100/80 hover:text-rose-600 transition cursor-pointer cursor-pointer" @click="confirmRollback(turn.turnId, 'transcript_only')">
+                            <Check class="h-3 w-3" />
+                          </button>
+                        </PopoverClose>
+                      </div>
+                    </PopoverContent>
+                  </PopoverPortal>
+                </PopoverRoot>
+                <PopoverRoot>
+                  <PopoverTrigger as-child>
+                    <button
+                      class="checkpoint-icon-button"
+                      type="button"
+                      :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight"
+                      :title="isSubmitting ? '运行中暂不可撤回' : '撤回对话和修改'"
+                    >
+                      <RotateCcw class="h-3.5 w-3.5" />
+                      <span class="sr-only">撤回对话和修改</span>
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverPortal>
+                    <PopoverContent side="top" align="center" :side-offset="6" class="z-50 rounded-[0.3rem] border border-stone-200/70 bg-white/97 px-2.5 py-1.5 shadow-md backdrop-blur">
+                      <div class="flex items-center gap-1 text-nowrap">
+                        <span class="text-[11px] leading-none text-stone-400 select-none">确认撤回对话和文件？</span>
+                        <PopoverClose as-child>
+                          <button type="button" class="inline-flex items-center justify-center w-5 h-5 rounded-[0.25rem] text-rose-500 hover:bg-rose-100/80 hover:text-rose-600 transition cursor-pointer cursor-pointer" @click="confirmRollback(turn.turnId, 'transcript_and_workspace')">
+                            <Check class="h-3 w-3" />
+                          </button>
+                        </PopoverClose>
+                      </div>
+                    </PopoverContent>
+                  </PopoverPortal>
+                </PopoverRoot>
                 </div>
               </div>
             </article>
@@ -2050,27 +1953,6 @@ watch(isSubmitting, (submitting) => {
       </div>
     </div>
   </section>
-
-  <Teleport to="body">
-    <div
-      v-if="rollbackConfirm"
-      ref="rollbackConfirmMenuRef"
-      :style="rollbackConfirmStyle"
-      class="rollback-confirm-popover z-[9999] flex items-center gap-1"
-      @mouseenter="clearRollbackDismiss"
-      @mouseleave="scheduleCancelRollback"
-    >
-      <span class="rollback-confirm-hint">{{ rollbackConfirm?.action === 'transcript_and_workspace' ? '确认撤回对话和文件？' : '确认仅撤回对话？' }}</span>
-      <button
-        type="button"
-        class="rollback-confirm-btn rollback-confirm-btn-danger"
-        title="确认撤回"
-        @click="confirmRollback"
-      >
-        <Check class="h-3 w-3" />
-      </button>
-    </div>
-  </Teleport>
 </template>
 
 <style scoped>
@@ -2642,46 +2524,4 @@ watch(isSubmitting, (submitting) => {
   }
 }
 
-.rollback-confirm-popover {
-  border: 1px solid rgba(231, 229, 228, 0.8);
-  border-radius: 0.375rem;
-  background: rgba(255, 255, 255, 0.97);
-  box-shadow: 0 4px 14px rgba(41, 37, 36, 0.08);
-  padding: 0.2rem 0.65rem;
-  backdrop-filter: blur(10px);
-}
-
-.rollback-confirm-hint {
-  font-size: 11px;
-  line-height: 1;
-  color: rgb(168 162 158);
-  white-space: nowrap;
-  user-select: none;
-}
-
-.rollback-confirm-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.25rem;
-  height: 1.25rem;
-  border-radius: 0.25rem;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
-}
-
-.rollback-confirm-btn:active {
-  transform: scale(0.85);
-}
-
-.rollback-confirm-btn-danger {
-  color: rgb(220 38 38);
-}
-
-.rollback-confirm-btn-danger:hover {
-  color: rgb(185 28 28);
-  background: rgba(220, 38, 38, 0.1);
-}
 </style>
