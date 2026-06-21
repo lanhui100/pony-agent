@@ -1013,9 +1013,33 @@ async function confirmRollback() {
     updateRollbackProgressPosition();
     void nextTick().then(() => updateRollbackProgressPosition());
 
-    const isFirstTurn = nodeId === pending.nodeId;
+    const isSynthetic = nodeId.startsWith("synthetic-");
+    const isFirstTurn =
+      isSynthetic
+        ? turns.value.findIndex((t) => t.turnId === pending.turnId) <= 0
+        : nodeId === pending.nodeId;
+
     if (isFirstTurn) {
       runtimeStore.$patch({ messages: [], turnTraceHistory: [] });
+    } else if (isSynthetic) {
+      // Synthetic rollback to previous turn: truncate messages manually
+      const turnIndex = turns.value.findIndex((t) => t.turnId === pending.turnId);
+      const previousTurn = turnIndex > 0 ? turns.value[turnIndex - 1] : null;
+      if (previousTurn) {
+        let lastMsgIdx = -1;
+        for (let idx = messages.value.length - 1; idx >= 0; idx--) {
+          if (messages.value[idx]!.turnId === previousTurn.turnId) {
+            lastMsgIdx = idx;
+            break;
+          }
+        }
+        if (lastMsgIdx >= 0) {
+          runtimeStore.$patch({
+            messages: messages.value.slice(0, lastMsgIdx + 1),
+            turnTraceHistory: []
+          });
+        }
+      }
     } else {
       await Promise.all([
         runtimeStore.checkoutHistoryNode(nodeId, pending.action, pending.turnId),
