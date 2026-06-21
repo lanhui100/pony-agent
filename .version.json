@@ -233,11 +233,23 @@
       ],
       "timestamp": "2026-06-21T21:52:49+08:00",
       "commit": "edf61d7"
+    },
+    {
+      "timestamp": "2026-06-21T21:57:42+08:00",
+      "bumps": [
+        {
+          "segment": "patch",
+          "from": "0.1.7",
+          "component": "tauri",
+          "to": "0.1.8"
+        }
+      ],
+      "commit": "5938783"
     }
   ],
-  "lastBump": "2026-06-21T21:52:49+08:00",
+  "lastBump": "2026-06-21T21:57:42+08:00",
   "tauri": {
-    "patch": 7,
+    "patch": 8,
     "minor": 1,
     "major": 0
   },

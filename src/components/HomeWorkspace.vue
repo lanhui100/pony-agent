@@ -1037,15 +1037,8 @@ async function confirmRollback() {
   rollbackInFlight.value = null;
   rollbackConfirmAnchorRect.value = null;
 
-  // Hydrate draft with the user message of the checkpoint being rolled back to
-  const targetNode = historyNodeById.value.get(nodeId);
-  const targetTurnId = targetNode?.turnId?.trim();
-  const targetTurn = targetTurnId ? turns.value.find(t => t.turnId === targetTurnId) : null;
-  const targetUserContent = targetTurn?.user?.content?.trim() || "";
-
-  const nextDraft = shouldHydrateDraft
-    ? (targetUserContent || userContent)
-    : preservedDraft;
+  // Hydrate draft with the clicked turn's user message (the source of rollback)
+  const nextDraft = shouldHydrateDraft ? userContent : preservedDraft;
   draftMessage.value = nextDraft;
   runtimeStore.setDraftMessage(nextDraft);
 }
