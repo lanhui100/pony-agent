@@ -289,12 +289,6 @@ type StreamDebugBucket = {
 let scheduledRuntimeMetricsPush = false;
 let pendingRuntimeMetricsPatch: Record<string, unknown> | null = null;
 
-function swallowAsyncError(result: unknown) {
-  if (result && typeof result === "object" && "catch" in result && typeof result.catch === "function") {
-    void result.catch(() => {});
-  }
-}
-
 function streamDebugEnabled() {
   if (typeof window === "undefined") {
     return false;
@@ -341,12 +335,7 @@ function updateStreamDebugBucket(section: keyof StreamDebugBucket, patch: Record
     if (!payload) {
       return;
     }
-
-    swallowAsyncError(safeInvoke("record_stream_debug_metrics", {
-      section: "runtime",
-      payload
-    }));
-  }, 250);
+  }, 0);
 }
 
 function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
@@ -3718,6 +3707,10 @@ export const useRuntimeStore = defineStore("runtime", {
         historyNodes: this.historyNodes,
         historyBranches: this.historyBranches
       };
+      const shouldApplyRuntimeViewCheckpoint =
+        !options?.nodeId ||
+        !runtimeView.historyCursor ||
+        normalizeHistoryCursorMode(runtimeView.historyCursor.mode) === "live";
       const hasCheckpointOverride =
         options != null && Object.prototype.hasOwnProperty.call(options, "executionCheckpoint");
       this.applySessionSnapshot(nextSessionId, snapshot, retrieved, runtimeView);
@@ -3740,7 +3733,9 @@ export const useRuntimeStore = defineStore("runtime", {
       this.applyExecutionCheckpoint(
         hasCheckpointOverride
           ? (options?.executionCheckpoint ?? null)
-          : (runtimeView.checkpoint ?? null),
+          : shouldApplyRuntimeViewCheckpoint
+            ? (runtimeView.checkpoint ?? null)
+            : null,
         persisted?.messages
       );
       this.latestGraphRunSubmissionPlan = runtimeView.submissionPlan ? { ...runtimeView.submissionPlan } : null;
@@ -3919,7 +3914,7 @@ export const useRuntimeStore = defineStore("runtime", {
       });
       this.persistHistory();
     },
-    async checkoutHistoryNode(nodeId: string, mode: HistoryCheckoutMode = "transcript_only") {
+    async checkoutHistoryNode(nodeId: string, mode: HistoryCheckoutMode = "transcript_only", turnId?: string | null) {
       const sessionId = this.sessionId;
       if (!sessionId || !nodeId.trim()) {
         return null;
@@ -3938,6 +3933,29 @@ export const useRuntimeStore = defineStore("runtime", {
         });
         result = normalizeHistoryCheckoutResult(payload, this.historyNodes, this.historyBranches);
       } else {
+        const resolvedTurnId = turnId?.trim() || this.findCheckpointTurnIdByNodeId(nodeId);
+        let truncationIndex = -1;
+        if (resolvedTurnId) {
+          for (let i = this.messages.length - 1; i >= 0; i--) {
+            if ((this.messages[i] as ChatMessage).turnId === resolvedTurnId) {
+              truncationIndex = i;
+              break;
+            }
+          }
+        }
+        if (truncationIndex >= 0) {
+          this.messages = this.messages.slice(0, truncationIndex + 1);
+          this.turnTraceHistory = this.turnTraceHistory.filter(
+            (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
+          );
+          this.traceSteps = createDefaultTraceSteps();
+          const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
+          this.traceTimeline = lastTrace?.traceTimeline?.length
+            ? cloneTraceTimeline(lastTrace.traceTimeline)
+            : createDefaultTraceTimeline();
+          this.persistHistory();
+        }
+
         result = {
           sessionId,
           nodeId,
@@ -3969,6 +3987,10 @@ export const useRuntimeStore = defineStore("runtime", {
         result.historyStateAuditSummary ?? null
       );
       return result;
+    },
+    findCheckpointTurnIdByNodeId(nodeId: string): string | null {
+      const entry = this.conversationCheckpointEntries.find((e) => e.nodeId === nodeId);
+      return entry?.turnId?.trim() || null;
     },
     async restoreBranchHead(branchId?: string | null) {
       const sessionId = this.sessionId;
@@ -5110,7 +5132,6 @@ export const useRuntimeStore = defineStore("runtime", {
 
         // Yield to browser — let Vue flush reactivity + DOM for chat area
         window.setTimeout(() => {
-          const stage2StartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           // ===== STAGE 2 (setTimeout 0): Trace + metadata + UI unlock =====
           const nextPhase = completedPhase === "completed" ? "ready" : completedPhase;
           const nextTraceSteps = payload.traceSteps ?? this.traceSteps;
@@ -5125,14 +5146,8 @@ export const useRuntimeStore = defineStore("runtime", {
           const nextOutputTokens = payload.outputTokens ?? this.outputTokens;
           const nextTotalTokens = payload.totalTokens ?? this.totalTokens;
           const nextFirstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-          const tokenStatsStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
-          const tokenStatsDurationMs =
-            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - tokenStatsStartAt) * 100)) / 100;
-          const toolMessagesStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           this.syncToolMessages(payload.turnId, payload.toolActivities, false);
-          const toolMessagesDurationMs =
-            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - toolMessagesStartAt) * 100)) / 100;
 
           const traceTimeline = resolveEventTraceTimeline(payload, () =>
             buildFallbackRuntimeTraceTimeline({
@@ -5160,7 +5175,6 @@ export const useRuntimeStore = defineStore("runtime", {
               turnDurationMs: payload.turnDurationMs ?? null
             })
           );
-          const traceCommitStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
             eventId: payload.eventId ?? null,
             eventType: payload.eventType ?? null,
@@ -5190,8 +5204,6 @@ export const useRuntimeStore = defineStore("runtime", {
             ...turnDurationPatch,
             error: null
           }, false);
-          const traceCommitDurationMs =
-            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - traceCommitStartAt) * 100)) / 100;
           this.$patch((state) => {
             state.phase = nextPhase;
             state.traceSteps = nextTraceSteps;
@@ -5210,22 +5222,6 @@ export const useRuntimeStore = defineStore("runtime", {
             state.firstTokenLatencyMs = nextFirstTokenLatencyMs;
             state.isSubmitting = false;
             state.activeTurnId = null;
-          });
-          const stage2DurationMs =
-            Math.round((((typeof performance !== "undefined" ? performance.now() : Date.now()) - stage2StartAt) * 100)) / 100;
-          const turnToolMessageCount = this.messages.filter(
-            (message) => message.turnId === payload.turnId && message.role === "tool"
-          ).length;
-          debugLog("perf:turn-completed-stage2", {
-            turnId: payload.turnId,
-            stage2DurationMs,
-            tokenStatsDurationMs,
-            toolMessagesDurationMs,
-            traceCommitDurationMs,
-            messagesCount: this.messages.length,
-            turnToolMessageCount,
-            traceTimelineLength: this.traceTimeline.length,
-            turnTraceHistoryLength: this.turnTraceHistory.length
           });
 
           // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====

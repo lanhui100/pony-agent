@@ -173,11 +173,23 @@
           "component": "core"
         }
       ]
+    },
+    {
+      "bumps": [
+        {
+          "segment": "patch",
+          "component": "tauri",
+          "to": "0.1.4",
+          "from": "0.1.3"
+        }
+      ],
+      "commit": "8d15217",
+      "timestamp": "2026-06-21T15:04:09+08:00"
     }
   ],
-  "lastBump": "2026-06-21T11:37:37+08:00",
+  "lastBump": "2026-06-21T15:04:09+08:00",
   "tauri": {
-    "patch": 3,
+    "patch": 4,
     "minor": 1,
     "major": 0
   },

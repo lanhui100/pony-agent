@@ -8,20 +8,22 @@ import {
   Bot,
   Check,
   ChevronDown,
+  GitBranch,
   GitFork,
   History,
   LoaderCircle,
   Copy,
   RotateCcw,
   Square,
+  Undo2,
   UserRound,
   Wrench
 } from "lucide-vue-next";
 import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
-import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode } from "@/types/runtime";
+import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode, HistoryNode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
-import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
+
 import Button from "@/components/ui/Button.vue";
 import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
@@ -41,8 +43,11 @@ const providerStore = useProviderStore();
 const runtimeStoreSessionList = storeToRefs(runtimeStore).sessionList;
 
 const {
+  activeBranchId,
   conversationCheckpointEntries,
   draftMessage,
+  historyNodes,
+  historyBranches,
   isSubmitting,
   latestExecutionCheckpoint,
   latestGraphRunSubmissionPlan,
@@ -74,6 +79,17 @@ const hoveredProviderId = ref<string | null>(null);
 const reasoningMenuOpen = ref(false);
 const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
+const copiedAssistantTurnId = ref<string | null>(null);
+const rollbackConfirm = ref<{ turnId: string; nodeId: string | null; action: CheckpointRollbackAction } | null>(null);
+const rollbackConfirmMenuRef = ref<HTMLElement | null>(null);
+const rollbackConfirmAnchorEl = ref<HTMLElement | null>(null);
+const rollbackConfirmAnchorRect = ref<DOMRect | null>(null);
+const workspaceContentColumnRef = ref<HTMLElement | null>(null);
+const rollbackConfirmStyle = ref<Record<string, string | undefined>>({});
+const rollbackInFlight = ref<{ turnId: string; action: CheckpointRollbackAction } | null>(null);
+const rollbackProgressStyle = ref<Record<string, string | undefined>>({});
+const optimisticRollbackTurnId = ref<string | null>(null);
+let rollbackDismissTimer: ReturnType<typeof setTimeout> | null = null;
 const providerMenuRef = ref<HTMLElement | null>(null);
 const modelSubmenuStyle = ref<Record<string, string>>({ top: '0' });
 const reasoningMenuRef = ref<HTMLElement | null>(null);
@@ -98,75 +114,15 @@ const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string
 const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
 const AUTO_SCROLL_THRESHOLD_PX = 160;
 const STREAM_FADE_MIN_CHARS = 24;
-const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
 const PROGRAMMATIC_SCROLL_GRACE_MS = 700;
-let scheduledRevealMetricsPush = false;
-let pendingRevealMetricsPatch: Record<string, unknown> | null = null;
+
 let pendingStreamAutoFollow = true;
 let pendingScrollBehavior: ScrollBehavior = "auto";
 let scheduledScrollRequestId = 0;
 let programmaticScrollUntilMs = 0;
 const streamAutoFollowEnabled = ref(true);
 
-function swallowAsyncError(result: unknown) {
-  if (result && typeof result === "object" && "catch" in result && typeof result.catch === "function") {
-    void result.catch(() => {});
-  }
-}
-
-function streamDebugEnabled() {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  return import.meta.env.DEV || window.localStorage.getItem(STREAM_DEBUG_STORAGE_KEY) === "true";
-}
-
-function updateStreamDebugReveal(patch: Record<string, unknown>) {
-  if (!streamDebugEnabled() || typeof window === "undefined") {
-    return;
-  }
-
-  const streamWindow = window as Window & {
-    __ponyStreamMetrics?: Record<string, unknown>;
-  };
-
-  const current = streamWindow.__ponyStreamMetrics ?? {};
-  const reveal = (current.reveal as Record<string, unknown> | undefined) ?? {};
-  streamWindow.__ponyStreamMetrics = {
-    ...current,
-    reveal: {
-      ...reveal,
-      ...patch,
-      updatedAt: Date.now()
-    }
-  };
-
-  if (!isTauriAvailable()) {
-    return;
-  }
-
-  pendingRevealMetricsPatch = {
-    ...((streamWindow.__ponyStreamMetrics.reveal as Record<string, unknown> | undefined) ?? {})
-  };
-  if (scheduledRevealMetricsPush) {
-    return;
-  }
-
-  scheduledRevealMetricsPush = true;
-  window.setTimeout(() => {
-    scheduledRevealMetricsPush = false;
-    const payload = pendingRevealMetricsPatch;
-    pendingRevealMetricsPatch = null;
-    if (!payload) {
-      return;
-    }
-
-    swallowAsyncError(safeInvoke("record_stream_debug_metrics", {
-      section: "reveal",
-      payload
-    }));
-  }, 250);
+function updateStreamDebugReveal(_patch: Record<string, unknown>) {
 }
 
 const currentModelSupportsReasoning = computed(
@@ -348,6 +304,20 @@ const turns = computed<TurnBucket[]>(() => {
   return Array.from(buckets.values());
 });
 
+const visibleTurns = computed<TurnBucket[]>(() => {
+  const cutoffTurnId = optimisticRollbackTurnId.value;
+  if (!cutoffTurnId) {
+    return turns.value;
+  }
+
+  const cutoffIndex = turns.value.findIndex((turn) => turn.turnId === cutoffTurnId);
+  if (cutoffIndex <= 0) {
+    return [];
+  }
+
+  return turns.value.slice(0, cutoffIndex);
+});
+
 const hasVisibleHistorySession = computed(() =>
   runtimeStoreSessionList.value.some(
     (session) =>
@@ -355,7 +325,18 @@ const hasVisibleHistorySession = computed(() =>
       !isTransientSessionOverview(session)
   )
 );
-const isEmptyWorkspace = computed(() => turns.value.length === 0 && !hasVisibleHistorySession.value);
+const isEmptyWorkspace = computed(() =>
+  visibleTurns.value.length === 0 && !hasVisibleHistorySession.value && !rollbackInFlight.value
+);
+const isLastTurn = computed(() => {
+  const t = visibleTurns.value;
+  if (t.length === 0) {
+    return () => true;
+  }
+
+  const lastTurnId = t[t.length - 1]!.turnId;
+  return (turnId: string) => turnId === lastTurnId;
+});
 const latestFailedTrace = computed(() => {
   const traces = [...turnTraceHistory.value].reverse();
   return traces.find((trace) => trace.phase === "failed" || Boolean(trace.error)) ?? null;
@@ -386,14 +367,37 @@ const checkpointEntryByTurnId = computed(() => {
   return lookup;
 });
 
-const checkpointPickerEntries = computed(() => checkpointEntries.value.filter((entry) => !entry.isLatest));
+const historyNodeById = computed(() => {
+  const lookup = new Map<string, HistoryNode>();
+  for (const node of historyNodes.value) {
+    lookup.set(node.nodeId, node);
+  }
+  return lookup;
+});
 
-const checkpointShortcutLabel = computed(() => {
+const branchList = computed(() => {
+  return historyBranches.value.map((branch, index) => ({
+    ...branch,
+    displayName: branch.label?.trim() || (index === 0 ? "主分支" : `分支 ${index}`)
+  }));
+});
+
+const currentBranchDisplay = computed(() => {
+  const current = branchList.value.find((b) => b.branchId === activeBranchId.value);
+  return current?.displayName || (branchList.value.length > 0 ? branchList.value[0]!.displayName : "主分支");
+});
+
+const canUndoLastTurn = computed(() => {
+  const nonLatest = checkpointEntries.value.filter((entry) => !entry.isLatest);
+  return nonLatest.length > 0 && !isSubmitting.value && !sessionOperation.value;
+});
+
+const undoShortcutLabel = computed(() => {
   if (typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac")) {
-    return "Cmd+K";
+    return "Cmd+Z";
   }
 
-  return "Ctrl+K";
+  return "Ctrl+Z";
 });
 
 const latestTurnSignature = computed(() => {
@@ -762,6 +766,22 @@ function copyErrorDetail(turnId: string, text: string) {
   }
 }
 
+function copyAssistantResponse(turnId: string, content: string) {
+  copiedAssistantTurnId.value = turnId;
+
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(content);
+  }
+
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => {
+      if (copiedAssistantTurnId.value === turnId) {
+        copiedAssistantTurnId.value = null;
+      }
+    }, 1200);
+  }
+}
+
 function toolStatusIcon(message: ChatMessage) {
   if (message.status === "error") {
     return "error";
@@ -786,61 +806,234 @@ function requireCheckpointEntryForTurn(turnId: string) {
   return entry;
 }
 
-function messageCheckpointActionTitle(
-  entry: ConversationCheckpointEntry,
-  action: CheckpointRollbackAction
-) {
-  if (action === "transcript_only") {
-    if (isSubmitting.value) {
-      return "运行中暂不可回退 checkpoint（仅对话）";
-    }
-    if (sessionOperation.value) {
-      return "当前正在处理会话操作，暂不可回退 checkpoint（仅对话）";
-    }
-    return "回到此 checkpoint（仅对话）";
-  }
-
-  if (isSubmitting.value) {
-    return "运行中暂不可回退 checkpoint（对话 + 文件）";
-  }
-  if (sessionOperation.value) {
-    return "当前正在处理会话操作，暂不可回退 checkpoint（对话 + 文件）";
-  }
-  if (!entry.workspaceRollbackCapable) {
-    return "该 checkpoint 不支持文件回退，将仅恢复对话历史";
-  }
-  return "回到此 checkpoint（对话 + 文件）";
-}
-
-function canUseCheckpointAction(_entry: ConversationCheckpointEntry, _action: CheckpointRollbackAction) {
-  return !isSubmitting.value && !sessionOperation.value;
-}
-
-function checkpointPickerEntryTitle(entry: ConversationCheckpointEntry) {
-  return entry.workspaceRollbackCapable
-    ? "回到此 checkpoint（优先恢复对话与文件）"
-    : "回到此 checkpoint（仅恢复对话历史）";
-}
-
 function checkpointModeForPickerEntry(entry: ConversationCheckpointEntry): HistoryCheckoutMode {
   return entry.workspaceRollbackCapable ? "transcript_and_workspace" : "transcript_only";
 }
 
-function checkpointMetaLabel(entry: ConversationCheckpointEntry) {
-  return entry.workspaceRollbackCapable ? "对话 + 文件" : "仅对话";
+function requestRollbackConfirm(turnId: string, action: CheckpointRollbackAction, event?: MouseEvent) {
+  if (isSubmitting.value || sessionOperation.value) return;
+  const entry = checkpointEntryForTurn(turnId);
+  rollbackConfirmAnchorEl.value = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  rollbackConfirmAnchorRect.value = rollbackConfirmAnchorEl.value?.getBoundingClientRect() ?? null;
+
+  if (import.meta.env.DEV) {
+    console.log("[debug-rollback] requestRollbackConfirm:", {
+      turnId,
+      action,
+      hasAnchor: !!rollbackConfirmAnchorEl.value,
+      anchorTagName: rollbackConfirmAnchorEl.value?.tagName,
+      anchorClassName: rollbackConfirmAnchorEl.value?.className,
+      anchorRect: rollbackConfirmAnchorRect.value
+        ? { left: rollbackConfirmAnchorRect.value.left, top: rollbackConfirmAnchorRect.value.top, width: rollbackConfirmAnchorRect.value.width, height: rollbackConfirmAnchorRect.value.height }
+        : null,
+      entryNodeId: entry?.nodeId
+    });
+  }
+
+  rollbackConfirm.value = { turnId, nodeId: entry?.nodeId ?? null, action };
+  if (rollbackConfirmAnchorRect.value) {
+    rollbackConfirmStyle.value = {
+      position: "fixed",
+      left: `${rollbackConfirmAnchorRect.value.left + (rollbackConfirmAnchorRect.value.width / 2)}px`,
+      top: `${Math.max(12, rollbackConfirmAnchorRect.value.top - 8)}px`,
+      transform: "translate(-50%, -100%)"
+    };
+  } else {
+    rollbackConfirmStyle.value = {};
+  }
+  void nextTick().then(() => window.requestAnimationFrame(() => updateRollbackConfirmPosition()));
 }
 
-async function rollbackToCheckpoint(
-  entry: ConversationCheckpointEntry,
-  action: CheckpointRollbackAction
-) {
-  if (!canUseCheckpointAction(entry, action)) {
+function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | null) {
+  const entryNodeId = fallbackNodeId ?? checkpointEntryForTurn(turnId)?.nodeId ?? null;
+  if (!entryNodeId) {
+    return null;
+  }
+
+  const entryNode = historyNodeById.value.get(entryNodeId) ?? null;
+  return entryNode?.parentNodeId?.trim() || null;
+}
+
+function updateRollbackConfirmPosition() {
+  if (typeof window === "undefined") {
     return;
   }
 
-  forkSummaryOpenForNodeId.value = null;
-  checkpointPickerOpen.value = false;
-  await runtimeStore.checkoutHistoryNode(entry.nodeId, action);
+  const popover = rollbackConfirmMenuRef.value;
+  const contentColumn = workspaceContentColumnRef.value;
+  const anchor = rollbackConfirmAnchorEl.value;
+  if (
+    !popover ||
+    !contentColumn ||
+    typeof popover.getBoundingClientRect !== "function" ||
+    typeof contentColumn.getBoundingClientRect !== "function"
+  ) {
+    rollbackConfirmStyle.value = {};
+    return;
+  }
+
+  const anchorRect = anchor && typeof anchor.getBoundingClientRect === "function"
+    ? anchor.getBoundingClientRect()
+    : rollbackConfirmAnchorRect.value;
+  if (!anchorRect) {
+    rollbackConfirmStyle.value = {};
+    return;
+  }
+  const popoverRect = popover.getBoundingClientRect();
+  const columnRect = contentColumn.getBoundingClientRect();
+  const desiredLeft = anchorRect.left + (anchorRect.width / 2) - (popoverRect.width / 2);
+  const minLeft = columnRect.left + 12;
+  const maxLeft = columnRect.right - popoverRect.width - 12;
+  const left = Math.min(Math.max(desiredLeft, minLeft), Math.max(minLeft, maxLeft));
+  const top = Math.max(12, anchorRect.top - popoverRect.height - 8);
+
+  if (import.meta.env.DEV) {
+    console.log("[debug-rollback] popover:", {
+      anchorRect: { left: anchorRect.left, top: anchorRect.top, width: anchorRect.width, height: anchorRect.height },
+      popoverRect: { left: popoverRect.left, top: popoverRect.top, width: popoverRect.width, height: popoverRect.height },
+      columnRect: { left: columnRect.left, top: columnRect.top, right: columnRect.right, width: columnRect.width },
+      desiredLeft,
+      minLeft,
+      maxLeft,
+      left,
+      top,
+      style: { position: "fixed", left: `${left}px`, top: `${top}px` }
+    });
+  }
+
+  rollbackConfirmStyle.value = {
+    position: "fixed",
+    left: `${left}px`,
+    top: `${top}px`,
+    outline: import.meta.env.DEV ? "2px solid #f00" : undefined
+  };
+}
+
+function updateRollbackProgressPosition() {
+  if (typeof window === "undefined") {
+    rollbackProgressStyle.value = {};
+    return;
+  }
+
+  const contentColumn = workspaceContentColumnRef.value;
+  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+  if (
+    !rollbackInFlight.value ||
+    !contentColumn ||
+    typeof contentColumn.getBoundingClientRect !== "function"
+  ) {
+    rollbackProgressStyle.value = {};
+    return;
+  }
+
+  const columnRect = contentColumn.getBoundingClientRect();
+  const viewportRect = viewport && typeof viewport.getBoundingClientRect === "function"
+    ? viewport.getBoundingClientRect()
+    : null;
+  const left = viewportRect ? Math.max(columnRect.left, viewportRect.left) : columnRect.left;
+  const right = viewportRect ? Math.min(columnRect.right, viewportRect.right) : columnRect.right;
+  const top = viewportRect ? Math.max(columnRect.top, viewportRect.top) : columnRect.top;
+  const bottom = viewportRect ? Math.min(columnRect.bottom, viewportRect.bottom) : columnRect.bottom;
+  const width = Math.max(0, right - left);
+  const height = Math.max(0, bottom - top);
+
+  if (import.meta.env.DEV) {
+    console.log("[debug-rollback] progress overlay:", {
+      columnRect: { left: columnRect.left, top: columnRect.top, right: columnRect.right, width: columnRect.width, height: columnRect.height },
+      viewportRect: viewportRect ? { left: viewportRect.left, top: viewportRect.top, right: viewportRect.right, bottom: viewportRect.bottom } : null,
+      result: { left, top, width, height }
+    });
+  }
+
+  if (width < 20 || height < 20) {
+    rollbackProgressStyle.value = {};
+    if (import.meta.env.DEV) {
+      console.log("[debug-rollback] progress overlay: zero-area fallback to full viewport");
+    }
+    return;
+  }
+
+  rollbackProgressStyle.value = {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+    height: `${height}px`,
+    outline: import.meta.env.DEV ? "2px dashed #00f" : undefined
+  };
+}
+
+function updateFloatingUiPositions() {
+  updateRollbackConfirmPosition();
+  updateRollbackProgressPosition();
+}
+
+async function confirmRollback() {
+  const pending = rollbackConfirm.value;
+  if (!pending) return;
+  rollbackConfirm.value = null;
+  rollbackConfirmAnchorEl.value = null;
+
+  const turn = turns.value.find(t => t.turnId === pending.turnId);
+  const userContent = turn?.user?.content ?? "";
+
+  // Resolve nodeId: prefer pre-resolved, fallback to fresh lookup
+  const nodeId = resolveRollbackCheckoutNodeId(pending.turnId, pending.nodeId);
+
+  if (!nodeId) {
+    console.warn("[rollback] Cannot resolve parent nodeId for turn", pending.turnId);
+    return;
+  }
+
+  try {
+    forkSummaryOpenForNodeId.value = null;
+    checkpointPickerOpen.value = false;
+    optimisticRollbackTurnId.value = pending.turnId;
+    rollbackInFlight.value = { turnId: pending.turnId, action: pending.action };
+    updateRollbackProgressPosition();
+    void nextTick().then(() => updateRollbackProgressPosition());
+    await runtimeStore.checkoutHistoryNode(nodeId, pending.action, pending.turnId);
+  } catch (err) {
+    optimisticRollbackTurnId.value = null;
+    rollbackInFlight.value = null;
+    rollbackConfirmAnchorRect.value = null;
+    console.error("[rollback] checkoutHistoryNode failed:", err);
+    return;
+  }
+
+  optimisticRollbackTurnId.value = null;
+  rollbackInFlight.value = null;
+  rollbackConfirmAnchorRect.value = null;
+
+  if (userContent) {
+    runtimeStore.draftMessage = userContent;
+  }
+}
+
+function scheduleCancelRollback() {
+  if (rollbackDismissTimer) clearTimeout(rollbackDismissTimer);
+  rollbackDismissTimer = setTimeout(() => {
+    rollbackConfirm.value = null;
+    rollbackConfirmAnchorEl.value = null;
+    rollbackConfirmAnchorRect.value = null;
+    rollbackDismissTimer = null;
+  }, 260);
+}
+
+function clearRollbackDismiss() {
+  if (rollbackDismissTimer) {
+    clearTimeout(rollbackDismissTimer);
+    rollbackDismissTimer = null;
+  }
+}
+
+function rollbackProgressLabel() {
+  if (!rollbackInFlight.value) {
+    return "";
+  }
+
+  return rollbackInFlight.value.action === "transcript_and_workspace"
+    ? "正在撤回对话和文件..."
+    : "正在撤回对话...";
 }
 
 function toggleCheckpointPicker() {
@@ -851,10 +1044,6 @@ function toggleCheckpointPicker() {
     reasoningMenuOpen.value = false;
     forkSummaryOpenForNodeId.value = null;
   }
-}
-
-async function selectCheckpointPickerEntry(entry: ConversationCheckpointEntry) {
-  await rollbackToCheckpoint(entry, checkpointModeForPickerEntry(entry));
 }
 
 function toggleForkSummary(nodeId: string) {
@@ -878,13 +1067,53 @@ async function jumpToForkTarget(
   await runtimeStore.checkoutHistoryNode(target.nodeId, checkpointModeForPickerEntry(entry));
 }
 
+function branchLabelForDisplay(branch: { label?: string | null; branchId: string }, index: number) {
+  return branch.label?.trim() || (index === 0 ? "主分支" : `分支 ${index}`);
+}
+
+async function handleCreateBranch(turnId: string) {
+  const entry = checkpointEntryForTurn(turnId);
+  if (!entry) {
+    return;
+  }
+
+  await runtimeStore.forkHistoryNode(entry.nodeId);
+}
+
+async function handleUndoLastTurn() {
+  if (!canUndoLastTurn.value) {
+    return;
+  }
+
+  const sortedEntries = [...checkpointEntries.value]
+    .filter((e) => !e.isLatest)
+    .sort((a, b) => b.createdAtMs - a.createdAtMs);
+  const previousEntry = sortedEntries[0];
+  if (!previousEntry) {
+    return;
+  }
+
+  forkSummaryOpenForNodeId.value = null;
+  checkpointPickerOpen.value = false;
+  await runtimeStore.checkoutHistoryNode(previousEntry.nodeId, "transcript_only", previousEntry.turnId);
+}
+
+async function handleSwitchBranch(branchId: string) {
+  if (branchId === activeBranchId.value) {
+    return;
+  }
+
+  checkpointPickerOpen.value = false;
+  await runtimeStore.switchHistoryBranch(branchId);
+}
+
 function handleCheckpointShortcut(event: KeyboardEvent) {
   const isMac = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
   const shortcutPressed = event.key.toLowerCase() === "k" && (isMac ? event.metaKey : event.ctrlKey);
 
   if (shortcutPressed && !event.shiftKey && !event.altKey) {
     event.preventDefault();
-    if (checkpointPickerEntries.value.length > 0) {
+    if (branchList.value.length > 0) {
       checkpointPickerOpen.value = true;
       providerMenuOpen.value = false;
       hoveredProviderId.value = null;
@@ -899,6 +1128,17 @@ function handleCheckpointShortcut(event: KeyboardEvent) {
 
 function handleComposerKeydown(event: KeyboardEvent) {
   if (handleCheckpointShortcut(event)) {
+    return;
+  }
+
+  const isUndoShortcut =
+    event.key.toLowerCase() === "z" &&
+    (event.ctrlKey || event.metaKey) &&
+    !event.shiftKey &&
+    !event.altKey;
+  if (isUndoShortcut && draftMessage.value.trim() === "") {
+    event.preventDefault();
+    handleUndoLastTurn();
     return;
   }
 
@@ -918,6 +1158,17 @@ function handleWindowKeydown(event: KeyboardEvent) {
     target?.isContentEditable === true;
 
   if (isEditableTarget && target !== document.activeElement) {
+    return;
+  }
+
+  const isUndoShortcut =
+    event.key.toLowerCase() === "z" &&
+    (event.ctrlKey || event.metaKey) &&
+    !event.shiftKey &&
+    !event.altKey;
+  if (isUndoShortcut && !isEditableTarget) {
+    event.preventDefault();
+    handleUndoLastTurn();
     return;
   }
 
@@ -1041,6 +1292,12 @@ function handleClickOutside(event: MouseEvent) {
   if (forkSummaryMenuRef.value && target && !forkSummaryMenuRef.value.contains(target)) {
     forkSummaryOpenForNodeId.value = null;
   }
+
+  if (rollbackConfirmMenuRef.value && target && !rollbackConfirmMenuRef.value.contains(target)) {
+    rollbackConfirm.value = null;
+    rollbackConfirmAnchorEl.value = null;
+    rollbackConfirmAnchorRect.value = null;
+  }
 }
 
 function isTimelineNearBottom() {
@@ -1104,6 +1361,7 @@ function queueScrollToLatestTurn(behavior: ScrollBehavior = "smooth") {
 }
 
 function handleTimelineViewportScroll() {
+  updateFloatingUiPositions();
   if (Date.now() < programmaticScrollUntilMs) {
     streamAutoFollowEnabled.value = true;
     return;
@@ -1115,6 +1373,7 @@ function handleTimelineViewportScroll() {
 function handleTimelineUserScrollIntent() {
   programmaticScrollUntilMs = 0;
   streamAutoFollowEnabled.value = isTimelineNearBottom();
+  updateFloatingUiPositions();
 }
 
 onMounted(() => {
@@ -1126,6 +1385,7 @@ onMounted(() => {
   syncStreamingPresentationState("mounted");
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("keydown", handleWindowKeydown);
+  window.addEventListener("resize", updateFloatingUiPositions);
   handleTimelineViewportScroll();
   queueScrollToLatestTurn("auto");
 });
@@ -1133,6 +1393,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("click", handleClickOutside);
   window.removeEventListener("keydown", handleWindowKeydown);
+  window.removeEventListener("resize", updateFloatingUiPositions);
   const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
   if (viewport && "removeEventListener" in viewport) {
     viewport.removeEventListener("scroll", handleTimelineViewportScroll);
@@ -1161,6 +1422,14 @@ watch(
   },
   { flush: "post" }
 );
+
+watch(rollbackConfirm, () => {
+  void nextTick().then(() => updateRollbackConfirmPosition());
+}, { flush: "post" });
+
+watch(rollbackInFlight, () => {
+  void nextTick().then(() => updateRollbackProgressPosition());
+}, { flush: "post" });
 
 watch(latestTurnSignature, (signature, previousSignature) => {
   if (signature === previousSignature) {
@@ -1200,8 +1469,19 @@ watch(isSubmitting, (submitting) => {
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
       viewport-class="px-4 py-4 sm:px-5"
     >
-      <div class="mx-auto w-full max-w-[58rem]" data-testid="workspace-content-column">
-      <TransitionGroup name="turn-flow" tag="div" class="space-y-5">
+      <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[58rem]" data-testid="workspace-content-column">
+      <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5">
+        <div
+          v-if="rollbackInFlight"
+          class="rollback-progress-overlay"
+          :style="rollbackProgressStyle"
+          data-testid="workspace-rollback-progress"
+        >
+          <div class="rollback-progress-card">
+            <RotateCcw class="rollback-progress-icon h-4 w-4" />
+            <span>{{ rollbackProgressLabel() }}</span>
+          </div>
+        </div>
         <section
           v-if="isEmptyWorkspace"
           key="workspace-empty-state"
@@ -1212,7 +1492,7 @@ watch(isSubmitting, (submitting) => {
             我能帮你做些什么？
           </h2>
         </section>
-        <section v-for="turn in turns" :key="turn.turnId" class="space-y-3">
+        <section v-for="turn in visibleTurns" :key="turn.turnId" class="space-y-3">
           <article v-if="turn.user" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-user-message ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
             <div class="flex flex-col items-end">
               <div :class="actorLabelClass()" class="mb-1">
@@ -1222,6 +1502,52 @@ watch(isSubmitting, (submitting) => {
               <div :class="userShellClass()">
                 <div class="text-left whitespace-pre-wrap text-sm leading-6">
                   {{ turn.user.content }}
+                </div>
+              </div>
+              <div
+                class="message-action-bar relative self-start mt-1.5 flex items-center gap-1.5"
+                data-testid="workspace-user-checkpoint-actions"
+                @mouseleave="scheduleCancelRollback"
+                @mouseenter="clearRollbackDismiss"
+              >
+                <button
+                  class="checkpoint-icon-button"
+                  type="button"
+                  :disabled="isSubmitting || !!sessionOperation"
+                  :title="isSubmitting ? '运行中暂不可撤回' : '仅撤回对话'"
+                  @click="requestRollbackConfirm(turn.turnId, 'transcript_only', $event)"
+                >
+                  <History class="h-3.5 w-3.5" />
+                  <span class="sr-only">仅撤回对话</span>
+                </button>
+                <button
+                  class="checkpoint-icon-button"
+                  type="button"
+                  :disabled="isSubmitting || !!sessionOperation"
+                  :title="isSubmitting ? '运行中暂不可撤回' : '撤回对话和修改'"
+                  @click="requestRollbackConfirm(turn.turnId, 'transcript_and_workspace', $event)"
+                >
+                  <RotateCcw class="h-3.5 w-3.5" />
+                  <span class="sr-only">撤回对话和修改</span>
+                </button>
+
+                <div
+                  v-if="rollbackConfirm?.turnId === turn.turnId"
+                  ref="rollbackConfirmMenuRef"
+                  :style="rollbackConfirmStyle"
+                  class="rollback-confirm-popover z-[9999] flex items-center gap-1"
+                  @mouseenter="clearRollbackDismiss"
+                  @mouseleave="scheduleCancelRollback"
+                >
+                  <span class="rollback-confirm-hint">{{ rollbackConfirm?.action === 'transcript_and_workspace' ? '确认撤回对话和文件？' : '确认仅撤回对话？' }}</span>
+                  <button
+                    type="button"
+                    class="rollback-confirm-btn rollback-confirm-btn-danger"
+                    title="确认撤回"
+                    @click="confirmRollback"
+                  >
+                    <Check class="h-3 w-3" />
+                  </button>
                 </div>
               </div>
             </div>
@@ -1376,67 +1702,62 @@ watch(isSubmitting, (submitting) => {
             </details>
 
             <div
-              v-if="turn.assistant && checkpointEntryForTurn(turn.turnId) && !checkpointEntryForTurn(turn.turnId)?.isLatest"
-              class="mt-3 flex flex-wrap items-center gap-2 border-t border-stone-200/60 pt-2.5"
-              data-testid="workspace-checkpoint-actions"
+              v-if="turn.assistant"
+              class="agent-action-bar ml-auto mt-3 flex flex-wrap items-center justify-end gap-2"
+              data-testid="workspace-agent-branch-actions"
             >
               <button
                 class="checkpoint-icon-button"
                 type="button"
-                :disabled="!canUseCheckpointAction(requireCheckpointEntryForTurn(turn.turnId), 'transcript_only')"
-                :title="messageCheckpointActionTitle(requireCheckpointEntryForTurn(turn.turnId), 'transcript_only')"
-                :data-testid="`workspace-checkpoint-transcript-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
-                @click="rollbackToCheckpoint(requireCheckpointEntryForTurn(turn.turnId), 'transcript_only')"
+                :title="copiedAssistantTurnId === turn.turnId ? '已复制' : '复制回复'"
+                @click="copyAssistantResponse(turn.turnId, turn.assistant?.content ?? '')"
               >
-                <History class="h-3.5 w-3.5" />
-                <span class="sr-only">仅回退对话历史</span>
+                <component :is="copiedAssistantTurnId === turn.turnId ? Check : Copy" class="h-3.5 w-3.5" />
+                <span class="sr-only">复制回复</span>
               </button>
 
               <button
+                v-if="!isLastTurn(turn.turnId)"
                 class="checkpoint-icon-button"
                 type="button"
-                :disabled="!canUseCheckpointAction(requireCheckpointEntryForTurn(turn.turnId), 'transcript_and_workspace')"
-                :title="messageCheckpointActionTitle(requireCheckpointEntryForTurn(turn.turnId), 'transcript_and_workspace')"
-                :data-testid="`workspace-checkpoint-workspace-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
-                @click="rollbackToCheckpoint(requireCheckpointEntryForTurn(turn.turnId), 'transcript_and_workspace')"
+                :disabled="isSubmitting || !!sessionOperation"
+                title="创建分支"
+                @click="handleCreateBranch(turn.turnId)"
               >
-                <RotateCcw class="h-3.5 w-3.5" />
-                <span class="sr-only">回退对话历史并尝试恢复文件改动</span>
+                <GitBranch class="h-3.5 w-3.5" />
+                <span class="sr-only">创建分支</span>
               </button>
 
               <div
-                v-if="checkpointEntryForTurn(turn.turnId)?.forkTargets.length"
+                v-if="!isLastTurn(turn.turnId) && checkpointEntryForTurn(turn.turnId)?.forkTargets.length"
                 ref="forkSummaryMenuRef"
                 class="relative"
               >
                 <button
                   class="checkpoint-icon-button"
                   type="button"
-                  title="查看从该 checkpoint 分叉出来的对话轨迹"
-                  :data-testid="`workspace-checkpoint-forks-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
+                  title="查看和切换分支"
                   @click="toggleForkSummary(requireCheckpointEntryForTurn(turn.turnId).nodeId)"
                 >
                   <GitFork class="h-3.5 w-3.5" />
-                  <span class="sr-only">查看 fork 对话摘要</span>
+                  <span class="sr-only">查看分支</span>
                 </button>
 
                 <div
                   v-if="forkSummaryOpenForNodeId === checkpointEntryForTurn(turn.turnId)?.nodeId"
                   class="checkpoint-popover absolute left-0 top-[calc(100%+0.45rem)] z-20 w-[19rem] max-w-[calc(100vw-2rem)]"
-                  :data-testid="`workspace-checkpoint-fork-menu-${checkpointEntryForTurn(turn.turnId)?.nodeId}`"
                 >
-                  <div class="checkpoint-popover-caption">Fork 对话</div>
+                  <div class="checkpoint-popover-caption">分支</div>
                   <div class="checkpoint-popover-divider"></div>
                   <button
-                    v-for="target in checkpointEntryForTurn(turn.turnId)?.forkTargets ?? []"
+                    v-for="(target, targetIdx) in checkpointEntryForTurn(turn.turnId)?.forkTargets ?? []"
                     :key="`${checkpointEntryForTurn(turn.turnId)?.nodeId}-${target.branchId}-${target.nodeId}`"
                     class="checkpoint-picker-item"
                     type="button"
-                    :data-testid="`workspace-checkpoint-fork-target-${target.branchId}`"
                     @click="jumpToForkTarget(requireCheckpointEntryForTurn(turn.turnId), target)"
                   >
                     <div class="flex min-w-0 flex-1 flex-col text-left">
-                      <span class="truncate text-[12px] text-stone-800">{{ target.label }}</span>
+                      <span class="truncate text-[12px] text-stone-800">{{ branchLabelForDisplay({ label: target.label, branchId: target.branchId }, targetIdx + 1) }}</span>
                       <span class="mt-0.5 line-clamp-2 text-[10px] leading-4 text-stone-500">
                         {{ target.summary }}
                       </span>
@@ -1478,52 +1799,61 @@ watch(isSubmitting, (submitting) => {
             <button
               class="composer-select-trigger"
               type="button"
-              :disabled="checkpointPickerEntries.length === 0"
+              :disabled="branchList.length === 0"
               :title="
-                checkpointPickerEntries.length
-                  ? `打开 checkpoint 菜单（${checkpointShortcutLabel}）`
-                  : '当前还没有可回退的 checkpoint'
+                branchList.length
+                  ? '切换对话分支'
+                  : '当前还没有分支'
               "
-              data-testid="workspace-checkpoint-picker-trigger"
+              data-testid="workspace-branch-switcher-trigger"
               @click.stop="toggleCheckpointPicker"
             >
-              <History class="h-3.5 w-3.5 text-stone-500" />
-              <span class="truncate">Checkpoint</span>
+              <GitBranch class="h-3.5 w-3.5 text-stone-500" />
+              <span class="truncate">{{ currentBranchDisplay }}</span>
               <ChevronDown class="h-2.5 w-2.5 text-stone-400" />
             </button>
 
             <div
               v-if="checkpointPickerOpen"
               class="composer-menu-panel absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[18rem] max-w-[min(28rem,calc(100vw-2rem))]"
-              data-testid="workspace-checkpoint-picker-menu"
+              data-testid="workspace-branch-switcher-menu"
             >
-              <div class="composer-menu-caption">Checkpoint 菜单</div>
+              <div class="composer-menu-caption">分支</div>
               <div class="composer-menu-divider"></div>
               <button
-                v-for="entry in checkpointPickerEntries"
-                :key="`picker-${entry.nodeId}`"
+                v-for="branch in branchList"
+                :key="`branch-switcher-${branch.branchId}`"
                 class="checkpoint-picker-item"
                 type="button"
-                :title="checkpointPickerEntryTitle(entry)"
-                :data-testid="`workspace-checkpoint-picker-item-${entry.nodeId}`"
-                @click="selectCheckpointPickerEntry(entry)"
+                :data-testid="`workspace-branch-switcher-item-${branch.branchId}`"
+                @click="handleSwitchBranch(branch.branchId)"
               >
                 <div class="flex min-w-0 flex-1 flex-col text-left">
-                  <span class="truncate text-[12px] text-stone-800">{{ entry.summary }}</span>
+                  <span class="truncate text-[12px] text-stone-800">{{ branch.displayName }}</span>
                   <span class="mt-0.5 text-[10px] leading-4 text-stone-500">
-                    分支 {{ entry.branchId }} · {{ checkpointMetaLabel(entry) }}
+                    {{ branch.branchId }}
                   </span>
                 </div>
                 <span
                   class="shrink-0 rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] text-stone-500"
                 >
-                  {{ entry.isVisible ? "当前" : "回退" }}
+                  {{ branch.branchId === activeBranchId ? "当前" : "切换" }}
                 </span>
               </button>
-              <div class="composer-menu-divider"></div>
-              <div class="composer-menu-caption">快捷键：{{ checkpointShortcutLabel }}</div>
             </div>
           </div>
+
+          <button
+            class="composer-select-trigger"
+            type="button"
+            :disabled="!canUndoLastTurn"
+            :title="canUndoLastTurn ? `撤回上一轮（${undoShortcutLabel}）` : '没有可撤回的操作'"
+            data-testid="workspace-undo-button"
+            @click.stop="handleUndoLastTurn"
+          >
+            <Undo2 class="h-3.5 w-3.5 text-stone-500" />
+            <span class="truncate">撤回</span>
+          </button>
 
           <div ref="providerMenuRef" class="relative">
             <button
@@ -1864,8 +2194,14 @@ watch(isSubmitting, (submitting) => {
 .turn-flow-enter-active,
 .turn-flow-leave-active {
   transition:
-    opacity 260ms ease,
-    transform 260ms ease;
+    opacity 280ms ease,
+    transform 280ms ease;
+}
+
+.turn-flow-leave-active {
+  position: absolute;
+  left: 0;
+  right: 0;
 }
 
 .turn-flow-enter-from,
@@ -2093,29 +2429,62 @@ watch(isSubmitting, (submitting) => {
 
 .checkpoint-icon-button {
   display: inline-flex;
-  height: 1.9rem;
-  width: 1.9rem;
+  height: 1.35rem;
+  width: 1.35rem;
   align-items: center;
   justify-content: center;
-  border-radius: 9999px;
-  border: 1px solid rgba(231, 229, 228, 0.95);
-  background: rgba(255, 255, 255, 0.92);
-  color: rgb(120 113 108);
+  border-radius: 0.25rem;
+  border: none;
+  background: transparent;
+  color: rgb(168 162 158);
+  cursor: pointer;
   transition:
-    border-color 0.16s ease,
-    background-color 0.16s ease,
-    color 0.16s ease;
+    color 0.15s ease,
+    background-color 0.15s ease,
+    transform 0.1s ease;
 }
 
 .checkpoint-icon-button:hover {
-  border-color: rgba(214, 188, 146, 0.95);
-  background: rgba(251, 244, 232, 0.98);
+  color: rgb(87 83 78);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.checkpoint-icon-button:active {
+  transform: scale(0.82);
   color: rgb(68 64 60);
 }
 
 .checkpoint-icon-button:disabled {
   cursor: not-allowed;
-  opacity: 0.45;
+  opacity: 0.3;
+}
+
+.checkpoint-icon-button:disabled:hover {
+  background: transparent;
+  color: rgb(168 162 158);
+}
+
+.checkpoint-icon-button:disabled:active {
+  transform: none;
+}
+
+/* Hover-reveal for action bars — opacity preserves layout */
+.conversation-user-message .message-action-bar {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.conversation-user-message:hover .message-action-bar {
+  opacity: 1;
+}
+
+.conversation-agent-shell .agent-action-bar {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.conversation-agent-shell:hover .agent-action-bar {
+  opacity: 1;
 }
 
 .checkpoint-popover {
@@ -2149,5 +2518,91 @@ watch(isSubmitting, (submitting) => {
 
 .checkpoint-picker-item:hover {
   background: rgba(245, 245, 244, 0.9);
+}
+
+.rollback-progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rollback-progress-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  border: 1px solid rgba(231, 229, 228, 0.72);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.92);
+  color: rgb(87 83 78);
+  box-shadow: 0 6px 18px rgba(41, 37, 36, 0.08);
+  padding: 1.15rem 1.5rem;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  backdrop-filter: blur(8px);
+}
+
+.rollback-progress-icon {
+  width: 1.6rem;
+  height: 1.6rem;
+  color: rgb(180 138 112);
+  animation: rollback-progress-spin 0.9s linear infinite;
+}
+
+@keyframes rollback-progress-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+.rollback-confirm-popover {
+  border: 1px solid rgba(231, 229, 228, 0.8);
+  border-radius: 0.375rem;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 4px 14px rgba(41, 37, 36, 0.08);
+  padding: 0.2rem 0.65rem;
+  backdrop-filter: blur(10px);
+}
+
+.rollback-confirm-hint {
+  font-size: 11px;
+  line-height: 1;
+  color: rgb(168 162 158);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.rollback-confirm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 0.25rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+
+.rollback-confirm-btn:active {
+  transform: scale(0.85);
+}
+
+.rollback-confirm-btn-danger {
+  color: rgb(220 38 38);
+}
+
+.rollback-confirm-btn-danger:hover {
+  color: rgb(185 28 28);
+  background: rgba(220, 38, 38, 0.1);
 }
 </style>
