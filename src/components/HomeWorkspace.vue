@@ -392,7 +392,9 @@ const currentBranchDisplay = computed(() => {
 });
 
 const canUndoLastTurn = computed(() => {
-  const nonLatest = checkpointEntries.value.filter((entry) => !entry.isLatest);
+  const nonLatest = checkpointEntries.value.filter(
+    (entry) => !entry.isLatest && entry.branchId === activeBranchId.value
+  );
   return (
     nonLatest.length > 0 &&
     !isSubmitting.value &&
@@ -1134,7 +1136,7 @@ async function handleUndoLastTurn() {
   }
 
   const sortedEntries = [...checkpointEntries.value]
-    .filter((e) => !e.isLatest)
+    .filter((e) => !e.isLatest && e.branchId === activeBranchId.value)
     .sort((a, b) => b.createdAtMs - a.createdAtMs);
   const previousEntry = sortedEntries[0];
   if (!previousEntry) {

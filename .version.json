@@ -221,11 +221,23 @@
           "to": "0.1.6"
         }
       ]
+    },
+    {
+      "bumps": [
+        {
+          "component": "tauri",
+          "from": "0.1.6",
+          "to": "0.1.7",
+          "segment": "patch"
+        }
+      ],
+      "timestamp": "2026-06-21T21:52:49+08:00",
+      "commit": "edf61d7"
     }
   ],
-  "lastBump": "2026-06-21T21:46:02+08:00",
+  "lastBump": "2026-06-21T21:52:49+08:00",
   "tauri": {
-    "patch": 6,
+    "patch": 7,
     "minor": 1,
     "major": 0
   },
