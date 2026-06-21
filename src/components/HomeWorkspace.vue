@@ -48,12 +48,15 @@ const {
   draftMessage,
   historyNodes,
   historyBranches,
+  branchHeadNodeId,
+  historyCursorMode,
   isSubmitting,
   latestExecutionCheckpoint,
   latestGraphRunSubmissionPlan,
   latestRunControlAuditSummary,
   messages,
   sessionOperation,
+  visibleNodeId,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
@@ -89,6 +92,7 @@ const rollbackConfirmStyle = ref<Record<string, string | undefined>>({});
 const rollbackInFlight = ref<{ turnId: string; action: CheckpointRollbackAction } | null>(null);
 const rollbackProgressStyle = ref<Record<string, string | undefined>>({});
 const optimisticRollbackTurnId = ref<string | null>(null);
+const forkInFlightNodeId = ref<string | null>(null);
 let rollbackDismissTimer: ReturnType<typeof setTimeout> | null = null;
 const providerMenuRef = ref<HTMLElement | null>(null);
 const modelSubmenuStyle = ref<Record<string, string>>({ top: '0' });
@@ -326,7 +330,7 @@ const hasVisibleHistorySession = computed(() =>
   )
 );
 const isEmptyWorkspace = computed(() =>
-  visibleTurns.value.length === 0 && !hasVisibleHistorySession.value && !rollbackInFlight.value
+  visibleTurns.value.length === 0 && !rollbackInFlight.value
 );
 const isLastTurn = computed(() => {
   const t = visibleTurns.value;
@@ -389,8 +393,18 @@ const currentBranchDisplay = computed(() => {
 
 const canUndoLastTurn = computed(() => {
   const nonLatest = checkpointEntries.value.filter((entry) => !entry.isLatest);
-  return nonLatest.length > 0 && !isSubmitting.value && !sessionOperation.value;
+  return (
+    nonLatest.length > 0 &&
+    !isSubmitting.value &&
+    !sessionOperation.value &&
+    !rollbackInFlight.value &&
+    draftMessage.value.trim().length === 0
+  );
 });
+
+const branchSwitcherDisabled = computed(
+  () => branchList.value.length === 0 || isSubmitting.value || Boolean(sessionOperation.value) || Boolean(rollbackInFlight.value)
+);
 
 const undoShortcutLabel = computed(() => {
   if (typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac")) {
@@ -811,8 +825,11 @@ function checkpointModeForPickerEntry(entry: ConversationCheckpointEntry): Histo
 }
 
 function requestRollbackConfirm(turnId: string, action: CheckpointRollbackAction, event?: MouseEvent) {
-  if (isSubmitting.value || sessionOperation.value) return;
+  if (isSubmitting.value || sessionOperation.value || rollbackInFlight.value) return;
   const entry = checkpointEntryForTurn(turnId);
+  if (!entry) {
+    return;
+  }
   rollbackConfirmAnchorEl.value = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null;
   rollbackConfirmAnchorRect.value = rollbackConfirmAnchorEl.value?.getBoundingClientRect() ?? null;
 
@@ -851,7 +868,7 @@ function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | 
   }
 
   const entryNode = historyNodeById.value.get(entryNodeId) ?? null;
-  return entryNode?.parentNodeId?.trim() || null;
+  return entryNode?.parentNodeId?.trim() || entryNodeId;
 }
 
 function updateRollbackConfirmPosition() {
@@ -904,8 +921,7 @@ function updateRollbackConfirmPosition() {
   rollbackConfirmStyle.value = {
     position: "fixed",
     left: `${left}px`,
-    top: `${top}px`,
-    outline: import.meta.env.DEV ? "2px solid #f00" : undefined
+    top: `${top}px`
   };
 }
 
@@ -958,7 +974,8 @@ function updateRollbackProgressPosition() {
     top: `${top}px`,
     width: `${width}px`,
     height: `${height}px`,
-    outline: import.meta.env.DEV ? "2px dashed #00f" : undefined
+    right: "auto",
+    bottom: "auto"
   };
 }
 
@@ -970,11 +987,12 @@ function updateFloatingUiPositions() {
 async function confirmRollback() {
   const pending = rollbackConfirm.value;
   if (!pending) return;
+  if (rollbackInFlight.value) return;
   rollbackConfirm.value = null;
   rollbackConfirmAnchorEl.value = null;
 
-  const turn = turns.value.find(t => t.turnId === pending.turnId);
-  const userContent = turn?.user?.content ?? "";
+  const preservedDraft = draftMessage.value;
+  const shouldHydrateDraft = draftMessage.value.trim().length === 0;
 
   // Resolve nodeId: prefer pre-resolved, fallback to fresh lookup
   const nodeId = resolveRollbackCheckoutNodeId(pending.turnId, pending.nodeId);
@@ -984,6 +1002,10 @@ async function confirmRollback() {
     return;
   }
 
+  // Source turn message: the one the user clicked on
+  const sourceTurn = turns.value.find(t => t.turnId === pending.turnId);
+  const userContent = sourceTurn?.user?.content ?? "";
+
   try {
     forkSummaryOpenForNodeId.value = null;
     checkpointPickerOpen.value = false;
@@ -991,7 +1013,16 @@ async function confirmRollback() {
     rollbackInFlight.value = { turnId: pending.turnId, action: pending.action };
     updateRollbackProgressPosition();
     void nextTick().then(() => updateRollbackProgressPosition());
-    await runtimeStore.checkoutHistoryNode(nodeId, pending.action, pending.turnId);
+
+    const isFirstTurn = nodeId === pending.nodeId;
+    if (isFirstTurn) {
+      runtimeStore.$patch({ messages: [], turnTraceHistory: [] });
+    } else {
+      await Promise.all([
+        runtimeStore.checkoutHistoryNode(nodeId, pending.action, pending.turnId),
+        new Promise<void>(resolve => setTimeout(resolve, 350))
+      ]);
+    }
   } catch (err) {
     optimisticRollbackTurnId.value = null;
     rollbackInFlight.value = null;
@@ -1004,9 +1035,17 @@ async function confirmRollback() {
   rollbackInFlight.value = null;
   rollbackConfirmAnchorRect.value = null;
 
-  if (userContent) {
-    runtimeStore.draftMessage = userContent;
-  }
+  // Hydrate draft with the user message of the checkpoint being rolled back to
+  const targetNode = historyNodeById.value.get(nodeId);
+  const targetTurnId = targetNode?.turnId?.trim();
+  const targetTurn = targetTurnId ? turns.value.find(t => t.turnId === targetTurnId) : null;
+  const targetUserContent = targetTurn?.user?.content?.trim() || "";
+
+  const nextDraft = shouldHydrateDraft
+    ? (targetUserContent || userContent)
+    : preservedDraft;
+  draftMessage.value = nextDraft;
+  runtimeStore.setDraftMessage(nextDraft);
 }
 
 function scheduleCancelRollback() {
@@ -1072,16 +1111,25 @@ function branchLabelForDisplay(branch: { label?: string | null; branchId: string
 }
 
 async function handleCreateBranch(turnId: string) {
+  if (isSubmitting.value || sessionOperation.value || rollbackInFlight.value || forkInFlightNodeId.value) {
+    return;
+  }
+
   const entry = checkpointEntryForTurn(turnId);
   if (!entry) {
     return;
   }
 
-  await runtimeStore.forkHistoryNode(entry.nodeId);
+  forkInFlightNodeId.value = entry.nodeId;
+  try {
+    await runtimeStore.forkHistoryNode(entry.nodeId);
+  } finally {
+    forkInFlightNodeId.value = null;
+  }
 }
 
 async function handleUndoLastTurn() {
-  if (!canUndoLastTurn.value) {
+  if (!canUndoLastTurn.value || rollbackInFlight.value) {
     return;
   }
 
@@ -1099,7 +1147,20 @@ async function handleUndoLastTurn() {
 }
 
 async function handleSwitchBranch(branchId: string) {
+  if (isSubmitting.value || sessionOperation.value || rollbackInFlight.value) {
+    return;
+  }
+
   if (branchId === activeBranchId.value) {
+    if (
+      historyCursorMode.value !== "live" &&
+      visibleNodeId.value &&
+      branchHeadNodeId.value &&
+      visibleNodeId.value !== branchHeadNodeId.value
+    ) {
+      checkpointPickerOpen.value = false;
+      await runtimeStore.restoreBranchHead(branchId);
+    }
     return;
   }
 
@@ -1470,7 +1531,6 @@ watch(isSubmitting, (submitting) => {
       viewport-class="px-4 py-4 sm:px-5"
     >
       <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[58rem]" data-testid="workspace-content-column">
-      <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5">
         <div
           v-if="rollbackInFlight"
           class="rollback-progress-overlay"
@@ -1482,6 +1542,7 @@ watch(isSubmitting, (submitting) => {
             <span>{{ rollbackProgressLabel() }}</span>
           </div>
         </div>
+      <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5">
         <section
           v-if="isEmptyWorkspace"
           key="workspace-empty-state"
@@ -1513,7 +1574,7 @@ watch(isSubmitting, (submitting) => {
                 <button
                   class="checkpoint-icon-button"
                   type="button"
-                  :disabled="isSubmitting || !!sessionOperation"
+                  :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight"
                   :title="isSubmitting ? '运行中暂不可撤回' : '仅撤回对话'"
                   @click="requestRollbackConfirm(turn.turnId, 'transcript_only', $event)"
                 >
@@ -1523,7 +1584,7 @@ watch(isSubmitting, (submitting) => {
                 <button
                   class="checkpoint-icon-button"
                   type="button"
-                  :disabled="isSubmitting || !!sessionOperation"
+                  :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight"
                   :title="isSubmitting ? '运行中暂不可撤回' : '撤回对话和修改'"
                   @click="requestRollbackConfirm(turn.turnId, 'transcript_and_workspace', $event)"
                 >
@@ -1716,14 +1777,14 @@ watch(isSubmitting, (submitting) => {
                 <span class="sr-only">复制回复</span>
               </button>
 
-              <button
-                v-if="!isLastTurn(turn.turnId)"
-                class="checkpoint-icon-button"
-                type="button"
-                :disabled="isSubmitting || !!sessionOperation"
-                title="创建分支"
-                @click="handleCreateBranch(turn.turnId)"
-              >
+                <button
+                  v-if="!isLastTurn(turn.turnId)"
+                  class="checkpoint-icon-button"
+                  type="button"
+                  :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight || !!forkInFlightNodeId"
+                  title="创建分支"
+                  @click="handleCreateBranch(turn.turnId)"
+                >
                 <GitBranch class="h-3.5 w-3.5" />
                 <span class="sr-only">创建分支</span>
               </button>
@@ -1799,7 +1860,7 @@ watch(isSubmitting, (submitting) => {
             <button
               class="composer-select-trigger"
               type="button"
-              :disabled="branchList.length === 0"
+              :disabled="branchSwitcherDisabled"
               :title="
                 branchList.length
                   ? '切换对话分支'
@@ -1843,14 +1904,14 @@ watch(isSubmitting, (submitting) => {
             </div>
           </div>
 
-          <button
-            class="composer-select-trigger"
-            type="button"
-            :disabled="!canUndoLastTurn"
-            :title="canUndoLastTurn ? `撤回上一轮（${undoShortcutLabel}）` : '没有可撤回的操作'"
-            data-testid="workspace-undo-button"
-            @click.stop="handleUndoLastTurn"
-          >
+            <button
+              class="composer-select-trigger"
+              type="button"
+              :disabled="!canUndoLastTurn"
+              :title="canUndoLastTurn ? `撤回上一轮（${undoShortcutLabel}）` : (draftMessage.trim().length > 0 ? '请先处理当前草稿' : '没有可撤回的操作')"
+              data-testid="workspace-undo-button"
+              @click.stop="handleUndoLastTurn"
+            >
             <Undo2 class="h-3.5 w-3.5 text-stone-500" />
             <span class="truncate">撤回</span>
           </button>

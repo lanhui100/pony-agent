@@ -14,6 +14,11 @@ console.info("[pony-agent][boot] mount app", {
 
 const app = createApp(App);
 
-app.use(createPinia());
+const pinia = createPinia();
+app.use(pinia);
 app.use(MotionPlugin);
 app.mount("#app");
+
+if (import.meta.env.DEV && typeof window !== "undefined") {
+  (window as unknown as Record<string, unknown>).__ponyaPinia = pinia;
+}

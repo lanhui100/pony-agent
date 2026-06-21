@@ -28,7 +28,7 @@ test("P0-E2E-001 启动后展示主工作台与浏览器预览 provider", async 
 
   await expect(page.getByTestId("session-sidebar-session-list")).toBeVisible();
   await expect(page.getByTestId("home-right-sidebar-shell")).toHaveAttribute("data-open", "true");
-  await expect(page.getByTestId("workspace-content-column")).toContainText("需要我帮你做什么？");
+  await expect(page.getByTestId("workspace-content-column")).toContainText("我能帮你做些什么？");
 });
 
 test("P0-E2E-002 浏览器预览模式可完成流式回放并落入历史", async ({ page }) => {

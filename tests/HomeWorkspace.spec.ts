@@ -440,6 +440,10 @@ function findStreamingMarkdown(wrapper: ReturnType<typeof mount>) {
   return wrapper.find('.markdown-stub[streaming="true"]');
 }
 
+function flushAsyncUiWork() {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+}
+
 describe("HomeWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1771,6 +1775,7 @@ describe("HomeWorkspace", () => {
       historyNodes: [
         createHistoryNode({
           nodeId: "node-old",
+          parentNodeId: "node-root",
           turnId: "turn-old",
           summary: "旧 checkpoint",
           workspaceRef: { kind: "host_snapshot", rollbackCapable: false },
@@ -1778,6 +1783,7 @@ describe("HomeWorkspace", () => {
         }),
         createHistoryNode({
           nodeId: "node-head",
+          parentNodeId: "node-old",
           turnId: "turn-head",
           summary: "最新 checkpoint",
           workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
@@ -1792,19 +1798,28 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.get('[data-testid="workspace-checkpoint-transcript-node-old"]').attributes("title")).toContain(
-      "仅对话"
-    );
-    expect(wrapper.get('[data-testid="workspace-checkpoint-workspace-node-old"]').attributes("title")).toContain(
-      "将仅恢复对话历史"
-    );
-    expect(wrapper.find('[data-testid="workspace-checkpoint-transcript-node-head"]').exists()).toBe(false);
+    const actionBars = wrapper.findAll('[data-testid="workspace-user-checkpoint-actions"]');
+    expect(actionBars).toHaveLength(2);
 
-    await wrapper.get('[data-testid="workspace-checkpoint-transcript-node-old"]').trigger("click");
-    await wrapper.get('[data-testid="workspace-checkpoint-workspace-node-old"]').trigger("click");
+    const oldTurnButtons = actionBars[0]!.findAll("button");
+    const headTurnButtons = actionBars[1]!.findAll("button");
 
-    expect(checkoutSpy).toHaveBeenNthCalledWith(1, "node-old", "transcript_only");
-    expect(checkoutSpy).toHaveBeenNthCalledWith(2, "node-old", "transcript_and_workspace");
+    expect(oldTurnButtons).toHaveLength(2);
+    expect(oldTurnButtons[0]!.attributes("title")).toContain("仅撤回对话");
+    expect(oldTurnButtons[1]!.attributes("title")).toContain("撤回对话和修改");
+    expect(headTurnButtons).toHaveLength(2);
+
+    await oldTurnButtons[0]!.trigger("click");
+    await nextTick();
+    await wrapper.get('.rollback-confirm-btn-danger').trigger("click");
+    await new Promise(r => setTimeout(r, 400));
+
+    await oldTurnButtons[1]!.trigger("click");
+    await nextTick();
+    await wrapper.get('.rollback-confirm-btn-danger').trigger("click");
+
+    expect(checkoutSpy).toHaveBeenNthCalledWith(1, "node-root", "transcript_only", "turn-old");
+    expect(checkoutSpy).toHaveBeenNthCalledWith(2, "node-root", "transcript_and_workspace", "turn-old");
   });
 
   it("opens checkpoint picker from trigger and global shortcut, then rolls back using the best available mode", async () => {
@@ -1833,6 +1848,7 @@ describe("HomeWorkspace", () => {
         }),
         createHistoryNode({
           nodeId: "node-head",
+          parentNodeId: "node-old",
           turnId: "turn-head",
           summary: "最新 checkpoint",
           workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
@@ -1847,16 +1863,403 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    await wrapper.get('[data-testid="workspace-checkpoint-picker-trigger"]').trigger("click");
+    await wrapper.get('[data-testid="workspace-branch-switcher-trigger"]').trigger("click");
     await nextTick();
-    expect(wrapper.get('[data-testid="workspace-checkpoint-picker-menu"]').text()).toContain("旧 checkpoint");
+    expect(wrapper.get('[data-testid="workspace-branch-switcher-menu"]').text()).toContain("main");
 
-    await wrapper.get('[data-testid="workspace-checkpoint-picker-item-node-old"]').trigger("click");
-    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_and_workspace");
+    await wrapper.get('[data-testid="workspace-undo-button"]').trigger("click");
+    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-old");
 
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
     await nextTick();
-    expect(wrapper.get('[data-testid="workspace-checkpoint-picker-menu"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="workspace-branch-switcher-menu"]').exists()).toBe(true);
+  });
+
+  it("does not allow composer undo when a draft is present", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      draftMessage: "还没发送的新草稿",
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-old",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          parentNodeId: "node-old",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const undoButton = wrapper.get('[data-testid="workspace-undo-button"]');
+    expect(undoButton.attributes("disabled")).toBeDefined();
+    expect(undoButton.attributes("title")).toContain("请先处理当前草稿");
+
+    await undoButton.trigger("click");
+    expect(checkoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("rolls back conversation and trace state after confirming a checkpoint action", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      historyCursorMode: "live",
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-head", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-head", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      turnTraceHistory: [
+        createTrace({ turnId: "turn-old", phase: "completed", sessionSummary: "old summary" }),
+        createTrace({ turnId: "turn-head", phase: "completed", sessionSummary: "head summary" })
+      ],
+      latestExecutionCheckpoint: createCheckpoint({
+        turnId: "turn-head",
+        checkpointKind: "runtime_control",
+        status: "running",
+        phase: "calling_model"
+      }),
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-root",
+          turnId: null,
+          summary: "初始状态",
+          workspaceRef: { kind: "none", rollbackCapable: false },
+          createdAtMs: 500
+        }),
+        createHistoryNode({
+          nodeId: "node-old",
+          parentNodeId: "node-root",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "checkout_history_node") {
+        expect(payload).toEqual({
+          sessionId: "session-current",
+          nodeId: "node-root",
+          mode: "transcript_only"
+        });
+        return {
+          sessionId: "session-current",
+          nodeId: "node-root",
+          requestedMode: "transcript_only",
+          appliedMode: "transcript_only",
+          transcriptRestoreApplied: true,
+          workspaceRollbackCapable: true,
+          workspaceRollbackApplied: false,
+          degraded: false,
+          degradationReason: null,
+          cursor: {
+            sessionId: "session-current",
+            visibleNodeId: "node-root",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-root",
+            mode: "historical"
+          }
+        };
+      }
+
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId: "session-current",
+          runId: null,
+          nodeId: "node-root"
+        });
+        return {
+          session: {
+            conversationId: "session-current",
+            title: "Session current",
+            summary: "初始状态",
+            history: [],
+            attachmentAssets: [],
+            historyStateAuditSummary: null,
+            runControlAuditSummary: null,
+            turnTraceHistory: [],
+            turnCount: 0,
+            lastReferencedFile: null,
+            updatedAtMs: 500
+          },
+          retrieved: {
+            turnContext: {
+              userMessage: "",
+              images: [],
+              referencesImage: false
+            },
+            sessionContext: {
+              conversationId: "session-current",
+              title: "Session current",
+              summary: "初始状态",
+              recentHistory: [],
+              recentAttachmentAssets: [],
+              turnCount: 0,
+              lastReferencedFile: null
+            },
+            runState: {},
+            longTermMemory: {
+              status: "empty",
+              summary: "No long-term memory entries are stored for this session yet.",
+              entries: []
+            },
+            transcript: {
+              providerNativeMessages: []
+            }
+          },
+          checkpoint: createCheckpoint({
+            turnId: "turn-head",
+            checkpointKind: "runtime_control",
+            status: "running",
+            phase: "calling_model"
+          }),
+          submissionPlan: null,
+          controlBoundaryEvidence: null,
+          historyStateAuditSummary: null,
+          runControlAuditSummary: null,
+          historyNodes: [
+            createHistoryNode({
+              nodeId: "node-root",
+              turnId: null,
+              summary: "初始状态",
+              workspaceRef: { kind: "none", rollbackCapable: false },
+              createdAtMs: 500
+            }),
+            createHistoryNode({
+              nodeId: "node-old",
+              parentNodeId: "node-root",
+              turnId: "turn-old",
+              summary: "旧 checkpoint",
+              workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+              createdAtMs: 1000
+            }),
+            createHistoryNode({
+              nodeId: "node-head",
+              turnId: "turn-head",
+              summary: "最新 checkpoint",
+              workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+              createdAtMs: 2000
+            })
+          ],
+          historyBranches: [
+            createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+          ],
+          historyCursor: {
+            sessionId: "session-current",
+            visibleNodeId: "node-root",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-root",
+            mode: "historical"
+          }
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const actionBars = wrapper.findAll('[data-testid="workspace-user-checkpoint-actions"]');
+    await actionBars[0]!.findAll("button")[0]!.trigger("click");
+    await nextTick();
+    await wrapper.get('.rollback-confirm-btn-danger').trigger("click");
+    expect(wrapper.get('[data-testid="workspace-rollback-progress"]').text()).toContain("正在撤回对话...");
+    await new Promise(r => setTimeout(r, 400));
+    await nextTick();
+
+    expect(runtimeStore.messages).toEqual([]);
+    expect(runtimeStore.turnTraceHistory).toHaveLength(0);
+    expect(runtimeStore.draftMessage).toBe("旧问题");
+    expect((wrapper.get('[data-testid="workspace-composer-input"]').element as HTMLTextAreaElement).value).toBe("旧问题");
+    expect(wrapper.text()).not.toContain("旧问题");
+    expect(wrapper.text()).not.toContain("旧回答");
+    expect(wrapper.text()).not.toContain("新问题");
+    expect(wrapper.text()).not.toContain("新回答");
+  });
+
+  it("keeps existing draft text when rollback completes", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      draftMessage: "我自己的新草稿",
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      historyCursorMode: "live",
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-head", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-head", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-root",
+          turnId: null,
+          summary: "初始状态",
+          workspaceRef: { kind: "none", rollbackCapable: false },
+          createdAtMs: 500
+        }),
+        createHistoryNode({
+          nodeId: "node-old",
+          parentNodeId: "node-root",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          parentNodeId: "node-old",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "checkout_history_node") {
+        return {
+          sessionId: "session-current",
+          nodeId: "node-root",
+          requestedMode: "transcript_only",
+          appliedMode: "transcript_only",
+          transcriptRestoreApplied: true,
+          workspaceRollbackCapable: true,
+          workspaceRollbackApplied: false,
+          degraded: false,
+          degradationReason: null,
+          cursor: {
+            sessionId: "session-current",
+            visibleNodeId: "node-root",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-root",
+            mode: "historical"
+          }
+        };
+      }
+
+      if (command === "load_session_runtime_view") {
+        return {
+          session: {
+            conversationId: "session-current",
+            title: "Session current",
+            summary: "初始状态",
+            history: [],
+            attachmentAssets: [],
+            historyStateAuditSummary: null,
+            runControlAuditSummary: null,
+            turnTraceHistory: [],
+            turnCount: 0,
+            lastReferencedFile: null,
+            updatedAtMs: 500
+          },
+          retrieved: {
+            turnContext: { userMessage: "", images: [], referencesImage: false },
+            sessionContext: {
+              conversationId: "session-current",
+              title: "Session current",
+              summary: "初始状态",
+              recentHistory: [],
+              recentAttachmentAssets: [],
+              turnCount: 0,
+              lastReferencedFile: null
+            },
+            runState: {},
+            longTermMemory: { status: "empty", summary: "", entries: [] },
+            transcript: { providerNativeMessages: [] }
+          },
+          checkpoint: null,
+          submissionPlan: null,
+          controlBoundaryEvidence: null,
+          historyStateAuditSummary: null,
+          runControlAuditSummary: null,
+          historyNodes: runtimeStore.historyNodes,
+          historyBranches: runtimeStore.historyBranches,
+          historyCursor: {
+            sessionId: "session-current",
+            visibleNodeId: "node-root",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-root",
+            mode: "historical"
+          }
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const actionBars = wrapper.findAll('[data-testid="workspace-user-checkpoint-actions"]');
+    await actionBars[1]!.findAll("button")[0]!.trigger("click");
+    await nextTick();
+    await wrapper.get('.rollback-confirm-btn-danger').trigger("click");
+    await new Promise(r => setTimeout(r, 400));
+    await nextTick();
+
+    expect(runtimeStore.draftMessage).toBe("我自己的新草稿");
   });
 
   it("shows fork summary menu and jumps through existing branch actions", async () => {
@@ -1890,6 +2293,7 @@ describe("HomeWorkspace", () => {
       historyNodes: [
         createHistoryNode({
           nodeId: "node-source",
+          parentNodeId: "node-root",
           turnId: "turn-source",
           summary: "源 checkpoint",
           workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
@@ -1926,14 +2330,73 @@ describe("HomeWorkspace", () => {
     const wrapper = mountWorkspace();
     await nextTick();
 
-    await wrapper.get('[data-testid="workspace-checkpoint-forks-node-source"]').trigger("click");
+    const forkButtons = wrapper.findAll('[data-testid="workspace-agent-branch-actions"] button');
+    await forkButtons[2]!.trigger("click");
     await nextTick();
 
-    expect(wrapper.get('[data-testid="workspace-checkpoint-fork-menu-node-source"]').text()).toContain("fork-1");
+    expect(wrapper.text()).toContain("fork-1");
 
-    await wrapper.get('[data-testid="workspace-checkpoint-fork-target-branch-fork"]').trigger("click");
+    const forkTarget = wrapper.findAll('button').find((node) => node.text().includes('fork-1'));
+    expect(forkTarget).toBeDefined();
+    await forkTarget!.trigger("click");
 
     expect(switchSpy).toHaveBeenCalledWith("branch-fork");
     expect(checkoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("restores branch head when selecting the active branch from historical mode", async () => {
+    const runtimeStore = useRuntimeStore();
+    const restoreSpy = vi.spyOn(runtimeStore, "restoreBranchHead").mockResolvedValue(null);
+    const switchSpy = vi.spyOn(runtimeStore, "switchHistoryBranch").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-head",
+      historyCursorMode: "historical",
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    await wrapper.get('[data-testid="workspace-branch-switcher-trigger"]').trigger("click");
+    await nextTick();
+    await wrapper.get('[data-testid="workspace-branch-switcher-item-branch-main"]').trigger("click");
+
+    expect(restoreSpy).toHaveBeenCalledWith("branch-main");
+    expect(switchSpy).not.toHaveBeenCalled();
+  });
+
+  it("disables branch switching while submitting", async () => {
+    const runtimeStore = useRuntimeStore();
+    const switchSpy = vi.spyOn(runtimeStore, "switchHistoryBranch").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "calling_model",
+      error: null,
+      isSubmitting: true,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" }),
+        createHistoryBranch({ branchId: "branch-alt", headNodeId: "node-alt", label: "alt" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const trigger = wrapper.get('[data-testid="workspace-branch-switcher-trigger"]');
+    expect(trigger.attributes("disabled")).toBeDefined();
+
+    await trigger.trigger("click");
+    expect(wrapper.find('[data-testid="workspace-branch-switcher-menu"]').exists()).toBe(false);
+    expect(switchSpy).not.toHaveBeenCalled();
   });
 });
