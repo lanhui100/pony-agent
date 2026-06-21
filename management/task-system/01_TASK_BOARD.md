@@ -20,7 +20,7 @@
 
 ## Ready
 - `PA-044` agent core 多端基础设施边界加固
-  说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
+   说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
 
 ## In Progress
 
@@ -35,6 +35,9 @@
 - 暂无
 
 ## Done
+
+- `PA-058` 拆分 session trace 存储并扩展定向持久化
+   说明：已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过全局并行审核验收。OpenSpec change 已归档。
 
 - `PA-057` 前端飞行记录仪与卡顿诊断体系
   说明：已完成前端 flight recorder、stall 检测、Tauri/SQLite 持久化与导出、主链路埋点、启动冻结分析与修复。已提交 `f6aab80`。OpenSpec change 已归档。

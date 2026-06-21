@@ -62,9 +62,11 @@
 19. `PA-056` 已完成架构、实现与 6 月 17 日 follow-up 收口
    当前已完成 context layering、memory/project/carry 分层实现、观测字段落点、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash` 代码审核与一轮 follow-up 采纳调优；后续若继续推进，应转入 instruction scope 真 source 枚举与 continuation/compaction 深化。
 20. `PA-056` 已补齐显式 `Coding / Work` 配置与 prompt 收紧闭环
-   当前已新增独立 `AppSettings`、Tauri settings 命令、前端设置 store、左侧边栏尾部设置入口、`SettingsPanel` 与 `workspaceMode -> TurnContext -> domain profile` 主链透传，并已补 `BASE_SYSTEM_PROMPT` 中文默认语义恢复、小窗口 domain profile 跳过和 `runtime.ts` teardown 稳定性修复；后续其它全栈配置项可以沿这条配置面继续扩展，而不必再重复改造上下文主路径。
+    当前已新增独立 `AppSettings`、Tauri settings 命令、前端设置 store、左侧边栏尾部设置入口、`SettingsPanel` 与 `workspaceMode -> TurnContext -> domain profile` 主链透传，并已补 `BASE_SYSTEM_PROMPT` 中文默认语义恢复、小窗口 domain profile 跳过和 `runtime.ts` teardown 稳定性修复；后续其它全栈配置项可以沿这条配置面继续扩展，而不必再重复改造上下文主路径。
 21. `PA-057` 已完成前端 flight recorder 与卡顿诊断体系
-    当前已完成前端 `frontend-flight-recorder.ts`（ring buffer、stall 检测、flush 退避）、Rust 端 `frontend_diagnostics.rs`（SQLite 持久化 + async spawn_blocking）、host 层集成（6 个 Tauri command）、主链路埋点激活及`npm run dev`启动冻结分析与修复；已提交 `f6aab80`，OpenSpec change 已归档。
+     当前已完成前端 `frontend-flight-recorder.ts`（ring buffer、stall 检测、flush 退避）、Rust 端 `frontend_diagnostics.rs`（SQLite 持久化 + async spawn_blocking）、host 层集成（6 个 Tauri command）、主链路埋点激活及`npm run dev`启动冻结分析与修复；已提交 `f6aab80`，OpenSpec change 已归档。
+22. session persistence 热路径已完成第一轮性能收口，`PA-058` 已完成并通过全局验收
+     当前已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过 15 项定向测试与多轮并行智能体审核验收。OpenSpec change 已归档，canonical spec 已同步。
 
 ## 远期扩展
 
@@ -119,6 +121,7 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。
 5. 前端卡顿定位现已具备 flight recorder 证据链（`PA-057` 已完成），后续性能优化可以基于 `frontend-diagnostics.db` 中的 stall 快照和 trace 事件进行数据分析，而不是再靠手动复现。
+6. `PA-058` 已完成，不再处于 Ready/Dashboard 主文中作为下一步目标。
 
 ## 新近线候选
 

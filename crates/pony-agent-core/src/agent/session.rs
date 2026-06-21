@@ -264,6 +264,8 @@ pub struct SessionState {
     #[serde(default)]
     pub turn_trace_history: Vec<TurnTraceRecord>,
     #[serde(default)]
+    pub trace_migration_state: TraceMigrationState,
+    #[serde(default)]
     pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
     #[serde(default)]
     pub memory_write_evidence: Vec<PersistedEffectEvidence>,
@@ -317,6 +319,62 @@ pub struct SessionSnapshot {
     pub history_cursor: HistoryCursor,
     pub resolved_node_id: Option<String>,
     pub latest_node_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceMigrationState {
+    #[default]
+    LegacyBlob,
+    DualWrite,
+    TraceTableAuthoritative,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SeparateTraceTableMode {
+    #[default]
+    Off,
+    DualWrite,
+    WriteSeparate,
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionBackendTraceLoadResult {
+    Unsupported,
+    Loaded(Vec<TurnTraceRecord>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionBackendMutationResult {
+    Unsupported,
+    NotFound,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionTraceMutation {
+    ReplaceAll {
+        traces: Vec<TurnTraceRecord>,
+    },
+    UpsertOne {
+        trace: TurnTraceRecord,
+        trace_order: usize,
+    },
+    UpdateTerminalEvent {
+        turn_id: String,
+        event_id: Option<String>,
+        event_type: Option<String>,
+        event_version: Option<String>,
+        sequence: Option<u64>,
+        emitted_at_ms: Option<u64>,
+        updated_at: u64,
+    },
+    AppendHookRecords {
+        turn_id: String,
+        hook_trace_records: Vec<HookTraceRecord>,
+        updated_at: u64,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -493,6 +551,60 @@ pub struct TurnTraceRecord {
 pub trait SessionBackend: Send {
     fn load_store(&self) -> Option<PersistedStore>;
     fn save_store(&self, store: &PersistedStore);
+    fn trace_storage_mode(&self) -> SeparateTraceTableMode {
+        SeparateTraceTableMode::Off
+    }
+    fn upsert_session(&self, _session_id: &str, _session: &SessionState) -> bool {
+        false
+    }
+    fn load_session_traces(&self, _session_id: &str) -> SessionBackendTraceLoadResult {
+        SessionBackendTraceLoadResult::Unsupported
+    }
+    fn replace_session_traces(
+        &self,
+        _session_id: &str,
+        _traces: &[TurnTraceRecord],
+    ) -> SessionBackendMutationResult {
+        SessionBackendMutationResult::Unsupported
+    }
+    fn upsert_turn_trace(
+        &self,
+        _session_id: &str,
+        _trace: &TurnTraceRecord,
+        _trace_order: usize,
+    ) -> SessionBackendMutationResult {
+        SessionBackendMutationResult::Unsupported
+    }
+    fn update_turn_trace_terminal_event(
+        &self,
+        _session_id: &str,
+        _turn_id: &str,
+        _event_id: Option<&str>,
+        _event_type: Option<&str>,
+        _event_version: Option<&str>,
+        _sequence: Option<u64>,
+        _emitted_at_ms: Option<u64>,
+        _updated_at: u64,
+    ) -> SessionBackendMutationResult {
+        SessionBackendMutationResult::Unsupported
+    }
+    fn append_turn_trace_hook_records(
+        &self,
+        _session_id: &str,
+        _turn_id: &str,
+        _hook_trace_records: &[HookTraceRecord],
+        _updated_at: u64,
+    ) -> SessionBackendMutationResult {
+        SessionBackendMutationResult::Unsupported
+    }
+    fn persist_session_with_trace_mutation(
+        &self,
+        _session_id: &str,
+        _session: &SessionState,
+        _mutation: SessionTraceMutation,
+    ) -> SessionBackendMutationResult {
+        SessionBackendMutationResult::Unsupported
+    }
     fn attachment_root(&self) -> Option<PathBuf>;
 }
 
@@ -744,7 +856,12 @@ impl SessionStore {
         }
 
         let snapshot = self.snapshot_for_session(&session_key);
-        self.save_to_backend();
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::ReplaceAll {
+                traces: snapshot.turn_trace_history.clone(),
+            },
+        );
         snapshot
     }
 
@@ -778,8 +895,18 @@ impl SessionStore {
             sync_latest_history_node(session, Some(trace.turn_id.clone()));
         }
         let snapshot = self.snapshot_for_session(&session_key);
-
-        self.save_to_backend();
+        let trace_order = snapshot
+            .turn_trace_history
+            .iter()
+            .position(|item| item.turn_id == trace.turn_id)
+            .unwrap_or(snapshot.turn_trace_history.len().saturating_sub(1));
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::UpsertOne {
+                trace: trace.clone(),
+                trace_order,
+            },
+        );
         snapshot
     }
 
@@ -794,6 +921,9 @@ impl SessionStore {
         emitted_at_ms: Option<u64>,
     ) -> Option<SessionSnapshot> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let persisted_event_id = event_id.clone();
+        let persisted_event_type = event_type.clone();
+        let persisted_event_version = event_version.clone();
         {
             let session = self.sessions.get_mut(&session_key)?;
             let trace = session
@@ -809,8 +939,30 @@ impl SessionStore {
             trace.updated_at = now_timestamp_ms();
             refresh_session_metadata(session, true);
         }
+        let updated_at = self
+            .sessions
+            .get(&session_key)
+            .and_then(|session| {
+                session
+                    .turn_trace_history
+                    .iter()
+                    .find(|item| item.turn_id == turn_id)
+                    .map(|trace| trace.updated_at)
+            })
+            .unwrap_or_default();
         let snapshot = self.snapshot_for_session(&session_key);
-        self.save_to_backend();
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::UpdateTerminalEvent {
+                turn_id: turn_id.to_string(),
+                event_id: persisted_event_id,
+                event_type: persisted_event_type,
+                event_version: persisted_event_version,
+                sequence,
+                emitted_at_ms,
+                updated_at,
+            },
+        );
         Some(snapshot)
     }
 
@@ -825,6 +977,7 @@ impl SessionStore {
         }
 
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let persisted_hook_trace_records = hook_trace_records.clone();
         {
             let session = self.sessions.get_mut(&session_key)?;
             let trace = session
@@ -837,8 +990,26 @@ impl SessionStore {
             refresh_session_metadata(session, true);
             sync_latest_history_node(session, Some(turn_id.to_string()));
         }
+        let updated_at = self
+            .sessions
+            .get(&session_key)
+            .and_then(|session| {
+                session
+                    .turn_trace_history
+                    .iter()
+                    .find(|item| item.turn_id == turn_id)
+                    .map(|trace| trace.updated_at)
+            })
+            .unwrap_or_default();
         let snapshot = self.snapshot_for_session(&session_key);
-        self.save_to_backend();
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::AppendHookRecords {
+                turn_id: turn_id.to_string(),
+                hook_trace_records: persisted_hook_trace_records,
+                updated_at,
+            },
+        );
         Some(snapshot)
     }
 
@@ -897,7 +1068,7 @@ impl SessionStore {
         }
         let snapshot = self.snapshot_for_session(&session_key);
 
-        self.save_to_backend();
+        self.save_session_to_backend(&session_key);
         snapshot
     }
 
@@ -1008,7 +1179,12 @@ impl SessionStore {
                 }
             }
         }
-        self.save_to_backend();
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::ReplaceAll {
+                traces: self.load_turn_traces(&session_key),
+            },
+        );
         if let Some(error) = blocked_error {
             return Err(error);
         }
@@ -1132,7 +1308,12 @@ impl SessionStore {
                 restored_node_id = Some(node.node_id);
             }
         }
-        self.save_to_backend();
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::ReplaceAll {
+                traces: self.load_turn_traces(&session_key),
+            },
+        );
         if let Some(error) = blocked_error {
             return Err(error);
         }
@@ -1228,7 +1409,12 @@ impl SessionStore {
                 }
             }
         }
-        self.save_to_backend();
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::ReplaceAll {
+                traces: self.load_turn_traces(&session_key),
+            },
+        );
         if let Some(error) = blocked_error {
             return Err(error);
         }
@@ -1320,7 +1506,12 @@ impl SessionStore {
                 target_node_id = Some(node.node_id);
             }
         }
-        self.save_to_backend();
+        self.persist_session_and_trace_change(
+            &session_key,
+            SessionTraceMutation::ReplaceAll {
+                traces: self.load_turn_traces(&session_key),
+            },
+        );
         if let Some(error) = blocked_error {
             return Err(error);
         }
@@ -1567,6 +1758,11 @@ impl SessionStore {
     }
 
     fn ensure_session(&mut self, session_id: &str) -> &mut SessionState {
+        let initial_trace_migration_state = match self.backend.trace_storage_mode() {
+            SeparateTraceTableMode::Off => TraceMigrationState::LegacyBlob,
+            SeparateTraceTableMode::DualWrite => TraceMigrationState::DualWrite,
+            SeparateTraceTableMode::WriteSeparate => TraceMigrationState::DualWrite,
+        };
         self.sessions
             .entry(session_id.to_string())
             .or_insert_with(|| SessionState {
@@ -1576,6 +1772,7 @@ impl SessionStore {
                 history: Vec::new(),
                 provider_native_transcript: Vec::new(),
                 turn_trace_history: Vec::new(),
+                trace_migration_state: initial_trace_migration_state,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -1593,18 +1790,157 @@ impl SessionStore {
     }
 
     fn save_to_backend(&self) {
-        self.backend.save_store(&PersistedStore {
+        if matches!(self.backend.trace_storage_mode(), SeparateTraceTableMode::WriteSeparate) {
+            for (session_id, session) in &self.sessions {
+                if matches!(session.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
+                {
+                    let _ = self
+                        .backend
+                        .replace_session_traces(session_id, &session.turn_trace_history);
+                }
+            }
+        }
+        let trace_mode = self.backend.trace_storage_mode();
+        let store = PersistedStore {
             sessions: self
                 .sessions
                 .iter()
                 .filter(|(_, session)| session_is_persistable(session))
-                .map(|(session_id, session)| (session_id.clone(), session.clone()))
+                .map(|(session_id, session)| {
+                    (
+                        session_id.clone(),
+                        session_state_for_backend(session, trace_mode),
+                    )
+                })
                 .collect::<SessionMap>(),
             attachment_assets: self.attachment_assets.clone(),
             session_attachment_index: self.session_attachment_index.clone(),
             mcp_source_snapshots: self.mcp_source_snapshots.clone(),
             skill_source_snapshots: self.skill_source_snapshots.clone(),
-        });
+        };
+        self.backend.save_store(&store);
+    }
+
+    fn save_session_to_backend(&self, session_id: &str) {
+        let Some(session) = self.sessions.get(session_id) else {
+            return;
+        };
+        let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
+        if matches!(prepared.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
+            && matches!(
+                self.backend.persist_session_with_trace_mutation(
+                    session_id,
+                    &prepared,
+                    SessionTraceMutation::ReplaceAll {
+                        traces: session.turn_trace_history.clone(),
+                    },
+                ),
+                SessionBackendMutationResult::Succeeded
+            )
+        {
+            return;
+        }
+        if session_is_persistable(session) && self.backend.upsert_session(session_id, &prepared) {
+            return;
+        }
+        self.save_to_backend();
+    }
+
+    fn persist_session_and_trace_change(&mut self, session_id: &str, mutation: SessionTraceMutation) {
+        let Some(session) = self.sessions.get(session_id) else {
+            return;
+        };
+        let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
+        let result = if session_is_persistable(session) {
+            self.backend
+                .persist_session_with_trace_mutation(session_id, &prepared, mutation.clone())
+        } else {
+            SessionBackendMutationResult::Unsupported
+        };
+
+        if matches!(result, SessionBackendMutationResult::Succeeded) {
+            if matches!(
+                self.backend.trace_storage_mode(),
+                SeparateTraceTableMode::WriteSeparate
+            ) {
+                if let Some(session) = self.sessions.get_mut(session_id) {
+                    session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+                }
+            }
+            return;
+        }
+
+        if matches!(result, SessionBackendMutationResult::NotFound)
+            && matches!(prepared.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
+        {
+            let replace_all = SessionTraceMutation::ReplaceAll {
+                traces: session.turn_trace_history.clone(),
+            };
+            if matches!(
+                self.backend
+                    .persist_session_with_trace_mutation(session_id, &prepared, replace_all),
+                SessionBackendMutationResult::Succeeded
+            ) {
+                return;
+            }
+        }
+
+        self.persist_trace_change(session_id, trace_action_from_mutation(mutation));
+        self.save_session_to_backend(session_id);
+    }
+
+    fn persist_trace_change(&self, session_id: &str, action: TracePersistenceAction) {
+        let result = match action {
+            TracePersistenceAction::ReplaceAll => self
+                .sessions
+                .get(session_id)
+                .map(|session| {
+                    self.backend
+                        .replace_session_traces(session_id, &session.turn_trace_history)
+                })
+                .unwrap_or(SessionBackendMutationResult::Unsupported),
+            TracePersistenceAction::UpsertOne { trace, trace_order } => {
+                self.backend.upsert_turn_trace(session_id, &trace, trace_order)
+            }
+            TracePersistenceAction::UpdateTerminalEvent {
+                turn_id,
+                event_id,
+                event_type,
+                event_version,
+                sequence,
+                emitted_at_ms,
+                updated_at,
+            } => self.backend.update_turn_trace_terminal_event(
+                session_id,
+                &turn_id,
+                event_id.as_deref(),
+                event_type.as_deref(),
+                event_version.as_deref(),
+                sequence,
+                emitted_at_ms,
+                updated_at,
+            ),
+            TracePersistenceAction::AppendHookRecords {
+                turn_id,
+                hook_trace_records,
+                updated_at,
+            } => self.backend.append_turn_trace_hook_records(
+                session_id,
+                &turn_id,
+                &hook_trace_records,
+                updated_at,
+            ),
+        };
+
+        if matches!(
+            result,
+            SessionBackendMutationResult::Failed | SessionBackendMutationResult::NotFound
+        ) {
+            eprintln!(
+                "[pony-agent][session] trace-level persistence {:?} for session {}",
+                result, session_id
+            );
+        }
     }
 
     fn snapshot_for_session(&self, session_id: &str) -> SessionSnapshot {
@@ -1948,6 +2284,7 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                     .take((turn_index + 1).min(session.turn_trace_history.len()))
                     .cloned()
                     .collect(),
+                trace_migration_state: TraceMigrationState::default(),
                 long_term_memory_entries: replay_long_term_memory(&session.history[..end]),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -2218,6 +2555,91 @@ fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
     session.memory_write_hook_trace_records = node.memory_write_hook_trace_records.clone();
     session.turn_count = node.turn_count;
     session.last_referenced_file = node.last_referenced_file.clone();
+}
+
+fn session_state_for_backend(
+    session: &SessionState,
+    trace_mode: SeparateTraceTableMode,
+) -> SessionState {
+    let mut prepared = session.clone();
+    match (trace_mode, prepared.trace_migration_state) {
+        (SeparateTraceTableMode::Off, _) => {}
+        (SeparateTraceTableMode::DualWrite, TraceMigrationState::LegacyBlob) => {
+            prepared.trace_migration_state = TraceMigrationState::DualWrite;
+        }
+        (SeparateTraceTableMode::DualWrite, TraceMigrationState::DualWrite)
+        | (SeparateTraceTableMode::DualWrite, TraceMigrationState::TraceTableAuthoritative) => {}
+        (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::DualWrite)
+        | (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::TraceTableAuthoritative) => {
+            prepared.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        }
+        (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::LegacyBlob) => {
+            // Do not auto-promote a legacy-only session straight to authoritative.
+        }
+    }
+    if matches!(trace_mode, SeparateTraceTableMode::WriteSeparate)
+        && matches!(prepared.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
+    {
+        prepared.turn_trace_history.clear();
+    }
+    prepared
+}
+
+enum TracePersistenceAction {
+    ReplaceAll,
+    UpsertOne {
+        trace: TurnTraceRecord,
+        trace_order: usize,
+    },
+    UpdateTerminalEvent {
+        turn_id: String,
+        event_id: Option<String>,
+        event_type: Option<String>,
+        event_version: Option<String>,
+        sequence: Option<u64>,
+        emitted_at_ms: Option<u64>,
+        updated_at: u64,
+    },
+    AppendHookRecords {
+        turn_id: String,
+        hook_trace_records: Vec<HookTraceRecord>,
+        updated_at: u64,
+    },
+}
+
+fn trace_action_from_mutation(mutation: SessionTraceMutation) -> TracePersistenceAction {
+    match mutation {
+        SessionTraceMutation::ReplaceAll { .. } => TracePersistenceAction::ReplaceAll,
+        SessionTraceMutation::UpsertOne { trace, trace_order } => {
+            TracePersistenceAction::UpsertOne { trace, trace_order }
+        }
+        SessionTraceMutation::UpdateTerminalEvent {
+            turn_id,
+            event_id,
+            event_type,
+            event_version,
+            sequence,
+            emitted_at_ms,
+            updated_at,
+        } => TracePersistenceAction::UpdateTerminalEvent {
+            turn_id,
+            event_id,
+            event_type,
+            event_version,
+            sequence,
+            emitted_at_ms,
+            updated_at,
+        },
+        SessionTraceMutation::AppendHookRecords {
+            turn_id,
+            hook_trace_records,
+            updated_at,
+        } => TracePersistenceAction::AppendHookRecords {
+            turn_id,
+            hook_trace_records,
+            updated_at,
+        },
+    }
 }
 
 fn build_history_state_cursor_summary(cursor: &HistoryCursor) -> HistoryStateCursorSummary {
@@ -3461,6 +3883,7 @@ fn default_sessions() -> SessionMap {
             history: Vec::new(),
             provider_native_transcript: Vec::new(),
             turn_trace_history: Vec::new(),
+            trace_migration_state: TraceMigrationState::default(),
             long_term_memory_entries: Vec::new(),
             memory_write_evidence: Vec::new(),
             memory_write_hook_trace_records: Vec::new(),
@@ -5720,6 +6143,7 @@ mod tests {
                     }),
                 ],
                 turn_trace_history: Vec::new(),
+                trace_migration_state: TraceMigrationState::default(),
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -5782,6 +6206,7 @@ mod tests {
                     }),
                 ],
                 turn_trace_history: Vec::new(),
+                trace_migration_state: TraceMigrationState::default(),
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -5863,6 +6288,7 @@ mod tests {
                     }),
                 ],
                 turn_trace_history: Vec::new(),
+                trace_migration_state: TraceMigrationState::default(),
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -5930,6 +6356,7 @@ mod tests {
                     }),
                 ],
                 turn_trace_history: Vec::new(),
+                trace_migration_state: TraceMigrationState::default(),
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
