@@ -195,6 +195,8 @@ pub struct LayeredTurnContext {
     #[serde(default)]
     pub conversation_carry_messages: Vec<ProviderMessage>,
     #[serde(default)]
+    pub volatile_context_messages: Vec<ProviderMessage>,
+    #[serde(default)]
     pub volatile_input_messages: Vec<ProviderMessage>,
     #[serde(default)]
     pub volatile_input_observation_text: String,
@@ -211,6 +213,8 @@ pub struct LayeredTurnContext {
     #[serde(default)]
     pub native_conversation_carry_messages: Vec<Value>,
     #[serde(default)]
+    pub native_volatile_context_messages: Vec<Value>,
+    #[serde(default)]
     pub native_volatile_input_messages: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
@@ -224,7 +228,6 @@ pub struct LayeredTurnContext {
 
 struct SemistableContextSection {
     note: String,
-    prefix_mutation_reasons: Vec<PrefixMutationReason>,
 }
 
 impl TurnContextBuilder for DefaultTurnContextBuilder {
@@ -319,43 +322,40 @@ fn build_layered_turn_context(
         .filter_map(to_provider_history_message)
         .collect::<Vec<_>>();
     let image_note = image_capability_note(provider, retrieved);
-    let base_semistable_context = provider_semistable_context_note(
-        graph_name,
-        retrieved,
-        planner_skills,
-        image_note.as_deref(),
-        None,
-        None,
-    );
+    let base_semistable_context = provider_semistable_context_note(graph_name, retrieved);
+    let memory_messages = build_memory_messages(retrieved);
     let mut reserved_messages = vec![
         base_system_messages[0].clone(),
         runtime_fact_messages[0].clone(),
     ];
     reserved_messages.extend(domain_profile_messages.clone());
     reserved_messages.push(ProviderMessage::developer(base_semistable_context.note.clone()));
+    reserved_messages.extend(memory_messages.clone());
+    reserved_messages.extend(build_volatile_context_messages(
+        retrieved,
+        planner_skills,
+        image_note.as_deref(),
+        None,
+    ));
     reserved_messages.push(current_user_message.clone());
     let (history_messages, history_truncated_count) =
         truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens);
     let history_truncation_note = truncation_note(history_truncated_count, "history messages");
-    let project_instruction_messages = vec![ProviderMessage::developer(
-        provider_semistable_context_note(
-            graph_name,
-            retrieved,
-            planner_skills,
-            image_note.as_deref(),
-            history_truncation_note.as_deref(),
-            Some(PrefixMutationReason::HistoryBoundaryShifted),
-        )
-        .note,
-    )];
-    let memory_messages = build_memory_messages(retrieved);
+    let project_instruction_messages =
+        vec![ProviderMessage::developer(base_semistable_context.note.clone())];
     let conversation_carry_messages = history_messages;
+    let volatile_context_messages = build_volatile_context_messages(
+        retrieved,
+        planner_skills,
+        image_note.as_deref(),
+        history_truncation_note.as_deref(),
+    );
     let volatile_input_messages = vec![current_user_message];
     let volatile_input_observation_text = render_turn_input_for_observation(
         &retrieved.turn_context.user_message,
         &retrieved.turn_context.images,
     );
-    let mut prefix_mutation_reasons = collect_prefix_mutation_reasons(
+    let prefix_mutation_reasons = collect_prefix_mutation_reasons(
         retrieved,
         planner_skills,
         image_note.as_deref(),
@@ -368,8 +368,10 @@ fn build_layered_turn_context(
     let mut native_project_instruction_messages = Vec::new();
     let mut native_memory_messages = Vec::new();
     let mut native_conversation_carry_messages = Vec::new();
+    let mut native_volatile_context_messages = Vec::new();
     let mut native_volatile_input_messages = Vec::new();
     let conversation_carry_mode = if provider.requires_provider_native_tool_flow() {
+        let native_memory = build_native_memory_messages(retrieved);
         let mut reserved_native_messages = vec![
             json!({
                 "role": "system",
@@ -381,11 +383,7 @@ fn build_layered_turn_context(
             }),
             json!({
                 "role": "system",
-                "content": project_instruction_messages[0].content.clone(),
-            }),
-            json!({
-                "role": "user",
-                "content": retrieved.turn_context.user_message.clone()
+                "content": base_semistable_context.note.clone(),
             }),
         ];
         reserved_native_messages.splice(
@@ -397,6 +395,17 @@ fn build_layered_turn_context(
                 })
             }),
         );
+        reserved_native_messages.extend(native_memory.clone());
+        reserved_native_messages.extend(build_native_volatile_context_messages(
+            retrieved,
+            planner_skills,
+            image_note.as_deref(),
+            None,
+        ));
+        reserved_native_messages.push(json!({
+            "role": "user",
+            "content": retrieved.turn_context.user_message.clone()
+        }));
         let (native_transcript, native_truncated_count) = truncate_native_messages(
             retrieved.transcript.provider_native_messages.clone(),
             &reserved_native_messages,
@@ -406,18 +415,6 @@ fn build_layered_turn_context(
             native_truncated_count,
             "provider-native transcript messages",
         );
-        let native_project_note = provider_semistable_context_note(
-            graph_name,
-            retrieved,
-            planner_skills,
-            image_note.as_deref(),
-            native_transcript_note.as_deref(),
-            Some(PrefixMutationReason::NativeTranscriptBoundaryShifted),
-        );
-        prefix_mutation_reasons = dedupe_prefix_mutation_reasons(join_prefix_mutation_reasons(&[
-            prefix_mutation_reasons,
-            native_project_note.prefix_mutation_reasons,
-        ]));
         native_base_system_messages = vec![json!({
             "role": "system",
             "content": BASE_SYSTEM_PROMPT,
@@ -437,10 +434,16 @@ fn build_layered_turn_context(
             .collect();
         native_project_instruction_messages = vec![json!({
             "role": "system",
-            "content": native_project_note.note,
+            "content": base_semistable_context.note.clone(),
         })];
-        native_memory_messages = build_native_memory_messages(retrieved);
+        native_memory_messages = native_memory;
         native_conversation_carry_messages = native_transcript;
+        native_volatile_context_messages = build_native_volatile_context_messages(
+            retrieved,
+            planner_skills,
+            image_note.as_deref(),
+            native_transcript_note.as_deref(),
+        );
         native_volatile_input_messages = vec![json!({
             "role": "user",
             "content": if retrieved.turn_context.images.is_empty() {
@@ -468,6 +471,7 @@ fn build_layered_turn_context(
         project_instruction_messages,
         memory_messages,
         conversation_carry_messages,
+        volatile_context_messages,
         volatile_input_messages,
         volatile_input_observation_text,
         native_base_system_messages,
@@ -476,6 +480,7 @@ fn build_layered_turn_context(
         native_project_instruction_messages,
         native_memory_messages,
         native_conversation_carry_messages,
+        native_volatile_context_messages,
         native_volatile_input_messages,
         prefix_mutation_reasons: dedupe_prefix_mutation_reasons(prefix_mutation_reasons),
         context_refresh_reason: derive_context_refresh_reason(retrieved, planner_skills),
@@ -490,8 +495,9 @@ fn flatten_layered_input_messages(context: &LayeredTurnContext) -> Vec<ProviderM
     messages.extend(context.runtime_fact_messages.clone());
     messages.extend(context.domain_profile_messages.clone());
     messages.extend(context.project_instruction_messages.clone());
-    messages.extend(context.memory_messages.clone());
     messages.extend(context.conversation_carry_messages.clone());
+    messages.extend(context.memory_messages.clone());
+    messages.extend(context.volatile_context_messages.clone());
     messages.extend(context.volatile_input_messages.clone());
     messages
 }
@@ -502,8 +508,9 @@ fn flatten_layered_native_messages(context: &LayeredTurnContext) -> Vec<Value> {
     messages.extend(context.native_runtime_fact_messages.clone());
     messages.extend(context.native_domain_profile_messages.clone());
     messages.extend(context.native_project_instruction_messages.clone());
-    messages.extend(context.native_memory_messages.clone());
     messages.extend(context.native_conversation_carry_messages.clone());
+    messages.extend(context.native_memory_messages.clone());
+    messages.extend(context.native_volatile_context_messages.clone());
     messages.extend(context.native_volatile_input_messages.clone());
     messages
 }
@@ -538,14 +545,16 @@ fn build_request_observation_from_layered_context(
     {
         join_non_empty_sections(&[
             render_native_messages_for_observation(&context.native_project_instruction_messages),
-            render_native_messages_for_observation(&context.native_memory_messages),
             render_native_messages_for_observation(&context.native_conversation_carry_messages),
+            render_native_messages_for_observation(&context.native_memory_messages),
+            render_native_messages_for_observation(&context.native_volatile_context_messages),
         ])
     } else {
         join_non_empty_sections(&[
             render_provider_messages_for_observation(&context.project_instruction_messages),
-            render_provider_messages_for_observation(&context.memory_messages),
             render_provider_messages_for_observation(&context.conversation_carry_messages),
+            render_provider_messages_for_observation(&context.memory_messages),
+            render_provider_messages_for_observation(&context.volatile_context_messages),
         ])
     };
     let volatile_input_text = if !context.native_volatile_input_messages.is_empty() {
@@ -672,57 +681,75 @@ fn provider_capability_note(provider: &ProviderManager) -> String {
 fn provider_semistable_context_note(
     graph_name: &str,
     retrieved: &RetrievedContextState,
+) -> SemistableContextSection {
+    SemistableContextSection {
+        note: format!(
+            "Session label: graph={} / session={}",
+            graph_name, retrieved.session_context.conversation_id
+        ),
+    }
+}
+
+fn build_volatile_context_messages(
+    retrieved: &RetrievedContextState,
     planner_skills: &[SkillDescriptor],
     image_note: Option<&str>,
     truncation_note: Option<&str>,
-    boundary_reason: Option<PrefixMutationReason>,
-) -> SemistableContextSection {
-    let mut notes = vec![format!(
-        "Session summary: {} / graph={} / session={}",
-        retrieved.session_context.summary, graph_name, retrieved.session_context.conversation_id
-    )];
-    let mut reasons = vec![PrefixMutationReason::SessionSummaryChanged];
+) -> Vec<ProviderMessage> {
+    let note = volatile_context_note(retrieved, planner_skills, image_note, truncation_note);
+    if note.is_empty() {
+        Vec::new()
+    } else {
+        vec![ProviderMessage::developer(note)]
+    }
+}
+
+fn build_native_volatile_context_messages(
+    retrieved: &RetrievedContextState,
+    planner_skills: &[SkillDescriptor],
+    image_note: Option<&str>,
+    truncation_note: Option<&str>,
+) -> Vec<Value> {
+    let note = volatile_context_note(retrieved, planner_skills, image_note, truncation_note);
+    if note.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({
+            "role": "system",
+            "content": note,
+        })]
+    }
+}
+
+fn volatile_context_note(
+    retrieved: &RetrievedContextState,
+    planner_skills: &[SkillDescriptor],
+    image_note: Option<&str>,
+    truncation_note: Option<&str>,
+) -> String {
+    let mut notes = Vec::new();
+
+    if let Some(path) = retrieved.session_context.last_referenced_file.as_deref() {
+        notes.push(format!("Focus file: {}.", path));
+    }
 
     if let Some(goal) = retrieved.run_state.goal.as_deref() {
         notes.push(format!("Run goal: {}.", goal));
-        reasons.push(PrefixMutationReason::RunGoalChanged);
-    }
-
-    if !retrieved.long_term_memory.entries.is_empty() {
-        let summary = retrieved
-            .long_term_memory
-            .summary
-            .as_deref()
-            .unwrap_or("Long-term memory entries are attached to this retrieval snapshot.");
-        notes.push(format!(
-            "Long-term memory status: {}. {}",
-            retrieved.long_term_memory.status, summary
-        ));
-        reasons.push(PrefixMutationReason::LongTermMemoryChanged);
     }
 
     if !planner_skills.is_empty() {
         notes.push(render_planner_skills_note(planner_skills));
-        reasons.push(PrefixMutationReason::PlannerSkillsChanged);
     }
 
     if let Some(note) = image_note {
         notes.push(note.to_string());
-        reasons.push(PrefixMutationReason::ImageNoteChanged);
     }
 
     if let Some(note) = truncation_note {
         notes.push(note.to_string());
-        reasons.push(PrefixMutationReason::TruncationNoteChanged);
-        if let Some(boundary_reason) = boundary_reason {
-            reasons.push(boundary_reason);
-        }
     }
 
-    SemistableContextSection {
-        note: notes.join(" "),
-        prefix_mutation_reasons: dedupe_prefix_mutation_reasons(reasons),
-    }
+    notes.join(" ")
 }
 
 fn build_memory_messages(retrieved: &RetrievedContextState) -> Vec<ProviderMessage> {
@@ -812,38 +839,8 @@ fn collect_prefix_mutation_reasons(
     history_truncation_note: Option<&str>,
     provider_native_tool_flow: bool,
 ) -> Vec<PrefixMutationReason> {
-    let mut reasons = vec![PrefixMutationReason::SessionSummaryChanged];
-
-    if retrieved.run_state.goal.is_some() {
-        reasons.push(PrefixMutationReason::RunGoalChanged);
-    }
-
-    if !retrieved.long_term_memory.entries.is_empty() {
-        reasons.push(PrefixMutationReason::LongTermMemoryChanged);
-    }
-
-    if !planner_skills.is_empty() {
-        reasons.push(PrefixMutationReason::PlannerSkillsChanged);
-    }
-
-    if image_note.is_some() {
-        reasons.push(PrefixMutationReason::ImageNoteChanged);
-    }
-
-    if history_truncation_note.is_some() {
-        reasons.push(PrefixMutationReason::TruncationNoteChanged);
-        reasons.push(if provider_native_tool_flow {
-            PrefixMutationReason::NativeTranscriptBoundaryShifted
-        } else {
-            PrefixMutationReason::HistoryBoundaryShifted
-        });
-    }
-
-    dedupe_prefix_mutation_reasons(reasons)
-}
-
-fn join_prefix_mutation_reasons(groups: &[Vec<PrefixMutationReason>]) -> Vec<PrefixMutationReason> {
-    groups.iter().flatten().cloned().collect()
+    let _ = (retrieved, planner_skills, image_note, history_truncation_note, provider_native_tool_flow);
+    Vec::new()
 }
 
 fn render_planner_skills_note(planner_skills: &[SkillDescriptor]) -> String {
@@ -1682,6 +1679,10 @@ mod tests {
             .observation
             .stable_prefix_text
             .contains("Capability profile:"));
+        assert!(request
+            .observation
+            .semi_stable_context_text
+            .contains("Session label: graph=graph-a / session="));
         assert!(!request
             .observation
             .stable_prefix_text
@@ -1691,10 +1692,6 @@ mod tests {
             .stable_prefix_text
             .contains("Please inspect the latest diagram screenshot"));
 
-        assert!(request
-            .observation
-            .semi_stable_context_text
-            .contains("Investigating provider behavior"));
         assert!(request
             .observation
             .semi_stable_context_text
@@ -1712,15 +1709,7 @@ mod tests {
             .instruction_scope_sources
             .iter()
             .any(|source| source.starts_with("thread://")));
-        assert_eq!(
-            request.observation.prefix_mutation_reasons,
-            vec![
-                PrefixMutationReason::SessionSummaryChanged,
-                PrefixMutationReason::RunGoalChanged,
-                PrefixMutationReason::LongTermMemoryChanged,
-                PrefixMutationReason::ImageNoteChanged,
-            ]
-        );
+        assert!(request.observation.prefix_mutation_reasons.is_empty());
 
         assert!(request
             .observation
@@ -1795,14 +1784,7 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("current volatile request"));
-        assert_eq!(
-            request.observation.prefix_mutation_reasons,
-            vec![
-                PrefixMutationReason::SessionSummaryChanged,
-                PrefixMutationReason::RunGoalChanged,
-                PrefixMutationReason::ImageNoteChanged,
-            ]
-        );
+        assert!(request.observation.prefix_mutation_reasons.is_empty());
     }
 
     #[test]
@@ -1847,14 +1829,7 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("Older context was truncated to fit the provider window"));
-        assert!(request
-            .observation
-            .prefix_mutation_reasons
-            .contains(&PrefixMutationReason::TruncationNoteChanged));
-        assert!(request
-            .observation
-            .prefix_mutation_reasons
-            .contains(&PrefixMutationReason::NativeTranscriptBoundaryShifted));
+        assert!(request.observation.prefix_mutation_reasons.is_empty());
     }
 
     #[test]
@@ -2001,18 +1976,7 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("Older context was truncated to fit the provider window"));
-        assert!(request
-            .observation
-            .prefix_mutation_reasons
-            .contains(&PrefixMutationReason::ImageNoteChanged));
-        assert!(request
-            .observation
-            .prefix_mutation_reasons
-            .contains(&PrefixMutationReason::TruncationNoteChanged));
-        assert!(request
-            .observation
-            .prefix_mutation_reasons
-            .contains(&PrefixMutationReason::HistoryBoundaryShifted));
+        assert!(request.observation.prefix_mutation_reasons.is_empty());
     }
 
     #[test]
@@ -2271,10 +2235,7 @@ mod tests {
         ) && message
             .content
             .contains("Available executable skills")));
-        assert!(request
-            .observation
-            .prefix_mutation_reasons
-            .contains(&PrefixMutationReason::PlannerSkillsChanged));
+        assert!(request.observation.prefix_mutation_reasons.is_empty());
     }
 
     #[test]
