@@ -2127,7 +2127,7 @@ describe("HomeWorkspace", () => {
     expect(wrapper.text()).not.toContain("新回答");
   });
 
-  it("keeps existing draft text when rollback completes", async () => {
+  it("overwrites existing draft text when rollback completes", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionId: "session-current",
@@ -2259,7 +2259,7 @@ describe("HomeWorkspace", () => {
     await new Promise(r => setTimeout(r, 400));
     await nextTick();
 
-    expect(runtimeStore.draftMessage).toBe("我自己的新草稿");
+    expect(runtimeStore.draftMessage).toBe("新问题");
   });
 
   it("shows fork summary menu and jumps through existing branch actions", async () => {

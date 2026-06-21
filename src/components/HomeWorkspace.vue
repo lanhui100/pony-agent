@@ -993,9 +993,6 @@ async function confirmRollback() {
   rollbackConfirm.value = null;
   rollbackConfirmAnchorEl.value = null;
 
-  const preservedDraft = draftMessage.value;
-  const shouldHydrateDraft = draftMessage.value.trim().length === 0;
-
   // Resolve nodeId: prefer pre-resolved, fallback to fresh lookup
   const nodeId = resolveRollbackCheckoutNodeId(pending.turnId, pending.nodeId);
 
@@ -1038,7 +1035,7 @@ async function confirmRollback() {
   rollbackConfirmAnchorRect.value = null;
 
   // Hydrate draft with the clicked turn's user message (the source of rollback)
-  const nextDraft = shouldHydrateDraft ? userContent : preservedDraft;
+  const nextDraft = userContent;
   draftMessage.value = nextDraft;
   runtimeStore.setDraftMessage(nextDraft);
 }
