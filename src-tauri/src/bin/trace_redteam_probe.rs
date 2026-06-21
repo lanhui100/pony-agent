@@ -257,6 +257,7 @@ fn run_probe(target: &ProbeTarget, prompt: &str, run_index: usize) {
             provider_id: Some(target.provider_id.clone()),
             model_id: Some(target.model_id.clone()),
             reasoning_effort: None,
+            workspace_mode: None,
             session_id: Some(session_id.clone()),
             node_id: None,
             history: Vec::new(),

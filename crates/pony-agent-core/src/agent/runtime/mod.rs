@@ -5349,8 +5349,7 @@ impl AgentRuntime {
             );
             return;
         }
-        let finalize_hook_outcome =
-            self.dispatch_hook_trace_records(TurnHookPoint::TurnFinalizeEnd);
+        let finalize_hook_outcome = self.dispatch_hook_trace_records(TurnHookPoint::TurnFinalizeEnd);
         let finalize_hook_trace_records = finalize_hook_outcome.trace_records.clone();
         let mut terminal_hook_trace_records = planner_hook_trace_records.clone();
         terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());

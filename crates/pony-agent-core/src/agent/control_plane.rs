@@ -30,7 +30,7 @@ use crate::agent::session::{
     build_missing_run_control_audit_summary, HistoryBranch,
     HistoryCheckoutMode as SessionHistoryCheckoutMode, HistoryCursor, HistoryNode,
     HistoryStateAuditSummary, RunControlAuditActionSummary, RunControlAuditCurrentContext,
-    RunControlAuditSummary, SessionOverview, SessionSnapshot, TurnTraceRecord,
+    RunControlAuditSummary, SessionOverview, SessionSnapshot, TurnTraceRecord, WorkspaceRef,
 };
 use crate::agent::turn_flow::TurnEventSink;
 use serde::{Deserialize, Serialize};
@@ -442,7 +442,11 @@ pub struct HistoryNodeView {
     pub branch_id: String,
     pub forked_from_node_id: Option<String>,
     pub kind: String,
+    pub turn_id: Option<String>,
+    pub workspace_ref: WorkspaceRef,
     pub summary: Option<String>,
+    pub title: Option<String>,
+    pub turn_count: Option<usize>,
     pub created_at_ms: Option<u64>,
 }
 
@@ -2375,7 +2379,11 @@ impl HostControlPlane {
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
                 .unwrap_or_else(|| "turn_committed".to_string()),
+            turn_id: node.turn_trace_history.last().map(|trace| trace.turn_id.clone()),
+            workspace_ref: node.workspace_ref.clone(),
             summary: Some(node.summary.clone()),
+            title: Some(node.title.clone()),
+            turn_count: Some(node.turn_count),
             created_at_ms: Some(node.created_at_ms),
         }
     }
@@ -6464,6 +6472,12 @@ mod tests {
         );
         assert_eq!(historical_view.session.history.len(), 2);
         assert_eq!(historical_view.session.history[0].content, "第一问");
+        let historical_nodes = historical_view
+            .history_nodes
+            .clone()
+            .expect("history nodes should be present in runtime view");
+        assert_eq!(historical_nodes[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(historical_nodes[0].workspace_ref.rollback_capable, false);
 
         let fork = control_plane
             .fork_from_history_node(ForkFromHistoryNodeCommand {

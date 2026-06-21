@@ -14,6 +14,7 @@ import {
   Clock3,
   Copy,
   Gauge,
+  GitBranch,
   FileText,
   Image as ImageIcon,
   Layout,
@@ -74,11 +75,13 @@ const runtimeStore = useRuntimeStore();
 const providerStore = useProviderStore();
 
 const {
+  activeBranchId,
   availableTools,
   activeTurnId: runtimeActiveTurnId,
   error,
   fallbackReason,
   firstTokenLatencyMs,
+  historyBranches,
   inputTokens,
   isSubmitting,
   messages,
@@ -206,6 +209,20 @@ const currentContextWindowTokens = computed(
   () => retrievedSessionContext.value?.contextWindowTokens ?? providerStore.currentModel?.capabilities?.contextWindowTokens ?? null
 );
 const sessionTurnCount = computed(() => orderedTurnTraces.value.length);
+const branchCount = computed(() => historyBranches.value.length);
+const currentBranchLabel = computed(() => {
+  if (branchCount.value <= 1) {
+    return "";
+  }
+
+  const activeBranch = historyBranches.value.find((b) => b.branchId === activeBranchId.value);
+  if (!activeBranch) {
+    return "";
+  }
+
+  const index = historyBranches.value.indexOf(activeBranch);
+  return activeBranch.label?.trim() || (index === 0 ? "主分支" : `分支 ${index}`);
+});
 // Cached timeline per turn — computed once per orderedTurnTraces change,
 // shared by all consumers (template v-for, session stats, metric helpers).
 const turnTimelineCache = computed(() => {
@@ -1471,6 +1488,21 @@ watch(orderedTurnTraceSignature, () => {
           </div>
 
           <section class="mt-1.5 space-y-1">
+            <!-- Branch info -->
+            <div
+              v-if="branchCount > 1"
+              class="flex items-center justify-between text-[11px] leading-5 text-stone-600"
+            >
+              <span class="inline-flex items-center gap-1 text-stone-400">
+                <GitBranch class="h-3 w-3" />
+                <span>分支</span>
+              </span>
+              <span class="inline-flex items-center gap-1">
+                <span class="text-stone-600">{{ currentBranchLabel }}</span>
+                <span class="text-stone-400">· {{ branchCount }} 个分支</span>
+              </span>
+            </div>
+
             <!-- Token metrics -->
             <div class="flex items-center justify-between text-[11px] leading-5 text-stone-600">
               <span class="inline-flex items-center gap-1 text-stone-400">

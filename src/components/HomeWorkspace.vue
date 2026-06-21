@@ -1607,28 +1607,9 @@ watch(isSubmitting, (submitting) => {
                   <RotateCcw class="h-3.5 w-3.5" />
                   <span class="sr-only">撤回对话和修改</span>
                 </button>
-
-                <div
-                  v-if="rollbackConfirm?.turnId === turn.turnId"
-                  ref="rollbackConfirmMenuRef"
-                  :style="rollbackConfirmStyle"
-                  class="rollback-confirm-popover z-[9999] flex items-center gap-1"
-                  @mouseenter="clearRollbackDismiss"
-                  @mouseleave="scheduleCancelRollback"
-                >
-                  <span class="rollback-confirm-hint">{{ rollbackConfirm?.action === 'transcript_and_workspace' ? '确认撤回对话和文件？' : '确认仅撤回对话？' }}</span>
-                  <button
-                    type="button"
-                    class="rollback-confirm-btn rollback-confirm-btn-danger"
-                    title="确认撤回"
-                    @click="confirmRollback"
-                  >
-                    <Check class="h-3 w-3" />
-                  </button>
                 </div>
               </div>
-            </div>
-          </article>
+            </article>
 
           <article v-if="turn.assistant || turn.tools.length" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-agent-shell w-full px-0 py-1">
             <div v-motion :initial="{ opacity: 0, y: 6 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.02 }" class="conversation-agent-header flex items-center justify-between gap-3">
@@ -2069,6 +2050,27 @@ watch(isSubmitting, (submitting) => {
       </div>
     </div>
   </section>
+
+  <Teleport to="body">
+    <div
+      v-if="rollbackConfirm"
+      ref="rollbackConfirmMenuRef"
+      :style="rollbackConfirmStyle"
+      class="rollback-confirm-popover z-[9999] flex items-center gap-1"
+      @mouseenter="clearRollbackDismiss"
+      @mouseleave="scheduleCancelRollback"
+    >
+      <span class="rollback-confirm-hint">{{ rollbackConfirm?.action === 'transcript_and_workspace' ? '确认撤回对话和文件？' : '确认仅撤回对话？' }}</span>
+      <button
+        type="button"
+        class="rollback-confirm-btn rollback-confirm-btn-danger"
+        title="确认撤回"
+        @click="confirmRollback"
+      >
+        <Check class="h-3 w-3" />
+      </button>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>

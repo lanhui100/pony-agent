@@ -180,6 +180,7 @@ fn run_direct_scenario(runtime: &mut AgentRuntime, scenario: &DirectScenario) {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
+            workspace_mode: None,
             session_id: Some(scenario.session_id.to_string()),
             node_id: None,
             history: vec![],
