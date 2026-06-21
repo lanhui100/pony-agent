@@ -2927,7 +2927,7 @@ function isPersistedMessageShapeCompatible(
     return false;
   }
 
-  const persistedHistory = collectPersistedHistoryMessages(persisted.messages);
+  const persistedHistory = buildTurnHistory(persisted.messages);
   if (persistedHistory.length !== snapshot.history.length) {
     return false;
   }
@@ -3975,6 +3975,9 @@ export const useRuntimeStore = defineStore("runtime", {
           refreshCatalog: false,
           nodeId
         });
+        this.turnTraceHistory = this.turnTraceHistory.filter(
+          (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
+        );
         result = normalizeHistoryCheckoutResult(payload, this.historyNodes, this.historyBranches);
       } else {
         const resolvedTurnId = turnId?.trim() || this.findCheckpointTurnIdByNodeId(nodeId);
