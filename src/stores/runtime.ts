@@ -2972,8 +2972,7 @@ function traceErrorDetail(trace?: TurnTraceRecord | null) {
     return timelineError;
   }
 
-  const sessionSummary = trace.sessionSummary?.trim();
-  return sessionSummary || null;
+  return null;
 }
 
 function traceModelLabel(trace?: TurnTraceRecord | null) {
@@ -3123,7 +3122,9 @@ function hydrateMessagesFromHistory(
     restoredHistoryIndex += 1;
     const restoredErrorDetail = restoredMessage?.errorDetail ?? null;
     const traceError = traceErrorDetail(currentTrace);
-    const hasErrorState = restoredMessage?.status === "error" || currentTrace?.phase === "failed" || Boolean(traceError);
+    const hasTraceError = currentTrace?.phase === "failed" || Boolean(traceError);
+    const hasErrorState = hasTraceError || (!currentTrace && restoredMessage?.status === "error");
+    const errorDetail = hasTraceError ? (traceError || restoredErrorDetail) : (currentTrace ? null : restoredErrorDetail);
     messages.push({
       id: restoredMessage?.id ?? `history-assistant-${turnIndex}`,
       turnId: currentTurnId,
@@ -3134,7 +3135,7 @@ function hydrateMessagesFromHistory(
       reasoningContent: restoredMessage?.reasoningContent ?? traceReasoningContent(currentTrace),
       tokenCount: restoredMessage?.tokenCount ?? currentTrace?.outputTokens ?? null,
       modelName: restoredMessage?.modelName ?? traceModelLabel(currentTrace),
-      errorDetail: restoredErrorDetail || traceError
+      errorDetail
     });
     appendToolMessagesForTurn(currentTurnId, currentTrace);
     currentTurnId = null;

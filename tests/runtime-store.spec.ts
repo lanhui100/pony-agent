@@ -1331,6 +1331,103 @@ describe("runtime session resilience", () => {
     expect(assistantMessage?.modelName).toBe("OpenAI/gpt-5");
   });
 
+  it("does not hydrate successful assistant history entries with error semantics", () => {
+    const store = useRuntimeStore();
+    store.applySessionSnapshot(
+      "session-no-error",
+      createSnapshot({
+        conversationId: "session-no-error",
+        summary: "no error summary",
+        history: [
+          { role: "user", content: "normal question" },
+          { role: "assistant", content: "normal answer" }
+        ],
+        turnTraceHistory: [
+          createTrace({
+            turnId: "turn-no-error",
+            phase: "completed",
+            sessionSummary: "normal answer / graph=main / session=session-no-error / turns=1 / provider=test / mode=chat"
+          })
+        ],
+        turnCount: 1
+      })
+    );
+
+    const assistantMessage = store.messages.find((message) => message.role === "assistant");
+    expect(assistantMessage).toBeTruthy();
+    expect(assistantMessage?.content).toBe("normal answer");
+    expect(assistantMessage?.status).toBe("done");
+    expect(assistantMessage?.errorDetail).toBeFalsy();
+  });
+
+  it("cleans up stale persisted error state when trace has no error", () => {
+    const store = useRuntimeStore();
+    writePersistedSessions({
+      "session-stale-error": {
+        messages: [
+          createMessage({
+            id: "user-stale",
+            turnId: "turn-stale",
+            role: "user",
+            content: "question"
+          }),
+          createMessage({
+            id: "assistant-stale",
+            turnId: "turn-stale",
+            role: "assistant",
+            content: "answer",
+            status: "error",
+            errorDetail: "stale error detail from old bug"
+          })
+        ],
+        turnTraceHistory: [
+          createTrace({
+            turnId: "turn-stale",
+            phase: "completed",
+            sessionSummary: "answer / graph=main / session=session-stale-error / turns=1 / provider=test / mode=chat"
+          })
+        ],
+        sessionSummary: "stale summary",
+        providerRequestedName: null,
+        providerName: null,
+        providerProtocol: null,
+        providerModel: null,
+        providerSource: null,
+        providerMode: null,
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null
+      }
+    });
+
+    store.applySessionSnapshot(
+      "session-stale-error",
+      createSnapshot({
+        conversationId: "session-stale-error",
+        summary: "fresh summary",
+        history: [
+          { role: "user", content: "question" },
+          { role: "assistant", content: "answer" }
+        ],
+        turnTraceHistory: [
+          createTrace({
+            turnId: "turn-stale",
+            phase: "completed",
+            sessionSummary: "answer / graph=main / session=session-stale-error / turns=1 / provider=test / mode=chat"
+          })
+        ],
+        turnCount: 1
+      })
+    );
+
+    const assistantMessage = store.messages.find((message) => message.role === "assistant");
+    expect(assistantMessage).toBeTruthy();
+    expect(assistantMessage?.status).toBe("done");
+    expect(assistantMessage?.errorDetail).toBeFalsy();
+  });
+
   it("preserves attachment asset lifecycle metadata from snapshots and supports local filtering", () => {
     const store = useRuntimeStore();
     const attachmentAssets: AttachmentAsset[] = [
@@ -5706,6 +5803,126 @@ describe("runtime session resilience", () => {
     expect(store.visibleNodeId).toBe("node-old");
     expect(store.branchHeadNodeId).toBe("node-head");
     expect(store.activeBranchId).toBe("branch-main");
+    expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("does not reapply latest session checkpoint over historical checkout snapshots", async () => {
+    const store = useRuntimeStore();
+    const historicalSnapshot = createSnapshot({
+      conversationId: "checkout-session",
+      summary: "Historical summary",
+      history: [
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" }
+      ],
+      turnTraceHistory: [
+        createTrace({
+          turnId: "turn-old",
+          title: "old turn",
+          phase: "completed",
+          updatedAt: 2000
+        })
+      ],
+      turnCount: 1,
+      updatedAtMs: 2000
+    });
+
+    store.$patch({
+      sessionId: "checkout-session",
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-head",
+      historyCursorMode: "live",
+      historyBranches: [
+        createHistoryBranch({
+          branchId: "branch-main",
+          sessionId: "checkout-session",
+          headNodeId: "node-head"
+        })
+      ],
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId: "checkout-session", turnId: "turn-old", createdAtMs: 2000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId: "checkout-session", turnId: "turn-latest", createdAtMs: 3200 })
+      ],
+      messages: [
+        createMessage({ id: "user-latest", turnId: "turn-latest", role: "user", content: "latest question" }),
+        createMessage({ id: "assistant-latest", turnId: "turn-latest", role: "assistant", content: "latest answer" })
+      ],
+      turnTraceHistory: [createTrace({ turnId: "turn-latest", title: "latest turn", updatedAt: 3200 })],
+      latestExecutionCheckpoint: createCheckpoint({ turnId: "turn-latest", status: "running" })
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "checkout_history_node") {
+        expect(payload).toEqual({
+          sessionId: "checkout-session",
+          nodeId: "node-old",
+          mode: "transcript_only"
+        });
+        return {
+          sessionId: "checkout-session",
+          nodeId: "node-old",
+          requestedMode: "transcript_only",
+          appliedMode: "transcript_only",
+          transcriptRestoreApplied: true,
+          workspaceRollbackCapable: false,
+          workspaceRollbackApplied: false,
+          degraded: false,
+          degradationReason: null,
+          cursor: createHistoryCursor({
+            sessionId: "checkout-session",
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-old",
+            mode: "historical"
+          })
+        };
+      }
+
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId: "checkout-session",
+          runId: null,
+          nodeId: "node-old"
+        });
+        return createSessionRuntimeView(historicalSnapshot, {
+          checkpoint: createCheckpoint({
+            turnId: "turn-latest",
+            sessionId: "checkout-session",
+            status: "running",
+            checkpointKind: "runtime_control",
+            phase: "calling_model"
+          }),
+          historyNodes: [
+            createHistoryNode({ nodeId: "node-old", sessionId: "checkout-session", turnId: "turn-old", createdAtMs: 2000 }),
+            createHistoryNode({ nodeId: "node-head", sessionId: "checkout-session", turnId: "turn-latest", createdAtMs: 3200 })
+          ],
+          historyBranches: [
+            createHistoryBranch({ branchId: "branch-main", sessionId: "checkout-session", headNodeId: "node-head" })
+          ],
+          historyCursor: createHistoryCursor({
+            sessionId: "checkout-session",
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-old",
+            mode: "historical"
+          })
+        });
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.checkoutHistoryNode("node-old");
+
+    expect(store.messages.map((message) => message.turnId)).toEqual(["turn-old", "turn-old"]);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.turnId).toBe("turn-old");
+    expect(store.latestExecutionCheckpoint).toBeNull();
+    expect(store.visibleNodeId).toBe("node-old");
     expect(store.historyCursorMode).toBe("historical");
   });
 
