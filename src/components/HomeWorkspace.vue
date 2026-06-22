@@ -939,31 +939,29 @@ async function confirmRollback(turnId: string, action: CheckpointRollbackAction)
     void nextTick().then(() => updateRollbackProgressPosition());
 
     const isSynthetic = nodeId.startsWith("synthetic-");
-    const isFirstTurn =
-      isSynthetic
-        ? turns.value.findIndex((t) => t.turnId === turnId) <= 0
-        : nodeId === entry?.nodeId;
 
-    if (isFirstTurn) {
-      runtimeStore.$patch({ messages: [], turnTraceHistory: [] });
-      runtimeStore.persistHistory();
-    } else if (isSynthetic) {
+    if (isSynthetic) {
       const turnIndex = turns.value.findIndex((t) => t.turnId === turnId);
-      const previousTurn = turnIndex > 0 ? turns.value[turnIndex - 1] : null;
-      if (previousTurn) {
-        let lastMsgIdx = -1;
-        for (let idx = messages.value.length - 1; idx >= 0; idx--) {
-          if (messages.value[idx]!.turnId === previousTurn.turnId) {
-            lastMsgIdx = idx;
-            break;
+      if (turnIndex <= 0) {
+        runtimeStore.$patch({ messages: [], turnTraceHistory: [] });
+        runtimeStore.persistHistory();
+      } else {
+        const previousTurn = turns.value[turnIndex - 1];
+        if (previousTurn) {
+          let lastMsgIdx = -1;
+          for (let idx = messages.value.length - 1; idx >= 0; idx--) {
+            if (messages.value[idx]!.turnId === previousTurn.turnId) {
+              lastMsgIdx = idx;
+              break;
+            }
           }
-        }
-        if (lastMsgIdx >= 0) {
-          runtimeStore.$patch({
-            messages: messages.value.slice(0, lastMsgIdx + 1),
-            turnTraceHistory: []
-          });
-          runtimeStore.persistHistory();
+          if (lastMsgIdx >= 0) {
+            runtimeStore.$patch({
+              messages: messages.value.slice(0, lastMsgIdx + 1),
+              turnTraceHistory: []
+            });
+            runtimeStore.persistHistory();
+          }
         }
       }
     } else {
