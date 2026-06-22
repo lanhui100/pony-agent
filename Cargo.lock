@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "pony-agent"
-version = "0.1.11"
+version = "0.1.19"
 dependencies = [
  "pony-agent-core",
  "raw-window-handle",
@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "pony-agent-core"
-version = "0.1.13"
+version = "0.1.16"
 dependencies = [
  "chrono",
  "dirs",
