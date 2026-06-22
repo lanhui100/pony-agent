@@ -30,6 +30,10 @@
 - [上下文构建与缓存策略 canonical spec](C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/context-assembly-and-cache-strategy/spec.md)
 - [PA-056 任务卡](C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-056-redesign-context-assembly-and-cache-strategy.md)
 
+## 2.6 工具面研究与对比
+
+- [内置工具面三方对比：Pony Agent vs Codex vs Claude Code](C:/Users/HUAWEI/Documents/pony-agent/docs/analysis/builtin-tool-surface-comparison-2026-06-22.md)
+
 ## 3. 决策记录
 
 - [决策记录索引](C:/Users/HUAWEI/Documents/pony-agent/docs/decisions/README.md)
@@ -85,3 +89,4 @@
 - 想保持工程质量：看“规范”
 - 想推进复杂开发任务：看“OpenSpec”
 - 想看第二波 builtin 工具面收口范围：先看 `openspec/specs/second-wave-tool-surface/spec.md`，再看 `PA-050 ~ PA-054` 与对应审核/收口日志
+- 想对比三方工具面差距、决策后续该实现哪些工具：看 `docs/analysis/builtin-tool-surface-comparison-2026-06-22.md`
