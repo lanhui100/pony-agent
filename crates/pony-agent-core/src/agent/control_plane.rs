@@ -2597,6 +2597,23 @@ impl HostControlPlane {
                     .as_ref()
                     .and_then(|checkpoint| checkpoint.session_id.clone())
             }));
+
+        // If no explicit node_id, fall back to the session cursor's visible
+        // node so that checkout_history_node state is preserved across
+        // client reconnects / session switches without every client
+        // having to track visibleNodeId.
+        let resolved_node_id = query.node_id.clone().or_else(|| {
+            let cursor = self.load_history_cursor(HistoryCursorQuery {
+                session_id: Some(resolved_session_id.clone()),
+            });
+            cursor.visible_node_id.filter(|visible| {
+                cursor
+                    .branch_head_node_id
+                    .as_ref()
+                    .map_or(true, |head| visible != head)
+            })
+        });
+
         let run = self.resolve_graph_run_for_retrieval(
             query.run_id.as_deref(),
             Some(resolved_session_id.as_str()),
@@ -2604,16 +2621,16 @@ impl HostControlPlane {
         let submission_plan = Some(self.resolve_graph_run_submission_plan(
             GraphRunSubmissionPlanQuery {
                 session_id: Some(resolved_session_id.clone()),
-                node_id: query.node_id.clone(),
+                node_id: resolved_node_id.clone(),
                 run_id: query.run_id.clone(),
             },
         ));
         let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
         let session = runtime
-            .load_session_snapshot_at(Some(resolved_session_id.as_str()), query.node_id.as_deref());
+            .load_session_snapshot_at(Some(resolved_session_id.as_str()), resolved_node_id.as_deref());
         let retrieved = runtime.inspect_retrieved_context_at(
             Some(resolved_session_id.as_str()),
-            query.node_id.as_deref(),
+            resolved_node_id.as_deref(),
             run.as_ref(),
             checkpoint.as_ref(),
             None,
