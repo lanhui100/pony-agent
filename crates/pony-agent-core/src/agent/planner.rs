@@ -769,6 +769,7 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             attachments: Vec::new(),
+            ..Default::default()
         }
     }
 

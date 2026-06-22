@@ -11788,21 +11788,25 @@ mod tests {
                         size_bytes: 4,
                         created_at_ms: 1,
                     }],
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "我看到了旧图。".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "user".to_string(),
                     content: "继续看 runtime.rs。".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "好的。".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
             ],
             attachment_assets: Vec::new(),
@@ -11851,11 +11855,13 @@ mod tests {
                         size_bytes: 4,
                         created_at_ms: 1,
                     }],
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "我看到了图。".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
             ],
             attachment_assets: Vec::new(),

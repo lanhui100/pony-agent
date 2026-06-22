@@ -1540,16 +1540,19 @@ mod tests {
                     role: "assistant".to_string(),
                     content: "orphan assistant".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "user".to_string(),
                     content: "最近一次用户问题".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "最近一次助手回答".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
             ],
             vec![
@@ -1640,11 +1643,13 @@ mod tests {
                     role: "user".to_string(),
                     content: "recent history question".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "recent history answer".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
             ],
             Vec::new(),
@@ -1908,6 +1913,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "previous turn".to_string(),
                 attachments: Vec::new(),
+                ..Default::default()
             }],
             Vec::new(),
             None,
@@ -1939,11 +1945,13 @@ mod tests {
                     role: "user".to_string(),
                     content: "old turn ".repeat(60),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "old assistant ".repeat(60),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
             ],
             Vec::new(),
@@ -2000,21 +2008,25 @@ mod tests {
                     role: "user".to_string(),
                     content: "old turn ".repeat(60),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "old assistant ".repeat(60),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "user".to_string(),
                     content: "recent question about provider behavior".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
                 TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content: "recent assistant answer with concise summary".to_string(),
                     attachments: Vec::new(),
+                    ..Default::default()
                 },
             ],
             Vec::new(),

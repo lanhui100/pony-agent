@@ -750,6 +750,11 @@ export type TurnHistoryMessage = {
   role: "user" | "assistant";
   content: string;
   attachments?: AttachmentMeta[];
+  turnId?: string | null;
+  status?: "done" | "error" | null;
+  modelName?: string | null;
+  tokenCount?: number | null;
+  reasoningContent?: string | null;
 };
 
 export type SessionOverview = {

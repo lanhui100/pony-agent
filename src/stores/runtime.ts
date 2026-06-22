@@ -182,6 +182,7 @@ type PersistedRuntimeState = {
   outputTokens: number | null;
   totalTokens: number | null;
   firstTokenLatencyMs: number | null;
+  visibleNodeId?: string | null;
 };
 
 type SessionRuntimeSnapshot = {
@@ -2389,7 +2390,12 @@ function buildTurnHistory(messages: ChatMessage[]): TurnHistoryMessage[] {
           (attachment) =>
             typeof attachment.relativePath === "string" && attachment.relativePath.trim().length > 0
         )
-        .map((attachment) => ({ ...attachment }))
+        .map((attachment) => ({ ...attachment })),
+      turnId: message.turnId,
+      status: message.status === "done" || message.status === "error" ? message.status : null,
+      modelName: message.modelName,
+      tokenCount: message.tokenCount,
+      reasoningContent: message.reasoningContent
     }));
 }
 
@@ -3098,7 +3104,7 @@ function hydrateMessagesFromHistory(
 
     if (item.role === "user") {
       currentTrace = orderedTurnTraceHistory[traceIndex] ?? null;
-      currentTurnId = restoredMessage?.turnId ?? currentTrace?.turnId ?? createHistoryTurnId(turnIndex);
+      currentTurnId = item.turnId ?? restoredMessage?.turnId ?? currentTrace?.turnId ?? createHistoryTurnId(turnIndex);
       turnIndex += 1;
       restoredHistoryIndex += 1;
       messages.push({
@@ -3108,14 +3114,14 @@ function hydrateMessagesFromHistory(
         content: item.content,
         attachments: item.attachments ?? [],
         status: "done",
-        tokenCount: restoredMessage?.tokenCount ?? null
+        tokenCount: item.tokenCount ?? restoredMessage?.tokenCount ?? null
       });
       continue;
     }
 
     currentTrace = currentTrace ?? orderedTurnTraceHistory[traceIndex] ?? null;
     if (!currentTurnId) {
-      currentTurnId = restoredMessage?.turnId ?? currentTrace?.turnId ?? createHistoryTurnId(turnIndex);
+      currentTurnId = item.turnId ?? restoredMessage?.turnId ?? currentTrace?.turnId ?? createHistoryTurnId(turnIndex);
       turnIndex += 1;
     }
 
@@ -3123,7 +3129,7 @@ function hydrateMessagesFromHistory(
     const restoredErrorDetail = restoredMessage?.errorDetail ?? null;
     const traceError = traceErrorDetail(currentTrace);
     const hasTraceError = currentTrace?.phase === "failed" || Boolean(traceError);
-    const hasErrorState = hasTraceError || (!currentTrace && restoredMessage?.status === "error");
+    const hasErrorState = item.status === "error" || hasTraceError || (!currentTrace && restoredMessage?.status === "error");
     const errorDetail = hasTraceError ? (traceError || restoredErrorDetail) : (currentTrace ? null : restoredErrorDetail);
     messages.push({
       id: restoredMessage?.id ?? `history-assistant-${turnIndex}`,
@@ -3132,9 +3138,9 @@ function hydrateMessagesFromHistory(
       content: item.content,
       attachments: [],
       status: hasErrorState ? "error" : "done",
-      reasoningContent: restoredMessage?.reasoningContent ?? traceReasoningContent(currentTrace),
-      tokenCount: restoredMessage?.tokenCount ?? currentTrace?.outputTokens ?? null,
-      modelName: restoredMessage?.modelName ?? traceModelLabel(currentTrace),
+      reasoningContent: item.reasoningContent ?? restoredMessage?.reasoningContent ?? traceReasoningContent(currentTrace),
+      tokenCount: item.tokenCount ?? restoredMessage?.tokenCount ?? currentTrace?.outputTokens ?? null,
+      modelName: item.modelName ?? restoredMessage?.modelName ?? traceModelLabel(currentTrace),
       errorDetail
     });
     appendToolMessagesForTurn(currentTurnId, currentTrace);
@@ -3548,7 +3554,8 @@ export const useRuntimeStore = defineStore("runtime", {
         inputTokens: this.inputTokens,
         outputTokens: this.outputTokens,
         totalTokens: this.totalTokens,
-        firstTokenLatencyMs: this.firstTokenLatencyMs
+        firstTokenLatencyMs: this.firstTokenLatencyMs,
+        visibleNodeId: this.visibleNodeId
       };
 
       try {
@@ -4197,6 +4204,7 @@ export const useRuntimeStore = defineStore("runtime", {
         return;
       }
 
+      this.persistHistory();
       const previousSnapshot = createSessionRuntimeSnapshot(this);
       this.sessionOperation = "switching";
       this.sessionError = null;

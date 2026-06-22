@@ -1115,6 +1115,46 @@ describe("runtime session resilience", () => {
     });
   });
 
+  it("hydrates message metadata from history when snapshot carries enriched TurnHistoryMessage", () => {
+    const store = useRuntimeStore();
+    store.applySessionSnapshot(
+      "session-enriched-history",
+      createSnapshot({
+        conversationId: "session-enriched-history",
+        summary: "enriched history summary",
+        history: [
+          {
+            role: "user",
+            content: "你好",
+            turnId: "turn-enriched-1",
+            status: "done" as const,
+            modelName: null,
+            tokenCount: null,
+            reasoningContent: null
+          },
+          {
+            role: "assistant",
+            content: "收到。",
+            turnId: "turn-enriched-1",
+            status: "done" as const,
+            modelName: "gpt-5",
+            tokenCount: 42,
+            reasoningContent: "思考过程"
+          }
+        ],
+        turnCount: 1
+      })
+    );
+    expect(store.messages.length).toBe(2);
+    expect(store.messages[0].turnId).toBe("turn-enriched-1");
+    expect(store.messages[0].status).toBe("done");
+    expect(store.messages[1].turnId).toBe("turn-enriched-1");
+    expect(store.messages[1].modelName).toBe("gpt-5");
+    expect(store.messages[1].tokenCount).toBe(42);
+    expect(store.messages[1].reasoningContent).toBe("思考过程");
+    expect(store.messages[1].status).toBe("done");
+  });
+
   it("prefers backend snapshot trace history over stale persisted runtime trace cache", () => {
     const store = useRuntimeStore();
     const staleTrace = createTrace({

@@ -66,7 +66,9 @@
 21. `PA-057` 已完成前端 flight recorder 与卡顿诊断体系
      当前已完成前端 `frontend-flight-recorder.ts`（ring buffer、stall 检测、flush 退避）、Rust 端 `frontend_diagnostics.rs`（SQLite 持久化 + async spawn_blocking）、host 层集成（6 个 Tauri command）、主链路埋点激活及`npm run dev`启动冻结分析与修复；已提交 `f6aab80`，OpenSpec change 已归档。
 22. session persistence 热路径已完成第一轮性能收口，`PA-058` 已完成并通过全局验收
-     当前已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过 15 项定向测试与多轮并行智能体审核验收。OpenSpec change 已归档，canonical spec 已同步。
+      当前已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过 15 项定向测试与多轮并行智能体审核验收。OpenSpec change 已归档，canonical spec 已同步。
+23. `PA-059` 已完成并收口
+      已完成 `TurnHistoryMessage` 扩展消息元数据（`turnId`/`status`/`modelName`/`tokenCount`/`reasoningContent`）、末端对齐投影 enrich 策略、`MessageStatus` 枚举、`stable_id()` 消费者标识符、前端 hydration 优先级重构，以及 5 个新增 Rust 测试 + 1 个前端测试。审核与代码调优已全部完成，审核记录：`02_REVIEWS/2026-06-22-pa059-spec-review.md`。
 
 ## 远期扩展
 
@@ -122,7 +124,6 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。
 5. 前端卡顿定位现已具备 flight recorder 证据链（`PA-057` 已完成），后续性能优化可以基于 `frontend-diagnostics.db` 中的 stall 快照和 trace 事件进行数据分析，而不是再靠手动复现。
 6. `PA-058` 已完成，不再处于 Ready/Dashboard 主文中作为下一步目标。
-
 ## 新近线候选
 
 1. 基于 `Session Control Plane` 的 monitor / drilldown 读面扩展

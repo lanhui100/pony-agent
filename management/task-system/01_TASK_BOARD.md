@@ -17,8 +17,8 @@
   说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排
   说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
-
 ## Ready
+
 - `PA-044` agent core 多端基础设施边界加固
    说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
 
@@ -36,8 +36,11 @@
 
 ## Done
 
+- `PA-059` 扩展 TurnHistoryMessage 携带消息元数据
+    说明：已完成 `MessageStatus` 枚举、`TurnHistoryMessage` 扩展 5 字段 + `stable_id()`、`PartialEq,Eq`、末端对齐投影 enrich（live + node 双路径）、前端 TS 类型更新、`hydrateMessagesFromHistory` 优先级重构、`buildTurnHistory` 传播、`isPersistedMessageShapeCompatible` 简化，已通过 5 个新增 Rust 测试 + 1 个前端测试 + 3 轮并行智能体审核 + 最终代码审核三轮调优。审核记录：`02_REVIEWS/2026-06-22-pa059-spec-review.md`。
+
 - `PA-058` 拆分 session trace 存储并扩展定向持久化
-   说明：已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过全局并行审核验收。OpenSpec change 已归档。
+    说明：已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过全局并行审核验收。OpenSpec change 已归档。
 
 - `PA-057` 前端飞行记录仪与卡顿诊断体系
   说明：已完成前端 flight recorder、stall 检测、Tauri/SQLite 持久化与导出、主链路埋点、启动冻结分析与修复。已提交 `f6aab80`。OpenSpec change 已归档。

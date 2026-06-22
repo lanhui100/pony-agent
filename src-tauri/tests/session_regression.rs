@@ -27,11 +27,13 @@ fn snapshot_with_fallback_history_persists_hydrated_session_metadata() {
             role: "user".to_string(),
             content: "Inspect src/main.rs for startup wiring.".to_string(),
             attachments: Vec::new(),
+            ..Default::default()
         },
         TurnHistoryMessage {
             role: "assistant".to_string(),
             content: "I will inspect it.".to_string(),
             attachments: Vec::new(),
+            ..Default::default()
         },
     ];
 

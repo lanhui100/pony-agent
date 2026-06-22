@@ -43,6 +43,14 @@ pub enum HistoryNodeKind {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum MessageStatus {
+    #[default]
+    Done,
+    Error,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum HistoryCursorMode {
     #[default]
     Live,
@@ -155,13 +163,34 @@ pub struct HistoryCursor {
     pub checkout_status: HistoryCheckoutStatus,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnHistoryMessage {
     pub role: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentReference>,
+
+    // PA-059: 新增元数据字段（均为 Option，向后兼容）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<MessageStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+}
+
+impl TurnHistoryMessage {
+    /// 稳定消息标识符，所有消费者（桌面/TUI/CLI/HTTP）可用。
+    /// 格式："{turn_id}-{role}"，turn_id 缺失时 fallback "unknown-{role}"。
+    /// 注意：方法不参与序列化，仅内存投影。
+    pub fn stable_id(&self) -> String {
+        format!("{}-{}", self.turn_id.as_deref().unwrap_or("unknown"), self.role)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -780,11 +809,13 @@ impl SessionStore {
                 role: "user".to_string(),
                 content: user_message.to_string(),
                 attachments,
+                ..Default::default()
             });
             session.history.push(TurnHistoryMessage {
                 role: "assistant".to_string(),
                 content: assistant_message.to_string(),
                 attachments: Vec::new(),
+                ..Default::default()
             });
 
             if session.history.len() > DEFAULT_HISTORY_LIMIT {
@@ -831,11 +862,13 @@ impl SessionStore {
                 role: "user".to_string(),
                 content: user_message.to_string(),
                 attachments: Vec::new(),
+                ..Default::default()
             });
             session.history.push(TurnHistoryMessage {
                 role: "assistant".to_string(),
                 content: assistant_message.to_string(),
                 attachments: Vec::new(),
+                ..Default::default()
             });
             trace.updated_at = now_timestamp_ms();
             session.turn_trace_history.push(trace);
@@ -2036,6 +2069,63 @@ impl Drop for MemorySessionBackend {
     }
 }
 
+/// 从 trace_timeline 提取最终 assistant 消息的 reasoning_content。
+/// 取最后一条 `call_model` 类型 timeline entry 的 reasoning_content，
+/// 与前端 traceReasoningContent 逻辑一致。
+fn extract_reasoning_content(trace: &TurnTraceRecord) -> Option<String> {
+    trace
+        .trace_timeline
+        .iter()
+        .rev()
+        .find(|e| e.kind == "call_model")
+        .and_then(|e| e.reasoning_content.clone())
+}
+
+/// TurnTraceRecord.phase → MessageStatus 映射
+fn derive_status_from_trace(trace: &TurnTraceRecord) -> MessageStatus {
+    match trace.phase.as_str() {
+        "completed" => MessageStatus::Done,
+        "failed" | "cancelled" => MessageStatus::Error,
+        _ => MessageStatus::Error,
+    }
+}
+
+/// 用 turn_trace_history 中的元数据补全 TurnHistoryMessage 列表。
+/// 使用末端对齐策略处理 history 与 turn_trace_history 截断步长不一致的问题。
+/// 幂等：已携带元数据的条目不覆写。
+fn enrich_history_from_traces(
+    history: &mut [TurnHistoryMessage],
+    turn_trace_history: &[TurnTraceRecord],
+) {
+    let msg_count = history.len();
+    let trace_count = turn_trace_history.len();
+    if msg_count == 0 || trace_count == 0 {
+        return;
+    }
+    let offset = trace_count.saturating_sub(msg_count / 2);
+
+    for (i, msg) in history.iter_mut().enumerate() {
+        let turn_idx = i / 2;
+        let trace_idx = turn_idx + offset;
+
+        if msg.turn_id.is_some() {
+            continue; // 幂等：跳过已携带元数据的条目
+        }
+
+        if let Some(trace) = turn_trace_history.get(trace_idx) {
+            if msg.role == "assistant" {
+                msg.turn_id = Some(trace.turn_id.clone());
+                msg.model_name = trace.provider_model.clone();
+                msg.token_count = trace.output_tokens;
+                msg.reasoning_content = extract_reasoning_content(trace);
+                msg.status = Some(derive_status_from_trace(trace));
+            } else if msg.role == "user" {
+                msg.turn_id = Some(trace.turn_id.clone());
+            }
+        }
+    }
+}
+
 fn snapshot_from_state(
     session: &SessionState,
     attachment_assets: Vec<AttachmentAsset>,
@@ -2090,11 +2180,13 @@ fn snapshot_from_state(
             checkout_mode: HistoryCheckoutMode::TranscriptOnly,
             checkout_status,
         };
+        let mut enriched_history = selected_node.history.clone();
+        enrich_history_from_traces(&mut enriched_history, &selected_node.turn_trace_history);
         return SessionSnapshot {
             conversation_id: session.conversation_id.clone(),
             title: selected_node.title.clone(),
             summary: selected_node.summary.clone(),
-            history: selected_node.history.clone(),
+            history: enriched_history,
             attachment_assets,
             provider_native_transcript: selected_node.provider_native_transcript.clone(),
             turn_trace_history: selected_node.turn_trace_history.clone(),
@@ -2118,11 +2210,13 @@ fn snapshot_from_state(
         };
     }
 
+    let mut enriched_history = session.history.clone();
+    enrich_history_from_traces(&mut enriched_history, &session.turn_trace_history);
     SessionSnapshot {
         conversation_id: session.conversation_id.clone(),
         title: session.title.clone(),
         summary: session.summary.clone(),
-        history: session.history.clone(),
+        history: enriched_history,
         attachment_assets,
         provider_native_transcript: session.provider_native_transcript.clone(),
         turn_trace_history: session.turn_trace_history.clone(),
@@ -4352,6 +4446,288 @@ mod tests {
     }
 
     #[test]
+    fn serde_roundtrip_enriched_metadata() {
+        let msg = TurnHistoryMessage {
+            role: "assistant".to_string(),
+            content: "test".to_string(),
+            attachments: Vec::new(),
+            turn_id: Some("turn-1".to_string()),
+            status: Some(MessageStatus::Done),
+            model_name: Some("gpt-5".to_string()),
+            token_count: Some(42),
+            reasoning_content: Some("thinking...".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let deserialized: TurnHistoryMessage =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.turn_id, Some("turn-1".to_string()));
+        assert_eq!(deserialized.status, Some(MessageStatus::Done));
+        assert_eq!(deserialized.model_name, Some("gpt-5".to_string()));
+        assert_eq!(deserialized.token_count, Some(42));
+        assert_eq!(deserialized.reasoning_content, Some("thinking...".to_string()));
+        assert_eq!(deserialized.stable_id(), "turn-1-assistant");
+    }
+
+    #[test]
+    fn serde_roundtrip_old_blob_compatible() {
+        let old_json = r#"{"role":"user","content":"hello","attachments":[]}"#;
+        let msg: TurnHistoryMessage =
+            serde_json::from_str(old_json).expect("old blob deserialize");
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content, "hello");
+        assert!(msg.turn_id.is_none());
+        assert!(msg.status.is_none());
+        assert!(msg.model_name.is_none());
+        assert!(msg.token_count.is_none());
+        assert!(msg.reasoning_content.is_none());
+        assert_eq!(msg.stable_id(), "unknown-user");
+
+        let re_json = serde_json::to_string(&msg).expect("serialize");
+        assert!(!re_json.contains("turnId"));
+        assert!(!re_json.contains("status"));
+        assert!(!re_json.contains("modelName"));
+        assert!(!re_json.contains("tokenCount"));
+        assert!(!re_json.contains("reasoningContent"));
+    }
+
+    #[test]
+    fn snapshot_enriched_history_metadata() {
+        let mut store = SessionStore::memory_only();
+        let session_id = "enriched-test";
+        store.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history: vec![
+                    TurnHistoryMessage {
+                        role: "user".to_string(),
+                        content: "你好".to_string(),
+                        attachments: Vec::new(),
+                        ..Default::default()
+                    },
+                    TurnHistoryMessage {
+                        role: "assistant".to_string(),
+                        content: "收到。".to_string(),
+                        attachments: Vec::new(),
+                        ..Default::default()
+                    },
+                ],
+                provider_native_transcript: Vec::new(),
+                turn_trace_history: vec![
+                    TurnTraceRecord {
+                        turn_id: "turn-1".to_string(),
+                        phase: "completed".to_string(),
+                        title: "test turn".to_string(),
+                        provider_model: Some("gpt-5".to_string()),
+                        output_tokens: Some(42),
+                        ..Default::default()
+                    },
+                ],
+                trace_migration_state: TraceMigrationState::default(),
+                long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: None,
+                updated_at_ms: now_timestamp_ms(),
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor::default(),
+            },
+        );
+        let snapshot = store.snapshot(Some(session_id), &[]);
+        assert_eq!(snapshot.history.len(), 2);
+        assert_eq!(snapshot.history[0].role, "user");
+        assert_eq!(
+            snapshot.history[0].turn_id.as_deref(),
+            Some("turn-1")
+        );
+        assert_eq!(snapshot.history[1].role, "assistant");
+        assert_eq!(
+            snapshot.history[1].turn_id.as_deref(),
+            Some("turn-1")
+        );
+        assert_eq!(
+            snapshot.history[1].model_name.as_deref(),
+            Some("gpt-5")
+        );
+        assert_eq!(snapshot.history[1].token_count, Some(42));
+        assert_eq!(
+            snapshot.history[1].status,
+            Some(MessageStatus::Done)
+        );
+    }
+
+    #[test]
+    fn snapshot_mixed_metadata_preserves_existing() {
+        // 空 trace：幂等性——已有元数据不被清除
+        let msg = TurnHistoryMessage {
+            role: "assistant".to_string(),
+            content: "已有元数据".to_string(),
+            attachments: Vec::new(),
+            turn_id: Some("existing-turn".to_string()),
+            status: Some(MessageStatus::Done),
+            model_name: Some("existing-model".to_string()),
+            token_count: Some(99),
+            reasoning_content: Some("existing".to_string()),
+        };
+        let empty_trace: Vec<TurnTraceRecord> = Vec::new();
+        let mut history = vec![msg];
+        enrich_history_from_traces(&mut history, &empty_trace);
+        assert_eq!(history[0].turn_id, Some("existing-turn".to_string()));
+        assert_eq!(history[0].model_name, Some("existing-model".to_string()));
+        assert_eq!(history[0].token_count, Some(99));
+
+        // 有 trace：已有元数据不被覆写
+        let msg2 = TurnHistoryMessage {
+            role: "assistant".to_string(),
+            content: "不变".to_string(),
+            attachments: Vec::new(),
+            turn_id: Some("preserved-turn".to_string()),
+            ..Default::default()
+        };
+        let traces = vec![TurnTraceRecord {
+            turn_id: "trace-turn".to_string(),
+            phase: "completed".to_string(),
+            title: "trace".to_string(),
+            provider_model: Some("trace-model".to_string()),
+            output_tokens: Some(1),
+            ..Default::default()
+        }];
+        let mut history2 = vec![TurnHistoryMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            attachments: Vec::new(),
+            ..Default::default()
+        }, msg2];
+        enrich_history_from_traces(&mut history2, &traces);
+        assert_eq!(history2[0].turn_id, Some("trace-turn".to_string()));
+        assert_eq!(history2[1].turn_id, Some("preserved-turn".to_string()));
+        assert!(history2[1].model_name.is_none());
+    }
+
+    #[test]
+    fn checkout_history_node_metadata() {
+        let mut store = SessionStore::memory_only();
+        let session_id = "checkout-meta";
+        let node_id = "node-checkout-1".to_string();
+        store.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history: vec![
+                    TurnHistoryMessage {
+                        role: "user".to_string(),
+                        content: "第一轮".to_string(),
+                        attachments: Vec::new(),
+                        ..Default::default()
+                    },
+                    TurnHistoryMessage {
+                        role: "assistant".to_string(),
+                        content: "收到。".to_string(),
+                        attachments: Vec::new(),
+                        ..Default::default()
+                    },
+                ],
+                provider_native_transcript: Vec::new(),
+                turn_trace_history: vec![TurnTraceRecord {
+                    turn_id: "turn-1".to_string(),
+                    phase: "completed".to_string(),
+                    title: "first turn".to_string(),
+                    provider_model: Some("gpt-5".to_string()),
+                    output_tokens: Some(42),
+                    ..Default::default()
+                }],
+                trace_migration_state: TraceMigrationState::default(),
+                long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: None,
+                updated_at_ms: now_timestamp_ms(),
+                history_nodes: vec![HistoryNode {
+                    node_id: node_id.clone(),
+                    session_id: session_id.to_string(),
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    title: DEFAULT_SESSION_TITLE.to_string(),
+                    summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                    history: vec![
+                        TurnHistoryMessage {
+                            role: "user".to_string(),
+                            content: "第一轮".to_string(),
+                            attachments: Vec::new(),
+                            ..Default::default()
+                        },
+                        TurnHistoryMessage {
+                            role: "assistant".to_string(),
+                            content: "收到。".to_string(),
+                            attachments: Vec::new(),
+                            ..Default::default()
+                        },
+                    ],
+                    turn_trace_history: vec![TurnTraceRecord {
+                        turn_id: "turn-1".to_string(),
+                        phase: "completed".to_string(),
+                        title: "first turn".to_string(),
+                        provider_model: Some("gpt-5".to_string()),
+                        output_tokens: Some(42),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                history_branches: vec![HistoryBranch {
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    head_node_id: Some(node_id.clone()),
+                    ..Default::default()
+                }],
+                history_cursor: HistoryCursor {
+                    session_id: session_id.to_string(),
+                    visible_node_id: Some(node_id.clone()),
+                    active_branch_id: Some(DEFAULT_HISTORY_BRANCH_ID.to_string()),
+                    branch_head_node_id: Some(node_id.clone()),
+                    workspace_node_id: Some(node_id.clone()),
+                    mode: HistoryCursorMode::Live,
+                    ..Default::default()
+                },
+            },
+        );
+        let snapshot = store
+            .checkout_history_node(
+                Some(session_id),
+                &node_id,
+                HistoryCheckoutMode::TranscriptOnly,
+            )
+            .expect("checkout should succeed");
+
+        assert!(snapshot.history.len() >= 2);
+        assert_eq!(
+            snapshot.history[0].turn_id.as_deref(),
+            Some("turn-1"),
+            "user message should have turn_id after enrichment"
+        );
+        assert_eq!(
+            snapshot.history[1].turn_id.as_deref(),
+            Some("turn-1"),
+            "assistant message should have turn_id after enrichment"
+        );
+        assert_eq!(
+            snapshot.history[1].model_name.as_deref(),
+            Some("gpt-5")
+        );
+        assert_eq!(snapshot.history[1].token_count, Some(42));
+        assert_eq!(
+            snapshot.history[1].status,
+            Some(MessageStatus::Done)
+        );
+    }
+
+    #[test]
     fn file_backend_roundtrip_restores_sessions() {
         let path = temp_sessions_path();
         let backend = Box::new(FileSessionBackend::new(path.clone()));
@@ -6122,6 +6498,7 @@ mod tests {
                     role: "user".to_string(),
                     attachments: Vec::new(),
                     content: "继续".to_string(),
+                    ..Default::default()
                 }],
                 provider_native_transcript: vec![
                     serde_json::json!({
@@ -6175,6 +6552,7 @@ mod tests {
                     role: "user".to_string(),
                     attachments: Vec::new(),
                     content: "继续".to_string(),
+                    ..Default::default()
                 }],
                 provider_native_transcript: vec![
                     serde_json::json!({
@@ -6239,11 +6617,13 @@ mod tests {
                         role: "user".to_string(),
                         attachments: Vec::new(),
                         content: "请记住 tauri.conf.json".to_string(),
+                        ..Default::default()
                     },
                     TurnHistoryMessage {
                         role: "assistant".to_string(),
                         attachments: Vec::new(),
                         content: "搜索没有直接命中，让我查看一下工作区的文件结构。".to_string(),
+                        ..Default::default()
                     },
                 ],
                 provider_native_transcript: vec![
@@ -6320,6 +6700,7 @@ mod tests {
                     role: "user".to_string(),
                     attachments: Vec::new(),
                     content: "继续".to_string(),
+                    ..Default::default()
                 }],
                 provider_native_transcript: vec![
                     serde_json::json!({
