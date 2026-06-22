@@ -16,6 +16,7 @@ import type {
   SessionOverview,
   SessionSnapshot,
   SessionRuntimeView,
+  TurnStreamEvent,
   TurnTraceRecord
 } from "@/types/runtime";
 import { __resetFrontendFlightRecorderForTests } from "@/lib/frontend-flight-recorder";
@@ -5964,6 +5965,265 @@ describe("runtime session resilience", () => {
     expect(store.latestExecutionCheckpoint).toBeNull();
     expect(store.visibleNodeId).toBe("node-old");
     expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("does not merge persisted live messages back into a historical reload", async () => {
+    const store = useRuntimeStore();
+    const sessionId = "historical-reload-session";
+    const historicalSnapshot = createSnapshot({
+      conversationId: sessionId,
+      summary: "Historical summary",
+      history: [
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" }
+      ],
+      turnTraceHistory: [
+        createTrace({
+          turnId: "turn-old",
+          title: "old turn",
+          phase: "completed",
+          updatedAt: 2000
+        })
+      ],
+      turnCount: 1,
+      updatedAtMs: 2000
+    });
+
+    writePersistedSessions({
+      [sessionId]: {
+        phase: "ready",
+        messages: [
+          createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+          createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" }),
+          createMessage({ id: "user-latest", turnId: "turn-latest", role: "user", content: "latest question" }),
+          createMessage({
+            id: "assistant-latest",
+            turnId: "turn-latest",
+            role: "assistant",
+            content: "latest answer"
+          })
+        ],
+        attachmentAssets: [],
+        sessionSummary: "Live summary",
+        providerRequestedName: "",
+        providerName: "",
+        providerProtocol: "",
+        providerModel: "",
+        providerSource: "",
+        providerMode: "",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null,
+        visibleNodeId: "node-head"
+      }
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId,
+          runId: null,
+          nodeId: "node-old"
+        });
+        return createSessionRuntimeView(historicalSnapshot, {
+          historyNodes: [
+            createHistoryNode({ nodeId: "node-old", sessionId, turnId: "turn-old", createdAtMs: 2000 }),
+            createHistoryNode({ nodeId: "node-head", sessionId, turnId: "turn-latest", createdAtMs: 3200 })
+          ],
+          historyBranches: [
+            createHistoryBranch({ branchId: "branch-main", sessionId, headNodeId: "node-head" })
+          ],
+          historyCursor: createHistoryCursor({
+            sessionId,
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-old",
+            mode: "historical"
+          })
+        });
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState(sessionId, { nodeId: "node-old" });
+
+    expect(store.messages.map((message) => message.turnId)).toEqual(["turn-old", "turn-old"]);
+    expect(store.messages.map((message) => message.content)).toEqual(["old question", "old answer"]);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.turnId).toBe("turn-old");
+    expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("ignores realtime turn events while viewing historical checkout", async () => {
+    const store = useRuntimeStore();
+    const eventHandlers = new Map<string, (event: { payload: TurnStreamEvent }) => void>();
+
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: (event: { payload: TurnStreamEvent }) => void) => {
+      eventHandlers.set(eventName, handler);
+      return () => {
+        eventHandlers.delete(eventName);
+      };
+    });
+
+    store.$patch({
+      sessionId: "history-session",
+      historyCursorMode: "historical",
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-head",
+      activeBranchId: "branch-main",
+      activeTurnId: "turn-head",
+      phase: "ready",
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" })
+      ],
+      turnTraceHistory: [createTrace({ turnId: "turn-old", title: "old turn", updatedAt: 2000 })]
+    });
+
+    await store.initializeTurnEvents();
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "turn-head",
+        eventId: "turn-head:1",
+        eventType: "turn.started",
+        eventVersion: "turn-event-v1",
+        sequence: 1,
+        emittedAtMs: 3000,
+        phase: "calling_model",
+        traceSteps: createCheckpoint({ turnId: "turn-head" }).traceSteps,
+        toolActivities: []
+      } as TurnStreamEvent
+    });
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "turn-head",
+        eventId: "turn-head:2",
+        eventType: "turn.completed",
+        eventVersion: "turn-event-v1",
+        sequence: 2,
+        emittedAtMs: 3200,
+        phase: "completed",
+        text: "latest answer",
+        traceSteps: createCheckpoint({ turnId: "turn-head" }).traceSteps,
+        toolActivities: [],
+        providerCallRecords: [],
+        hookTraceRecords: []
+      } as TurnStreamEvent
+    });
+
+    expect(store.messages.map((message) => message.turnId)).toEqual(["turn-old", "turn-old"]);
+    expect(store.messages.some((message) => message.turnId === "turn-head")).toBe(false);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.turnId).toBe("turn-old");
+  });
+
+  it("treats historical_dirty as historical for cache merge and realtime gating", async () => {
+    const store = useRuntimeStore();
+    const sessionId = "historical-dirty-session";
+    const eventHandlers = new Map<string, (event: { payload: TurnStreamEvent }) => void>();
+
+    writePersistedSessions({
+      [sessionId]: {
+        phase: "ready",
+        messages: [
+          createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+          createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" }),
+          createMessage({ id: "user-live", turnId: "turn-live", role: "user", content: "live question" }),
+          createMessage({ id: "assistant-live", turnId: "turn-live", role: "assistant", content: "live answer" })
+        ],
+        attachmentAssets: [],
+        sessionSummary: "Live summary",
+        providerRequestedName: "",
+        providerName: "",
+        providerProtocol: "",
+        providerModel: "",
+        providerSource: "",
+        providerMode: "",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null,
+        visibleNodeId: "node-head"
+      }
+    });
+
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: (event: { payload: TurnStreamEvent }) => void) => {
+      eventHandlers.set(eventName, handler);
+      return () => {
+        eventHandlers.delete(eventName);
+      };
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId,
+          runId: null,
+          nodeId: "node-old"
+        });
+        const snapshot = createSnapshot({
+          conversationId: sessionId,
+          summary: "Historical summary",
+          history: [
+            { role: "user", content: "old question" },
+            { role: "assistant", content: "old answer" }
+          ],
+          turnTraceHistory: [createTrace({ turnId: "turn-old", title: "old turn", updatedAt: 2000 })],
+          turnCount: 1,
+          updatedAtMs: 2000
+        });
+        return createSessionRuntimeView(snapshot, {
+          historyCursor: createHistoryCursor({
+            sessionId,
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-old",
+            mode: "historical_dirty"
+          })
+        });
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState(sessionId, { nodeId: "node-old" });
+    await store.initializeTurnEvents();
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "turn-live",
+        eventId: "turn-live:1",
+        eventType: "turn.started",
+        eventVersion: "turn-event-v1",
+        sequence: 1,
+        emittedAtMs: 3000,
+        phase: "calling_model",
+        traceSteps: createCheckpoint({ turnId: "turn-live" }).traceSteps,
+        toolActivities: []
+      } as TurnStreamEvent
+    });
+
+    expect(store.historyCursorMode).toBe("historical_dirty");
+    expect(store.messages.map((message) => message.turnId)).toEqual(["turn-old", "turn-old"]);
+    expect(store.messages.some((message) => message.turnId === "turn-live")).toBe(false);
   });
 
   it("updates latest history audit summary from history-control responses", async () => {

@@ -2941,6 +2941,18 @@ function isPersistedMessageShapeCompatible(
   return persistedHistory.every((message, index) => message.role === snapshot.history[index]?.role);
 }
 
+function isHistoricalRuntimeView(
+  runtimeView?:
+    | Pick<SessionRuntimeView, "historyCursor">
+    | null
+) {
+  return normalizeHistoryCursorMode(runtimeView?.historyCursor?.mode) !== "live";
+}
+
+function isHistoricalMode(mode?: HistoryCursorMode | null) {
+  return normalizeHistoryCursorMode(mode) !== "live";
+}
+
 function traceReasoningContent(trace?: TurnTraceRecord | null) {
   if (!trace?.traceTimeline?.length) {
     return null;
@@ -3667,6 +3679,10 @@ export const useRuntimeStore = defineStore("runtime", {
         return;
       }
 
+      if (!this.messages.some((msg) => msg.turnId === checkpoint.turnId)) {
+        return;
+      }
+
       const checkpointStatus = checkpoint.status.trim().toLowerCase();
       const isRecoveryCheckpoint = checkpoint.checkpointKind === "recovery";
       if (!isRecoveryCheckpoint && checkpointStatus !== "running") {
@@ -3759,9 +3775,8 @@ export const useRuntimeStore = defineStore("runtime", {
         historyBranches: this.historyBranches
       };
       const shouldApplyRuntimeViewCheckpoint =
-        !options?.nodeId ||
-        !runtimeView.historyCursor ||
-        normalizeHistoryCursorMode(runtimeView.historyCursor.mode) === "live";
+        !isHistoricalMode(runtimeView.historyCursor?.mode) &&
+        (!options?.nodeId || !runtimeView.historyCursor || !isHistoricalMode(runtimeView.historyCursor.mode));
       const hasCheckpointOverride =
         options != null && Object.prototype.hasOwnProperty.call(options, "executionCheckpoint");
       this.applySessionSnapshot(nextSessionId, snapshot, retrieved, runtimeView);
@@ -3892,8 +3907,11 @@ export const useRuntimeStore = defineStore("runtime", {
         | null
     ) {
       const persisted = loadPersistedRuntimeState(sessionId);
-      const canReusePersistedState = isPersistedStateCompatible(snapshot, persisted);
-      const canMergePersistedMessages = isPersistedMessageShapeCompatible(snapshot, persisted);
+      const historicalRuntimeView = isHistoricalRuntimeView(runtimeView);
+      const canReusePersistedState =
+        !historicalRuntimeView && isPersistedStateCompatible(snapshot, persisted);
+      const canMergePersistedMessages =
+        !historicalRuntimeView && isPersistedMessageShapeCompatible(snapshot, persisted);
       const restoredState = canReusePersistedState ? persisted : null;
       const blankFields = createBlankSessionRuntimeFields();
       const retrievedSummary = retrieved?.sessionContext?.summary?.trim() ?? "";
@@ -3903,7 +3921,9 @@ export const useRuntimeStore = defineStore("runtime", {
       const effectiveTurnTraceHistory = (
         snapshotTurnTraceHistory.length
           ? snapshotTurnTraceHistory
-          : restoredState?.turnTraceHistory ?? []
+          : historicalRuntimeView
+            ? []
+            : restoredState?.turnTraceHistory ?? []
       ).map((trace) => normalizeTurnTraceRecord(trace));
 
       this.sessionId = sessionId;
@@ -4449,6 +4469,9 @@ export const useRuntimeStore = defineStore("runtime", {
       }
     },
     shouldProcessTurnEvent(payload: Pick<TurnStreamEvent, "turnId" | "eventId" | "sequence" | "emittedAtMs">) {
+      if (isHistoricalMode(this.historyCursorMode)) {
+        return false;
+      }
       return shouldAcceptTurnEvent(this.eventCursorByTurnId[payload.turnId], payload);
     },
     commitTurnEventCursor(payload: Pick<TurnStreamEvent, "turnId" | "eventId" | "sequence" | "emittedAtMs">) {
@@ -5187,6 +5210,14 @@ export const useRuntimeStore = defineStore("runtime", {
 
         // Yield to browser — let Vue flush reactivity + DOM for chat area
         window.setTimeout(() => {
+          if (
+            this.sessionId !== completedSessionId ||
+            this.activeTurnId !== payload.turnId ||
+            isHistoricalMode(this.historyCursorMode)
+          ) {
+            return;
+          }
+
           // ===== STAGE 2 (setTimeout 0): Trace + metadata + UI unlock =====
           const nextPhase = completedPhase === "completed" ? "ready" : completedPhase;
           const nextTraceSteps = payload.traceSteps ?? this.traceSteps;
@@ -5429,6 +5460,10 @@ export const useRuntimeStore = defineStore("runtime", {
 
         // Yield to browser
         window.setTimeout(() => {
+          if (this.sessionId !== failedSessionId || isHistoricalMode(this.historyCursorMode)) {
+            return;
+          }
+
           // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
           this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
           this.syncToolMessages(payload.turnId, payload.toolActivities, false);
@@ -5562,6 +5597,10 @@ export const useRuntimeStore = defineStore("runtime", {
 
         // Yield to browser
         window.setTimeout(() => {
+          if (this.sessionId !== cancelledSessionId || isHistoricalMode(this.historyCursorMode)) {
+            return;
+          }
+
           // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
           this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
           this.syncToolMessages(payload.turnId, payload.toolActivities, false);
