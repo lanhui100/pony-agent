@@ -1,6 +1,6 @@
 [package]
 name = "pony-agent"
-version = "0.1.23"
+version = "0.1.24"
 description = "Tauri + Rust rewrite scaffold for Hermes Agent"
 authors = ["HUAWEI"]
 edition = "2021"
@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.0.0", features = ["image-png"] }
 raw-window-handle = "0.6"
+
 
 
 

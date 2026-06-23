@@ -310,7 +310,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
         </button>
 
         <button
-          class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
+          class="relative inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
           :class="
             props.currentPage === 'home'
               ? 'bg-[#f7e3bf] text-stone-900'
@@ -322,6 +322,11 @@ function clearPendingDeleteSession(session: SessionOverview) {
           @click="navigate('home')"
         >
           <MessageSquareMore class="h-4 w-4" />
+          <span
+            v-if="Object.keys(runtimeStore.runningSessionMap).length > 0"
+            class="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500"
+            data-testid="session-sidebar-collapsed-running-indicator"
+          />
         </button>
 
         <button
@@ -418,7 +423,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                     <button
                       class="min-w-0 flex-1 text-left"
                       type="button"
-                      :disabled="isSubmitting || Boolean(sessionOperation)"
+                      :disabled="Boolean(sessionOperation)"
                       :data-testid="`session-switch-${session.conversationId}`"
                       @click="openSessionHistory(session.conversationId)"
                     >
@@ -438,6 +443,21 @@ function clearPendingDeleteSession(session: SessionOverview) {
                       </div>
                     </button>
 
+                    <span
+                      v-if="session.conversationId in runtimeStore.completedSessionSet"
+                      class="h-2 w-2 shrink-0 cursor-pointer rounded-full bg-emerald-500"
+                      title="后台任务已完成，点击查看"
+                      :data-testid="`session-completed-${session.conversationId}`"
+                      @click="openSessionHistory(session.conversationId)"
+                    />
+                    <span
+                      v-else-if="session.conversationId in runtimeStore.failedSessionSet"
+                      class="h-2 w-2 shrink-0 cursor-pointer rounded-full bg-rose-500"
+                      title="后台任务执行失败，点击查看"
+                      :data-testid="`session-failed-${session.conversationId}`"
+                      @click="openSessionHistory(session.conversationId)"
+                    />
+
                     <button
                       class="pointer-events-none inline-flex shrink-0 cursor-pointer items-center justify-center text-[10px] text-stone-400 opacity-0 transition hover:cursor-pointer hover:text-rose-600 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:text-stone-300"
                       :class="
@@ -445,6 +465,8 @@ function clearPendingDeleteSession(session: SessionOverview) {
                           ? 'h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100'
                           : pendingDeleteSessionId === session.conversationId
                           ? 'h-5 rounded-full bg-rose-200 px-1.5 text-rose-800 hover:bg-rose-300 hover:text-rose-900'
+                          : runtimeStore.isSessionRunning(session.conversationId)
+                          ? 'pointer-events-auto h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100 hover:text-amber-600'
                           : 'rounded-[0.35rem] px-1.5 py-1'
                       "
                       type="button"
@@ -465,6 +487,11 @@ function clearPendingDeleteSession(session: SessionOverview) {
                         v-if="isDeletingSession(session)"
                         class="h-3.5 w-3.5 animate-spin text-stone-400"
                         :data-testid="`session-delete-loading-${session.conversationId}`"
+                      />
+                      <LoaderCircle
+                        v-else-if="runtimeStore.isSessionRunning(session.conversationId)"
+                        class="h-3.5 w-3.5 animate-spin text-amber-600"
+                        :data-testid="`session-running-${session.conversationId}`"
                       />
                       <Trash2 v-else-if="pendingDeleteSessionId !== session.conversationId" class="h-3.5 w-3.5" />
                       <span v-else class="inline-flex items-center justify-center text-[10px] font-medium text-rose-800">
