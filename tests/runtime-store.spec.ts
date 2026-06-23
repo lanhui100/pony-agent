@@ -1012,8 +1012,176 @@ describe("runtime session resilience", () => {
     expect(store.phase).toBe("ready");
     expect(store.sessionList).toEqual(originalSessionList);
     expect(store.sessionOperation).toBeNull();
+    expect(store.deletingSessionSet).toEqual({});
     expect(store.sessionError).toContain("delete backend failed");
     expect(readPersistedSessions().sessions["session-delete"]).toBeTruthy();
+  });
+
+  it("allows deleting another saved session while an inactive delete is already in flight", async () => {
+    const store = useRuntimeStore();
+
+    store.$patch({
+      sessionId: "session-current",
+      sessionList: [
+        {
+          conversationId: "session-current",
+          title: "Current session",
+          summary: "Current summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 1000
+        },
+        {
+          conversationId: "session-delete-a",
+          title: "Delete A",
+          summary: "Delete A summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 2000
+        },
+        {
+          conversationId: "session-delete-b",
+          title: "Delete B",
+          summary: "Delete B summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 3000
+        }
+      ],
+      phase: "ready",
+      sessionSummary: "Current summary",
+      messages: [createMessage({ id: "current-user", turnId: "current-turn", role: "user", content: "current session" })]
+    });
+
+    let releaseFirstDelete: (() => void) | null = null;
+    let releaseSecondDelete: (() => void) | null = null;
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string, payload?: { sessionId?: string }) => {
+      if (command !== "delete_session") {
+        throw new Error(`unexpected command: ${command}`);
+      }
+
+      if (payload?.sessionId === "session-delete-a") {
+        return new Promise<SessionOverview[]>((resolve) => {
+          releaseFirstDelete = () =>
+            resolve([
+              {
+                conversationId: "session-current",
+                title: "Current session",
+                summary: "Current summary",
+                turnCount: 1,
+                lastReferencedFile: null,
+                updatedAtMs: 1000
+              },
+              {
+                conversationId: "session-delete-b",
+                title: "Delete B",
+                summary: "Delete B summary",
+                turnCount: 1,
+                lastReferencedFile: null,
+                updatedAtMs: 3000
+              }
+            ]);
+        });
+      }
+
+      if (payload?.sessionId === "session-delete-b") {
+        return new Promise<SessionOverview[]>((resolve) => {
+          releaseSecondDelete = () =>
+            resolve([
+              {
+                conversationId: "session-current",
+                title: "Current session",
+                summary: "Current summary",
+                turnCount: 1,
+                lastReferencedFile: null,
+                updatedAtMs: 1000
+              }
+            ]);
+        });
+      }
+
+      throw new Error(`unexpected session delete: ${payload?.sessionId}`);
+    });
+
+    const firstDelete = store.deleteSession("session-delete-a");
+    expect(store.sessionOperation).toBeNull();
+    expect(store.deletingSessionSet).toEqual({ "session-delete-a": true });
+
+    const secondDelete = store.deleteSession("session-delete-b");
+    expect(store.deletingSessionSet).toEqual({
+      "session-delete-a": true,
+      "session-delete-b": true
+    });
+
+    releaseFirstDelete?.();
+    await firstDelete;
+    expect(store.sessionList.map((session) => session.conversationId)).toEqual(["session-current"]);
+    expect(store.deletingSessionSet).toEqual({ "session-delete-b": true });
+
+    releaseSecondDelete?.();
+    await secondDelete;
+    expect(store.sessionList.map((session) => session.conversationId)).toEqual(["session-current"]);
+    expect(store.deletingSessionSet).toEqual({});
+    expect(store.sessionOperation).toBeNull();
+  });
+
+  it("optimistically removes an inactive session before delete_session resolves", async () => {
+    const store = useRuntimeStore();
+
+    store.$patch({
+      sessionId: "session-current",
+      sessionList: [
+        {
+          conversationId: "session-current",
+          title: "Current session",
+          summary: "Current summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 1000
+        },
+        {
+          conversationId: "session-delete",
+          title: "Delete me",
+          summary: "Delete summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 2000
+        }
+      ],
+      phase: "ready",
+      sessionSummary: "Current summary",
+      messages: [createMessage({ id: "current-user", turnId: "current-turn", role: "user", content: "current session" })]
+    });
+
+    let releaseDelete: (() => void) | null = null;
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command !== "delete_session") {
+        throw new Error(`unexpected command: ${command}`);
+      }
+
+      return new Promise<SessionOverview[]>((resolve) => {
+        releaseDelete = () =>
+          resolve([
+            {
+              conversationId: "session-current",
+              title: "Current session",
+              summary: "Current summary",
+              turnCount: 1,
+              lastReferencedFile: null,
+              updatedAtMs: 1000
+            }
+          ]);
+      });
+    });
+
+    const deletePromise = store.deleteSession("session-delete");
+    expect(store.sessionList.map((session) => session.conversationId)).toEqual(["session-current"]);
+    expect(store.deletingSessionSet).toEqual({ "session-delete": true });
+
+    releaseDelete?.();
+    await deletePromise;
+    expect(store.sessionList.map((session) => session.conversationId)).toEqual(["session-current"]);
+    expect(store.deletingSessionSet).toEqual({});
   });
 
   it("loads a fallback session after deleting the active session", async () => {

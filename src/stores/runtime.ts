@@ -103,6 +103,7 @@ type RuntimeState = {
   sessionId: string;
   sessionList: SessionOverview[];
   sessionOperation: "initializing" | "switching" | "deleting" | null;
+  deletingSessionSet: Record<string, boolean>;
   sessionSwitchToken: number;
   sessionError: string | null;
   phase: RuntimePhase;
@@ -198,6 +199,7 @@ type PersistedRuntimeState = {
 type SessionRuntimeSnapshot = {
   sessionId: string;
   sessionList: SessionOverview[];
+  deletingSessionSet: Record<string, boolean>;
   phase: RuntimePhase;
   error: string | null;
   draftMessage: string;
@@ -1747,6 +1749,7 @@ function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapsh
   return {
     sessionId: state.sessionId,
     sessionList: state.sessionList.map((session) => ({ ...session })),
+    deletingSessionSet: { ...state.deletingSessionSet },
     phase: state.phase,
     error: state.error,
     draftMessage: state.draftMessage,
@@ -1802,6 +1805,7 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   }
   state.sessionId = snapshot.sessionId;
   state.sessionList = snapshot.sessionList.map((session) => ({ ...session }));
+  state.deletingSessionSet = { ...snapshot.deletingSessionSet };
   state.phase = snapshot.phase;
   state.error = snapshot.error;
   state.draftMessage = snapshot.draftMessage;
@@ -1859,6 +1863,13 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.streamDebugReasoningCharsFlushed = 0;
   state.streamDebugTextCharsReceived = 0;
   state.streamDebugTextCharsFlushed = 0;
+}
+
+function filterDeletingSessions(
+  sessions: SessionOverview[],
+  deletingSessionSet: Record<string, boolean>
+): SessionOverview[] {
+  return sessions.filter((session) => !deletingSessionSet[session.conversationId]);
 }
 
 function buildEventCursorByTurnTraceHistory(turnTraceHistory: TurnTraceRecord[]) {
@@ -3315,6 +3326,7 @@ export const useRuntimeStore = defineStore("runtime", {
         sessionId: DEFAULT_SESSION_ID,
         sessionList: [],
         sessionOperation: null,
+        deletingSessionSet: {},
         sessionSwitchToken: 0,
         sessionError: null,
       phase: resolveRestoredPersistedPhase(
@@ -3402,6 +3414,9 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     isHistoricalMode(state): boolean {
       return state.historyCursorMode !== "live";
+    },
+    isSessionDeleting(state) {
+      return (sessionId: string) => sessionId in state.deletingSessionSet;
     },
     conversationCheckpointEntries(state): ConversationCheckpointEntry[] {
       const entries = buildConversationCheckpointEntries(
@@ -3853,14 +3868,20 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     async loadSessionCatalog() {
       if (isTauriAvailable()) {
-        this.sessionList = await safeInvoke<SessionOverview[]>("list_sessions");
+        this.sessionList = filterDeletingSessions(
+          await safeInvoke<SessionOverview[]>("list_sessions"),
+          this.deletingSessionSet
+        );
         return;
       }
 
       const cache = loadPersistedRuntimeCache();
-      this.sessionList = Object.entries(cache.sessions)
-        .map(([conversationId, state]) => buildSessionOverviewFromPersistedState(conversationId, state))
-        .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+      this.sessionList = filterDeletingSessions(
+        Object.entries(cache.sessions)
+          .map(([conversationId, state]) => buildSessionOverviewFromPersistedState(conversationId, state))
+          .sort((left, right) => right.updatedAtMs - left.updatedAtMs),
+        this.deletingSessionSet
+      );
     },
     async loadSessionRuntimeViewState(sessionId: string, nodeId?: string | null) {
       if (isTauriAvailable()) {
@@ -4544,15 +4565,27 @@ export const useRuntimeStore = defineStore("runtime", {
       });
     },
     async deleteSession(targetSessionId: string) {
-      if (this.isSubmitting || this.sessionOperation) {
+      if (this.isSubmitting || this.deletingSessionSet[targetSessionId]) {
         return;
       }
 
       const deletingActiveEmptySession =
         targetSessionId === this.sessionId && !hasPersistableMessages(this.messages);
+      const requiresGlobalSessionOperation =
+        deletingActiveEmptySession ||
+        targetSessionId === this.sessionId ||
+        !this.sessionList.some((session) => session.conversationId === this.sessionId);
+      if (requiresGlobalSessionOperation && this.sessionOperation) {
+        return;
+      }
       const previousSnapshot = createSessionRuntimeSnapshot(this);
       const persistedStateToRestore = loadPersistedRuntimeState(targetSessionId);
-      this.sessionOperation = "deleting";
+      this.deletingSessionSet[targetSessionId] = true;
+      if (requiresGlobalSessionOperation) {
+        this.sessionOperation = "deleting";
+      } else {
+        this.sessionList = this.sessionList.filter((session) => session.conversationId !== targetSessionId);
+      }
       this.sessionError = null;
 
       try {
@@ -4562,9 +4595,12 @@ export const useRuntimeStore = defineStore("runtime", {
         delete this.failedSessionSet[targetSessionId];
 
         if (isTauriAvailable() && !deletingActiveEmptySession) {
-          this.sessionList = await safeInvoke<SessionOverview[]>("delete_session", {
-            sessionId: targetSessionId
-          });
+          this.sessionList = filterDeletingSessions(
+            await safeInvoke<SessionOverview[]>("delete_session", {
+              sessionId: targetSessionId
+            }),
+            this.deletingSessionSet
+          );
         } else {
           await this.loadSessionCatalog();
         }
@@ -4626,7 +4662,10 @@ export const useRuntimeStore = defineStore("runtime", {
           error: String(error)
         });
       } finally {
-        this.sessionOperation = null;
+        delete this.deletingSessionSet[targetSessionId];
+        if (requiresGlobalSessionOperation) {
+          this.sessionOperation = null;
+        }
       }
     },
     async initializeSessions() {

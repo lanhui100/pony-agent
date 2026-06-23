@@ -52,7 +52,6 @@ const modelOpen = ref(loadStoredBoolean(MODEL_OPEN_STORAGE_KEY, true));
 const conversationOpen = ref(true);
 const visibleConversationCount = ref(CONVERSATION_PAGE_SIZE);
 const pendingDeleteSessionId = ref<string | null>(null);
-const deletingSessionId = ref<string | null>(null);
 const menuInteractiveClass =
   "rounded-[0.2rem] transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900";
 const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
@@ -216,11 +215,15 @@ function isTransientSession(session: SessionOverview) {
 }
 
 function canDeleteSession(session: SessionOverview) {
-  return !isSubmitting.value && !sessionOperation.value && !isTransientSession(session);
+  if (isSubmitting.value || isTransientSession(session) || runtimeStore.isSessionDeleting(session.conversationId)) {
+    return false;
+  }
+
+  return !sessionOperation.value;
 }
 
 function isDeletingSession(session: SessionOverview) {
-  return deletingSessionId.value === session.conversationId;
+  return runtimeStore.isSessionDeleting(session.conversationId);
 }
 
 async function handleDeleteSession(session: SessionOverview) {
@@ -234,14 +237,7 @@ async function handleDeleteSession(session: SessionOverview) {
   }
 
   pendingDeleteSessionId.value = null;
-  deletingSessionId.value = session.conversationId;
-  try {
-    await runtimeStore.deleteSession(session.conversationId);
-  } finally {
-    if (deletingSessionId.value === session.conversationId) {
-      deletingSessionId.value = null;
-    }
-  }
+  await runtimeStore.deleteSession(session.conversationId);
 }
 
 function clearPendingDeleteSession(session: SessionOverview) {

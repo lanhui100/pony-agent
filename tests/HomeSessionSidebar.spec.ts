@@ -378,6 +378,7 @@ describe("HomeSessionSidebar", () => {
     seedSidebarSessions();
 
     const runtimeStore = useRuntimeStore();
+    runtimeStore.deletingSessionSet["session-other"] = true;
     let finishDelete: (() => void) | null = null;
     const deleteSessionSpy = vi.spyOn(runtimeStore, "deleteSession").mockImplementation(
       () =>
@@ -388,24 +389,54 @@ describe("HomeSessionSidebar", () => {
     const wrapper = mountSidebar();
     await nextTick();
 
-    await wrapper.get('[data-testid="session-delete-session-other"]').trigger("click");
-    await nextTick();
-    wrapper.get('[data-testid="session-delete-session-other"]').element.dispatchEvent(
-      new MouseEvent("click", { bubbles: true })
-    );
-    await nextTick();
-
-    expect(deleteSessionSpy).toHaveBeenCalledWith("session-other");
     expect(wrapper.find('[data-testid="session-delete-loading-session-other"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="session-delete-session-other"]').attributes("title")).toBe("正在删除");
     expect(wrapper.get('[data-testid="session-delete-session-other"]').classes()).toContain("opacity-100");
     expect(wrapper.get('[data-testid="session-delete-session-other"]').text()).not.toContain("确认");
 
+    delete runtimeStore.deletingSessionSet["session-other"];
     finishDelete?.();
     await Promise.resolve();
     await nextTick();
 
     expect(wrapper.find('[data-testid="session-delete-loading-session-other"]').exists()).toBe(false);
+  });
+
+  it("keeps other saved sessions deletable while one history delete is in flight", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      sessionList: [
+        createSession({
+          conversationId: "session-current",
+          title: "Current session",
+          summary: "Current summary"
+        }),
+        createSession({
+          conversationId: "session-other",
+          title: "Other session",
+          summary: "Other summary",
+          updatedAtMs: 2000
+        }),
+        createSession({
+          conversationId: "session-third",
+          title: "Third session",
+          summary: "Third summary",
+          updatedAtMs: 3000
+        })
+      ]
+    });
+    runtimeStore.deletingSessionSet["session-other"] = true;
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="session-delete-session-other"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.find('[data-testid="session-delete-loading-session-other"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="session-delete-session-third"]').attributes("disabled")).toBeUndefined();
   });
 
   it("keeps create actions above session list and model sections", async () => {
