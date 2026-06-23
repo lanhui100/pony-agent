@@ -455,16 +455,28 @@
       ],
       "commit": "ecb7491",
       "timestamp": "2026-06-23T11:10:23+08:00"
+    },
+    {
+      "commit": "5f354bf",
+      "bumps": [
+        {
+          "component": "core",
+          "to": "0.1.19",
+          "from": "0.1.18",
+          "segment": "patch"
+        }
+      ],
+      "timestamp": "2026-06-23T14:07:14+08:00"
     }
   ],
-  "lastBump": "2026-06-23T11:10:23+08:00",
+  "lastBump": "2026-06-23T14:07:14+08:00",
   "tauri": {
     "patch": 22,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 18,
+    "patch": 19,
     "minor": 1,
     "major": 0
   }

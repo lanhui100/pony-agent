@@ -428,6 +428,16 @@ fn planned_child_activities(active_call: &ToolCall) -> Vec<TurnToolActivity> {
 }
 
 fn nested_child_activities(active_call: &ToolCall, parsed: &Value) -> Vec<TurnToolActivity> {
+    if !matches!(
+        active_call.name.as_str(),
+        "workspace_batch"
+            | "workspace.batch"
+            | "workspace_gather_context"
+            | "workspace.gather_context"
+    ) {
+        return Vec::new();
+    }
+
     parsed
         .get("results")
         .and_then(Value::as_array)
@@ -737,5 +747,56 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("search failed"));
+    }
+
+    #[test]
+    fn web_search_result_does_not_expand_search_hits_as_child_activities() {
+        let call = ToolCall {
+            call_id: None,
+            name: "web_search_query".to_string(),
+            arguments: json!({
+                "query": "pony agent"
+            }),
+            plan: None,
+        };
+        let result = ToolResult {
+            tool_name: "web_search_query".to_string(),
+            status: "ok".to_string(),
+            output: serde_json::to_string(&json!({
+                "ok": true,
+                "query": "pony agent",
+                "resultCount": 2,
+                "results": [
+                    {
+                        "title": "Pony Agent",
+                        "url": "https://example.com/pony-agent",
+                        "snippet": "Agent home page",
+                        "score": 0.9
+                    },
+                    {
+                        "title": "Docs",
+                        "url": "https://example.com/docs",
+                        "snippet": "Documentation",
+                        "score": 0.7
+                    }
+                ],
+                "summary": {
+                    "text": "已完成搜索，返回 2 条结果。"
+                }
+            }))
+            .expect("result payload"),
+            duration_ms: 18,
+        };
+
+        let activities = tool_activities_after_result(&call, &result);
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].name, "WebSearch");
+        assert_eq!(activities[0].status, "done");
+        assert!(activities[0]
+            .result_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("resultCount"));
     }
 }
