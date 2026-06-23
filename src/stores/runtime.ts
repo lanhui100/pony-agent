@@ -103,6 +103,7 @@ type RuntimeState = {
   sessionId: string;
   sessionList: SessionOverview[];
   sessionOperation: "initializing" | "switching" | "deleting" | null;
+  sessionSwitchToken: number;
   sessionError: string | null;
   phase: RuntimePhase;
   health: HealthPayload | null;
@@ -2892,6 +2893,84 @@ function loadPersistedRuntimeState(sessionId: string): PersistedRuntimeState | n
   return loadPersistedRuntimeCache().sessions[sessionId] ?? null;
 }
 
+function buildRuntimeViewFromPersistedState(
+  sessionId: string,
+  persisted: PersistedRuntimeState | null,
+  nodeId?: string | null
+): SessionRuntimeView {
+  const persistedVisibleNodeId = persisted?.visibleNodeId?.trim() || null;
+  const requestedVisibleNodeId = nodeId?.trim() || persistedVisibleNodeId;
+  const persistedBranchHeadNodeId = persisted?.branchHeadNodeId?.trim() || null;
+  const persistedActiveBranchId = persisted?.activeBranchId?.trim() || null;
+  const persistedHistoryNodes = cloneHistoryNodes(persisted?.historyNodes);
+  const persistedHistoryBranches = cloneHistoryBranches(persisted?.historyBranches);
+  const persistedHistoryCursor =
+    requestedVisibleNodeId || persistedBranchHeadNodeId || persistedActiveBranchId
+      ? {
+          sessionId,
+          visibleNodeId: requestedVisibleNodeId,
+          activeBranchId: persistedActiveBranchId,
+          branchHeadNodeId:
+            persistedBranchHeadNodeId ||
+            resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches),
+          workspaceNodeId: requestedVisibleNodeId,
+          mode: normalizeHistoryCursorMode(
+            persisted?.historyCursorMode ??
+              (requestedVisibleNodeId && persistedBranchHeadNodeId && requestedVisibleNodeId !== persistedBranchHeadNodeId
+                ? "historical"
+                : "live")
+          ),
+          authorityMode: "local_preview",
+          cursorVersion: null,
+          isAtBranchHead:
+            !!requestedVisibleNodeId &&
+            !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
+            requestedVisibleNodeId ===
+              (persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches))
+        }
+      : null;
+  const snapshot = {
+    conversationId: sessionId,
+    title: buildSessionTitleFromMessages(persisted?.messages ?? []),
+    summary: persisted?.sessionSummary ?? (persisted?.messages?.length ? DEFAULT_BROWSER_SESSION_SUMMARY : ""),
+    history: buildTurnHistory(persisted?.messages ?? []),
+    attachmentAssets: persisted?.attachmentAssets ?? [],
+    turnCount: persisted?.messages?.filter((message) => message.role === "user").length ?? 0,
+    historyStateEvidence: [],
+    historyStateAuditSummary: null,
+    runControlAuditSummary: null,
+    lastReferencedFile: null,
+    updatedAtMs:
+      persisted?.turnTraceHistory?.length
+        ? persisted.turnTraceHistory[persisted.turnTraceHistory.length - 1]!.updatedAt
+        : Date.now()
+  } satisfies SessionSnapshot;
+
+  return {
+    session: snapshot,
+    historyStateEvidence: snapshot.historyStateEvidence ?? [],
+    historyStateAuditSummary: snapshot.historyStateAuditSummary ?? null,
+    runControlAuditSummary: snapshot.runControlAuditSummary ?? null,
+    retrieved: deriveRetrievedContextFromSnapshot(snapshot),
+    checkpoint: null,
+    submissionPlan: null,
+    controlBoundaryEvidence: null,
+    historyNodes: persistedHistoryNodes.length > 0 ? persistedHistoryNodes : undefined,
+    historyBranches: persistedHistoryBranches.length > 0 ? persistedHistoryBranches : undefined,
+    historyCursor: persistedHistoryCursor,
+    authorityMode: "local_preview",
+    resolvedVisibleNodeId: requestedVisibleNodeId,
+    activeBranchHeadNodeId:
+      persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches),
+    isAtBranchHead:
+      !!requestedVisibleNodeId &&
+      !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
+      requestedVisibleNodeId ===
+        (persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)),
+    cursorVersion: null
+  } satisfies SessionRuntimeView;
+}
+
 function persistSessionState(sessionId: string, payload: PersistedRuntimeState) {
   if (typeof window === "undefined") {
     return;
@@ -3232,11 +3311,12 @@ export const useRuntimeStore = defineStore("runtime", {
   state: (): RuntimeState => {
     const persisted = loadPersistedRuntimeState(DEFAULT_SESSION_ID);
 
-    return {
-      sessionId: DEFAULT_SESSION_ID,
-      sessionList: [],
-      sessionOperation: null,
-      sessionError: null,
+      return {
+        sessionId: DEFAULT_SESSION_ID,
+        sessionList: [],
+        sessionOperation: null,
+        sessionSwitchToken: 0,
+        sessionError: null,
       phase: resolveRestoredPersistedPhase(
         persisted?.phase,
         persisted?.messages ?? [],
@@ -3658,6 +3738,89 @@ export const useRuntimeStore = defineStore("runtime", {
         debugLog("persist:error");
       }
     },
+    updatePersistedBackgroundSession(
+      sessionId: string,
+      turnId: string,
+      patch: {
+        content?: string | null;
+        reasoningContent?: string | null;
+        status: ChatMessage["status"];
+        modelName?: string | null;
+        tokenCount?: number | null;
+        phase: RuntimePhase;
+        sessionSummary?: string | null;
+        providerRequestedName?: string | null;
+        providerName?: string | null;
+        providerProtocol?: string | null;
+        providerModel?: string | null;
+        providerSource?: string | null;
+        providerMode?: string | null;
+        fallbackReason?: string | null;
+        inputTokens?: number | null;
+        outputTokens?: number | null;
+        totalTokens?: number | null;
+        firstTokenLatencyMs?: number | null;
+        errorDetail?: string | null;
+      }
+    ) {
+      const persisted = loadPersistedRuntimeState(sessionId);
+      if (!persisted) {
+        return;
+      }
+
+      const messages = persisted.messages.map((message) => ({
+        ...message,
+        attachments: message.attachments?.map((attachment) => ({ ...attachment })) ?? []
+      }));
+      let assistantMessage = messages.find(
+        (message) => message.turnId === turnId && message.role === "assistant"
+      );
+
+      if (!assistantMessage) {
+        assistantMessage = {
+          id: `assistant-${turnId}`,
+          turnId,
+          role: "assistant",
+          content: "",
+          reasoningContent: null,
+          status: patch.status,
+          tokenCount: null,
+          modelName: patch.modelName?.trim() || undefined
+        };
+        messages.push(assistantMessage);
+      }
+
+      const nextContent = patch.content?.trim();
+      if (nextContent) {
+        assistantMessage.content = patch.content ?? assistantMessage.content;
+      }
+      assistantMessage.reasoningContent = normalizeReasoningContent(
+        patch.reasoningContent ?? assistantMessage.reasoningContent ?? null
+      );
+      assistantMessage.status = patch.status;
+      assistantMessage.modelName = patch.modelName?.trim() || assistantMessage.modelName;
+      assistantMessage.tokenCount = patch.tokenCount ?? assistantMessage.tokenCount ?? null;
+      assistantMessage.errorDetail = patch.errorDetail ?? assistantMessage.errorDetail ?? null;
+
+      persistSessionState(sessionId, {
+        ...persisted,
+        phase: patch.phase,
+        messages,
+        sessionSummary: patch.sessionSummary ?? persisted.sessionSummary,
+        providerRequestedName: patch.providerRequestedName ?? persisted.providerRequestedName,
+        providerName: patch.providerName ?? persisted.providerName,
+        providerProtocol: patch.providerProtocol ?? persisted.providerProtocol,
+        providerModel: patch.providerModel ?? persisted.providerModel,
+        providerSource: patch.providerSource ?? persisted.providerSource,
+        providerMode: patch.providerMode ?? persisted.providerMode,
+        fallbackReason:
+          patch.fallbackReason === undefined ? persisted.fallbackReason : patch.fallbackReason,
+        inputTokens: patch.inputTokens ?? persisted.inputTokens,
+        outputTokens: patch.outputTokens ?? persisted.outputTokens,
+        totalTokens: patch.totalTokens ?? persisted.totalTokens,
+        firstTokenLatencyMs: patch.firstTokenLatencyMs ?? persisted.firstTokenLatencyMs
+      });
+    },
     getAttachmentAssets(filter?: AttachmentAssetFilter | null) {
       return filterAttachmentAssets(this.attachmentAssets, filter);
     },
@@ -3714,78 +3877,7 @@ export const useRuntimeStore = defineStore("runtime", {
         });
       }
 
-      const persisted = loadPersistedRuntimeState(sessionId);
-      const persistedVisibleNodeId = persisted?.visibleNodeId?.trim() || null;
-      const requestedVisibleNodeId = nodeId?.trim() || persistedVisibleNodeId;
-      const persistedBranchHeadNodeId = persisted?.branchHeadNodeId?.trim() || null;
-      const persistedActiveBranchId = persisted?.activeBranchId?.trim() || null;
-      const persistedHistoryNodes = cloneHistoryNodes(persisted?.historyNodes);
-      const persistedHistoryBranches = cloneHistoryBranches(persisted?.historyBranches);
-      const persistedHistoryCursor =
-        requestedVisibleNodeId || persistedBranchHeadNodeId || persistedActiveBranchId
-          ? {
-              sessionId,
-              visibleNodeId: requestedVisibleNodeId,
-              activeBranchId: persistedActiveBranchId,
-              branchHeadNodeId:
-                persistedBranchHeadNodeId ||
-                resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches),
-              workspaceNodeId: requestedVisibleNodeId,
-              mode: normalizeHistoryCursorMode(
-                persisted?.historyCursorMode ??
-                  (requestedVisibleNodeId && persistedBranchHeadNodeId && requestedVisibleNodeId !== persistedBranchHeadNodeId
-                    ? "historical"
-                    : "live")
-              ),
-              authorityMode: "local_preview",
-              cursorVersion: null,
-              isAtBranchHead:
-                !!requestedVisibleNodeId &&
-                !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
-                requestedVisibleNodeId ===
-                  (persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches))
-            }
-          : null;
-      const snapshot = {
-        conversationId: sessionId,
-        title: buildSessionTitleFromMessages(persisted?.messages ?? []),
-        summary: persisted?.sessionSummary ?? (persisted?.messages?.length ? DEFAULT_BROWSER_SESSION_SUMMARY : ""),
-        history: buildTurnHistory(persisted?.messages ?? []),
-        attachmentAssets: persisted?.attachmentAssets ?? [],
-        turnCount: persisted?.messages?.filter((message) => message.role === "user").length ?? 0,
-        historyStateEvidence: [],
-        historyStateAuditSummary: null,
-        runControlAuditSummary: null,
-        lastReferencedFile: null,
-        updatedAtMs:
-          persisted?.turnTraceHistory?.length
-            ? persisted.turnTraceHistory[persisted.turnTraceHistory.length - 1]!.updatedAt
-            : Date.now()
-      } satisfies SessionSnapshot;
-
-      return {
-        session: snapshot,
-        historyStateEvidence: snapshot.historyStateEvidence ?? [],
-        historyStateAuditSummary: snapshot.historyStateAuditSummary ?? null,
-        runControlAuditSummary: snapshot.runControlAuditSummary ?? null,
-        retrieved: deriveRetrievedContextFromSnapshot(snapshot),
-        checkpoint: null,
-        submissionPlan: null,
-        controlBoundaryEvidence: null,
-        historyNodes: persistedHistoryNodes.length > 0 ? persistedHistoryNodes : undefined,
-        historyBranches: persistedHistoryBranches.length > 0 ? persistedHistoryBranches : undefined,
-        historyCursor: persistedHistoryCursor,
-        authorityMode: "local_preview",
-        resolvedVisibleNodeId: requestedVisibleNodeId,
-        activeBranchHeadNodeId:
-          persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches),
-        isAtBranchHead:
-          !!requestedVisibleNodeId &&
-          !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
-          requestedVisibleNodeId ===
-            (persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)),
-        cursorVersion: null
-      } satisfies SessionRuntimeView;
+      return buildRuntimeViewFromPersistedState(sessionId, loadPersistedRuntimeState(sessionId), nodeId);
     },
     applyExecutionCheckpoint(
       checkpoint: ExecutionCheckpoint | null,
@@ -4310,7 +4402,7 @@ export const useRuntimeStore = defineStore("runtime", {
       return result;
     },
     async switchSession(nextSessionId: string) {
-      if (this.sessionOperation) {
+      if (this.sessionOperation && this.sessionOperation !== "switching") {
         return;
       }
       if (nextSessionId === this.sessionId) {
@@ -4330,11 +4422,31 @@ export const useRuntimeStore = defineStore("runtime", {
 
       this.persistHistory();
       const previousSnapshot = createSessionRuntimeSnapshot(this);
+      const switchToken = this.sessionSwitchToken + 1;
+      this.sessionSwitchToken = switchToken;
       this.sessionOperation = "switching";
       this.sessionError = null;
 
       try {
-        await this.loadSessionState(nextSessionId);
+        const cachedRuntimeView = buildRuntimeViewFromPersistedState(
+          nextSessionId,
+          loadPersistedRuntimeState(nextSessionId)
+        );
+        const hasCachedState =
+          cachedRuntimeView.session.history.length > 0 ||
+          cachedRuntimeView.session.attachmentAssets.length > 0 ||
+          cachedRuntimeView.session.summary.trim().length > 0;
+
+        if (hasCachedState) {
+          await this.loadSessionState(nextSessionId, {
+            refreshCatalog: false,
+            runtimeView: cachedRuntimeView
+          });
+        } else {
+          this.resetSessionRuntimeState();
+          this.sessionId = nextSessionId;
+          this.phase = "connecting";
+        }
 
         // Clear completed status for the target session (user is now viewing it)
         delete this.completedSessionSet[nextSessionId];
@@ -4353,8 +4465,30 @@ export const useRuntimeStore = defineStore("runtime", {
           from: previousSnapshot.sessionId,
           to: nextSessionId,
           backgroundTurnRegistered: switchingFromRunningTurn,
-          restoredBackgroundTurn: Boolean(bgTurn)
+          restoredBackgroundTurn: Boolean(bgTurn),
+          hydratedFromCache: hasCachedState
         });
+
+        this.sessionOperation = null;
+        void this.loadSessionState(nextSessionId)
+          .then(() => {
+            if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId) {
+              return;
+            }
+            delete this.completedSessionSet[nextSessionId];
+            delete this.failedSessionSet[nextSessionId];
+          })
+          .catch((error) => {
+            if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId) {
+              return;
+            }
+            this.sessionError = `切换对话失败：${String(error)}`;
+            debugLog("session:switch:refresh:error", {
+              from: previousSnapshot.sessionId,
+              to: nextSessionId,
+              error: String(error)
+            });
+          });
       } catch (error) {
         // Check if the background turn is still running before restoring the snapshot.
         // If it completed during the failed loadSessionState await, don't restore a dead spinner.
@@ -4375,7 +4509,6 @@ export const useRuntimeStore = defineStore("runtime", {
           to: nextSessionId,
           error: String(error)
         });
-      } finally {
         this.sessionOperation = null;
       }
     },
@@ -5288,6 +5421,31 @@ export const useRuntimeStore = defineStore("runtime", {
       });
 
       const outputEndUnlisten = await safeListen<TurnStreamEvent>("turn:output_end", ({ payload }) => {
+        if (payload.sessionId) {
+          const bg = this.runningSessionMap[payload.sessionId];
+          if (bg && bg.turnId === payload.turnId) {
+            this.updatePersistedBackgroundSession(payload.sessionId, payload.turnId, {
+              content: payload.text ?? null,
+              reasoningContent: payload.reasoningContent ?? null,
+              status: "done",
+              modelName: buildAssistantModelLabel(payload.providerName, payload.providerModel),
+              tokenCount: payload.outputTokens ?? null,
+              phase: resolveRuntimePhaseFromEvent(payload, "completed"),
+              providerRequestedName: payload.providerRequestedName ?? null,
+              providerName: payload.providerName ?? null,
+              providerProtocol: payload.providerProtocol ?? null,
+              providerModel: payload.providerModel ?? null,
+              providerSource: payload.providerSource ?? null,
+              providerMode: payload.providerMode ?? null,
+              fallbackReason: payload.fallbackReason ?? undefined,
+              inputTokens: payload.inputTokens ?? null,
+              outputTokens: payload.outputTokens ?? null,
+              totalTokens: payload.totalTokens ?? null,
+              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? null
+            });
+            return;
+          }
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -5309,6 +5467,26 @@ export const useRuntimeStore = defineStore("runtime", {
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
+            this.updatePersistedBackgroundSession(payload.sessionId, payload.turnId, {
+              content: payload.text ?? null,
+              reasoningContent: payload.reasoningContent ?? null,
+              status: "done",
+              modelName: buildAssistantModelLabel(payload.providerName, payload.providerModel),
+              tokenCount: payload.outputTokens ?? null,
+              phase: "ready",
+              sessionSummary: payload.sessionSummary ?? null,
+              providerRequestedName: payload.providerRequestedName ?? null,
+              providerName: payload.providerName ?? null,
+              providerProtocol: payload.providerProtocol ?? null,
+              providerModel: payload.providerModel ?? null,
+              providerSource: payload.providerSource ?? null,
+              providerMode: payload.providerMode ?? null,
+              fallbackReason: payload.fallbackReason ?? undefined,
+              inputTokens: payload.inputTokens ?? null,
+              outputTokens: payload.outputTokens ?? null,
+              totalTokens: payload.totalTokens ?? null,
+              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? null
+            });
             this.completedSessionSet[payload.sessionId] = true;
             delete this.runningSessionMap[payload.sessionId];
             return;
@@ -5504,6 +5682,27 @@ export const useRuntimeStore = defineStore("runtime", {
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
+            this.updatePersistedBackgroundSession(payload.sessionId, payload.turnId, {
+              content: payload.text ?? DEFAULT_FAILED_TURN_MESSAGE,
+              reasoningContent: payload.reasoningContent ?? null,
+              status: "error",
+              modelName: buildAssistantModelLabel(payload.providerName, payload.providerModel),
+              tokenCount: payload.outputTokens ?? null,
+              phase: "failed",
+              sessionSummary: payload.sessionSummary ?? null,
+              providerRequestedName: payload.providerRequestedName ?? null,
+              providerName: payload.providerName ?? null,
+              providerProtocol: payload.providerProtocol ?? null,
+              providerModel: payload.providerModel ?? null,
+              providerSource: payload.providerSource ?? null,
+              providerMode: payload.providerMode ?? null,
+              fallbackReason: payload.fallbackReason ?? undefined,
+              inputTokens: payload.inputTokens ?? null,
+              outputTokens: payload.outputTokens ?? null,
+              totalTokens: payload.totalTokens ?? null,
+              firstTokenLatencyMs: payload.firstTokenLatencyMs ?? null,
+              errorDetail: payload.error ?? DEFAULT_FAILED_TURN_ERROR
+            });
             this.failedSessionSet[payload.sessionId] = true;
             delete this.runningSessionMap[payload.sessionId];
             return;

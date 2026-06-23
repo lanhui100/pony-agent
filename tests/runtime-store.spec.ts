@@ -482,7 +482,7 @@ describe("runtime session resilience", () => {
     setActivePinia(createPinia());
   });
 
-  it("restores the current session when switching fails", async () => {
+  it("shows the target session placeholder and surfaces an error when switching fails without cached state", async () => {
     const store = useRuntimeStore();
     const originalMessages = [
       createMessage({ id: "user-1", turnId: "turn-1", role: "user", content: "keep this context" }),
@@ -522,26 +522,22 @@ describe("runtime session resilience", () => {
     });
 
     await store.switchSession("session-next");
+    await flushMicrotasks();
 
-    expect(store.sessionId).toBe("session-current");
-    expect(store.phase).toBe("ready");
-    expect(store.draftMessage).toBe("draft message");
-    expect(store.messages).toEqual(originalMessages);
+    expect(store.sessionId).toBe("session-next");
+    expect(store.phase).toBe("connecting");
+    expect(store.draftMessage).toBe("");
+    expect(store.messages).toEqual([]);
     expect(store.sessionList).toEqual(originalSessionList);
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionError).toContain("snapshot exploded");
   });
 
-  it("keeps the current session content visible until the next session finishes loading", async () => {
+  it("switches immediately from cached session state while host refresh is still pending", async () => {
     const store = useRuntimeStore();
     const originalMessages = [
       createMessage({ id: "user-current", turnId: "turn-current", role: "user", content: "current session" }),
-      createMessage({
-        id: "assistant-current",
-        turnId: "turn-current",
-        role: "assistant",
-        content: "current reply"
-      })
+      createMessage({ id: "assistant-current", turnId: "turn-current", role: "assistant", content: "current reply" })
     ];
     const nextSnapshot = createSnapshot({
       conversationId: "session-next",
@@ -554,6 +550,10 @@ describe("runtime session resilience", () => {
       turnCount: 1,
       updatedAtMs: 2400
     });
+    const cachedNextMessages = [
+      createMessage({ id: "user-next", turnId: "turn-next", role: "user", content: "cached next session" }),
+      createMessage({ id: "assistant-next", turnId: "turn-next", role: "assistant", content: "cached next reply" })
+    ];
     const nextSessionList: SessionOverview[] = [
       {
         conversationId: "session-next",
@@ -572,6 +572,26 @@ describe("runtime session resilience", () => {
         updatedAtMs: 1000
       }
     ];
+
+    writePersistedSessions({
+      "session-next": {
+        phase: "ready",
+        messages: cachedNextMessages,
+        attachmentAssets: [],
+        sessionSummary: "Cached next summary",
+        providerRequestedName: "",
+        providerName: "",
+        providerProtocol: "",
+        providerModel: "",
+        providerSource: "",
+        providerMode: "",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null
+      }
+    });
 
     let resolveRuntimeView: ((value: SessionRuntimeView) => void) | null = null;
     const runtimeViewPromise = new Promise<SessionRuntimeView>((resolve) => {
@@ -601,13 +621,17 @@ describe("runtime session resilience", () => {
     const switchingPromise = store.switchSession("session-next");
     await flushMicrotasks();
 
-    expect(store.sessionOperation).toBe("switching");
-    expect(store.sessionId).toBe("session-current");
+    expect(store.sessionOperation).toBeNull();
+    expect(store.sessionId).toBe("session-next");
     expect(store.phase).toBe("ready");
-    expect(store.messages).toEqual(originalMessages);
+    expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
+      "user:cached next session",
+      "assistant:cached next reply"
+    ]);
 
     resolveRuntimeView?.(createSessionRuntimeView(nextSnapshot));
     await switchingPromise;
+    await flushMicrotasks();
 
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionId).toBe("session-next");
@@ -5313,6 +5337,158 @@ describe("runtime session resilience", () => {
 
     expect(store.messages[1]?.reasoningContent).toBe("final pass");
     nowSpy.mockRestore();
+  });
+
+  it("writes final assistant text into persisted background sessions before the user switches back", async () => {
+    const store = useRuntimeStore();
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(
+          createSnapshot({
+            conversationId: "session-other",
+            title: "Other session",
+            summary: "Other summary",
+            history: [
+              { role: "user", content: "other question" },
+              { role: "assistant", content: "other answer" }
+            ],
+            turnCount: 1,
+            updatedAtMs: 2000
+          })
+        );
+      }
+
+      if (command === "list_sessions") {
+        return [
+          {
+            conversationId: "session-background",
+            title: "Background session",
+            summary: "Background summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 1000
+          },
+          {
+            conversationId: "session-other",
+            title: "Other session",
+            summary: "Other summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 2000
+          }
+        ] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const backgroundMessages = [
+      createMessage({ id: "user-bg", turnId: "turn-bg", role: "user", content: "background question" }),
+      createMessage({
+        id: "assistant-turn-bg",
+        turnId: "turn-bg",
+        role: "assistant",
+        content: "",
+        status: "pending",
+        modelName: "OpenAI / gpt-5"
+      })
+    ];
+
+    writePersistedSessions({
+      "session-background": {
+        phase: "calling_model",
+        messages: backgroundMessages,
+        attachmentAssets: [],
+        sessionSummary: "Background summary",
+        providerRequestedName: "OpenAI",
+        providerName: "OpenAI",
+        providerProtocol: "openai",
+        providerModel: "gpt-5",
+        providerSource: "primary",
+        providerMode: "standard",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null
+      }
+    });
+
+    await store.initializeTurnEvents();
+    store.$patch({
+      sessionId: "session-background",
+      sessionList: [
+        {
+          conversationId: "session-background",
+          title: "Background session",
+          summary: "Background summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 1000
+        },
+        {
+          conversationId: "session-other",
+          title: "Other session",
+          summary: "Other summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 2000
+        }
+      ],
+      messages: backgroundMessages,
+      isSubmitting: true,
+      activeTurnId: "turn-bg",
+      phase: "calling_model"
+    });
+
+    await store.switchSession("session-other");
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        sessionId: "session-background",
+        turnId: "turn-bg",
+        text: "background final answer",
+        reasoningContent: "background final reasoning",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        providerRequestedName: "OpenAI",
+        sessionSummary: "Background completed summary",
+        outputTokens: 42,
+        totalTokens: 100,
+        traceSteps: [],
+        toolActivities: []
+      }
+    } as any);
+
+    await flushMicrotasks();
+
+    const persisted = JSON.parse(window.localStorage.getItem(RUNTIME_STORAGE_KEY) ?? "{}") as {
+      sessions?: Record<string, { messages?: ChatMessage[]; sessionSummary?: string; phase?: string }>;
+    };
+    const persistedBackground = persisted.sessions?.["session-background"];
+    const assistant = persistedBackground?.messages?.find(
+      (message) => message.turnId === "turn-bg" && message.role === "assistant"
+    );
+
+    expect(assistant?.content).toBe("background final answer");
+    expect(assistant?.reasoningContent).toBe("background final reasoning");
+    expect(assistant?.status).toBe("done");
+    expect(persistedBackground?.sessionSummary).toBe("Background completed summary");
+    expect(persistedBackground?.phase).toBe("ready");
   });
 
   it("does not fail the turn when stream start response omits run id but streamed completion still arrives", async () => {

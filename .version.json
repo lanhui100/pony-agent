@@ -467,11 +467,23 @@
         }
       ],
       "timestamp": "2026-06-23T14:07:14+08:00"
+    },
+    {
+      "commit": "ea9496f",
+      "bumps": [
+        {
+          "to": "0.1.23",
+          "segment": "patch",
+          "from": "0.1.22",
+          "component": "tauri"
+        }
+      ],
+      "timestamp": "2026-06-23T19:21:12+08:00"
     }
   ],
-  "lastBump": "2026-06-23T14:07:14+08:00",
+  "lastBump": "2026-06-23T19:21:12+08:00",
   "tauri": {
-    "patch": 22,
+    "patch": 23,
     "minor": 1,
     "major": 0
   },
