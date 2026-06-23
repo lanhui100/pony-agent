@@ -1237,6 +1237,11 @@ function buildTimelineCopyText(turn: TurnTraceRecord, entry: TraceTimelineEntry)
   buildTimelineRows(turn, entry).forEach((row) => {
     lines.push(`${row.label}: ${row.value}`);
   });
+  for (const section of buildTimelineDetailSections(turn, entry)) {
+    if (section.content) {
+      lines.push("", `--- ${section.label} ---`, section.content);
+    }
+  }
   return lines.join("\n");
 }
 

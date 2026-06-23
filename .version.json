@@ -425,11 +425,23 @@
         }
       ],
       "commit": "f934002"
+    },
+    {
+      "bumps": [
+        {
+          "component": "tauri",
+          "from": "0.1.20",
+          "to": "0.1.21",
+          "segment": "patch"
+        }
+      ],
+      "timestamp": "2026-06-23T10:58:00+08:00",
+      "commit": "857e6dd"
     }
   ],
-  "lastBump": "2026-06-22T17:02:19+08:00",
+  "lastBump": "2026-06-23T10:58:00+08:00",
   "tauri": {
-    "patch": 20,
+    "patch": 21,
     "minor": 1,
     "major": 0
   },
