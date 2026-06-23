@@ -142,6 +142,7 @@ type RuntimeState = {
   visibleNodeId: string | null;
   branchHeadNodeId: string | null;
   activeBranchId: string | null;
+  cursorVersion: number | null;
   historyCursorMode: HistoryCursorMode;
   historyNodes: HistoryNode[];
   historyBranches: HistoryBranch[];
@@ -160,6 +161,9 @@ type RuntimeState = {
   streamDebugTextCharsReceived: number;
   streamDebugTextCharsFlushed: number;
   browserPreviewRunToken: number;
+  runningSessionMap: Record<string, { turnId: string; phase: RuntimePhase }>;
+  completedSessionSet: Record<string, boolean>;
+  failedSessionSet: Record<string, boolean>;
 };
 
 type PersistedRuntimeState = {
@@ -182,6 +186,11 @@ type PersistedRuntimeState = {
   outputTokens: number | null;
   totalTokens: number | null;
   firstTokenLatencyMs: number | null;
+  branchHeadNodeId?: string | null;
+  activeBranchId?: string | null;
+  historyCursorMode?: HistoryCursorMode;
+  historyNodes?: HistoryNode[];
+  historyBranches?: HistoryBranch[];
   visibleNodeId?: string | null;
 };
 
@@ -215,6 +224,7 @@ type SessionRuntimeSnapshot = {
   visibleNodeId: string | null;
   branchHeadNodeId: string | null;
   activeBranchId: string | null;
+  cursorVersion: number | null;
   historyCursorMode: HistoryCursorMode;
   historyNodes: HistoryNode[];
   historyBranches: HistoryBranch[];
@@ -700,6 +710,58 @@ function cloneHistoryBranches(branches?: HistoryBranch[] | null) {
 
 function cloneHistoryCursor(cursor?: HistoryCursorState | null) {
   return cursor ? { ...cursor } : null;
+}
+
+function hasHostManagedHistoryState(runtimeView?: Pick<SessionRuntimeView, "historyCursor" | "authorityMode"> | null) {
+  return (runtimeView?.authorityMode ?? runtimeView?.historyCursor?.authorityMode ?? "host_authoritative") === "host_authoritative";
+}
+
+function previewHistoryMutationUnavailable() {
+  return "当前为 browser preview / local preview 降级模式，不支持 branch / restore / fork 等正式宿主历史控制动作。";
+}
+
+function historyCursorVersion(cursor?: Pick<HistoryCursorState, "cursorVersion"> | null) {
+  return typeof cursor?.cursorVersion === "number" && Number.isFinite(cursor.cursorVersion)
+    ? cursor.cursorVersion
+    : null;
+}
+
+function resolveRuntimeViewHistoryProjection(
+  runtimeView?:
+    | Pick<
+        SessionRuntimeView,
+        | "historyCursor"
+        | "resolvedVisibleNodeId"
+        | "activeBranchHeadNodeId"
+        | "isAtBranchHead"
+        | "historyNodes"
+        | "historyBranches"
+      >
+    | null
+) {
+  const runtimeHistoryCursor = cloneHistoryCursor(runtimeView?.historyCursor);
+  if (runtimeHistoryCursor) {
+    return runtimeHistoryCursor;
+  }
+
+  const visibleNodeId = runtimeView?.resolvedVisibleNodeId?.trim() || null;
+  const activeBranchId =
+    runtimeView?.historyBranches?.find((branch) => branch.headNodeId === runtimeView?.activeBranchHeadNodeId)?.branchId ?? null;
+  const branchHeadNodeId = runtimeView?.activeBranchHeadNodeId?.trim() || null;
+  if (!visibleNodeId && !branchHeadNodeId && !activeBranchId) {
+    return null;
+  }
+
+  return {
+    sessionId: "",
+    visibleNodeId,
+    activeBranchId,
+    branchHeadNodeId,
+    workspaceNodeId: visibleNodeId,
+    mode: normalizeHistoryCursorMode(
+      runtimeView?.isAtBranchHead === false ? "historical" : "live"
+    )
+  } satisfies Partial<HistoryCursorState>;
 }
 
 function cloneHistoryStateEvidence(evidence?: HistoryStateHookEvidence[] | null) {
@@ -1717,6 +1779,7 @@ function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapsh
     visibleNodeId: state.visibleNodeId,
     branchHeadNodeId: state.branchHeadNodeId,
     activeBranchId: state.activeBranchId,
+    cursorVersion: state.cursorVersion,
     historyCursorMode: state.historyCursorMode,
     historyNodes: cloneHistoryNodes(state.historyNodes),
     historyBranches: cloneHistoryBranches(state.historyBranches),
@@ -3206,6 +3269,7 @@ export const useRuntimeStore = defineStore("runtime", {
       visibleNodeId: null,
       branchHeadNodeId: null,
       activeBranchId: null,
+      cursorVersion: null,
       historyCursorMode: "live",
       historyNodes: [],
       historyBranches: [],
@@ -3235,7 +3299,10 @@ export const useRuntimeStore = defineStore("runtime", {
       turnTraceHistory: (persisted?.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace)),
       eventCursorByTurnId: buildEventCursorByTurnTraceHistory(
         (persisted?.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace))
-      )
+      ),
+      runningSessionMap: {},
+      completedSessionSet: {},
+      failedSessionSet: {}
     };
   },
   getters: {
@@ -3307,6 +3374,9 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       return entries;
+    },
+    isSessionRunning(state): (sessionId: string) => boolean {
+      return (sessionId: string) => sessionId in state.runningSessionMap;
     }
   },
   actions: {
@@ -3567,7 +3637,12 @@ export const useRuntimeStore = defineStore("runtime", {
         outputTokens: this.outputTokens,
         totalTokens: this.totalTokens,
         firstTokenLatencyMs: this.firstTokenLatencyMs,
-        visibleNodeId: this.visibleNodeId
+        visibleNodeId: this.visibleNodeId,
+        branchHeadNodeId: this.branchHeadNodeId,
+        activeBranchId: this.activeBranchId,
+        historyCursorMode: this.historyCursorMode,
+        historyNodes: cloneHistoryNodes(this.historyNodes),
+        historyBranches: cloneHistoryBranches(this.historyBranches)
       };
 
       try {
@@ -3608,6 +3683,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.activeBranchId = activeBranchId;
       this.branchHeadNodeId = branchHeadNodeId;
       this.visibleNodeId = visibleNodeId;
+      this.cursorVersion = historyCursorVersion(payload);
       this.historyCursorMode = normalizeHistoryCursorMode(
         payload?.mode ?? (visibleNodeId && branchHeadNodeId && visibleNodeId !== branchHeadNodeId ? "historical" : "live")
       );
@@ -3639,6 +3715,37 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       const persisted = loadPersistedRuntimeState(sessionId);
+      const persistedVisibleNodeId = persisted?.visibleNodeId?.trim() || null;
+      const requestedVisibleNodeId = nodeId?.trim() || persistedVisibleNodeId;
+      const persistedBranchHeadNodeId = persisted?.branchHeadNodeId?.trim() || null;
+      const persistedActiveBranchId = persisted?.activeBranchId?.trim() || null;
+      const persistedHistoryNodes = cloneHistoryNodes(persisted?.historyNodes);
+      const persistedHistoryBranches = cloneHistoryBranches(persisted?.historyBranches);
+      const persistedHistoryCursor =
+        requestedVisibleNodeId || persistedBranchHeadNodeId || persistedActiveBranchId
+          ? {
+              sessionId,
+              visibleNodeId: requestedVisibleNodeId,
+              activeBranchId: persistedActiveBranchId,
+              branchHeadNodeId:
+                persistedBranchHeadNodeId ||
+                resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches),
+              workspaceNodeId: requestedVisibleNodeId,
+              mode: normalizeHistoryCursorMode(
+                persisted?.historyCursorMode ??
+                  (requestedVisibleNodeId && persistedBranchHeadNodeId && requestedVisibleNodeId !== persistedBranchHeadNodeId
+                    ? "historical"
+                    : "live")
+              ),
+              authorityMode: "local_preview",
+              cursorVersion: null,
+              isAtBranchHead:
+                !!requestedVisibleNodeId &&
+                !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
+                requestedVisibleNodeId ===
+                  (persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches))
+            }
+          : null;
       const snapshot = {
         conversationId: sessionId,
         title: buildSessionTitleFromMessages(persisted?.messages ?? []),
@@ -3665,9 +3772,19 @@ export const useRuntimeStore = defineStore("runtime", {
         checkpoint: null,
         submissionPlan: null,
         controlBoundaryEvidence: null,
-        historyNodes: undefined,
-        historyBranches: undefined,
-        historyCursor: null
+        historyNodes: persistedHistoryNodes.length > 0 ? persistedHistoryNodes : undefined,
+        historyBranches: persistedHistoryBranches.length > 0 ? persistedHistoryBranches : undefined,
+        historyCursor: persistedHistoryCursor,
+        authorityMode: "local_preview",
+        resolvedVisibleNodeId: requestedVisibleNodeId,
+        activeBranchHeadNodeId:
+          persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches),
+        isAtBranchHead:
+          !!requestedVisibleNodeId &&
+          !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
+          requestedVisibleNodeId ===
+            (persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)),
+        cursorVersion: null
       } satisfies SessionRuntimeView;
     },
     applyExecutionCheckpoint(
@@ -3676,16 +3793,6 @@ export const useRuntimeStore = defineStore("runtime", {
     ) {
       this.latestExecutionCheckpoint = checkpoint ? { ...checkpoint } : null;
       if (!checkpoint) {
-        return;
-      }
-
-      if (!this.messages.some((msg) => msg.turnId === checkpoint.turnId)) {
-        return;
-      }
-
-      const checkpointStatus = checkpoint.status.trim().toLowerCase();
-      const isRecoveryCheckpoint = checkpoint.checkpointKind === "recovery";
-      if (!isRecoveryCheckpoint && checkpointStatus !== "running") {
         return;
       }
 
@@ -3701,6 +3808,16 @@ export const useRuntimeStore = defineStore("runtime", {
           ...this.messages.filter((message) => message.turnId !== checkpoint.turnId),
           ...restoredTurnMessages
         ];
+      }
+
+      if (!this.messages.some((msg) => msg.turnId === checkpoint.turnId)) {
+        return;
+      }
+
+      const checkpointStatus = checkpoint.status.trim().toLowerCase();
+      const isRecoveryCheckpoint = checkpoint.checkpointKind === "recovery";
+      if (!isRecoveryCheckpoint && checkpointStatus !== "running") {
+        return;
       }
 
       const modelLabel = buildAssistantModelLabel(checkpoint.providerName, checkpoint.providerModel);
@@ -3763,39 +3880,28 @@ export const useRuntimeStore = defineStore("runtime", {
       }
     ) {
       const refreshCatalog = options?.refreshCatalog ?? true;
+      const persistedState = loadPersistedRuntimeState(nextSessionId);
+      const persistedVisibleNodeId = persistedState?.visibleNodeId?.trim() || null;
+      const fallbackNodeId =
+        options?.nodeId ??
+        (!isTauriAvailable()
+          ? persistedVisibleNodeId
+          : null);
       const runtimeView =
-        options?.runtimeView ?? (await this.loadSessionRuntimeViewState(nextSessionId, options?.nodeId ?? null));
+        options?.runtimeView ?? (await this.loadSessionRuntimeViewState(nextSessionId, fallbackNodeId));
       const snapshot = runtimeView.session;
       const retrieved = runtimeView.retrieved;
-      const persisted = loadPersistedRuntimeState(nextSessionId);
-      const previousHistoryState = {
-        activeBranchId: this.activeBranchId,
-        branchHeadNodeId: this.branchHeadNodeId,
-        historyNodes: this.historyNodes,
-        historyBranches: this.historyBranches
-      };
+      const persisted = persistedState;
+      const runtimeViewIsHistorical =
+        !hasHostManagedHistoryState(runtimeView)
+          ? normalizeHistoryCursorMode(runtimeView.historyCursor?.mode ?? null) !== "live"
+          : normalizeHistoryCursorMode(runtimeView.historyCursor?.mode ?? null) !== "live" ||
+            runtimeView.isAtBranchHead === false;
       const shouldApplyRuntimeViewCheckpoint =
-        !isHistoricalMode(runtimeView.historyCursor?.mode) &&
-        (!options?.nodeId || !runtimeView.historyCursor || !isHistoricalMode(runtimeView.historyCursor.mode));
+        !runtimeViewIsHistorical && (!options?.nodeId || !runtimeViewIsHistorical);
       const hasCheckpointOverride =
         options != null && Object.prototype.hasOwnProperty.call(options, "executionCheckpoint");
       this.applySessionSnapshot(nextSessionId, snapshot, retrieved, runtimeView);
-      if (
-        options?.nodeId &&
-        !runtimeView.historyCursor &&
-        !runtimeView.historyNodes?.length &&
-        !runtimeView.historyBranches?.length
-      ) {
-        this.applyHistoryState(nextSessionId, {
-          ...previousHistoryState,
-          visibleNodeId: options.nodeId,
-          mode:
-            previousHistoryState.branchHeadNodeId &&
-            previousHistoryState.branchHeadNodeId !== options.nodeId
-              ? "historical"
-              : "live"
-        });
-      }
       this.applyExecutionCheckpoint(
         hasCheckpointOverride
           ? (options?.executionCheckpoint ?? null)
@@ -3978,11 +4084,32 @@ export const useRuntimeStore = defineStore("runtime", {
       this.latestGraphRunControlBoundaryEvidence = cloneGraphRunControlBoundaryEvidence(
         runtimeView?.controlBoundaryEvidence
       );
-      this.applyHistoryState(sessionId, {
-        historyNodes: runtimeView?.historyNodes,
-        historyBranches: runtimeView?.historyBranches,
-        ...(cloneHistoryCursor(runtimeView?.historyCursor) ?? {})
-      });
+      const runtimeHistoryCursor = resolveRuntimeViewHistoryProjection(runtimeView);
+      const hasRuntimeHistoryState = Boolean(
+        runtimeHistoryCursor || runtimeView?.historyNodes?.length || runtimeView?.historyBranches?.length
+      );
+      if (hasRuntimeHistoryState) {
+        this.applyHistoryState(sessionId, {
+          historyNodes: runtimeView?.historyNodes,
+          historyBranches: runtimeView?.historyBranches,
+          ...(runtimeHistoryCursor ? { ...runtimeHistoryCursor, sessionId } : {})
+        });
+      } else if (!hasHostManagedHistoryState(runtimeView) && restoredState) {
+        this.applyHistoryState(sessionId, {
+          historyNodes: restoredState.historyNodes,
+          historyBranches: restoredState.historyBranches,
+          activeBranchId: restoredState.activeBranchId,
+          branchHeadNodeId: restoredState.branchHeadNodeId,
+          visibleNodeId: restoredState.visibleNodeId,
+          mode: restoredState.historyCursorMode
+        });
+      } else {
+        this.applyHistoryState(sessionId, {
+          historyNodes: runtimeView?.historyNodes,
+          historyBranches: runtimeView?.historyBranches,
+          ...(runtimeHistoryCursor ? { ...runtimeHistoryCursor, sessionId } : {})
+        });
+      }
       this.persistHistory();
     },
     async checkoutHistoryNode(nodeId: string, mode: HistoryCheckoutMode = "transcript_only", turnId?: string | null) {
@@ -3993,11 +4120,18 @@ export const useRuntimeStore = defineStore("runtime", {
 
       let result: HistoryCheckoutResult;
       if (isTauriAvailable()) {
-        const payload = await safeInvoke<HistoryCheckoutWireResult>("checkout_history_node", {
-          sessionId,
-          nodeId,
-          mode
-        });
+        let payload: HistoryCheckoutWireResult;
+        try {
+          payload = await safeInvoke<HistoryCheckoutWireResult>("checkout_history_node", {
+            sessionId,
+            nodeId,
+            mode,
+            expectedCursorVersion: this.cursorVersion
+          });
+        } catch (error) {
+          this.sessionError = `历史 checkout 冲突或失败：${String(error)}`;
+          return null;
+        }
         await this.loadSessionState(sessionId, {
           refreshCatalog: false,
           nodeId
@@ -4073,44 +4207,28 @@ export const useRuntimeStore = defineStore("runtime", {
         return null;
       }
 
-      let result: HistoryRestoreResult;
-      if (isTauriAvailable()) {
-        const payload = await safeInvoke<HistoryRestoreWireResult>("restore_branch_head", {
-          sessionId,
-          branchId: targetBranchId ?? null
-        });
-        await this.loadSessionState(sessionId, {
-          refreshCatalog: false,
-          nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
-        });
-        result = normalizeHistoryRestoreResult(payload, this.historyNodes, this.historyBranches);
-      } else {
-        const branchHeadNodeId =
-          resolveHistoryBranchHeadNodeId(targetBranchId, this.historyBranches) ?? this.branchHeadNodeId;
-        result = {
-          sessionId,
-          branchId: targetBranchId,
-          visibleNodeId: branchHeadNodeId,
-          activeBranchId: targetBranchId,
-          branchHeadNodeId,
-          workspaceNodeId: branchHeadNodeId,
-          mode: "live",
-          restoredNodeId: branchHeadNodeId,
-          transcriptRestoreApplied: true,
-          workspaceRollbackCapable: false,
-          workspaceRestoreCapable: false,
-          workspaceRollbackApplied: false,
-          workspaceRestoreApplied: false,
-          degraded: false,
-          degradedToTranscriptOnly: false,
-          degradationReason: null,
-          restoredFromNodeId: this.visibleNodeId,
-          historyStateEvidence: null,
-          historyStateAuditSummary: null,
-          historyNodes: this.historyNodes,
-          historyBranches: this.historyBranches
-        };
+      if (!isTauriAvailable()) {
+        this.sessionError = previewHistoryMutationUnavailable();
+        return null;
       }
+
+      let result: HistoryRestoreResult;
+      let payload: HistoryRestoreWireResult;
+      try {
+        payload = await safeInvoke<HistoryRestoreWireResult>("restore_branch_head", {
+          sessionId,
+          branchId: targetBranchId ?? null,
+          expectedCursorVersion: this.cursorVersion
+        });
+      } catch (error) {
+        this.sessionError = `恢复 branch head 冲突或失败：${String(error)}`;
+        return null;
+      }
+      await this.loadSessionState(sessionId, {
+        refreshCatalog: false,
+        nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
+      });
+      result = normalizeHistoryRestoreResult(payload, this.historyNodes, this.historyBranches);
       this.applyHistoryState(sessionId, result);
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
         result.historyStateAuditSummary ?? null
@@ -4124,46 +4242,28 @@ export const useRuntimeStore = defineStore("runtime", {
         return null;
       }
 
+      if (!isTauriAvailable()) {
+        this.sessionError = previewHistoryMutationUnavailable();
+        return null;
+      }
+
       let result: HistoryForkResult;
-      if (isTauriAvailable()) {
-        const payload = await safeInvoke<HistoryForkWireResult>("fork_from_history_node", {
-          sessionId,
-          nodeId: targetNodeId
-        });
-        await this.loadSessionState(sessionId, {
-          refreshCatalog: false,
-          nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
-        });
-        result = normalizeHistoryForkResult(payload, this.historyNodes, this.historyBranches);
-      } else {
-        const createdBranchId = `branch-${Date.now()}`;
-        const nextBranch: HistoryBranch = {
-          branchId: createdBranchId,
-          sessionId,
-          baseNodeId: targetNodeId,
-          headNodeId: targetNodeId,
-          forkedFromBranchId: this.activeBranchId,
-          forkedFromNodeId: targetNodeId,
-          label: null,
-          createdAtMs: Date.now(),
-          updatedAtMs: Date.now()
-        };
-        result = {
+      let payload: HistoryForkWireResult;
+      try {
+        payload = await safeInvoke<HistoryForkWireResult>("fork_from_history_node", {
           sessionId,
           nodeId: targetNodeId,
-          createdBranchId,
-          branch: { ...nextBranch },
-          visibleNodeId: targetNodeId,
-          activeBranchId: createdBranchId,
-          branchHeadNodeId: targetNodeId,
-          workspaceNodeId: this.visibleNodeId,
-          mode: "live",
-          historyStateEvidence: null,
-          historyStateAuditSummary: null,
-          historyNodes: this.historyNodes,
-          historyBranches: [...this.historyBranches, nextBranch]
-        };
+          expectedCursorVersion: this.cursorVersion
+        });
+      } catch (error) {
+        this.sessionError = `创建 branch 冲突或失败：${String(error)}`;
+        return null;
       }
+      await this.loadSessionState(sessionId, {
+        refreshCatalog: false,
+        nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
+      });
+      result = normalizeHistoryForkResult(payload, this.historyNodes, this.historyBranches);
 
       this.applyHistoryState(sessionId, result);
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
@@ -4177,39 +4277,32 @@ export const useRuntimeStore = defineStore("runtime", {
         return null;
       }
 
+      if (!isTauriAvailable()) {
+        this.sessionError = previewHistoryMutationUnavailable();
+        return null;
+      }
+
       let result: HistoryBranchSwitchResult;
-      if (isTauriAvailable()) {
-        const payload = await safeInvoke<HistoryBranchSwitchWireResult>("switch_history_branch", {
-          sessionId,
-          branchId
-        });
-        await this.loadSessionState(sessionId, {
-          refreshCatalog: false,
-          nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
-        });
-        result = normalizeHistoryBranchSwitchResult(
-          payload,
-          this.historyNodes,
-          this.historyBranches
-        );
-      } else {
-        const branchHeadNodeId = resolveHistoryBranchHeadNodeId(branchId, this.historyBranches);
-        result = {
+      let payload: HistoryBranchSwitchWireResult;
+      try {
+        payload = await safeInvoke<HistoryBranchSwitchWireResult>("switch_history_branch", {
           sessionId,
           branchId,
-          previousBranchId: this.activeBranchId,
-          nodeId: branchHeadNodeId,
-          visibleNodeId: branchHeadNodeId,
-          activeBranchId: branchId,
-          branchHeadNodeId,
-          workspaceNodeId: branchHeadNodeId,
-          mode: "live",
-          historyStateEvidence: null,
-          historyStateAuditSummary: null,
-          historyNodes: this.historyNodes,
-          historyBranches: this.historyBranches
-        };
+          expectedCursorVersion: this.cursorVersion
+        });
+      } catch (error) {
+        this.sessionError = `切换 branch 冲突或失败：${String(error)}`;
+        return null;
       }
+      await this.loadSessionState(sessionId, {
+        refreshCatalog: false,
+        nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
+      });
+      result = normalizeHistoryBranchSwitchResult(
+        payload,
+        this.historyNodes,
+        this.historyBranches
+      );
       this.applyHistoryState(sessionId, result);
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
         result.historyStateAuditSummary ?? null
@@ -4217,11 +4310,22 @@ export const useRuntimeStore = defineStore("runtime", {
       return result;
     },
     async switchSession(nextSessionId: string) {
-      if (this.isSubmitting || this.sessionOperation) {
+      if (this.sessionOperation) {
         return;
       }
       if (nextSessionId === this.sessionId) {
         return;
+      }
+
+      // Register current running turn as a background turn before switching away
+      const switchingFromRunningTurn = this.isSubmitting && this.activeTurnId != null;
+      if (switchingFromRunningTurn && this.activeTurnId) {
+        this.runningSessionMap[this.sessionId] = {
+          turnId: this.activeTurnId,
+          phase: this.phase
+        };
+        delete this.completedSessionSet[this.sessionId];
+        delete this.failedSessionSet[this.sessionId];
       }
 
       this.persistHistory();
@@ -4231,12 +4335,40 @@ export const useRuntimeStore = defineStore("runtime", {
 
       try {
         await this.loadSessionState(nextSessionId);
+
+        // Clear completed status for the target session (user is now viewing it)
+        delete this.completedSessionSet[nextSessionId];
+        delete this.failedSessionSet[nextSessionId];
+
+        // If the target session has a background turn still running, restore its loading state
+        const bgTurn = this.runningSessionMap[nextSessionId];
+        if (bgTurn) {
+          this.activeTurnId = bgTurn.turnId;
+          this.isSubmitting = true;
+          this.phase = bgTurn.phase;
+          delete this.runningSessionMap[nextSessionId];
+        }
+
         debugLog("session:switch", {
           from: previousSnapshot.sessionId,
-          to: nextSessionId
+          to: nextSessionId,
+          backgroundTurnRegistered: switchingFromRunningTurn,
+          restoredBackgroundTurn: Boolean(bgTurn)
         });
       } catch (error) {
-        restoreSessionRuntimeSnapshot(this, previousSnapshot);
+        // Check if the background turn is still running before restoring the snapshot.
+        // If it completed during the failed loadSessionState await, don't restore a dead spinner.
+        if (switchingFromRunningTurn) {
+          if (this.runningSessionMap[previousSnapshot.sessionId]) {
+            // Turn still running in background — safe to bring back to foreground
+            restoreSessionRuntimeSnapshot(this, previousSnapshot);
+          } else {
+            // Turn terminated while we were away — restore without the running state
+            restoreSessionRuntimeSnapshot(this, { ...previousSnapshot, isSubmitting: false, activeTurnId: null });
+          }
+        } else {
+          restoreSessionRuntimeSnapshot(this, previousSnapshot);
+        }
         this.sessionError = `切换对话失败：${String(error)}`;
         debugLog("session:switch:error", {
           from: previousSnapshot.sessionId,
@@ -4250,6 +4382,16 @@ export const useRuntimeStore = defineStore("runtime", {
     async createSession() {
       if (this.sessionOperation || !hasPersistableMessages(this.messages)) {
         return;
+      }
+
+      // Register current running turn as a background turn before resetting
+      if (this.isSubmitting && this.activeTurnId) {
+        this.runningSessionMap[this.sessionId] = {
+          turnId: this.activeTurnId,
+          phase: this.phase
+        };
+        delete this.completedSessionSet[this.sessionId];
+        delete this.failedSessionSet[this.sessionId];
       }
 
       const nextSessionId = `session-${Date.now()}`;
@@ -4282,6 +4424,9 @@ export const useRuntimeStore = defineStore("runtime", {
 
       try {
         removePersistedSessionState(targetSessionId);
+        delete this.runningSessionMap[targetSessionId];
+        delete this.completedSessionSet[targetSessionId];
+        delete this.failedSessionSet[targetSessionId];
 
         if (isTauriAvailable() && !deletingActiveEmptySession) {
           this.sessionList = await safeInvoke<SessionOverview[]>("delete_session", {
@@ -5160,6 +5305,15 @@ export const useRuntimeStore = defineStore("runtime", {
       });
 
       const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
+        // Detect terminal event for a background session's turn
+        if (payload.sessionId) {
+          const bg = this.runningSessionMap[payload.sessionId];
+          if (bg && bg.turnId === payload.turnId) {
+            this.completedSessionSet[payload.sessionId] = true;
+            delete this.runningSessionMap[payload.sessionId];
+            return;
+          }
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -5346,6 +5500,15 @@ export const useRuntimeStore = defineStore("runtime", {
       });
 
       const failedUnlisten = await safeListen<TurnStreamEvent>("turn:failed", ({ payload }) => {
+        // Detect terminal event for a background session's turn
+        if (payload.sessionId) {
+          const bg = this.runningSessionMap[payload.sessionId];
+          if (bg && bg.turnId === payload.turnId) {
+            this.failedSessionSet[payload.sessionId] = true;
+            delete this.runningSessionMap[payload.sessionId];
+            return;
+          }
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -5489,6 +5652,14 @@ export const useRuntimeStore = defineStore("runtime", {
       });
 
       const cancelledUnlisten = await safeListen<TurnStreamEvent>("turn:cancelled", ({ payload }) => {
+        // Detect terminal event for a background session's turn
+        if (payload.sessionId) {
+          const bg = this.runningSessionMap[payload.sessionId];
+          if (bg && bg.turnId === payload.turnId) {
+            delete this.runningSessionMap[payload.sessionId];
+            return;
+          }
+        }
         if (this.activeTurnId !== payload.turnId) {
           return;
         }

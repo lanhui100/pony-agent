@@ -231,6 +231,40 @@ fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
+fn get_service_api_key(service: String) -> Result<String, String> {
+    let store = pony_agent_core::agent::config::ProviderRegistryStore::new();
+    Ok(store.get_service_api_key(&service).unwrap_or_default())
+}
+
+#[tauri::command]
+fn set_service_api_key(service: String, key: String) -> Result<(), String> {
+    let store = pony_agent_core::agent::config::ProviderRegistryStore::new();
+    store.set_service_api_key(&service, &key)
+}
+
+#[tauri::command]
+fn open_url(url: String) {
+    let _ = open_url_in_browser(&url);
+}
+
+fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", &url.replace('&', "^&")])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+#[tauri::command]
 fn list_sessions(control_plane: State<'_, HostControlPlane>) -> Vec<SessionOverview> {
     control_plane.list_sessions()
 }
@@ -328,11 +362,13 @@ fn checkout_history_node(
     session_id: Option<String>,
     node_id: String,
     mode: HistoryCheckoutMode,
+    expected_cursor_version: Option<u64>,
 ) -> Result<HistoryCheckoutResponse, String> {
     control_plane.checkout_history_node(CheckoutHistoryNodeCommand {
         session_id,
         node_id,
         mode,
+        expected_cursor_version,
     })
 }
 
@@ -341,10 +377,12 @@ fn restore_branch_head(
     control_plane: State<'_, HostControlPlane>,
     session_id: Option<String>,
     branch_id: Option<String>,
+    expected_cursor_version: Option<u64>,
 ) -> Result<RestoreBranchHeadResponse, String> {
     control_plane.restore_branch_head(RestoreBranchHeadCommand {
         session_id,
         branch_id,
+        expected_cursor_version,
     })
 }
 
@@ -353,10 +391,12 @@ fn fork_from_history_node(
     control_plane: State<'_, HostControlPlane>,
     session_id: Option<String>,
     node_id: String,
+    expected_cursor_version: Option<u64>,
 ) -> Result<ForkFromHistoryNodeResponse, String> {
     control_plane.fork_from_history_node(ForkFromHistoryNodeCommand {
         session_id,
         node_id,
+        expected_cursor_version,
     })
 }
 
@@ -365,10 +405,12 @@ fn switch_history_branch(
     control_plane: State<'_, HostControlPlane>,
     session_id: Option<String>,
     branch_id: String,
+    expected_cursor_version: Option<u64>,
 ) -> Result<SwitchHistoryBranchResponse, String> {
     control_plane.switch_history_branch(SwitchHistoryBranchCommand {
         session_id,
         branch_id,
+        expected_cursor_version,
     })
 }
 
@@ -791,7 +833,10 @@ pub fn run() {
             export_frontend_trace_chrome_trace,
             save_app_settings,
             save_provider_registry,
-            save_provider_registry_without_env_sync
+            save_provider_registry_without_env_sync,
+            get_service_api_key,
+            set_service_api_key,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Pony Agent");

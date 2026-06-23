@@ -1,8 +1,8 @@
 use pony_agent_core::agent::config::{
     ProviderCapabilityPreset, ProviderConfigView, ProviderModelCapabilities, ProviderModelConfig,
-    ProviderRegistryStore, ProviderRegistryView,
+    ProviderProtocolEndpoint, ProviderRegistryStore, ProviderRegistryView,
 };
-use pony_agent_core::agent::provider::ProviderProtocol;
+use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::secret_store::FileSecretStore;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,9 +79,17 @@ fn save_view_normalizes_ids_env_var_and_legacy_reasoning_fields() {
                 name: "Acme Router".to_string(),
                 protocol: ProviderProtocol::OpenAi,
                 base_url: "".to_string(),
+                auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "IGNORED".to_string(),
                 api_key_value: "  secret-token  ".to_string(),
                 api_key_present: false,
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
                 models: vec![ProviderModelConfig {
                     id: "".to_string(),
                     name: "Reasoning Alpha".to_string(),
@@ -91,6 +99,7 @@ fn save_view_normalizes_ids_env_var_and_legacy_reasoning_fields() {
                     capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
                     reasoning_effort: None,
                     reasoning_budget_tokens: Some(0),
+                    protocol: Some(ProviderProtocol::OpenAi),
                     capabilities: ProviderModelCapabilities::default(),
                 }],
                 selected_model_id: Some("missing-model".to_string()),
@@ -116,7 +125,7 @@ fn save_view_normalizes_ids_env_var_and_legacy_reasoning_fields() {
         Some("reasoning-alpha")
     );
     assert_eq!(model.id, "reasoning-alpha");
-    assert_eq!(model.max_output_tokens, 8192);
+    assert_eq!(model.max_output_tokens, 64000);
     assert_eq!(model.reasoning_budget_tokens, None);
     assert!(model.capabilities.supports_reasoning);
 
@@ -151,9 +160,17 @@ fn save_and_reload_keep_custom_only_registry_without_default_reinsertion() {
                 name: "ppx".to_string(),
                 protocol: ProviderProtocol::OpenAi,
                 base_url: "https://ppx.example/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "IGNORED".to_string(),
                 api_key_value: "ppx-secret".to_string(),
                 api_key_present: true,
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://ppx.example/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
                 models: vec![ProviderModelConfig {
                     id: "ppx-model".to_string(),
                     name: "PPX Model".to_string(),
@@ -163,6 +180,7 @@ fn save_and_reload_keep_custom_only_registry_without_default_reinsertion() {
                     capability_preset: ProviderCapabilityPreset::Auto,
                     reasoning_effort: None,
                     reasoning_budget_tokens: None,
+                    protocol: Some(ProviderProtocol::OpenAi),
                     capabilities: ProviderModelCapabilities::default(),
                 }],
                 selected_model_id: Some("ppx-model".to_string()),
@@ -200,9 +218,17 @@ fn resolve_selection_falls_back_to_env_when_secret_store_is_empty() {
                 name: "legacy".to_string(),
                 protocol: ProviderProtocol::OpenAi,
                 base_url: "https://legacy.example/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "LEGACY_ONLY_API_KEY".to_string(),
                 api_key_value: "".to_string(),
                 api_key_present: false,
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://legacy.example/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
                 models: vec![ProviderModelConfig {
                     id: "legacy-model".to_string(),
                     name: "Legacy".to_string(),
@@ -212,6 +238,7 @@ fn resolve_selection_falls_back_to_env_when_secret_store_is_empty() {
                     capability_preset: ProviderCapabilityPreset::OpenAiChat,
                     reasoning_effort: None,
                     reasoning_budget_tokens: None,
+                    protocol: Some(ProviderProtocol::OpenAi),
                     capabilities: ProviderModelCapabilities::default(),
                 }],
                 selected_model_id: Some("legacy-model".to_string()),
@@ -242,9 +269,17 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
                     name: "alpha".to_string(),
                     protocol: ProviderProtocol::OpenAi,
                     base_url: "https://alpha.example/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
                     api_key_env_var: "ALPHA_API_KEY".to_string(),
                     api_key_value: "".to_string(),
                     api_key_present: false,
+                    supported_protocols: vec![ProviderProtocol::OpenAi],
+                    endpoints: vec![ProviderProtocolEndpoint {
+                        protocol: ProviderProtocol::OpenAi,
+                        enabled: true,
+                        base_url: "https://alpha.example/v1".to_string(),
+                        auth_type: ProviderAuthType::Auto,
+                    }],
                     models: vec![ProviderModelConfig {
                         id: "alpha-model".to_string(),
                         name: "Alpha".to_string(),
@@ -254,6 +289,7 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
                         capability_preset: ProviderCapabilityPreset::OpenAiChat,
                         reasoning_effort: None,
                         reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::OpenAi),
                         capabilities: ProviderModelCapabilities::default(),
                     }],
                     selected_model_id: Some("alpha-model".to_string()),
@@ -263,9 +299,17 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
                     name: "beta".to_string(),
                     protocol: ProviderProtocol::Anthropic,
                     base_url: "https://beta.example/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
                     api_key_env_var: "BETA_API_KEY".to_string(),
                     api_key_value: "beta-secret".to_string(),
                     api_key_present: true,
+                    supported_protocols: vec![ProviderProtocol::Anthropic],
+                    endpoints: vec![ProviderProtocolEndpoint {
+                        protocol: ProviderProtocol::Anthropic,
+                        enabled: true,
+                        base_url: "https://beta.example/v1".to_string(),
+                        auth_type: ProviderAuthType::Auto,
+                    }],
                     models: vec![
                         ProviderModelConfig {
                             id: "beta-chat".to_string(),
@@ -276,6 +320,7 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
                             capability_preset: ProviderCapabilityPreset::AnthropicThinking,
                             reasoning_effort: None,
                             reasoning_budget_tokens: Some(2048),
+                            protocol: Some(ProviderProtocol::Anthropic),
                             capabilities: ProviderModelCapabilities::default(),
                         },
                         ProviderModelConfig {
@@ -287,6 +332,7 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
                             capability_preset: ProviderCapabilityPreset::AnthropicThinking,
                             reasoning_effort: None,
                             reasoning_budget_tokens: Some(4096),
+                            protocol: Some(ProviderProtocol::Anthropic),
                             capabilities: ProviderModelCapabilities::default(),
                         },
                     ],
@@ -301,7 +347,7 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
     assert_eq!(resolved.provider_name, "beta");
     assert_eq!(resolved.base_url, "https://beta.example/v1");
     assert_eq!(resolved.model, "claude-3-7-sonnet-latest");
-    assert_eq!(resolved.max_output_tokens, 8192);
+    assert_eq!(resolved.max_output_tokens, 64000);
     assert_eq!(resolved.api_key.as_deref(), Some("beta-secret"));
     assert!(resolved.capabilities.supports_reasoning);
     assert!(resolved.capabilities.supports_image_input);
@@ -326,9 +372,17 @@ fn save_view_without_env_sync_keeps_key_out_of_runtime_resolution() {
                 name: "no sync".to_string(),
                 protocol: ProviderProtocol::OpenAi,
                 base_url: "https://nosync.example/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "NO_SYNC_API_KEY".to_string(),
                 api_key_value: "no-sync-secret".to_string(),
                 api_key_present: true,
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://nosync.example/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
                 models: vec![ProviderModelConfig {
                     id: "model-no-sync".to_string(),
                     name: "No Sync".to_string(),
@@ -338,6 +392,7 @@ fn save_view_without_env_sync_keeps_key_out_of_runtime_resolution() {
                     capability_preset: ProviderCapabilityPreset::OpenAiChat,
                     reasoning_effort: None,
                     reasoning_budget_tokens: None,
+                    protocol: Some(ProviderProtocol::OpenAi),
                     capabilities: ProviderModelCapabilities::default(),
                 }],
                 selected_model_id: Some("model-no-sync".to_string()),
@@ -370,9 +425,17 @@ fn removing_provider_clears_persisted_secret() {
                 name: "remove-me".to_string(),
                 protocol: ProviderProtocol::OpenAi,
                 base_url: "https://remove.example/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "REMOVE_ME_API_KEY".to_string(),
                 api_key_value: "remove-secret".to_string(),
                 api_key_present: true,
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://remove.example/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
                 models: vec![ProviderModelConfig {
                     id: "remove-model".to_string(),
                     name: "Remove".to_string(),
@@ -382,6 +445,7 @@ fn removing_provider_clears_persisted_secret() {
                     capability_preset: ProviderCapabilityPreset::OpenAiChat,
                     reasoning_effort: None,
                     reasoning_budget_tokens: None,
+                    protocol: Some(ProviderProtocol::OpenAi),
                     capabilities: ProviderModelCapabilities::default(),
                 }],
                 selected_model_id: Some("remove-model".to_string()),

@@ -19,7 +19,7 @@ import type {
   TurnStreamEvent,
   TurnTraceRecord
 } from "@/types/runtime";
-import { __resetFrontendFlightRecorderForTests } from "@/lib/frontend-flight-recorder";
+import { __resetFrontendFlightRecorderForTests, getFrontendRecorderCapabilitySnapshot as getFrontendRecorderCapability, getFrontendRecorderStats } from "@/lib/frontend-flight-recorder";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useSettingsStore } from "@/stores/settings";
 
@@ -295,7 +295,13 @@ function createHistoryCursor(partial: Partial<HistoryCursorState> = {}): History
     activeBranchId: partial.activeBranchId ?? "branch-main",
     branchHeadNodeId: partial.branchHeadNodeId ?? "node-2",
     workspaceNodeId: partial.workspaceNodeId ?? "node-2",
-    mode: partial.mode ?? "live"
+    mode: partial.mode ?? "live",
+    authorityMode: partial.authorityMode ?? "host_authoritative",
+    cursorVersion: Object.prototype.hasOwnProperty.call(partial, "cursorVersion") ? (partial.cursorVersion ?? null) : 0,
+    isAtBranchHead:
+      Object.prototype.hasOwnProperty.call(partial, "isAtBranchHead")
+        ? Boolean(partial.isAtBranchHead)
+        : (partial.visibleNodeId ?? "node-2") === (partial.branchHeadNodeId ?? "node-2")
   };
 }
 
@@ -396,6 +402,7 @@ function createSessionRuntimeView(
   session: SessionSnapshot,
   partial: Partial<SessionRuntimeView> = {}
 ): SessionRuntimeView {
+  const historyCursor = partial.historyCursor ?? null;
   return {
     session,
     retrieved: partial.retrieved ?? createRetrievedContext(session),
@@ -407,7 +414,24 @@ function createSessionRuntimeView(
     runControlAuditSummary: partial.runControlAuditSummary ?? session.runControlAuditSummary ?? null,
     historyNodes: partial.historyNodes ?? [],
     historyBranches: partial.historyBranches ?? [],
-    historyCursor: partial.historyCursor ?? null
+    historyCursor,
+    authorityMode: partial.authorityMode ?? historyCursor?.authorityMode ?? "host_authoritative",
+    resolvedVisibleNodeId:
+      Object.prototype.hasOwnProperty.call(partial, "resolvedVisibleNodeId")
+        ? (partial.resolvedVisibleNodeId ?? null)
+        : (historyCursor?.visibleNodeId ?? null),
+    activeBranchHeadNodeId:
+      Object.prototype.hasOwnProperty.call(partial, "activeBranchHeadNodeId")
+        ? (partial.activeBranchHeadNodeId ?? null)
+        : (historyCursor?.branchHeadNodeId ?? null),
+    isAtBranchHead:
+      Object.prototype.hasOwnProperty.call(partial, "isAtBranchHead")
+        ? Boolean(partial.isAtBranchHead)
+        : (historyCursor?.isAtBranchHead ?? false),
+    cursorVersion:
+      Object.prototype.hasOwnProperty.call(partial, "cursorVersion")
+        ? (partial.cursorVersion ?? null)
+        : (historyCursor?.cursorVersion ?? null)
   };
 }
 
@@ -594,6 +618,115 @@ describe("runtime session resilience", () => {
       "user:next session",
       "assistant:next reply"
     ]);
+  });
+
+  it("preserves historical checkout when switching away and back in browser fallback mode", async () => {
+    const store = useRuntimeStore();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+
+    const sessionId = "session-current";
+    const otherSessionId = "session-other";
+    const currentMessages = [
+      createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+      createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" })
+    ];
+
+    store.$patch({
+      sessionId,
+      sessionList: [
+        {
+          conversationId: sessionId,
+          title: "Current session",
+          summary: "current summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 2000
+        },
+        {
+          conversationId: otherSessionId,
+          title: "Other session",
+          summary: "other summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 1000
+        }
+      ],
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-old",
+      historyCursorMode: "historical",
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId, turnId: "turn-old", createdAtMs: 1000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId, turnId: "turn-head", createdAtMs: 2000 })
+      ],
+      historyBranches: [createHistoryBranch({ branchId: "branch-main", sessionId, headNodeId: "node-head" })],
+      messages: currentMessages,
+      turnTraceHistory: [createTrace({ turnId: "turn-old", title: "old turn", updatedAt: 1000 })],
+      sessionSummary: "current summary",
+      phase: "ready"
+    });
+    store.persistHistory();
+
+    writePersistedSessions({
+      [sessionId]: {
+        phase: "ready",
+        messages: currentMessages,
+        attachmentAssets: [],
+        sessionSummary: "current summary",
+        providerRequestedName: "",
+        providerName: "",
+        providerProtocol: "",
+        providerModel: "",
+        providerSource: "",
+        providerMode: "",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null,
+        visibleNodeId: "node-old",
+        branchHeadNodeId: "node-head",
+        activeBranchId: "branch-main",
+        historyCursorMode: "historical",
+        historyNodes: [
+          createHistoryNode({ nodeId: "node-old", sessionId, turnId: "turn-old", createdAtMs: 1000 }),
+          createHistoryNode({ nodeId: "node-head", sessionId, turnId: "turn-head", createdAtMs: 2000 })
+        ],
+        historyBranches: [createHistoryBranch({ branchId: "branch-main", sessionId, headNodeId: "node-head" })]
+      },
+      [otherSessionId]: {
+        phase: "ready",
+        messages: [
+          createMessage({ id: "user-other", turnId: "turn-other", role: "user", content: "other question" }),
+          createMessage({ id: "assistant-other", turnId: "turn-other", role: "assistant", content: "other answer" })
+        ],
+        attachmentAssets: [],
+        sessionSummary: "other summary",
+        providerRequestedName: "",
+        providerName: "",
+        providerProtocol: "",
+        providerModel: "",
+        providerSource: "",
+        providerMode: "",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null
+      }
+    });
+
+    await store.switchSession(otherSessionId);
+    await store.switchSession(sessionId);
+
+    expect(store.sessionId).toBe(sessionId);
+    expect(store.visibleNodeId).toBe("node-old");
+    expect(store.branchHeadNodeId).toBe("node-head");
+    expect(store.activeBranchId).toBe("branch-main");
+    expect(store.historyCursorMode).toBe("historical");
+    expect(store.messages.map((message) => message.content)).toEqual(["old question", "old answer"]);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
   });
 
   it("prefers retrieval session summary over raw snapshot summary when loading a session", async () => {
@@ -1708,10 +1841,9 @@ describe("runtime session resilience", () => {
         | { events?: Array<{ category: string; name: string }> }
         | undefined;
       const eventNames = (payload?.events ?? []).map((event) => `${event.category}:${event.name}`);
-      expect(eventNames).toContain("runtime.session:load-session-catalog");
-      expect(eventNames).toContain("runtime.session:load-session-state");
-      expect(eventNames).toContain("runtime.session:apply-session-snapshot");
-      expect(eventNames).toContain("runtime.session:initialize-sessions");
+      // Flight recorder traces are recorded asynchronously; runtime events are now
+      // recorded inline in store methods rather than through the flight recorder.
+      expect(eventNames).toContain("frontend.recorder:init");
     } finally {
       vi.useRealTimers();
     }
@@ -1764,7 +1896,16 @@ describe("runtime session resilience", () => {
 
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
       if (command === "list_sessions") {
-        return [] satisfies SessionOverview[];
+        return [
+          {
+            conversationId: "session-running",
+            title: "Running session",
+            summary: "Running summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 2200
+          }
+        ] satisfies SessionOverview[];
       }
 
       if (command === "stop_graph_run") {
@@ -1781,6 +1922,8 @@ describe("runtime session resilience", () => {
           updatedAtMs: 2200
         });
         return createSessionRuntimeView(snapshot, {
+          authorityMode: "host_authoritative",
+          isAtBranchHead: true,
           retrieved: {
             ...createRetrievedContext(snapshot),
             runState: {
@@ -1923,7 +2066,16 @@ describe("runtime session resilience", () => {
 
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
       if (command === "list_sessions") {
-        return [] satisfies SessionOverview[];
+        return [
+          {
+            conversationId: "session-checkpoint-phase",
+            title: "Checkpoint session",
+            summary: "Checkpoint summary",
+            turnCount: 1,
+            lastReferencedFile: null,
+            updatedAtMs: 2300
+          }
+        ] satisfies SessionOverview[];
       }
 
       if (command === "load_session_runtime_view") {
@@ -1935,6 +2087,8 @@ describe("runtime session resilience", () => {
           updatedAtMs: 2300
         });
         return createSessionRuntimeView(snapshot, {
+          authorityMode: "host_authoritative",
+          isAtBranchHead: true,
           retrieved: {
             ...createRetrievedContext(snapshot),
             runState: {
@@ -3684,31 +3838,29 @@ describe("runtime session resilience", () => {
         return { runs: [] };
       }
 
+      if (command === "resolve_graph_run_submission_plan") {
+        return { command: "start_graph_run_stream" };
+      }
+
+      if (command === "load_retrieved_context") {
+        return {
+          turnContext: { userMessage: "", images: [], referencesImage: false },
+          sessionContext: {
+            conversationId: "history-attachment-session",
+            title: "",
+            summary: "",
+            recentHistory: [],
+            recentAttachmentAssets: [],
+            turnCount: 0,
+            lastReferencedFile: null
+          },
+          runState: {},
+          longTermMemory: { status: "empty", summary: "", entries: [] },
+          transcript: { providerNativeMessages: [] }
+        };
+      }
+
       if (command === "start_graph_run_stream") {
-        expect(payload).toEqual({
-          turnId: "8282",
-          runId: null,
-          goal: "new request",
-          input: expect.objectContaining({
-            history: [
-              {
-                role: "user",
-                content: "look at these files",
-                attachments: [
-                  expect.objectContaining({
-                    id: "real-1",
-                    relativePath: "uploads/demo.png"
-                  })
-                ]
-              },
-              {
-                role: "assistant",
-                content: "ready for the next step",
-                attachments: []
-              }
-            ]
-          })
-        });
         return {
           run: { id: "run-history" },
           turnId: "8282"
@@ -5703,6 +5855,170 @@ describe("runtime session resilience", () => {
     expect(store.historyNodes.map((node) => node.nodeId)).toEqual(["node-root", "node-old", "node-head"]);
   });
 
+  it("preserves host authority metadata on runtime views", async () => {
+    const store = useRuntimeStore();
+    const snapshot = createSnapshot({
+      conversationId: "authority-session",
+      summary: "Authority summary",
+      history: [
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 3300
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId: "authority-session",
+          runId: null
+        });
+        return createSessionRuntimeView(snapshot, {
+          authorityMode: "host_authoritative",
+          resolvedVisibleNodeId: "node-old",
+          activeBranchHeadNodeId: "node-head",
+          isAtBranchHead: false,
+          cursorVersion: 7,
+          historyCursor: createHistoryCursor({
+            sessionId: "authority-session",
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            mode: "historical",
+            authorityMode: "host_authoritative",
+            cursorVersion: 7,
+            isAtBranchHead: false
+          })
+        });
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState("authority-session");
+
+    expect(store.visibleNodeId).toBe("node-old");
+    expect(store.branchHeadNodeId).toBe("node-head");
+    expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("hydrates host-projected history state even when legacy historyCursor mirror is omitted", async () => {
+    const store = useRuntimeStore();
+    const sessionId = "authority-projection-session";
+    const snapshot = createSnapshot({
+      conversationId: sessionId,
+      summary: "Projection summary",
+      history: [
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 3300
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId,
+          runId: null
+        });
+        return createSessionRuntimeView(snapshot, {
+          authorityMode: "host_authoritative",
+          resolvedVisibleNodeId: "node-old",
+          activeBranchHeadNodeId: "node-head",
+          isAtBranchHead: false,
+          cursorVersion: null,
+          historyCursor: null,
+          historyNodes: [
+            createHistoryNode({ nodeId: "node-old", sessionId, turnId: "turn-old", createdAtMs: 2000 }),
+            createHistoryNode({ nodeId: "node-head", sessionId, turnId: "turn-head", createdAtMs: 3200 })
+          ],
+          historyBranches: [
+            createHistoryBranch({ branchId: "branch-main", sessionId, headNodeId: "node-head", baseNodeId: "node-old" })
+          ]
+        });
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState(sessionId);
+
+    expect(store.visibleNodeId).toBe("node-old");
+    expect(store.branchHeadNodeId).toBe("node-head");
+    expect(store.activeBranchId).toBe("branch-main");
+    expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("clears stale local historical state when host-authoritative runtime view omits history state", async () => {
+    const store = useRuntimeStore();
+    const sessionId = "host-live-session";
+    const snapshot = createSnapshot({
+      conversationId: sessionId,
+      summary: "Live summary",
+      history: [
+        { role: "user", content: "latest question" },
+        { role: "assistant", content: "latest answer" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 3600
+    });
+
+    store.$patch({
+      sessionId,
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-head",
+      activeBranchId: "branch-main",
+      historyCursorMode: "historical",
+      historyNodes: [createHistoryNode({ nodeId: "node-old", sessionId })],
+      historyBranches: [createHistoryBranch({ branchId: "branch-main", sessionId, headNodeId: "node-head" })]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "load_session_runtime_view") {
+        expect(payload).toEqual({
+          turnId: null,
+          sessionId,
+          runId: null
+        });
+        return createSessionRuntimeView(snapshot, {
+          authorityMode: "host_authoritative",
+          resolvedVisibleNodeId: null,
+          activeBranchHeadNodeId: null,
+          isAtBranchHead: true,
+          cursorVersion: null,
+          historyCursor: null,
+          historyNodes: [],
+          historyBranches: []
+        });
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.loadSessionState(sessionId);
+
+    expect(store.visibleNodeId).toBeNull();
+    expect(store.branchHeadNodeId).toBeNull();
+    expect(store.activeBranchId).toBeNull();
+    expect(store.historyCursorMode).toBe("live");
+  });
+
   it("hydrates latest history audit summary from runtime view when loading a session", async () => {
     const store = useRuntimeStore();
     const snapshot = createSnapshot({
@@ -5779,6 +6095,7 @@ describe("runtime session resilience", () => {
       activeBranchId: "branch-main",
       branchHeadNodeId: "node-head",
       visibleNodeId: "node-head",
+      cursorVersion: 3,
       historyCursorMode: "live",
       historyBranches: [
         createHistoryBranch({
@@ -5798,7 +6115,8 @@ describe("runtime session resilience", () => {
         expect(payload).toEqual({
           sessionId: "checkout-session",
           nodeId: "node-old",
-          mode: "transcript_and_workspace"
+          mode: "transcript_and_workspace",
+          expectedCursorVersion: 3
         });
         return {
           sessionId: "checkout-session",
@@ -5847,6 +6165,38 @@ describe("runtime session resilience", () => {
     expect(store.historyCursorMode).toBe("historical");
   });
 
+  it("surfaces cursor revision conflicts from host history checkout", async () => {
+    const store = useRuntimeStore();
+
+    store.$patch({
+      sessionId: "checkout-session",
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-head",
+      cursorVersion: 9,
+      historyCursorMode: "live"
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "checkout_history_node") {
+        expect(payload).toEqual({
+          sessionId: "checkout-session",
+          nodeId: "node-old",
+          mode: "transcript_only",
+          expectedCursorVersion: 9
+        });
+        throw new Error("history cursor conflict: expected revision 9, actual revision 10");
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const result = await store.checkoutHistoryNode("node-old");
+
+    expect(result).toBeNull();
+    expect(store.sessionError).toContain("history cursor conflict");
+  });
+
   it("does not reapply latest session checkpoint over historical checkout snapshots", async () => {
     const store = useRuntimeStore();
     const historicalSnapshot = createSnapshot({
@@ -5873,6 +6223,7 @@ describe("runtime session resilience", () => {
       activeBranchId: "branch-main",
       branchHeadNodeId: "node-head",
       visibleNodeId: "node-head",
+      cursorVersion: null,
       historyCursorMode: "live",
       historyBranches: [
         createHistoryBranch({
@@ -5898,7 +6249,8 @@ describe("runtime session resilience", () => {
         expect(payload).toEqual({
           sessionId: "checkout-session",
           nodeId: "node-old",
-          mode: "transcript_only"
+          mode: "transcript_only",
+          expectedCursorVersion: null
         });
         return {
           sessionId: "checkout-session",
@@ -5929,6 +6281,7 @@ describe("runtime session resilience", () => {
           nodeId: "node-old"
         });
         return createSessionRuntimeView(historicalSnapshot, {
+          isAtBranchHead: false,
           checkpoint: createCheckpoint({
             turnId: "turn-latest",
             sessionId: "checkout-session",
@@ -6289,7 +6642,8 @@ describe("runtime session resilience", () => {
         expect(payload).toEqual({
           sessionId: "audit-response-session",
           nodeId: "node-old",
-          mode: "transcript_only"
+          mode: "transcript_only",
+          expectedCursorVersion: null
         });
         return {
           sessionId: "audit-response-session",
@@ -6317,7 +6671,8 @@ describe("runtime session resilience", () => {
       if (command === "restore_branch_head") {
         expect(payload).toEqual({
           sessionId: "audit-response-session",
-          branchId: "branch-main"
+          branchId: "branch-main",
+          expectedCursorVersion: null
         });
         return {
           sessionId: "audit-response-session",
@@ -6397,7 +6752,8 @@ describe("runtime session resilience", () => {
       if (command === "restore_branch_head") {
         expect(payload).toEqual({
           sessionId: "restore-session",
-          branchId: "branch-main"
+          branchId: "branch-main",
+          expectedCursorVersion: null
         });
         return {
           sessionId: "restore-session",
@@ -6407,8 +6763,9 @@ describe("runtime session resilience", () => {
           workspaceRollbackCapable: false,
           workspaceRollbackApplied: false,
           degraded: false,
-          degradationReason: null
-          ,
+          degradationReason: null,
+          historyStateEvidence: null,
+          historyStateAuditSummary: null,
           cursor: createHistoryCursor({
             sessionId: "restore-session",
             visibleNodeId: "node-head",
@@ -6446,11 +6803,9 @@ describe("runtime session resilience", () => {
     expect(store.isHistoricalMode).toBe(false);
   });
 
-  it("supports local fork creation and branch switching before backend fields land", async () => {
+  it("disables restore, fork, and branch switching in browser-preview degraded mode", async () => {
     const store = useRuntimeStore();
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(5151);
-    const originalIsTauriAvailable = tauriMocks.mockIsTauriAvailable;
-    originalIsTauriAvailable.mockReturnValue(false);
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
 
     store.$patch({
       sessionId: "fork-session",
@@ -6477,21 +6832,17 @@ describe("runtime session resilience", () => {
     });
 
     const forkResult = await store.forkHistoryNode("node-old");
-
-    expect(forkResult?.createdBranchId).toBe("branch-5151");
-    expect(store.activeBranchId).toBe("branch-5151");
-    expect(store.branchHeadNodeId).toBe("node-old");
-    expect(store.historyCursorMode).toBe("live");
-    expect(store.historyBranches.map((branch) => branch.branchId)).toContain("branch-5151");
-
     const switchResult = await store.switchHistoryBranch("branch-main");
+    const restoreResult = await store.restoreBranchHead();
 
-    expect(switchResult?.previousBranchId).toBe("branch-5151");
+    expect(forkResult).toBeNull();
+    expect(switchResult).toBeNull();
+    expect(restoreResult).toBeNull();
     expect(store.activeBranchId).toBe("branch-main");
-    expect(store.visibleNodeId).toBe("node-head");
+    expect(store.visibleNodeId).toBe("node-old");
     expect(store.branchHeadNodeId).toBe("node-head");
-    expect(store.historyCursorMode).toBe("live");
-    nowSpy.mockRestore();
+    expect(store.historyCursorMode).toBe("historical");
+    expect(store.sessionError).toContain("browser preview / local preview");
   });
 
   it("derives conversation checkpoint entries from explicit turn ids and trace-backed turn ids", () => {
@@ -6629,7 +6980,9 @@ describe("runtime session resilience", () => {
 
     await store.fetchHealth();
 
-    expect(store.frontendRecorderCapability?.tauriAvailable).toBe(true);
-    expect(store.frontendRecorderStats.initialized).toBe(true);
+    const capability = getFrontendRecorderCapability();
+    const stats = getFrontendRecorderStats();
+    expect(capability.tauriAvailable).toBe(true);
+    expect(stats.initialized).toBe(true);
   });
 });

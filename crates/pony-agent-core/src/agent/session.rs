@@ -156,6 +156,8 @@ pub struct HistoryCursor {
     pub branch_head_node_id: Option<String>,
     pub workspace_node_id: Option<String>,
     #[serde(default)]
+    pub cursor_version: u64,
+    #[serde(default)]
     pub mode: HistoryCursorMode,
     #[serde(default)]
     pub checkout_mode: HistoryCheckoutMode,
@@ -348,6 +350,28 @@ pub struct SessionSnapshot {
     pub history_cursor: HistoryCursor,
     pub resolved_node_id: Option<String>,
     pub latest_node_id: Option<String>,
+}
+
+fn bump_cursor_version(cursor: &mut HistoryCursor) {
+    cursor.cursor_version = cursor.cursor_version.saturating_add(1);
+}
+
+fn reject_stale_cursor_version(
+    cursor: &HistoryCursor,
+    expected_cursor_version: Option<u64>,
+) -> Result<(), String> {
+    let Some(expected) = expected_cursor_version else {
+        return Ok(());
+    };
+
+    if expected == cursor.cursor_version {
+        return Ok(());
+    }
+
+    Err(format!(
+        "history cursor conflict: expected revision {}, actual revision {}",
+        expected, cursor.cursor_version
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1111,6 +1135,7 @@ impl SessionStore {
         session_id: Option<&str>,
         node_id: &str,
         mode: HistoryCheckoutMode,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
@@ -1118,6 +1143,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
+            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
             let requested_mode = mode.clone();
             if let Some(start_envelope) = build_history_state_hook_envelope(
                 session,
@@ -1179,6 +1205,7 @@ impl SessionStore {
                         }
                     }
                 };
+                bump_cursor_version(&mut session.history_cursor);
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -1256,6 +1283,7 @@ impl SessionStore {
         &mut self,
         session_id: Option<&str>,
         branch_id: Option<&str>,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
@@ -1264,6 +1292,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
+            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
             let target_branch_id = branch_id
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -1317,6 +1346,7 @@ impl SessionStore {
                 session.history_cursor.mode = HistoryCursorMode::Live;
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+                bump_cursor_version(&mut session.history_cursor);
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -1359,6 +1389,7 @@ impl SessionStore {
         &mut self,
         session_id: Option<&str>,
         node_id: &str,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
@@ -1366,6 +1397,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
+            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
             if let Some(start_envelope) = build_history_state_hook_envelope(
                 session,
                 HistoryStateHookPoint::BranchForkStart,
@@ -1419,6 +1451,7 @@ impl SessionStore {
                 session.history_cursor.mode = HistoryCursorMode::Live;
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+                bump_cursor_version(&mut session.history_cursor);
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -1459,6 +1492,7 @@ impl SessionStore {
         &mut self,
         session_id: Option<&str>,
         branch_id: &str,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
@@ -1467,6 +1501,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
+            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
             if let Some(start_envelope) = build_history_state_hook_envelope(
                 session,
                 HistoryStateHookPoint::BranchSwitchStart,
@@ -1515,6 +1550,7 @@ impl SessionStore {
                 session.history_cursor.mode = HistoryCursorMode::Live;
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+                bump_cursor_version(&mut session.history_cursor);
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -2172,6 +2208,7 @@ fn snapshot_from_state(
             active_branch_id: Some(selected_node.branch_id.clone()),
             branch_head_node_id: branch_head_node_id.clone(),
             workspace_node_id: Some(selected_node.node_id.clone()),
+            cursor_version: session.history_cursor.cursor_version,
             mode: if branch_head_node_id.as_deref() == Some(selected_node.node_id.as_str()) {
                 HistoryCursorMode::Live
             } else {

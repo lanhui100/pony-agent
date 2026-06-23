@@ -417,6 +417,9 @@ export type HistoryCursorState = {
   branchHeadNodeId?: string | null;
   workspaceNodeId?: string | null;
   mode: HistoryCursorMode;
+  authorityMode?: "host_authoritative" | "local_preview" | string;
+  cursorVersion?: number | null;
+  isAtBranchHead?: boolean;
 };
 
 export type HistoryCheckoutMode = "transcript_only" | "transcript_and_workspace";
@@ -1086,6 +1089,11 @@ export type SessionRuntimeView = {
   historyNodes?: HistoryNode[];
   historyBranches?: HistoryBranch[];
   historyCursor?: HistoryCursorState | null;
+  authorityMode?: "host_authoritative" | "local_preview" | string;
+  resolvedVisibleNodeId?: string | null;
+  activeBranchHeadNodeId?: string | null;
+  isAtBranchHead?: boolean;
+  cursorVersion?: number | null;
 };
 
 export type GraphRunSubmissionPlan = {

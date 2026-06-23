@@ -236,24 +236,28 @@ pub struct CheckoutHistoryNodeCommand {
     pub session_id: Option<String>,
     pub node_id: String,
     pub mode: HistoryCheckoutMode,
+    pub expected_cursor_version: Option<u64>,
 }
 
 #[derive(Clone)]
 pub struct RestoreBranchHeadCommand {
     pub session_id: Option<String>,
     pub branch_id: Option<String>,
+    pub expected_cursor_version: Option<u64>,
 }
 
 #[derive(Clone)]
 pub struct ForkFromHistoryNodeCommand {
     pub session_id: Option<String>,
     pub node_id: String,
+    pub expected_cursor_version: Option<u64>,
 }
 
 #[derive(Clone)]
 pub struct SwitchHistoryBranchCommand {
     pub session_id: Option<String>,
     pub branch_id: String,
+    pub expected_cursor_version: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -282,6 +286,11 @@ pub struct SessionRuntimeView {
     pub history_nodes: Option<Vec<HistoryNodeView>>,
     pub history_branches: Option<Vec<HistoryBranchView>>,
     pub history_cursor: Option<HistoryCursorState>,
+    pub authority_mode: String,
+    pub resolved_visible_node_id: Option<String>,
+    pub active_branch_head_node_id: Option<String>,
+    pub is_at_branch_head: bool,
+    pub cursor_version: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -473,6 +482,9 @@ pub struct HistoryCursorState {
     pub branch_head_node_id: Option<String>,
     pub workspace_node_id: Option<String>,
     pub mode: HistoryCursorMode,
+    pub authority_mode: String,
+    pub cursor_version: Option<u64>,
+    pub is_at_branch_head: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -2403,6 +2415,7 @@ impl HostControlPlane {
     }
 
     fn history_cursor_state(cursor: &HistoryCursor) -> HistoryCursorState {
+        let is_at_branch_head = cursor.visible_node_id == cursor.branch_head_node_id;
         HistoryCursorState {
             session_id: cursor.session_id.clone(),
             visible_node_id: cursor.visible_node_id.clone(),
@@ -2410,6 +2423,9 @@ impl HostControlPlane {
             branch_head_node_id: cursor.branch_head_node_id.clone(),
             workspace_node_id: cursor.workspace_node_id.clone(),
             mode: Self::history_cursor_mode_from_session(cursor),
+            authority_mode: "host_authoritative".to_string(),
+            cursor_version: Some(cursor.cursor_version),
+            is_at_branch_head,
         }
     }
 
@@ -2479,6 +2495,7 @@ impl HostControlPlane {
             Some(session_id.as_str()),
             &command.node_id,
             Self::history_checkout_mode_to_session(requested_mode),
+            command.expected_cursor_version,
         )?;
         let cursor = Self::history_cursor_state(&snapshot.history_cursor);
         let applied_mode =
@@ -2517,8 +2534,11 @@ impl HostControlPlane {
     ) -> Result<RestoreBranchHeadResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
         let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let snapshot =
-            runtime.restore_branch_head(Some(session_id.as_str()), command.branch_id.as_deref())?;
+        let snapshot = runtime.restore_branch_head(
+            Some(session_id.as_str()),
+            command.branch_id.as_deref(),
+            command.expected_cursor_version,
+        )?;
         Ok(RestoreBranchHeadResponse {
             session_id,
             branch_id: snapshot.history_cursor.active_branch_id.clone(),
@@ -2541,8 +2561,11 @@ impl HostControlPlane {
         let session_id = self.normalize_history_session_id(command.session_id);
         let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
         let before = runtime.load_history_cursor(Some(session_id.as_str()));
-        let snapshot =
-            runtime.fork_from_history_node(Some(session_id.as_str()), &command.node_id)?;
+        let snapshot = runtime.fork_from_history_node(
+            Some(session_id.as_str()),
+            &command.node_id,
+            command.expected_cursor_version,
+        )?;
         let created_branch_id = snapshot
             .history_cursor
             .active_branch_id
@@ -2574,8 +2597,11 @@ impl HostControlPlane {
     ) -> Result<SwitchHistoryBranchResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
         let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let snapshot =
-            runtime.switch_history_branch(Some(session_id.as_str()), &command.branch_id)?;
+        let snapshot = runtime.switch_history_branch(
+            Some(session_id.as_str()),
+            &command.branch_id,
+            command.expected_cursor_version,
+        )?;
         Ok(SwitchHistoryBranchResponse {
             session_id,
             branch_id: command.branch_id,
@@ -2636,6 +2662,9 @@ impl HostControlPlane {
             None,
         );
 
+        let resolved_visible_node_id = session.history_cursor.visible_node_id.clone();
+        let active_branch_head_node_id = session.history_cursor.branch_head_node_id.clone();
+        let is_at_branch_head = resolved_visible_node_id == active_branch_head_node_id;
         SessionRuntimeView {
             history_state_evidence: Self::project_history_state_evidence(&session),
             history_state_audit_summary: Self::project_history_state_audit_summary(&session),
@@ -2667,6 +2696,11 @@ impl HostControlPlane {
             retrieved,
             checkpoint,
             submission_plan,
+            authority_mode: "host_authoritative".to_string(),
+            resolved_visible_node_id,
+            active_branch_head_node_id,
+            is_at_branch_head,
+            cursor_version: Some(0),
         }
     }
 
@@ -6483,6 +6517,31 @@ mod tests {
             node_id: Some(first_node_id.clone()),
             ..SessionRuntimeViewQuery::default()
         });
+        assert_eq!(historical_view.authority_mode, "host_authoritative");
+        assert_eq!(
+            historical_view.resolved_visible_node_id.as_deref(),
+            Some(first_node_id.as_str())
+        );
+        assert_eq!(
+            historical_view.active_branch_head_node_id.as_deref(),
+            Some(latest_node_id.as_str())
+        );
+        assert!(!historical_view.is_at_branch_head);
+        assert_eq!(historical_view.cursor_version, None);
+        assert_eq!(
+            historical_view
+                .history_cursor
+                .as_ref()
+                .map(|cursor| cursor.authority_mode.as_str()),
+            Some("host_authoritative")
+        );
+        assert_eq!(
+            historical_view
+                .history_cursor
+                .as_ref()
+                .and_then(|cursor| cursor.cursor_version),
+            None
+        );
         assert_eq!(
             historical_view.session.resolved_node_id.as_deref(),
             Some(first_node_id.as_str())

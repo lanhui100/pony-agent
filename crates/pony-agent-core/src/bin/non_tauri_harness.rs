@@ -1,5 +1,6 @@
 use pony_agent_core::agent::config::{
     ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
+    ThinkingParamPattern,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlaneBuilder, RunTurnCommand, StartGraphRunStreamCommand, StartTurnStreamCommand,
@@ -38,7 +39,7 @@ impl ProviderSelectionResolver for StaticResolver {
             reasoning_effort: None,
             reasoning_budget_tokens: None,
             capabilities: ProviderModelCapabilities::default(),
-            thinking_param_pattern: crate::agent::config::ThinkingParamPattern::None,
+            thinking_param_pattern: ThinkingParamPattern::None,
         }
     }
 }

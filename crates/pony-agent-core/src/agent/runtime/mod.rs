@@ -1084,33 +1084,40 @@ impl AgentRuntime {
         session_id: Option<&str>,
         node_id: &str,
         mode: HistoryCheckoutMode,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         self.sessions
-            .checkout_history_node(session_id, node_id, mode)
+            .checkout_history_node(session_id, node_id, mode, expected_cursor_version)
     }
 
     pub fn restore_branch_head(
         &mut self,
         session_id: Option<&str>,
         branch_id: Option<&str>,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
-        self.sessions.restore_branch_head(session_id, branch_id)
+        self.sessions
+            .restore_branch_head(session_id, branch_id, expected_cursor_version)
     }
 
     pub fn fork_from_history_node(
         &mut self,
         session_id: Option<&str>,
         node_id: &str,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
-        self.sessions.fork_from_history_node(session_id, node_id)
+        self.sessions
+            .fork_from_history_node(session_id, node_id, expected_cursor_version)
     }
 
     pub fn switch_history_branch(
         &mut self,
         session_id: Option<&str>,
         branch_id: &str,
+        expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
-        self.sessions.switch_history_branch(session_id, branch_id)
+        self.sessions
+            .switch_history_branch(session_id, branch_id, expected_cursor_version)
     }
 
     fn prepare_turn(

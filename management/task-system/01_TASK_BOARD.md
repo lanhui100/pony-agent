@@ -39,6 +39,18 @@
 - `PA-059` 扩展 TurnHistoryMessage 携带消息元数据
     说明：已完成 `MessageStatus` 枚举、`TurnHistoryMessage` 扩展 5 字段 + `stable_id()`、`PartialEq,Eq`、末端对齐投影 enrich（live + node 双路径）、前端 TS 类型更新、`hydrateMessagesFromHistory` 优先级重构、`buildTurnHistory` 传播、`isPersistedMessageShapeCompatible` 简化，已通过 5 个新增 Rust 测试 + 1 个前端测试 + 3 轮并行智能体审核 + 最终代码审核三轮调优。审核记录：`02_REVIEWS/2026-06-22-pa059-spec-review.md`。
 
+- `PA-060` 统一 checkpoint / cursor / view 合同以支持多端宿主
+     说明：已完成 `session-cursor-view-contract` canonical spec、任务系统接入、3 路 spec 审核采纳、2 路代码审核采纳，以及 authority/read-model 最小合同接线（`authorityMode / resolvedVisibleNodeId / activeBranchHeadNodeId / isAtBranchHead`）。审核记录：`02_REVIEWS/2026-06-22-pa060-spec-review.md`。OpenSpec change 已归档：`openspec/changes/archive/2026-06-22-unify-session-cursor-view-contract/`。
+
+- `PA-061` 宿主权威 session view 硬切与旧读面安全清理
+     说明：已完成正式宿主链路硬切，host-backed `loadSessionState()` 不再从 persisted local state 猜测历史节点，旧 `previousHistoryState` host 补偿分支已删除，并补齐"host authoritative 清空 stale local historical state"定向测试。`npm run verify` 通过验证。OpenSpec change 已归档：`openspec/changes/archive/2026-06-22-unify-session-cursor-view-contract/`。
+
+- `PA-062` browser preview fallback 退场与安全降级收口
+     说明：已完成 browser preview / local preview 的能力收口：保留最小可用 preview 体验，但禁用 `restore branch head / fork / switch branch` 这类正式宿主历史控制动作，避免继续伪装成 host-authoritative 恢复能力。相关定向测试已通过。OpenSpec change 已归档：`openspec/changes/archive/2026-06-22-unify-session-cursor-view-contract/`。
+
+- `PA-063` cursor versioning 与多端冲突保护
+     说明：已完成 `HistoryCursor.cursor_version`、四类 history-control command 的 `expected_cursor_version`、stale revision 显式冲突错误，以及前端 store 的 `cursorVersion` 透传与 `sessionError` 提示。Rust 回归集已恢复并通过。OpenSpec change 已归档：`openspec/changes/archive/2026-06-22-unify-session-cursor-view-contract/`。
+
 - `PA-058` 拆分 session trace 存储并扩展定向持久化
     说明：已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过全局并行审核验收。OpenSpec change 已归档。
 
