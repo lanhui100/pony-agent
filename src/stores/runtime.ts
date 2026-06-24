@@ -103,6 +103,7 @@ type RuntimeState = {
   sessionId: string;
   sessionList: SessionOverview[];
   sessionOperation: "initializing" | "switching" | "deleting" | null;
+  sessionHydrating: boolean;
   deletingSessionSet: Record<string, boolean>;
   sessionSwitchToken: number;
   sessionError: string | null;
@@ -151,6 +152,7 @@ type RuntimeState = {
   eventsReady: boolean;
   deferredPersistTimerId: number | null;
   streamFlushFrameId: number | null;
+  streamFlushTimerId: number | null;
   streamBufferTurnId: string | null;
   streamBufferText: string;
   streamBufferReasoning: string;
@@ -170,6 +172,7 @@ type RuntimeState = {
 };
 
 type PersistedRuntimeState = {
+  cachedStateVersion: number;
   phase: RuntimePhase;
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
@@ -196,6 +199,8 @@ type PersistedRuntimeState = {
   historyBranches?: HistoryBranch[];
   visibleNodeId?: string | null;
   initialRollbackActive?: boolean;
+  checkpoint?: ExecutionCheckpoint | null;
+  runningTurnId?: string | null;
 };
 
 type SessionRuntimeSnapshot = {
@@ -244,16 +249,43 @@ type SessionRuntimeSnapshot = {
 };
 
 const RUNTIME_STORAGE_KEY = "pony-agent.runtime-history.v1";
+const CACHED_STATE_VERSION = 2;
 const DEFAULT_SESSION_ID = "local-dev-session";
 
 type PersistedRuntimeCache = {
   sessions: Record<string, PersistedRuntimeState>;
+  runningSessionMap?: Record<string, { turnId: string; phase: RuntimePhase }>;
 };
+
+type SessionInitializationStrategy =
+  | { kind: "local-cache"; persistedState: PersistedRuntimeState }
+  | { kind: "host-read"; sessionId: string; reason: "no-cache" | "insufficient-checkpoint" }
+  | { kind: "empty-fallback"; sessionId: string };
 
 const DEFAULT_BROWSER_SESSION_SUMMARY = "浏览器预览会话";
 const DEFAULT_FAILED_TURN_MESSAGE = "本轮执行失败，请查看右侧 trace。";
 const DEFAULT_FAILED_TURN_ERROR = "本轮执行失败。";
 const TIMEOUT_RETRY_PENDING_MESSAGE = "超时后错误重连中...";
+const HYDRATION_TIMEOUT_MS = 15000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} 超时 (${ms}ms)`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 const BROWSER_PREVIEW_PROVIDER_NAME = "browser-preview";
 const BROWSER_PREVIEW_MODEL_NAME = "mock-stream";
 const BROWSER_PREVIEW_FALLBACK_REASON =
@@ -280,6 +312,9 @@ const TRACE_STEP_LABELS = {
 } as const;
 
 function debugLog(event: string, payload?: Record<string, unknown>) {
+  if (typeof window !== "undefined" && window.localStorage.getItem("pony-agent.debug.runtime-logs") !== "true") {
+    return;
+  }
   const message = {
     event,
     payload: payload ?? {},
@@ -289,6 +324,9 @@ function debugLog(event: string, payload?: Record<string, unknown>) {
 }
 
 function errorLog(event: string, payload?: Record<string, unknown>) {
+  if (typeof window !== "undefined" && window.localStorage.getItem("pony-agent.debug.runtime-logs") !== "true") {
+    return;
+  }
   const message = {
     event,
     payload: payload ?? {},
@@ -297,7 +335,57 @@ function errorLog(event: string, payload?: Record<string, unknown>) {
   console.error(`[pony-agent][runtime] ${JSON.stringify(message)}`);
 }
 
+function reportSwitchPerf(stage: string, payload: Record<string, unknown>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const perfWindow = window as Window & {
+    __ponySwitchPerf?: Array<Record<string, unknown>>;
+  };
+  const entry = {
+    stage,
+    at: Date.now(),
+    ...payload
+  };
+  perfWindow.__ponySwitchPerf = [...(perfWindow.__ponySwitchPerf ?? []), entry].slice(-50);
+  const elapsedMs = typeof payload.elapsedMs === "number" ? payload.elapsedMs : 0;
+  if (elapsedMs >= 120) {
+    console.warn("[pony-agent][perf] session-switch", entry);
+  }
+}
+
+async function measureHostRead<T>(
+  label: string,
+  payload: Record<string, unknown>,
+  run: () => Promise<T>
+): Promise<T> {
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  try {
+    const result = await run();
+    const elapsedMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt;
+    if (elapsedMs >= 120) {
+      console.warn("[pony-agent][perf] host-read", {
+        label,
+        elapsedMs,
+        ...payload
+      });
+    }
+    return result;
+  } catch (error) {
+    const elapsedMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt;
+    console.warn("[pony-agent][perf] host-read-error", {
+      label,
+      elapsedMs,
+      error: String(error),
+      ...payload
+    });
+    throw error;
+  }
+}
+
 const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
+const STREAM_FLUSH_INTERVAL_MS = 32;
 
 type StreamDebugBucket = {
   runtime?: Record<string, unknown>;
@@ -312,7 +400,7 @@ function streamDebugEnabled() {
     return false;
   }
 
-  return import.meta.env.DEV || window.localStorage.getItem(STREAM_DEBUG_STORAGE_KEY) === "true";
+  return window.localStorage.getItem(STREAM_DEBUG_STORAGE_KEY) === "true";
 }
 
 function updateStreamDebugBucket(section: keyof StreamDebugBucket, patch: Record<string, unknown>) {
@@ -1808,6 +1896,9 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   if (state.streamFlushFrameId != null) {
     window.cancelAnimationFrame(state.streamFlushFrameId);
   }
+  if (state.streamFlushTimerId != null) {
+    window.clearTimeout(state.streamFlushTimerId);
+  }
   state.sessionId = snapshot.sessionId;
   state.sessionList = snapshot.sessionList.map((session) => ({ ...session }));
   state.deletingSessionSet = { ...snapshot.deletingSessionSet };
@@ -1830,6 +1921,8 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.isSubmitting = snapshot.isSubmitting;
   state.activeTurnId = snapshot.activeTurnId;
   state.activeRunId = snapshot.activeRunId;
+  state.streamFlushFrameId = null;
+  state.streamFlushTimerId = null;
   state.latestExecutionCheckpoint = snapshot.latestExecutionCheckpoint ? { ...snapshot.latestExecutionCheckpoint } : null;
   state.latestGraphRunSubmissionPlan = snapshot.latestGraphRunSubmissionPlan
     ? { ...snapshot.latestGraphRunSubmissionPlan }
@@ -2893,6 +2986,18 @@ function normalizeCheckpointPhase(checkpoint: ExecutionCheckpoint): RuntimePhase
   return "calling_model";
 }
 
+function isValidPersistedState(state: unknown): state is PersistedRuntimeState {
+  if (state == null || typeof state !== "object") {
+    return false;
+  }
+  const s = state as Record<string, unknown>;
+  const version = s.cachedStateVersion;
+  if (version !== undefined && version !== CACHED_STATE_VERSION) {
+    return false;
+  }
+  return Array.isArray(s.messages);
+}
+
 function loadPersistedRuntimeCache(): PersistedRuntimeCache {
   if (typeof window === "undefined") {
     return { sessions: {} };
@@ -2906,11 +3011,15 @@ function loadPersistedRuntimeCache(): PersistedRuntimeCache {
     }
 
     const parsed = JSON.parse(raw) as PersistedRuntimeCache;
+    const allSessions = parsed.sessions ?? {};
+    const validCount = Object.values(allSessions).filter((s) => isValidPersistedState(s)).length;
     debugLog("restore:ok", {
-      sessions: Object.keys(parsed.sessions ?? {}).length
+      sessions: Object.keys(allSessions).length,
+      valid: validCount,
+      stale: Object.keys(allSessions).length - validCount
     });
     return {
-      sessions: parsed.sessions ?? {}
+      sessions: allSessions
     };
   } catch {
     debugLog("restore:error");
@@ -2919,7 +3028,14 @@ function loadPersistedRuntimeCache(): PersistedRuntimeCache {
 }
 
 function loadPersistedRuntimeState(sessionId: string): PersistedRuntimeState | null {
-  return loadPersistedRuntimeCache().sessions[sessionId] ?? null;
+  const raw = loadPersistedRuntimeCache().sessions[sessionId];
+  if (raw && isValidPersistedState(raw)) {
+    return raw;
+  }
+  if (raw) {
+    debugLog("persist:stale", { sessionId, version: (raw as Partial<PersistedRuntimeState>).cachedStateVersion });
+  }
+  return null;
 }
 
 function buildRuntimeViewFromPersistedState(
@@ -3010,6 +3126,29 @@ function persistSessionState(sessionId: string, payload: PersistedRuntimeState) 
   window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
 }
 
+function persistRunningSessionMap(
+  map: Record<string, { turnId: string; phase: RuntimePhase }>
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const cache = loadPersistedRuntimeCache();
+    cache.runningSessionMap = map;
+    window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
+  } catch {
+    debugLog("persist:running-map:error");
+  }
+}
+
+function loadRunningSessionMap(): Record<string, { turnId: string; phase: RuntimePhase }> {
+  try {
+    return loadPersistedRuntimeCache().runningSessionMap ?? {};
+  } catch {
+    return {};
+  }
+}
+
 function removePersistedSessionState(sessionId: string) {
   if (typeof window === "undefined") {
     return;
@@ -3018,6 +3157,64 @@ function removePersistedSessionState(sessionId: string) {
   const cache = loadPersistedRuntimeCache();
   delete cache.sessions[sessionId];
   window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
+}
+
+function mergeRuntimeViews(
+  cached: SessionRuntimeView,
+  host: SessionRuntimeView | null
+): SessionRuntimeView {
+  if (!host) {
+    return cached;
+  }
+  return {
+    ...cached,
+    checkpoint: host.checkpoint ?? cached.checkpoint,
+    submissionPlan: host.submissionPlan ?? cached.submissionPlan,
+    controlBoundaryEvidence: host.controlBoundaryEvidence?.length
+      ? host.controlBoundaryEvidence
+      : cached.controlBoundaryEvidence,
+    runControlAuditSummary: host.runControlAuditSummary ?? cached.runControlAuditSummary,
+    historyStateAuditSummary: host.historyStateAuditSummary ?? cached.historyStateAuditSummary,
+    retrieved: host.retrieved ?? cached.retrieved,
+    authorityMode: host.authorityMode ?? cached.authorityMode,
+    resolvedVisibleNodeId: host.resolvedVisibleNodeId ?? cached.resolvedVisibleNodeId,
+    activeBranchHeadNodeId: host.activeBranchHeadNodeId ?? cached.activeBranchHeadNodeId,
+    isAtBranchHead: host.isAtBranchHead ?? cached.isAtBranchHead,
+    historyNodes: host.historyNodes?.length ? host.historyNodes : cached.historyNodes,
+    historyBranches: host.historyBranches?.length ? host.historyBranches : cached.historyBranches,
+    historyCursor: host.historyCursor ?? cached.historyCursor,
+    session: {
+      ...cached.session,
+      turnTraceHistory: cached.session.turnTraceHistory?.length
+        ? cached.session.turnTraceHistory
+        : host.session.turnTraceHistory,
+      historyStateEvidence: (host.historyStateEvidence?.length
+        ? host.historyStateEvidence
+        : cached.historyStateEvidence) ?? undefined,
+      historyStateAuditSummary: host.historyStateAuditSummary ?? cached.session.historyStateAuditSummary ?? null,
+      runControlAuditSummary: host.runControlAuditSummary ?? cached.session.runControlAuditSummary ?? null,
+    }
+  };
+}
+
+function deriveInitStrategy(
+  currentSessionId: string,
+  persisted: PersistedRuntimeState | null,
+  sessionList: SessionOverview[]
+): SessionInitializationStrategy {
+  if (persisted) {
+    const hasValidCheckpoint = persisted.checkpoint != null;
+    const isNonIdle = persisted.phase != null && persisted.phase !== "idle";
+    if (hasValidCheckpoint && isNonIdle) {
+      return { kind: "local-cache", persistedState: persisted };
+    }
+    return { kind: "host-read", sessionId: currentSessionId, reason: "insufficient-checkpoint" };
+  }
+  const targetSessionId = sessionList[0]?.conversationId ?? currentSessionId;
+  if (sessionList.length > 0 || targetSessionId !== DEFAULT_SESSION_ID) {
+    return { kind: "host-read", sessionId: targetSessionId, reason: "no-cache" };
+  }
+  return { kind: "empty-fallback", sessionId: currentSessionId };
 }
 
 function createHistoryTurnId(index: number) {
@@ -3058,6 +3255,46 @@ function buildSessionOverviewFromPersistedState(
         ? legacyTraceHistory[legacyTraceHistory.length - 1]!.updatedAt
         : Date.now()
   };
+}
+
+function buildSessionOverviewFromRuntimeState(state: Pick<RuntimeState, "sessionId" | "sessionSummary" | "messages" | "turnTraceHistory">): SessionOverview | null {
+  if (!hasPersistableMessages(state.messages)) {
+    return null;
+  }
+
+  const latestTrace = state.turnTraceHistory[state.turnTraceHistory.length - 1] ?? null;
+  return {
+    conversationId: state.sessionId,
+    title: buildSessionTitleFromMessages(state.messages),
+    summary: state.sessionSummary || DEFAULT_BROWSER_SESSION_SUMMARY,
+    turnCount: state.messages.filter((message) => message.role === "user").length,
+    lastReferencedFile: null,
+    updatedAtMs: latestTrace?.updatedAt ?? Date.now()
+  };
+}
+
+function ensureUniqueSessionList(sessions: SessionOverview[]): SessionOverview[] {
+  const seen = new Set<string>();
+  const deduped: SessionOverview[] = [];
+  for (const session of sessions) {
+    if (seen.has(session.conversationId)) {
+      continue;
+    }
+    seen.add(session.conversationId);
+    deduped.push(session);
+  }
+  return deduped;
+}
+
+function createNextSessionId(existingSessionIds: Iterable<string>): string {
+  const existing = new Set(existingSessionIds);
+  let candidate = `session-${Date.now()}`;
+  let counter = 1;
+  while (existing.has(candidate)) {
+    candidate = `session-${Date.now()}-${counter}`;
+    counter += 1;
+  }
+  return candidate;
 }
 
 function buildSessionTitleFromMessages(messages: ChatMessage[]) {
@@ -3344,6 +3581,7 @@ export const useRuntimeStore = defineStore("runtime", {
         sessionId: DEFAULT_SESSION_ID,
         sessionList: [],
         sessionOperation: null,
+        sessionHydrating: false,
         deletingSessionSet: {},
         sessionSwitchToken: 0,
         sessionError: null,
@@ -3387,6 +3625,7 @@ export const useRuntimeStore = defineStore("runtime", {
       eventsReady: false,
       deferredPersistTimerId: null,
       streamFlushFrameId: null,
+      streamFlushTimerId: null,
       streamBufferTurnId: null,
       streamBufferText: "",
       streamBufferReasoning: "",
@@ -3500,6 +3739,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "idle";
       this.error = null;
       this.draftMessage = "";
+      this.sessionHydrating = false;
       this.sessionSummary = blankFields.sessionSummary;
       this.retrievedContext = null;
       this.providerRequestedName = blankFields.providerRequestedName;
@@ -3535,6 +3775,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.eventCursorByTurnId = {};
       this.cancelStreamFlush();
       this.streamBufferTurnId = null;
+      this.streamFlushTimerId = null;
       this.streamBufferText = "";
       this.streamBufferReasoning = "";
       this.streamDebugDeltaCount = 0;
@@ -3557,11 +3798,20 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     cancelStreamFlush() {
       if (this.streamFlushFrameId == null) {
-        return;
+        if (this.streamFlushTimerId == null) {
+          return;
+        }
       }
 
-      window.cancelAnimationFrame(this.streamFlushFrameId);
-      this.streamFlushFrameId = null;
+      if (this.streamFlushFrameId != null) {
+        window.cancelAnimationFrame(this.streamFlushFrameId);
+        this.streamFlushFrameId = null;
+      }
+
+      if (this.streamFlushTimerId != null) {
+        window.clearTimeout(this.streamFlushTimerId);
+        this.streamFlushTimerId = null;
+      }
     },
     resetStreamDebugMetrics() {
       this.streamDebugDeltaCount = 0;
@@ -3618,6 +3868,7 @@ export const useRuntimeStore = defineStore("runtime", {
         bufferedTextLength,
         bufferedReasoningLength,
         pendingRaf: this.streamFlushFrameId != null,
+        pendingTimer: this.streamFlushTimerId != null,
         flushDurationMs:
           (typeof performance !== "undefined" ? performance.now() : Date.now()) - flushStartedAt
       });
@@ -3638,14 +3889,14 @@ export const useRuntimeStore = defineStore("runtime", {
         return;
       }
 
-      if (this.streamFlushFrameId != null) {
+      if (this.streamFlushFrameId != null || this.streamFlushTimerId != null) {
         return;
       }
 
-      this.streamFlushFrameId = window.requestAnimationFrame(() => {
-        this.streamFlushFrameId = null;
+      this.streamFlushTimerId = window.setTimeout(() => {
+        this.streamFlushTimerId = null;
         this.flushBufferedStreamText(turnId);
-      });
+      }, STREAM_FLUSH_INTERVAL_MS);
     },
     cancelBrowserPreviewTurn(turnId: string) {
       if (this.activeTurnId !== turnId) {
@@ -3736,6 +3987,7 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       const payload: PersistedRuntimeState = {
+        cachedStateVersion: CACHED_STATE_VERSION,
         phase: this.phase,
         messages: this.messages,
         attachmentAssets: this.attachmentAssets,
@@ -3758,16 +4010,22 @@ export const useRuntimeStore = defineStore("runtime", {
         historyCursorMode: this.historyCursorMode,
         historyNodes: cloneHistoryNodes(this.historyNodes),
         historyBranches: cloneHistoryBranches(this.historyBranches),
-        initialRollbackActive: this.initialRollbackActive
+        initialRollbackActive: this.initialRollbackActive,
+        checkpoint: this.latestExecutionCheckpoint ? { ...this.latestExecutionCheckpoint } : null,
+        runningTurnId: this.activeTurnId
       };
 
       try {
         persistSessionState(this.sessionId, payload);
+        persistRunningSessionMap(this.runningSessionMap);
         debugLog("persist", {
           sessionId: this.sessionId,
           messages: this.messages.length,
           traces: this.turnTraceHistory.length,
-          phase: this.phase
+          phase: this.phase,
+          hasCheckpoint: !!this.latestExecutionCheckpoint,
+          hasRunningTurn: !!this.activeTurnId,
+          runningSessionCount: Object.keys(this.runningSessionMap).length
         });
       } catch {
         // Ignore storage failures and keep runtime in memory.
@@ -3891,7 +4149,9 @@ export const useRuntimeStore = defineStore("runtime", {
     async loadSessionCatalog() {
       if (isTauriAvailable()) {
         this.sessionList = filterDeletingSessions(
-          await safeInvoke<SessionOverview[]>("list_sessions"),
+          await measureHostRead("list_sessions", {
+            deletingCount: Object.keys(this.deletingSessionSet).length
+          }, () => safeInvoke<SessionOverview[]>("list_sessions")),
           this.deletingSessionSet
         );
         return;
@@ -3915,9 +4175,12 @@ export const useRuntimeStore = defineStore("runtime", {
         if (nodeId) {
           payload.nodeId = nodeId;
         }
-        return await safeInvoke<SessionRuntimeView>("load_session_runtime_view", {
+        return await measureHostRead("load_session_runtime_view", {
+          sessionId,
+          nodeId: nodeId ?? null
+        }, () => safeInvoke<SessionRuntimeView>("load_session_runtime_view", {
           ...payload
-        });
+        }));
       }
 
       return buildRuntimeViewFromPersistedState(sessionId, loadPersistedRuntimeState(sessionId), nodeId);
@@ -4081,7 +4344,11 @@ export const useRuntimeStore = defineStore("runtime", {
         if (options?.nodeId) {
           payload.nodeId = options.nodeId;
         }
-        const retrieved = await safeInvoke<RetrievedContextState>("load_retrieved_context", payload);
+        const retrieved = await measureHostRead("load_retrieved_context", {
+          sessionId,
+          nodeId: options?.nodeId ?? null,
+          runId: options?.runId ?? null
+        }, () => safeInvoke<RetrievedContextState>("load_retrieved_context", payload));
         return cloneRetrievedContext(retrieved);
       } catch (error) {
         debugLog("retrieved-context:load:error", {
@@ -4303,6 +4570,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.turnTraceHistory = [];
       this.eventCursorByTurnId = {};
       this.streamBufferTurnId = null;
+      this.streamFlushTimerId = null;
       this.streamBufferText = "";
       this.streamBufferReasoning = "";
       this.streamDebugDeltaCount = 0;
@@ -4544,96 +4812,103 @@ export const useRuntimeStore = defineStore("runtime", {
       this.persistHistory();
       const previousSnapshot = createSessionRuntimeSnapshot(this);
       const switchToken = this.sessionSwitchToken + 1;
+      const switchStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
       this.sessionSwitchToken = switchToken;
       this.sessionOperation = "switching";
       this.sessionError = null;
 
-      try {
-        const cachedPersistedState = loadPersistedRuntimeState(nextSessionId);
-        const cachedRuntimeView = buildRuntimeViewFromPersistedState(
-          nextSessionId,
-          cachedPersistedState
-        );
-        const hasCachedState =
-          Boolean(cachedPersistedState?.initialRollbackActive) ||
-          cachedRuntimeView.session.history.length > 0 ||
-          (cachedRuntimeView.session.attachmentAssets?.length ?? 0) > 0 ||
-          cachedRuntimeView.session.summary.trim().length > 0;
+      const cachedPersistedState = loadPersistedRuntimeState(nextSessionId);
+      const cachedRuntimeView = buildRuntimeViewFromPersistedState(
+        nextSessionId,
+        cachedPersistedState
+      );
+      const hasCachedState =
+        Boolean(cachedPersistedState?.initialRollbackActive) ||
+        cachedRuntimeView.session.history.length > 0 ||
+        (cachedRuntimeView.session.attachmentAssets?.length ?? 0) > 0 ||
+        cachedRuntimeView.session.summary.trim().length > 0;
 
-        if (hasCachedState) {
-          await this.loadSessionState(nextSessionId, {
-            refreshCatalog: false,
-            runtimeView: cachedRuntimeView
-          });
-        } else {
-          this.resetSessionRuntimeState();
-          this.sessionId = nextSessionId;
-          this.phase = "connecting";
-        }
-
-        // Clear completed status for the target session (user is now viewing it)
-        delete this.completedSessionSet[nextSessionId];
-        delete this.failedSessionSet[nextSessionId];
-
-        // If the target session has a background turn still running, restore its loading state
-        const bgTurn = this.runningSessionMap[nextSessionId];
-        if (bgTurn) {
-          this.activeTurnId = bgTurn.turnId;
-          this.isSubmitting = true;
-          this.phase = bgTurn.phase;
-          delete this.runningSessionMap[nextSessionId];
-        }
-
-        debugLog("session:switch", {
-          from: previousSnapshot.sessionId,
-          to: nextSessionId,
-          backgroundTurnRegistered: switchingFromRunningTurn,
-          restoredBackgroundTurn: Boolean(bgTurn),
-          hydratedFromCache: hasCachedState
-        });
-
-        this.sessionOperation = null;
-        void this.loadSessionState(nextSessionId)
-          .then(() => {
-            if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId) {
-              return;
-            }
-            delete this.completedSessionSet[nextSessionId];
-            delete this.failedSessionSet[nextSessionId];
-          })
-          .catch((error) => {
-            if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId) {
-              return;
-            }
-            this.sessionError = `切换对话失败：${String(error)}`;
-            debugLog("session:switch:refresh:error", {
-              from: previousSnapshot.sessionId,
-              to: nextSessionId,
-              error: String(error)
-            });
-          });
-      } catch (error) {
-        // Check if the background turn is still running before restoring the snapshot.
-        // If it completed during the failed loadSessionState await, don't restore a dead spinner.
-        if (switchingFromRunningTurn) {
-          if (this.runningSessionMap[previousSnapshot.sessionId]) {
-            // Turn still running in background — safe to bring back to foreground
-            restoreSessionRuntimeSnapshot(this, previousSnapshot);
-          } else {
-            // Turn terminated while we were away — restore without the running state
-            restoreSessionRuntimeSnapshot(this, { ...previousSnapshot, isSubmitting: false, activeTurnId: null });
+      this.sessionHydrating = true;
+      if (hasCachedState) {
+        void this.loadSessionState(nextSessionId, {
+          refreshCatalog: false,
+          runtimeView: cachedRuntimeView
+        }).catch((error) => {
+          if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId) {
+            return;
           }
-        } else {
-          restoreSessionRuntimeSnapshot(this, previousSnapshot);
-        }
-        this.sessionError = `切换对话失败：${String(error)}`;
-        debugLog("session:switch:error", {
-          from: previousSnapshot.sessionId,
-          to: nextSessionId,
-          error: String(error)
+          this.sessionHydrating = false;
+          this.sessionError = `切换对话失败：${String(error)}`;
+          debugLog("session:switch:cache:error", {
+            from: previousSnapshot.sessionId,
+            to: nextSessionId,
+            error: String(error)
+          });
         });
-        this.sessionOperation = null;
+      } else {
+        this.resetSessionRuntimeState();
+        this.sessionId = nextSessionId;
+        this.phase = "connecting";
+        this.sessionHydrating = true;
+        const loadPromise = this.loadSessionState(nextSessionId, {
+          refreshCatalog: false
+        }).then(() => {
+          if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId) {
+            return;
+          }
+          this.sessionHydrating = false;
+          this.sessionError = null;
+          debugLog("session:switch:no-cache:loaded", {
+            from: previousSnapshot.sessionId,
+            to: nextSessionId
+          });
+        });
+        void withTimeout(loadPromise, HYDRATION_TIMEOUT_MS, "加载对话").catch((error) => {
+          if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId) {
+            return;
+          }
+          this.sessionHydrating = false;
+          this.sessionError = `切换对话失败：${String(error)}`;
+          debugLog("session:switch:no-cache:error", {
+            from: previousSnapshot.sessionId,
+            to: nextSessionId,
+            error: String(error)
+          });
+        });
       }
+
+      delete this.completedSessionSet[nextSessionId];
+      delete this.failedSessionSet[nextSessionId];
+
+      const bgTurn = this.runningSessionMap[nextSessionId];
+      if (bgTurn) {
+        this.activeTurnId = bgTurn.turnId;
+        this.isSubmitting = true;
+        this.phase = bgTurn.phase;
+        delete this.runningSessionMap[nextSessionId];
+      }
+
+      debugLog("session:switch", {
+        from: previousSnapshot.sessionId,
+        to: nextSessionId,
+        backgroundTurnRegistered: switchingFromRunningTurn,
+        restoredBackgroundTurn: Boolean(bgTurn),
+        hydratedFromCache: hasCachedState
+      });
+      reportSwitchPerf("foreground-switched", {
+        from: previousSnapshot.sessionId,
+        to: nextSessionId,
+        hasCachedState,
+        restoredBackgroundTurn: Boolean(bgTurn),
+        elapsedMs: (typeof performance !== "undefined" ? performance.now() : Date.now()) - switchStartedAt
+      });
+
+      this.sessionOperation = null;
+      this.sessionHydrating = false;
+      reportSwitchPerf("host-refresh-skipped", {
+        to: nextSessionId,
+        reason: hasCachedState ? "cached-session" : "interactive-switch-no-host-read"
+      });
     },
     async createSession() {
       if (this.sessionOperation || !hasPersistableMessages(this.messages)) {
@@ -4650,17 +4925,26 @@ export const useRuntimeStore = defineStore("runtime", {
         delete this.failedSessionSet[this.sessionId];
       }
 
-      const nextSessionId = `session-${Date.now()}`;
+      const nextSessionId = createNextSessionId([
+        this.sessionId,
+        ...this.sessionList.map((session) => session.conversationId)
+      ]);
+      const previousSessionId = this.sessionId;
       this.persistHistory();
-      await this.loadSessionCatalog();
+      const currentOverview = buildSessionOverviewFromRuntimeState(this);
       this.resetSessionRuntimeState();
       this.sessionId = nextSessionId;
       this.phase = "idle";
       this.sessionError = null;
-      this.sessionList = [
+      const dedupedCurrentSessionList = this.sessionList.filter((session) => session.conversationId !== nextSessionId);
+      this.sessionList = ensureUniqueSessionList([
         createTransientSessionOverview(nextSessionId),
-        ...this.sessionList.filter((session) => session.conversationId !== nextSessionId)
-      ];
+        ...(currentOverview ? [currentOverview] : []),
+        ...dedupedCurrentSessionList.filter(
+          (session) => session.conversationId !== currentOverview?.conversationId
+            && session.conversationId !== previousSessionId
+        )
+      ]);
       debugLog("session:create:transient", {
         from: this.sessionList[1]?.conversationId ?? null,
         to: nextSessionId
@@ -4781,34 +5065,62 @@ export const useRuntimeStore = defineStore("runtime", {
 
       try {
         await this.loadSessionCatalog();
-        const preferredSessionId = this.sessionList[0]?.conversationId ?? this.sessionId;
-        const runtimeView =
-          this.sessionList.length === 0 ? await this.loadSessionRuntimeViewState(preferredSessionId) : null;
-
-        if (
-          this.sessionList.length === 0 &&
-          preferredSessionId === this.sessionId &&
-          !runtimeView?.checkpoint &&
-          runtimeView != null &&
-          runtimeView.session.history.length === 0
-        ) {
-          this.resetSessionRuntimeState();
-          this.sessionId = preferredSessionId;
-          this.phase = "idle";
-          debugLog("session:init:empty");
-          return;
+        const restoredRunningMap = loadRunningSessionMap();
+        if (Object.keys(restoredRunningMap).length > 0) {
+          this.runningSessionMap = { ...restoredRunningMap };
+          debugLog("session:init:running-map", { sessions: Object.keys(restoredRunningMap) });
         }
+        const preferredSessionId = this.sessionList[0]?.conversationId ?? this.sessionId;
+        const persisted = loadPersistedRuntimeState(preferredSessionId);
+        const strategy = deriveInitStrategy(preferredSessionId, persisted, this.sessionList);
 
-        this.resetSessionRuntimeState();
-        this.sessionId = preferredSessionId;
-        this.phase = "connecting";
-        await this.loadSessionState(preferredSessionId, {
-          refreshCatalog: false,
-          runtimeView
-        });
-        debugLog("session:init", {
-          preferredSessionId
-        });
+        debugLog("session:init:strategy", { strategy: strategy.kind, preferredSessionId });
+
+        switch (strategy.kind) {
+          case "local-cache": {
+            const cachedRuntimeView = buildRuntimeViewFromPersistedState(preferredSessionId, strategy.persistedState);
+            const hostRuntimeView = await this.loadSessionRuntimeViewState(preferredSessionId).catch((error) => {
+              debugLog("session:init:host:error", { sessionId: preferredSessionId, error: String(error) });
+              return null;
+            });
+            const mergedRuntimeView = mergeRuntimeViews(cachedRuntimeView, hostRuntimeView);
+            this.resetSessionRuntimeState();
+            this.sessionId = preferredSessionId;
+            this.phase = "connecting";
+            await this.loadSessionState(preferredSessionId, {
+              refreshCatalog: false,
+              runtimeView: mergedRuntimeView
+            });
+            debugLog("session:init:cache", { sessionId: preferredSessionId, hostRefresh: hostRuntimeView != null });
+            break;
+          }
+          case "host-read": {
+            const runtimeView = await this.loadSessionRuntimeViewState(preferredSessionId);
+            if (!runtimeView?.checkpoint && runtimeView?.session.history.length === 0) {
+              this.resetSessionRuntimeState();
+              this.sessionId = preferredSessionId;
+              this.phase = "idle";
+              debugLog("session:init:empty");
+              return;
+            }
+            this.resetSessionRuntimeState();
+            this.sessionId = preferredSessionId;
+            this.phase = "connecting";
+            await this.loadSessionState(preferredSessionId, {
+              refreshCatalog: false,
+              runtimeView
+            });
+            debugLog("session:init:host", { sessionId: preferredSessionId, reason: strategy.reason });
+            break;
+          }
+          case "empty-fallback": {
+            this.resetSessionRuntimeState();
+            this.sessionId = preferredSessionId;
+            this.phase = "idle";
+            debugLog("session:init:empty-fallback", { sessionId: preferredSessionId });
+            break;
+          }
+        }
       } catch (error) {
         restoreSessionRuntimeSnapshot(this, previousSnapshot);
         this.sessionError = `初始化对话失败：${String(error)}`;
@@ -5383,8 +5695,8 @@ export const useRuntimeStore = defineStore("runtime", {
 
         this.streamDebugDeltaCount += 1;
         this.streamDebugLastDeltaAtMs = Date.now();
-        this.streamDebugTextCharsReceived += deltaText.length;
-        this.streamDebugReasoningCharsReceived += deltaReasoning.length;
+      this.streamDebugTextCharsReceived += deltaText.length;
+      this.streamDebugReasoningCharsReceived += deltaReasoning.length;
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
@@ -5406,6 +5718,7 @@ export const useRuntimeStore = defineStore("runtime", {
           bufferReasoningLength: this.streamBufferReasoning.length,
           bufferTurnId: this.streamBufferTurnId,
           pendingRaf: this.streamFlushFrameId != null,
+          pendingTimer: this.streamFlushTimerId != null,
           deltaToLastFlushMs:
             this.streamDebugLastFlushAtMs == null ? null : this.streamDebugLastDeltaAtMs - this.streamDebugLastFlushAtMs
         });

@@ -637,11 +637,92 @@ describe("runtime session resilience", () => {
     expect(store.sessionId).toBe("session-next");
     expect(store.phase).toBe("ready");
     expect(store.retrievedContext?.sessionContext.conversationId).toBe("session-next");
-    expect(store.sessionList).toEqual(nextSessionList);
+    expect(store.sessionList).toEqual([nextSessionList[1]]);
     expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
-      "user:next session",
-      "assistant:next reply"
+      "user:cached next session",
+      "assistant:cached next reply"
     ]);
+  });
+
+  it("switches immediately even when host session state is still pending and no local cache exists", async () => {
+    const store = useRuntimeStore();
+    const originalMessages = [
+      createMessage({ id: "user-current", turnId: "turn-current", role: "user", content: "current session" }),
+      createMessage({ id: "assistant-current", turnId: "turn-current", role: "assistant", content: "current reply" })
+    ];
+    const nextSnapshot = createSnapshot({
+      conversationId: "session-next",
+      title: "Next session",
+      summary: "Next summary",
+      history: [
+        { role: "user", content: "next session" },
+        { role: "assistant", content: "next reply" }
+      ],
+      turnCount: 1,
+      updatedAtMs: 2400
+    });
+    const nextSessionList: SessionOverview[] = [
+      {
+        conversationId: "session-next",
+        title: "Next session",
+        summary: "Next summary",
+        turnCount: 1,
+        lastReferencedFile: null,
+        updatedAtMs: 2400
+      },
+      {
+        conversationId: "session-current",
+        title: "Current session",
+        summary: "Current summary",
+        turnCount: 1,
+        lastReferencedFile: null,
+        updatedAtMs: 1000
+      }
+    ];
+
+    let resolveRuntimeView: ((value: SessionRuntimeView) => void) | null = null;
+    const runtimeViewPromise = new Promise<SessionRuntimeView>((resolve) => {
+      resolveRuntimeView = resolve;
+    });
+
+    store.$patch({
+      sessionId: "session-current",
+      sessionList: [nextSessionList[1]],
+      phase: "ready",
+      sessionSummary: "Current summary",
+      messages: originalMessages
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return runtimeViewPromise;
+      }
+
+      if (command === "list_sessions") {
+        return nextSessionList;
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const switchingPromise = store.switchSession("session-next");
+    await flushMicrotasks();
+
+    expect(store.sessionOperation).toBeNull();
+    expect(store.sessionId).toBe("session-next");
+    expect(store.phase).toBe("connecting");
+    expect(store.messages).toEqual([]);
+
+    resolveRuntimeView?.(createSessionRuntimeView(nextSnapshot));
+    await switchingPromise;
+    await flushMicrotasks();
+
+    expect(store.sessionOperation).toBeNull();
+    expect(store.sessionId).toBe("session-next");
+    expect(store.phase).toBe("ready");
+    expect(store.retrievedContext).not.toBeNull();
+    expect(store.sessionList).toEqual([nextSessionList[1]]);
+    expect(store.messages.length).toBeGreaterThan(0);
   });
 
   it("preserves historical checkout when switching away and back in browser fallback mode", async () => {
@@ -2875,9 +2956,7 @@ describe("runtime session resilience", () => {
         summary: "Browser summary",
         turnCount: 1,
         lastReferencedFile: null,
-        // turnTraceHistory is no longer persisted to localStorage, so updatedAtMs
-        // falls back to Date.now() (mocked to 4242) instead of trace's updatedAt (4000).
-        updatedAtMs: 4242
+        updatedAtMs: 4000
       }
     ]);
     expect(Object.keys(readPersistedSessions().sessions)).toEqual(["browser-current"]);
@@ -2931,8 +3010,7 @@ describe("runtime session resilience", () => {
       "session-5151",
       "session-existing"
     ]);
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledTimes(1);
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("list_sessions");
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalled();
 
     nowSpy.mockRestore();
   });
@@ -7647,5 +7725,242 @@ describe("runtime session resilience", () => {
     const stats = getFrontendRecorderStats();
     expect(capability.tauriAvailable).toBe(true);
     expect(stats.initialized).toBe(true);
+  });
+
+  it("handles rapid concurrent session switches correctly", async () => {
+    const store = useRuntimeStore();
+    const sessionList: SessionOverview[] = [
+      { conversationId: "session-a", title: "A", summary: "", turnCount: 0, lastReferencedFile: null, updatedAtMs: 100 },
+      { conversationId: "session-b", title: "B", summary: "", turnCount: 0, lastReferencedFile: null, updatedAtMs: 200 },
+      { conversationId: "session-c", title: "C", summary: "", turnCount: 0, lastReferencedFile: null, updatedAtMs: 300 }
+    ];
+
+    store.$patch({
+      sessionId: "session-a",
+      sessionList,
+      phase: "ready",
+      messages: [createMessage({ id: "a-1", turnId: "turn-a", role: "user", content: "session a" })]
+    });
+
+    let resolveB: ((v: SessionRuntimeView) => void) | null = null;
+    let resolveC: ((v: SessionRuntimeView) => void) | null = null;
+    const deferredB = new Promise<SessionRuntimeView>((r) => { resolveB = r; });
+    const deferredC = new Promise<SessionRuntimeView>((r) => { resolveC = r; });
+    let callCount = 0;
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        callCount++;
+        if (callCount === 1) return deferredB;
+        if (callCount === 2) return deferredC;
+        return createSessionRuntimeView(createSnapshot({
+          conversationId: "session-a",
+          history: [], turnCount: 0, updatedAtMs: 100
+        }));
+      }
+      if (command === "list_sessions") return sessionList;
+      throw new Error(`unexpected: ${command}`);
+    });
+
+    writePersistedSessions({
+      "session-b": {
+        cachedStateVersion: 2,
+        phase: "ready",
+        messages: [createMessage({ id: "b-1", turnId: "turn-b", role: "user", content: "session b" })],
+        turnTraceHistory: [], sessionSummary: "B",
+        providerRequestedName: "", providerName: "", providerProtocol: "", providerModel: "",
+        providerSource: "", providerMode: "", fallbackReason: null,
+        inputTokens: null, outputTokens: null, totalTokens: null, firstTokenLatencyMs: null,
+        visibleNodeId: null, branchHeadNodeId: null, activeBranchId: null,
+        historyNodes: [], historyBranches: [], initialRollbackActive: false,
+        checkpoint: null, runningTurnId: null
+      },
+      "session-c": {
+        cachedStateVersion: 2,
+        phase: "ready",
+        messages: [createMessage({ id: "c-1", turnId: "turn-c", role: "user", content: "session c" })],
+        turnTraceHistory: [], sessionSummary: "C",
+        providerRequestedName: "", providerName: "", providerProtocol: "", providerModel: "",
+        providerSource: "", providerMode: "", fallbackReason: null,
+        inputTokens: null, outputTokens: null, totalTokens: null, firstTokenLatencyMs: null,
+        visibleNodeId: null, branchHeadNodeId: null, activeBranchId: null,
+        historyNodes: [], historyBranches: [], initialRollbackActive: false,
+        checkpoint: null, runningTurnId: null
+      }
+    });
+
+    await store.switchSession("session-b");
+
+    expect(store.sessionId).toBe("session-b");
+
+    await store.switchSession("session-c");
+
+    resolveB?.(createSessionRuntimeView(createSnapshot({
+      conversationId: "session-b", history: [], turnCount: 0, updatedAtMs: 200
+    })));
+
+    resolveC?.(createSessionRuntimeView(createSnapshot({
+      conversationId: "session-c", history: [], turnCount: 0, updatedAtMs: 300
+    })));
+
+    await flushMicrotasks();
+
+    expect(store.sessionId).toBe("session-c");
+    expect(store.sessionOperation).toBeNull();
+    expect(store.phase).toBe("ready");
+    expect(store.messages[0]?.content).toBe("session c");
+  });
+
+  it("falls back gracefully when persisted cache is corrupt", async () => {
+    const store = useRuntimeStore();
+
+    window.localStorage.setItem(RUNTIME_STORAGE_KEY, "{sessions: {broken json}}");
+
+    store.$patch({
+      sessionId: "session-a",
+      sessionList: [],
+      phase: "idle",
+      messages: []
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(createSnapshot({
+          conversationId: "session-a", history: [], turnCount: 0, updatedAtMs: 100
+        }));
+      }
+      if (command === "list_sessions") return [];
+      throw new Error(`unexpected: ${command}`);
+    });
+
+    await store.initializeSessions();
+
+    expect(store.sessionError).toBeNull();
+    expect(store.sessionOperation).toBeNull();
+  });
+
+  it("falls back gracefully when persisted cache has wrong state version", async () => {
+    const store = useRuntimeStore();
+    const sessionList: SessionOverview[] = [
+      { conversationId: "session-stale", title: "Stale", summary: "", turnCount: 0, lastReferencedFile: null, updatedAtMs: 100 }
+    ];
+
+    writePersistedSessions({
+      "session-stale": {
+        cachedStateVersion: 999,
+        phase: "ready",
+        messages: [createMessage({ id: "stale-1", turnId: "turn-stale", role: "user", content: "stale" })],
+        turnTraceHistory: [], sessionSummary: "",
+        providerRequestedName: "", providerName: "", providerProtocol: "", providerModel: "",
+        providerSource: "", providerMode: "", fallbackReason: null,
+        inputTokens: null, outputTokens: null, totalTokens: null, firstTokenLatencyMs: null,
+        visibleNodeId: null, branchHeadNodeId: null, activeBranchId: null,
+        historyNodes: [], historyBranches: [], initialRollbackActive: false,
+        checkpoint: null, runningTurnId: null
+      }
+    });
+
+    store.$patch({
+      sessionId: "session-old",
+      sessionList,
+      phase: "ready",
+      messages: []
+    });
+
+    let loadCalled = false;
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "list_sessions") {
+        return sessionList;
+      }
+      if (command === "load_session_runtime_view") {
+        loadCalled = true;
+        return createSessionRuntimeView(createSnapshot({
+          conversationId: "session-stale", history: [], turnCount: 0, updatedAtMs: 100
+        }));
+      }
+      throw new Error(`unexpected: ${command}`);
+    });
+
+    await store.switchSession("session-stale");
+    await flushMicrotasks();
+
+    expect(loadCalled).toBe(true);
+    expect(store.sessionError).toBeNull();
+  });
+
+  it("degrades gracefully when localStorage.setItem throws", async () => {
+    const store = useRuntimeStore();
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("localStorage quota exceeded");
+    });
+
+    store.$patch({
+      sessionId: "test-session",
+      sessionList: [],
+      phase: "idle",
+      messages: [createMessage({ id: "msg-1", turnId: "turn-1", role: "user", content: "hello" })]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        return createSessionRuntimeView(createSnapshot({
+          conversationId: "test-session",
+          history: [{ role: "user", content: "hello" }, { role: "assistant", content: "hi" }],
+          turnCount: 1, updatedAtMs: 100
+        }));
+      }
+      if (command === "list_sessions") return [{ conversationId: "test-session", title: "", summary: "", turnCount: 1, lastReferencedFile: null, updatedAtMs: 100 }];
+      throw new Error(`unexpected: ${command}`);
+    });
+
+    let persistError: Error | null = null;
+    try {
+      store.persistHistory();
+    } catch (e) {
+      persistError = e as Error;
+    }
+
+    expect(persistError).toBeNull();
+
+    let initError: Error | null = null;
+    try {
+      await store.initializeSessions();
+    } catch (e) {
+      initError = e as Error;
+    }
+
+    expect(initError).toBeNull();
+    expect(store.sessionError).toBeNull();
+
+    setItemSpy.mockRestore();
+  });
+
+  it("surfaces error when host read fails for uncached session switch", async () => {
+    const store = useRuntimeStore();
+    const sessionList: SessionOverview[] = [
+      { conversationId: "session-error", title: "Error", summary: "", turnCount: 0, lastReferencedFile: null, updatedAtMs: 100 }
+    ];
+
+    store.$patch({
+      sessionId: "session-fast",
+      sessionList,
+      phase: "ready",
+      messages: [createMessage({ id: "fast-1", turnId: "turn-fast", role: "user", content: "fast" })]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "load_session_runtime_view") {
+        throw new Error("host read failed");
+      }
+      if (command === "list_sessions") return sessionList;
+      throw new Error(`unexpected: ${command}`);
+    });
+
+    await store.switchSession("session-error");
+    await flushMicrotasks();
+
+    expect(store.sessionId).toBe("session-error");
+    expect(store.sessionError).toContain("host read failed");
+    expect(store.sessionHydrating).toBe(false);
   });
 });

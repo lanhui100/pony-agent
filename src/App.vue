@@ -25,6 +25,7 @@ let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 let onBeforeUnload: (() => void) | null = null;
 let onPageHide: (() => void) | null = null;
 let onVisibility: (() => void) | null = null;
+let longTaskObserver: PerformanceObserver | null = null;
 
 function logLifecycle(event: string) {
   console.info(`[pony-agent][app] ${event}`, {
@@ -59,6 +60,34 @@ async function runStartupTask(label: string, task: () => Promise<unknown>) {
   }
 }
 
+function setupLongTaskObserver() {
+  if (typeof window === "undefined" || typeof PerformanceObserver === "undefined") {
+    return;
+  }
+
+  try {
+    longTaskObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.duration < 120) {
+          continue;
+        }
+        console.warn("[pony-agent][perf] long-task", {
+          name: entry.name,
+          duration: entry.duration,
+          startTime: entry.startTime,
+          page: currentPage.value,
+          sessionId: runtimeStore.sessionId,
+          isSubmitting: runtimeStore.isSubmitting,
+          messageCount: runtimeStore.messages.length
+        });
+      }
+    });
+    longTaskObserver.observe({ entryTypes: ["longtask"] });
+  } catch {
+    longTaskObserver = null;
+  }
+}
+
 onMounted(async () => {
   logLifecycle("mounted");
   if (typeof window !== "undefined") {
@@ -67,7 +96,10 @@ onMounted(async () => {
       rightSidebarOpen.value = storedSidebarPreference !== "false";
     }
   }
-  onBeforeUnload = () => logLifecycle("beforeunload");
+  onBeforeUnload = () => {
+    logLifecycle("beforeunload");
+    runtimeStore.persistHistory();
+  };
   onPageHide = () => logLifecycle("pagehide");
   onVisibility = () => logLifecycle(`visibility:${document.visibilityState}`);
 
@@ -75,6 +107,7 @@ onMounted(async () => {
   window.addEventListener("pagehide", onPageHide);
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("resize", handleWindowResize, { passive: true });
+  setupLongTaskObserver();
 
   await Promise.all([
     runStartupTask("providerRegistry", () => providerStore.loadRegistry()),
@@ -101,6 +134,8 @@ onBeforeUnmount(() => {
     clearTimeout(resizeTimer);
     resizeTimer = null;
   }
+  longTaskObserver?.disconnect();
+  longTaskObserver = null;
   logLifecycle("beforeUnmount");
 });
 
