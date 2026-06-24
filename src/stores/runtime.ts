@@ -6299,7 +6299,7 @@ export const useRuntimeStore = defineStore("runtime", {
       const requestId = String(Date.now());
       const userMessageId = `user-${requestId}`;
 
-      if (this.initialRollbackActive) {
+      if (this.initialRollbackActive || isHistoricalMode(this.historyCursorMode)) {
         this.initialRollbackActive = false;
         this.historyCursorMode = "live";
       }

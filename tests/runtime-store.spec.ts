@@ -5639,6 +5639,93 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("processes streamed turn events after submitting from a historical root checkout", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9191);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "resolve_graph_run_submission_plan") {
+        return { command: "start_graph_run_stream", runId: null };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-root-restart" },
+          turnId: "9191"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const store = useRuntimeStore();
+    store.$patch({
+      sessionId: "session-root-restart",
+      draftMessage: "restart from root",
+      phase: "ready",
+      visibleNodeId: "node-root",
+      branchHeadNodeId: "node-head",
+      activeBranchId: "branch-main",
+      historyCursorMode: "historical",
+      messages: [],
+      turnTraceHistory: []
+    });
+
+    await store.submitTurn();
+
+    expect(store.historyCursorMode).toBe("live");
+
+    eventHandlers.get("turn:delta")?.({
+      payload: {
+        turnId: "9191",
+        eventId: "event-turn-delta-9191",
+        eventType: "turn.output_delta",
+        sequence: 1,
+        emittedAtMs: 1000,
+        text: "partial answer"
+      }
+    });
+
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+    expect(store.messages.find((message) => message.role === "assistant")?.content).toBe("partial answer");
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "9191",
+        eventId: "event-turn-completed-9191",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 1200,
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        outputTokens: 9,
+        traceSteps: store.traceSteps,
+        toolActivities: []
+      }
+    });
+
+    await flushDeferredTurnWork();
+    await flushMicrotasks();
+
+    expect(store.messages.find((message) => message.role === "assistant")?.content).toBe("final answer");
+    expect(store.messages.find((message) => message.role === "assistant")?.status).toBe("done");
+    nowSpy.mockRestore();
+  });
+
   it("writes final assistant text into persisted background sessions before the user switches back", async () => {
     const store = useRuntimeStore();
     const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();

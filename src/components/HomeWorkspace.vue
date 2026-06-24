@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
 import { storeToRefs } from "pinia";
+import { isTauriAvailable } from "@/lib/tauri";
 import {
   AlertTriangle,
   ArrowUp,
@@ -944,6 +945,14 @@ function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | 
   const branchBaseNodeId = historyBranches.value
     .find((branch) => branch.branchId === entryNode?.branchId)
     ?.baseNodeId?.trim() || null;
+  if (branchBaseNodeId) {
+    if (branchBaseNodeId !== entryNodeId) {
+      return branchBaseNodeId;
+    }
+    if (isTauriAvailable()) {
+      return branchBaseNodeId;
+    }
+  }
   if (branchBaseNodeId && branchBaseNodeId !== entryNodeId) {
     return branchBaseNodeId;
   }

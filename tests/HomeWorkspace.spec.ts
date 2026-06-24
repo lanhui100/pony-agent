@@ -2614,6 +2614,7 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
 
   it("restores the initial empty state when the first checkpoint has no explicit parent node", async () => {
     const runtimeStore = useRuntimeStore();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
     runtimeStore.$patch({
       sessionId: "session-current",
       sessionOperation: null,
