@@ -6500,6 +6500,7 @@ mod tests {
                 session_id: Some("history-control".to_string()),
                 node_id: first_node_id.clone(),
                 mode: HistoryCheckoutMode::TranscriptAndWorkspace,
+                expected_cursor_version: None,
             })
             .expect("checkout should succeed");
         assert!(checkout.transcript_restore_applied);
@@ -6559,6 +6560,7 @@ mod tests {
             .fork_from_history_node(ForkFromHistoryNodeCommand {
                 session_id: Some("history-control".to_string()),
                 node_id: first_node_id.clone(),
+                expected_cursor_version: None,
             })
             .expect("fork should succeed");
         assert_ne!(fork.branch.branch_id.as_str(), "branch-main");
@@ -6605,6 +6607,7 @@ mod tests {
             .switch_history_branch(SwitchHistoryBranchCommand {
                 session_id: Some("history-control".to_string()),
                 branch_id: "branch-main".to_string(),
+                expected_cursor_version: None,
             })
             .expect("switch back to main should succeed");
         assert_eq!(switched.node_id.as_deref(), Some(latest_node_id.as_str()));
@@ -6613,6 +6616,7 @@ mod tests {
             .restore_branch_head(RestoreBranchHeadCommand {
                 session_id: Some("history-control".to_string()),
                 branch_id: Some(fork.branch.branch_id.clone()),
+                expected_cursor_version: None,
             })
             .expect("restore fork head should succeed");
         assert_eq!(
@@ -6709,6 +6713,7 @@ mod tests {
                 session_id: Some("history-evidence-control".to_string()),
                 node_id: first_node_id.clone(),
                 mode: HistoryCheckoutMode::TranscriptOnly,
+                expected_cursor_version: None,
             })
             .expect("checkout should succeed");
 
@@ -6839,6 +6844,7 @@ mod tests {
             .fork_from_history_node(ForkFromHistoryNodeCommand {
                 session_id: Some("history-command-evidence".to_string()),
                 node_id: first_node_id.clone(),
+                expected_cursor_version: None,
             })
             .expect("fork should succeed");
         assert_eq!(
@@ -6859,6 +6865,7 @@ mod tests {
             .switch_history_branch(SwitchHistoryBranchCommand {
                 session_id: Some("history-command-evidence".to_string()),
                 branch_id: "branch-main".to_string(),
+                expected_cursor_version: None,
             })
             .expect("switch should succeed");
         assert_eq!(
@@ -6889,6 +6896,7 @@ mod tests {
             .restore_branch_head(RestoreBranchHeadCommand {
                 session_id: Some("history-command-evidence".to_string()),
                 branch_id: Some("branch-main".to_string()),
+                expected_cursor_version: None,
             })
             .expect("restore should succeed");
         assert_eq!(
@@ -7004,6 +7012,7 @@ mod tests {
                 session_id: Some("history-degrade-control".to_string()),
                 node_id: first_node_id.clone(),
                 mode: HistoryCheckoutMode::TranscriptAndWorkspace,
+                expected_cursor_version: None,
             })
             .expect("degraded checkout should succeed");
 

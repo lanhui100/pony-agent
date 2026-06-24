@@ -44,16 +44,94 @@ vi.mock("@/lib/frontend-flight-recorder", async () => {
 
 const scrollToBottomSpy = vi.fn();
 const viewportScrollToSpy = vi.fn();
-const scrollIntoViewSpy = vi.fn();
+const viewportMetrics = {
+  scrollHeight: 1000,
+  scrollTop: 700,
+  clientHeight: 400
+};
+let latestViewportEl: HTMLElement | null = null;
+let latestResizeObserverCallback: ResizeObserverCallback | null = null;
+let latestResizeObserverTarget: Element | null = null;
+
+function resetViewportMetrics() {
+  viewportMetrics.scrollHeight = 1000;
+  viewportMetrics.scrollTop = 700;
+  viewportMetrics.clientHeight = 400;
+}
+
+function createViewportElement() {
+  const viewportEl = document.createElement("div");
+  Object.defineProperty(viewportEl, "scrollHeight", {
+    configurable: true,
+    get: () => viewportMetrics.scrollHeight
+  });
+  Object.defineProperty(viewportEl, "clientHeight", {
+    configurable: true,
+    get: () => viewportMetrics.clientHeight
+  });
+  Object.defineProperty(viewportEl, "scrollTop", {
+    configurable: true,
+    get: () => viewportMetrics.scrollTop,
+    set: (value: number) => {
+      viewportMetrics.scrollTop = value;
+    }
+  });
+  Object.defineProperty(viewportEl, "scrollTo", {
+    configurable: true,
+    value: (options?: ScrollToOptions | number, y?: number) => {
+      viewportScrollToSpy(options);
+      if (typeof options === "number") {
+        viewportMetrics.scrollTop = typeof y === "number" ? y : viewportMetrics.scrollTop;
+      } else if (options?.top != null) {
+        viewportMetrics.scrollTop = options.top;
+      }
+      viewportEl.dispatchEvent(new Event("scroll"));
+    }
+  });
+  latestViewportEl = viewportEl;
+  return viewportEl;
+}
+
+function triggerViewportScroll(top: number) {
+  if (!latestViewportEl) {
+    throw new Error("viewport is not mounted");
+  }
+
+  viewportMetrics.scrollTop = top;
+  latestViewportEl.dispatchEvent(new Event("scroll"));
+}
+
+function triggerViewportProgrammaticIntermediateScroll(top: number) {
+  if (!latestViewportEl) {
+    throw new Error("viewport is not mounted");
+  }
+
+  viewportMetrics.scrollTop = top;
+  latestViewportEl.dispatchEvent(new Event("scroll"));
+}
+
+function triggerViewportWheel() {
+  if (!latestViewportEl) {
+    throw new Error("viewport is not mounted");
+  }
+
+  latestViewportEl.dispatchEvent(new Event("wheel"));
+}
+
+function triggerContentResize() {
+  if (!latestResizeObserverCallback || !latestResizeObserverTarget) {
+    throw new Error("resize observer is not active");
+  }
+
+  latestResizeObserverCallback(
+    [{ target: latestResizeObserverTarget } as ResizeObserverEntry],
+    {} as ResizeObserver
+  );
+}
 
 const ScrollAreaStub = defineComponent({
   setup(_props, { slots, expose }) {
-    const viewportEl = {
-      scrollHeight: 1000,
-      scrollTop: 700,
-      clientHeight: 400,
-      scrollTo: viewportScrollToSpy
-    } as unknown as HTMLElement;
+    const viewportEl = createViewportElement();
 
     expose({
       viewportEl,
@@ -462,10 +540,6 @@ describe("HomeWorkspace", () => {
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     vi.spyOn(console, "info").mockImplementation(() => {});
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoViewSpy
-    });
     vi.stubGlobal(
       "requestAnimationFrame",
       ((callback: FrameRequestCallback) => {
@@ -474,12 +548,32 @@ describe("HomeWorkspace", () => {
       }) as typeof requestAnimationFrame
     );
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.stubGlobal(
+      "ResizeObserver",
+      class ResizeObserver {
+        constructor(callback: ResizeObserverCallback) {
+          latestResizeObserverCallback = callback;
+        }
+
+        observe(target: Element) {
+          latestResizeObserverTarget = target;
+        }
+
+        disconnect() {
+          latestResizeObserverTarget = null;
+        }
+      } as typeof ResizeObserver
+    );
     scrollToBottomSpy.mockReset();
     viewportScrollToSpy.mockReset();
-    scrollIntoViewSpy.mockReset();
+    latestViewportEl = null;
+    latestResizeObserverCallback = null;
+    latestResizeObserverTarget = null;
+    resetViewportMetrics();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -547,7 +641,6 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     mountWorkspace();
     await nextTick();
 
-    expect(scrollIntoViewSpy).not.toHaveBeenCalled();
     expect(viewportScrollToSpy).not.toHaveBeenCalled();
     expect(scrollToBottomSpy).not.toHaveBeenCalled();
   });
@@ -741,6 +834,39 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(wrapper.text()).not.toContain("重新开始新的执行");
   });
 
+  it("renders timeout retrying assistant state in error color", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "calling_model",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-timeout-retry",
+          turnId: "turn-timeout-retry",
+          role: "user",
+          content: "再试一次"
+        }),
+        createMessage({
+          id: "assistant-timeout-retry",
+          turnId: "turn-timeout-retry",
+          role: "assistant",
+          content: "超时后错误重连中...",
+          status: "pending",
+          modelName: "OpenAI/GPT-5",
+          errorDetail: "timeout: previous call timed out"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="workspace-assistant-pending-status"]').text()).toContain("超时后错误重连中");
+    const markdownBlocks = wrapper.findAll(".markdown-stub");
+    expect(markdownBlocks.some((node) => node.classes().includes("text-rose-800"))).toBe(true);
+  });
+
   it("keeps control boundary evidence out of the workspace header area", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -919,7 +1045,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
 
     const wrapper = mountWorkspace();
     await nextTick();
-    scrollIntoViewSpy.mockClear();
+    viewportScrollToSpy.mockClear();
 
     runtimeStore.$patch({
       messages: [
@@ -1131,7 +1257,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
 
-    scrollIntoViewSpy.mockClear();
+    viewportScrollToSpy.mockClear();
     runtimeStore.$patch({
       phase: "ready",
       isSubmitting: false,
@@ -1156,7 +1282,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
     expect(wrapper.find(".markdown-stub").exists()).toBe(true);
-    expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+    expect(viewportScrollToSpy).not.toHaveBeenCalled();
   });
 
   it("cleans up stale streaming state when assistant message ids change without changing message count", async () => {
@@ -1247,6 +1373,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
 
     const wrapper = mountWorkspace();
     await nextTick();
+    viewportScrollToSpy.mockClear();
 
     runtimeStore.$patch({
       messages: [
@@ -1267,9 +1394,9 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
       ]
     });
     await vi.waitFor(() =>
-      expect(scrollIntoViewSpy).toHaveBeenCalledWith({
-        block: "end",
-        behavior: "auto"
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: viewportMetrics.scrollHeight,
+        behavior: "smooth"
       })
     );
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
@@ -1303,7 +1430,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
 
     const wrapper = mountWorkspace();
     await nextTick();
-    scrollIntoViewSpy.mockClear();
+    viewportScrollToSpy.mockClear();
 
     runtimeStore.$patch({
       messages: [
@@ -1324,9 +1451,9 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
       ]
     });
     await vi.waitFor(() =>
-      expect(scrollIntoViewSpy).toHaveBeenCalledWith({
-        block: "end",
-        behavior: "auto"
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: viewportMetrics.scrollHeight,
+        behavior: "smooth"
       })
     );
 
@@ -1353,6 +1480,323 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
     expect(findStreamingMarkdown(wrapper).text()).toContain("hello");
     expect(findStreamingMarkdown(wrapper).text().length).toBeGreaterThan(5);
+  });
+
+  it("keeps user scroll override while streaming updates continue", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "从头看"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    viewportScrollToSpy.mockClear();
+
+    triggerViewportWheel();
+    triggerViewportScroll(120);
+    await nextTick();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "从头看"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello world again",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await flushAsyncUiWork();
+    await nextTick();
+
+    expect(viewportScrollToSpy).not.toHaveBeenCalled();
+  });
+
+  it("resumes auto-follow after idle only when new streamed content arrives", async () => {
+    vi.useFakeTimers();
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续生成"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "alpha",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    viewportScrollToSpy.mockClear();
+
+    triggerViewportWheel();
+    triggerViewportScroll(80);
+    await nextTick();
+
+    await vi.advanceTimersByTimeAsync(4000);
+    await nextTick();
+    expect(viewportScrollToSpy).not.toHaveBeenCalled();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续生成"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "alpha beta",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await vi.waitFor(() =>
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: viewportMetrics.scrollHeight,
+        behavior: "auto"
+      })
+    );
+    vi.useRealTimers();
+  });
+
+  it("keeps bottom lock through resize-driven streaming growth", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    viewportScrollToSpy.mockClear();
+
+    viewportMetrics.scrollHeight = 1320;
+    triggerContentResize();
+
+    await vi.waitFor(() =>
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: 1320,
+        behavior: "auto"
+      })
+    );
+  });
+
+  it("uses smooth follow for stream deltas and auto for resize compensation", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    viewportScrollToSpy.mockClear();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello there",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    await vi.waitFor(() =>
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: viewportMetrics.scrollHeight,
+        behavior: "smooth"
+      })
+    );
+
+    viewportScrollToSpy.mockClear();
+    viewportMetrics.scrollHeight = 1380;
+    triggerContentResize();
+
+    await vi.waitFor(() =>
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: 1380,
+        behavior: "auto"
+      })
+    );
+  });
+
+  it("keeps auto-follow active across intermediate smooth-scroll events", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    viewportScrollToSpy.mockClear();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello there",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    await vi.waitFor(() =>
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: viewportMetrics.scrollHeight,
+        behavior: "smooth"
+      })
+    );
+
+    viewportScrollToSpy.mockClear();
+    triggerViewportProgrammaticIntermediateScroll(760);
+    triggerViewportProgrammaticIntermediateScroll(820);
+    triggerViewportProgrammaticIntermediateScroll(900);
+    await nextTick();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello there again",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    await vi.waitFor(() =>
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({
+        top: viewportMetrics.scrollHeight,
+        behavior: "smooth"
+      })
+    );
   });
 
   // KNOWN TEST DEBT: refreshFrontendRecorderStats removed from store
@@ -1960,7 +2404,7 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     expect(checkoutSpy).not.toHaveBeenCalled();
   });
 
-  it("rolls back conversation and trace state after confirming a checkpoint action", async () => {
+  it("restores the initial empty state when rolling back the first turn", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionId: "session-current",
@@ -2159,12 +2603,70 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
 
     expect(runtimeStore.messages).toEqual([]);
     expect(runtimeStore.turnTraceHistory).toHaveLength(0);
-    expect(runtimeStore.draftMessage).toBe("旧问题");
-    expect((wrapper.get('[data-testid="workspace-composer-input"]').element as HTMLTextAreaElement).value).toBe("旧问题");
+    expect(runtimeStore.draftMessage).toBe("");
+    expect((wrapper.get('[data-testid="workspace-composer-input"]').element as HTMLTextAreaElement).value).toBe("");
     expect(wrapper.text()).not.toContain("旧问题");
     expect(wrapper.text()).not.toContain("旧回答");
     expect(wrapper.text()).not.toContain("新问题");
     expect(wrapper.text()).not.toContain("新回答");
+    expect(wrapper.find('[data-testid="workspace-empty-state"]').exists()).toBe(true);
+  });
+
+  it("restores the initial empty state when the first checkpoint has no explicit parent node", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      historyCursorMode: "live",
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-head", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-head", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-old",
+          parentNodeId: null,
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          parentNodeId: "node-old",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", baseNodeId: "node-old", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const actionBars = wrapper.findAll('[data-testid="workspace-user-checkpoint-actions"]');
+    await actionBars[0]!.findAll("button")[0]!.trigger("click");
+    await nextTick();
+    clickLatestRollbackConfirm('确认仅撤回对话？');
+    await nextTick();
+    await new Promise(r => setTimeout(r, 400));
+    await nextTick();
+
+    expect(runtimeStore.messages).toEqual([]);
+    expect(runtimeStore.draftMessage).toBe("");
+    expect((wrapper.get('[data-testid="workspace-composer-input"]').element as HTMLTextAreaElement).value).toBe("");
+    expect(wrapper.find('[data-testid="workspace-empty-state"]').exists()).toBe(true);
   });
 
   it("overwrites existing draft text when rollback completes", async () => {

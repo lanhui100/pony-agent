@@ -4,10 +4,12 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 
+use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
+
 use super::session::{
-    FileSessionBackend, PersistedStore, SeparateTraceTableMode, SessionBackend,
-    SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionState,
-    SessionTraceMutation, TraceMigrationState, TurnTraceRecord,
+    AttachmentAsset, FileSessionBackend, PersistedStore, SeparateTraceTableMode,
+    SessionBackend, SessionBackendMutationResult, SessionBackendTraceLoadResult,
+    SessionState, SessionTraceMutation, TraceMigrationState, TurnTraceRecord,
 };
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
@@ -658,6 +660,90 @@ impl SessionBackend for SqliteSessionBackend {
         true
     }
 
+    fn remove_session(
+        &self,
+        session_id: &str,
+        attachment_assets: &HashMap<String, AttachmentAsset>,
+        session_attachment_index: &HashMap<String, Vec<String>>,
+        mcp_source_snapshots: &HashMap<String, McpSourceSnapshot>,
+        skill_source_snapshots: &HashMap<String, SkillSourceSnapshot>,
+    ) -> bool {
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                return false;
+            }
+        };
+        let conn = slot.as_ref().expect("connection initialized");
+        let tx = match conn.unchecked_transaction() {
+            Ok(tx) => tx,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite delete begin tx error: {error}");
+                return false;
+            }
+        };
+
+        if let Err(error) = tx.execute(
+            "DELETE FROM sessions WHERE conversation_id = ?1",
+            params![session_id],
+        ) {
+            eprintln!("[pony-agent][session] SQLite delete session error: {error}");
+            return false;
+        }
+        if let Err(error) = tx.execute(
+            "DELETE FROM session_turn_traces WHERE session_id = ?1",
+            params![session_id],
+        ) {
+            eprintln!("[pony-agent][session] SQLite delete session traces error: {error}");
+            return false;
+        }
+
+        {
+            let metadata_entries: [(&str, Option<String>); 4] = [
+                (
+                    "attachment_assets",
+                    serde_json::to_string(attachment_assets).ok(),
+                ),
+                (
+                    "session_attachment_index",
+                    serde_json::to_string(session_attachment_index).ok(),
+                ),
+                (
+                    "mcp_source_snapshots",
+                    serde_json::to_string(mcp_source_snapshots).ok(),
+                ),
+                (
+                    "skill_source_snapshots",
+                    serde_json::to_string(skill_source_snapshots).ok(),
+                ),
+            ];
+            let mut meta_stmt = match tx
+                .prepare("INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)")
+            {
+                Ok(stmt) => stmt,
+                Err(error) => {
+                    eprintln!("[pony-agent][session] SQLite prepare metadata delete-upsert error: {error}");
+                    return false;
+                }
+            };
+            for (key, value) in &metadata_entries {
+                if let Some(val) = value {
+                    if let Err(error) = meta_stmt.execute(params![key, val]) {
+                        eprintln!("[pony-agent][session] SQLite metadata delete-upsert error: {error}");
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if let Err(error) = tx.commit() {
+            eprintln!("[pony-agent][session] SQLite delete commit error: {error}");
+            return false;
+        }
+        true
+    }
+
     fn load_session_traces(&self, session_id: &str) -> SessionBackendTraceLoadResult {
         let mut slot = match self.connection() {
             Ok(slot) => slot,
@@ -1121,6 +1207,65 @@ mod tests {
     }
 
     #[test]
+    fn remove_session_updates_rows_and_metadata_incrementally() {
+        let dir = unique_dir("remove-session-incremental");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("remove-session-incremental.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::DualWrite,
+        );
+
+        let mut store = PersistedStore::default();
+        store
+            .sessions
+            .insert("s1".to_string(), minimal_session("s1", "first", 1000));
+        store
+            .sessions
+            .insert("s2".to_string(), minimal_session("s2", "second", 2000));
+        store.attachment_assets.insert(
+            "asset:s1/file.dataurl".to_string(),
+            AttachmentAsset {
+                id: "asset:s1/file.dataurl".to_string(),
+                session_id: "s1".to_string(),
+                name: Some("file".to_string()),
+                mime_type: "image/png".to_string(),
+                relative_path: "s1/file.dataurl".to_string(),
+                size_bytes: 4,
+                created_at_ms: 1000,
+                ..AttachmentAsset::default()
+            },
+        );
+        store.session_attachment_index.insert(
+            "s1".to_string(),
+            vec!["asset:s1/file.dataurl".to_string()],
+        );
+        backend.save_store(&store);
+
+        let mut attachment_assets = store.attachment_assets.clone();
+        attachment_assets.remove("asset:s1/file.dataurl");
+        let mut session_attachment_index = store.session_attachment_index.clone();
+        session_attachment_index.remove("s1");
+
+        assert!(backend.remove_session(
+            "s1",
+            &attachment_assets,
+            &session_attachment_index,
+            &HashMap::<String, McpSourceSnapshot>::new(),
+            &HashMap::<String, SkillSourceSnapshot>::new(),
+        ));
+
+        let loaded = backend.load_store().unwrap();
+        assert_eq!(loaded.sessions.len(), 1);
+        assert!(!loaded.sessions.contains_key("s1"));
+        assert!(loaded.attachment_assets.is_empty());
+        assert!(!loaded.session_attachment_index.contains_key("s1"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn load_store_normalizes_session_conversation_id_to_row_key() {
         let dir = unique_dir("normalize-conversation-id");
         fs::create_dir_all(&dir).unwrap();
@@ -1509,7 +1654,7 @@ mod tests {
         let second_node_id = nodes_before[1].node_id.clone();
 
         store
-            .fork_from_history_node(Some("switch-session"), first_node_id.as_str())
+            .fork_from_history_node(Some("switch-session"), first_node_id.as_str(), None)
             .expect("fork should succeed");
         store.append_turn(
             Some("switch-session"),
@@ -1528,7 +1673,7 @@ mod tests {
             .expect("fork branch should exist");
 
         store
-            .switch_history_branch(Some("switch-session"), "branch-main")
+            .switch_history_branch(Some("switch-session"), "branch-main", None)
             .expect("switch to main branch should succeed");
         let reloaded_main_backend = Box::new(SqliteSessionBackend::new_with_trace_mode(
             db_path.clone(),
@@ -1541,7 +1686,7 @@ mod tests {
         assert_eq!(main_snapshot.turn_trace_history[1].turn_id, "turn-main-2");
 
         let restored = store
-            .restore_branch_head(Some("switch-session"), Some(fork_branch_id.as_str()))
+            .restore_branch_head(Some("switch-session"), Some(fork_branch_id.as_str()), None)
             .expect("restore fork branch head should succeed");
         assert_ne!(restored.resolved_node_id.as_deref(), Some(second_node_id.as_str()));
 

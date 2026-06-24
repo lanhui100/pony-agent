@@ -159,6 +159,32 @@
 - 对 OpenAI 兼容 reasoning 模型，工具 follow-up 的流式调用现已具备“stream 失败时自动回退 sync follow-up，再继续按 delta 回放”的保守兜底
 - 这让桌面端和未来 SSE 宿主都能共享同一条 core turn 流，而不是把 provider 兼容性问题泄漏到 adapter 层
 
+### 2026-06-24 Timeout Retry 契约补充
+
+- provider 同步请求、provider follow-up、`web_fetch`、`web_search` 现在统一采用“仅在 timeout 类错误时最多重试 5 次”的收口策略。
+- retry 判定只针对 timeout / timed out / deadline has elapsed / 超时 一类错误；普通 4xx/5xx、参数错误、解析错误不会进入自动重试。
+- provider 流式请求额外受一条安全约束：若该次 stream 已经向前端发出过任何 delta，则不得自动重试，避免主对话区出现重复文本。
+- `workspace_run_command` 当前不自动重试；因为命令可能有副作用，timeout 后重放会带来重复执行风险。
+- `web_fetch` 与 `web_search` 在最终收口失败时，工具结果里的 `error.code` 会稳定落为 `timeout`，而不是泛化成 `request_failed`。
+
+### 前端展示契约
+
+- 当上一轮 assistant 失败原因为 timeout，且用户直接再次发送时，前端会在主对话区提前创建一个 pending assistant 气泡，文案为 `超时后错误重连中...`。
+- 该 pending assistant 气泡沿用错误详情相同的 rose 色系，而不是普通 streaming assistant 的中性色；这样用户可以明确看出“当前是在错误后的重试链路中”。
+- 这里展示的是“直接再次发送后的重试状态”，不是单独新增一个“重连/重试”按钮。
+- 一旦后端继续正常产出 delta 或终态，该 pending 气泡会自然被本轮真实 assistant 内容覆盖或收口。
+
+### 当前验证
+
+- Rust core：
+- `retry_provider_timeout_retries_until_success`
+- `retry_tool_timeout_retries_until_success`
+- `web_fetch_returns_timeout_error_after_retries`
+- `web_search_returns_timeout_error_after_retries`
+- Frontend：
+- `tests/runtime-store.spec.ts` 中“timeout failure 后再次 submitTurn 会注入 retrying assistant”用例
+- `tests/HomeWorkspace.spec.ts` 中“主对话区 timeout retrying assistant 走错误色展示”用例
+
 ## 下一步最小动作
 
 - 继续观察真实 provider 下“大体积工具结果”的 follow-up 上限与压缩策略，避免把 provider 限制误判为 adapter 问题

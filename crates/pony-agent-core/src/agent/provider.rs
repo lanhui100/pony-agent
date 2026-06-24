@@ -423,12 +423,12 @@ impl ProviderManager {
             return Err(error);
         }
 
-        let result = match self.config.protocol {
+        let result = retry_provider_timeout("decision", || match self.config.protocol {
             ProviderProtocol::OpenAi => self.send_openai_tool_decision_request(request, tools),
             ProviderProtocol::Anthropic => {
                 self.send_anthropic_tool_decision_request(request, tools)
             }
-        };
+        });
 
         match result {
             Ok(decision) => {
@@ -478,14 +478,26 @@ impl ProviderManager {
             return Err(error);
         }
 
-        let result = match self.config.protocol {
-            ProviderProtocol::OpenAi => {
-                self.send_openai_tool_decision_stream_request(request, tools, &mut on_delta)
+        let mut streamed_any_delta = false;
+        let result = retry_provider_timeout("decision_stream", || {
+            if streamed_any_delta {
+                return Err("stream already emitted delta; skip timeout retry".to_string());
             }
-            ProviderProtocol::Anthropic => {
-                self.send_anthropic_tool_decision_request(request, tools)
+
+            match self.config.protocol {
+                ProviderProtocol::OpenAi => self.send_openai_tool_decision_stream_request(
+                    request,
+                    tools,
+                    &mut |chunk| {
+                        streamed_any_delta = true;
+                        on_delta(chunk);
+                    },
+                ),
+                ProviderProtocol::Anthropic => {
+                    self.send_anthropic_tool_decision_request(request, tools)
+                }
             }
-        };
+        });
 
         match result {
             Ok(decision) => {
@@ -537,8 +549,8 @@ impl ProviderManager {
         }
 
         match self.config.protocol {
-            ProviderProtocol::OpenAi => self
-                .send_openai_tool_followup_request(
+            ProviderProtocol::OpenAi => retry_provider_timeout("followup_sync", || {
+                self.send_openai_tool_followup_request(
                     request,
                     tools,
                     accumulated_messages,
@@ -546,6 +558,7 @@ impl ProviderManager {
                     tool_call,
                     tool_result,
                 )
+            })
                 .or_else(|error| {
                     provider_log(format!(
                         "followup:local-fallback protocol=openai provider={} model={} reason={}",
@@ -618,7 +631,12 @@ impl ProviderManager {
 
         match self.config.protocol {
             ProviderProtocol::OpenAi => {
-                let stream_result = retry_followup(|| {
+                let mut streamed_any_delta = false;
+                let stream_result = retry_provider_timeout("followup_stream", || {
+                    if streamed_any_delta {
+                        return Err("stream already emitted delta; skip timeout retry".to_string());
+                    }
+
                     self.send_openai_tool_followup_stream_request(
                         request,
                         tools,
@@ -626,7 +644,10 @@ impl ProviderManager {
                         assistant_message,
                         tool_call,
                         tool_result,
-                        &mut on_delta,
+                        &mut |chunk| {
+                            streamed_any_delta = true;
+                            on_delta(chunk);
+                        },
                     )
                 });
                 match stream_result {
@@ -636,7 +657,7 @@ impl ProviderManager {
                             "followup:stream-fallback protocol=openai provider={} model={} reason={}",
                             self.config.provider_name, request.model, stream_error
                         ));
-                        let response = match retry_followup(|| {
+                        let response = match retry_provider_timeout("followup_sync_fallback", || {
                             self.send_openai_tool_followup_request(
                                 request,
                                 tools,
@@ -2194,6 +2215,7 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
         .get("arguments")
         .and_then(Value::as_str)
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .map(|v| if v.is_null() { json!({}) } else { v })
         .unwrap_or_else(|| json!({}));
 
     Some(ToolCall {
@@ -2271,7 +2293,9 @@ fn partial_openai_tool_call_to_tool_call(partial: PartialOpenAiToolCall) -> Opti
     let arguments = if partial.arguments.trim().is_empty() {
         json!({})
     } else {
-        serde_json::from_str::<Value>(&partial.arguments).unwrap_or_else(|_| json!({}))
+        serde_json::from_str::<Value>(&partial.arguments)
+            .map(|v| if v.is_null() { json!({}) } else { v })
+            .unwrap_or_else(|_| json!({}))
     };
 
     Some(ToolCall {
@@ -2644,7 +2668,7 @@ const OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS: usize = 12_000;
 const OPENAI_TOOL_RESULT_HEAD_CHARS: usize = 4_500;
 const OPENAI_TOOL_RESULT_TAIL_CHARS: usize = 2_500;
 const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
-const FOLLOWUP_RETRY_MAX_ATTEMPTS: u32 = 5;
+const PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 5;
 
 fn extract_provider_error_detail(err: &str) -> String {
     // 透传错误响应正文给前端，由前端根据 JSON 结构自适应展示
@@ -2655,17 +2679,25 @@ fn extract_provider_error_detail(err: &str) -> String {
     preview_text(err, 240)
 }
 
-fn retry_followup<F>(mut operation: F) -> Result<ProviderResponse, String>
+fn is_provider_timeout_error(err: &str) -> bool {
+    let normalized = err.to_ascii_lowercase();
+    normalized.contains("type=timeout")
+        || normalized.contains("timeout")
+        || normalized.contains("timed out")
+        || normalized.contains("deadline has elapsed")
+}
+
+fn retry_provider_timeout<T, F>(label: &str, mut operation: F) -> Result<T, String>
 where
-    F: FnMut() -> Result<ProviderResponse, String>,
+    F: FnMut() -> Result<T, String>,
 {
     let mut last_error = String::new();
-    for attempt in 1..=FOLLOWUP_RETRY_MAX_ATTEMPTS {
+    for attempt in 1..=PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS {
         if attempt > 1 {
             let delay_ms = std::cmp::min(500 * (1 << (attempt - 2)), 8000);
             provider_log(format!(
-                "followup:retry attempt={}/{} delay={}ms",
-                attempt, FOLLOWUP_RETRY_MAX_ATTEMPTS, delay_ms
+                "{}:retry attempt={}/{} delay={}ms",
+                label, attempt, PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS, delay_ms
             ));
             std::thread::sleep(Duration::from_millis(delay_ms));
         }
@@ -2673,10 +2705,18 @@ where
             Ok(response) => return Ok(response),
             Err(err) => {
                 last_error = extract_provider_error_detail(&err);
+                let is_timeout = is_provider_timeout_error(&err);
                 provider_log(format!(
-                    "followup:retry attempt={}/{} failed error_detail={}",
-                    attempt, FOLLOWUP_RETRY_MAX_ATTEMPTS, last_error
+                    "{}:retry attempt={}/{} failed timeout={} error_detail={}",
+                    label,
+                    attempt,
+                    PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS,
+                    is_timeout,
+                    last_error
                 ));
+                if !is_timeout || attempt == PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS {
+                    return Err(last_error);
+                }
             }
         }
     }
@@ -4442,5 +4482,43 @@ mod tests {
             .unwrap_or_default()
             .contains("provider_followup_failed"));
         assert!(deltas.is_empty());
+    }
+
+    #[test]
+    fn provider_timeout_classifier_matches_timeout_errors() {
+        assert!(is_provider_timeout_error(
+            "调用 provider 失败：operation timed out；type=timeout；elapsed=45000ms"
+        ));
+        assert!(!is_provider_timeout_error("provider 返回错误状态：500"));
+    }
+
+    #[test]
+    fn retry_provider_timeout_stops_after_non_timeout_error() {
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_timeout("decision", || {
+            attempts.set(attempts.get() + 1);
+            Err("provider returned 500".to_string())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn retry_provider_timeout_retries_until_success() {
+        let attempts = std::cell::Cell::new(0);
+        let result = retry_provider_timeout("decision", || {
+            let next = attempts.get() + 1;
+            attempts.set(next);
+            if next < 3 {
+                Err("调用 provider 失败：operation timed out；type=timeout".to_string())
+            } else {
+                Ok("ok")
+            }
+        })
+        .expect("timeout retry should eventually succeed");
+
+        assert_eq!(result, "ok");
+        assert_eq!(attempts.get(), 3);
     }
 }

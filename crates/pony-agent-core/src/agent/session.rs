@@ -610,6 +610,16 @@ pub trait SessionBackend: Send {
     fn upsert_session(&self, _session_id: &str, _session: &SessionState) -> bool {
         false
     }
+    fn remove_session(
+        &self,
+        _session_id: &str,
+        _attachment_assets: &AttachmentAssetMap,
+        _session_attachment_index: &SessionAttachmentIndex,
+        _mcp_source_snapshots: &HashMap<String, McpSourceSnapshot>,
+        _skill_source_snapshots: &HashMap<String, SkillSourceSnapshot>,
+    ) -> bool {
+        false
+    }
     fn load_session_traces(&self, _session_id: &str) -> SessionBackendTraceLoadResult {
         SessionBackendTraceLoadResult::Unsupported
     }
@@ -1623,14 +1633,22 @@ impl SessionStore {
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {
         if self.sessions.remove(session_id).is_some() {
             delete_session_attachment_dir(&self.attachment_root, session_id);
-            self.refresh_attachment_catalog();
+            self.remove_session_attachment_catalog(session_id);
+
+            if !self.backend.remove_session(
+                session_id,
+                &self.attachment_assets,
+                &self.session_attachment_index,
+                &self.mcp_source_snapshots,
+                &self.skill_source_snapshots,
+            ) {
+                self.save_to_backend();
+            }
         }
 
         if self.sessions.is_empty() {
             self.sessions = default_sessions();
         }
-
-        self.save_to_backend();
         self.list_sessions()
     }
 
@@ -2043,6 +2061,18 @@ impl SessionStore {
         );
         self.session_attachment_index = rebuild_session_attachment_index(&self.sessions);
     }
+
+    fn remove_session_attachment_catalog(&mut self, session_id: &str) {
+        let removed_asset_ids = self
+            .session_attachment_index
+            .remove(session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        self.attachment_assets.retain(|asset_id, asset| {
+            asset.session_id != session_id && !removed_asset_ids.contains(asset_id)
+        });
+    }
 }
 
 impl FileSessionBackend {
@@ -2387,6 +2417,27 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
         changed = true;
     }
     if session.history_nodes.is_empty() && !session.history.is_empty() {
+        session.history_nodes.push(HistoryNode {
+            node_id: legacy_history_root_node_id(session),
+            session_id: session.conversation_id.clone(),
+            parent_node_id: None,
+            branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+            forked_from_node_id: None,
+            kind: HistoryNodeKind::Checkpoint,
+            run_id: None,
+            workspace_ref: WorkspaceRef::default(),
+            summary: DEFAULT_SESSION_SUMMARY.to_string(),
+            title: DEFAULT_SESSION_TITLE.to_string(),
+            history: Vec::new(),
+            provider_native_transcript: Vec::new(),
+            turn_trace_history: Vec::new(),
+            long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            turn_count: 0,
+            last_referenced_file: None,
+            created_at_ms: session.updated_at_ms.saturating_sub(1),
+        });
         let user_indexes = session
             .history
             .iter()
@@ -2461,6 +2512,61 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
         changed = true;
     }
 
+    let root_node_id = legacy_history_root_node_id(session);
+    let first_main_branch_turn_index = session
+        .history_nodes
+        .iter()
+        .position(|node| node.branch_id == DEFAULT_HISTORY_BRANCH_ID && node.turn_count > 0);
+    let has_root_node = session.history_nodes.iter().any(|node| node.node_id == root_node_id);
+    if !has_root_node {
+        if let Some(first_index) = first_main_branch_turn_index {
+            let first_node_id = session.history_nodes[first_index].node_id.clone();
+            let main_branch_base_node_id = session
+                .history_branches
+                .iter()
+                .find(|branch| branch.branch_id == DEFAULT_HISTORY_BRANCH_ID)
+                .and_then(|branch| branch.base_node_id.clone());
+            let should_insert_root = session.history_nodes[first_index]
+                .parent_node_id
+                .is_none()
+                && main_branch_base_node_id
+                    .as_deref()
+                    .map(|base| base == first_node_id)
+                    .unwrap_or(true);
+            if should_insert_root {
+                let created_at_ms = session.history_nodes[first_index].created_at_ms.saturating_sub(1);
+                session.history_nodes.insert(
+                    first_index,
+                    HistoryNode {
+                        node_id: root_node_id.clone(),
+                        session_id: session.conversation_id.clone(),
+                        parent_node_id: None,
+                        branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                        forked_from_node_id: None,
+                        kind: HistoryNodeKind::Checkpoint,
+                        run_id: None,
+                        workspace_ref: WorkspaceRef::default(),
+                        summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                        title: DEFAULT_SESSION_TITLE.to_string(),
+                        history: Vec::new(),
+                        provider_native_transcript: Vec::new(),
+                        turn_trace_history: Vec::new(),
+                        long_term_memory_entries: Vec::new(),
+                        memory_write_evidence: Vec::new(),
+                        memory_write_hook_trace_records: Vec::new(),
+                        turn_count: 0,
+                        last_referenced_file: None,
+                        created_at_ms,
+                    },
+                );
+                if let Some(first_node) = session.history_nodes.get_mut(first_index + 1) {
+                    first_node.parent_node_id = Some(root_node_id.clone());
+                }
+                changed = true;
+            }
+        }
+    }
+
     let latest_node_id = session
         .history_nodes
         .last()
@@ -2476,9 +2582,14 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
         .first()
         .map(|node| node.node_id.clone());
     let updated_at_ms = session.updated_at_ms;
+    let has_legacy_root_node = session.history_nodes.iter().any(|node| node.node_id == root_node_id);
     if let Some(main_branch) = history_branch_mut(session, DEFAULT_HISTORY_BRANCH_ID) {
         if main_branch.base_node_id.is_none() {
             main_branch.base_node_id = first_node_id;
+            changed = true;
+        }
+        if main_branch.base_node_id.as_deref() != Some(root_node_id.as_str()) && has_legacy_root_node {
+            main_branch.base_node_id = Some(root_node_id.clone());
             changed = true;
         }
         if main_branch.head_node_id != main_branch_head_node_id {
@@ -2972,6 +3083,10 @@ fn history_branch_mut<'a>(
 
 fn legacy_history_node_id(session: &SessionState, turn_count: usize) -> String {
     format!("{}-legacy-node-{}", session.conversation_id, turn_count)
+}
+
+fn legacy_history_root_node_id(session: &SessionState) -> String {
+    format!("{}-legacy-root", session.conversation_id)
 }
 
 fn new_history_node_id(session: &SessionState, ordinal: usize, created_at_ms: u64) -> String {
@@ -4739,6 +4854,7 @@ mod tests {
                 Some(session_id),
                 &node_id,
                 HistoryCheckoutMode::TranscriptOnly,
+                None,
             )
             .expect("checkout should succeed");
 
@@ -4762,6 +4878,104 @@ mod tests {
             snapshot.history[1].status,
             Some(MessageStatus::Done)
         );
+    }
+
+    #[test]
+    fn ensure_history_graph_inserts_initial_root_node_for_legacy_sessions() {
+        let mut store = SessionStore::memory_only();
+        let session_id = "legacy-root-session";
+        let node_id = "node-checkout-1".to_string();
+        store.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history: vec![
+                    TurnHistoryMessage {
+                        role: "user".to_string(),
+                        content: "第一轮".to_string(),
+                        attachments: Vec::new(),
+                        ..Default::default()
+                    },
+                    TurnHistoryMessage {
+                        role: "assistant".to_string(),
+                        content: "收到。".to_string(),
+                        attachments: Vec::new(),
+                        ..Default::default()
+                    },
+                ],
+                provider_native_transcript: Vec::new(),
+                turn_trace_history: vec![TurnTraceRecord {
+                    turn_id: "turn-1".to_string(),
+                    phase: "completed".to_string(),
+                    title: "first turn".to_string(),
+                    ..Default::default()
+                }],
+                trace_migration_state: TraceMigrationState::default(),
+                long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: None,
+                updated_at_ms: now_timestamp_ms(),
+                history_nodes: vec![HistoryNode {
+                    node_id: node_id.clone(),
+                    session_id: session_id.to_string(),
+                    parent_node_id: None,
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    title: DEFAULT_SESSION_TITLE.to_string(),
+                    summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                    history: vec![
+                        TurnHistoryMessage {
+                            role: "user".to_string(),
+                            content: "第一轮".to_string(),
+                            attachments: Vec::new(),
+                            ..Default::default()
+                        },
+                        TurnHistoryMessage {
+                            role: "assistant".to_string(),
+                            content: "收到。".to_string(),
+                            attachments: Vec::new(),
+                            ..Default::default()
+                        },
+                    ],
+                    turn_trace_history: vec![TurnTraceRecord {
+                        turn_id: "turn-1".to_string(),
+                        phase: "completed".to_string(),
+                        title: "first turn".to_string(),
+                        ..Default::default()
+                    }],
+                    turn_count: 1,
+                    ..Default::default()
+                }],
+                history_branches: vec![HistoryBranch {
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    head_node_id: Some(node_id.clone()),
+                    base_node_id: Some(node_id.clone()),
+                    ..Default::default()
+                }],
+                history_cursor: HistoryCursor {
+                    session_id: session_id.to_string(),
+                    visible_node_id: Some(node_id.clone()),
+                    active_branch_id: Some(DEFAULT_HISTORY_BRANCH_ID.to_string()),
+                    branch_head_node_id: Some(node_id.clone()),
+                    workspace_node_id: Some(node_id.clone()),
+                    mode: HistoryCursorMode::Live,
+                    ..Default::default()
+                },
+            },
+        );
+
+        let (history_nodes, history_branches, _) = store.load_history_graph(Some(session_id));
+        let root_node_id = format!("{}-legacy-root", session_id);
+
+        assert_eq!(history_nodes.len(), 2);
+        assert_eq!(history_nodes[0].node_id, root_node_id);
+        assert_eq!(history_nodes[0].turn_count, 0);
+        assert_eq!(history_nodes[1].parent_node_id.as_deref(), Some(history_nodes[0].node_id.as_str()));
+        assert_eq!(history_branches[0].base_node_id.as_deref(), Some(history_nodes[0].node_id.as_str()));
     }
 
     #[test]
@@ -5078,6 +5292,7 @@ mod tests {
                 Some("memory-hook-history"),
                 nodes[0].node_id.as_str(),
                 HistoryCheckoutMode::TranscriptOnly,
+                None,
             )
             .expect("checkout should succeed");
         assert_eq!(historical.memory_write_hook_trace_records.len(), 1);
@@ -5146,6 +5361,7 @@ mod tests {
                 Some("history-hook-session"),
                 nodes[0].node_id.as_str(),
                 HistoryCheckoutMode::TranscriptOnly,
+                None,
             )
             .expect("checkout should succeed");
 
@@ -5232,6 +5448,7 @@ mod tests {
                 Some("history-hook-blocked"),
                 nodes[0].node_id.as_str(),
                 HistoryCheckoutMode::TranscriptOnly,
+                None,
             )
             .expect_err("checkout should be blocked by hook");
         assert!(error.contains("history checkout blocked by hook"));
@@ -5308,6 +5525,7 @@ mod tests {
                 Some("history-hook-roundtrip"),
                 nodes[0].node_id.as_str(),
                 HistoryCheckoutMode::TranscriptOnly,
+                None,
             )
             .expect("checkout should succeed");
 
@@ -5384,7 +5602,7 @@ mod tests {
         );
 
         let snapshot = store
-            .restore_branch_head(Some("history-restore-session"), Some("branch-main"))
+            .restore_branch_head(Some("history-restore-session"), Some("branch-main"), None)
             .expect("restore should succeed");
 
         assert_eq!(snapshot.history_state_evidence.len(), 2);
@@ -5466,7 +5684,7 @@ mod tests {
             .expect("latest visible node before blocked fork");
         let (nodes, branches, _) = store.load_history_graph(Some("history-fork-blocked"));
         let error = store
-            .fork_from_history_node(Some("history-fork-blocked"), nodes[0].node_id.as_str())
+            .fork_from_history_node(Some("history-fork-blocked"), nodes[0].node_id.as_str(), None)
             .expect_err("fork should be blocked by hook");
         assert!(error.contains("history branch fork blocked by hook"));
 
@@ -5507,7 +5725,7 @@ mod tests {
         );
         let (nodes, _, _) = store.load_history_graph(Some("history-switch-session"));
         store
-            .fork_from_history_node(Some("history-switch-session"), nodes[0].node_id.as_str())
+            .fork_from_history_node(Some("history-switch-session"), nodes[0].node_id.as_str(), None)
             .expect("fork should succeed before switch test");
         store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
             start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -5543,7 +5761,7 @@ mod tests {
         }));
 
         let snapshot = store
-            .switch_history_branch(Some("history-switch-session"), "branch-main")
+            .switch_history_branch(Some("history-switch-session"), "branch-main", None)
             .expect("switch should succeed");
 
         assert_eq!(snapshot.history_state_evidence.len(), 2);
@@ -5623,6 +5841,7 @@ mod tests {
                 Some("history-degrade-truth"),
                 nodes[0].node_id.as_str(),
                 HistoryCheckoutMode::TranscriptAndWorkspace,
+                None,
             )
             .expect("degraded checkout should succeed");
 
@@ -5718,6 +5937,7 @@ mod tests {
                 Some("history-missing-evidence"),
                 nodes[0].node_id.as_str(),
                 HistoryCheckoutMode::TranscriptAndWorkspace,
+                None,
             )
             .expect("degraded checkout should succeed");
         assert_eq!(
@@ -6519,6 +6739,39 @@ mod tests {
         let snapshot = store.snapshot(Some(DEFAULT_SESSION_ID), &[]);
         assert_eq!(snapshot.conversation_id, DEFAULT_SESSION_ID);
         assert_eq!(snapshot.title, DEFAULT_SESSION_TITLE);
+    }
+
+    #[test]
+    fn removing_session_clears_attachment_catalog_without_full_refresh() {
+        let mut store = SessionStore::memory_only();
+        let images = vec![TurnInputImage {
+            data_url: "data:image/png;base64,AAAA".to_string(),
+            mime_type: "image/png".to_string(),
+            name: Some("delete-me.png".to_string()),
+        }];
+
+        let attachments = store
+            .save_input_attachments("remove-attachments", &images)
+            .expect("save attachments");
+        store.append_turn(
+            Some("remove-attachments"),
+            "[已附图片 1 张：delete-me.png]",
+            "我看到了图片。",
+            None,
+            attachments,
+        );
+
+        assert_eq!(store.list_attachment_assets(Some("remove-attachments")).len(), 1);
+        assert_eq!(store.session_attachment_index.get("remove-attachments").map(Vec::len), Some(1));
+
+        store.remove_session("remove-attachments");
+
+        assert!(store.list_attachment_assets(Some("remove-attachments")).is_empty());
+        assert!(!store.session_attachment_index.contains_key("remove-attachments"));
+        assert!(store
+            .attachment_assets
+            .values()
+            .all(|asset| asset.session_id != "remove-attachments"));
     }
 
     #[test]
@@ -8065,6 +8318,7 @@ mod tests {
                 Some("history-session"),
                 &nodes[0].node_id,
                 HistoryCheckoutMode::TranscriptAndWorkspace,
+                None,
             )
             .expect("history checkout should succeed");
 
@@ -8101,6 +8355,7 @@ mod tests {
                 Some("fork-session"),
                 fork_base.as_str(),
                 HistoryCheckoutMode::TranscriptOnly,
+                None,
             )
             .expect("checkout should succeed");
 
@@ -8162,7 +8417,7 @@ mod tests {
         let second_node_id = nodes_before[1].node_id.clone();
 
         store
-            .fork_from_history_node(Some("switch-session"), first_node_id.as_str())
+            .fork_from_history_node(Some("switch-session"), first_node_id.as_str(), None)
             .expect("fork should succeed");
         store.append_turn(
             Some("switch-session"),
@@ -8180,7 +8435,7 @@ mod tests {
             .expect("fork branch should exist");
 
         let switched = store
-            .switch_history_branch(Some("switch-session"), DEFAULT_HISTORY_BRANCH_ID)
+            .switch_history_branch(Some("switch-session"), DEFAULT_HISTORY_BRANCH_ID, None)
             .expect("switch to main branch should succeed");
         assert_eq!(
             switched.resolved_node_id.as_deref(),
@@ -8189,7 +8444,7 @@ mod tests {
         assert_eq!(switched.history_cursor.mode, HistoryCursorMode::Live);
 
         let restored = store
-            .restore_branch_head(Some("switch-session"), Some(fork_branch_id.as_str()))
+            .restore_branch_head(Some("switch-session"), Some(fork_branch_id.as_str()), None)
             .expect("restore fork branch head should succeed");
         assert_eq!(
             restored.history_cursor.active_branch_id.as_deref(),

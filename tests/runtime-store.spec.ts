@@ -753,6 +753,93 @@ describe("runtime session resilience", () => {
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
   });
 
+  it("preserves the rolled-back initial empty state when switching away and back in browser fallback mode", async () => {
+    const store = useRuntimeStore();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+
+    const sessionId = "session-current";
+    const otherSessionId = "session-other";
+
+    writePersistedSessions({
+      [otherSessionId]: {
+        phase: "ready",
+        messages: [
+          createMessage({ id: "user-other", turnId: "turn-other", role: "user", content: "other question" }),
+          createMessage({ id: "assistant-other", turnId: "turn-other", role: "assistant", content: "other answer" })
+        ],
+        attachmentAssets: [],
+        sessionSummary: "other summary",
+        providerRequestedName: "",
+        providerName: "",
+        providerProtocol: "",
+        providerModel: "",
+        providerSource: "",
+        providerMode: "",
+        fallbackReason: null,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        firstTokenLatencyMs: null
+      }
+    });
+
+    store.$patch({
+      sessionId,
+      sessionList: [
+        {
+          conversationId: sessionId,
+          title: "Current session",
+          summary: "current summary",
+          turnCount: 2,
+          lastReferencedFile: null,
+          updatedAtMs: 2000
+        },
+        {
+          conversationId: otherSessionId,
+          title: "Other session",
+          summary: "other summary",
+          turnCount: 1,
+          lastReferencedFile: null,
+          updatedAtMs: 1000
+        }
+      ],
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-head",
+      historyCursorMode: "live",
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId, turnId: "turn-old", createdAtMs: 1000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId, turnId: "turn-head", createdAtMs: 2000 })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", sessionId, headNodeId: "node-head", baseNodeId: "node-old" })
+      ],
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" }),
+        createMessage({ id: "user-head", turnId: "turn-head", role: "user", content: "head question" }),
+        createMessage({ id: "assistant-head", turnId: "turn-head", role: "assistant", content: "head answer" })
+      ],
+      turnTraceHistory: [
+        createTrace({ turnId: "turn-old", title: "old turn", updatedAt: 1000 }),
+        createTrace({ turnId: "turn-head", title: "head turn", updatedAt: 2000 })
+      ],
+      sessionSummary: "current summary",
+      phase: "ready"
+    });
+
+    store.rollbackToInitialState();
+
+    await store.switchSession(otherSessionId);
+    await store.switchSession(sessionId);
+
+    expect(store.sessionId).toBe(sessionId);
+    expect(store.messages).toEqual([]);
+    expect(store.initialRollbackActive).toBe(true);
+    expect(store.historyCursorMode).toBe("historical_dirty");
+    expect(store.visibleNodeId).toBeNull();
+  });
+
   it("prefers retrieval session summary over raw snapshot summary when loading a session", async () => {
     const store = useRuntimeStore();
     const snapshot = createSnapshot({
@@ -5507,6 +5594,51 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("starts a fresh browser-preview turn after rollback to initial state without reviving old messages", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8081);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+    store.$patch({
+      sessionId: "browser-session",
+      draftMessage: "new request",
+      phase: "ready",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      activeBranchId: "branch-main",
+      historyCursorMode: "live",
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" })
+      ],
+      turnTraceHistory: [createTrace({ turnId: "turn-old", title: "old turn", updatedAt: 1000 })],
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId: "browser-session", turnId: "turn-old", createdAtMs: 1000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId: "browser-session", turnId: "turn-head", createdAtMs: 2000 })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", sessionId: "browser-session", headNodeId: "node-head", baseNodeId: "node-old" })
+      ]
+    });
+
+    store.rollbackToInitialState();
+    store.draftMessage = "new request";
+
+    await store.submitTurn();
+
+    expect(store.initialRollbackActive).toBe(false);
+    expect(store.phase).toBe("completed");
+    expect(store.messages).toHaveLength(2);
+    expect(store.messages.map((message) => message.content)).toEqual([
+      "new request",
+      expect.any(String)
+    ]);
+    expect(store.messages.some((message) => message.content === "old question")).toBe(false);
+    expect(store.messages.some((message) => message.content === "old answer")).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
   it("writes final assistant text into persisted background sessions before the user switches back", async () => {
     const store = useRuntimeStore();
     const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
@@ -6111,6 +6243,53 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("seeds a timeout retrying assistant message when submitting after timeout failure", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(9191);
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-timeout-retry" },
+          turnId: "9191"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "timeout-retry-session",
+      draftMessage: "retry this timeout",
+      phase: "failed",
+      error: "timeout: previous call timed out",
+      messages: [
+        createMessage({
+          id: "assistant-timeout-old",
+          turnId: "turn-timeout-old",
+          role: "assistant",
+          content: "旧失败",
+          status: "error",
+          errorDetail: "timeout: previous call timed out"
+        })
+      ]
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    const assistantMessage = store.messages.find((message) => message.id === "assistant-9191");
+    expect(assistantMessage?.status).toBe("pending");
+    expect(assistantMessage?.content).toBe("超时后错误重连中...");
+    expect(assistantMessage?.errorDetail).toBe("timeout: previous call timed out");
+    nowSpy.mockRestore();
+  });
+
   it("passes nodeId through runtime and retrieved context requests and hydrates history cursor state", async () => {
     const store = useRuntimeStore();
     const snapshot = createSnapshot({
@@ -6661,6 +6840,59 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory[0]?.turnId).toBe("turn-old");
     expect(store.latestExecutionCheckpoint).toBeNull();
     expect(store.visibleNodeId).toBe("node-old");
+    expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("clears browser-preview transcript when checking out the root node", async () => {
+    const store = useRuntimeStore();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+
+    store.$patch({
+      sessionId: "checkout-session",
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-head",
+      historyCursorMode: "live",
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-root", sessionId: "checkout-session", turnId: null, createdAtMs: 500 }),
+        createHistoryNode({
+          nodeId: "node-old",
+          sessionId: "checkout-session",
+          parentNodeId: "node-root",
+          turnId: "turn-old",
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          sessionId: "checkout-session",
+          parentNodeId: "node-old",
+          turnId: "turn-head",
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", sessionId: "checkout-session", headNodeId: "node-head" })
+      ],
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" }),
+        createMessage({ id: "user-head", turnId: "turn-head", role: "user", content: "head question" }),
+        createMessage({ id: "assistant-head", turnId: "turn-head", role: "assistant", content: "head answer" })
+      ],
+      turnTraceHistory: [
+        createTrace({ turnId: "turn-old", title: "old turn", updatedAt: 1000 }),
+        createTrace({ turnId: "turn-head", title: "head turn", updatedAt: 2000 })
+      ]
+    });
+
+    const result = await store.checkoutHistoryNode("node-root", "transcript_only", "turn-old");
+
+    expect(result).not.toBeNull();
+    expect(result?.nodeId).toBe("node-root");
+    expect(result?.appliedMode).toBe("transcript_only");
+    expect(store.messages).toEqual([]);
+    expect(store.turnTraceHistory).toEqual([]);
+    expect(store.visibleNodeId).toBe("node-root");
     expect(store.historyCursorMode).toBe("historical");
   });
 

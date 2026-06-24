@@ -1,6 +1,9 @@
+use encoding_rs::{Encoding, GBK};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::error::Error;
+use std::env;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -42,6 +45,7 @@ const SUMMARY_ITEM_LIMIT: usize = 3;
 const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000;
 const MAX_RUN_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_WEB_TIMEOUT_MS: u64 = 15_000;
+const TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -824,13 +828,26 @@ impl ToolRouter {
             }
         };
 
-        let response = match client.get(url).send() {
+        let response = match retry_tool_timeout(TOOL_WEB_FETCH_URL, || {
+            client.get(url).send().map_err(|error| {
+                if is_reqwest_timeout_error(&error) {
+                    format!("timeout: 抓取 URL 超时：{}。", error)
+                } else {
+                    format!("抓取 URL 失败：{}。", error)
+                }
+            })
+        }) {
             Ok(value) => value,
             Err(error) => {
+                let code = if is_tool_timeout_message(&error) {
+                    "timeout"
+                } else {
+                    "request_failed"
+                };
                 return error_result(
                     TOOL_WEB_FETCH_URL,
-                    "request_failed",
-                    format!("抓取 URL 失败：{}。", error),
+                    code,
+                    error,
                     Some("请确认目标地址可访问，或稍后重试。".to_string()),
                 )
             }
@@ -838,7 +855,8 @@ impl ToolRouter {
 
         let status = response.status();
         let final_url = response.url().to_string();
-        let body = match response.text() {
+        let headers = response.headers().clone();
+        let bytes = match response.bytes() {
             Ok(value) => value,
             Err(error) => {
                 return error_result(
@@ -849,6 +867,8 @@ impl ToolRouter {
                 )
             }
         };
+
+        let body = decode_content(&headers, &bytes);
 
         ToolResult {
             tool_name: TOOL_WEB_FETCH_URL.to_string(),
@@ -908,18 +928,18 @@ impl ToolRouter {
             .map(|value| value.clamp(1, 60_000))
             .unwrap_or(DEFAULT_WEB_TIMEOUT_MS);
 
-        let encoded_query = query.replace(' ', "+");
-        let url = format!("https://duckduckgo.com/html/?q={encoded_query}");
-        self.execute_web_search_request(query, limit, timeout_ms, &url)
-    }
+        let api_key = match crate::agent::config::ProviderRegistryStore::new().get_service_api_key("exa") {
+            Some(key) => key,
+            None => {
+                return error_result(
+                    TOOL_WEB_SEARCH_QUERY,
+                    "missing_api_key",
+                    "未设置 EXA_API_KEY。请在设置页面输入 Exa API Key，或设置 EXA_API_KEY 环境变量。".to_string(),
+                    Some("访问 https://dashboard.exa.ai 获取 API Key。".to_string()),
+                )
+            }
+        };
 
-    fn execute_web_search_request(
-        &self,
-        query: &str,
-        limit: usize,
-        timeout_ms: u64,
-        url: &str,
-    ) -> ToolResult {
         let client = match build_web_client(timeout_ms) {
             Ok(value) => value,
             Err(error) => {
@@ -927,59 +947,130 @@ impl ToolRouter {
             }
         };
 
-        let response = match client.get(url).send() {
+        let body = json!({
+            "query": query,
+            "type": "auto",
+            "numResults": limit,
+            "contents": {
+                "highlights": true
+            }
+        });
+
+        let response = match retry_tool_timeout(TOOL_WEB_SEARCH_QUERY, || {
+            client
+                .post("https://api.exa.ai/search")
+                .header("x-api-key", &api_key)
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .send()
+                .map_err(|error| {
+                    if is_reqwest_timeout_error(&error) {
+                        format!("timeout: Exa 搜索请求超时：{}。", error)
+                    } else {
+                        format!("Exa 搜索请求失败：{}。", error)
+                    }
+                })
+        }) {
             Ok(value) => value,
             Err(error) => {
+                let code = if is_tool_timeout_message(&error) {
+                    "timeout"
+                } else {
+                    "request_failed"
+                };
                 return error_result(
                     TOOL_WEB_SEARCH_QUERY,
-                    "request_failed",
-                    format!("执行外部搜索失败：{}。", error),
-                    Some("请确认当前网络可访问外部搜索页面，或稍后重试。".to_string()),
+                    code,
+                    error,
+                    Some("请确认 API Key 有效且网络可访问 api.exa.ai。".to_string()),
                 )
             }
         };
 
         let status = response.status();
-        let body = match response.text() {
+        let response_body = match response.text() {
             Ok(value) => value,
             Err(error) => {
                 return error_result(
                     TOOL_WEB_SEARCH_QUERY,
                     "read_body_failed",
-                    format!("读取搜索结果失败：{}。", error),
-                    Some("请确认搜索结果页面可读取。".to_string()),
+                    format!("读取 Exa 响应失败：{}。", error),
+                    None,
                 )
             }
         };
 
-        let results = extract_duckduckgo_results(&body, limit);
+        let parsed: Value = match serde_json::from_str(&response_body) {
+            Ok(value) => value,
+            Err(_) => {
+                return error_result(
+                    TOOL_WEB_SEARCH_QUERY,
+                    "api_error",
+                    format!(
+                        "Exa API 返回异常（状态码 {}）：{}",
+                        status.as_u16(),
+                        preview_text(&response_body, 200)
+                    ),
+                    Some("请检查 API Key 和查询参数。".to_string()),
+                )
+            }
+        };
+
+        if !status.is_success() {
+            let error_msg = parsed
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误");
+            return error_result(
+                TOOL_WEB_SEARCH_QUERY,
+                "api_error",
+                format!(
+                    "Exa API 错误（状态码 {}）：{}",
+                    status.as_u16(),
+                    error_msg
+                ),
+                Some("请检查 API Key 和查询参数。".to_string()),
+            );
+        }
+
+        let results: Vec<Value> = parsed
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|r| {
+                        json!({
+                            "title": r.get("title").and_then(Value::as_str).unwrap_or(""),
+                            "url": r.get("url").and_then(Value::as_str).unwrap_or(""),
+                            "snippet": r.get("highlights")
+                                .and_then(Value::as_array)
+                                .and_then(|h| h.first())
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                            "score": r.get("score").and_then(Value::as_f64).unwrap_or(0.0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         ToolResult {
             tool_name: TOOL_WEB_SEARCH_QUERY.to_string(),
-            status: if status.is_success() {
-                "ok".to_string()
-            } else {
-                "error".to_string()
-            },
+            status: "ok".to_string(),
             output: json_string(json!({
-                "ok": status.is_success(),
+                "ok": true,
                 "query": query,
                 "statusCode": status.as_u16(),
                 "resultCount": results.len(),
                 "results": results,
-                "error": (!status.is_success()).then(|| json!({
-                    "code": "http_error",
-                    "message": format!("外部搜索返回非成功状态码 {}。", status.as_u16()),
-                    "hint": "请稍后重试，或检查外部搜索页面是否可访问。"
-                })),
                 "summary": {
-                    "text": format!("已完成外部搜索 `{}`，返回 {} 条结果。", query, results.len())
+                    "text": format!("已完成 Exa 搜索 `{}`，返回 {} 条结果。", query, results.len())
                 }
             })),
             duration_ms: 0,
         }
     }
-
     fn read_file(&self, call: &ToolCall) -> ToolResult {
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
@@ -3378,53 +3469,96 @@ fn is_http_url(url: &str) -> bool {
 }
 
 fn build_web_client(timeout_ms: u64) -> Result<Client, String> {
-    Client::builder()
+    let mut builder = Client::builder()
         .timeout(Duration::from_millis(timeout_ms))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+
+    if let Ok(proxy_url) = env::var("HTTPS_PROXY")
+        .or_else(|_| env::var("https_proxy"))
+        .or_else(|_| env::var("ALL_PROXY"))
+        .or_else(|_| env::var("all_proxy"))
+    {
+        if let Ok(proxy) = reqwest::Proxy::https(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    builder
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败：{}。", error))
 }
 
-fn extract_duckduckgo_results(body: &str, limit: usize) -> Vec<Value> {
-    let mut results = Vec::new();
-    for line in body.lines() {
-        if results.len() >= limit {
-            break;
+fn is_reqwest_timeout_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error
+            .source()
+            .map(|source| source.to_string().to_ascii_lowercase().contains("timed out"))
+            .unwrap_or(false)
+}
+
+fn is_tool_timeout_message(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("timeout")
+        || normalized.contains("timed out")
+        || normalized.contains("deadline has elapsed")
+}
+
+fn retry_tool_timeout<T, F>(tool_name: &str, mut operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    let mut last_error = String::new();
+    for attempt in 1..=TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS {
+        if attempt > 1 {
+            let delay_ms = std::cmp::min(500 * (1 << (attempt - 2)), 8000);
+            thread::sleep(Duration::from_millis(delay_ms));
         }
-        if let Some(href_index) = line.find("result__a") {
-            let snippet = preview_text(line, 240);
-            let line_slice = &line[href_index..];
-            let url = line_slice
-                .split("href=\"")
-                .nth(1)
-                .and_then(|value| value.split('"').next())
-                .unwrap_or("")
-                .to_string();
-            let title = strip_html_tags(line_slice);
-            if !url.is_empty() || !title.is_empty() {
-                results.push(json!({
-                    "url": url,
-                    "title": title,
-                    "snippet": snippet
-                }));
+
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = error;
+                if !is_tool_timeout_message(&last_error) {
+                    return Err(last_error);
+                }
+                if attempt == TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS {
+                    return Err(last_error);
+                }
+                let _ = (tool_name, preview_text(&last_error, 180));
             }
         }
     }
-    results
+
+    Err(last_error)
 }
 
-fn strip_html_tags(input: &str) -> String {
-    let mut output = String::new();
-    let mut inside_tag = false;
-    for ch in input.chars() {
-        match ch {
-            '<' => inside_tag = true,
-            '>' => inside_tag = false,
-            _ if !inside_tag => output.push(ch),
-            _ => {}
-        }
+fn decode_content(headers: &reqwest::header::HeaderMap, bytes: &[u8]) -> String {
+    let encoding = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ct| {
+            ct.split(';')
+                .nth(1)
+                .and_then(|s| s.split('=').nth(1))
+                .map(|s| s.trim().trim_matches('"').to_lowercase())
+                .filter(|s| !s.is_empty())
+        })
+        .and_then(|charset| Encoding::for_label(charset.as_bytes()));
+
+    if let Some(enc) = encoding {
+        let (cow, _, _) = enc.decode(bytes);
+        return cow.into_owned();
     }
-    output.split_whitespace().collect::<Vec<_>>().join(" ")
+
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+
+    let (cow, _, _) = GBK.decode(bytes);
+    cow.into_owned()
 }
+
+
 
 fn spawn_workspace_command(command: &str, cwd: &Path) -> std::io::Result<std::process::Child> {
     if cfg!(windows) {
@@ -3468,6 +3602,9 @@ fn error_result(tool_name: &str, code: &str, message: String, hint: Option<Strin
                 "code": code,
                 "message": message,
                 "hint": hint,
+            },
+            "summary": {
+                "text": message
             }
         })),
         duration_ms: 0,
@@ -3985,6 +4122,41 @@ mod tests {
         });
 
         format!("http://{}", address)
+    }
+
+    fn serve_timeout_http_response(delay_ms: u64) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test http server");
+        let address = listener.local_addr().expect("read test server addr");
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            thread::sleep(Duration::from_millis(delay_ms));
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 7\r\nConnection: close\r\n\r\ntimeout",
+            );
+            let _ = stream.flush();
+        });
+
+        format!("http://{}", address)
+    }
+
+    fn with_env_var<R>(key: &str, value: &str, operation: impl FnOnce() -> R) -> R {
+        let previous = env::var(key).ok();
+        unsafe {
+            env::set_var(key, value);
+        }
+        let result = operation();
+        match previous {
+            Some(previous_value) => unsafe {
+                env::set_var(key, previous_value);
+            },
+            None => unsafe {
+                env::remove_var(key);
+            },
+        }
+        result
     }
 
     #[test]
@@ -4926,43 +5098,6 @@ mod tests {
     }
 
     #[test]
-    fn web_search_returns_results_for_http_success_page() {
-        let workspace = temp_workspace();
-        let router = ToolRouter::with_workspace_root(workspace);
-        let html = r#"
-        <html>
-          <body>
-            <a class="result__a" href="https://example.com/pony-agent">Pony Agent Search Result</a>
-            <a class="result__a" href="https://example.com/phase-d">Phase D Tool Search</a>
-          </body>
-        </html>
-        "#;
-        let search_url =
-            serve_single_http_response("HTTP/1.1 200 OK", html, "text/html; charset=utf-8");
-
-        let result = router.execute_web_search_request("pony agent", 5, 5000, &search_url);
-
-        assert_eq!(result.status, "ok");
-        let payload =
-            serde_json::from_str::<Value>(&result.output).expect("web search success output json");
-        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(200));
-        assert_eq!(payload.get("resultCount").and_then(Value::as_u64), Some(2));
-        let results = payload
-            .get("results")
-            .and_then(Value::as_array)
-            .expect("web search results array");
-        assert_eq!(
-            results[0].get("url").and_then(Value::as_str),
-            Some("https://example.com/pony-agent")
-        );
-        assert!(results[0]
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .contains("Pony Agent Search Result"));
-    }
-
-    #[test]
     fn web_fetch_returns_structured_http_error_for_non_2xx_response() {
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
@@ -5001,53 +5136,75 @@ mod tests {
     }
 
     #[test]
-    fn web_search_returns_structured_http_error_for_non_2xx_response() {
+    fn web_fetch_returns_timeout_error_after_retries() {
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
-        let search_url = serve_single_http_response(
-            "HTTP/1.1 503 Service Unavailable",
-            "<html><body>search unavailable</body></html>",
-            "text/html; charset=utf-8",
-        );
+        let url = serve_timeout_http_response(150);
 
-        let result = router.execute_web_search_request("pony agent", 5, 5000, &search_url);
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WEB_FETCH_URL.to_string(),
+            arguments: json!({
+                "url": url,
+                "timeoutMs": 50
+            }),
+            plan: None,
+        });
 
         assert_eq!(result.status, "error");
         let payload = serde_json::from_str::<Value>(&result.output)
-            .expect("web search http error output json");
-        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(503));
+            .expect("web fetch timeout output json");
         assert_eq!(
             payload
                 .get("error")
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str),
-            Some("http_error")
+            Some("timeout")
         );
-        assert_eq!(payload.get("resultCount").and_then(Value::as_u64), Some(0));
+        assert!(payload
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("timeout"));
     }
 
     #[test]
-    fn extract_duckduckgo_results_parses_anchor_rows() {
-        let html = r#"
-        <html>
-          <body>
-            <a class="result__a" href="https://example.com/page-1">Example Result One</a>
-            <a class="result__a" href="https://example.com/page-2">Example Result Two</a>
-          </body>
-        </html>
-        "#;
+    fn web_search_returns_timeout_error_after_retries() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let base_url = serve_timeout_http_response(150);
 
-        let results = extract_duckduckgo_results(html, 5);
-        assert_eq!(results.len(), 2);
+        let result = with_env_var("EXA_API_KEY", "test-key", || {
+            with_env_var("EXA_API_BASE_URL", &base_url, || {
+                router.execute(&ToolCall {
+                    call_id: None,
+                    name: TOOL_WEB_SEARCH_QUERY.to_string(),
+                    arguments: json!({
+                        "query": "pony agent",
+                        "timeoutMs": 50
+                    }),
+                    plan: None,
+                })
+            })
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output)
+            .expect("web search timeout output json");
         assert_eq!(
-            results[0].get("url").and_then(Value::as_str),
-            Some("https://example.com/page-1")
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("timeout")
         );
-        assert!(results[0]
-            .get("title")
+        assert!(payload
+            .get("error")
+            .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
             .unwrap_or("")
-            .contains("Example Result One"));
+            .contains("timeout"));
     }
 
     // ── workspace_read_file ─────────────────────────────────────────
@@ -5360,5 +5517,42 @@ mod tests {
                 .and_then(Value::as_str),
             Some("invalid_path")
         );
+    }
+
+    #[test]
+    fn tool_timeout_message_classifier_matches_timeout_errors() {
+        assert!(is_tool_timeout_message("timeout: request timed out"));
+        assert!(is_tool_timeout_message("deadline has elapsed"));
+        assert!(!is_tool_timeout_message("request failed"));
+    }
+
+    #[test]
+    fn retry_tool_timeout_stops_after_non_timeout_error() {
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_tool_timeout(TOOL_WEB_FETCH_URL, || {
+            attempts.set(attempts.get() + 1);
+            Err("request failed".to_string())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn retry_tool_timeout_retries_until_success() {
+        let attempts = std::cell::Cell::new(0);
+        let result = retry_tool_timeout(TOOL_WEB_FETCH_URL, || {
+            let next = attempts.get() + 1;
+            attempts.set(next);
+            if next < 3 {
+                Err("timeout: request timed out".to_string())
+            } else {
+                Ok("ok")
+            }
+        })
+        .expect("timeout retry should eventually succeed");
+
+        assert_eq!(result, "ok");
+        assert_eq!(attempts.get(), 3);
     }
 }

@@ -163,6 +163,7 @@ type RuntimeState = {
   streamDebugTextCharsReceived: number;
   streamDebugTextCharsFlushed: number;
   browserPreviewRunToken: number;
+  initialRollbackActive: boolean;
   runningSessionMap: Record<string, { turnId: string; phase: RuntimePhase }>;
   completedSessionSet: Record<string, boolean>;
   failedSessionSet: Record<string, boolean>;
@@ -194,6 +195,7 @@ type PersistedRuntimeState = {
   historyNodes?: HistoryNode[];
   historyBranches?: HistoryBranch[];
   visibleNodeId?: string | null;
+  initialRollbackActive?: boolean;
 };
 
 type SessionRuntimeSnapshot = {
@@ -231,6 +233,7 @@ type SessionRuntimeSnapshot = {
   historyCursorMode: HistoryCursorMode;
   historyNodes: HistoryNode[];
   historyBranches: HistoryBranch[];
+  initialRollbackActive: boolean;
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
   toolActivities: ToolActivity[];
@@ -250,6 +253,7 @@ type PersistedRuntimeCache = {
 const DEFAULT_BROWSER_SESSION_SUMMARY = "浏览器预览会话";
 const DEFAULT_FAILED_TURN_MESSAGE = "本轮执行失败，请查看右侧 trace。";
 const DEFAULT_FAILED_TURN_ERROR = "本轮执行失败。";
+const TIMEOUT_RETRY_PENDING_MESSAGE = "超时后错误重连中...";
 const BROWSER_PREVIEW_PROVIDER_NAME = "browser-preview";
 const BROWSER_PREVIEW_MODEL_NAME = "mock-stream";
 const BROWSER_PREVIEW_FALLBACK_REASON =
@@ -1787,6 +1791,7 @@ function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapsh
     historyCursorMode: state.historyCursorMode,
     historyNodes: cloneHistoryNodes(state.historyNodes),
     historyBranches: cloneHistoryBranches(state.historyBranches),
+    initialRollbackActive: state.initialRollbackActive,
     messages: cloneMessages(state.messages),
     attachmentAssets: cloneAttachmentAssets(state.attachmentAssets),
       toolActivities: cloneToolActivities(state.toolActivities),
@@ -1842,6 +1847,7 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.historyCursorMode = snapshot.historyCursorMode;
   state.historyNodes = cloneHistoryNodes(snapshot.historyNodes);
   state.historyBranches = cloneHistoryBranches(snapshot.historyBranches);
+  state.initialRollbackActive = snapshot.initialRollbackActive;
   state.messages = cloneMessages(snapshot.messages);
   state.attachmentAssets = cloneAttachmentAssets(snapshot.attachmentAssets);
   state.toolActivities = cloneToolActivities(snapshot.toolActivities);
@@ -1863,6 +1869,18 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.streamDebugReasoningCharsFlushed = 0;
   state.streamDebugTextCharsReceived = 0;
   state.streamDebugTextCharsFlushed = 0;
+}
+
+function isTimeoutErrorDetail(detail: string | null | undefined) {
+  const normalized = detail?.trim().toLowerCase() ?? "";
+  if (!normalized) {
+    return false;
+  }
+
+  return normalized.includes("timeout")
+    || normalized.includes("timed out")
+    || normalized.includes("deadline has elapsed")
+    || normalized.includes("超时");
 }
 
 function filterDeletingSessions(
@@ -3365,6 +3383,7 @@ export const useRuntimeStore = defineStore("runtime", {
       historyCursorMode: "live",
       historyNodes: [],
       historyBranches: [],
+      initialRollbackActive: false,
       eventsReady: false,
       deferredPersistTimerId: null,
       streamFlushFrameId: null,
@@ -3506,6 +3525,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.historyCursorMode = "live";
       this.historyNodes = [];
       this.historyBranches = [];
+      this.initialRollbackActive = false;
       this.messages = [];
       this.attachmentAssets = [];
       this.toolActivities = [];
@@ -3707,7 +3727,7 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     persistHistory() {
       this.cancelDeferredPersist();
-      if (!hasPersistableMessages(this.messages)) {
+      if (!hasPersistableMessages(this.messages) && !this.initialRollbackActive) {
         removePersistedSessionState(this.sessionId);
         debugLog("persist:skip-empty", {
           sessionId: this.sessionId
@@ -3737,7 +3757,8 @@ export const useRuntimeStore = defineStore("runtime", {
         activeBranchId: this.activeBranchId,
         historyCursorMode: this.historyCursorMode,
         historyNodes: cloneHistoryNodes(this.historyNodes),
-        historyBranches: cloneHistoryBranches(this.historyBranches)
+        historyBranches: cloneHistoryBranches(this.historyBranches),
+        initialRollbackActive: this.initialRollbackActive
       };
 
       try {
@@ -3797,6 +3818,7 @@ export const useRuntimeStore = defineStore("runtime", {
           turnId,
           role: "assistant",
           content: "",
+          attachments: [],
           reasoningContent: null,
           status: patch.status,
           tokenCount: null,
@@ -3994,6 +4016,7 @@ export const useRuntimeStore = defineStore("runtime", {
     ) {
       const refreshCatalog = options?.refreshCatalog ?? true;
       const persistedState = loadPersistedRuntimeState(nextSessionId);
+      const shouldPreferLocalInitialRollback = Boolean(persistedState?.initialRollbackActive) && !options?.nodeId;
       const persistedVisibleNodeId = persistedState?.visibleNodeId?.trim() || null;
       const fallbackNodeId =
         options?.nodeId ??
@@ -4001,7 +4024,9 @@ export const useRuntimeStore = defineStore("runtime", {
           ? persistedVisibleNodeId
           : null);
       const runtimeView =
-        options?.runtimeView ?? (await this.loadSessionRuntimeViewState(nextSessionId, fallbackNodeId));
+        options?.runtimeView ?? (shouldPreferLocalInitialRollback
+          ? buildRuntimeViewFromPersistedState(nextSessionId, persistedState, fallbackNodeId)
+          : await this.loadSessionRuntimeViewState(nextSessionId, fallbackNodeId));
       const snapshot = runtimeView.session;
       const retrieved = runtimeView.retrieved;
       const persisted = persistedState;
@@ -4127,10 +4152,11 @@ export const useRuntimeStore = defineStore("runtime", {
     ) {
       const persisted = loadPersistedRuntimeState(sessionId);
       const historicalRuntimeView = isHistoricalRuntimeView(runtimeView);
+      const persistedInitialRollbackActive = Boolean(persisted?.initialRollbackActive);
       const canReusePersistedState =
-        !historicalRuntimeView && isPersistedStateCompatible(snapshot, persisted);
+        persistedInitialRollbackActive || (!historicalRuntimeView && isPersistedStateCompatible(snapshot, persisted));
       const canMergePersistedMessages =
-        !historicalRuntimeView && isPersistedMessageShapeCompatible(snapshot, persisted);
+        persistedInitialRollbackActive || (!historicalRuntimeView && isPersistedMessageShapeCompatible(snapshot, persisted));
       const restoredState = canReusePersistedState ? persisted : null;
       const blankFields = createBlankSessionRuntimeFields();
       const retrievedSummary = retrieved?.sessionContext?.summary?.trim() ?? "";
@@ -4159,6 +4185,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
         runtimeView?.historyStateAuditSummary ?? snapshot.historyStateAuditSummary ?? null
       );
+      this.initialRollbackActive = Boolean(restoredState?.initialRollbackActive);
       this.draftMessage = "";
       this.sessionSummary = sessionSummary;
       this.retrievedContext = cloneRetrievedContext(retrieved ?? deriveRetrievedContextFromSnapshot(snapshot));
@@ -4225,6 +4252,70 @@ export const useRuntimeStore = defineStore("runtime", {
       }
       this.persistHistory();
     },
+    rollbackToInitialState() {
+      this.cancelDeferredPersist();
+      this.cancelStreamFlush();
+      this.phase = "idle";
+      this.error = null;
+      this.draftMessage = "";
+      this.sessionSummary = "";
+      this.retrievedContext = deriveRetrievedContextFromSnapshot({
+        conversationId: this.sessionId,
+        title: "新对话",
+        summary: "",
+        history: [],
+        attachmentAssets: [],
+        turnTraceHistory: [],
+        historyStateEvidence: [],
+        historyStateAuditSummary: null,
+        runControlAuditSummary: null,
+        turnCount: 0,
+        lastReferencedFile: null,
+        updatedAtMs: Date.now()
+      });
+      this.providerRequestedName = "";
+      this.providerName = "";
+      this.providerProtocol = "";
+      this.providerModel = "";
+      this.providerSource = "";
+      this.providerMode = "";
+      this.fallbackReason = null;
+      this.inputTokens = null;
+      this.outputTokens = null;
+      this.totalTokens = null;
+      this.firstTokenLatencyMs = null;
+      this.isSubmitting = false;
+      this.activeTurnId = null;
+      this.activeRunId = null;
+      this.latestExecutionCheckpoint = null;
+      this.latestGraphRunSubmissionPlan = null;
+      this.latestGraphRunControlBoundaryEvidence = [];
+      this.latestRunControlAuditSummary = null;
+      this.latestHistoryStateAuditSummary = null;
+      this.visibleNodeId = null;
+      this.cursorVersion = null;
+      this.historyCursorMode = "historical_dirty";
+      this.messages = [];
+      this.attachmentAssets = [];
+      this.toolActivities = [];
+      this.traceSteps = createDefaultTraceSteps();
+      this.traceTimeline = createDefaultTraceTimeline();
+      this.turnTraceHistory = [];
+      this.eventCursorByTurnId = {};
+      this.streamBufferTurnId = null;
+      this.streamBufferText = "";
+      this.streamBufferReasoning = "";
+      this.streamDebugDeltaCount = 0;
+      this.streamDebugFlushCount = 0;
+      this.streamDebugLastDeltaAtMs = null;
+      this.streamDebugLastFlushAtMs = null;
+      this.streamDebugReasoningCharsReceived = 0;
+      this.streamDebugReasoningCharsFlushed = 0;
+      this.streamDebugTextCharsReceived = 0;
+      this.streamDebugTextCharsFlushed = 0;
+      this.initialRollbackActive = true;
+      this.persistHistory();
+    },
     async checkoutHistoryNode(nodeId: string, mode: HistoryCheckoutMode = "transcript_only", turnId?: string | null) {
       const sessionId = this.sessionId;
       if (!sessionId || !nodeId.trim()) {
@@ -4249,6 +4340,7 @@ export const useRuntimeStore = defineStore("runtime", {
           refreshCatalog: false,
           nodeId
         });
+        this.initialRollbackActive = false;
         this.turnTraceHistory = this.turnTraceHistory.filter(
           (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
         );
@@ -4256,6 +4348,8 @@ export const useRuntimeStore = defineStore("runtime", {
       } else {
         const resolvedTurnId = turnId?.trim() || this.findCheckpointTurnIdByNodeId(nodeId);
         let truncationIndex = -1;
+        const targetNode = this.historyNodes.find((item) => item.nodeId === nodeId) ?? null;
+        const targetIsInitialState = !targetNode?.turnId?.trim();
         if (resolvedTurnId) {
           for (let i = this.messages.length - 1; i >= 0; i--) {
             if ((this.messages[i] as ChatMessage).turnId === resolvedTurnId) {
@@ -4264,7 +4358,9 @@ export const useRuntimeStore = defineStore("runtime", {
             }
           }
         }
-        if (truncationIndex >= 0) {
+        if (targetIsInitialState) {
+          this.rollbackToInitialState();
+        } else if (truncationIndex >= 0) {
           this.messages = this.messages.slice(0, truncationIndex + 1);
           this.turnTraceHistory = this.turnTraceHistory.filter(
             (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
@@ -4274,6 +4370,7 @@ export const useRuntimeStore = defineStore("runtime", {
           this.traceTimeline = lastTrace?.traceTimeline?.length
             ? cloneTraceTimeline(lastTrace.traceTimeline)
             : createDefaultTraceTimeline();
+          this.initialRollbackActive = false;
           this.persistHistory();
         }
 
@@ -4342,6 +4439,7 @@ export const useRuntimeStore = defineStore("runtime", {
         nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
       });
       result = normalizeHistoryRestoreResult(payload, this.historyNodes, this.historyBranches);
+      this.initialRollbackActive = false;
       this.applyHistoryState(sessionId, result);
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
         result.historyStateAuditSummary ?? null
@@ -4377,6 +4475,7 @@ export const useRuntimeStore = defineStore("runtime", {
         nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
       });
       result = normalizeHistoryForkResult(payload, this.historyNodes, this.historyBranches);
+      this.initialRollbackActive = false;
 
       this.applyHistoryState(sessionId, result);
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
@@ -4416,6 +4515,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.historyNodes,
         this.historyBranches
       );
+      this.initialRollbackActive = false;
       this.applyHistoryState(sessionId, result);
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
         result.historyStateAuditSummary ?? null
@@ -4449,13 +4549,15 @@ export const useRuntimeStore = defineStore("runtime", {
       this.sessionError = null;
 
       try {
+        const cachedPersistedState = loadPersistedRuntimeState(nextSessionId);
         const cachedRuntimeView = buildRuntimeViewFromPersistedState(
           nextSessionId,
-          loadPersistedRuntimeState(nextSessionId)
+          cachedPersistedState
         );
         const hasCachedState =
+          Boolean(cachedPersistedState?.initialRollbackActive) ||
           cachedRuntimeView.session.history.length > 0 ||
-          cachedRuntimeView.session.attachmentAssets.length > 0 ||
+          (cachedRuntimeView.session.attachmentAssets?.length ?? 0) > 0 ||
           cachedRuntimeView.session.summary.trim().length > 0;
 
         if (hasCachedState) {
@@ -6171,6 +6273,10 @@ export const useRuntimeStore = defineStore("runtime", {
       const settingsStore = useSettingsStore();
       const images = (options?.images ?? []).map((image) => ({ ...image }));
       const message = this.draftMessage.trim();
+      const lastAssistantMessage = [...this.messages]
+        .reverse()
+        .find((entry) => entry.role === "assistant") ?? null;
+      const retryingAfterTimeout = isTimeoutErrorDetail(lastAssistantMessage?.errorDetail);
       const providerMessage = buildProviderUserMessage(message, images);
       const displayMessage = buildDisplayedUserMessage(message, images);
       const payload: TurnInput = {
@@ -6192,6 +6298,11 @@ export const useRuntimeStore = defineStore("runtime", {
 
       const requestId = String(Date.now());
       const userMessageId = `user-${requestId}`;
+
+      if (this.initialRollbackActive) {
+        this.initialRollbackActive = false;
+        this.historyCursorMode = "live";
+      }
 
       this.messages.push({
         id: userMessageId,
@@ -6235,6 +6346,20 @@ export const useRuntimeStore = defineStore("runtime", {
         toolActivities: [],
         error: null
       });
+
+      if (retryingAfterTimeout) {
+        const assistantMessage = this.ensureAssistantMessage(
+          requestId,
+          buildAssistantModelLabel(
+            providerStore.currentProvider?.name ?? null,
+            providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null
+          )
+        );
+        assistantMessage.content = TIMEOUT_RETRY_PENDING_MESSAGE;
+        assistantMessage.reasoningContent = null;
+        assistantMessage.status = "pending";
+        assistantMessage.errorDetail = lastAssistantMessage?.errorDetail ?? DEFAULT_FAILED_TURN_ERROR;
+      }
 
       try {
         await waitForNextPaint();

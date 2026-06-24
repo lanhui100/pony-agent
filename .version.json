@@ -503,16 +503,28 @@
         }
       ],
       "commit": "b98fe70"
+    },
+    {
+      "bumps": [
+        {
+          "from": "0.1.19",
+          "to": "0.1.20",
+          "component": "core",
+          "segment": "patch"
+        }
+      ],
+      "commit": "dd7d3d7",
+      "timestamp": "2026-06-24T09:55:32+08:00"
     }
   ],
-  "lastBump": "2026-06-23T20:35:06+08:00",
+  "lastBump": "2026-06-24T09:55:32+08:00",
   "tauri": {
     "patch": 25,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 19,
+    "patch": 20,
     "minor": 1,
     "major": 0
   }
