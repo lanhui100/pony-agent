@@ -11,7 +11,7 @@ use serde_json::json;
 const MAX_LOCAL_BATCH_PATHS: usize = 6;
 const MAX_GRAPH_AUTO_CONTINUE_STEPS: usize = 8;
 
-pub trait TurnPlanner: Send {
+pub trait TurnPlanner: Send + Sync {
     fn preflight_decision(
         &self,
         user_message: &str,

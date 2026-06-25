@@ -237,7 +237,7 @@ pub struct ToolPlan {
     pub steps: Vec<ToolPlanStep>,
 }
 
-pub trait ToolExecutor: Send {
+pub trait ToolExecutor: Send + Sync {
     fn execute(&self, call: &ToolCall) -> ToolResult;
 }
 

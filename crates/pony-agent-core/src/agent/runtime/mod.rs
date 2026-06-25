@@ -66,6 +66,8 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Instant;
 
+pub mod turn_runner;
+
 fn is_out_of_scope_tool_result(tool_result: &crate::agent::tools::ToolResult) -> bool {
     let parsed = serde_json::from_str::<Value>(&tool_result.output).unwrap_or(Value::Null);
     if let Some(error) = tool_error_from_output(tool_result.status.as_str(), &parsed) {
@@ -432,7 +434,7 @@ impl AgentRuntime {
     }
 
     pub fn annotate_turn_trace_terminal_event(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         event_id: Option<String>,
@@ -460,7 +462,7 @@ impl AgentRuntime {
     }
 
     pub fn append_turn_trace_hook_records(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         hook_trace_records: Vec<HookTraceRecord>,
@@ -985,12 +987,12 @@ impl AgentRuntime {
             .load_turn_traces(session_id)
     }
 
-    pub fn load_session_snapshot(&mut self, session_id: Option<&str>) -> SessionSnapshot {
+    pub fn load_session_snapshot(&self, session_id: Option<&str>) -> SessionSnapshot {
         self.load_session_snapshot_at(session_id, None)
     }
 
     pub fn load_session_snapshot_at(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         node_id: Option<&str>,
     ) -> SessionSnapshot {
@@ -1004,7 +1006,7 @@ impl AgentRuntime {
     }
 
     pub fn inspect_retrieved_context(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         run: Option<&GraphRun>,
         checkpoint: Option<&ExecutionCheckpoint>,
@@ -1014,7 +1016,7 @@ impl AgentRuntime {
     }
 
     pub fn inspect_retrieved_context_at(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         node_id: Option<&str>,
         run: Option<&GraphRun>,
@@ -1041,7 +1043,7 @@ impl AgentRuntime {
 
     #[allow(dead_code)]
     pub fn build_graph_turn_handoff(
-        &mut self,
+        &self,
         run: Option<&GraphRun>,
         turn_id: Option<&str>,
         session_id: Option<&str>,
@@ -1084,7 +1086,7 @@ impl AgentRuntime {
 
     #[allow(dead_code)]
     pub fn decide_graph_after_turn_with_planner(
-        &mut self,
+        &self,
         run: &GraphRun,
         turn_id: Option<&str>,
         session_id: Option<&str>,
@@ -1215,7 +1217,7 @@ impl AgentRuntime {
     }
 
     fn prepare_turn(
-        &mut self,
+        &self,
         input: &TurnInput,
         reject_empty: bool,
     ) -> Result<PreparedTurn, String> {
@@ -1580,7 +1582,7 @@ impl AgentRuntime {
     }
 
     pub fn record_planner_graph_decision_trace(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         run: &GraphRun,
@@ -1804,7 +1806,7 @@ impl AgentRuntime {
     }
 
     fn persist_turn_outcome(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         user_message: &str,
         assistant_message: &str,
@@ -1856,8 +1858,8 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn persist_turn_trace(
-        &mut self,
+    pub(super) fn persist_turn_trace(
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         user_message: &str,
@@ -1910,7 +1912,7 @@ impl AgentRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn persist_turn_trace_with_provider_calls_and_hooks(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         user_message: &str,
@@ -2003,7 +2005,7 @@ impl AgentRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn persist_turn_trace_with_provider_calls(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         user_message: &str,
@@ -2058,7 +2060,7 @@ impl AgentRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn fail_stream_turn_with_hook_dispatch(
-        &mut self,
+        &self,
         sink: &impl TurnEventSink,
         control: &ExecutionControlRegistry,
         session_id: Option<&str>,
@@ -2134,14 +2136,14 @@ impl AgentRuntime {
     }
 
     fn save_input_attachments(
-        &mut self,
+        &self,
         input: &TurnInput,
     ) -> Result<Vec<SessionAttachment>, String> {
         self.save_input_attachments_for_session(input.session_id.as_deref(), &input.images)
     }
 
     fn save_input_attachments_for_session(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         images: &[TurnInputImage],
     ) -> Result<Vec<SessionAttachment>, String> {
@@ -2158,7 +2160,7 @@ impl AgentRuntime {
     }
 
     fn persist_cancelled_turn_outcome(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         user_message: &str,
         provider_meta: Option<&ProviderEventMeta>,
@@ -2214,7 +2216,7 @@ impl AgentRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn persist_failed_sync_turn_trace_with_hooks(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         user_message: &str,
@@ -2301,7 +2303,7 @@ impl AgentRuntime {
     }
 
     fn annotate_sync_terminal_trace_with_envelope(
-        &mut self,
+        &self,
         session_id: Option<&str>,
         turn_id: &str,
         envelope: &TurnEventEnvelope,
@@ -2373,7 +2375,7 @@ impl AgentRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn cancel_stream_turn<S: TurnEventSink>(
-        &mut self,
+        &self,
         sink: &S,
         control: &ExecutionControlRegistry,
         turn_id: &str,
@@ -2474,7 +2476,7 @@ impl AgentRuntime {
 
     #[allow(clippy::too_many_arguments)]
     fn handle_stream_tool_turn<S: TurnEventSink>(
-        &mut self,
+        &self,
         sink: &S,
         control: &ExecutionControlRegistry,
         turn_id: &str,
@@ -3515,7 +3517,7 @@ impl AgentRuntime {
     }
 
     fn handle_sync_tool_turn(
-        &mut self,
+        &self,
         user_message: String,
         display_message: String,
         provider: &ProviderManager,
@@ -3787,7 +3789,7 @@ impl AgentRuntime {
         }
     }
 
-    pub fn run_turn(&mut self, input: TurnInput) -> TurnResult {
+    pub fn run_turn(&self, input: TurnInput) -> TurnResult {
         let turn_started_at = Instant::now();
         let prepared = match self.prepare_turn(&input, false) {
             Ok(prepared) => prepared,
@@ -4217,7 +4219,7 @@ impl AgentRuntime {
     }
 
     pub fn start_turn_stream_with_control<S: TurnEventSink>(
-        &mut self,
+        &self,
         sink: &S,
         control: &ExecutionControlRegistry,
         turn_id: String,
@@ -6220,11 +6222,11 @@ fn candidate_capability_ids_for_tool_name(
     candidate_ids
 }
 
-fn normalized_arguments_from_summary(summary: &str) -> Value {
+pub(crate) fn normalized_arguments_from_summary(summary: &str) -> Value {
     serde_json::from_str(summary).unwrap_or_else(|_| Value::Object(Map::new()))
 }
 
-fn apply_capability_argument_patches(
+pub(crate) fn apply_capability_argument_patches(
     hook_point: &CapabilityMediationHookPoint,
     original_argument_summary: &str,
     execution_results: &[crate::agent::hooks::HookExecutionResult],
@@ -6305,7 +6307,7 @@ fn summarize_provider_decision(decision: &ProviderDecision) -> String {
     }
 }
 
-fn apply_planner_patches(
+pub(crate) fn apply_planner_patches(
     hook_point: &PlannerHookPoint,
     mut decision: Option<ProviderDecision>,
     mut selected_tool_call: Option<ToolCall>,

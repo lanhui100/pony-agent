@@ -765,7 +765,7 @@ impl<'a, S: TurnEventSink> TurnEventSink for RecordingTurnEventSink<'a, S> {
 }
 
 pub struct HostControlPlane {
-    runtime: Mutex<AgentRuntime>,
+    runtime: RwLock<AgentRuntime>,
     sessions_rwlock: Arc<RwLock<SessionStore>>,
     execution_control: ExecutionControlRegistry,
     graph_runs: Mutex<GraphRunStore>,
@@ -833,7 +833,7 @@ impl HostControlPlaneBuilder {
         let capability_registry = runtime.capability_registry_snapshot();
         let sessions_rwlock = runtime.sessions_handle();
         HostControlPlane {
-            runtime: Mutex::new(runtime),
+            runtime: RwLock::new(runtime),
             sessions_rwlock,
             execution_control: self
                 .execution_control
@@ -877,7 +877,7 @@ impl HostControlPlane {
     }
 
     pub fn health_snapshot(&self) -> HostHealthSnapshot {
-        let runtime = self.runtime.lock().expect("runtime lock poisoned");
+        let runtime = self.runtime.read().expect("runtime lock poisoned");
 
         HostHealthSnapshot {
             app_name: "Pony Agent".to_string(),
@@ -995,7 +995,7 @@ impl HostControlPlane {
         validate_mcp_source_snapshot(&command.snapshot)?;
 
         {
-            let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = self.runtime.write().expect("runtime lock poisoned");
             runtime.dispatch_mcp_source_ingress_hooks(&command.snapshot)?;
             runtime.apply_mcp_source_snapshot(command.snapshot.clone());
         }
@@ -1033,7 +1033,7 @@ impl HostControlPlane {
         };
 
         {
-            let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = self.runtime.write().expect("runtime lock poisoned");
             runtime.dispatch_skill_source_ingress_hooks(&normalized_snapshot)?;
             runtime.apply_skill_source_snapshot(normalized_snapshot.clone())?;
         }
@@ -1058,7 +1058,7 @@ impl HostControlPlane {
     }
 
     pub fn run_turn(&self, command: RunTurnCommand) -> TurnResult {
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
+        let runtime = self.runtime.read().expect("runtime lock poisoned");
         runtime.run_turn(command.input)
     }
 
@@ -1080,7 +1080,7 @@ impl HostControlPlane {
             .unwrap_or_else(next_graph_run_id);
 
         let run = {
-            let runtime = self.runtime.lock().expect("runtime lock poisoned");
+            let runtime = self.runtime.read().expect("runtime lock poisoned");
             runtime.start_graph_run(
                 run_id.clone(),
                 goal.to_string(),
@@ -1216,7 +1216,7 @@ impl HostControlPlane {
             .unwrap_or_else(next_graph_run_id);
 
         let run = {
-            let runtime = self.runtime.lock().expect("runtime lock poisoned");
+            let runtime = self.runtime.read().expect("runtime lock poisoned");
             runtime.start_graph_run(
                 run_id.clone(),
                 goal.to_string(),
@@ -1352,7 +1352,7 @@ impl HostControlPlane {
         prepared: PreparedGraphRunStream,
     ) -> Result<GraphRunTurnResponse, String> {
         let (turn_result, handoff, decision) = {
-            let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
+            let runtime = self.runtime.read().expect("runtime lock poisoned");
             let recording_sink = RecordingTurnEventSink::new(sink);
             runtime.start_turn_stream_with_control(
                 &recording_sink,
@@ -1489,8 +1489,8 @@ impl HostControlPlane {
             None,
         );
 
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        runtime.start_turn_stream_with_control(
+        let runtime = self.runtime.read().expect("runtime lock poisoned");
+            runtime.start_turn_stream_with_control(
             sink,
             &self.execution_control,
             command.turn_id,
@@ -2836,7 +2836,7 @@ impl HostControlPlane {
             .snapshot_at(Some(resolved_session_id.as_str()), resolved_node_id.as_deref(), &[]);
         let retrieved = self
             .runtime
-            .lock()
+            .read()
             .expect("runtime lock poisoned")
             .inspect_retrieved_context_at(
             Some(resolved_session_id.as_str()),
@@ -2976,7 +2976,7 @@ impl HostControlPlane {
             Some(resolved_session_id.as_str()),
         );
         self.runtime
-            .lock()
+            .read()
             .expect("runtime lock poisoned")
             .inspect_retrieved_context_at(
             Some(resolved_session_id.as_str()),
@@ -3015,7 +3015,7 @@ impl HostControlPlane {
             })
             .flatten();
         let retrieved = if query.include_retrieved {
-            let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
+            let runtime = self.runtime.read().expect("runtime lock poisoned");
             Some(runtime.inspect_retrieved_context(
                 resolved_session_id.as_deref(),
                 run.as_ref(),
@@ -3138,7 +3138,7 @@ impl HostControlPlane {
         };
 
         let (turn_result, handoff, decision) = {
-            let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
+            let runtime = self.runtime.read().expect("runtime lock poisoned");
             let mut turn_result = runtime.run_turn(input.clone());
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
@@ -4408,7 +4408,7 @@ mod tests {
         );
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "check Cargo.toml".to_string(),
                 display_message: None,
@@ -4485,7 +4485,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("runtime-view")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请继续推进 PA-018。".to_string(),
                 display_message: None,
@@ -4527,7 +4527,7 @@ mod tests {
     fn session_runtime_view_reads_runtime_generated_hook_traces_and_metrics() {
         let control_plane = HostControlPlane::new();
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.record_turn_trace_for_test(
                 Some("session-hook-view"),
                 crate::agent::session::TurnTraceRecord {
@@ -4612,7 +4612,7 @@ mod tests {
     fn model_monitor_session_drilldown_preserves_failed_and_cancelled_terminal_evidence() {
         let control_plane = HostControlPlane::new();
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.record_turn_trace_for_test(
                 Some("session-terminal-evidence"),
                 crate::agent::session::TurnTraceRecord {
@@ -4851,7 +4851,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("checkpoint lifecycle ready")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请验证 checkpoint boundary".to_string(),
                 display_message: None,
@@ -4907,7 +4907,7 @@ mod tests {
         let (control_plane, server) = build_test_control_plane(vec![json_completion("retrieved")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请记住这个项目优先推进 PA-018。".to_string(),
                 display_message: None,
@@ -5078,7 +5078,7 @@ mod tests {
         let (control_plane, server) =
             build_test_control_plane(vec![json_completion("first response")]);
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.set_hook_executor_for_test(Box::new(TransformingPlannerHookExecutor));
             runtime
                 .register_hook_descriptor(transform_hook_descriptor(
@@ -5655,7 +5655,7 @@ mod tests {
         let (control_plane, server) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.start_graph_run(
                 "run-boundary-internal",
                 "boundary contract",
@@ -5769,7 +5769,7 @@ mod tests {
         let (control_plane, server) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.start_graph_run("run-plan-ready", "plan fallback", Some("plan-session"))
         };
 
@@ -5811,7 +5811,7 @@ mod tests {
         let (control_plane, server) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.start_graph_run("run-plan-recovery", "plan recovery", Some("plan-recovery"))
         };
 
@@ -5961,7 +5961,7 @@ mod tests {
         let (control_plane, server) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.start_graph_run(
                 "run-not-resumable",
                 "plan reconcile",
@@ -6022,7 +6022,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("lifecycle boundary completed")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "完成一个普通 turn".to_string(),
                 display_message: None,
@@ -6072,7 +6072,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("我会记住这条信息。")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请记住这个项目当前优先推进 PA-039。".to_string(),
                 display_message: None,
@@ -6144,7 +6144,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请记住这个项目当前优先推进 PA-039。".to_string(),
                 display_message: None,
@@ -6460,7 +6460,7 @@ mod tests {
         let (control_plane, server) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.start_graph_run(
                 "run-plan-boundary",
                 "boundary plan check",
@@ -6669,7 +6669,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "第一问".to_string(),
                 display_message: None,
@@ -6783,7 +6783,7 @@ mod tests {
         );
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "在分叉上继续".to_string(),
                 display_message: None,
@@ -6852,7 +6852,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.set_history_state_hook_executor_for_test(Box::new(
                 StaticHistoryStateHookExecutor {
                     start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -6984,7 +6984,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.set_history_state_hook_executor_for_test(Box::new(
                 StaticHistoryStateHookExecutor {
                     start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -7151,7 +7151,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.set_history_state_hook_executor_for_test(Box::new(
                 StaticHistoryStateHookExecutor {
                     start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -7267,7 +7267,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "先看第一轮".to_string(),
                 display_message: None,
@@ -7808,7 +7808,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let result = runtime.run_turn(TurnInput {
                 message: "列出当前目录文件".to_string(),
                 display_message: None,
@@ -8373,7 +8373,7 @@ mod tests {
         assert_eq!(capabilities.len(), 1);
         assert_eq!(capabilities[0].capability_id, "mcp:tool:workspace-search");
 
-        let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+        let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
         let runtime_source = runtime
             .inspect_capability_source("mcp-local")
             .expect("runtime source registry should be synchronized");
@@ -8663,7 +8663,7 @@ mod tests {
         assert_eq!(ingress.candidate_ids, vec!["skill:search".to_string()]);
         assert!(ingress.summary.contains("host-skills"));
 
-        let runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+        let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
         let runtime_source = runtime
             .inspect_skill_source("host-skills")
             .expect("runtime skill source registry should be synchronized");
@@ -8688,7 +8688,7 @@ mod tests {
     fn skill_source_ingress_hooks_can_block_snapshot_apply_without_persisting_source() {
         let control_plane = HostControlPlane::new();
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             runtime.set_hook_executor_for_test(Box::new(BlockingSkillSourceIngressHookExecutor));
             runtime
                 .register_hook_descriptor(guard_hook_descriptor(
@@ -8868,7 +8868,7 @@ mod tests {
         let (control_plane, server) = build_test_control_plane(vec![json_completion("下钻摘要")]);
 
         {
-            let mut runtime = control_plane.runtime.lock().expect("runtime lock poisoned");
+            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请准备一个下钻样本".to_string(),
                 display_message: None,

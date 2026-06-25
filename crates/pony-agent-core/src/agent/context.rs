@@ -147,7 +147,7 @@ pub trait ContextStateRetriever: Send {
 
 pub struct DefaultContextStateRetriever;
 
-pub trait TurnContextBuilder: Send {
+pub trait TurnContextBuilder: Send + Sync {
     fn retrieve_context_state(
         &self,
         user_message: &str,

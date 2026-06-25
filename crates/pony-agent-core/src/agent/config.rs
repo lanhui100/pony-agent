@@ -244,7 +244,7 @@ pub struct ResolvedProviderSelection {
     pub thinking_param_pattern: ThinkingParamPattern,
 }
 
-pub trait ProviderSelectionResolver: Send {
+pub trait ProviderSelectionResolver: Send + Sync {
     fn resolve_provider_selection(
         &self,
         provider_id: Option<&str>,

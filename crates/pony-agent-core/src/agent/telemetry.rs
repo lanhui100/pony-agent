@@ -104,7 +104,7 @@ pub struct ProviderCallCacheRecord {
     pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
 }
 
-pub trait TurnTelemetryBuilder: Send {
+pub trait TurnTelemetryBuilder: Send + Sync {
     fn start_trace_steps(&self) -> Vec<TurnTraceStep>;
     fn trace_tool_active(&self) -> Vec<TurnTraceStep>;
     fn trace_return_active(&self, tool_ok: bool) -> Vec<TurnTraceStep>;
