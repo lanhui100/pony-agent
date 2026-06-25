@@ -72,3 +72,12 @@ main.resizing [data-testid="workspace-composer-shell"] {
 main.resizing [data-testid="home-right-sidebar-shell"] {
   transition: width 0.15s ease-out, max-width 0.15s ease-out;
 }
+
+/* Hide scrollbar visually while keeping scroll functionality */
+.hide-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}

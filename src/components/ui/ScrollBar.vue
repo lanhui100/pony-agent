@@ -19,9 +19,9 @@ const props = withDefaults(
 
 const className = computed(() =>
   cn(
-    "flex touch-none select-none p-[1px] transition-colors",
-    props.orientation === "vertical" && "h-full w-2.5 border-l border-l-transparent",
-    props.orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent",
+    "pointer-events-none flex touch-none select-none p-[1px] transition-colors",
+    props.orientation === "vertical" && "h-full w-2.5 border-l border-l-transparent opacity-0",
+    props.orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent opacity-0",
     props.class
   )
 );

@@ -618,7 +618,7 @@ onMounted(() => {
             </div>
           </div>
 
-          <div class="grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4 lg:grid-cols-2">
+          <div class="grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4 lg:grid-cols-2 hide-scrollbar">
             <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-providers">
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Providers</div>
               <div class="mt-3 space-y-2">
@@ -956,7 +956,7 @@ onMounted(() => {
             正在加载会话下钻...
           </div>
 
-          <div v-else-if="drilldown && selectedSessionMetrics" class="grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4">
+          <div v-else-if="drilldown && selectedSessionMetrics" class="grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4 hide-scrollbar">
             <section class="grid gap-3 sm:grid-cols-3" data-testid="model-monitor-drilldown-metrics">
               <div class="rounded-[0.75rem] bg-white/5 px-3 py-3">
                 <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">成本与负载</div>
