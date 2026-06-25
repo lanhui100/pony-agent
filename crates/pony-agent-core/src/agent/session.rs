@@ -601,7 +601,7 @@ pub struct TurnTraceRecord {
     pub updated_at: u64,
 }
 
-pub trait SessionBackend: Send {
+pub trait SessionBackend: Send + Sync {
     fn load_store(&self) -> Option<PersistedStore>;
     fn save_store(&self, store: &PersistedStore);
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {

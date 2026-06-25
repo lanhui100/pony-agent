@@ -30,12 +30,15 @@ use crate::agent::session::{
     build_missing_run_control_audit_summary, HistoryBranch,
     HistoryCheckoutMode as SessionHistoryCheckoutMode, HistoryCursor, HistoryNode,
     HistoryStateAuditSummary, RunControlAuditActionSummary, RunControlAuditCurrentContext,
-    RunControlAuditSummary, SessionOverview, SessionSnapshot, TurnTraceRecord, WorkspaceRef,
+    RunControlAuditSummary, SessionOverview, SessionSnapshot, SessionStore, TurnTraceRecord,
+    WorkspaceRef,
 };
 use crate::agent::turn_flow::TurnEventSink;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -754,6 +757,7 @@ impl<'a, S: TurnEventSink> TurnEventSink for RecordingTurnEventSink<'a, S> {
 
 pub struct HostControlPlane {
     runtime: Mutex<AgentRuntime>,
+    sessions_rwlock: Arc<RwLock<SessionStore>>,
     execution_control: ExecutionControlRegistry,
     graph_runs: Mutex<GraphRunStore>,
     graph_runner: GraphRunner,
@@ -818,8 +822,10 @@ impl HostControlPlaneBuilder {
     pub fn build(self) -> HostControlPlane {
         let runtime = self.runtime.unwrap_or_else(AgentRuntime::new);
         let capability_registry = runtime.capability_registry_snapshot();
+        let sessions_rwlock = runtime.sessions_handle();
         HostControlPlane {
             runtime: Mutex::new(runtime),
+            sessions_rwlock,
             execution_control: self
                 .execution_control
                 .unwrap_or_else(ExecutionControlRegistry::new),
@@ -1539,13 +1545,17 @@ impl HostControlPlane {
     }
 
     pub fn list_sessions(&self) -> Vec<SessionOverview> {
-        let runtime = self.runtime.lock().expect("runtime lock poisoned");
-        runtime.list_sessions()
+        self.sessions_rwlock
+            .read()
+            .expect("sessions rwlock poisoned")
+            .list_sessions()
     }
 
     pub fn load_session_traces(&self, session_id: &str) -> Vec<TurnTraceRecord> {
-        let runtime = self.runtime.lock().expect("runtime lock poisoned");
-        runtime.load_turn_traces(session_id)
+        self.sessions_rwlock
+            .read()
+            .expect("sessions rwlock poisoned")
+            .load_turn_traces(session_id)
     }
 
     pub fn load_model_monitor_summary(
@@ -1558,8 +1568,10 @@ impl HostControlPlane {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let session_overviews = runtime.list_sessions();
+        let session_overviews = self.sessions_rwlock
+            .read()
+            .expect("sessions rwlock poisoned")
+            .list_sessions();
         let selected_overviews = session_overviews
             .into_iter()
             .filter(|overview| {
@@ -1594,8 +1606,11 @@ impl HostControlPlane {
         let mut sessions = Vec::with_capacity(selected_overviews.len());
 
         for session_overview in selected_overviews {
-            let snapshot =
-                runtime.load_session_snapshot(Some(session_overview.conversation_id.as_str()));
+            let snapshot = self
+                .sessions_rwlock
+                .write()
+                .expect("sessions rwlock poisoned")
+                .snapshot_at(Some(session_overview.conversation_id.as_str()), None, &[]);
             let session_metrics = aggregate_session_metrics(&snapshot);
             merge_monitor_overview(
                 &mut overview,
@@ -1909,8 +1924,11 @@ impl HostControlPlane {
         query: ExecutionCheckpointQuery,
     ) -> Option<ExecutionCheckpoint> {
         let session_id = query.session_id?;
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let snapshot = runtime.load_session_snapshot(Some(session_id.as_str()));
+        let snapshot = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .snapshot_at(Some(session_id.as_str()), None, &[]);
         let trace = if let Some(turn_id) = query.turn_id.as_deref() {
             snapshot.turn_trace_history.iter().find(|trace| {
                 trace.turn_id == turn_id && Self::trace_has_checkpoint_boundary(trace)
@@ -2006,8 +2024,11 @@ impl HostControlPlane {
             return;
         };
 
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let snapshot = runtime.load_session_snapshot(Some(session_id));
+        let snapshot = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .snapshot_at(Some(session_id), None, &[]);
         let relevant_history_node_id =
             Self::resolve_checkpoint_history_node_id(&snapshot, checkpoint);
         checkpoint.persisted_effect_evidence = snapshot
@@ -2343,8 +2364,11 @@ impl HostControlPlane {
         session_id
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
-                let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-                runtime.load_session_snapshot(None).conversation_id
+                self.sessions_rwlock
+                    .write()
+                    .expect("sessions rwlock poisoned")
+                    .snapshot_at(None, None, &[])
+                    .conversation_id
             })
     }
 
@@ -2440,9 +2464,11 @@ impl HostControlPlane {
     }
 
     pub fn load_session_snapshot(&self, query: SessionSnapshotQuery) -> SessionSnapshot {
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let mut snapshot = runtime.load_session_snapshot(query.session_id.as_deref());
-        drop(runtime);
+        let mut snapshot = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .snapshot_at(query.session_id.as_deref(), None, &[]);
         let checkpoint = self.load_execution_checkpoint(ExecutionCheckpointQuery {
             turn_id: None,
             session_id: Some(snapshot.conversation_id.clone()),
@@ -2467,8 +2493,11 @@ impl HostControlPlane {
 
     pub fn load_history_graph(&self, query: HistoryGraphQuery) -> HistoryGraphView {
         let session_id = self.normalize_history_session_id(query.session_id);
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let (nodes, branches, cursor) = runtime.load_history_graph(Some(session_id.as_str()));
+        let (nodes, branches, cursor) = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .load_history_graph(Some(session_id.as_str()));
         HistoryGraphView {
             session_id,
             nodes: nodes.iter().map(Self::history_node_view).collect(),
@@ -2479,8 +2508,11 @@ impl HostControlPlane {
 
     pub fn load_history_cursor(&self, query: HistoryCursorQuery) -> HistoryCursorState {
         let session_id = self.normalize_history_session_id(query.session_id);
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let cursor = runtime.load_history_cursor(Some(session_id.as_str()));
+        let cursor = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .load_history_cursor(Some(session_id.as_str()));
         Self::history_cursor_state(&cursor)
     }
 
@@ -2490,8 +2522,11 @@ impl HostControlPlane {
     ) -> Result<HistoryCheckoutResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
         let requested_mode = command.mode;
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let snapshot = runtime.checkout_history_node(
+        let snapshot = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .checkout_history_node(
             Some(session_id.as_str()),
             &command.node_id,
             Self::history_checkout_mode_to_session(requested_mode),
@@ -2533,8 +2568,11 @@ impl HostControlPlane {
         command: RestoreBranchHeadCommand,
     ) -> Result<RestoreBranchHeadResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let snapshot = runtime.restore_branch_head(
+        let snapshot = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .restore_branch_head(
             Some(session_id.as_str()),
             command.branch_id.as_deref(),
             command.expected_cursor_version,
@@ -2559,13 +2597,17 @@ impl HostControlPlane {
         command: ForkFromHistoryNodeCommand,
     ) -> Result<ForkFromHistoryNodeResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let before = runtime.load_history_cursor(Some(session_id.as_str()));
-        let snapshot = runtime.fork_from_history_node(
+        let mut sessions = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned");
+        let before = sessions.load_history_cursor(Some(session_id.as_str()));
+        let snapshot = sessions.fork_from_history_node(
             Some(session_id.as_str()),
             &command.node_id,
             command.expected_cursor_version,
         )?;
+        drop(sessions);
         let created_branch_id = snapshot
             .history_cursor
             .active_branch_id
@@ -2596,8 +2638,11 @@ impl HostControlPlane {
         command: SwitchHistoryBranchCommand,
     ) -> Result<SwitchHistoryBranchResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let snapshot = runtime.switch_history_branch(
+        let snapshot = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .switch_history_branch(
             Some(session_id.as_str()),
             &command.branch_id,
             command.expected_cursor_version,
@@ -2651,10 +2696,16 @@ impl HostControlPlane {
                 run_id: query.run_id.clone(),
             },
         ));
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        let session = runtime
-            .load_session_snapshot_at(Some(resolved_session_id.as_str()), resolved_node_id.as_deref());
-        let retrieved = runtime.inspect_retrieved_context_at(
+        let session = self
+            .sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .snapshot_at(Some(resolved_session_id.as_str()), resolved_node_id.as_deref(), &[]);
+        let retrieved = self
+            .runtime
+            .lock()
+            .expect("runtime lock poisoned")
+            .inspect_retrieved_context_at(
             Some(resolved_session_id.as_str()),
             resolved_node_id.as_deref(),
             run.as_ref(),
@@ -2788,8 +2839,10 @@ impl HostControlPlane {
             query.run_id.as_deref(),
             Some(resolved_session_id.as_str()),
         );
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        runtime.inspect_retrieved_context_at(
+        self.runtime
+            .lock()
+            .expect("runtime lock poisoned")
+            .inspect_retrieved_context_at(
             Some(resolved_session_id.as_str()),
             query.node_id.as_deref(),
             run.as_ref(),
@@ -2799,8 +2852,10 @@ impl HostControlPlane {
     }
 
     pub fn delete_session(&self, command: DeleteSessionCommand) -> Vec<SessionOverview> {
-        let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
-        runtime.remove_session(&command.session_id)
+        self.sessions_rwlock
+            .write()
+            .expect("sessions rwlock poisoned")
+            .remove_session(&command.session_id)
     }
 
     pub fn inspect(&self, query: HostInspectionQuery) -> HostInspectionSnapshot {

@@ -61,7 +61,9 @@ use std::path::Path;
 use std::rc::Rc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::time::Instant;
 
 fn is_out_of_scope_tool_result(tool_result: &crate::agent::tools::ToolResult) -> bool {
@@ -279,7 +281,7 @@ struct NormalizedToolDirective {
 
 pub struct AgentRuntime {
     graph: GraphEngine,
-    sessions: SessionStore,
+    sessions: Arc<RwLock<SessionStore>>,
     provider_resolver: Box<dyn ProviderSelectionResolver>,
     capability_registry: CapabilityRegistry,
     hook_registry: AgentHookRegistry,
@@ -413,7 +415,7 @@ impl AgentRuntime {
         }
         Self {
             graph: GraphEngine::new("state-machine-v1"),
-            sessions,
+            sessions: Arc::new(RwLock::new(sessions)),
             provider_resolver,
             capability_registry,
             hook_registry: AgentHookRegistry::new(),
@@ -423,6 +425,10 @@ impl AgentRuntime {
             context_builder,
             telemetry_builder,
         }
+    }
+
+    pub fn sessions_handle(&self) -> Arc<RwLock<SessionStore>> {
+        Arc::clone(&self.sessions)
     }
 
     pub fn annotate_turn_trace_terminal_event(
@@ -436,6 +442,8 @@ impl AgentRuntime {
         emitted_at_ms: Option<u64>,
     ) -> bool {
         self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
             .annotate_turn_trace_terminal_event(
                 session_id,
                 turn_id,
@@ -455,6 +463,8 @@ impl AgentRuntime {
         hook_trace_records: Vec<HookTraceRecord>,
     ) -> bool {
         self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
             .append_turn_trace_hook_records(session_id, turn_id, hook_trace_records)
             .is_some()
     }
@@ -473,7 +483,10 @@ impl AgentRuntime {
 
     pub fn apply_mcp_source_snapshot(&mut self, snapshot: McpSourceSnapshot) {
         let snapshot = enrich_mcp_source_snapshot(snapshot);
-        self.sessions.persist_mcp_source_snapshot(snapshot.clone());
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .persist_mcp_source_snapshot(snapshot.clone());
         self.capability_registry
             .replace_mcp_source_snapshot(snapshot);
     }
@@ -501,6 +514,8 @@ impl AgentRuntime {
     ) -> Result<(), String> {
         let snapshot = enrich_skill_source_snapshot(snapshot);
         self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
             .persist_skill_source_snapshot(snapshot.clone());
         self.capability_registry
             .replace_skill_source_snapshot(snapshot)
@@ -550,7 +565,10 @@ impl AgentRuntime {
 
     #[cfg(test)]
     pub fn record_turn_trace_for_test(&mut self, session_id: Option<&str>, trace: TurnTraceRecord) {
-        self.sessions.record_turn_trace(session_id, trace);
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .record_turn_trace(session_id, trace);
     }
 
     fn dispatch_hook_trace_records(&self, hook_point: TurnHookPoint) -> HookDispatchOutcome {
@@ -928,11 +946,17 @@ impl AgentRuntime {
     }
 
     pub fn list_sessions(&self) -> Vec<SessionOverview> {
-        self.sessions.list_sessions()
+        self.sessions
+            .read()
+            .expect("sessions rwlock poisoned")
+            .list_sessions()
     }
 
     pub fn load_turn_traces(&self, session_id: &str) -> Vec<TurnTraceRecord> {
-        self.sessions.load_turn_traces(session_id)
+        self.sessions
+            .read()
+            .expect("sessions rwlock poisoned")
+            .load_turn_traces(session_id)
     }
 
     pub fn load_session_snapshot(&mut self, session_id: Option<&str>) -> SessionSnapshot {
@@ -944,7 +968,10 @@ impl AgentRuntime {
         session_id: Option<&str>,
         node_id: Option<&str>,
     ) -> SessionSnapshot {
-        self.sessions.snapshot_at(session_id, node_id, &[])
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .snapshot_at(session_id, node_id, &[])
     }
 
     pub fn inspect_retrieved_context(
@@ -1065,18 +1092,27 @@ impl AgentRuntime {
     }
 
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {
-        self.sessions.remove_session(session_id)
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .remove_session(session_id)
     }
 
     pub fn load_history_graph(
         &mut self,
         session_id: Option<&str>,
     ) -> (Vec<HistoryNode>, Vec<HistoryBranch>, HistoryCursor) {
-        self.sessions.load_history_graph(session_id)
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .load_history_graph(session_id)
     }
 
     pub fn load_history_cursor(&mut self, session_id: Option<&str>) -> HistoryCursor {
-        self.sessions.load_history_cursor(session_id)
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .load_history_cursor(session_id)
     }
 
     pub fn checkout_history_node(
@@ -1087,6 +1123,8 @@ impl AgentRuntime {
         expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
             .checkout_history_node(session_id, node_id, mode, expected_cursor_version)
     }
 
@@ -1097,6 +1135,8 @@ impl AgentRuntime {
         expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
             .restore_branch_head(session_id, branch_id, expected_cursor_version)
     }
 
@@ -1107,6 +1147,8 @@ impl AgentRuntime {
         expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
             .fork_from_history_node(session_id, node_id, expected_cursor_version)
     }
 
@@ -1117,6 +1159,8 @@ impl AgentRuntime {
         expected_cursor_version: Option<u64>,
     ) -> Result<SessionSnapshot, String> {
         self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
             .switch_history_branch(session_id, branch_id, expected_cursor_version)
     }
 
@@ -1135,7 +1179,10 @@ impl AgentRuntime {
             normalize_user_message(&input.message)
         };
 
-        let session = self.sessions.snapshot_at(
+        let session = self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .snapshot_at(
             input.session_id.as_deref(),
             input.node_id.as_deref(),
             &input.history,
@@ -1691,6 +1738,8 @@ impl AgentRuntime {
             let recall_limit = recalled_image_limit(&retrieved.turn_context.user_message);
             images = self
                 .sessions
+                .read()
+                .expect("sessions rwlock poisoned")
                 .load_recent_images(input.session_id.as_deref(), recall_limit);
         }
 
@@ -1710,7 +1759,10 @@ impl AgentRuntime {
         attachments: Vec<SessionAttachment>,
         workspace_mode: Option<&str>,
     ) -> PersistedTurnOutcome {
-        let updated_session = self.sessions.append_turn(
+        let updated_session = self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .append_turn(
             session_id,
             user_message,
             assistant_message,
@@ -1845,7 +1897,10 @@ impl AgentRuntime {
             first_token_latency_ms,
             turn_duration_ms,
         );
-        self.sessions.record_turn_trace(
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .record_turn_trace(
             session_id,
             TurnTraceRecord {
                 turn_id: turn_id.to_string(),
@@ -2031,7 +2086,10 @@ impl AgentRuntime {
         let Some(session_id) = session_id else {
             return Ok(Vec::new());
         };
-        self.sessions.save_input_attachments(session_id, images)
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .save_input_attachments(session_id, images)
     }
 
     fn persist_cancelled_turn_outcome(
@@ -2130,7 +2188,10 @@ impl AgentRuntime {
             first_token_latency_ms,
             turn_duration_ms,
         );
-        self.sessions.append_failed_turn(
+        self.sessions
+            .write()
+            .expect("sessions rwlock poisoned")
+            .append_failed_turn(
             session_id,
             user_message,
             &assistant_message,
