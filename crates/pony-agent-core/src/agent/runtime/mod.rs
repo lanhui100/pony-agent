@@ -443,7 +443,10 @@ impl AgentRuntime {
     ) -> bool {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .annotate_turn_trace_terminal_event(
                 session_id,
                 turn_id,
@@ -464,7 +467,10 @@ impl AgentRuntime {
     ) -> bool {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .append_turn_trace_hook_records(session_id, turn_id, hook_trace_records)
             .is_some()
     }
@@ -485,7 +491,10 @@ impl AgentRuntime {
         let snapshot = enrich_mcp_source_snapshot(snapshot);
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .persist_mcp_source_snapshot(snapshot.clone());
         self.capability_registry
             .replace_mcp_source_snapshot(snapshot);
@@ -515,7 +524,10 @@ impl AgentRuntime {
         let snapshot = enrich_skill_source_snapshot(snapshot);
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .persist_skill_source_snapshot(snapshot.clone());
         self.capability_registry
             .replace_skill_source_snapshot(snapshot)
@@ -560,6 +572,11 @@ impl AgentRuntime {
         hook_executor: Box<dyn crate::agent::hooks::HistoryStateHookExecutor>,
     ) {
         self.sessions
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .set_history_state_hook_executor_for_test(hook_executor);
     }
 
@@ -567,7 +584,10 @@ impl AgentRuntime {
     pub fn record_turn_trace_for_test(&mut self, session_id: Option<&str>, trace: TurnTraceRecord) {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .record_turn_trace(session_id, trace);
     }
 
@@ -948,14 +968,20 @@ impl AgentRuntime {
     pub fn list_sessions(&self) -> Vec<SessionOverview> {
         self.sessions
             .read()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .list_sessions()
     }
 
     pub fn load_turn_traces(&self, session_id: &str) -> Vec<TurnTraceRecord> {
         self.sessions
             .read()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .load_turn_traces(session_id)
     }
 
@@ -970,7 +996,10 @@ impl AgentRuntime {
     ) -> SessionSnapshot {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .snapshot_at(session_id, node_id, &[])
     }
 
@@ -1094,7 +1123,10 @@ impl AgentRuntime {
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .remove_session(session_id)
     }
 
@@ -1104,14 +1136,20 @@ impl AgentRuntime {
     ) -> (Vec<HistoryNode>, Vec<HistoryBranch>, HistoryCursor) {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .load_history_graph(session_id)
     }
 
     pub fn load_history_cursor(&mut self, session_id: Option<&str>) -> HistoryCursor {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .load_history_cursor(session_id)
     }
 
@@ -1124,7 +1162,10 @@ impl AgentRuntime {
     ) -> Result<SessionSnapshot, String> {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .checkout_history_node(session_id, node_id, mode, expected_cursor_version)
     }
 
@@ -1136,7 +1177,10 @@ impl AgentRuntime {
     ) -> Result<SessionSnapshot, String> {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .restore_branch_head(session_id, branch_id, expected_cursor_version)
     }
 
@@ -1148,7 +1192,10 @@ impl AgentRuntime {
     ) -> Result<SessionSnapshot, String> {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .fork_from_history_node(session_id, node_id, expected_cursor_version)
     }
 
@@ -1160,7 +1207,10 @@ impl AgentRuntime {
     ) -> Result<SessionSnapshot, String> {
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .switch_history_branch(session_id, branch_id, expected_cursor_version)
     }
 
@@ -1181,7 +1231,10 @@ impl AgentRuntime {
 
         let session = self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .snapshot_at(
             input.session_id.as_deref(),
             input.node_id.as_deref(),
@@ -1739,7 +1792,10 @@ impl AgentRuntime {
             images = self
                 .sessions
                 .read()
-                .expect("sessions rwlock poisoned")
+                .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
                 .load_recent_images(input.session_id.as_deref(), recall_limit);
         }
 
@@ -1761,7 +1817,10 @@ impl AgentRuntime {
     ) -> PersistedTurnOutcome {
         let updated_session = self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .append_turn(
             session_id,
             user_message,
@@ -1899,7 +1958,10 @@ impl AgentRuntime {
         );
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .record_turn_trace(
             session_id,
             TurnTraceRecord {
@@ -2088,7 +2150,10 @@ impl AgentRuntime {
         };
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .save_input_attachments(session_id, images)
     }
 
@@ -2190,7 +2255,10 @@ impl AgentRuntime {
         );
         self.sessions
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .append_failed_turn(
             session_id,
             user_message,
