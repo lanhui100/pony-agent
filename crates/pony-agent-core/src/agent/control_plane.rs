@@ -642,7 +642,10 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         input: &TurnInput,
         fallback_session_summary: String,
     ) -> Option<TurnResult> {
-        let terminal = self.terminal.lock().expect("recording sink lock poisoned");
+        let terminal = self.terminal.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         let phase = terminal.phase.clone()?;
         let user_message = input
             .display_message
@@ -690,7 +693,10 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
     }
 
     fn record_terminal_payload(&self, payload: &TurnStreamEvent) {
-        let mut terminal = self.terminal.lock().expect("recording sink lock poisoned");
+        let mut terminal = self.terminal.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         terminal.event_id = payload.event_id.clone();
         terminal.event_type = payload.event_type.clone();
         terminal.event_version = payload.event_version.clone();
@@ -733,7 +739,10 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         Option<u64>,
         Option<u64>,
     )> {
-        let terminal = self.terminal.lock().expect("recording sink lock poisoned");
+        let terminal = self.terminal.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         Some((
             terminal.session_id.clone(),
             terminal.turn_id.clone()?,
@@ -762,7 +771,7 @@ pub struct HostControlPlane {
     graph_runs: Mutex<GraphRunStore>,
     graph_runner: GraphRunner,
     graph_planner: Box<dyn GraphPlanner>,
-    capability_registry: Mutex<CapabilityRegistry>,
+    capability_registry: RwLock<CapabilityRegistry>,
     frontend_diagnostics: FrontendDiagnosticsStore,
 }
 
@@ -834,7 +843,7 @@ impl HostControlPlaneBuilder {
             graph_planner: self
                 .graph_planner
                 .unwrap_or_else(|| Box::new(DefaultGraphPlanner)),
-            capability_registry: Mutex::new(capability_registry),
+            capability_registry: RwLock::new(capability_registry),
             frontend_diagnostics: FrontendDiagnosticsStore::new(default_frontend_diagnostics_sqlite_path()),
         }
     }
@@ -905,22 +914,31 @@ impl HostControlPlane {
 
     pub fn list_capability_sources(&self) -> Vec<CapabilitySourceView> {
         self.capability_registry
-            .lock()
-            .expect("capability registry lock poisoned")
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .list_sources()
     }
 
     pub fn list_capabilities(&self, query: CapabilityListQuery) -> Vec<CapabilityView> {
         self.capability_registry
-            .lock()
-            .expect("capability registry lock poisoned")
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .list_capabilities(query.source_id.as_deref(), query.kind.as_deref())
     }
 
     pub fn inspect_capability(&self, query: CapabilityInspectionQuery) -> Option<CapabilityView> {
         self.capability_registry
-            .lock()
-            .expect("capability registry lock poisoned")
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .inspect_capability(&query.capability_id)
     }
 
@@ -929,8 +947,11 @@ impl HostControlPlane {
         query: CapabilitySourceInspectionQuery,
     ) -> Option<CapabilitySourceView> {
         self.capability_registry
-            .lock()
-            .expect("capability registry lock poisoned")
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .inspect_source(&query.source_id)
     }
 
@@ -939,22 +960,31 @@ impl HostControlPlane {
         query: SkillSourceInspectionQuery,
     ) -> Option<SkillSourceView> {
         self.capability_registry
-            .lock()
-            .expect("capability registry lock poisoned")
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .inspect_skill_source(&query.source_id)
     }
 
     pub fn list_skills(&self, query: SkillListQuery) -> Vec<SkillDescriptor> {
         self.capability_registry
-            .lock()
-            .expect("capability registry lock poisoned")
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .list_skills(query.source_id.as_deref())
     }
 
     pub fn inspect_skill(&self, query: SkillInspectionQuery) -> Option<SkillDescriptor> {
         self.capability_registry
-            .lock()
-            .expect("capability registry lock poisoned")
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .inspect_skill(&query.skill_id)
     }
 
@@ -972,8 +1002,11 @@ impl HostControlPlane {
 
         let mut registry = self
             .capability_registry
-            .lock()
-            .expect("capability registry lock poisoned");
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         registry.replace_mcp_source_snapshot(command.snapshot.clone());
 
         Ok(command.snapshot.source)
@@ -988,8 +1021,11 @@ impl HostControlPlane {
         let normalized_snapshot = {
             let registry = self
                 .capability_registry
-                .lock()
-                .expect("capability registry lock poisoned");
+                .read()
+                .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             normalize_skill_source_snapshot_against_capabilities(
                 &registry,
                 command.snapshot.clone(),
@@ -1002,10 +1038,20 @@ impl HostControlPlane {
             runtime.apply_skill_source_snapshot(normalized_snapshot.clone())?;
         }
 
+        // Re-acquire as write lock and re-normalize: the registry may have changed
+        // between the read-lock normalization above and this write-lock application,
+        // so we re-normalize under the write lock to maintain consistency.
         let mut registry = self
             .capability_registry
-            .lock()
-            .expect("capability registry lock poisoned");
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
+        let normalized_snapshot = normalize_skill_source_snapshot_against_capabilities(
+            &registry,
+            command.snapshot,
+        )?;
         registry.replace_skill_source_snapshot(normalized_snapshot.clone())?;
 
         Ok(normalized_snapshot.source)
@@ -1043,7 +1089,10 @@ impl HostControlPlane {
         };
 
         {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             if graph_runs.load_run(&run_id).is_some() {
                 return Err(format!("Graph run `{run_id}` already exists."));
             }
@@ -1058,7 +1107,10 @@ impl HostControlPlane {
         command: ContinueGraphRunCommand,
     ) -> Result<GraphRunTurnResponse, String> {
         let input = {
-            let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             let run = graph_runs
                 .load_run(&command.run_id)
                 .ok_or_else(|| format!("Graph run `{}` not found.", command.run_id))?;
@@ -1098,7 +1150,10 @@ impl HostControlPlane {
         command: ResumeGraphRunCommand,
     ) -> Result<GraphRunTurnResponse, String> {
         let input = {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             let lifecycle = self
                 .graph_runner
                 .resume_run(
@@ -1170,7 +1225,10 @@ impl HostControlPlane {
         };
 
         {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             if graph_runs.load_run(&run_id).is_some() {
                 return Err(format!("Graph run `{run_id}` already exists."));
             }
@@ -1185,7 +1243,10 @@ impl HostControlPlane {
         command: ContinueGraphRunStreamCommand,
     ) -> Result<(GraphRunStreamStartResponse, PreparedGraphRunStream), String> {
         let input = {
-            let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             let run = graph_runs
                 .load_run(&command.run_id)
                 .ok_or_else(|| format!("Graph run `{}` not found.", command.run_id))?;
@@ -1231,7 +1292,10 @@ impl HostControlPlane {
         command: ResumeGraphRunStreamCommand,
     ) -> Result<(GraphRunStreamStartResponse, PreparedGraphRunStream), String> {
         let (input, control_boundary_evidence) = {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             let lifecycle = self
                 .graph_runner
                 .resume_run(
@@ -1320,7 +1384,10 @@ impl HostControlPlane {
                 .execution_control
                 .load_checkpoint(Some(prepared.turn_id.as_str()), None);
             let run = {
-                let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+                let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
                 graph_runs.load_run(&prepared.run_id).ok_or_else(|| {
                     format!(
                         "Graph run `{}` failed to load planner state.",
@@ -1392,7 +1459,10 @@ impl HostControlPlane {
         };
 
         let advance = {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             self.graph_runner
                 .apply_turn_result(&mut graph_runs, &prepared.run_id, handoff, decision)
                 .ok_or_else(|| {
@@ -1437,7 +1507,10 @@ impl HostControlPlane {
         command: StopGraphRunCommand,
     ) -> Result<GraphRunControlResponse, String> {
         let turn_stop = {
-            let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             let run = graph_runs
                 .load_run(&command.run_id)
                 .ok_or_else(|| format!("Graph run `{}` not found.", command.run_id))?;
@@ -1462,7 +1535,10 @@ impl HostControlPlane {
         };
 
         let (lifecycle, control_boundary_evidence) = {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             let lifecycle = self
                 .graph_runner
                 .request_stop(
@@ -1547,14 +1623,20 @@ impl HostControlPlane {
     pub fn list_sessions(&self) -> Vec<SessionOverview> {
         self.sessions_rwlock
             .read()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .list_sessions()
     }
 
     pub fn load_session_traces(&self, session_id: &str) -> Vec<TurnTraceRecord> {
         self.sessions_rwlock
             .read()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .load_turn_traces(session_id)
     }
 
@@ -1570,7 +1652,10 @@ impl HostControlPlane {
             .map(str::to_string);
         let session_overviews = self.sessions_rwlock
             .read()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .list_sessions();
         let selected_overviews = session_overviews
             .into_iter()
@@ -1609,7 +1694,10 @@ impl HostControlPlane {
             let snapshot = self
                 .sessions_rwlock
                 .write()
-                .expect("sessions rwlock poisoned")
+                .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
                 .snapshot_at(Some(session_overview.conversation_id.as_str()), None, &[]);
             let session_metrics = aggregate_session_metrics(&snapshot);
             merge_monitor_overview(
@@ -1826,13 +1914,19 @@ impl HostControlPlane {
     }
 
     pub fn load_graph_run(&self, query: GraphRunQuery) -> Option<GraphRun> {
-        let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+        let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         let run_id = query.run_id?;
         graph_runs.load_run(&run_id)
     }
 
     pub fn list_graph_runs(&self) -> Vec<GraphRun> {
-        let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+        let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         graph_runs.list_runs()
     }
 
@@ -1927,7 +2021,10 @@ impl HostControlPlane {
         let snapshot = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .snapshot_at(Some(session_id.as_str()), None, &[]);
         let trace = if let Some(turn_id) = query.turn_id.as_deref() {
             snapshot.turn_trace_history.iter().find(|trace| {
@@ -2027,7 +2124,10 @@ impl HostControlPlane {
         let snapshot = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .snapshot_at(Some(session_id), None, &[]);
         let relevant_history_node_id =
             Self::resolve_checkpoint_history_node_id(&snapshot, checkpoint);
@@ -2200,7 +2300,10 @@ impl HostControlPlane {
         let session_id = session_id
             .map(str::trim)
             .filter(|session_id| !session_id.is_empty())?;
-        let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+        let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         graph_runs.list_runs().into_iter().find(|run| {
             run.session_id.as_deref() == Some(session_id)
                 && !matches!(
@@ -2366,7 +2469,10 @@ impl HostControlPlane {
             .unwrap_or_else(|| {
                 self.sessions_rwlock
                     .write()
-                    .expect("sessions rwlock poisoned")
+                    .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
                     .snapshot_at(None, None, &[])
                     .conversation_id
             })
@@ -2457,7 +2563,10 @@ impl HostControlPlane {
         &self,
         query: GraphRunCheckpointQuery,
     ) -> Option<GraphRunCheckpoint> {
-        let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+        let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         let run_id = query.run_id?;
         let run = graph_runs.load_run(&run_id)?;
         Some(self.graph_runner.build_checkpoint(&run))
@@ -2467,7 +2576,10 @@ impl HostControlPlane {
         let mut snapshot = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .snapshot_at(query.session_id.as_deref(), None, &[]);
         let checkpoint = self.load_execution_checkpoint(ExecutionCheckpointQuery {
             turn_id: None,
@@ -2496,7 +2608,10 @@ impl HostControlPlane {
         let (nodes, branches, cursor) = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .load_history_graph(Some(session_id.as_str()));
         HistoryGraphView {
             session_id,
@@ -2511,7 +2626,10 @@ impl HostControlPlane {
         let cursor = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .load_history_cursor(Some(session_id.as_str()));
         Self::history_cursor_state(&cursor)
     }
@@ -2525,7 +2643,10 @@ impl HostControlPlane {
         let snapshot = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .checkout_history_node(
             Some(session_id.as_str()),
             &command.node_id,
@@ -2571,7 +2692,10 @@ impl HostControlPlane {
         let snapshot = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .restore_branch_head(
             Some(session_id.as_str()),
             command.branch_id.as_deref(),
@@ -2600,7 +2724,10 @@ impl HostControlPlane {
         let mut sessions = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned");
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            });
         let before = sessions.load_history_cursor(Some(session_id.as_str()));
         let snapshot = sessions.fork_from_history_node(
             Some(session_id.as_str()),
@@ -2641,7 +2768,10 @@ impl HostControlPlane {
         let snapshot = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .switch_history_branch(
             Some(session_id.as_str()),
             &command.branch_id,
@@ -2699,7 +2829,10 @@ impl HostControlPlane {
         let session = self
             .sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .snapshot_at(Some(resolved_session_id.as_str()), resolved_node_id.as_deref(), &[]);
         let retrieved = self
             .runtime
@@ -2765,7 +2898,10 @@ impl HostControlPlane {
             .and_then(|run_id| {
                 self.graph_runs
                     .lock()
-                    .expect("graph run lock poisoned")
+                    .unwrap_or_else(|e| {
+                        eprintln!("[pony-agent] graph run lock poisoned, recovering: {e}");
+                        e.into_inner()
+                    })
                     .load_run(run_id)
             })
             .or_else(|| self.resolve_graph_run_for_retrieval(None, query.session_id.as_deref()));
@@ -2854,7 +2990,10 @@ impl HostControlPlane {
     pub fn delete_session(&self, command: DeleteSessionCommand) -> Vec<SessionOverview> {
         self.sessions_rwlock
             .write()
-            .expect("sessions rwlock poisoned")
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
             .remove_session(&command.session_id)
     }
 
@@ -2913,7 +3052,10 @@ impl HostControlPlane {
             .register_turn(&turn_id, input.session_id.as_deref(), Some(&run_id));
 
         let lifecycle = {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             self.graph_runner
                 .begin_turn(
                     &mut graph_runs,
@@ -2970,13 +3112,19 @@ impl HostControlPlane {
     ) -> Result<GraphRunTurnResponse, String> {
         let turn_id = {
             let next_turn_id = {
-                let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+                let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
                 let run = graph_runs
                     .load_run(&run_id)
                     .ok_or_else(|| format!("Graph run `{run_id}` cannot accept a new turn."))?;
                 format!("{}-turn-{}", run.id, run.steps.len() + 1)
             };
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             let lifecycle = self
                 .graph_runner
                 .begin_turn(
@@ -2993,7 +3141,10 @@ impl HostControlPlane {
             let mut runtime = self.runtime.lock().expect("runtime lock poisoned");
             let mut turn_result = runtime.run_turn(input.clone());
             let run = {
-                let graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+                let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
                 graph_runs
                     .load_run(&run_id)
                     .ok_or_else(|| format!("Graph run `{run_id}` failed to load planner state."))?
@@ -3045,7 +3196,10 @@ impl HostControlPlane {
         };
 
         let advance = {
-            let mut graph_runs = self.graph_runs.lock().expect("graph run lock poisoned");
+            let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                e.into_inner()
+            });
             self.graph_runner
                 .apply_turn_result(&mut graph_runs, &run_id, handoff, decision)
                 .ok_or_else(|| format!("Graph run `{run_id}` failed to record turn result."))?
