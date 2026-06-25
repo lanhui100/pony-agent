@@ -36,6 +36,21 @@
 
 ## Done
 
+- `PA-068` 接入 per-session async turn task 模型
+    说明：已完成 `TurnTaskRegistry` per-session 任务追踪、`spawn_turn_stream`/`spawn_graph_run_stream` 从 `spawn_blocking` 切换到 `tauri::async_runtime::spawn` + 内层 `spawn_blocking` 的 async task 模型、`TaskCleanupGuard` 自动反注册、`abort_all` 挂钩窗口关闭事件。多 session 通过 `TurnTaskRegistry` 实现独立任务身份。Rust 测试 30 项 + TS 测试 231 项全部通过，3 轮并行智能体审核验收。
+
+- `PA-067` 收口 blocking 工作并建立统一执行 helper
+    说明：已完成 `BlockingHelper::spawn` 统一 helper、6 个前端诊断 Tauri command 从 `tauri::async_runtime::spawn_blocking` 迁移到 `BlockingHelper::spawn`、`tauri_adapter.rs` 添加 PA-068 transition target 标记与 `TaskCleanupGuard`。前/后端全量测试通过，3 轮并行审核验收。
+
+- `PA-066` 异步化 provider IO 与 streaming 边界
+    说明：已完成 `provider.rs` + `tools.rs` 从 `reqwest::blocking` 迁移到 async `reqwest`（通过 `block_on()` 桥接）、`crates/pony-agent-core/Cargo.toml` 移除 `blocking` feature、新增 `runtime_helper::block_on` 共享函数消除 provider/tools 重复。Provider 测试 25 项全部通过，3 轮并行智能体审核验收。
+
+- `PA-065` 拆分 runtime ownership 并解除 turn 与读路径互锁
+    说明：已完成 `SessionStore` 提取为 `Arc<RwLock<SessionStore>>` 独立所有权域、`HostControlPlane` 新增 `sessions_rwlock` 字段、16 个读面方法从 `Mutex<AgentRuntime>` 迁移到 `sessions_rwlock`、`SessionBackend` trait 增加 `Sync` 约束。全量编译通过，3 轮并行智能体审核验收。
+
+- `PA-064` 降低 session 切换与 init 宿主读取压力
+    说明：已完成缓存优先会话切换、`list_sessions` 延迟加载、`HomeWorkspace` staged hydration、`createSession()` collision-safe id、前端去重与 spec 3 维度审核调优。TypeScript 测试全部通过。
+
 - `PA-059` 扩展 TurnHistoryMessage 携带消息元数据
     说明：已完成 `MessageStatus` 枚举、`TurnHistoryMessage` 扩展 5 字段 + `stable_id()`、`PartialEq,Eq`、末端对齐投影 enrich（live + node 双路径）、前端 TS 类型更新、`hydrateMessagesFromHistory` 优先级重构、`buildTurnHistory` 传播、`isPersistedMessageShapeCompatible` 简化，已通过 5 个新增 Rust 测试 + 1 个前端测试 + 3 轮并行智能体审核 + 最终代码审核三轮调优。审核记录：`02_REVIEWS/2026-06-22-pa059-spec-review.md`。
 

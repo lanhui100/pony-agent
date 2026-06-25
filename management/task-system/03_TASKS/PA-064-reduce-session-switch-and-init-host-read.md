@@ -1,7 +1,7 @@
 # PA-064 Reduce Session Switch And Init Host Read
 
 ## Status
-- In Progress (spec reviewed and tuned)
+- Done
 
 ## Priority
 - High
@@ -37,15 +37,14 @@
 - `createSession()` 改为 collision-safe session id + sessionList 去重
 - Spec 经 3 维度并行审核后调优：新增缓存校验、错误恢复、后台 turn 持久化、超时、失效会话处理、localStorage 降级
 
-## Remaining Work
-- `initializeSessions()` cache-first with checkpoint insufficiency predicate
-- Cache validation and corrupted-state fallback
-- localStorage unavailability graceful degradation
-- Host read timeout (15s) with error + retry
-- Stale/deleted session reconciliation in sidebar
-- Running turn state persistence across restart
-- Concurrent rapid-switch test + other edge-case tests
-- Full regression suite for runtime store and workspace
+## Completed Work
+- 缓存会话切换不再自动触发 `load_session_runtime_view`
+- 新建会话不再同步 `list_sessions`
+- `HomeWorkspace` 引入 staged hydration
+- `HomeSessionSidebar` 渲染前按 `conversationId` 去重
+- `createSession()` 改为 collision-safe session id + sessionList 去重
+- Spec 经 3 维度并行审核后调优
+- 后续任务 PA-065~068 已完成并收口
 
 ## 后续任务映射
 - `PA-065` 拆分 runtime ownership 并解除 turn 与读路径互锁

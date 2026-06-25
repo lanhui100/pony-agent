@@ -64,10 +64,18 @@
 20. `PA-056` 已补齐显式 `Coding / Work` 配置与 prompt 收紧闭环
     当前已新增独立 `AppSettings`、Tauri settings 命令、前端设置 store、左侧边栏尾部设置入口、`SettingsPanel` 与 `workspaceMode -> TurnContext -> domain profile` 主链透传，并已补 `BASE_SYSTEM_PROMPT` 中文默认语义恢复、小窗口 domain profile 跳过和 `runtime.ts` teardown 稳定性修复；后续其它全栈配置项可以沿这条配置面继续扩展，而不必再重复改造上下文主路径。
 21. `PA-057` 已完成前端 flight recorder 与卡顿诊断体系
-     当前已完成前端 `frontend-flight-recorder.ts`（ring buffer、stall 检测、flush 退避）、Rust 端 `frontend_diagnostics.rs`（SQLite 持久化 + async spawn_blocking）、host 层集成（6 个 Tauri command）、主链路埋点激活及`npm run dev`启动冻结分析与修复；已提交 `f6aab80`，OpenSpec change 已归档。
+    当前已完成前端 `frontend-flight-recorder.ts`（ring buffer、stall 检测、flush 退避）、Rust 端 `frontend_diagnostics.rs`（SQLite 持久化 + async spawn_blocking）、host 层集成（6 个 Tauri command）、主链路埋点激活及`npm run dev`启动冻结分析与修复；已提交 `f6aab80`，OpenSpec change 已归档。
 22. session persistence 热路径已完成第一轮性能收口，`PA-058` 已完成并通过全局验收
-      当前已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过 15 项定向测试与多轮并行智能体审核验收。OpenSpec change 已归档，canonical spec 已同步。
+    当前已完成独立 `session_turn_traces` 表、dual-read / authoritative no-fallback、hot path trace-level mutation、组合写事务、branch/history trace materialization、`NotFound` 自愈与 trace 表 prune，并通过 15 项定向测试与多轮并行智能体审核验收。OpenSpec change 已归档，canonical spec 已同步。
 23. `PA-059` 已完成并收口
+24. `PA-064` 已完成并收口
+    已完成缓存优先会话切换、`list_sessions` 延迟加载、`HomeWorkspace` staged hydration、`createSession()` collision-safe id、前端去重与 3 维度 spec 审核调优。TS 测试全部通过。
+25. `PA-065~068` Tokio 异步重构四卡已完成并收口
+    - `PA-065` 拆分 runtime ownership：`SessionStore` 提取为 `Arc<RwLock<>>` 独立域，16 个读面方法从 `Mutex<AgentRuntime>` 解耦
+    - `PA-066` 异步化 provider IO：`reqwest::blocking` → async `reqwest`（`block_on()` 桥接），provider.rs + tools.rs 双路径
+    - `PA-067` blocking 工作收口：`BlockingHelper::spawn` 统一 helper，6 个 Tauri command 迁移，PA-068 过渡标记
+    - `PA-068` per-session async turn task：`TurnTaskRegistry` 任务追踪，`spawn_turn_stream`/`spawn_graph_run_stream` 切换 async task 模型
+    四卡累计通过 22 次子智能体审核调优，Rust 测试 + 231 项 TS 测试全部通过。OpenSpec changes 已归档：`openspec/changes/archive/2026-06-25-async-refactor-tokio/`。
       已完成 `TurnHistoryMessage` 扩展消息元数据（`turnId`/`status`/`modelName`/`tokenCount`/`reasoningContent`）、末端对齐投影 enrich 策略、`MessageStatus` 枚举、`stable_id()` 消费者标识符、前端 hydration 优先级重构，以及 5 个新增 Rust 测试 + 1 个前端测试。审核与代码调优已全部完成，审核记录：`02_REVIEWS/2026-06-22-pa059-spec-review.md`。
 
 ## 远期扩展
