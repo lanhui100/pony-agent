@@ -19,8 +19,19 @@
   说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
 ## Ready
 
+- `PA-069-A` 工具文件 IO 从 runtime 锁内移出 (P1)
+    说明：tools.rs 中同步文件操作（workspace_read_file/write_file/search_text）在 runtime.lock() 持有期间执行。需将长文件操作移出锁范围。
+- `PA-069-B` capability_registry Mutex → RwLock (P2)
+    说明：control_plane.rs 中 `capability_registry: Mutex<CapabilityRegistry>` 读多写少，改为 RwLock 消除读互斥。
+- `PA-069-C` Mutex 中毒容错修复 (P2)
+    说明：关键路径 `lock().expect("poisoned")` 替换为容错模式，防止连锁崩溃。
+- `PA-069-D` SQLite 写路径优化 (P2)
+    说明：sqlite_session.rs 减少 write_full_store 全量序列化频率，优先增量写。
+- `PA-069-E` 锁序规范文档化 (P2)
+    说明：文档化 runtime → sessions_rwlock 锁序，防止 ABBA 死锁。
+
 - `PA-044` agent core 多端基础设施边界加固
-   说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
+    说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
 
 ## In Progress
 
