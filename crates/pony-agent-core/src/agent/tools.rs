@@ -1,5 +1,6 @@
+use crate::agent::runtime_helper::block_on;
 use encoding_rs::{Encoding, GBK};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::error::Error;
@@ -829,7 +830,7 @@ impl ToolRouter {
         };
 
         let response = match retry_tool_timeout(TOOL_WEB_FETCH_URL, || {
-            client.get(url).send().map_err(|error| {
+            block_on(client.get(url).send()).map_err(|error| {
                 if is_reqwest_timeout_error(&error) {
                     format!("timeout: 抓取 URL 超时：{}。", error)
                 } else {
@@ -856,7 +857,7 @@ impl ToolRouter {
         let status = response.status();
         let final_url = response.url().to_string();
         let headers = response.headers().clone();
-        let bytes = match response.bytes() {
+        let bytes = match block_on(response.bytes()) {
             Ok(value) => value,
             Err(error) => {
                 return error_result(
@@ -957,19 +958,21 @@ impl ToolRouter {
         });
 
         let response = match retry_tool_timeout(TOOL_WEB_SEARCH_QUERY, || {
-            client
-                .post("https://api.exa.ai/search")
-                .header("x-api-key", &api_key)
-                .header("Content-Type", "application/json")
-                .body(body.to_string())
-                .send()
-                .map_err(|error| {
-                    if is_reqwest_timeout_error(&error) {
-                        format!("timeout: Exa 搜索请求超时：{}。", error)
-                    } else {
-                        format!("Exa 搜索请求失败：{}。", error)
-                    }
-                })
+            block_on(
+                client
+                    .post("https://api.exa.ai/search")
+                    .header("x-api-key", &api_key)
+                    .header("Content-Type", "application/json")
+                    .body(body.to_string())
+                    .send(),
+            )
+            .map_err(|error| {
+                if is_reqwest_timeout_error(&error) {
+                    format!("timeout: Exa 搜索请求超时：{}。", error)
+                } else {
+                    format!("Exa 搜索请求失败：{}。", error)
+                }
+            })
         }) {
             Ok(value) => value,
             Err(error) => {
@@ -988,7 +991,7 @@ impl ToolRouter {
         };
 
         let status = response.status();
-        let response_body = match response.text() {
+        let response_body = match block_on(response.text()) {
             Ok(value) => value,
             Err(error) => {
                 return error_result(

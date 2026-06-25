@@ -16,5 +16,6 @@ pub mod session;
 pub mod sqlite_session;
 pub mod sse_adapter;
 pub mod telemetry;
+pub mod runtime_helper;
 pub mod tools;
 pub mod turn_flow;

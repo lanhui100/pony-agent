@@ -741,6 +741,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -896,7 +905,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
- "futures-sink",
 ]
 
 [[package]]
@@ -2442,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "pony-agent"
-version = "0.1.20"
+version = "0.1.26"
 dependencies = [
  "pony-agent-core",
  "raw-window-handle",
@@ -2454,15 +2462,17 @@ dependencies = [
 
 [[package]]
 name = "pony-agent-core"
-version = "0.1.17"
+version = "0.1.21"
 dependencies = [
  "chrono",
  "dirs",
+ "encoding_rs",
  "keyring",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
+ "tokio",
  "winreg 0.56.0",
 ]
 
@@ -2678,9 +2688,8 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-channel",
+ "encoding_rs",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -2689,6 +2698,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",

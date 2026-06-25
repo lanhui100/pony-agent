@@ -2,8 +2,9 @@ use crate::agent::config::{
     ProviderReasoningEffort, ResolvedProviderSelection, ThinkingParamPattern,
 };
 use crate::agent::input::TurnInputImage;
+use crate::agent::runtime_helper::block_on;
 use crate::agent::tools::{builtin_tool_contract_views, ToolCall, ToolDefinition, ToolResult};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -991,7 +992,7 @@ impl ProviderManager {
         &self,
         endpoint: &str,
         body: &Value,
-    ) -> Result<reqwest::blocking::Response, String> {
+    ) -> Result<reqwest::Response, String> {
         let client = build_streaming_http_client(
             Duration::from_secs(15),
             Duration::from_secs(180),
@@ -999,23 +1000,25 @@ impl ProviderManager {
         )?;
         let started_at = Instant::now();
 
-        let response = client
-            .post(endpoint)
-            .bearer_auth(
-                self.config
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-            )
-            .json(body)
-            .send()
-            .map_err(|error| {
-                format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
-            })?;
+        let response = block_on(
+            client
+                .post(endpoint)
+                .bearer_auth(
+                    self.config
+                        .api_key
+                        .as_deref()
+                        .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+                )
+                .json(body)
+                .send(),
+        )
+        .map_err(|error| {
+            format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
+        })?;
 
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().map_err(|error| {
+            let text = block_on(response.text()).map_err(|error| {
                 format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
             })?;
 
@@ -1350,22 +1353,24 @@ impl ProviderManager {
         let client = build_http_client(Duration::from_secs(45))?;
         let started_at = Instant::now();
 
-        let response = client
-            .post(endpoint)
-            .bearer_auth(
-                self.config
-                    .api_key
-                    .as_deref()
-                    .ok_or_else(|| "provider 缺少 API Key".to_string())?,
-            )
-            .json(body)
-            .send()
-            .map_err(|error| {
-                format_request_error("调用 provider 失败", &error, started_at.elapsed())
-            })?;
+        let response = block_on(
+            client
+                .post(endpoint)
+                .bearer_auth(
+                    self.config
+                        .api_key
+                        .as_deref()
+                        .ok_or_else(|| "provider 缺少 API Key".to_string())?,
+                )
+                .json(body)
+                .send(),
+        )
+        .map_err(|error| {
+            format_request_error("调用 provider 失败", &error, started_at.elapsed())
+        })?;
 
         let status = response.status();
-        let text = response.text().map_err(|error| {
+        let text = block_on(response.text()).map_err(|error| {
             format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
         })?;
 
@@ -1409,12 +1414,12 @@ impl ProviderManager {
                     .header("anthropic-version", "2023-06-01");
             }
         }
-        let response = request.json(body).send().map_err(|error| {
+        let response = block_on(request.json(body).send()).map_err(|error| {
             format_request_error("调用 provider 失败", &error, started_at.elapsed())
         })?;
 
         let status = response.status();
-        let text = response.text().map_err(|error| {
+        let text = block_on(response.text()).map_err(|error| {
             format_request_error("读取 provider 返回失败", &error, started_at.elapsed())
         })?;
 
@@ -1753,7 +1758,7 @@ where
 }
 
 fn collect_openai_sse_message_from_response<F>(
-    response: reqwest::blocking::Response,
+    response: reqwest::Response,
     started_at: Instant,
     endpoint: &str,
     on_delta: &mut F,
@@ -1761,8 +1766,15 @@ fn collect_openai_sse_message_from_response<F>(
 where
     F: FnMut(ProviderStreamChunk),
 {
-    let reader = BufReader::new(response);
-    collect_openai_sse_message_from_reader(reader, endpoint, on_delta).map_err(|error| {
+    let response_preview = endpoint;
+    let body_bytes = block_on(response.bytes()).map_err(|error| {
+        format!(
+            "读取 provider SSE 响应正文失败: {}; endpoint={}",
+            error, endpoint
+        )
+    })?;
+    let reader = BufReader::new(body_bytes.as_ref());
+    collect_openai_sse_message_from_reader(reader, response_preview, on_delta).map_err(|error| {
         format!(
             "解析 provider SSE 流失败: {}; elapsed={}ms; endpoint={}",
             error,
