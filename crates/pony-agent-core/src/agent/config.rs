@@ -283,6 +283,17 @@ impl ProviderRegistryStore {
         }
     }
 
+    pub fn get_service_api_key(&self, service: &str) -> Option<String> {
+        let env_var = format!("{}_API_KEY", service.to_uppercase());
+        std::env::var(&env_var).ok().filter(|key| !key.is_empty())
+    }
+
+    pub fn set_service_api_key(&self, service: &str, key: &str) -> Result<(), String> {
+        let env_var = format!("{}_API_KEY", service.to_uppercase());
+        std::env::set_var(&env_var, key);
+        Ok(())
+    }
+
     pub fn load_view(&self) -> ProviderRegistryView {
         self.build_view_from_storage(self.load_storage())
     }
