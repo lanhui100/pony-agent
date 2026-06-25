@@ -90,6 +90,16 @@ type HistoryForkWireResult = {
   cursor: HistoryCursorState;
 };
 
+const MAX_BG_TEXT_BUFFER_CHARS = 50000;
+const MAX_BG_REASONING_BUFFER_CHARS = 20000;
+
+type RunningTurn = {
+  turnId: string;
+  phase: RuntimePhase;
+  textBuffer: string;
+  reasoningBuffer: string;
+};
+
 type HistoryBranchSwitchWireResult = {
   sessionId: string;
   branchId: string;
@@ -166,7 +176,7 @@ type RuntimeState = {
   streamDebugTextCharsFlushed: number;
   browserPreviewRunToken: number;
   initialRollbackActive: boolean;
-  runningSessionMap: Record<string, { turnId: string; phase: RuntimePhase }>;
+  runningSessionMap: Record<string, RunningTurn>;
   completedSessionSet: Record<string, boolean>;
   failedSessionSet: Record<string, boolean>;
 };
@@ -1165,7 +1175,7 @@ function appendNormalizedReasoningContent(current: string | null, delta: string)
   return combined;
 }
 
-const STREAM_FLUSH_EAGER_CHARS = 4096;
+const STREAM_FLUSH_EAGER_CHARS = 50;
 
 const TRACE_STEP_IDS = {
   plan: "step-plan",
@@ -3127,23 +3137,39 @@ function persistSessionState(sessionId: string, payload: PersistedRuntimeState) 
 }
 
 function persistRunningSessionMap(
-  map: Record<string, { turnId: string; phase: RuntimePhase }>
+  map: Record<string, RunningTurn>
 ) {
   if (typeof window === "undefined") {
     return;
   }
   try {
     const cache = loadPersistedRuntimeCache();
-    cache.runningSessionMap = map;
+    // Strip text/reasoning buffers before persist — they are in-memory only
+    const stripped: Record<string, RunningTurn> = {};
+    for (const [sid, turn] of Object.entries(map)) {
+      stripped[sid] = { turnId: turn.turnId, phase: turn.phase, textBuffer: "", reasoningBuffer: "" };
+    }
+    cache.runningSessionMap = stripped;
     window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
   } catch {
     debugLog("persist:running-map:error");
   }
 }
 
-function loadRunningSessionMap(): Record<string, { turnId: string; phase: RuntimePhase }> {
+function loadRunningSessionMap(): Record<string, RunningTurn> {
   try {
-    return loadPersistedRuntimeCache().runningSessionMap ?? {};
+    const raw = loadPersistedRuntimeCache().runningSessionMap ?? {};
+    // Normalize old format (without buffers) to new format
+    const normalized: Record<string, RunningTurn> = {};
+    for (const [sid, turn] of Object.entries(raw)) {
+      normalized[sid] = {
+        turnId: (turn as any).turnId ?? "",
+        phase: (turn as any).phase ?? "idle",
+        textBuffer: (turn as any).textBuffer ?? "",
+        reasoningBuffer: (turn as any).reasoningBuffer ?? ""
+      };
+    }
+    return normalized;
   } catch {
     return {};
   }
@@ -4803,7 +4829,9 @@ export const useRuntimeStore = defineStore("runtime", {
       if (switchingFromRunningTurn && this.activeTurnId) {
         this.runningSessionMap[this.sessionId] = {
           turnId: this.activeTurnId,
-          phase: this.phase
+          phase: this.phase,
+          textBuffer: "",
+          reasoningBuffer: ""
         };
         delete this.completedSessionSet[this.sessionId];
         delete this.failedSessionSet[this.sessionId];
@@ -4885,6 +4913,13 @@ export const useRuntimeStore = defineStore("runtime", {
         this.activeTurnId = bgTurn.turnId;
         this.isSubmitting = true;
         this.phase = bgTurn.phase;
+        if (bgTurn.textBuffer) {
+          this.streamBufferText = bgTurn.textBuffer;
+          this.streamBufferTurnId = bgTurn.turnId;
+        }
+        if (bgTurn.reasoningBuffer) {
+          this.streamBufferReasoning = bgTurn.reasoningBuffer;
+        }
         delete this.runningSessionMap[nextSessionId];
       }
 
@@ -4919,7 +4954,9 @@ export const useRuntimeStore = defineStore("runtime", {
       if (this.isSubmitting && this.activeTurnId) {
         this.runningSessionMap[this.sessionId] = {
           turnId: this.activeTurnId,
-          phase: this.phase
+          phase: this.phase,
+          textBuffer: "",
+          reasoningBuffer: ""
         };
         delete this.completedSessionSet[this.sessionId];
         delete this.failedSessionSet[this.sessionId];
@@ -5670,6 +5707,21 @@ export const useRuntimeStore = defineStore("runtime", {
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
         if (this.activeTurnId !== payload.turnId) {
+          if (payload.sessionId) {
+            const bg = this.runningSessionMap[payload.sessionId];
+            if (bg && bg.turnId === payload.turnId) {
+              const dt = payload.text ?? "";
+              const dr = payload.reasoningContent ?? "";
+              if (dt) bg.textBuffer += dt;
+              if (dr) bg.reasoningBuffer += dr;
+              if (bg.textBuffer.length > MAX_BG_TEXT_BUFFER_CHARS) {
+                bg.textBuffer = bg.textBuffer.slice(0, MAX_BG_TEXT_BUFFER_CHARS);
+              }
+              if (bg.reasoningBuffer.length > MAX_BG_REASONING_BUFFER_CHARS) {
+                bg.reasoningBuffer = bg.reasoningBuffer.slice(0, MAX_BG_REASONING_BUFFER_CHARS);
+              }
+            }
+          }
           return;
         }
         if (!this.shouldProcessTurnEvent(payload)) {
@@ -5702,6 +5754,9 @@ export const useRuntimeStore = defineStore("runtime", {
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         if (payload.traceTimeline?.length) {
           this.updateActiveTraceTimeline(payload.traceTimeline);
+        }
+        if (!deltaText && !deltaReasoning) {
+          return;
         }
         this.scheduleStreamFlush(payload.turnId);
         updateStreamDebugBucket("runtime", {
@@ -5878,6 +5933,8 @@ export const useRuntimeStore = defineStore("runtime", {
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
+            bg.textBuffer = "";
+            bg.reasoningBuffer = "";
             this.updatePersistedBackgroundSession(payload.sessionId, payload.turnId, {
               content: payload.text ?? null,
               reasoningContent: payload.reasoningContent ?? null,

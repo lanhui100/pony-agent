@@ -635,11 +635,23 @@
           "to": "0.1.26"
         }
       ]
+    },
+    {
+      "commit": "db136cc",
+      "bumps": [
+        {
+          "segment": "patch",
+          "component": "tauri",
+          "from": "0.1.29",
+          "to": "0.1.30"
+        }
+      ],
+      "timestamp": "2026-06-25T16:50:47+08:00"
     }
   ],
-  "lastBump": "2026-06-25T16:08:41+08:00",
+  "lastBump": "2026-06-25T16:50:47+08:00",
   "tauri": {
-    "patch": 29,
+    "patch": 30,
     "minor": 1,
     "major": 0
   },

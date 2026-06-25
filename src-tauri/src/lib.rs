@@ -84,7 +84,7 @@ fn start_graph_run_stream(
             goal,
             input,
         })?;
-    tauri_adapter::spawn_graph_run_stream(&app, prepared);
+    tauri_adapter::spawn_graph_run_stream(&app, prepared)?;
     Ok(response)
 }
 
@@ -111,7 +111,7 @@ fn continue_graph_run_stream(
             run_id,
             input,
         })?;
-    tauri_adapter::spawn_graph_run_stream(&app, prepared);
+    tauri_adapter::spawn_graph_run_stream(&app, prepared)?;
     Ok(response)
 }
 
@@ -138,14 +138,13 @@ fn resume_graph_run_stream(
             run_id,
             input,
         })?;
-    tauri_adapter::spawn_graph_run_stream(&app, prepared);
+    tauri_adapter::spawn_graph_run_stream(&app, prepared)?;
     Ok(response)
 }
 
 #[tauri::command]
 fn start_turn_stream(app: AppHandle, turn_id: String, input: TurnInput) -> Result<(), String> {
-    tauri_adapter::spawn_turn_stream(&app, StartTurnStreamCommand { turn_id, input });
-    Ok(())
+    tauri_adapter::spawn_turn_stream(&app, StartTurnStreamCommand { turn_id, input })
 }
 
 #[tauri::command]
@@ -743,7 +742,7 @@ pub fn run() {
         .manage(StreamDebugMetricsState {
             latest: Mutex::new(json!({})),
         })
-        .manage(TurnTaskRegistry::new())
+        .manage(TurnTaskRegistry::with_max_concurrent(3))
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 // === Load icon from compile-time embedded ICON_PNG ===
