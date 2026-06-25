@@ -455,7 +455,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                     />
 
                     <button
-                      class="pointer-events-none inline-flex shrink-0 cursor-pointer items-center justify-center text-[10px] text-stone-400 opacity-0 transition hover:cursor-pointer hover:text-rose-600 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:text-stone-300"
+                      class="pointer-events-none inline-flex shrink-0 cursor-pointer items-center justify-center text-[10px] text-stone-400 opacity-0 transition hover:cursor-pointer hover:text-rose-600 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:text-stone-300 min-w-[2rem]"
                       :class="
                         isDeletingSession(session)
                           ? 'h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100'
@@ -463,7 +463,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                           ? 'h-5 rounded-full bg-rose-200 px-1.5 text-rose-800 hover:bg-rose-300 hover:text-rose-900'
                           : runtimeStore.isSessionRunning(session.conversationId)
                           ? 'pointer-events-auto h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100 hover:text-amber-600'
-                          : 'rounded-[0.35rem] px-1.5 py-1'
+                          : 'h-5 rounded-[0.35rem] px-1.5 py-1'
                       "
                       type="button"
                       :disabled="!canDeleteSession(session)"
