@@ -166,14 +166,6 @@ type RuntimeState = {
   streamBufferTurnId: string | null;
   streamBufferText: string;
   streamBufferReasoning: string;
-  streamDebugDeltaCount: number;
-  streamDebugFlushCount: number;
-  streamDebugLastDeltaAtMs: number | null;
-  streamDebugLastFlushAtMs: number | null;
-  streamDebugReasoningCharsReceived: number;
-  streamDebugReasoningCharsFlushed: number;
-  streamDebugTextCharsReceived: number;
-  streamDebugTextCharsFlushed: number;
   browserPreviewRunToken: number;
   initialRollbackActive: boolean;
   runningSessionMap: Record<string, RunningTurn>;
@@ -184,6 +176,7 @@ type RuntimeState = {
 type PersistedRuntimeState = {
   cachedStateVersion: number;
   phase: RuntimePhase;
+  canonicalTerminalPhase?: "completed" | "failed" | "cancelled";
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
   // turnTraceHistory is no longer persisted to localStorage — trace data is
@@ -264,7 +257,9 @@ const DEFAULT_SESSION_ID = "local-dev-session";
 
 type PersistedRuntimeCache = {
   sessions: Record<string, PersistedRuntimeState>;
-  runningSessionMap?: Record<string, { turnId: string; phase: RuntimePhase }>;
+  runningSessionMap?: Record<string, { turnId: string; phase: RuntimePhase; textBuffer?: string; reasoningBuffer?: string }>;
+  completedSet?: Record<string, boolean>;
+  failedSet?: Record<string, boolean>;
 };
 
 type SessionInitializationStrategy =
@@ -394,65 +389,7 @@ async function measureHostRead<T>(
   }
 }
 
-const STREAM_DEBUG_STORAGE_KEY = "pony-agent.debug.stream-metrics";
 const STREAM_FLUSH_INTERVAL_MS = 32;
-
-type StreamDebugBucket = {
-  runtime?: Record<string, unknown>;
-  reveal?: Record<string, unknown>;
-};
-
-let scheduledRuntimeMetricsPush = false;
-let pendingRuntimeMetricsPatch: Record<string, unknown> | null = null;
-
-function streamDebugEnabled() {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  return window.localStorage.getItem(STREAM_DEBUG_STORAGE_KEY) === "true";
-}
-
-function updateStreamDebugBucket(section: keyof StreamDebugBucket, patch: Record<string, unknown>) {
-  if (!streamDebugEnabled() || typeof window === "undefined") {
-    return;
-  }
-
-  const streamWindow = window as Window & {
-    __ponyStreamMetrics?: StreamDebugBucket;
-  };
-
-  const current = streamWindow.__ponyStreamMetrics ?? {};
-  streamWindow.__ponyStreamMetrics = {
-    ...current,
-    [section]: {
-      ...(current[section] ?? {}),
-      ...patch,
-      updatedAt: Date.now()
-    }
-  };
-
-  if (section !== "runtime" || !isTauriAvailable()) {
-    return;
-  }
-
-  pendingRuntimeMetricsPatch = {
-    ...((streamWindow.__ponyStreamMetrics.runtime as Record<string, unknown> | undefined) ?? {})
-  };
-  if (scheduledRuntimeMetricsPush) {
-    return;
-  }
-
-  scheduledRuntimeMetricsPush = true;
-  window.setTimeout(() => {
-    scheduledRuntimeMetricsPush = false;
-    const payload = pendingRuntimeMetricsPatch;
-    pendingRuntimeMetricsPatch = null;
-    if (!payload) {
-      return;
-    }
-  }, 0);
-}
 
 function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
   switch (status) {
@@ -1964,14 +1901,6 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.streamBufferTurnId = null;
   state.streamBufferText = "";
   state.streamBufferReasoning = "";
-  state.streamDebugDeltaCount = 0;
-  state.streamDebugFlushCount = 0;
-  state.streamDebugLastDeltaAtMs = null;
-  state.streamDebugLastFlushAtMs = null;
-  state.streamDebugReasoningCharsReceived = 0;
-  state.streamDebugReasoningCharsFlushed = 0;
-  state.streamDebugTextCharsReceived = 0;
-  state.streamDebugTextCharsFlushed = 0;
 }
 
 function isTimeoutErrorDetail(detail: string | null | undefined) {
@@ -2822,14 +2751,23 @@ function createBrowserPreviewTerminalEnvelope(
   };
 }
 
+function isTerminalPhase(phase: string): phase is "completed" | "failed" | "cancelled" {
+  return phase === "completed" || phase === "failed" || phase === "cancelled";
+}
+
 function resolveRestoredPersistedPhase(
   persistedPhase: RuntimePhase | null | undefined,
+  canonicalTerminalPhase: "completed" | "failed" | "cancelled" | null | undefined,
   messages: ChatMessage[],
   turnTraceHistory: TurnTraceRecord[]
 ): RuntimePhase {
   const restoredPhase = restorePhaseFromTurnHistory(messages, turnTraceHistory);
   if (restoredPhase !== "ready") {
     return restoredPhase;
+  }
+
+  if (canonicalTerminalPhase) {
+    return canonicalTerminalPhase;
   }
 
   if (persistedPhase === "cancelled" || persistedPhase === "failed") {
@@ -3090,6 +3028,7 @@ function buildRuntimeViewFromPersistedState(
     summary: persisted?.sessionSummary ?? (persisted?.messages?.length ? DEFAULT_BROWSER_SESSION_SUMMARY : ""),
     history: buildTurnHistory(persisted?.messages ?? []),
     attachmentAssets: persisted?.attachmentAssets ?? [],
+    turnTraceHistory: persisted?.turnTraceHistory ?? [],
     turnCount: persisted?.messages?.filter((message) => message.role === "user").length ?? 0,
     historyStateEvidence: [],
     historyStateAuditSummary: null,
@@ -3137,19 +3076,27 @@ function persistSessionState(sessionId: string, payload: PersistedRuntimeState) 
 }
 
 function persistRunningSessionMap(
-  map: Record<string, RunningTurn>
+  map: Record<string, RunningTurn>,
+  completedSessionSet: Record<string, boolean>,
+  failedSessionSet: Record<string, boolean>
 ) {
   if (typeof window === "undefined") {
     return;
   }
   try {
     const cache = loadPersistedRuntimeCache();
-    // Strip text/reasoning buffers before persist — they are in-memory only
-    const stripped: Record<string, RunningTurn> = {};
+    const stripped: Record<string, { turnId: string; phase: RuntimePhase; textBuffer: string; reasoningBuffer: string }> = {};
     for (const [sid, turn] of Object.entries(map)) {
-      stripped[sid] = { turnId: turn.turnId, phase: turn.phase, textBuffer: "", reasoningBuffer: "" };
+      stripped[sid] = {
+        turnId: turn.turnId,
+        phase: turn.phase,
+        textBuffer: turn.textBuffer.slice(-5000),
+        reasoningBuffer: turn.reasoningBuffer.slice(-2000)
+      };
     }
     cache.runningSessionMap = stripped;
+    cache.completedSet = { ...completedSessionSet };
+    cache.failedSet = { ...failedSessionSet };
     window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
   } catch {
     debugLog("persist:running-map:error");
@@ -3328,7 +3275,7 @@ function buildSessionTitleFromMessages(messages: ChatMessage[]) {
   return firstUserMessage ? buildTurnTitle(firstUserMessage.content) : "新对话";
 }
 
-function isPersistedStateCompatible(
+function isPersistedMetadataCompatible(
   snapshot: SessionSnapshot,
   persisted: PersistedRuntimeState | null
 ) {
@@ -3612,7 +3559,8 @@ export const useRuntimeStore = defineStore("runtime", {
         sessionSwitchToken: 0,
         sessionError: null,
       phase: resolveRestoredPersistedPhase(
-        persisted?.phase,
+        persisted?.phase ?? null,
+        persisted?.canonicalTerminalPhase ?? null,
         persisted?.messages ?? [],
         (persisted?.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace))
       ),
@@ -3655,14 +3603,6 @@ export const useRuntimeStore = defineStore("runtime", {
       streamBufferTurnId: null,
       streamBufferText: "",
       streamBufferReasoning: "",
-      streamDebugDeltaCount: 0,
-      streamDebugFlushCount: 0,
-      streamDebugLastDeltaAtMs: null,
-      streamDebugLastFlushAtMs: null,
-      streamDebugReasoningCharsReceived: 0,
-      streamDebugReasoningCharsFlushed: 0,
-      streamDebugTextCharsReceived: 0,
-      streamDebugTextCharsFlushed: 0,
       browserPreviewRunToken: 0,
       messages: persisted?.messages ?? [],
       attachmentAssets: persisted?.attachmentAssets ?? [],
@@ -3804,14 +3744,6 @@ export const useRuntimeStore = defineStore("runtime", {
       this.streamFlushTimerId = null;
       this.streamBufferText = "";
       this.streamBufferReasoning = "";
-      this.streamDebugDeltaCount = 0;
-      this.streamDebugFlushCount = 0;
-      this.streamDebugLastDeltaAtMs = null;
-      this.streamDebugLastFlushAtMs = null;
-      this.streamDebugReasoningCharsReceived = 0;
-      this.streamDebugReasoningCharsFlushed = 0;
-      this.streamDebugTextCharsReceived = 0;
-      this.streamDebugTextCharsFlushed = 0;
       this.browserPreviewRunToken = 0;
     },
     cancelDeferredPersist() {
@@ -3840,14 +3772,6 @@ export const useRuntimeStore = defineStore("runtime", {
       }
     },
     resetStreamDebugMetrics() {
-      this.streamDebugDeltaCount = 0;
-      this.streamDebugFlushCount = 0;
-      this.streamDebugLastDeltaAtMs = null;
-      this.streamDebugLastFlushAtMs = null;
-      this.streamDebugReasoningCharsReceived = 0;
-      this.streamDebugReasoningCharsFlushed = 0;
-      this.streamDebugTextCharsReceived = 0;
-      this.streamDebugTextCharsFlushed = 0;
     },
     flushBufferedStreamText(turnId?: string | null) {
       const bufferedTurnId = this.streamBufferTurnId;
@@ -3859,9 +3783,6 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       this.cancelStreamFlush();
-      const flushStartedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-      const bufferedTextLength = this.streamBufferText.length;
-      const bufferedReasoningLength = this.streamBufferReasoning.length;
 
       const assistantMessage = this.ensureAssistantMessage(
         bufferedTurnId,
@@ -3878,26 +3799,6 @@ export const useRuntimeStore = defineStore("runtime", {
       if (this.streamBufferText) {
         assistantMessage.content += this.streamBufferText;
       }
-
-      this.streamDebugFlushCount += 1;
-      this.streamDebugLastFlushAtMs = Date.now();
-      this.streamDebugTextCharsFlushed += bufferedTextLength;
-      this.streamDebugReasoningCharsFlushed += bufferedReasoningLength;
-      updateStreamDebugBucket("runtime", {
-        turnId: bufferedTurnId,
-        deltaCount: this.streamDebugDeltaCount,
-        flushCount: this.streamDebugFlushCount,
-        textCharsReceived: this.streamDebugTextCharsReceived,
-        textCharsFlushed: this.streamDebugTextCharsFlushed,
-        reasoningCharsReceived: this.streamDebugReasoningCharsReceived,
-        reasoningCharsFlushed: this.streamDebugReasoningCharsFlushed,
-        bufferedTextLength,
-        bufferedReasoningLength,
-        pendingRaf: this.streamFlushFrameId != null,
-        pendingTimer: this.streamFlushTimerId != null,
-        flushDurationMs:
-          (typeof performance !== "undefined" ? performance.now() : Date.now()) - flushStartedAt
-      });
 
       this.streamBufferTurnId = null;
       this.streamBufferText = "";
@@ -4015,6 +3916,9 @@ export const useRuntimeStore = defineStore("runtime", {
       const payload: PersistedRuntimeState = {
         cachedStateVersion: CACHED_STATE_VERSION,
         phase: this.phase,
+        canonicalTerminalPhase: !this.initialRollbackActive && isTerminalPhase(this.phase)
+          ? this.phase
+          : undefined,
         messages: this.messages,
         attachmentAssets: this.attachmentAssets,
         // turnTraceHistory intentionally excluded — trace data lives on the backend
@@ -4043,7 +3947,7 @@ export const useRuntimeStore = defineStore("runtime", {
 
       try {
         persistSessionState(this.sessionId, payload);
-        persistRunningSessionMap(this.runningSessionMap);
+        persistRunningSessionMap(this.runningSessionMap, this.completedSessionSet, this.failedSessionSet);
         debugLog("persist", {
           sessionId: this.sessionId,
           messages: this.messages.length,
@@ -4126,6 +4030,9 @@ export const useRuntimeStore = defineStore("runtime", {
       persistSessionState(sessionId, {
         ...persisted,
         phase: patch.phase,
+        canonicalTerminalPhase: isTerminalPhase(patch.phase)
+          ? patch.phase
+          : persisted.canonicalTerminalPhase,
         messages,
         sessionSummary: patch.sessionSummary ?? persisted.sessionSummary,
         providerRequestedName: patch.providerRequestedName ?? persisted.providerRequestedName,
@@ -4447,7 +4354,7 @@ export const useRuntimeStore = defineStore("runtime", {
       const historicalRuntimeView = isHistoricalRuntimeView(runtimeView);
       const persistedInitialRollbackActive = Boolean(persisted?.initialRollbackActive);
       const canReusePersistedState =
-        persistedInitialRollbackActive || (!historicalRuntimeView && isPersistedStateCompatible(snapshot, persisted));
+        persistedInitialRollbackActive || (!historicalRuntimeView && isPersistedMetadataCompatible(snapshot, persisted));
       const canMergePersistedMessages =
         persistedInitialRollbackActive || (!historicalRuntimeView && isPersistedMessageShapeCompatible(snapshot, persisted));
       const restoredState = canReusePersistedState ? persisted : null;
@@ -4459,9 +4366,7 @@ export const useRuntimeStore = defineStore("runtime", {
       const effectiveTurnTraceHistory = (
         snapshotTurnTraceHistory.length
           ? snapshotTurnTraceHistory
-          : historicalRuntimeView
-            ? []
-            : restoredState?.turnTraceHistory ?? []
+          : []
       ).map((trace) => normalizeTurnTraceRecord(trace));
 
       this.sessionId = sessionId;
@@ -4507,6 +4412,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.traceTimeline = restoredTraceTimeline.length ? restoredTraceTimeline : createDefaultTraceTimeline();
       this.phase = resolveRestoredPersistedPhase(
         restoredState?.phase ?? null,
+        restoredState?.canonicalTerminalPhase ?? null,
         this.messages,
         this.turnTraceHistory
       );
@@ -4599,16 +4505,39 @@ export const useRuntimeStore = defineStore("runtime", {
       this.streamFlushTimerId = null;
       this.streamBufferText = "";
       this.streamBufferReasoning = "";
-      this.streamDebugDeltaCount = 0;
-      this.streamDebugFlushCount = 0;
-      this.streamDebugLastDeltaAtMs = null;
-      this.streamDebugLastFlushAtMs = null;
-      this.streamDebugReasoningCharsReceived = 0;
-      this.streamDebugReasoningCharsFlushed = 0;
-      this.streamDebugTextCharsReceived = 0;
-      this.streamDebugTextCharsFlushed = 0;
       this.initialRollbackActive = true;
       this.persistHistory();
+    },
+    async performHistoryOperation<TInvokeArgs extends Record<string, unknown>, TResult extends HistoryCursorState & { historyStateAuditSummary?: HistoryStateAuditSummary | null }>(
+      options: {
+        cmd: string;
+        invokeArgs: TInvokeArgs;
+        normalize: (payload: any, nodes: HistoryNode[], branches: HistoryBranch[]) => TResult;
+        selectNodeId?: (result: any) => string | null;
+        errorMessagePrefix?: string;
+      }
+    ): Promise<TResult | null> {
+      try {
+        const payload = await safeInvoke(options.cmd, {
+          sessionId: this.sessionId,
+          expectedCursorVersion: this.cursorVersion,
+          ...options.invokeArgs
+        });
+        await this.loadSessionState(this.sessionId, {
+          refreshCatalog: false,
+          nodeId: options.selectNodeId?.(payload) ?? null
+        });
+        const result = options.normalize(payload, this.historyNodes, this.historyBranches);
+        this.initialRollbackActive = false;
+        this.applyHistoryState(this.sessionId, result);
+        this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
+          result.historyStateAuditSummary ?? null
+        );
+        return result;
+      } catch (error) {
+        this.sessionError = `${options.errorMessagePrefix ?? "操作"}失败：${String(error)}`;
+        return null;
+      }
     },
     async checkoutHistoryNode(nodeId: string, mode: HistoryCheckoutMode = "transcript_only", turnId?: string | null) {
       const sessionId = this.sessionId;
@@ -4638,6 +4567,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.turnTraceHistory = this.turnTraceHistory.filter(
           (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
         );
+        this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
         result = normalizeHistoryCheckoutResult(payload, this.historyNodes, this.historyBranches);
       } else {
         const resolvedTurnId = turnId?.trim() || this.findCheckpointTurnIdByNodeId(nodeId);
@@ -4659,6 +4589,7 @@ export const useRuntimeStore = defineStore("runtime", {
           this.turnTraceHistory = this.turnTraceHistory.filter(
             (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
           );
+          this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
           this.traceSteps = createDefaultTraceSteps();
           const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
           this.traceTimeline = lastTrace?.traceTimeline?.length
@@ -4705,9 +4636,8 @@ export const useRuntimeStore = defineStore("runtime", {
       return entry?.turnId?.trim() || null;
     },
     async restoreBranchHead(branchId?: string | null) {
-      const sessionId = this.sessionId;
       const targetBranchId = branchId?.trim() || this.activeBranchId;
-      if (!sessionId) {
+      if (!this.sessionId || !targetBranchId) {
         return null;
       }
 
@@ -4716,34 +4646,24 @@ export const useRuntimeStore = defineStore("runtime", {
         return null;
       }
 
-      let result: HistoryRestoreResult;
-      let payload: HistoryRestoreWireResult;
-      try {
-        payload = await safeInvoke<HistoryRestoreWireResult>("restore_branch_head", {
-          sessionId,
-          branchId: targetBranchId ?? null,
-          expectedCursorVersion: this.cursorVersion
-        });
-      } catch (error) {
-        this.sessionError = `恢复 branch head 冲突或失败：${String(error)}`;
-        return null;
-      }
-      await this.loadSessionState(sessionId, {
-        refreshCatalog: false,
-        nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
+      const result = await this.performHistoryOperation({
+        cmd: "restore_branch_head",
+        invokeArgs: { branchId: targetBranchId },
+        normalize: (payload) => normalizeHistoryRestoreResult(payload, this.historyNodes, this.historyBranches),
+        errorMessagePrefix: "恢复 branch head"
       });
-      result = normalizeHistoryRestoreResult(payload, this.historyNodes, this.historyBranches);
-      this.initialRollbackActive = false;
-      this.applyHistoryState(sessionId, result);
-      this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
-        result.historyStateAuditSummary ?? null
-      );
+      if (result) {
+        this.historyCursorMode = "live";
+        this.activeTurnId = null;
+        this.activeRunId = null;
+        this.isSubmitting = false;
+        this.latestExecutionCheckpoint = null;
+      }
       return result;
     },
     async forkHistoryNode(nodeId?: string | null) {
-      const sessionId = this.sessionId;
       const targetNodeId = nodeId?.trim() || this.visibleNodeId;
-      if (!sessionId || !targetNodeId) {
+      if (!this.sessionId || !targetNodeId) {
         return null;
       }
 
@@ -4752,34 +4672,16 @@ export const useRuntimeStore = defineStore("runtime", {
         return null;
       }
 
-      let result: HistoryForkResult;
-      let payload: HistoryForkWireResult;
-      try {
-        payload = await safeInvoke<HistoryForkWireResult>("fork_from_history_node", {
-          sessionId,
-          nodeId: targetNodeId,
-          expectedCursorVersion: this.cursorVersion
-        });
-      } catch (error) {
-        this.sessionError = `创建 branch 冲突或失败：${String(error)}`;
-        return null;
-      }
-      await this.loadSessionState(sessionId, {
-        refreshCatalog: false,
-        nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
+      return this.performHistoryOperation({
+        cmd: "fork_from_history_node",
+        invokeArgs: { nodeId: targetNodeId },
+        normalize: (payload) => normalizeHistoryForkResult(payload, this.historyNodes, this.historyBranches),
+        selectNodeId: (payload) => payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null,
+        errorMessagePrefix: "创建 branch"
       });
-      result = normalizeHistoryForkResult(payload, this.historyNodes, this.historyBranches);
-      this.initialRollbackActive = false;
-
-      this.applyHistoryState(sessionId, result);
-      this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
-        result.historyStateAuditSummary ?? null
-      );
-      return result;
     },
     async switchHistoryBranch(branchId: string) {
-      const sessionId = this.sessionId;
-      if (!sessionId || !branchId.trim()) {
+      if (!this.sessionId || !branchId.trim()) {
         return null;
       }
 
@@ -4788,33 +4690,13 @@ export const useRuntimeStore = defineStore("runtime", {
         return null;
       }
 
-      let result: HistoryBranchSwitchResult;
-      let payload: HistoryBranchSwitchWireResult;
-      try {
-        payload = await safeInvoke<HistoryBranchSwitchWireResult>("switch_history_branch", {
-          sessionId,
-          branchId,
-          expectedCursorVersion: this.cursorVersion
-        });
-      } catch (error) {
-        this.sessionError = `切换 branch 冲突或失败：${String(error)}`;
-        return null;
-      }
-      await this.loadSessionState(sessionId, {
-        refreshCatalog: false,
-        nodeId: payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null
+      return this.performHistoryOperation({
+        cmd: "switch_history_branch",
+        invokeArgs: { branchId },
+        normalize: (payload) => normalizeHistoryBranchSwitchResult(payload, this.historyNodes, this.historyBranches),
+        selectNodeId: (payload) => payload.cursor.visibleNodeId ?? payload.cursor.branchHeadNodeId ?? null,
+        errorMessagePrefix: "切换 branch"
       });
-      result = normalizeHistoryBranchSwitchResult(
-        payload,
-        this.historyNodes,
-        this.historyBranches
-      );
-      this.initialRollbackActive = false;
-      this.applyHistoryState(sessionId, result);
-      this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
-        result.historyStateAuditSummary ?? null
-      );
-      return result;
     },
     async switchSession(nextSessionId: string) {
       if (this.sessionOperation && this.sessionOperation !== "switching") {
@@ -4830,8 +4712,8 @@ export const useRuntimeStore = defineStore("runtime", {
         this.runningSessionMap[this.sessionId] = {
           turnId: this.activeTurnId,
           phase: this.phase,
-          textBuffer: "",
-          reasoningBuffer: ""
+          textBuffer: this.streamBufferText,
+          reasoningBuffer: this.streamBufferReasoning
         };
         delete this.completedSessionSet[this.sessionId];
         delete this.failedSessionSet[this.sessionId];
@@ -4873,6 +4755,17 @@ export const useRuntimeStore = defineStore("runtime", {
             error: String(error)
           });
         });
+        if (isTauriAvailable()) {
+          this.loadSessionRuntimeViewState(nextSessionId).then((hostView) => {
+            if (this.sessionSwitchToken !== switchToken || this.sessionId !== nextSessionId || !hostView) {
+              return;
+            }
+            return this.loadSessionState(nextSessionId, {
+              refreshCatalog: false,
+              runtimeView: hostView
+            }).catch(() => {});
+          }).catch(() => {});
+        }
       } else {
         this.resetSessionRuntimeState();
         this.sessionId = nextSessionId;
@@ -4955,8 +4848,8 @@ export const useRuntimeStore = defineStore("runtime", {
         this.runningSessionMap[this.sessionId] = {
           turnId: this.activeTurnId,
           phase: this.phase,
-          textBuffer: "",
-          reasoningBuffer: ""
+          textBuffer: this.streamBufferText,
+          reasoningBuffer: this.streamBufferReasoning
         };
         delete this.completedSessionSet[this.sessionId];
         delete this.failedSessionSet[this.sessionId];
@@ -5107,6 +5000,13 @@ export const useRuntimeStore = defineStore("runtime", {
           this.runningSessionMap = { ...restoredRunningMap };
           debugLog("session:init:running-map", { sessions: Object.keys(restoredRunningMap) });
         }
+        const persistedCache = loadPersistedRuntimeCache();
+        if (persistedCache.completedSet) {
+          this.completedSessionSet = { ...persistedCache.completedSet };
+        }
+        if (persistedCache.failedSet) {
+          this.failedSessionSet = { ...persistedCache.failedSet };
+        }
         const preferredSessionId = this.sessionList[0]?.conversationId ?? this.sessionId;
         const persisted = loadPersistedRuntimeState(preferredSessionId);
         const strategy = deriveInitStrategy(preferredSessionId, persisted, this.sessionList);
@@ -5195,6 +5095,7 @@ export const useRuntimeStore = defineStore("runtime", {
               ? cloneHookTraceRecords(patch.hookTraceRecords)
               : existing.hookTraceRecords
         });
+        this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
         if (persist) {
           this.persistHistory();
         }
@@ -5232,6 +5133,7 @@ export const useRuntimeStore = defineStore("runtime", {
         updatedAt
       }));
       this.turnTraceHistory[this.turnTraceHistory.length - 1]!.title = resolvedTitle;
+      this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
       if (persist) {
         this.persistHistory();
       }
@@ -5745,11 +5647,6 @@ export const useRuntimeStore = defineStore("runtime", {
           this.streamBufferText += deltaText;
         }
 
-        this.streamDebugDeltaCount += 1;
-        this.streamDebugLastDeltaAtMs = Date.now();
-      this.streamDebugTextCharsReceived += deltaText.length;
-      this.streamDebugReasoningCharsReceived += deltaReasoning.length;
-
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         if (payload.traceTimeline?.length) {
@@ -5759,24 +5656,6 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
         this.scheduleStreamFlush(payload.turnId);
-        updateStreamDebugBucket("runtime", {
-          turnId: payload.turnId,
-          deltaCount: this.streamDebugDeltaCount,
-          flushCount: this.streamDebugFlushCount,
-          textCharsReceived: this.streamDebugTextCharsReceived,
-          textCharsFlushed: this.streamDebugTextCharsFlushed,
-          reasoningCharsReceived: this.streamDebugReasoningCharsReceived,
-          reasoningCharsFlushed: this.streamDebugReasoningCharsFlushed,
-          lastDeltaTextLength: deltaText.length,
-          lastDeltaReasoningLength: deltaReasoning.length,
-          bufferTextLength: this.streamBufferText.length,
-          bufferReasoningLength: this.streamBufferReasoning.length,
-          bufferTurnId: this.streamBufferTurnId,
-          pendingRaf: this.streamFlushFrameId != null,
-          pendingTimer: this.streamFlushTimerId != null,
-          deltaToLastFlushMs:
-            this.streamDebugLastFlushAtMs == null ? null : this.streamDebugLastDeltaAtMs - this.streamDebugLastFlushAtMs
-        });
         debugLog("event:delta", {
           turnId: payload.turnId,
           deltaLength: deltaText.length,
@@ -6638,11 +6517,37 @@ export const useRuntimeStore = defineStore("runtime", {
       }
     },
     async submitTurn(options?: { images?: TurnInputImage[] }) {
+      if (this.isSubmitting) {
+        return false;
+      }
+
+      const images = (options?.images ?? []).map((image) => ({ ...image }));
+      const message = this.draftMessage.trim();
+
+      if (!message.trim() && !images.length) {
+        return false;
+      }
+
+      this.isSubmitting = true;
+
       await this.initializeTurnEvents();
       const providerStore = useProviderStore();
       const settingsStore = useSettingsStore();
-      const images = (options?.images ?? []).map((image) => ({ ...image }));
-      const message = this.draftMessage.trim();
+
+      const mode = this.historyCursorMode;
+      const needsRestore = this.initialRollbackActive || mode === "historical";
+      if (needsRestore && isTauriAvailable()) {
+        const restored = await this.restoreBranchHead();
+        if (!restored) {
+          this.isSubmitting = false;
+          this.sessionError = "无法提交：对话处于历史浏览模式，恢复最新状态失败";
+          return false;
+        }
+      }
+
+      this.initialRollbackActive = false;
+      this.historyCursorMode = "live";
+
       const lastAssistantMessage = [...this.messages]
         .reverse()
         .find((entry) => entry.role === "assistant") ?? null;
@@ -6662,17 +6567,8 @@ export const useRuntimeStore = defineStore("runtime", {
         images
       };
 
-      if (!payload.message.trim() && !images.length) {
-        return false;
-      }
-
       const requestId = String(Date.now());
       const userMessageId = `user-${requestId}`;
-
-      if (this.initialRollbackActive || isHistoricalMode(this.historyCursorMode)) {
-        this.initialRollbackActive = false;
-        this.historyCursorMode = "live";
-      }
 
       this.messages.push({
         id: userMessageId,
