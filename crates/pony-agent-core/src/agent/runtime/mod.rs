@@ -2896,6 +2896,8 @@ impl AgentRuntime {
                 Rc::clone(&provider_call_first_token_latency);
             let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
             let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+            let last_emit_for_client = Rc::new(Cell::new(0u64));
+            let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
             let delta_turn_id_for_emit = delta_turn_id.clone();
             let provider_call_started_at = Instant::now();
             let response = match provider_followup_stream(
@@ -2955,6 +2957,7 @@ impl AgentRuntime {
                         None
                     };
 
+                    let mut did_emit = false;
                     match delta {
                         ProviderStreamChunk::Text(text) => {
                             if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush()
@@ -2962,14 +2965,28 @@ impl AgentRuntime {
                                 flush_delta(None, Some(reasoning), latency);
                             }
                             flush_delta(Some(text), None, latency);
+                            did_emit = true;
                         }
                         ProviderStreamChunk::Reasoning(reasoning) => {
                             if let Some(buffered_reasoning) =
                                 reasoning_batcher_for_emit.borrow_mut().push(reasoning)
                             {
                                 flush_delta(None, Some(buffered_reasoning), latency);
+                                did_emit = true;
                             }
                         }
+                    }
+                    if did_emit {
+                        let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+                        let prev = last_emit_for_client_clone.get();
+                        let gap = now.saturating_sub(prev);
+                        const MIN_CLIENT_GAP_MS: u64 = 16;
+                        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                MIN_CLIENT_GAP_MS - gap,
+                            ));
+                        }
+                        last_emit_for_client_clone.set(now);
                     }
                 },
             ) {
@@ -3024,6 +3041,15 @@ impl AgentRuntime {
                     None,
                     input.session_id.clone(),
                 );
+                let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+                let prev = last_emit_for_client.get();
+                let gap = now.saturating_sub(prev);
+                const MIN_CLIENT_GAP_MS: u64 = 16;
+                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        MIN_CLIENT_GAP_MS - gap,
+                    ));
+                }
             }
             let mut response = response;
             let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
@@ -4527,6 +4553,8 @@ impl AgentRuntime {
                 Rc::clone(&initial_call_first_token_latency);
             let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
             let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+            let last_emit_for_client = Rc::new(Cell::new(0u64));
+            let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
             let turn_id_for_delta_emit = turn_id_for_stream.clone();
             let stream_session_id_for_delta_emit = stream_session_id.clone();
 
@@ -4577,6 +4605,7 @@ impl AgentRuntime {
                         let value = initial_decision_started_at.elapsed().as_millis() as u64;
                         initial_call_first_token_latency_for_emit.set(Some(value));
                     }
+                    let mut did_emit = false;
                     match delta {
                         ProviderStreamChunk::Text(text) => {
                             if let Some(reasoning) =
@@ -4585,14 +4614,28 @@ impl AgentRuntime {
                                 flush_delta(None, Some(reasoning));
                             }
                             flush_delta(Some(text), None);
+                            did_emit = true;
                         }
                         ProviderStreamChunk::Reasoning(reasoning) => {
                             if let Some(buffered_reasoning) =
                                 reasoning_batcher_for_emit.borrow_mut().push(reasoning)
                             {
                                 flush_delta(None, Some(buffered_reasoning));
+                                did_emit = true;
                             }
                         }
+                    }
+                    if did_emit {
+                        let now = turn_started_at.elapsed().as_millis() as u64;
+                        let prev = last_emit_for_client_clone.get();
+                        let gap = now.saturating_sub(prev);
+                        const MIN_CLIENT_GAP_MS: u64 = 16;
+                        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                MIN_CLIENT_GAP_MS - gap,
+                            ));
+                        }
+                        last_emit_for_client_clone.set(now);
                     }
                 },
             )?;
@@ -4632,6 +4675,15 @@ impl AgentRuntime {
                     None,
                     input.session_id.clone(),
                 );
+                let now = turn_started_at.elapsed().as_millis() as u64;
+                let prev = last_emit_for_client.get();
+                let gap = now.saturating_sub(prev);
+                const MIN_CLIENT_GAP_MS: u64 = 16;
+                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        MIN_CLIENT_GAP_MS - gap,
+                    ));
+                }
             }
             Ok((
                 decision,
@@ -7802,6 +7854,8 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
     let emitted_reasoning_chars_ref = Rc::new(Cell::new(0usize));
     let emitted_text_for_emit = Rc::clone(&emitted_text_ref);
     let emitted_reasoning_chars_for_emit = Rc::clone(&emitted_reasoning_chars_ref);
+    let last_emit_for_client = Rc::new(Cell::new(0u64));
+    let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
 
     let mut response = provider_followup_stream(
         provider,
@@ -7823,6 +7877,7 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
             } else {
                 None
             };
+            let mut did_emit = false;
             match delta {
                 ProviderStreamChunk::Text(text) => {
                     if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush() {
@@ -7849,6 +7904,7 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
                         latency,
                         session_id_for_emit.clone(),
                     );
+                    did_emit = true;
                 }
                 ProviderStreamChunk::Reasoning(reasoning) => {
                     if let Some(buffered_reasoning) =
@@ -7867,8 +7923,21 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
                             latency,
                             session_id_for_emit.clone(),
                         );
+                        did_emit = true;
                     }
                 }
+            }
+            if did_emit {
+                let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+                let prev = last_emit_for_client_clone.get();
+                let gap = now.saturating_sub(prev);
+                const MIN_CLIENT_GAP_MS: u64 = 16;
+                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        MIN_CLIENT_GAP_MS - gap,
+                    ));
+                }
+                last_emit_for_client_clone.set(now);
             }
         },
     )
@@ -7890,6 +7959,15 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
             None,
             session_id.clone(),
         );
+        let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+        let prev = last_emit_for_client.get();
+        let gap = now.saturating_sub(prev);
+        const MIN_CLIENT_GAP_MS: u64 = 16;
+        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+            std::thread::sleep(std::time::Duration::from_millis(
+                MIN_CLIENT_GAP_MS - gap,
+            ));
+        }
     }
 
     let emitted_text = emitted_text_ref.borrow().clone();
