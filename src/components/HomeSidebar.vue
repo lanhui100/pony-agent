@@ -1452,13 +1452,15 @@ watch(orderedTurnTraceSignature, () => {
   <aside class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.6rem] border border-stone-200/70 bg-white/62">
     <ScrollArea class="min-h-0 flex-1" viewport-class="px-4 pt-10 pb-4">
       <div class="flex min-h-full flex-col gap-3">
-        <section class="border-b border-stone-200/70 pb-2.5" data-open="true">
+        <section class="border-b border-stone-200/70 pb-16" data-open="true">
           <div class="flex w-full items-center justify-between gap-2 text-left" data-testid="status-panel-toggle">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <Tooltip text="状态概览">
                 <ScanSearch class="h-3.5 w-3.5" />
               </Tooltip>
               <span>状态</span>
+            </div>
+            <div class="flex items-center gap-x-3 text-[11px] leading-5 text-stone-600">
               <Tooltip :text="`复制 Session ID: ${sessionId}`">
                 <button
                   class="inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
@@ -1469,8 +1471,6 @@ watch(orderedTurnTraceSignature, () => {
                   <component :is="copiedKey === 'session-id' ? Check : Copy" class="h-3 w-3" />
                 </button>
               </Tooltip>
-            </div>
-            <div class="flex items-center gap-x-3 text-[11px] leading-5 text-stone-600">
               <Tooltip text="对话轮次数">
                 <span class="inline-flex items-center gap-1">
                   <MessageSquareMore class="h-3 w-3 text-stone-400" />
@@ -1492,7 +1492,7 @@ watch(orderedTurnTraceSignature, () => {
             </div>
           </div>
 
-          <section class="mt-1.5 space-y-1">
+          <section class="border-t border-stone-200/60 pt-3 mt-3 space-y-1">
             <!-- Branch info -->
             <div
               v-if="branchCount > 1"

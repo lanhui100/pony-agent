@@ -4,6 +4,7 @@ import { storeToRefs } from "pinia";
 import { isTauriAvailable } from "@/lib/tauri";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowUp,
   Brain,
   Bot,
@@ -24,6 +25,8 @@ import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
 import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode, HistoryNode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
+import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 
 import Button from "@/components/ui/Button.vue";
 import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
@@ -105,59 +108,17 @@ const timelineScrollAreaRef = ref<{
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   viewportEl: HTMLElement | null;
 } | null>(null);
-const scrollQueued = ref(false);
-const scrollAfterPaintFrameId = ref<number | null>(null);
+const scrollAnchorRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
-let isDestroyed = false;
 const checkpointPickerOpen = ref(false);
 const forkSummaryOpenForNodeId = ref<string | null>(null);
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
-const streamSnapshotTextByMessageId = shallowReactive<Record<string, string>>({});
-const streamSnapshotReasoningByMessageId = shallowReactive<Record<string, string>>({});
-const streamFadeTextByMessageId = shallowReactive<Record<string, string>>({});
-const streamFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
-const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string>>({});
-const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
-const AUTO_SCROLL_THRESHOLD_PX = 260;
+const SHOW_SCROLL_BOTTOM_THRESHOLD_PX = 400;
 const COMPOSER_BUFFER_PX = 220;
-const STREAM_FADE_MIN_CHARS = 3;
-const PROGRAMMATIC_SCROLL_MAX_MS = 1600;
-
-let scheduledScrollRequestId = 0;
-const streamAutoFollowEnabled = ref(true);
-let contentResizeObserver: ResizeObserver | null = null;
-let autoFollowIdleTimer: ReturnType<typeof setTimeout> | null = null;
-let programmaticScrollActive = false;
-let programmaticScrollTargetTop = 0;
-let programmaticScrollUntilMs = 0;
-let userScrollOverrideVersion = 0;
-let lastUserPausedSignature = "";
-let autoFollowIdleEligible = false;
-let lastUserScrollAtMs = 0;
-const USER_SCROLL_IDLE_MS = 3000;
-let scrollLerpRafId: number | null = null;
-const SCROLL_LERP_DURATION_MS = 200;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
 
 function collectTimelineScrollMetrics() {
-  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-  return {
-    streamAutoFollowEnabled: streamAutoFollowEnabled.value,
-    scrollQueued: scrollQueued.value,
-    isSubmitting: isSubmitting.value,
-    programmaticScrollActive,
-    programmaticScrollTargetTop,
-    programmaticScrollUntilMs,
-    userScrollOverrideVersion,
-    lastUserPausedSignature,
-    autoFollowIdleEligible,
-    viewportScrollTop: viewport?.scrollTop ?? null,
-    viewportScrollHeight: viewport?.scrollHeight ?? null,
-    viewportClientHeight: viewport?.clientHeight ?? null,
-    distanceToBottom: viewport
-      ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      : null
-  };
+  return timelineAutoScroll.collectMetrics();
 }
 
 function updateStreamDebugReveal(patch: Record<string, unknown>) {
@@ -183,33 +144,6 @@ function emitTimelineScrollDebug(event: string, patch: Record<string, unknown> =
     window.dispatchEvent(new CustomEvent("pony:workspace-scroll-debug", { detail: payload }));
   }
   console.info("[workspace-scroll]", payload);
-}
-
-function setupContentResizeObserver() {
-  teardownContentResizeObserver();
-  const contentColumn = workspaceContentColumnRef.value;
-  if (!contentColumn || typeof ResizeObserver === "undefined") return;
-
-  contentResizeObserver = new ResizeObserver(() => {
-    if (!streamAutoFollowEnabled.value || scrollQueued.value) {
-      emitTimelineScrollDebug("resize-observer:skip", {
-        reason: !streamAutoFollowEnabled.value ? "follow-disabled" : "scroll-queued"
-      });
-      return;
-    }
-    emitTimelineScrollDebug("resize-observer:queue-scroll", {
-      behavior: "smooth"
-    });
-    queueScrollToLatestTurn("smooth", userScrollOverrideVersion);
-  });
-  contentResizeObserver.observe(contentColumn);
-}
-
-function teardownContentResizeObserver() {
-  if (contentResizeObserver) {
-    contentResizeObserver.disconnect();
-    contentResizeObserver = null;
-  }
 }
 
 const currentModelSupportsReasoning = computed(
@@ -537,154 +471,18 @@ function isAssistantReasoningStreaming(message: ChatMessage | null) {
   return message?.status === "pending";
 }
 
-const PRESENTATION_MAPS = [
-  streamSnapshotTextByMessageId,
-  streamSnapshotReasoningByMessageId,
-  streamFadeTextByMessageId,
-  streamFadeKeyByMessageId,
-  streamReasoningFadeTextByMessageId,
-  streamReasoningFadeKeyByMessageId,
-];
-
-function syncPresentationMapValue<T extends string | number>(
-  map: Record<string, T>,
-  messageId: string,
-  nextValue: T
-) {
-  if (map[messageId] !== nextValue) {
-    map[messageId] = nextValue;
-  }
-}
-
-function syncStreamingPresentationState(source = "unknown") {
-  const syncStartAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-  const activeMessageIds = new Set<string>();
-  const pendingAssistants: ChatMessage[] = [];
-
-  for (const message of messages.value) {
-    if (message.role !== "assistant") continue;
-    activeMessageIds.add(message.id);
-    if (message.status === "pending") {
-      pendingAssistants.push(message);
-    }
-  }
-
-  if (pendingAssistants.length === 0) {
-    for (const map of PRESENTATION_MAPS) {
-      for (const id of Object.keys(map)) {
-        if (!activeMessageIds.has(id)) delete map[id];
-      }
-    }
-    const syncDurationMs = performance.now() - syncStartAt;
-    updateStreamDebugReveal({ syncSource: source, syncDurationMs, pendingAssistantCount: 0, autoScrollQueued: scrollQueued.value });
-    return;
-  }
-
-  for (const message of pendingAssistants) {
-    const nextReasoning = assistantReasoning(message);
-    const nextText = message.content;
-    const previousText = streamSnapshotTextByMessageId[message.id] ?? "";
-    const previousReasoning = streamSnapshotReasoningByMessageId[message.id] ?? "";
-
-    const appendedText = nextText.length > previousText.length ? nextText.slice(previousText.length) : "";
-    syncPresentationMapValue(streamFadeTextByMessageId, message.id, appendedText.length >= STREAM_FADE_MIN_CHARS ? appendedText : "");
-    if (streamFadeTextByMessageId[message.id]) {
-      streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
-    }
-
-    const appendedReasoning = nextReasoning.length > previousReasoning.length ? nextReasoning.slice(previousReasoning.length) : "";
-    syncPresentationMapValue(streamReasoningFadeTextByMessageId, message.id, appendedReasoning.length >= STREAM_FADE_MIN_CHARS ? appendedReasoning : "");
-    if (streamReasoningFadeTextByMessageId[message.id]) {
-      streamReasoningFadeKeyByMessageId[message.id] = (streamReasoningFadeKeyByMessageId[message.id] ?? 0) + 1;
-    }
-
-    syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
-    syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, nextReasoning);
-  }
-
-  for (const map of PRESENTATION_MAPS) {
-    for (const id of Object.keys(map)) {
-      if (!activeMessageIds.has(id)) delete map[id];
-    }
-  }
-
-  const syncDurationMs = performance.now() - syncStartAt;
-  updateStreamDebugReveal({ syncSource: source, syncDurationMs, pendingAssistantCount: pendingAssistants.length, autoScrollQueued: scrollQueued.value });
-}
-
-function assistantDisplayContent(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
-
-  return message.content;
-}
-
-function assistantDisplayStableContent(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
-
-  const displayText = assistantDisplayContent(message);
-  const fadeText = streamFadeTextByMessageId[message.id] ?? "";
-  return fadeText ? displayText.slice(0, Math.max(0, displayText.length - fadeText.length)) : displayText;
-}
-
-function assistantDisplayFadeContent(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
-
-  return streamFadeTextByMessageId[message.id] ?? "";
-}
-
-function assistantDisplayFadeStyle(message: ChatMessage | null) {
-  if (!message) {
-    return undefined;
-  }
-
-  const key = streamFadeKeyByMessageId[message.id] ?? 0;
-  return {
-    animationName: key % 2 === 0 ? "assistant-stream-fade-in-a" : "assistant-stream-fade-in-b"
-  };
-}
-
-function assistantDisplayedReasoning(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
-
-  return assistantReasoning(message);
-}
-
-function assistantDisplayedReasoningStable(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
-
-  const displayText = assistantDisplayedReasoning(message);
-  const fadeText = streamReasoningFadeTextByMessageId[message.id] ?? "";
-  return fadeText ? displayText.slice(0, Math.max(0, displayText.length - fadeText.length)) : displayText;
-}
-
-function assistantDisplayedReasoningFade(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
-
-  return streamReasoningFadeTextByMessageId[message.id] ?? "";
-}
-
-function assistantDisplayedReasoningFadeStyle(message: ChatMessage | null) {
-  if (!message) {
-    return undefined;
-  }
-
-  const key = streamReasoningFadeKeyByMessageId[message.id] ?? 0;
-  return {
-    animationName: key % 2 === 0 ? "assistant-stream-fade-in-a" : "assistant-stream-fade-in-b"
-  };
-}
+const streamingPresentation = useStreamingPresentationState(messages);
+const {
+  syncStreamingPresentationState,
+  assistantDisplayContent,
+  assistantDisplayStableContent,
+  assistantDisplayFadeContent,
+  assistantDisplayFadeStyle,
+  assistantDisplayedReasoning,
+  assistantDisplayedReasoningStable,
+  assistantDisplayedReasoningFade,
+  assistantDisplayedReasoningFadeStyle
+} = streamingPresentation;
 
 function shouldShowReasoningBlock(message: ChatMessage | null) {
   if (!message || !showReasoningContent.value) {
@@ -1143,6 +941,7 @@ function handleComposerKeydown(event: KeyboardEvent) {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     if (!isSubmitting.value) {
+      timelineAutoScroll.setAutoFollowEnabled();
       runtimeStore.submitTurn();
     }
   }
@@ -1183,6 +982,7 @@ async function handlePrimaryAction() {
   }
 
   stopRequested.value = false;
+  timelineAutoScroll.setAutoFollowEnabled();
   await runtimeStore.submitTurn();
 }
 
@@ -1292,312 +1092,27 @@ function handleClickOutside(event: MouseEvent) {
   }
 }
 
-function isTimelineNearBottom() {
-  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-  if (!viewport) {
-    return true;
-  }
+const timelineAutoScroll = useTimelineAutoScroll({
+  timelineScrollAreaRef,
+  scrollAnchorRef,
+  workspaceContentColumnRef,
+  isSubmitting,
+  latestTurnSignature,
+  showDebug: emitTimelineScrollDebug,
+  updateFloatingUiPositions
+});
 
-  const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-  return distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX;
-}
-
-function cancelScrollLerp() {
-  if (scrollLerpRafId != null) {
-    window.cancelAnimationFrame(scrollLerpRafId);
-    scrollLerpRafId = null;
-  }
-  scrollQueued.value = false;
-}
-
-function cancelPendingTimelineScroll(reason = "unspecified") {
-  scheduledScrollRequestId += 1;
-  scrollQueued.value = false;
-  programmaticScrollActive = false;
-  programmaticScrollTargetTop = 0;
-  programmaticScrollUntilMs = 0;
-  cancelScrollLerp();
-  if (scrollAfterPaintFrameId.value != null) {
-    window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
-    scrollAfterPaintFrameId.value = null;
-  }
-  emitTimelineScrollDebug("cancel-pending-scroll", { reason });
-}
-
-function pauseTimelineAutoFollow() {
-  userScrollOverrideVersion += 1;
-  streamAutoFollowEnabled.value = false;
-  autoFollowIdleEligible = false;
-  lastUserPausedSignature = latestTurnSignature.value;
-  cancelPendingTimelineScroll("pause-auto-follow");
-  emitTimelineScrollDebug("pause-auto-follow");
-  lastUserScrollAtMs = Date.now();
-  if (isSubmitting.value) {
-    scheduleAutoFollowIdleResume();
-  } else {
-    clearAutoFollowIdleTimer();
-  }
-}
-
-function resumeTimelineAutoFollow(behavior: ScrollBehavior = "auto") {
-  streamAutoFollowEnabled.value = true;
-  autoFollowIdleEligible = false;
-  lastUserPausedSignature = "";
-  clearAutoFollowIdleTimer();
-  emitTimelineScrollDebug("resume-auto-follow", { behavior });
-  queueScrollToLatestTurn(behavior, userScrollOverrideVersion);
-}
-
-function queueScrollToLatestTurn(
-  behavior: ScrollBehavior = "smooth",
-  expectedOverrideVersion = userScrollOverrideVersion
-) {
-  scheduledScrollRequestId += 1;
-  const requestId = scheduledScrollRequestId;
-  scrollQueued.value = true;
-  emitTimelineScrollDebug("queue-scroll-request", {
-    requestId,
-    behavior,
-    expectedOverrideVersion
-  });
-  void nextTick().then(() => {
-    if (
-      requestId !== scheduledScrollRequestId ||
-      expectedOverrideVersion !== userScrollOverrideVersion ||
-      !streamAutoFollowEnabled.value
-    ) {
-      if (requestId === scheduledScrollRequestId) {
-        scrollQueued.value = false;
-      }
-      emitTimelineScrollDebug("queue-scroll-request:cancelled-before-raf", {
-        requestId,
-        behavior,
-        expectedOverrideVersion
-      });
-      return;
-    }
-    if (scrollAfterPaintFrameId.value != null) {
-      if (expectedOverrideVersion !== userScrollOverrideVersion) {
-        window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
-        scrollAfterPaintFrameId.value = null;
-      } else {
-        return;
-      }
-    }
-
-    if (isDestroyed) {
-      if (requestId === scheduledScrollRequestId) {
-        scrollQueued.value = false;
-      }
-      return;
-    }
-
-    scrollAfterPaintFrameId.value = window.requestAnimationFrame(() => {
-      if (
-        requestId !== scheduledScrollRequestId ||
-        expectedOverrideVersion !== userScrollOverrideVersion ||
-        !streamAutoFollowEnabled.value
-      ) {
-        if (requestId === scheduledScrollRequestId) {
-          scrollQueued.value = false;
-          scrollAfterPaintFrameId.value = null;
-        }
-        emitTimelineScrollDebug("queue-scroll-request:cancelled-in-raf", {
-          requestId,
-          behavior,
-          expectedOverrideVersion
-        });
-        return;
-      }
-      scrollAfterPaintFrameId.value = null;
-      scrollQueued.value = false;
-      programmaticScrollActive = false;
-      const scrollArea = timelineScrollAreaRef.value;
-      const viewport = scrollArea?.viewportEl ?? null;
-      if (viewport) {
-        programmaticScrollActive = true;
-        programmaticScrollTargetTop = viewport.scrollHeight;
-        programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_MAX_MS;
-        emitTimelineScrollDebug("scroll-to-latest-turn", {
-          requestId,
-          behavior,
-          targetTop: viewport.scrollHeight,
-          expiresAt: programmaticScrollUntilMs
-        });
-        if (behavior === "auto") {
-          viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" });
-          programmaticScrollActive = false;
-          programmaticScrollTargetTop = 0;
-          programmaticScrollUntilMs = 0;
-        } else {
-          cancelScrollLerp();
-          const startTop = viewport.scrollTop;
-          const targetTop = viewport.scrollHeight;
-          const distance = targetTop - startTop;
-          if (distance <= 0) {
-            programmaticScrollActive = false;
-            programmaticScrollTargetTop = 0;
-            programmaticScrollUntilMs = 0;
-          } else {
-            const lerpStartMs = performance.now();
-            const lerpStartTop = startTop;
-            scrollLerpRafId = window.requestAnimationFrame(function lerp(now: number) {
-              if (!streamAutoFollowEnabled.value || expectedOverrideVersion !== userScrollOverrideVersion) {
-                scrollLerpRafId = null;
-                programmaticScrollActive = false;
-                programmaticScrollTargetTop = 0;
-                programmaticScrollUntilMs = 0;
-                return;
-              }
-              const elapsed = now - lerpStartMs;
-              const t = Math.min(elapsed / SCROLL_LERP_DURATION_MS, 1);
-              const eased = 1 - Math.pow(1 - t, 3);
-              viewport!.scrollTop = lerpStartTop + distance * eased;
-              if (t < 1) {
-                scrollLerpRafId = window.requestAnimationFrame(lerp);
-              } else {
-                scrollLerpRafId = null;
-                programmaticScrollActive = false;
-                programmaticScrollTargetTop = 0;
-                programmaticScrollUntilMs = 0;
-                streamAutoFollowEnabled.value = true;
-                autoFollowIdleEligible = false;
-                lastUserPausedSignature = "";
-                clearAutoFollowIdleTimer();
-              }
-            });
-          }
-        }
-      } else if (scrollArea && typeof scrollArea.scrollToBottom === "function") {
-        emitTimelineScrollDebug("scroll-to-latest-turn:fallback", {
-          requestId,
-          behavior
-        });
-        scrollArea.scrollToBottom(behavior);
-      }
-
-      updateStreamDebugReveal({
-        scrolledToComposerEdge: true,
-        scrollBehavior: behavior,
-        nearBottom: isTimelineNearBottom()
-      });
-    });
-  });
-}
-
-function handleTimelineViewportScroll() {
-  updateFloatingUiPositions();
-  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-  if (programmaticScrollActive && viewport) {
-    const nearBottom = isTimelineNearBottom();
-    const reachedProgrammaticTarget =
-      nearBottom ||
-      viewport.scrollTop >= Math.max(programmaticScrollTargetTop - viewport.clientHeight - AUTO_SCROLL_THRESHOLD_PX, 0);
-    const programmaticScrollExpired = Date.now() >= programmaticScrollUntilMs;
-    if (!reachedProgrammaticTarget && !programmaticScrollExpired) {
-      emitTimelineScrollDebug("viewport-scroll:programmatic-progress", {
-        reachedProgrammaticTarget,
-        programmaticScrollExpired
-      });
-      return;
-    }
-
-    programmaticScrollActive = false;
-    programmaticScrollTargetTop = 0;
-    programmaticScrollUntilMs = 0;
-    if (reachedProgrammaticTarget) {
-      streamAutoFollowEnabled.value = true;
-      autoFollowIdleEligible = false;
-      lastUserPausedSignature = "";
-      clearAutoFollowIdleTimer();
-      emitTimelineScrollDebug("viewport-scroll:programmatic-complete");
-      return;
-    }
-
-    emitTimelineScrollDebug("viewport-scroll:programmatic-expired");
-  }
-
-  const nearBottom = isTimelineNearBottom();
-  if (nearBottom) {
-    streamAutoFollowEnabled.value = true;
-    autoFollowIdleEligible = false;
-    lastUserPausedSignature = "";
-    lastUserScrollAtMs = 0;
-    clearAutoFollowIdleTimer();
-    emitTimelineScrollDebug("viewport-scroll:near-bottom");
-    return;
-  }
-
-  lastUserScrollAtMs = Date.now();
-  emitTimelineScrollDebug("viewport-scroll:user-away-from-bottom");
-  pauseTimelineAutoFollow();
-}
-
-function handleTimelineUserScrollIntent() {
-  emitTimelineScrollDebug("user-scroll-intent:wheel-or-touchstart");
-  cancelPendingTimelineScroll("user-scroll-intent");
-  lastUserScrollAtMs = Date.now();
-  updateFloatingUiPositions();
-  if (!isTimelineNearBottom()) {
-    pauseTimelineAutoFollow();
-  }
-}
-
-function handleTimelinePointerIntent() {
-  emitTimelineScrollDebug("user-scroll-intent:pointerdown");
-  cancelPendingTimelineScroll("pointer-intent");
-}
-
-function handleTimelineKeyboardIntent(event: KeyboardEvent) {
-  const target = event.target as HTMLElement | null;
-  const isEditableTarget =
-    target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLInputElement ||
-    target?.isContentEditable === true;
-  if (isEditableTarget) {
-    return;
-  }
-
-  if (!["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
-    return;
-  }
-
-  emitTimelineScrollDebug("user-scroll-intent:keyboard", {
-    key: event.key
-  });
-  cancelPendingTimelineScroll("keyboard-intent");
-}
-
-function scheduleAutoFollowIdleResume() {
-  clearAutoFollowIdleTimer();
-  emitTimelineScrollDebug("idle-resume:scheduled", {
-    delayMs: USER_SCROLL_IDLE_MS
-  });
-  autoFollowIdleTimer = setTimeout(() => {
-    autoFollowIdleTimer = null;
-    const idleMs = Date.now() - (lastUserScrollAtMs || Date.now());
-    if (idleMs >= USER_SCROLL_IDLE_MS) {
-      if (
-        isSubmitting.value &&
-        !streamAutoFollowEnabled.value &&
-        latestTurnSignature.value &&
-        latestTurnSignature.value !== lastUserPausedSignature
-      ) {
-        emitTimelineScrollDebug("idle-resume:resuming-after-idle");
-        resumeTimelineAutoFollow("auto");
-      }
-    }
-  }, USER_SCROLL_IDLE_MS);
-}
-
-function clearAutoFollowIdleTimer() {
-  cancelScrollLerp();
-  if (autoFollowIdleTimer != null) {
-    clearTimeout(autoFollowIdleTimer);
-    autoFollowIdleTimer = null;
-    emitTimelineScrollDebug("idle-resume:cleared");
-  }
-}
+const {
+  showScrollToBottom,
+  unreadCount,
+  scrollQueued,
+  streamAutoFollowEnabled,
+  handleScrollToBottom,
+  handleMarkdownRenderComplete,
+  handleLatestTurnSignatureChange,
+  handleSubmittingChange,
+  handleMessageCountChange
+} = timelineAutoScroll;
 
 onMounted(() => {
   if (typeof window !== "undefined") {
@@ -1606,54 +1121,14 @@ onMounted(() => {
   syncStreamingPresentationState("mounted");
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("keydown", handleWindowKeydown);
-  window.addEventListener("keydown", handleTimelineKeyboardIntent, true);
   window.addEventListener("resize", updateFloatingUiPositions);
-  handleTimelineViewportScroll();
-  setupContentResizeObserver();
-  queueScrollToLatestTurn("auto");
 });
 
 onBeforeUnmount(() => {
-  isDestroyed = true;
   window.removeEventListener("click", handleClickOutside);
   window.removeEventListener("keydown", handleWindowKeydown);
-  window.removeEventListener("keydown", handleTimelineKeyboardIntent, true);
   window.removeEventListener("resize", updateFloatingUiPositions);
-  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-  if (viewport && "removeEventListener" in viewport) {
-    viewport.removeEventListener("scroll", handleTimelineViewportScroll);
-    viewport.removeEventListener("wheel", handleTimelineUserScrollIntent);
-    viewport.removeEventListener("touchstart", handleTimelineUserScrollIntent);
-    viewport.removeEventListener("pointerdown", handleTimelinePointerIntent);
-  }
-  if (scrollAfterPaintFrameId.value != null) {
-    window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
-  }
-  cancelScrollLerp();
-
-  clearAutoFollowIdleTimer();
-  teardownContentResizeObserver();
 });
-
-watch(
-  () => timelineScrollAreaRef.value?.viewportEl ?? null,
-  (viewport, previousViewport) => {
-    if (previousViewport && "removeEventListener" in previousViewport) {
-      previousViewport.removeEventListener("scroll", handleTimelineViewportScroll);
-      previousViewport.removeEventListener("wheel", handleTimelineUserScrollIntent);
-      previousViewport.removeEventListener("touchstart", handleTimelineUserScrollIntent);
-      previousViewport.removeEventListener("pointerdown", handleTimelinePointerIntent);
-    }
-    if (viewport && "addEventListener" in viewport) {
-      viewport.addEventListener("scroll", handleTimelineViewportScroll, { passive: true });
-      viewport.addEventListener("wheel", handleTimelineUserScrollIntent, { passive: true });
-      viewport.addEventListener("touchstart", handleTimelineUserScrollIntent, { passive: true });
-      viewport.addEventListener("pointerdown", handleTimelinePointerIntent, { passive: true });
-    }
-    handleTimelineViewportScroll();
-  },
-  { flush: "post" }
-);
 
 watch(rollbackInFlight, () => {
   void nextTick().then(() => updateRollbackProgressPosition());
@@ -1663,38 +1138,8 @@ watch(latestTurnSignature, (signature, previousSignature) => {
   if (signature === previousSignature) {
     return;
   }
-
-  emitTimelineScrollDebug("latest-turn-signature:changed", {
-    signature,
-    previousSignature
-  });
-  void nextTick().then(() => {
-    syncStreamingPresentationState("latest-turn-signature:post");
-    if (!streamAutoFollowEnabled.value) {
-      if (
-        lastUserScrollAtMs > 0 &&
-        isSubmitting.value &&
-        autoFollowIdleTimer == null &&
-        signature !== lastUserPausedSignature &&
-        Date.now() - lastUserScrollAtMs >= USER_SCROLL_IDLE_MS
-      ) {
-        emitTimelineScrollDebug("latest-turn-signature:resume-after-idle-content");
-        resumeTimelineAutoFollow("auto");
-        return;
-      }
-      emitTimelineScrollDebug("latest-turn-signature:follow-disabled", {
-        signature,
-        previousSignature
-      });
-      return;
-    }
-
-    emitTimelineScrollDebug("latest-turn-signature:queue-follow-scroll", {
-      signature,
-      previousSignature
-    });
-    queueScrollToLatestTurn("smooth", userScrollOverrideVersion);
-  });
+  syncStreamingPresentationState("latest-turn-signature:post");
+  handleLatestTurnSignatureChange(signature, previousSignature);
 }, { flush: "pre" });
 
 watch(showReasoningContent, (value) => {
@@ -1711,7 +1156,6 @@ function collectStreamMetrics() {
   return {
     flushedAt: Date.now(),
     streamAutoFollowEnabled: streamAutoFollowEnabled.value,
-    autoFollowIdleEligible,
     viewportScrollTop: viewport?.scrollTop ?? null,
     viewportScrollHeight: viewport?.scrollHeight ?? null,
     viewportClientHeight: viewport?.clientHeight ?? null
@@ -1736,35 +1180,26 @@ function flushStreamMetricsToStorage() {
 watch(isSubmitting, (submitting, wasSubmitting) => {
   if (wasSubmitting && !submitting) {
     flushStreamMetricsToStorage();
-    void nextTick().then(() => {
-      syncStreamingPresentationState("is-submitting:post");
-      if (streamAutoFollowEnabled.value && latestTurnSignature.value) {
-        queueScrollToLatestTurn("smooth", userScrollOverrideVersion);
-      }
-    });
-  }
-  if (!submitting) {
-    clearAutoFollowIdleTimer();
-    cancelScrollLerp();
   }
   syncStreamingPresentationState("is-submitting");
-  emitTimelineScrollDebug("is-submitting:changed", {
-    submitting
-  });
   if (!submitting) {
     stopRequested.value = false;
-    clearAutoFollowIdleTimer();
-    autoFollowIdleEligible = false;
   }
+  handleSubmittingChange(submitting, wasSubmitting);
 });
+
+watch(
+  () => messages.value.length,
+  handleMessageCountChange
+);
 </script>
 
 <template>
-  <section class="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-t-[0.6rem]">
+  <section class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-[0.6rem]">
     <ScrollArea
       ref="timelineScrollAreaRef"
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
-      viewport-class="px-4 py-4 sm:px-5"
+      viewport-class="px-4 sm:px-5"
     >
       <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[58rem]" data-testid="workspace-content-column">
         <div
@@ -1932,11 +1367,12 @@ watch(isSubmitting, (submitting, wasSubmitting) => {
               </summary>
               <div class="mt-2">
                 <template v-if="assistantReasoning(turn.assistant)">
-                  <MarkdownRenderer
-                    :content="isAssistantReasoningStreaming(turn.assistant) ? assistantDisplayedReasoningStable(turn.assistant) : assistantReasoning(turn.assistant)"
-                    wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
-                    :streaming="isAssistantReasoningStreaming(turn.assistant)"
-                  />
+              <MarkdownRenderer
+                :content="isAssistantReasoningStreaming(turn.assistant) ? assistantDisplayedReasoningStable(turn.assistant) : assistantReasoning(turn.assistant)"
+                wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
+                :streaming="isAssistantReasoningStreaming(turn.assistant)"
+                @render-complete="handleMarkdownRenderComplete"
+              />
                   <span
                     v-if="isAssistantReasoningStreaming(turn.assistant) && assistantDisplayedReasoningFade(turn.assistant)"
                     :key="`rfade-${turn.assistant.id}-${streamReasoningFadeKeyByMessageId[turn.assistant.id] ?? 0}`"
@@ -1967,6 +1403,7 @@ watch(isSubmitting, (submitting, wasSubmitting) => {
                 wrapper-class="assistant-markdown text-sm"
                 :tone-class="assistantTone(turn.assistant)"
                 :streaming="isAssistantStreaming(turn.assistant)"
+                @render-complete="handleMarkdownRenderComplete"
               />
               <span
                 v-if="isAssistantStreaming(turn.assistant) && assistantDisplayFadeContent(turn.assistant)"
@@ -2090,8 +1527,23 @@ watch(isSubmitting, (submitting, wasSubmitting) => {
         </section>
       </TransitionGroup>
       <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
+      <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
       </div>
     </ScrollArea>
+
+    <button
+      v-show="showScrollToBottom"
+      class="absolute right-6 top-1/2 z-20 -translate-y-1/2 flex items-center gap-1.5 rounded-full border border-stone-200 bg-white/90 px-3 py-2 text-[12px] font-medium text-stone-600 shadow-[0_2px_8px_rgba(0,0,0,0.08)] backdrop-blur-sm transition-all duration-200 hover:bg-white hover:text-stone-900 hover:shadow-[0_4px_12px_rgba(0,0,0,0.12)]"
+      data-testid="workspace-scroll-to-bottom"
+      @click="handleScrollToBottom"
+    >
+      <ArrowDown class="h-3.5 w-3.5" />
+      <span>滚动到最新</span>
+      <span
+        v-if="unreadCount > 0"
+        class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white"
+      >{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+    </button>
 
     <div class="absolute bottom-0 left-0 right-0 z-10 px-4 py-3 sm:px-5 pointer-events-none">
       <div

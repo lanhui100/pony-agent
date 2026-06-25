@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { defineComponent, h, nextTick } from "vue";
+import { defineComponent, h, nextTick, watch } from "vue";
 import { mount } from "@vue/test-utils";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import {
@@ -167,6 +167,23 @@ const MarkdownRendererStub = defineComponent({
       type: String,
       default: ""
     }
+  },
+  emits: ["render-complete"],
+  setup(props, { emit }) {
+    watch(
+      () => [props.content, props.streaming] as const,
+      ([content, streaming]) => {
+        window.setTimeout(() => {
+          emit("render-complete", {
+            contentLength: content.length,
+            streaming
+          });
+        }, 0);
+      },
+      { immediate: true }
+    );
+
+    return {};
   },
   template:
     '<div class="markdown-stub" :class="[wrapperClass, toneClass]" :streaming="streaming ? \'true\' : undefined">{{ content }}</div>'
@@ -1408,6 +1425,84 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
   });
 
+  it("re-arms auto-follow when submitting a new turn after user scrolls away", async () => {
+    const runtimeStore = useRuntimeStore();
+
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: false,
+      error: null,
+      draftMessage: "继续",
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "上一轮"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "old reply",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const submitSpy = vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    triggerViewportWheel();
+    triggerViewportScroll(120);
+    await nextTick();
+    viewportScrollToSpy.mockClear();
+
+    await wrapper.get('[data-testid="workspace-submit-action"]').trigger("click");
+
+    expect(submitSpy).toHaveBeenCalledTimes(1);
+
+    runtimeStore.$patch({
+      isSubmitting: true,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "上一轮"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "old reply",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "user-2",
+          turnId: "turn-2",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-2",
+          turnId: "turn-2",
+          role: "assistant",
+          content: "hello world",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    await advanceAnimationFrames(13);
+    expect(viewportMetrics.scrollTop).toBeGreaterThan(700);
+  });
+
   it("keeps auto-follow armed across small streaming content updates", async () => {
     const runtimeStore = useRuntimeStore();
 
@@ -1633,7 +1728,8 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
 
     mountWorkspace();
     await nextTick();
-    await advanceAnimationFrames(3);
+    await flushAsyncUiWork();
+    triggerViewportScroll(1000);
     viewportScrollToSpy.mockClear();
 
     viewportMetrics.scrollHeight = 1320;
@@ -1641,6 +1737,63 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
 
     await advanceAnimationFrames(5);
     expect(viewportMetrics.scrollTop).toBeGreaterThan(1200);
+  });
+
+  it("replays deferred resize follow-up after a queued auto-follow completes", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    await flushAsyncUiWork();
+    await vi.waitFor(() => expect(viewportMetrics.scrollTop).toBeGreaterThan(700));
+    viewportScrollToSpy.mockClear();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello there",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    viewportMetrics.scrollHeight = 1440;
+    triggerContentResize();
+
+    await advanceAnimationFrames(8);
+    expect(viewportMetrics.scrollTop).toBeGreaterThan(1300);
   });
 
   it("uses smooth follow for stream deltas and auto for resize compensation", async () => {

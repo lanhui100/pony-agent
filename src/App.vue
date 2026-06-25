@@ -158,7 +158,7 @@ watch(rightSidebarOpen, (value) => {
       >
         <HomeSessionSidebar :current-page="currentPage" @navigate="currentPage = $event" />
 
-        <section class="min-h-0 min-w-0 flex-1">
+        <section class="flex flex-col min-h-0 min-w-0 flex-1">
           <Transition
             mode="out-in"
             enter-active-class="transition-all duration-300 ease-out"
@@ -172,11 +172,11 @@ watch(rightSidebarOpen, (value) => {
               v-if="currentPage === 'home'"
               key="page-home"
               :class="rightSidebarOpen ? 'gap-4' : 'gap-0'"
-              class="relative flex h-full min-h-0 min-w-0 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
+              class="relative flex min-h-0 min-w-0 flex-1 flex-col transition-[gap] duration-300 ease-out lg:flex-row"
               data-testid="home-layout-shell"
             >
-              <div class="min-h-0 min-w-0 flex-1">
-                <HomeWorkspace />
+              <div class="flex flex-col min-h-0 min-w-0 flex-1">
+                <HomeWorkspace class="min-h-0 flex-1" />
               </div>
               <div
                 :class="

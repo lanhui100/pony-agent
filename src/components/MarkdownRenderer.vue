@@ -9,6 +9,10 @@ const props = defineProps<{
   streaming?: boolean;
 }>();
 
+const emit = defineEmits<{
+  (event: "render-complete", payload: { contentLength: number; streaming: boolean }): void;
+}>();
+
 const renderedHtml = ref("");
 const unrenderedSuffix = ref("");
 const renderPending = ref(false);
@@ -72,6 +76,10 @@ async function executeRender(version: number) {
   lastRenderTime = Date.now();
   lastRenderedContentLength = props.content.length;
   unrenderedSuffix.value = "";
+  emit("render-complete", {
+    contentLength: props.content.length,
+    streaming: Boolean(props.streaming)
+  });
 }
 
 function scheduleStreamingRender() {
