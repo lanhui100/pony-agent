@@ -1,5 +1,7 @@
 pub use pony_agent_core::agent;
+mod blocking_helper;
 mod tauri_adapter;
+mod turn_task_registry;
 
 use agent::app_settings::{AppSettings, AppSettingsStore};
 use agent::capability_bridge::{CapabilitySourceView, CapabilityView, SkillDescriptor};
@@ -33,6 +35,8 @@ use agent::session::TurnTraceRecord;
 use agent::tools::{builtin_tool_contract_views, ToolDefinitionContractView};
 use serde_json::{json, Value};
 use std::sync::Mutex;
+use crate::blocking_helper::BlockingHelper;
+use crate::turn_task_registry::TurnTaskRegistry;
 use tauri::{AppHandle, Manager, State};
 
 #[derive(Default)]
@@ -80,7 +84,7 @@ fn start_graph_run_stream(
             goal,
             input,
         })?;
-    tauri_adapter::spawn_graph_run_stream(app, prepared);
+    tauri_adapter::spawn_graph_run_stream(&app, prepared);
     Ok(response)
 }
 
@@ -107,7 +111,7 @@ fn continue_graph_run_stream(
             run_id,
             input,
         })?;
-    tauri_adapter::spawn_graph_run_stream(app, prepared);
+    tauri_adapter::spawn_graph_run_stream(&app, prepared);
     Ok(response)
 }
 
@@ -134,13 +138,13 @@ fn resume_graph_run_stream(
             run_id,
             input,
         })?;
-    tauri_adapter::spawn_graph_run_stream(app, prepared);
+    tauri_adapter::spawn_graph_run_stream(&app, prepared);
     Ok(response)
 }
 
 #[tauri::command]
 fn start_turn_stream(app: AppHandle, turn_id: String, input: TurnInput) -> Result<(), String> {
-    tauri_adapter::spawn_turn_stream(app, StartTurnStreamCommand { turn_id, input });
+    tauri_adapter::spawn_turn_stream(&app, StartTurnStreamCommand { turn_id, input });
     Ok(())
 }
 
@@ -618,15 +622,14 @@ async fn append_frontend_trace_events(
     events: Vec<FrontendTraceEvent>,
     stall_snapshots: Vec<FrontendStallSnapshot>,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    BlockingHelper::spawn(move || {
         let control_plane = app.state::<HostControlPlane>();
         control_plane.append_frontend_trace_events(FrontendTraceAppendCommand {
             events,
             stall_snapshots,
         })
     })
-    .await
-    .map_err(|e| format!("spawn_blocking error: {e}"))?
+    .await?
 }
 
 #[tauri::command]
@@ -639,7 +642,7 @@ async fn query_frontend_trace_window(
     limit: Option<u32>,
     cursor: Option<String>,
 ) -> Result<FrontendTraceQueryResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    BlockingHelper::spawn(move || {
         let control_plane = app.state::<HostControlPlane>();
         control_plane.query_frontend_trace_window(FrontendTraceQuery {
             session_id,
@@ -650,8 +653,7 @@ async fn query_frontend_trace_window(
             cursor,
         })
     })
-    .await
-    .map_err(|e| format!("spawn_blocking error: {e}"))?
+    .await?
 }
 
 #[tauri::command]
@@ -663,7 +665,7 @@ async fn query_frontend_stall_snapshots(
     to_wall_ms: Option<i64>,
     limit: Option<u32>,
 ) -> Result<Vec<FrontendStallSnapshot>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    BlockingHelper::spawn(move || {
         let control_plane = app.state::<HostControlPlane>();
         control_plane.query_frontend_stall_snapshots(FrontendTraceQuery {
             session_id,
@@ -674,8 +676,7 @@ async fn query_frontend_stall_snapshots(
             cursor: None,
         })
     })
-    .await
-    .map_err(|e| format!("spawn_blocking error: {e}"))?
+    .await?
 }
 
 #[tauri::command]
@@ -683,12 +684,11 @@ async fn clear_frontend_trace_before(
     app: AppHandle,
     ts_wall_ms: i64,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    BlockingHelper::spawn(move || {
         let control_plane = app.state::<HostControlPlane>();
         control_plane.clear_frontend_trace_before(ts_wall_ms)
     })
-    .await
-    .map_err(|e| format!("spawn_blocking error: {e}"))?
+    .await?
 }
 
 #[tauri::command]
@@ -700,7 +700,7 @@ async fn export_frontend_trace_json(
     to_wall_ms: Option<i64>,
     limit: Option<u32>,
 ) -> Result<FrontendTraceExportPayload, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    BlockingHelper::spawn(move || {
         let control_plane = app.state::<HostControlPlane>();
         control_plane.export_frontend_trace_json(FrontendTraceQuery {
             session_id,
@@ -711,8 +711,7 @@ async fn export_frontend_trace_json(
             cursor: None,
         })
     })
-    .await
-    .map_err(|e| format!("spawn_blocking error: {e}"))?
+    .await?
 }
 
 #[tauri::command]
@@ -724,7 +723,7 @@ async fn export_frontend_trace_chrome_trace(
     to_wall_ms: Option<i64>,
     limit: Option<u32>,
 ) -> Result<FrontendTraceExportPayload, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    BlockingHelper::spawn(move || {
         let control_plane = app.state::<HostControlPlane>();
         control_plane.export_frontend_trace_chrome_trace(FrontendTraceQuery {
             session_id,
@@ -735,8 +734,7 @@ async fn export_frontend_trace_chrome_trace(
             cursor: None,
         })
     })
-    .await
-    .map_err(|e| format!("spawn_blocking error: {e}"))?
+    .await?
 }
 
 pub fn run() {
@@ -745,6 +743,7 @@ pub fn run() {
         .manage(StreamDebugMetricsState {
             latest: Mutex::new(json!({})),
         })
+        .manage(TurnTaskRegistry::new())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 // === Load icon from compile-time embedded ICON_PNG ===
@@ -838,6 +837,11 @@ pub fn run() {
             set_service_api_key,
             open_url
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                window.state::<TurnTaskRegistry>().abort_all();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("failed to run Pony Agent");
 }

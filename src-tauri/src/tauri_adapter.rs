@@ -3,6 +3,7 @@ use crate::agent::control_plane::{
 };
 use crate::agent::runtime::TurnStreamEvent;
 use crate::agent::turn_flow::TurnEventSink;
+use crate::turn_task_registry::TurnTaskRegistry;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub struct TauriTurnEventSink {
@@ -21,20 +22,59 @@ impl TurnEventSink for TauriTurnEventSink {
     }
 }
 
-pub fn spawn_turn_stream(app: AppHandle, command: StartTurnStreamCommand) {
-    let app_handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let control_plane = app_handle.state::<HostControlPlane>();
-        let sink = TauriTurnEventSink::new(app_handle.clone());
-        control_plane.start_turn_stream(&sink, command);
-    });
+struct TaskCleanupGuard {
+    app: AppHandle,
+    session_id: String,
 }
 
-pub fn spawn_graph_run_stream(app: AppHandle, prepared: PreparedGraphRunStream) {
+impl TaskCleanupGuard {
+    fn new(app: AppHandle, session_id: String) -> Self {
+        Self { app, session_id }
+    }
+}
+
+impl Drop for TaskCleanupGuard {
+    fn drop(&mut self) {
+        self.app.state::<TurnTaskRegistry>().unregister(&self.session_id);
+    }
+}
+
+pub fn spawn_turn_stream(app: &AppHandle, command: StartTurnStreamCommand) {
+    let session_id = command.input.session_id.clone().unwrap_or_default();
     let app_handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let control_plane = app_handle.state::<HostControlPlane>();
+    let session_id_for_register = session_id.clone();
+
+    let handle = tauri::async_runtime::spawn(async move {
+        let _cleanup = TaskCleanupGuard::new(app_handle.clone(), session_id.clone());
         let sink = TauriTurnEventSink::new(app_handle.clone());
-        let _ = control_plane.execute_graph_run_stream(&sink, prepared);
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let control_plane = app_handle.state::<HostControlPlane>();
+            control_plane.start_turn_stream(&sink, command);
+        })
+        .await;
+        if let Err(e) = result {
+            eprintln!("turn task {session_id} failed: {e}");
+        }
     });
+    app.state::<TurnTaskRegistry>().register(session_id_for_register, handle);
+}
+
+pub fn spawn_graph_run_stream(app: &AppHandle, prepared: PreparedGraphRunStream) {
+    let session_id = prepared.input.session_id.clone().unwrap_or_default();
+    let app_handle = app.clone();
+    let session_id_for_register = session_id.clone();
+
+    let handle = tauri::async_runtime::spawn(async move {
+        let _cleanup = TaskCleanupGuard::new(app_handle.clone(), session_id.clone());
+        let sink = TauriTurnEventSink::new(app_handle.clone());
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let control_plane = app_handle.state::<HostControlPlane>();
+            let _ = control_plane.execute_graph_run_stream(&sink, prepared);
+        })
+        .await;
+        if let Err(e) = result {
+            eprintln!("graph run task {session_id} failed: {e}");
+        }
+    });
+    app.state::<TurnTaskRegistry>().register(session_id_for_register, handle);
 }
