@@ -117,7 +117,8 @@ const streamFadeTextByMessageId = shallowReactive<Record<string, string>>({});
 const streamFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
 const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string>>({});
 const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
-const AUTO_SCROLL_THRESHOLD_PX = 160;
+const AUTO_SCROLL_THRESHOLD_PX = 260;
+const COMPOSER_BUFFER_PX = 220;
 const STREAM_FADE_MIN_CHARS = 24;
 const AUTO_SCROLL_IDLE_MS = 4000;
 const PROGRAMMATIC_SCROLL_MAX_MS = 1600;
@@ -1736,7 +1737,7 @@ watch(isSubmitting, (submitting) => {
 </script>
 
 <template>
-  <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-t-[0.6rem]">
+  <section class="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-t-[0.6rem]">
     <ScrollArea
       ref="timelineScrollAreaRef"
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
@@ -2063,13 +2064,15 @@ watch(isSubmitting, (submitting) => {
           </article>
         </section>
       </TransitionGroup>
+      <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
       </div>
     </ScrollArea>
 
-    <div class="px-4 py-3 sm:px-5">
+    <div class="absolute bottom-0 left-0 right-0 z-10 px-4 py-3 sm:px-5 pointer-events-none">
       <div
-        class="mx-auto w-full max-w-[58rem] rounded-[0.6rem] bg-white/76 px-4 py-3"
+        class="relative mx-auto w-full max-w-[48rem] rounded-[0.6rem] bg-white/76 px-4 py-3 shadow-[0_-4px_20px_-2px_rgba(60,40,20,0.06)] backdrop-blur-[8px]"
         data-testid="workspace-composer-shell"
+        style="pointer-events: auto;"
       >
       <textarea
         :value="draftMessage"

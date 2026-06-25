@@ -64,7 +64,8 @@ main.resizing [data-testid="home-layout-shell"] {
   transition: gap 0.15s ease-out;
 }
 
-main.resizing [data-testid="workspace-content-column"] {
+main.resizing [data-testid="workspace-content-column"],
+main.resizing [data-testid="workspace-composer-shell"] {
   transition: max-width 0.15s ease-out;
 }
 
