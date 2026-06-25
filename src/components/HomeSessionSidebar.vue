@@ -461,7 +461,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                           ? 'h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100'
                           : pendingDeleteSessionId === session.conversationId
                           ? 'h-5 rounded-full bg-rose-200 px-1.5 text-rose-800 hover:bg-rose-300 hover:text-rose-900'
-                          : runtimeStore.isSessionRunning(session.conversationId)
+                          : runtimeStore.isSessionRunning(session.conversationId) || (isSubmitting && session.conversationId === sessionId)
                           ? 'pointer-events-auto h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100 hover:text-amber-600'
                           : 'h-5 rounded-[0.35rem] px-1.5 py-1'
                       "
@@ -485,7 +485,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
                         :data-testid="`session-delete-loading-${session.conversationId}`"
                       />
                       <LoaderCircle
-                        v-else-if="runtimeStore.isSessionRunning(session.conversationId)"
+                        v-else-if="runtimeStore.isSessionRunning(session.conversationId) || (isSubmitting && session.conversationId === sessionId)"
                         class="h-3.5 w-3.5 animate-spin text-amber-600"
                         :data-testid="`session-running-${session.conversationId}`"
                       />
