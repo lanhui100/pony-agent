@@ -1,9 +1,13 @@
-import { shallowReactive, type ComputedRef } from "vue";
+import { shallowReactive, type ComputedRef, type Ref } from "vue";
 import type { ChatMessage } from "@/types/runtime";
 
 const STREAM_FADE_MIN_CHARS = 3;
 
-export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[]>) {
+function shouldKeepInitialStreamingContentStable(content: string) {
+  return /[*_`#[\]()]/.test(content);
+}
+
+export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[]> | Ref<ChatMessage[]>) {
   const streamSnapshotTextByMessageId = shallowReactive<Record<string, string>>({});
   const streamSnapshotReasoningByMessageId = shallowReactive<Record<string, string>>({});
   const streamFadeTextByMessageId = shallowReactive<Record<string, string>>({});
@@ -61,7 +65,7 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
 
       const appendedText = previousText.length > 0
         ? (nextText.length > previousText.length ? nextText.slice(previousText.length) : "")
-        : (hasOtherStreamingTextSnapshot ? nextText : "");
+        : (hasOtherStreamingTextSnapshot || !shouldKeepInitialStreamingContentStable(nextText) ? nextText : "");
       syncPresentationMapValue(streamFadeTextByMessageId, message.id, appendedText.length >= STREAM_FADE_MIN_CHARS ? appendedText : "");
       if (streamFadeTextByMessageId[message.id]) {
         streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
@@ -113,6 +117,11 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
     };
   }
 
+  function assistantDisplayFadeKey(message: ChatMessage | null) {
+    if (!message) return 0;
+    return streamFadeKeyByMessageId[message.id] ?? 0;
+  }
+
   function assistantDisplayedReasoning(message: ChatMessage | null) {
     return message?.reasoningContent ?? "";
   }
@@ -136,15 +145,22 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
     };
   }
 
+  function assistantDisplayedReasoningFadeKey(message: ChatMessage | null) {
+    if (!message) return 0;
+    return streamReasoningFadeKeyByMessageId[message.id] ?? 0;
+  }
+
   return {
     syncStreamingPresentationState,
     assistantDisplayContent,
     assistantDisplayStableContent,
     assistantDisplayFadeContent,
     assistantDisplayFadeStyle,
+    assistantDisplayFadeKey,
     assistantDisplayedReasoning,
     assistantDisplayedReasoningStable,
     assistantDisplayedReasoningFade,
-    assistantDisplayedReasoningFadeStyle
+    assistantDisplayedReasoningFadeStyle,
+    assistantDisplayedReasoningFadeKey
   };
 }

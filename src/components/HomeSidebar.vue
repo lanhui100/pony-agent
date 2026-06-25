@@ -36,6 +36,7 @@ import type {
 } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useProviderStore } from "@/stores/providers";
+import DebugPanel from "@/components/DebugPanel.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
 
@@ -102,7 +103,7 @@ const {
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"trace" | "tools" | "">("trace");
+const activePanel = ref<"trace" | "tools" | "debug" | "">("trace");
 const activeTurnId = ref("");
 const activeTraceStepKey = ref("");
 const activeTraceDetailKey = ref("");
@@ -1939,6 +1940,11 @@ watch(orderedTurnTraceSignature, () => {
             </section>
           </div>
         </section>
+
+        <DebugPanel
+          :active="activePanel === 'debug'"
+          @toggle="activePanel = activePanel === 'debug' ? '' : 'debug'"
+        />
       </div>
     </ScrollArea>
   </aside>

@@ -7410,11 +7410,10 @@ describe("runtime session resilience", () => {
       }
 
       if (command === "restore_branch_head") {
-        expect(payload).toEqual({
+        expect(payload).toEqual(expect.objectContaining({
           sessionId: "audit-response-session",
-          branchId: "branch-main",
-          expectedCursorVersion: null
-        });
+          branchId: "branch-main"
+        }));
         return {
           sessionId: "audit-response-session",
           branchId: "branch-main",

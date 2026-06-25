@@ -527,6 +527,16 @@ function mountWorkspace(options?: {
 
   return mount(HomeWorkspace, {
     global: {
+      directives: {
+        motion: {
+          mounted() {
+            // No-op in unit tests; only suppresses directive resolution noise.
+          },
+          updated() {
+            // No-op in unit tests; only suppresses directive resolution noise.
+          }
+        }
+      },
       stubs: {
         ScrollArea: ScrollAreaStub,
         MarkdownRenderer: MarkdownRendererStub,

@@ -15,10 +15,14 @@ type UseTimelineAutoScrollOptions = {
   scrollAnchorRef: Ref<HTMLElement | null>;
   workspaceContentColumnRef: Ref<HTMLElement | null>;
   isSubmitting: Ref<boolean>;
+  latestMessageRole: ComputedRef<"user" | "assistant" | "tool" | null>;
   latestTurnSignature: ComputedRef<string>;
+  getLatestAgentMessageElement: () => HTMLElement | null;
   showDebug: (event: string, patch?: Record<string, unknown>) => void;
   updateFloatingUiPositions: () => void;
 };
+
+type ScrollTargetMode = "anchor" | "latest-agent";
 
 const AUTO_SCROLL_THRESHOLD_PX = 260;
 const SHOW_SCROLL_BOTTOM_THRESHOLD_PX = 400;
@@ -26,6 +30,7 @@ const USER_RESUME_THRESHOLD_PX = 50;
 const PROGRAMMATIC_SCROLL_MAX_MS = 1600;
 const USER_SCROLL_IDLE_MS = 3000;
 const SCROLL_LERP_DURATION_MS = 200;
+const SCROLL_RAF_STUCK_TIMEOUT_MS = 500;
 
 export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   const {
@@ -33,7 +38,9 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     scrollAnchorRef,
     workspaceContentColumnRef,
     isSubmitting,
+    latestMessageRole,
     latestTurnSignature,
+    getLatestAgentMessageElement,
     showDebug,
     updateFloatingUiPositions
   } = options;
@@ -54,12 +61,69 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   let lastUserPausedSignature = "";
   let lastUserScrollAtMs = 0;
   let scrollLerpRafId: number | null = null;
+  let scrollQueueWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   let layoutDirtyWhileQueued = false;
   let contentDirtyWhileAnimating = false;
   let isDestroyed = false;
 
-  function collectMetrics() {
+  function getViewport() {
     const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+    return viewport instanceof HTMLElement ? viewport : null;
+  }
+
+  function readViewportMetrics(viewport: HTMLElement | null) {
+    if (!viewport) {
+      return null;
+    }
+
+    const scrollTop = viewport.scrollTop;
+    const scrollHeight = viewport.scrollHeight;
+    const clientHeight = viewport.clientHeight;
+    if (![scrollTop, scrollHeight, clientHeight].every((value) => Number.isFinite(value))) {
+      return null;
+    }
+
+    return {
+      scrollTop,
+      scrollHeight,
+      clientHeight,
+      distanceToBottom: scrollHeight - scrollTop - clientHeight
+    };
+  }
+
+  function clearScrollQueueWatchdog() {
+    if (scrollQueueWatchdogTimer != null) {
+      clearTimeout(scrollQueueWatchdogTimer);
+      scrollQueueWatchdogTimer = null;
+    }
+  }
+
+  function armScrollQueueWatchdog(requestId: number, behavior: ScrollBehavior, expectedOverrideVersion: number) {
+    clearScrollQueueWatchdog();
+    scrollQueueWatchdogTimer = setTimeout(() => {
+      if (scrollAfterPaintFrameId.value == null) {
+        return;
+      }
+
+      emit("queue-scroll-request:raf-stuck", {
+        requestId,
+        behavior,
+        expectedOverrideVersion,
+        rafId: scrollAfterPaintFrameId.value,
+        scheduledScrollRequestId
+      });
+      window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
+      scrollAfterPaintFrameId.value = null;
+      scrollQueued.value = false;
+      if (!isDestroyed && streamAutoFollowEnabled.value) {
+        queueScrollToLatestTurn(behavior, userScrollOverrideVersion);
+      }
+    }, SCROLL_RAF_STUCK_TIMEOUT_MS);
+  }
+
+  function collectMetrics() {
+    const viewport = getViewport();
+    const metrics = readViewportMetrics(viewport);
     return {
       streamAutoFollowEnabled: streamAutoFollowEnabled.value,
       scrollQueued: scrollQueued.value,
@@ -69,12 +133,12 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       programmaticScrollUntilMs,
       userScrollOverrideVersion,
       lastUserPausedSignature,
-      viewportScrollTop: viewport?.scrollTop ?? null,
-      viewportScrollHeight: viewport?.scrollHeight ?? null,
-      viewportClientHeight: viewport?.clientHeight ?? null,
-      distanceToBottom: viewport
-        ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-        : null
+      viewportScrollTop: metrics?.scrollTop ?? null,
+      viewportScrollHeight: metrics?.scrollHeight ?? null,
+      viewportClientHeight: metrics?.clientHeight ?? null,
+      distanceToBottom: metrics?.distanceToBottom ?? null,
+      viewportResolved: viewport instanceof HTMLElement,
+      viewportMetricsValid: metrics != null
     };
   }
 
@@ -86,26 +150,66 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   }
 
   function isTimelineNearBottom() {
-    const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-    if (!viewport) {
+    const metrics = readViewportMetrics(getViewport());
+    if (!metrics) {
       return true;
     }
 
-    const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-    return distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX;
+    return metrics.distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX;
   }
 
   function getAnchorTargetTop(): number {
-    const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+    const viewport = getViewport();
+    const metrics = readViewportMetrics(viewport);
     const anchor = scrollAnchorRef.value;
-    if (!viewport) return 0;
-    if (!anchor) return viewport.scrollHeight;
+    if (!viewport || !metrics) return 0;
+    if (!anchor) return metrics.scrollHeight;
     const anchorRect = anchor.getBoundingClientRect();
     const viewportRect = viewport.getBoundingClientRect();
     if (anchorRect.top === viewportRect.top && anchorRect.bottom === viewportRect.bottom) {
-      return viewport.scrollHeight;
+      return metrics.scrollHeight;
     }
-    return Math.max(0, viewport.scrollTop + (anchorRect.bottom - viewportRect.bottom));
+    const targetTop = metrics.scrollTop + (anchorRect.bottom - viewportRect.bottom);
+    if (!Number.isFinite(targetTop)) {
+      emit("anchor-target:invalid", {
+        anchorBottom: anchorRect.bottom,
+        viewportBottom: viewportRect.bottom,
+        fallbackTargetTop: metrics.scrollHeight
+      });
+      return metrics.scrollHeight;
+    }
+    return Math.max(0, targetTop);
+  }
+
+  function getLatestAgentTargetTop(): number {
+    const viewport = getViewport();
+    const metrics = readViewportMetrics(viewport);
+    const latestAgentMessage = getLatestAgentMessageElement();
+    if (!viewport || !metrics || !latestAgentMessage) {
+      return getAnchorTargetTop();
+    }
+
+    const agentRect = latestAgentMessage.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const goldenOffset = Math.min(Math.max(metrics.clientHeight * 0.18, 72), 160);
+    const targetTop = metrics.scrollTop + (agentRect.top - viewportRect.top) - goldenOffset;
+    if (!Number.isFinite(targetTop)) {
+      emit("latest-agent-target:invalid", {
+        agentTop: agentRect.top,
+        viewportTop: viewportRect.top,
+        fallbackTargetTop: getAnchorTargetTop()
+      });
+      return getAnchorTargetTop();
+    }
+
+    return Math.max(0, Math.min(targetTop, Math.max(metrics.scrollHeight - metrics.clientHeight, 0)));
+  }
+
+  function getTargetTop(mode: ScrollTargetMode) {
+    if (mode === "latest-agent") {
+      return getLatestAgentTargetTop();
+    }
+    return getAnchorTargetTop();
   }
 
   function cancelScrollLerp() {
@@ -113,6 +217,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       window.cancelAnimationFrame(scrollLerpRafId);
       scrollLerpRafId = null;
     }
+    clearScrollQueueWatchdog();
     scrollQueued.value = false;
   }
 
@@ -131,12 +236,17 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         return;
       }
 
-      const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+      const viewport = getViewport();
       if (!viewport) {
+        emit("anchor-compensation-scroll:missing-viewport");
         return;
       }
 
       const anchorTarget = getAnchorTargetTop();
+      if (!Number.isFinite(anchorTarget)) {
+        emit("anchor-compensation-scroll:invalid-target", { targetTop: anchorTarget });
+        return;
+      }
       emit("anchor-compensation-scroll", { targetTop: anchorTarget });
       programmaticScrollActive = true;
       programmaticScrollTargetTop = anchorTarget;
@@ -190,6 +300,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
       scrollAfterPaintFrameId.value = null;
     }
+    clearScrollQueueWatchdog();
     emit("cancel-pending-scroll", { reason });
   }
 
@@ -207,22 +318,23 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     }
   }
 
-  function resumeTimelineAutoFollow(behavior: ScrollBehavior = "auto") {
+  function resumeTimelineAutoFollow(behavior: ScrollBehavior = "auto", targetMode: ScrollTargetMode = "anchor") {
     streamAutoFollowEnabled.value = true;
     lastUserPausedSignature = "";
     clearAutoFollowIdleTimer();
-    emit("resume-auto-follow", { behavior });
-    queueScrollToLatestTurn(behavior, userScrollOverrideVersion);
+    emit("resume-auto-follow", { behavior, targetMode });
+    queueScrollToLatestTurn(behavior, userScrollOverrideVersion, targetMode);
   }
 
   function queueScrollToLatestTurn(
     behavior: ScrollBehavior = "smooth",
-    expectedOverrideVersion = userScrollOverrideVersion
+    expectedOverrideVersion = userScrollOverrideVersion,
+    targetMode: ScrollTargetMode = "anchor"
   ) {
     scheduledScrollRequestId += 1;
     const requestId = scheduledScrollRequestId;
     scrollQueued.value = true;
-    emit("queue-scroll-request", { requestId, behavior, expectedOverrideVersion });
+    emit("queue-scroll-request", { requestId, behavior, expectedOverrideVersion, targetMode });
     void nextTick().then(() => {
       if (
         requestId !== scheduledScrollRequestId ||
@@ -232,16 +344,20 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         if (requestId === scheduledScrollRequestId) {
           scrollQueued.value = false;
         }
-        emit("queue-scroll-request:cancelled-before-raf", { requestId, behavior, expectedOverrideVersion });
+        emit("queue-scroll-request:cancelled-before-raf", { requestId, behavior, expectedOverrideVersion, targetMode });
         return;
       }
       if (scrollAfterPaintFrameId.value != null) {
-        if (expectedOverrideVersion !== userScrollOverrideVersion) {
-          window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
-          scrollAfterPaintFrameId.value = null;
-        } else {
-          return;
-        }
+        emit("queue-scroll-request:replace-pending-raf", {
+          requestId,
+          behavior,
+          expectedOverrideVersion,
+          targetMode,
+          previousRafId: scrollAfterPaintFrameId.value
+        });
+        window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
+        scrollAfterPaintFrameId.value = null;
+        clearScrollQueueWatchdog();
       }
 
       if (isDestroyed) {
@@ -252,6 +368,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       }
 
       scrollAfterPaintFrameId.value = window.requestAnimationFrame(() => {
+        clearScrollQueueWatchdog();
         if (
           requestId !== scheduledScrollRequestId ||
           expectedOverrideVersion !== userScrollOverrideVersion ||
@@ -261,34 +378,45 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
             scrollQueued.value = false;
             scrollAfterPaintFrameId.value = null;
           }
-          emit("queue-scroll-request:cancelled-in-raf", { requestId, behavior, expectedOverrideVersion });
-          return;
-        }
+            emit("queue-scroll-request:cancelled-in-raf", { requestId, behavior, expectedOverrideVersion, targetMode });
+            return;
+          }
 
-        scrollAfterPaintFrameId.value = null;
-        scrollQueued.value = false;
-        const scrollArea = timelineScrollAreaRef.value;
-        const viewport = scrollArea?.viewportEl ?? null;
-        if (viewport) {
-          const anchorTarget = getAnchorTargetTop();
+          scrollAfterPaintFrameId.value = null;
+          scrollQueued.value = false;
+          const scrollArea = timelineScrollAreaRef.value;
+          const viewport = getViewport();
+          if (viewport) {
+          const targetTop = getTargetTop(targetMode);
+          if (!Number.isFinite(targetTop)) {
+            emit("scroll-to-latest-turn:invalid-target", { requestId, behavior, targetMode, targetTop });
+            finalizeProgrammaticScrollCycle();
+            return;
+          }
           programmaticScrollActive = true;
-          programmaticScrollTargetTop = anchorTarget;
+          programmaticScrollTargetTop = targetTop;
           programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_MAX_MS;
           emit("scroll-to-latest-turn", {
             requestId,
             behavior,
-            targetTop: anchorTarget,
+            targetMode,
+            targetTop,
             expiresAt: programmaticScrollUntilMs
           });
           if (behavior === "auto") {
-            viewport.scrollTo({ top: anchorTarget, behavior: "auto" });
+            viewport.scrollTo({ top: targetTop, behavior: "auto" });
             finalizeProgrammaticScrollCycle();
             return;
           }
 
           cancelScrollLerp();
           const startTop = viewport.scrollTop;
-          const distance = anchorTarget - startTop;
+          const distance = targetTop - startTop;
+          if (!Number.isFinite(startTop) || !Number.isFinite(distance)) {
+            emit("scroll-to-latest-turn:invalid-distance", { requestId, behavior, targetMode, startTop, targetTop });
+            finalizeProgrammaticScrollCycle();
+            return;
+          }
           if (Math.abs(distance) < 5) {
             finalizeProgrammaticScrollCycle();
             return;
@@ -312,7 +440,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
               return;
             }
 
-            const finalTarget = getAnchorTargetTop();
+            const finalTarget = getTargetTop(targetMode);
             if (finalTarget > viewport.scrollTop + 5) {
               lerpStartMs = performance.now();
               lerpStartTop = viewport.scrollTop;
@@ -325,21 +453,23 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
             finalizeProgrammaticScrollCycle();
           });
         } else if (scrollArea && typeof scrollArea.scrollToBottom === "function") {
-          emit("scroll-to-latest-turn:fallback", { requestId, behavior });
+          emit("scroll-to-latest-turn:fallback", { requestId, behavior, targetMode });
           scrollArea.scrollToBottom(behavior);
         }
       });
+      armScrollQueueWatchdog(requestId, behavior, expectedOverrideVersion);
     });
   }
 
   function handleTimelineViewportScroll() {
     updateFloatingUiPositions();
-    const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+    const viewport = getViewport();
+    const metrics = readViewportMetrics(viewport);
     if (programmaticScrollActive && viewport) {
       const nearBottom = isTimelineNearBottom();
       const reachedProgrammaticTarget =
         nearBottom ||
-        viewport.scrollTop >= Math.max(programmaticScrollTargetTop - viewport.clientHeight - AUTO_SCROLL_THRESHOLD_PX, 0);
+        (metrics != null && metrics.scrollTop >= Math.max(programmaticScrollTargetTop - metrics.clientHeight - AUTO_SCROLL_THRESHOLD_PX, 0));
       const programmaticScrollExpired = Date.now() >= programmaticScrollUntilMs;
       if (!reachedProgrammaticTarget && !programmaticScrollExpired) {
         emit("viewport-scroll:programmatic-progress", { reachedProgrammaticTarget, programmaticScrollExpired });
@@ -360,9 +490,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       emit("viewport-scroll:programmatic-expired");
     }
 
-    const distanceFromBottom = viewport
-      ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      : 0;
+    const distanceFromBottom = metrics?.distanceToBottom ?? 0;
 
     if (isTimelineNearBottom()) {
       streamAutoFollowEnabled.value = true;
@@ -421,7 +549,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   function handleScrollToBottom() {
     showScrollToBottom.value = false;
     unreadCount.value = 0;
-    resumeTimelineAutoFollow("smooth");
+    resumeTimelineAutoFollow("smooth", "latest-agent");
   }
 
   function handleMarkdownRenderComplete(payload: MarkdownRenderPayload) {
@@ -450,7 +578,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     }
 
     emit("markdown-render-complete:queue-follow");
-    queueScrollToLatestTurn("auto", userScrollOverrideVersion);
+    queueScrollToLatestTurn("auto", userScrollOverrideVersion, "anchor");
   }
 
   function scheduleAutoFollowIdleResume() {
@@ -525,7 +653,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
           Date.now() - lastUserScrollAtMs >= USER_SCROLL_IDLE_MS
         ) {
           emit("latest-turn-signature:resume-after-idle-content");
-          resumeTimelineAutoFollow("auto");
+          resumeTimelineAutoFollow("auto", "anchor");
           return;
         }
         emit("latest-turn-signature:follow-disabled", { signature, previousSignature });
@@ -533,7 +661,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       }
 
       emit("latest-turn-signature:queue-follow-scroll", { signature, previousSignature });
-      queueScrollToLatestTurn("smooth", userScrollOverrideVersion);
+      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "anchor");
     });
   }
 
@@ -547,7 +675,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     }
     emit("is-submitting:changed", { submitting });
     if (wasSubmitting && !submitting && streamAutoFollowEnabled.value && latestTurnSignature.value) {
-      queueScrollToLatestTurn("smooth", userScrollOverrideVersion);
+      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "anchor");
     }
   }
 
@@ -560,23 +688,31 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     if (!streamAutoFollowEnabled.value) {
       unreadCount.value += newLen - oldLen;
       showScrollToBottom.value = true;
+      return;
+    }
+
+    if (latestMessageRole.value === "user") {
+      emit("message-count:user-message-follow", { newLen, oldLen });
+      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "anchor");
     }
   }
 
   watch(
     () => timelineScrollAreaRef.value?.viewportEl ?? null,
     (viewport, previousViewport) => {
-      if (previousViewport && "removeEventListener" in previousViewport) {
-        previousViewport.removeEventListener("scroll", handleTimelineViewportScroll);
-        previousViewport.removeEventListener("wheel", handleTimelineUserScrollIntent);
-        previousViewport.removeEventListener("touchstart", handleTimelineUserScrollIntent);
-        previousViewport.removeEventListener("pointerdown", handleTimelinePointerIntent);
+      const previousElement = previousViewport instanceof HTMLElement ? previousViewport : null;
+      const viewportElement = viewport instanceof HTMLElement ? viewport : null;
+      if (previousElement) {
+        previousElement.removeEventListener("scroll", handleTimelineViewportScroll);
+        previousElement.removeEventListener("wheel", handleTimelineUserScrollIntent);
+        previousElement.removeEventListener("touchstart", handleTimelineUserScrollIntent);
+        previousElement.removeEventListener("pointerdown", handleTimelinePointerIntent);
       }
-      if (viewport && "addEventListener" in viewport) {
-        viewport.addEventListener("scroll", handleTimelineViewportScroll, { passive: true });
-        viewport.addEventListener("wheel", handleTimelineUserScrollIntent, { passive: true });
-        viewport.addEventListener("touchstart", handleTimelineUserScrollIntent, { passive: true });
-        viewport.addEventListener("pointerdown", handleTimelinePointerIntent, { passive: true });
+      if (viewportElement) {
+        viewportElement.addEventListener("scroll", handleTimelineViewportScroll, { passive: true });
+        viewportElement.addEventListener("wheel", handleTimelineUserScrollIntent, { passive: true });
+        viewportElement.addEventListener("touchstart", handleTimelineUserScrollIntent, { passive: true });
+        viewportElement.addEventListener("pointerdown", handleTimelinePointerIntent, { passive: true });
       }
       handleTimelineViewportScroll();
     },
@@ -593,8 +729,8 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   onBeforeUnmount(() => {
     isDestroyed = true;
     window.removeEventListener("keydown", handleTimelineKeyboardIntent, true);
-    const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-    if (viewport && "removeEventListener" in viewport) {
+    const viewport = getViewport();
+    if (viewport) {
       viewport.removeEventListener("scroll", handleTimelineViewportScroll);
       viewport.removeEventListener("wheel", handleTimelineUserScrollIntent);
       viewport.removeEventListener("touchstart", handleTimelineUserScrollIntent);
@@ -603,6 +739,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     if (scrollAfterPaintFrameId.value != null) {
       window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
     }
+    clearScrollQueueWatchdog();
     cancelScrollLerp();
     clearAutoFollowIdleTimer();
     teardownContentResizeObserver();

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
+import type { ComponentPublicInstance } from "vue";
 import { storeToRefs } from "pinia";
 import { isTauriAvailable } from "@/lib/tauri";
 import {
@@ -109,16 +110,36 @@ const timelineScrollAreaRef = ref<{
   viewportEl: HTMLElement | null;
 } | null>(null);
 const scrollAnchorRef = ref<HTMLElement | null>(null);
+const latestAgentMessageRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
 const checkpointPickerOpen = ref(false);
 const forkSummaryOpenForNodeId = ref<string | null>(null);
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
-const SHOW_SCROLL_BOTTOM_THRESHOLD_PX = 400;
 const COMPOSER_BUFFER_PX = 220;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
 
+function resolveTimelineViewport(): HTMLElement | null {
+  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+  return viewport instanceof HTMLElement ? viewport : null;
+}
+
 function collectTimelineScrollMetrics() {
   return timelineAutoScroll.collectMetrics();
+}
+
+function setLatestAgentMessageRef(element: Element | ComponentPublicInstance | null, turnId: string) {
+  if (!isLastTurn.value(turnId)) {
+    if (element == null) {
+      latestAgentMessageRef.value = null;
+    }
+    return;
+  }
+
+  latestAgentMessageRef.value = element instanceof HTMLElement ? element : null;
+}
+
+function getLatestAgentMessageElement() {
+  return latestAgentMessageRef.value;
 }
 
 function updateStreamDebugReveal(patch: Record<string, unknown>) {
@@ -433,6 +454,11 @@ const undoShortcutLabel = computed(() => {
   return "Ctrl+Z";
 });
 
+const latestMessageRole = computed<ChatMessage["role"] | null>(() => {
+  const latestMessage = messages.value[messages.value.length - 1] ?? null;
+  return latestMessage?.role ?? null;
+});
+
 const latestTurnSignature = computed(() => {
   const latestMessage = messages.value[messages.value.length - 1] ?? null;
   if (!latestMessage) return "";
@@ -478,10 +504,12 @@ const {
   assistantDisplayStableContent,
   assistantDisplayFadeContent,
   assistantDisplayFadeStyle,
+  assistantDisplayFadeKey,
   assistantDisplayedReasoning,
   assistantDisplayedReasoningStable,
   assistantDisplayedReasoningFade,
-  assistantDisplayedReasoningFadeStyle
+  assistantDisplayedReasoningFadeStyle,
+  assistantDisplayedReasoningFadeKey
 } = streamingPresentation;
 
 function shouldShowReasoningBlock(message: ChatMessage | null) {
@@ -676,7 +704,7 @@ function updateRollbackProgressPosition() {
   }
 
   const contentColumn = workspaceContentColumnRef.value;
-  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+  const viewport = resolveTimelineViewport();
   if (
     !rollbackInFlight.value ||
     !contentColumn ||
@@ -1097,7 +1125,9 @@ const timelineAutoScroll = useTimelineAutoScroll({
   scrollAnchorRef,
   workspaceContentColumnRef,
   isSubmitting,
+  latestMessageRole,
   latestTurnSignature,
+  getLatestAgentMessageElement,
   showDebug: emitTimelineScrollDebug,
   updateFloatingUiPositions
 });
@@ -1105,7 +1135,6 @@ const timelineAutoScroll = useTimelineAutoScroll({
 const {
   showScrollToBottom,
   unreadCount,
-  scrollQueued,
   streamAutoFollowEnabled,
   handleScrollToBottom,
   handleMarkdownRenderComplete,
@@ -1118,7 +1147,7 @@ onMounted(() => {
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
   }
-  syncStreamingPresentationState("mounted");
+  syncStreamingPresentationState();
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("keydown", handleWindowKeydown);
   window.addEventListener("resize", updateFloatingUiPositions);
@@ -1138,7 +1167,7 @@ watch(latestTurnSignature, (signature, previousSignature) => {
   if (signature === previousSignature) {
     return;
   }
-  syncStreamingPresentationState("latest-turn-signature:post");
+  syncStreamingPresentationState();
   handleLatestTurnSignatureChange(signature, previousSignature);
 }, { flush: "pre" });
 
@@ -1152,7 +1181,7 @@ const STREAM_METRICS_STORAGE_KEY = "pony-agent.metrics.stream-sessions";
 const MAX_STORED_SESSIONS = 50;
 
 function collectStreamMetrics() {
-  const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
+  const viewport = resolveTimelineViewport();
   return {
     flushedAt: Date.now(),
     streamAutoFollowEnabled: streamAutoFollowEnabled.value,
@@ -1181,7 +1210,7 @@ watch(isSubmitting, (submitting, wasSubmitting) => {
   if (wasSubmitting && !submitting) {
     flushStreamMetricsToStorage();
   }
-  syncStreamingPresentationState("is-submitting");
+  syncStreamingPresentationState();
   if (!submitting) {
     stopRequested.value = false;
   }
@@ -1294,7 +1323,7 @@ watch(
               </div>
             </article>
 
-          <article v-if="turn.assistant || turn.tools.length" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-agent-shell w-full px-0 py-1">
+          <article v-if="turn.assistant || turn.tools.length" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-agent-shell w-full px-0 py-1">
             <div v-motion :initial="{ opacity: 0, y: 6 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.02 }" class="conversation-agent-header flex items-center justify-between gap-3">
               <div :class="actorLabelClass()" class="min-w-0">
                 <Bot class="h-3.5 w-3.5" />
@@ -1375,7 +1404,7 @@ watch(
               />
                   <span
                     v-if="isAssistantReasoningStreaming(turn.assistant) && assistantDisplayedReasoningFade(turn.assistant)"
-                    :key="`rfade-${turn.assistant.id}-${streamReasoningFadeKeyByMessageId[turn.assistant.id] ?? 0}`"
+                    :key="`rfade-${turn.assistant.id}-${assistantDisplayedReasoningFadeKey(turn.assistant)}`"
                     class="assistant-streaming-fade"
                     :style="assistantDisplayedReasoningFadeStyle(turn.assistant)"
                   >
@@ -1407,7 +1436,7 @@ watch(
               />
               <span
                 v-if="isAssistantStreaming(turn.assistant) && assistantDisplayFadeContent(turn.assistant)"
-                :key="`fade-${turn.assistant.id}-${streamFadeKeyByMessageId[turn.assistant.id] ?? 0}`"
+                :key="`fade-${turn.assistant.id}-${assistantDisplayFadeKey(turn.assistant)}`"
                 class="assistant-streaming-fade"
                 :style="assistantDisplayFadeStyle(turn.assistant)"
               >

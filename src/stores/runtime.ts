@@ -171,6 +171,10 @@ type RuntimeState = {
   runningSessionMap: Record<string, RunningTurn>;
   completedSessionSet: Record<string, boolean>;
   failedSessionSet: Record<string, boolean>;
+  streamDebugDeltaCount: number;
+  streamDebugFlushCount: number;
+  streamDebugTextCharsReceived: number;
+  streamDebugTextCharsFlushed: number;
 };
 
 type PersistedRuntimeState = {
@@ -3618,7 +3622,11 @@ export const useRuntimeStore = defineStore("runtime", {
       ),
       runningSessionMap: {},
       completedSessionSet: {},
-      failedSessionSet: {}
+      failedSessionSet: {},
+      streamDebugDeltaCount: 0,
+      streamDebugFlushCount: 0,
+      streamDebugTextCharsReceived: 0,
+      streamDebugTextCharsFlushed: 0
     };
   },
   getters: {
@@ -3772,6 +3780,10 @@ export const useRuntimeStore = defineStore("runtime", {
       }
     },
     resetStreamDebugMetrics() {
+      this.streamDebugDeltaCount = 0;
+      this.streamDebugFlushCount = 0;
+      this.streamDebugTextCharsReceived = 0;
+      this.streamDebugTextCharsFlushed = 0;
     },
     flushBufferedStreamText(turnId?: string | null) {
       const bufferedTurnId = this.streamBufferTurnId;
@@ -4208,6 +4220,7 @@ export const useRuntimeStore = defineStore("runtime", {
         executionCheckpoint?: ExecutionCheckpoint | null;
         runtimeView?: SessionRuntimeView | null;
         nodeId?: string | null;
+        preserveMessages?: boolean;
       }
     ) {
       const refreshCatalog = options?.refreshCatalog ?? true;
@@ -4235,7 +4248,7 @@ export const useRuntimeStore = defineStore("runtime", {
         !runtimeViewIsHistorical && (!options?.nodeId || !runtimeViewIsHistorical);
       const hasCheckpointOverride =
         options != null && Object.prototype.hasOwnProperty.call(options, "executionCheckpoint");
-      this.applySessionSnapshot(nextSessionId, snapshot, retrieved, runtimeView);
+      this.applySessionSnapshot(nextSessionId, snapshot, retrieved, runtimeView, { preserveMessages: options?.preserveMessages });
       this.applyExecutionCheckpoint(
         hasCheckpointOverride
           ? (options?.executionCheckpoint ?? null)
@@ -4348,7 +4361,8 @@ export const useRuntimeStore = defineStore("runtime", {
             | "runControlAuditSummary"
             | "historyStateAuditSummary"
           >
-        | null
+        | null,
+      options?: { preserveMessages?: boolean }
     ) {
       const persisted = loadPersistedRuntimeState(sessionId);
       const historicalRuntimeView = isHistoricalRuntimeView(runtimeView);
@@ -4387,11 +4401,13 @@ export const useRuntimeStore = defineStore("runtime", {
       this.draftMessage = "";
       this.sessionSummary = sessionSummary;
       this.retrievedContext = cloneRetrievedContext(retrieved ?? deriveRetrievedContextFromSnapshot(snapshot));
-      this.messages = hydrateMessagesFromHistory(
-        snapshot.history,
-        canMergePersistedMessages ? persisted?.messages : null,
-        effectiveTurnTraceHistory
-      );
+      if (!options?.preserveMessages || !this.messages.length) {
+        this.messages = hydrateMessagesFromHistory(
+          snapshot.history,
+          canMergePersistedMessages ? persisted?.messages : null,
+          effectiveTurnTraceHistory
+        );
+      }
       this.attachmentAssets = snapshot.attachmentAssets ?? restoredState?.attachmentAssets ?? [];
       this.turnTraceHistory = effectiveTurnTraceHistory;
       this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
@@ -4650,6 +4666,7 @@ export const useRuntimeStore = defineStore("runtime", {
         cmd: "restore_branch_head",
         invokeArgs: { branchId: targetBranchId },
         normalize: (payload) => normalizeHistoryRestoreResult(payload, this.historyNodes, this.historyBranches),
+        selectNodeId: (payload) => payload.restoredNodeId ?? payload.cursor?.visibleNodeId ?? null,
         errorMessagePrefix: "恢复 branch head"
       });
       if (result) {
@@ -4762,7 +4779,8 @@ export const useRuntimeStore = defineStore("runtime", {
             }
             return this.loadSessionState(nextSessionId, {
               refreshCatalog: false,
-              runtimeView: hostView
+              runtimeView: hostView,
+              preserveMessages: hasCachedState
             }).catch(() => {});
           }).catch(() => {});
         }
@@ -6536,17 +6554,19 @@ export const useRuntimeStore = defineStore("runtime", {
 
       const mode = this.historyCursorMode;
       const needsRestore = this.initialRollbackActive || mode === "historical";
+      this.historyCursorMode = "live";
       if (needsRestore && isTauriAvailable()) {
         const restored = await this.restoreBranchHead();
         if (!restored) {
-          this.isSubmitting = false;
-          this.sessionError = "无法提交：对话处于历史浏览模式，恢复最新状态失败";
-          return false;
+          if (this.initialRollbackActive) {
+            this.isSubmitting = false;
+            this.sessionError = "无法提交：对话处于历史浏览模式，恢复最新状态失败";
+            return false;
+          }
         }
       }
 
       this.initialRollbackActive = false;
-      this.historyCursorMode = "live";
 
       const lastAssistantMessage = [...this.messages]
         .reverse()
