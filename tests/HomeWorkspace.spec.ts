@@ -2458,6 +2458,81 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(summaries.some((node) => node.html().includes("lucide-brain"))).toBe(true);
   });
 
+  it("only merges consecutive duplicate tool calls and keeps non-consecutive repeats visible", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-tools",
+          turnId: "turn-tools",
+          role: "user",
+          content: "run tools"
+        }),
+        createMessage({
+          id: "tool-search-1",
+          turnId: "turn-tools",
+          role: "tool",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "search alpha",
+          status: "done",
+          durationSeconds: 0.8
+        }),
+        createMessage({
+          id: "tool-search-2",
+          turnId: "turn-tools",
+          role: "tool",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "search beta",
+          status: "done",
+          durationSeconds: 1.1
+        }),
+        createMessage({
+          id: "tool-read-1",
+          turnId: "turn-tools",
+          role: "tool",
+          toolName: "Read",
+          canonicalToolName: "Read",
+          detail: "read package.json",
+          status: "done",
+          durationSeconds: 0.4
+        }),
+        createMessage({
+          id: "tool-search-3",
+          turnId: "turn-tools",
+          role: "tool",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "search gamma",
+          status: "done",
+          durationSeconds: 1.5
+        }),
+        createMessage({
+          id: "assistant-tools",
+          turnId: "turn-tools",
+          role: "assistant",
+          content: "done"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const toolRows = wrapper.findAll(".conversation-tool-panel > div");
+    expect(toolRows).toHaveLength(3);
+    expect(toolRows[0]?.text()).toContain("search beta");
+    expect(toolRows[0]?.text()).toContain("(2x)");
+    expect(toolRows[1]?.text()).toContain("read package.json");
+    expect(toolRows[1]?.text()).not.toContain("(2x)");
+    expect(toolRows[2]?.text()).toContain("search gamma");
+    expect(toolRows[2]?.text()).not.toContain("(2x)");
+  });
+
   it("shows reasoning placeholder for pending assistant with empty reasoning", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 

@@ -974,6 +974,30 @@ describe("HomeSidebar", () => {
     expect(durationSpan!.classes()).toContain("whitespace-nowrap");
   });
 
+  it("trace turn 列表不显示轮次分割线", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({ turnId: "turn-divider-1", title: "first turn", updatedAt: 1000 }),
+        createTraceRecord({ turnId: "turn-divider-2", title: "second turn", updatedAt: 2000 })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushAll();
+
+    const tracePanel = wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")!;
+    const turnSections = Array.from(tracePanel.querySelectorAll<HTMLElement>('section[data-open]')).filter((section) => {
+      return section.querySelector("button")?.textContent?.includes("turn") ?? false;
+    });
+
+    expect(turnSections).toHaveLength(2);
+    for (const section of turnSections) {
+      expect(section.className).not.toContain("border-b");
+      expect(section.className).not.toContain("border-stone-200/70");
+    }
+  });
+
   it("RECEIVE INPUT 只保留一个输入，且不显示 PREPARE RETRIEVAL", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({

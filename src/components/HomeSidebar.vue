@@ -1669,7 +1669,7 @@ watch(orderedTurnTraceSignature, () => {
               <section
                 v-for="turn in orderedTurnTraces"
                 :key="turn.turnId"
-                class="collapsible-shell overflow-hidden border-b border-stone-200/70 py-1.5 last:border-b-0"
+                class="collapsible-shell overflow-hidden py-1.5"
                 :data-open="activeTurnId === turn.turnId"
               >
                 <button class="group flex w-full items-start justify-between gap-2 text-left" type="button" @click="toggleTurn(turn.turnId)">

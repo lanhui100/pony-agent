@@ -53,6 +53,7 @@ type MergedToolCall = {
   toolName: string;
   canonicalToolName: string | null;
   displayNameZh: string | null;
+  mergeKey: string;
   description: string;
   status: ChatMessage["status"];
   durationSeconds: number | null;
@@ -523,11 +524,16 @@ function extractDescription(detail: string | null | undefined): string {
   return detail?.split("\n")[0]?.trim() ?? "";
 }
 
+function toolMergeKey(tool: Pick<ChatMessage, "canonicalToolName" | "toolName" | "displayNameZh">) {
+  return tool.canonicalToolName?.trim() || tool.toolName?.trim() || tool.displayNameZh?.trim() || "";
+}
+
 function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
   const result: MergedToolCall[] = [];
   for (const tool of tools) {
     const last = result[result.length - 1];
-    if (last && last.canonicalToolName === tool.canonicalToolName && last.status !== "error") {
+    const mergeKey = toolMergeKey(tool);
+    if (last && mergeKey && last.mergeKey === mergeKey && last.status !== "error") {
       last.description = extractDescription(tool.detail);
       last.status = tool.status ?? "done";
       last.durationSeconds = tool.durationSeconds ?? null;
@@ -539,6 +545,7 @@ function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
         toolName: tool.toolName ?? "",
         canonicalToolName: tool.canonicalToolName ?? null,
         displayNameZh: tool.displayNameZh ?? null,
+        mergeKey,
         description: extractDescription(tool.detail),
         status: tool.status ?? "done",
         durationSeconds: tool.durationSeconds ?? null,
