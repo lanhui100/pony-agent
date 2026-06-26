@@ -111,6 +111,33 @@ function triggerViewportProgrammaticIntermediateScroll(top: number) {
   latestViewportEl.dispatchEvent(new Event("scroll"));
 }
 
+function mockElementRect(
+  element: Element,
+  rect: Partial<Pick<DOMRect, "top" | "bottom" | "left" | "right" | "width" | "height">>
+) {
+  const top = rect.top ?? 0;
+  const bottom = rect.bottom ?? top + (rect.height ?? 0);
+  const left = rect.left ?? 0;
+  const right = rect.right ?? left + (rect.width ?? 0);
+  const width = rect.width ?? Math.max(0, right - left);
+  const height = rect.height ?? Math.max(0, bottom - top);
+
+  Object.defineProperty(element, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({
+      x: left,
+      y: top,
+      top,
+      bottom,
+      left,
+      right,
+      width,
+      height,
+      toJSON: () => ({ top, bottom, left, right, width, height })
+    })
+  });
+}
+
 async function advanceAnimationFrames(count = 13) {
   for (let i = 0; i < count; i++) {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -563,6 +590,14 @@ function clickLatestRollbackConfirm(label: string) {
   if (matches.length === 0) return false;
   matches[matches.length - 1]!.click();
   return true;
+}
+
+function latestScrollDebugEvent(eventName: string) {
+  const buffer = (window as typeof window & {
+    __ponyScrollDebugBuffer?: Array<Record<string, unknown>>;
+  }).__ponyScrollDebugBuffer ?? [];
+
+  return [...buffer].reverse().find((entry) => entry.event === eventName);
 }
 
 describe("HomeWorkspace", () => {
@@ -1945,6 +1980,84 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
 
     await advanceAnimationFrames(5);
     expect(viewportMetrics.scrollTop).toBeGreaterThan(900);
+  });
+
+  it("shows scroll-to-latest button only when latest user is below viewport", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "上一轮问题"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "上一轮回答",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "user-2",
+          turnId: "turn-2",
+          role: "user",
+          content: "最新问题"
+        })
+      ]
+    });
+
+    viewportMetrics.scrollHeight = 2200;
+    viewportMetrics.scrollTop = 800;
+    viewportMetrics.clientHeight = 400;
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+    await advanceAnimationFrames(3);
+
+    if (!latestViewportEl) {
+      throw new Error("viewport is not mounted");
+    }
+
+    mockElementRect(latestViewportEl, { top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 });
+
+    const latestUserMessage = wrapper.findAll(".conversation-user-message").at(-1);
+    expect(latestUserMessage).toBeDefined();
+
+    mockElementRect(latestUserMessage!.element, { top: 120, bottom: 220, left: 420, right: 760, width: 340, height: 100 });
+    triggerViewportWheel();
+    triggerViewportScroll(800);
+    await flushAsyncUiWork();
+    await nextTick();
+
+    const scrollButton = wrapper.get('[data-testid="workspace-scroll-to-bottom"]');
+    await vi.waitFor(() => {
+      const latestDebug = latestScrollDebugEvent("viewport-scroll:user-away-from-bottom");
+      expect(latestDebug).toBeDefined();
+      expect(latestDebug?.latestUserBelowViewport).toBe(false);
+      expect(latestDebug?.showScrollToBottom).toBe(false);
+    });
+
+    mockElementRect(latestUserMessage!.element, { top: 460, bottom: 560, left: 420, right: 760, width: 340, height: 100 });
+    triggerViewportWheel();
+    triggerViewportScroll(800);
+    await flushAsyncUiWork();
+    await nextTick();
+
+    await vi.waitFor(() => {
+      const latestDebug = latestScrollDebugEvent("viewport-scroll:user-away-from-bottom");
+      expect(latestDebug).toBeDefined();
+      expect(latestDebug?.latestUserBelowViewport).toBe(true);
+      expect(latestDebug?.showScrollToBottom).toBe(true);
+    });
+
+    expect(scrollButton.exists()).toBe(true);
   });
 
   // KNOWN TEST DEBT: refreshFrontendRecorderStats removed from store

@@ -13,20 +13,21 @@ type MarkdownRenderPayload = {
 type UseTimelineAutoScrollOptions = {
   timelineScrollAreaRef: Ref<ScrollAreaHandle | null>;
   scrollAnchorRef: Ref<HTMLElement | null>;
+  composerShellRef: Ref<HTMLElement | null>;
   workspaceContentColumnRef: Ref<HTMLElement | null>;
   isSubmitting: Ref<boolean>;
   latestMessageRole: ComputedRef<"user" | "assistant" | "tool" | null>;
   latestTurnSignature: ComputedRef<string>;
+  latestVisibleTurnLayoutSignature: ComputedRef<string>;
+  getLatestUserMessageElement: () => HTMLElement | null;
   getLatestAgentMessageElement: () => HTMLElement | null;
   showDebug: (event: string, patch?: Record<string, unknown>) => void;
   updateFloatingUiPositions: () => void;
 };
 
-type ScrollTargetMode = "anchor" | "latest-agent";
+type ScrollTargetMode = "anchor" | "latest-user" | "latest-agent";
 
 const AUTO_SCROLL_THRESHOLD_PX = 260;
-const SHOW_SCROLL_BOTTOM_THRESHOLD_PX = 400;
-const USER_RESUME_THRESHOLD_PX = 50;
 const PROGRAMMATIC_SCROLL_MAX_MS = 1600;
 const USER_SCROLL_IDLE_MS = 3000;
 const SCROLL_LERP_DURATION_MS = 200;
@@ -36,10 +37,13 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   const {
     timelineScrollAreaRef,
     scrollAnchorRef,
+    composerShellRef,
     workspaceContentColumnRef,
     isSubmitting,
     latestMessageRole,
     latestTurnSignature,
+    latestVisibleTurnLayoutSignature,
+    getLatestUserMessageElement,
     getLatestAgentMessageElement,
     showDebug,
     updateFloatingUiPositions
@@ -55,6 +59,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   let contentResizeObserver: ResizeObserver | null = null;
   let autoFollowIdleTimer: ReturnType<typeof setTimeout> | null = null;
   let programmaticScrollActive = false;
+  let programmaticScrollTargetMode: ScrollTargetMode = "anchor";
   let programmaticScrollTargetTop = 0;
   let programmaticScrollUntilMs = 0;
   let userScrollOverrideVersion = 0;
@@ -124,11 +129,19 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   function collectMetrics() {
     const viewport = getViewport();
     const metrics = readViewportMetrics(viewport);
+    const anchor = scrollAnchorRef.value;
+    const composerShell = composerShellRef.value;
+    const latestAgentMessage = getLatestAgentMessageElement();
+    const anchorTop = anchor?.getBoundingClientRect().top ?? null;
+    const anchorBottom = anchor?.getBoundingClientRect().bottom ?? null;
+    const composerTop = composerShell?.getBoundingClientRect().top ?? null;
+    const latestAgentTop = latestAgentMessage?.getBoundingClientRect().top ?? null;
     return {
       streamAutoFollowEnabled: streamAutoFollowEnabled.value,
       scrollQueued: scrollQueued.value,
       isSubmitting: isSubmitting.value,
       programmaticScrollActive,
+      programmaticScrollTargetMode,
       programmaticScrollTargetTop,
       programmaticScrollUntilMs,
       userScrollOverrideVersion,
@@ -137,6 +150,14 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       viewportScrollHeight: metrics?.scrollHeight ?? null,
       viewportClientHeight: metrics?.clientHeight ?? null,
       distanceToBottom: metrics?.distanceToBottom ?? null,
+      anchorTop,
+      anchorBottom,
+      composerTop,
+      anchorToComposerDistance: anchorBottom != null && composerTop != null ? composerTop - anchorBottom : null,
+      latestUserTop: getLatestUserMessageElement()?.getBoundingClientRect().top ?? null,
+      latestAgentTop,
+      targetDelta: metrics != null ? programmaticScrollTargetTop - metrics.scrollTop : null,
+      latestVisibleTurnLayoutSignature: latestVisibleTurnLayoutSignature.value,
       viewportResolved: viewport instanceof HTMLElement,
       viewportMetricsValid: metrics != null
     };
@@ -162,23 +183,48 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     const viewport = getViewport();
     const metrics = readViewportMetrics(viewport);
     const anchor = scrollAnchorRef.value;
+    const composerShell = composerShellRef.value;
     if (!viewport || !metrics) return 0;
     if (!anchor) return metrics.scrollHeight;
     const anchorRect = anchor.getBoundingClientRect();
     const viewportRect = viewport.getBoundingClientRect();
+    const composerTop = composerShell?.getBoundingClientRect().top ?? viewportRect.bottom;
     if (anchorRect.top === viewportRect.top && anchorRect.bottom === viewportRect.bottom) {
       return metrics.scrollHeight;
     }
-    const targetTop = metrics.scrollTop + (anchorRect.bottom - viewportRect.bottom);
+    const targetTop = metrics.scrollTop + (anchorRect.bottom - composerTop);
     if (!Number.isFinite(targetTop)) {
       emit("anchor-target:invalid", {
         anchorBottom: anchorRect.bottom,
-        viewportBottom: viewportRect.bottom,
+        composerTop,
         fallbackTargetTop: metrics.scrollHeight
       });
       return metrics.scrollHeight;
     }
     return Math.max(0, targetTop);
+  }
+
+  function getLatestUserTargetTop(): number {
+    const viewport = getViewport();
+    const metrics = readViewportMetrics(viewport);
+    const latestUserMessage = getLatestUserMessageElement();
+    if (!viewport || !metrics || !latestUserMessage) {
+      return getAnchorTargetTop();
+    }
+
+    const userRect = latestUserMessage.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const targetTop = metrics.scrollTop + (userRect.top - viewportRect.top);
+    if (!Number.isFinite(targetTop)) {
+      emit("latest-user-target:invalid", {
+        userTop: userRect.top,
+        viewportTop: viewportRect.top,
+        fallbackTargetTop: getAnchorTargetTop()
+      });
+      return getAnchorTargetTop();
+    }
+
+    return Math.max(0, Math.min(targetTop, Math.max(metrics.scrollHeight - metrics.clientHeight, 0)));
   }
 
   function getLatestAgentTargetTop(): number {
@@ -206,10 +252,29 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   }
 
   function getTargetTop(mode: ScrollTargetMode) {
+    if (mode === "latest-user") {
+      return getLatestUserTargetTop();
+    }
     if (mode === "latest-agent") {
       return getLatestAgentTargetTop();
     }
     return getAnchorTargetTop();
+  }
+
+  function isLatestUserMessageBelowViewport() {
+    const viewport = getViewport();
+    const latestUserMessage = getLatestUserMessageElement();
+    if (!viewport || !latestUserMessage) {
+      return false;
+    }
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const userRect = latestUserMessage.getBoundingClientRect();
+    return userRect.top > viewportRect.bottom || userRect.bottom > viewportRect.bottom;
+  }
+
+  function shouldShowScrollToLatestButton() {
+    return isLatestUserMessageBelowViewport();
   }
 
   function cancelScrollLerp() {
@@ -249,6 +314,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       }
       emit("anchor-compensation-scroll", { targetTop: anchorTarget });
       programmaticScrollActive = true;
+      programmaticScrollTargetMode = "anchor";
       programmaticScrollTargetTop = anchorTarget;
       programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_MAX_MS;
       viewport.scrollTo({ top: anchorTarget, behavior: "auto" });
@@ -279,6 +345,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
 
   function finalizeProgrammaticScrollCycle() {
     programmaticScrollActive = false;
+    programmaticScrollTargetMode = "anchor";
     programmaticScrollTargetTop = 0;
     programmaticScrollUntilMs = 0;
     showScrollToBottom.value = false;
@@ -293,6 +360,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     scheduledScrollRequestId += 1;
     scrollQueued.value = false;
     programmaticScrollActive = false;
+    programmaticScrollTargetMode = "anchor";
     programmaticScrollTargetTop = 0;
     programmaticScrollUntilMs = 0;
     cancelScrollLerp();
@@ -394,6 +462,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
             return;
           }
           programmaticScrollActive = true;
+          programmaticScrollTargetMode = targetMode;
           programmaticScrollTargetTop = targetTop;
           programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_MAX_MS;
           emit("scroll-to-latest-turn", {
@@ -467,12 +536,17 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     const metrics = readViewportMetrics(viewport);
     if (programmaticScrollActive && viewport) {
       const nearBottom = isTimelineNearBottom();
-      const reachedProgrammaticTarget =
-        nearBottom ||
-        (metrics != null && metrics.scrollTop >= Math.max(programmaticScrollTargetTop - metrics.clientHeight - AUTO_SCROLL_THRESHOLD_PX, 0));
+      const reachedProgrammaticTarget = programmaticScrollTargetMode === "anchor"
+        ? nearBottom || (metrics != null && metrics.scrollTop >= Math.max(programmaticScrollTargetTop - metrics.clientHeight - AUTO_SCROLL_THRESHOLD_PX, 0))
+        : metrics != null && Math.abs(programmaticScrollTargetTop - metrics.scrollTop) <= 12;
       const programmaticScrollExpired = Date.now() >= programmaticScrollUntilMs;
       if (!reachedProgrammaticTarget && !programmaticScrollExpired) {
-        emit("viewport-scroll:programmatic-progress", { reachedProgrammaticTarget, programmaticScrollExpired });
+        emit("viewport-scroll:programmatic-progress", {
+          reachedProgrammaticTarget,
+          programmaticScrollExpired,
+          targetMode: programmaticScrollTargetMode,
+          targetDelta: metrics != null ? programmaticScrollTargetTop - metrics.scrollTop : null
+        });
         return;
       }
 
@@ -483,11 +557,17 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         streamAutoFollowEnabled.value = true;
         lastUserPausedSignature = "";
         clearAutoFollowIdleTimer();
-        emit("viewport-scroll:programmatic-complete");
+        emit("viewport-scroll:programmatic-complete", {
+          targetMode: programmaticScrollTargetMode,
+          targetDelta: metrics != null ? programmaticScrollTargetTop - metrics.scrollTop : null
+        });
         return;
       }
 
-      emit("viewport-scroll:programmatic-expired");
+      emit("viewport-scroll:programmatic-expired", {
+        targetMode: programmaticScrollTargetMode,
+        targetDelta: metrics != null ? programmaticScrollTargetTop - metrics.scrollTop : null
+      });
     }
 
     const distanceFromBottom = metrics?.distanceToBottom ?? 0;
@@ -503,12 +583,14 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       return;
     }
 
-    if (distanceFromBottom > USER_RESUME_THRESHOLD_PX || distanceFromBottom > SHOW_SCROLL_BOTTOM_THRESHOLD_PX) {
-      showScrollToBottom.value = true;
-    }
+    showScrollToBottom.value = shouldShowScrollToLatestButton();
 
     lastUserScrollAtMs = Date.now();
-    emit("viewport-scroll:user-away-from-bottom", { distanceFromBottom, showScrollToBottom: showScrollToBottom.value });
+    emit("viewport-scroll:user-away-from-bottom", {
+      distanceFromBottom,
+      latestUserBelowViewport: showScrollToBottom.value,
+      showScrollToBottom: showScrollToBottom.value
+    });
     pauseTimelineAutoFollow();
   }
 
@@ -549,7 +631,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   function handleScrollToBottom() {
     showScrollToBottom.value = false;
     unreadCount.value = 0;
-    resumeTimelineAutoFollow("smooth", "latest-agent");
+    resumeTimelineAutoFollow("smooth", "latest-user");
   }
 
   function handleMarkdownRenderComplete(payload: MarkdownRenderPayload) {
@@ -687,7 +769,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     }
     if (!streamAutoFollowEnabled.value) {
       unreadCount.value += newLen - oldLen;
-      showScrollToBottom.value = true;
+      showScrollToBottom.value = shouldShowScrollToLatestButton();
       return;
     }
 
@@ -695,6 +777,30 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       emit("message-count:user-message-follow", { newLen, oldLen });
       queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "anchor");
     }
+  }
+
+  function handleVisibleTurnLayoutChange(signature: string, previousSignature: string | undefined) {
+    if (!signature || signature === previousSignature) {
+      return;
+    }
+    emit("visible-turn-layout:changed", { signature, previousSignature });
+    if (!streamAutoFollowEnabled.value) {
+      emit("visible-turn-layout:skip", { reason: "follow-disabled", signature, previousSignature });
+      return;
+    }
+    if (scrollQueued.value) {
+      layoutDirtyWhileQueued = true;
+      emit("visible-turn-layout:defer", { reason: "scroll-queued", signature, previousSignature });
+      return;
+    }
+    if (programmaticScrollActive) {
+      contentDirtyWhileAnimating = true;
+      emit("visible-turn-layout:defer", { reason: "programmatic-scroll-active", signature, previousSignature });
+      return;
+    }
+
+    emit("visible-turn-layout:queue-follow", { signature, previousSignature });
+    scheduleAnchorCompensationScroll();
   }
 
   watch(
@@ -718,6 +824,8 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     },
     { flush: "post" }
   );
+
+  watch(latestVisibleTurnLayoutSignature, handleVisibleTurnLayoutChange, { flush: "post" });
 
   onMounted(() => {
     window.addEventListener("keydown", handleTimelineKeyboardIntent, true);

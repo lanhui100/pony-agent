@@ -41,26 +41,44 @@ const RECENT_EVENT_LIMIT = 12;
 const EVENT_COUNT_LIMIT = 8;
 
 const DEBUG_FIELD_LABELS: Record<string, string> = {
+  anchorToComposerDistance: "anchor间距",
+  anchorTop: "anchor顶",
   behavior: "行为",
+  composerTop: "输入框顶",
   delayMs: "延迟",
   distanceFromBottom: "距底部",
   distanceToBottom: "距底部",
   expectedOverrideVersion: "覆盖版本",
   key: "按键",
+  latestAgentTop: "最新Agent顶",
+  latestUserBelowViewport: "User在视口下方",
+  latestUserTop: "最新User顶",
+  latestVisibleTurnLayoutSignature: "布局签名",
+  programmaticScrollTargetMode: "目标模式",
   reason: "原因",
   requestId: "请求",
   showScrollToBottom: "底部按钮",
   signature: "消息签名",
   streamAutoFollowEnabled: "自动跟随",
   submitting: "提交中",
+  targetDelta: "目标差值",
   targetTop: "目标位置"
 };
 
 const SUMMARY_FIELDS = [
   "reason",
   "behavior",
+  "anchorToComposerDistance",
+  "anchorTop",
+  "composerTop",
+  "latestUserBelowViewport",
+  "latestUserTop",
+  "latestAgentTop",
+  "programmaticScrollTargetMode",
+  "targetDelta",
   "distanceFromBottom",
   "distanceToBottom",
+  "latestVisibleTurnLayoutSignature",
   "targetTop",
   "delayMs",
   "key",
@@ -121,15 +139,21 @@ function getRecentEventSummary(entry: DebugEntry) {
   return parts.slice(0, 3).join(" / ") || "无附加信息";
 }
 
+function getCopyFields(entry: DebugEntry) {
+  return SUMMARY_FIELDS.flatMap((field) => {
+    if (!(field in entry)) {
+      return [];
+    }
+    return `  ${DEBUG_FIELD_LABELS[field] ?? field}: ${formatValue(entry[field])}`;
+  });
+}
+
 function buildDebugCopyText() {
   if (!debugEntries.value.length) return "";
   const parts = debugEntries.value.map((entry) => {
     const timestamp = typeof entry.at === "number" ? formatTimestamp(entry.at) : "--:--:--.---";
     const lines = [`[${timestamp}] ${String(entry.event ?? "unknown")}`];
-    const summary = getRecentEventSummary(entry);
-    if (summary !== "无附加信息") {
-      lines.push(`  ${summary}`);
-    }
+    lines.push(...getCopyFields(entry));
     return lines.join("\n");
   });
   return "=== Auto-Scroll Debug Log ===\n\n" + parts.join("\n\n");
@@ -187,48 +211,78 @@ const statusItems = computed<StatusItem[]>(() => {
       value: entry.scrollQueued ? "是" : "否"
     },
     {
-      label: "距底部",
-      value: formatMetric(entry.distanceToBottom)
+      label: "anchor间距",
+      value: formatMetric(entry.anchorToComposerDistance),
+      tone: typeof entry.anchorToComposerDistance === "number" && entry.anchorToComposerDistance < 0 ? "warn" : undefined
+    },
+    {
+      label: "anchor顶",
+      value: formatMetric(entry.anchorTop)
+    },
+    {
+      label: "输入框顶",
+      value: formatMetric(entry.composerTop)
+    },
+    {
+      label: "按钮显示",
+      value: formatValue(entry.showScrollToBottom),
+      tone: entry.showScrollToBottom ? "warn" : undefined
+    },
+    {
+      label: "User在视口下方",
+      value: formatValue(entry.latestUserBelowViewport)
+    },
+    {
+      label: "最新User顶",
+      value: formatMetric(entry.latestUserTop)
+    },
+    {
+      label: "最新Agent顶",
+      value: formatMetric(entry.latestAgentTop)
+    },
+    {
+      label: "目标模式",
+      value: formatValue(entry.programmaticScrollTargetMode)
+    },
+    {
+      label: "目标差值",
+      value: formatMetric(entry.targetDelta),
+      tone: typeof entry.targetDelta === "number" && Math.abs(entry.targetDelta) > 24 ? "warn" : undefined
     },
     {
       label: "scrollTop",
       value: formatMetric(entry.viewportScrollTop)
     },
     {
-      label: "提交",
-      value: entry.isSubmitting ? "进行中" : "空闲"
+      label: "布局签名",
+      value: formatValue(entry.latestVisibleTurnLayoutSignature)
     }
   ];
 });
 
-const interruptionItems = computed<StatusItem[]>(() => {
-  const pausedEntry = [...debugEntries.value]
+const diagnosisItems = computed<StatusItem[]>(() => {
+  const visibilityEntry = [...debugEntries.value]
     .reverse()
-    .find((entry) => String(entry.event ?? "").startsWith("pause-auto-follow") || entry.streamAutoFollowEnabled === false);
-  const intentEntry = [...debugEntries.value]
-    .reverse()
-    .find((entry) => String(entry.event ?? "").startsWith("user-scroll-intent:"));
+    .find((entry) => String(entry.event ?? "") === "viewport-scroll:user-away-from-bottom");
 
   return [
     {
-      label: "最后打断",
-      value: pausedEntry
-        ? `${String(pausedEntry.event ?? "unknown")} @ ${formatTimestamp((pausedEntry.at as number) ?? Date.now())}`
+      label: "最近判定",
+      value: visibilityEntry
+        ? `${String(visibilityEntry.event ?? "unknown")} @ ${formatTimestamp((visibilityEntry.at as number) ?? Date.now())}`
         : "未发现"
     },
     {
-      label: "用户意图",
-      value: intentEntry
-        ? `${String(intentEntry.event ?? "unknown")} @ ${formatTimestamp((intentEntry.at as number) ?? Date.now())}`
-        : "未发现"
+      label: "按钮显示",
+      value: formatValue(visibilityEntry?.showScrollToBottom)
     },
     {
-      label: "暂停签名",
-      value: formatValue(pausedEntry?.lastUserPausedSignature)
+      label: "User在视口下方",
+      value: formatValue(visibilityEntry?.latestUserBelowViewport)
     },
     {
-      label: "覆盖版本",
-      value: formatValue(pausedEntry?.userScrollOverrideVersion)
+      label: "User位置",
+      value: formatMetric(visibilityEntry?.latestUserTop)
     }
   ];
 });
@@ -336,9 +390,9 @@ onBeforeUnmount(() => {
           </section>
 
           <section class="rounded-[0.65rem] border border-stone-200/70 px-2.5 py-2">
-            <div class="mb-1 text-[10px] uppercase tracking-[0.14em] text-stone-400">打断线索</div>
+            <div class="mb-1 text-[10px] uppercase tracking-[0.14em] text-stone-400">按钮显示判定</div>
             <div class="space-y-1">
-              <div v-for="item in interruptionItems" :key="item.label" class="text-[10px] leading-[1.35]">
+              <div v-for="item in diagnosisItems" :key="item.label" class="text-[10px] leading-[1.35]">
                 <span class="text-stone-400">{{ item.label }}:</span>
                 <span class="ml-1 text-stone-700">{{ item.value }}</span>
               </div>

@@ -1070,7 +1070,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
         id: activity.id,
         label: toolDisplayLabel(activity),
         content: buildToolMessageDetail(activity),
-        summary: activity.summary,
+        summary: activity.description,
         kind: "tool",
         toolStatus: activity.status,
         durationText: formatDuration(activity.durationSeconds)
@@ -1101,7 +1101,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
         id: `tool-output-${toolEntry.id}-${activity.id}`,
         label: toolDisplayLabel(activity),
         content: buildToolMessageDetail(activity),
-        summary: activity.summary,
+        summary: activity.description,
         kind: "tool",
         toolStatus: activity.status,
         durationText: formatDuration(activity.durationSeconds)

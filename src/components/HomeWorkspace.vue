@@ -110,6 +110,8 @@ const timelineScrollAreaRef = ref<{
   viewportEl: HTMLElement | null;
 } | null>(null);
 const scrollAnchorRef = ref<HTMLElement | null>(null);
+const composerShellRef = ref<HTMLElement | null>(null);
+const latestUserMessageRef = ref<HTMLElement | null>(null);
 const latestAgentMessageRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
 const checkpointPickerOpen = ref(false);
@@ -127,15 +129,31 @@ function collectTimelineScrollMetrics() {
   return timelineAutoScroll.collectMetrics();
 }
 
-function setLatestAgentMessageRef(element: Element | ComponentPublicInstance | null, turnId: string) {
+function setLatestTurnElementRef(
+  targetRef: { value: HTMLElement | null },
+  element: Element | ComponentPublicInstance | null,
+  turnId: string
+) {
   if (!isLastTurn.value(turnId)) {
     if (element == null) {
-      latestAgentMessageRef.value = null;
+      targetRef.value = null;
     }
     return;
   }
 
-  latestAgentMessageRef.value = element instanceof HTMLElement ? element : null;
+  targetRef.value = element instanceof HTMLElement ? element : null;
+}
+
+function setLatestUserMessageRef(element: Element | ComponentPublicInstance | null, turnId: string) {
+  setLatestTurnElementRef(latestUserMessageRef, element, turnId);
+}
+
+function getLatestUserMessageElement() {
+  return latestUserMessageRef.value;
+}
+
+function setLatestAgentMessageRef(element: Element | ComponentPublicInstance | null, turnId: string) {
+  setLatestTurnElementRef(latestAgentMessageRef, element, turnId);
 }
 
 function getLatestAgentMessageElement() {
@@ -358,6 +376,19 @@ const visibleTurns = computed<TurnBucket[]>(() => {
   }
 
   return turns.value.slice(0, cutoffIndex);
+});
+
+const latestVisibleTurnLayoutSignature = computed(() => {
+  const latestTurn = visibleTurns.value[visibleTurns.value.length - 1] ?? null;
+  if (!latestTurn) {
+    return "";
+  }
+  return [
+    latestTurn.turnId,
+    latestTurn.user ? `user:${latestTurn.user.id}` : "user:-",
+    latestTurn.assistant ? `assistant:${latestTurn.assistant.id}:${latestTurn.assistant.status ?? "done"}` : "assistant:-",
+    `tools:${latestTurn.tools.map((tool) => tool.id).join(",")}`
+  ].join("|");
 });
 
 const hasVisibleHistorySession = computed(() =>
@@ -1123,10 +1154,13 @@ function handleClickOutside(event: MouseEvent) {
 const timelineAutoScroll = useTimelineAutoScroll({
   timelineScrollAreaRef,
   scrollAnchorRef,
+  composerShellRef,
   workspaceContentColumnRef,
   isSubmitting,
   latestMessageRole,
   latestTurnSignature,
+  latestVisibleTurnLayoutSignature,
+  getLatestUserMessageElement,
   getLatestAgentMessageElement,
   showDebug: emitTimelineScrollDebug,
   updateFloatingUiPositions
@@ -1254,7 +1288,7 @@ watch(
           </h2>
         </section>
         <section v-for="turn in visibleTurns" :key="turn.turnId" class="space-y-3">
-          <article v-if="turn.user" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-user-message ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
+          <article v-if="turn.user" :ref="(element) => setLatestUserMessageRef(element, turn.turnId)" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-user-message ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
             <div class="flex flex-col items-end">
               <div :class="actorLabelClass()" class="mb-1">
                 <span>User</span>
@@ -1576,6 +1610,7 @@ watch(
 
     <div class="absolute bottom-0 left-0 right-0 z-10 px-4 py-3 sm:px-5 pointer-events-none">
       <div
+        ref="composerShellRef"
         class="relative mx-auto w-full max-w-[48rem] rounded-[0.6rem] bg-white/76 px-4 py-3 shadow-[0_-4px_20px_-2px_rgba(60,40,20,0.06)] backdrop-blur-[8px]"
         data-testid="workspace-composer-shell"
         style="pointer-events: auto;"
