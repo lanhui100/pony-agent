@@ -1509,6 +1509,7 @@ watch(orderedTurnTraceSignature, () => {
               </span>
             </div>
 
+            <div class="rounded-[0.45rem] bg-[#f6f0e8] px-3 py-2 space-y-1.5">
             <!-- Token metrics -->
             <div class="flex items-center justify-between text-[11px] leading-5 text-stone-600">
               <span class="inline-flex items-center gap-1 text-stone-400">
@@ -1560,6 +1561,7 @@ watch(orderedTurnTraceSignature, () => {
                   <span>{{ formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || "未知" }}</span>
                 </Tooltip>
               </span>
+            </div>
             </div>
 
             <!-- Session status messages -->
