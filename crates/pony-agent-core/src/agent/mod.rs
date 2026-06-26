@@ -10,6 +10,7 @@ pub mod hooks;
 pub mod input;
 pub mod planner;
 pub mod provider;
+pub mod retry;
 pub mod runtime;
 pub mod secret_store;
 pub mod session;

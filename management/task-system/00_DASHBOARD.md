@@ -71,12 +71,13 @@
 24. `PA-064` 已完成并收口
     已完成缓存优先会话切换、`list_sessions` 延迟加载、`HomeWorkspace` staged hydration、`createSession()` collision-safe id、前端去重与 3 维度 spec 审核调优。TS 测试全部通过。
 25. `PA-065~068` Tokio 异步重构四卡已完成并收口
-    - `PA-065` 拆分 runtime ownership：`SessionStore` 提取为 `Arc<RwLock<>>` 独立域，16 个读面方法从 `Mutex<AgentRuntime>` 解耦
-    - `PA-066` 异步化 provider IO：`reqwest::blocking` → async `reqwest`（`block_on()` 桥接），provider.rs + tools.rs 双路径
-    - `PA-067` blocking 工作收口：`BlockingHelper::spawn` 统一 helper，6 个 Tauri command 迁移，PA-068 过渡标记
-    - `PA-068` per-session async turn task：`TurnTaskRegistry` 任务追踪，`spawn_turn_stream`/`spawn_graph_run_stream` 切换 async task 模型
-    四卡累计通过 22 次子智能体审核调优，Rust 测试 + 231 项 TS 测试全部通过。OpenSpec changes 已归档：`openspec/changes/archive/2026-06-25-async-refactor-tokio/`。
-      已完成 `TurnHistoryMessage` 扩展消息元数据（`turnId`/`status`/`modelName`/`tokenCount`/`reasoningContent`）、末端对齐投影 enrich 策略、`MessageStatus` 枚举、`stable_id()` 消费者标识符、前端 hydration 优先级重构，以及 5 个新增 Rust 测试 + 1 个前端测试。审核与代码调优已全部完成，审核记录：`02_REVIEWS/2026-06-22-pa059-spec-review.md`。
+     - `PA-065` 拆分 runtime ownership：`SessionStore` 提取为 `Arc<RwLock<>>` 独立域，16 个读面方法从 `Mutex<AgentRuntime>` 解耦
+     - `PA-066` 异步化 provider IO：`reqwest::blocking` → async `reqwest`（`block_on()` 桥接），provider.rs + tools.rs 双路径
+     - `PA-067` blocking 工作收口：`BlockingHelper::spawn` 统一 helper，6 个 Tauri command 迁移，PA-068 过渡标记
+     - `PA-068` per-session async turn task：`TurnTaskRegistry` 任务追踪，`spawn_turn_stream`/`spawn_graph_run_stream` 切换 async task 模型
+     四卡累计通过 22 次子智能体审核调优，Rust 测试 + 231 项 TS 测试全部通过。OpenSpec changes 已归档：`openspec/changes/archive/2026-06-25-async-refactor-tokio/`。
+26. `PA-070` 已完成 provider request retry 与退避边界治理
+    当前已完成 `retry.rs` substrate、provider/tool 退避原语收口、前端 whole-turn 自动重试退场、最终严格代码审核与一轮收尾调优。`call model` 的 request-level retry 现在明确收束在 `pony-agent-core`，而不是前端静默 whole-turn retry。
 
 ## 远期扩展
 
@@ -88,16 +89,16 @@
 ## 当前代码证据
 
 - retrieval contract 与默认实现：
-  [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/context.rs)
+  [context.rs](crates/pony-agent-core/src/agent/context.rs)
 - long-term memory 独立边界与稳定事实来源：
-  [session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+  [session.rs](crates/pony-agent-core/src/agent/session.rs)
 - runtime 接入：
-  [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
+  [runtime.rs](crates/pony-agent-core/src/agent/runtime.rs)
 - graph handoff 与 planner 收口：
-  [graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs)
-  [planner.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/planner.rs)
+  [graph.rs](crates/pony-agent-core/src/agent/graph.rs)
+  [planner.rs](crates/pony-agent-core/src/agent/planner.rs)
 - 宿主 retrieval-first 读面：
-  [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+  [control_plane.rs](crates/pony-agent-core/src/agent/control_plane.rs)
   [lib.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/lib.rs)
 - 架构边界文档：
   [context-state-subsystem.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)
@@ -143,7 +144,9 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 4. `PA-056` context assembly and cache strategy
    在 `PA-025 / PA-029` 已经提供第一版上下文观测与缓存 telemetry 的基础上，把 system prompt、runtime facts、project instructions、conversation carry 与长期记忆扩展点正式统一到同一套上下文分层架构中。
 5. 前端卡顿根因定位
-    PA-057 已交付完整的前端 flight recorder 与 stall 诊断体系。后续可通过分析 frontend-diagnostics.db 中的 rAF gap / timer drift / longtask 数据定位剩余卡顿。
+     PA-057 已交付完整的前端 flight recorder 与 stall 诊断体系。后续可通过分析 frontend-diagnostics.db 中的 rAF gap / timer drift / longtask 数据定位剩余卡顿。
+6. `PA-070` 已完成，不再作为近线候选
+    当前 canonical spec 已同步到 `openspec/specs/provider-retry-and-backoff-boundary/spec.md`，archive 已完成。后续若继续推进显式 turn-level retry，应以新 change 承接，而不是回灌已完成变更。
 
 ## 关联入口
 

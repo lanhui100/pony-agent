@@ -190,6 +190,7 @@
 - 继续观察真实 provider 下“大体积工具结果”的 follow-up 上限与压缩策略，避免把 provider 限制误判为 adapter 问题
 - 继续确认哪些宿主能力应该走 adapter，哪些仍属于桌面端专有实现
 - 继续把 `SecretStore` 与 provider registry 的边界稳定下来，为未来 HTTP / SSE / CLI / 桌面宿主复用做准备
+- 若未来继续推进显式 turn-level retry，应以新 change 承接 `startReason / run-control summary` 的控制面合同，不再回灌本轮已归档的 request-level retry 变更。
 
 ## 2026-05-23 收口补充
 

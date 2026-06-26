@@ -4,6 +4,7 @@ import { initFrontendFlightRecorder } from "@/lib/frontend-flight-recorder";
 import { useProviderStore } from "@/stores/providers";
 import { useSettingsStore } from "@/stores/settings";
 import { deriveGraphRunFromRunState, extractActiveTaskFocus, normalizeGraphRunPhase } from "../types/runtime";
+import { isRetryableError } from "@/lib/error-utils";
 import type {
   AttachmentAsset,
   AttachmentAssetFilter,
@@ -1905,18 +1906,6 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.streamBufferTurnId = null;
   state.streamBufferText = "";
   state.streamBufferReasoning = "";
-}
-
-function isTimeoutErrorDetail(detail: string | null | undefined) {
-  const normalized = detail?.trim().toLowerCase() ?? "";
-  if (!normalized) {
-    return false;
-  }
-
-  return normalized.includes("timeout")
-    || normalized.includes("timed out")
-    || normalized.includes("deadline has elapsed")
-    || normalized.includes("超时");
 }
 
 function filterDeletingSessions(
@@ -6086,7 +6075,6 @@ export const useRuntimeStore = defineStore("runtime", {
       });
 
       const failedUnlisten = await safeListen<TurnStreamEvent>("turn:failed", ({ payload }) => {
-        // Detect terminal event for a background session's turn
         if (payload.sessionId) {
           const bg = this.runningSessionMap[payload.sessionId];
           if (bg && bg.turnId === payload.turnId) {
@@ -6132,9 +6120,7 @@ export const useRuntimeStore = defineStore("runtime", {
           buildAssistantModelLabel(payload.providerName, payload.providerModel)
         );
 
-        assistantMessage.content = payload.text ?? DEFAULT_FAILED_TURN_MESSAGE;
         assistantMessage.reasoningContent = normalizeReasoningContent(payload.reasoningContent ?? null);
-        assistantMessage.status = "error";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
 
         // Pre-compute values for later stages
@@ -6153,7 +6139,17 @@ export const useRuntimeStore = defineStore("runtime", {
         const failedRunId = this.activeRunId;
         const failedNodeId = this.visibleNodeId;
 
-        // Keep terminal UI state consistent even before deferred trace work runs.
+        // --- Retry check: retired per PA-070 contract ---
+        // Frontend silent whole-turn auto-retry is retired.
+        // Provider request-level retry is handled inside pony-agent-core.
+        // If explicit turn-level retry is needed in the future, it must be
+        // a separate control-plane orchestration action, not a silent frontend timer.
+
+        // Standard failed path:
+        assistantMessage.content = payload.text ?? DEFAULT_FAILED_TURN_MESSAGE;
+        assistantMessage.status = "error";
+        assistantMessage.errorDetail = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
+
         this.phase = resolveRuntimePhaseFromEvent(payload, "failed");
         this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -6228,17 +6224,12 @@ export const useRuntimeStore = defineStore("runtime", {
           error: payload.error ?? DEFAULT_FAILED_TURN_ERROR
         }, false);
 
-        // Yield to browser
         window.setTimeout(() => {
           if (this.sessionId !== failedSessionId || isHistoricalMode(this.historyCursorMode)) {
             return;
           }
-
-          // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
           this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
           this.syncToolMessages(payload.turnId, payload.toolActivities, false);
-
-          // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
           runLowPriorityTurnWork(() => {
             this.persistHistory();
             void this.loadRetrievedContextState(failedSessionId, {
@@ -6267,6 +6258,7 @@ export const useRuntimeStore = defineStore("runtime", {
             return;
           }
         }
+
         if (this.activeTurnId !== payload.turnId) {
           return;
         }
@@ -6571,7 +6563,7 @@ export const useRuntimeStore = defineStore("runtime", {
       const lastAssistantMessage = [...this.messages]
         .reverse()
         .find((entry) => entry.role === "assistant") ?? null;
-      const retryingAfterTimeout = isTimeoutErrorDetail(lastAssistantMessage?.errorDetail);
+      const retryingAfterTimeout = isRetryableError(lastAssistantMessage?.errorDetail);
       const providerMessage = buildProviderUserMessage(message, images);
       const displayMessage = buildDisplayedUserMessage(message, images);
       const payload: TurnInput = {

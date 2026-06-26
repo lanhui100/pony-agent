@@ -8,13 +8,6 @@ pub struct TurnTaskRegistry {
 }
 
 impl TurnTaskRegistry {
-    pub fn new() -> Self {
-        Self {
-            tasks: Mutex::new(HashMap::new()),
-            max_concurrent: None,
-        }
-    }
-
     pub fn with_max_concurrent(max: usize) -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),

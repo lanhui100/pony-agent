@@ -931,13 +931,16 @@ impl ToolRouter {
 
         let api_key = match crate::agent::config::ProviderRegistryStore::new().get_service_api_key("exa") {
             Some(key) => key,
-            None => {
-                return error_result(
-                    TOOL_WEB_SEARCH_QUERY,
-                    "missing_api_key",
-                    "未设置 EXA_API_KEY。请在设置页面输入 Exa API Key，或设置 EXA_API_KEY 环境变量。".to_string(),
-                    Some("访问 https://dashboard.exa.ai 获取 API Key。".to_string()),
-                )
+            None => match std::env::var("EXA_API_KEY").ok() {
+                Some(key) if !key.trim().is_empty() => key,
+                _ => {
+                    return error_result(
+                        TOOL_WEB_SEARCH_QUERY,
+                        "missing_api_key",
+                        "未设置 EXA_API_KEY。请在设置页面输入 Exa API Key，或设置 EXA_API_KEY 环境变量。".to_string(),
+                        Some("访问 https://dashboard.exa.ai 获取 API Key。".to_string()),
+                    )
+                }
             }
         };
 
@@ -3526,13 +3529,20 @@ fn retry_tool_timeout<T, F>(tool_name: &str, mut operation: F) -> Result<T, Stri
 where
     F: FnMut() -> Result<T, String>,
 {
+    let config = crate::agent::retry::BackoffConfig {
+        max_retries: TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS.saturating_sub(1),
+        initial_delay_ms: 500,
+        multiplier: 2.0,
+        max_delay_ms: 8000,
+        total_budget_ms: 30_000,
+        jitter_kind: crate::agent::retry::JitterKind::None,
+    };
     let mut last_error = String::new();
-    for attempt in 1..=TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS {
-        if attempt > 1 {
-            let delay_ms = std::cmp::min(500 * (1 << (attempt - 2)), 8000);
-            thread::sleep(Duration::from_millis(delay_ms));
+    for attempt in 0..=config.max_retries {
+        if attempt > 0 {
+            let delay = crate::agent::retry::compute_delay(attempt, &config, 0.5);
+            thread::sleep(delay);
         }
-
         match operation() {
             Ok(value) => return Ok(value),
             Err(error) => {
@@ -3540,14 +3550,13 @@ where
                 if !is_tool_timeout_message(&last_error) {
                     return Err(last_error);
                 }
-                if attempt == TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS {
+                if attempt == config.max_retries {
                     return Err(last_error);
                 }
                 let _ = (tool_name, preview_text(&last_error, 180));
             }
         }
     }
-
     Err(last_error)
 }
 
@@ -5081,6 +5090,8 @@ mod tests {
 
     #[test]
     fn web_fetch_returns_success_payload_for_http_response() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
         let url = serve_single_http_response(
@@ -5118,6 +5129,8 @@ mod tests {
 
     #[test]
     fn web_fetch_returns_structured_http_error_for_non_2xx_response() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
         let url = serve_single_http_response(
@@ -5156,6 +5169,8 @@ mod tests {
 
     #[test]
     fn web_fetch_returns_timeout_error_after_retries() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
         let url = serve_timeout_http_response(150);
@@ -5190,6 +5205,8 @@ mod tests {
 
     #[test]
     fn web_search_returns_timeout_error_after_retries() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
         let base_url = serve_timeout_http_response(150);
@@ -5563,7 +5580,7 @@ mod tests {
         let result = retry_tool_timeout(TOOL_WEB_FETCH_URL, || {
             let next = attempts.get() + 1;
             attempts.set(next);
-            if next < 3 {
+            if next < 2 {
                 Err("timeout: request timed out".to_string())
             } else {
                 Ok("ok")
@@ -5572,6 +5589,6 @@ mod tests {
         .expect("timeout retry should eventually succeed");
 
         assert_eq!(result, "ok");
-        assert_eq!(attempts.get(), 3);
+        assert_eq!(attempts.get(), 2);
     }
 }

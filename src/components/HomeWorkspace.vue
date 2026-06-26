@@ -129,7 +129,6 @@ const latestUserMessageRef = ref<HTMLElement | null>(null);
 const latestAgentMessageRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
 const checkpointPickerOpen = ref(false);
-const retryState = computed(() => runtimeStore.retryState);
 const forkSummaryOpenForNodeId = ref<string | null>(null);
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const COMPOSER_BUFFER_PX = 220;
@@ -676,21 +675,6 @@ function shouldRenderAssistantAsError(turn: TurnBucket): boolean {
   }
 
   return true;
-}
-
-function isAssistantRetryPending(message: ChatMessage | null): boolean {
-  return message?.status === "retry_pending";
-}
-
-function canCancelRetry(): boolean {
-  return !!retryState.value && !retryState.value.aborted;
-}
-
-function cancelRetry() {
-  runtimeStore.cancelRetry();
-  runtimeStore.phase = "failed";
-  runtimeStore.isSubmitting = false;
-  runtimeStore.activeTurnId = null;
 }
 
 function assistantErrorCopyKey(turnId: string) {
@@ -1494,7 +1478,7 @@ watch(
               </div>
             </div>
             <div
-              v-if="turn.assistant && assistantHasVisibleContent(turn.assistant) && !shouldRenderAssistantAsError(turn) && turn.assistant.status !== 'retry_pending'"
+              v-if="turn.assistant && assistantHasVisibleContent(turn.assistant) && !shouldRenderAssistantAsError(turn)"
               v-motion
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
@@ -1502,7 +1486,6 @@ watch(
               class="assistant-response-panel my-0.5"
             >
               <MarkdownRenderer
-                v-if="!isAssistantRetryPending(turn.assistant)"
                 :content="isAssistantStreaming(turn.assistant) ? assistantDisplayStableContent(turn.assistant) : turn.assistant.content"
                 wrapper-class="assistant-markdown text-sm"
                 :tone-class="assistantTone(turn.assistant)"
@@ -1517,26 +1500,6 @@ watch(
               >
                 {{ assistantDisplayFadeContent(turn.assistant) }}
               </span>
-            </div>
-
-            <!-- Retry pending content -->
-            <div
-              v-if="turn.assistant?.status === 'retry_pending'"
-              role="status"
-              aria-live="polite"
-              class="assistant-response-panel my-0.5 border-l-2 border-rose-400 pl-3 py-1 text-sm text-rose-800"
-              data-testid="workspace-retry-pending"
-            >
-              <span>{{ turn.assistant.content }}</span>
-              <button
-                v-if="canCancelRetry()"
-                class="ml-3 inline-flex items-center gap-1 rounded-[0.35rem] px-2 py-0.5 text-[11px] text-stone-600 hover:bg-rose-50 hover:text-rose-700"
-                type="button"
-                @click="cancelRetry()"
-              >
-                <Square class="h-3 w-3" />
-                取消重试
-              </button>
             </div>
 
             <!-- Error detail panel (raw error for debugging) -->

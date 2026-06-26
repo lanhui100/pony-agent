@@ -2,6 +2,9 @@ use crate::agent::config::{
     ProviderReasoningEffort, ResolvedProviderSelection, ThinkingParamPattern,
 };
 use crate::agent::input::TurnInputImage;
+use crate::agent::retry::{
+    compute_delay, BackoffConfig, JitterKind, ProviderRetryPolicy, RetryBudget, RetryDecision, StreamState,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::tools::{builtin_tool_contract_views, ToolCall, ToolDefinition, ToolResult};
 use reqwest::Client;
@@ -676,7 +679,17 @@ impl ProviderManager {
                                     "followup:stream-error protocol=openai provider={} model={} reason={}",
                                     self.config.provider_name, request.model, sync_error
                                 ));
-                                Err(sync_error)
+                                Ok(ProviderResponse {
+                                    output_text: String::new(),
+                                    tool_call: None,
+                                    reasoning_content: None,
+                                    reasoning_content_value: None,
+                                    assistant_message: None,
+                                    provider_source: "provider_followup_stream_sync_fallback".to_string(),
+                                    provider_mode: "fallback".to_string(),
+                                    fallback_reason: Some(format!("stream_followup_failed;provider_followup_failed;{sync_error}")),
+                                    token_usage: None,
+                                })
                             }
                         };
                         response
@@ -2750,48 +2763,50 @@ fn extract_provider_error_detail(err: &str) -> String {
     preview_text(err, 240)
 }
 
-fn is_provider_timeout_error(err: &str) -> bool {
-    let normalized = err.to_ascii_lowercase();
-    normalized.contains("type=timeout")
-        || normalized.contains("timeout")
-        || normalized.contains("timed out")
-        || normalized.contains("deadline has elapsed")
-}
-
 fn retry_provider_timeout<T, F>(label: &str, mut operation: F) -> Result<T, String>
 where
     F: FnMut() -> Result<T, String>,
 {
-    let mut last_error = String::new();
-    for attempt in 1..=PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS {
-        if attempt > 1 {
-            let delay_ms = std::cmp::min(500 * (1 << (attempt - 2)), 8000);
-            provider_log(format!(
-                "{}:retry attempt={}/{} delay={}ms",
-                label, attempt, PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS, delay_ms
-            ));
-            std::thread::sleep(Duration::from_millis(delay_ms));
+    let config = BackoffConfig {
+        max_retries: PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS.saturating_sub(1),
+        initial_delay_ms: 500,
+        multiplier: 2.0,
+        max_delay_ms: 8000,
+        total_budget_ms: 30_000,
+        jitter_kind: JitterKind::None,
+    };
+    let policy = ProviderRetryPolicy::new(config);
+    let mut budget = RetryBudget::new(config.max_retries, config.total_budget_ms);
+
+    for attempt in 0..=config.max_retries {
+        let delay = compute_delay(attempt, &config, 0.5);
+        if attempt > 0 {
+            std::thread::sleep(delay);
+            budget.record_attempt(delay.as_millis() as u64);
         }
         match operation() {
-            Ok(response) => return Ok(response),
+            Ok(value) => return Ok(value),
             Err(err) => {
-                last_error = extract_provider_error_detail(&err);
-                let is_timeout = is_provider_timeout_error(&err);
-                provider_log(format!(
-                    "{}:retry attempt={}/{} failed timeout={} error_detail={}",
-                    label,
+                let last_error = extract_provider_error_detail(&err);
+                let failure = policy.classify(&err);
+                let decision = policy.decide(
+                    &failure,
+                    &budget,
                     attempt,
-                    PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS,
-                    is_timeout,
-                    last_error
+                    None,
+                    StreamState::NoDelta,
+                );
+                provider_log(format!(
+                    "{}:attempt={}/{} failed class={:?} decision={:?}",
+                    label, attempt + 1, config.max_retries + 1, failure, decision
                 ));
-                if !is_timeout || attempt == PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS {
+                if !matches!(decision, RetryDecision::Retry { .. }) {
                     return Err(last_error);
                 }
             }
         }
     }
-    Err(last_error)
+    Err("retry exhausted".to_string())
 }
 
 fn openai_followup_tool_result_message(tool_call: &ToolCall, tool_result: &ToolResult) -> Value {
@@ -4474,6 +4489,8 @@ mod tests {
 
     #[test]
     fn openai_reasoning_tool_followup_stream_attempts_live_stream_before_fallback() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
         let config = ResolvedProviderSelection {
             requested_name: "ppx".to_string(),
             provider_name: "ppx".to_string(),
@@ -4557,10 +4574,11 @@ mod tests {
 
     #[test]
     fn provider_timeout_classifier_matches_timeout_errors() {
-        assert!(is_provider_timeout_error(
-            "调用 provider 失败：operation timed out；type=timeout；elapsed=45000ms"
-        ));
-        assert!(!is_provider_timeout_error("provider 返回错误状态：500"));
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        assert!(policy
+            .classify("调用 provider 失败：operation timed out；type=timeout；elapsed=45000ms")
+            .is_retryable());
+        assert!(!policy.classify("provider 返回错误状态：500").is_retryable());
     }
 
     #[test]

@@ -17,6 +17,8 @@
   说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排
   说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
+- `PA-075` 清理会话日志中的过期路径引用 (P3)
+
 ## Ready
 
 - `PA-069-A` 工具文件 IO 从 runtime 锁内移出 (P1)
@@ -30,8 +32,10 @@
 - `PA-069-E` 锁序规范文档化 (P2)
     说明：文档化 runtime → sessions_rwlock 锁序，防止 ABBA 死锁。
 
-- `PA-044` agent core 多端基础设施边界加固
-    说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。OpenSpec change 已建立为 `harden-agent-core-infrastructure-boundary`。
+- `PA-044` agent core 多端基础设施边界加固 (已归档 OpenSpec change)
+    说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。
+
+
 
 ## In Progress
 
@@ -46,6 +50,24 @@
 - 暂无
 
 ## Done
+
+- `PA-072` 决议 checkpoint message controls change (P1)
+    说明：已归档。`add-checkpoint-message-controls-and-bottom-menu` 的 checkpoint UX 核心能力已在代码中基本实现，剩余前端打磨与当前基础设施优先级不匹配。归档位置：`openspec/changes/archive/2026-06-27-add-checkpoint-message-controls-and-bottom-menu/`。
+
+- `PA-071` 为基础设施变更补充架构文档 (P1)
+    说明：4 份架构文档已写入 `docs/architecture/`（runtime-ownership-split, async-provider-io-migration, blocking-helper-unification, per-session-async-turn-task-model），INDEX.md 已更新。
+
+- `PA-073` 推进统一 retry 边界到 design/spec 阶段 (P2)
+    说明：已完成 design/spec 推进，后续 PA-070 已继续完成实现、审核、canonical spec 同步与 archive 收口。
+
+- `PA-070` 统一 provider request retry 与退避边界 (P1)
+    说明：已完成 `retry.rs` substrate、provider/tool 退避原语收口、前端 whole-turn auto retry 退场、canonical spec 同步与 archive 收口。归档位置：`openspec/changes/archive/2026-06-27-unify-provider-retry-and-backoff-boundary/`。
+
+- `PA-074` 重写 Rust 智能体开发指南 (P2)
+    说明：`docs/guides/rust-agent.md` 已全面重写，覆盖 22 模块、关键 trait、开发工作流、测试策略。
+
+- `PA-075` 清理会话日志中的过期路径引用 (P3)
+    说明：63 个文件、200+ 处 `src-tauri/src/agent/` → `crates/pony-agent-core/src/agent/` 路径替换完成。98_IMPORTS/ 中 20 处绝对路径已改为相对路径。
 
 - `PA-068` 接入 per-session async turn task 模型
     说明：已完成 `TurnTaskRegistry` per-session 任务追踪、`spawn_turn_stream`/`spawn_graph_run_stream` 从 `spawn_blocking` 切换到 `tauri::async_runtime::spawn` + 内层 `spawn_blocking` 的 async task 模型、`TaskCleanupGuard` 自动反注册、`abort_all` 挂钩窗口关闭事件。多 session 通过 `TurnTaskRegistry` 实现独立任务身份。Rust 测试 30 项 + TS 测试 231 项全部通过，3 轮并行智能体审核验收。
@@ -95,6 +117,9 @@
   说明：已完成第二波工具面 spec、任务拆分、`opencode / deepseek-v4-flash` 审核采纳、canonical spec 同步与 OpenSpec 归档；对应实现卡 `PA-051 ~ PA-054` 已全部完成并验证。
 - `PA-056` 上下文构建与缓存命中策略重构
   说明：已完成 layered context 实现、`context_refresh_reason / instruction_scope_sources / conversation_carry_mode` 观测落点、显式 `Coding / Work` 配置闭环、`BASE_SYSTEM_PROMPT` 中文语义恢复、小窗口 domain profile 跳过、runtime teardown 稳定性修复、canonical spec 同步、OpenSpec 归档，以及 3 轮 `opencode / deepseek-v4-flash` 代码审核与 follow-up 调优。
+
+- `PA-070` 统一 provider request retry 与退避边界
+    说明：已完成 `retry.rs` 核心 substrate、provider/tool 退避对齐、前端 whole-turn auto retry 退场、OpenSpec canonical spec 同步与 archive 收口，并通过 3 路 spec 审核 + 2 路严格代码审核 + 1 轮最终代码调优。Canonical spec：`openspec/specs/provider-retry-and-backoff-boundary/spec.md`。
 
 - `PA-049` 工具观测读面、前端呈现与迁移验收
   说明：已完成实现、单测/e2e/tauri smoke、OpenSpec validate 与收口同步。
