@@ -26,6 +26,7 @@ import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
 import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode, HistoryNode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
+import { extractErrorMessage } from "@/lib/error-utils";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
 import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 
@@ -128,6 +129,7 @@ const latestUserMessageRef = ref<HTMLElement | null>(null);
 const latestAgentMessageRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
 const checkpointPickerOpen = ref(false);
+const retryState = computed(() => runtimeStore.retryState);
 const forkSummaryOpenForNodeId = ref<string | null>(null);
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const COMPOSER_BUFFER_PX = 220;
@@ -524,6 +526,17 @@ function extractDescription(detail: string | null | undefined): string {
   return detail?.split("\n")[0]?.trim() ?? "";
 }
 
+function extractToolDescription(tool: Pick<ChatMessage, "detail" | "content" | "status">): string {
+  if (tool.status === "error") {
+    return extractErrorMessage(tool.content)
+      || extractErrorMessage(tool.detail)
+      || extractDescription(tool.detail)
+      || extractDescription(tool.content);
+  }
+
+  return extractDescription(tool.detail);
+}
+
 function toolMergeKey(tool: Pick<ChatMessage, "canonicalToolName" | "toolName" | "displayNameZh">) {
   return tool.canonicalToolName?.trim() || tool.toolName?.trim() || tool.displayNameZh?.trim() || "";
 }
@@ -534,7 +547,7 @@ function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
     const last = result[result.length - 1];
     const mergeKey = toolMergeKey(tool);
     if (last && mergeKey && last.mergeKey === mergeKey && last.status !== "error") {
-      last.description = extractDescription(tool.detail);
+      last.description = extractToolDescription(tool);
       last.status = tool.status ?? "done";
       last.durationSeconds = tool.durationSeconds ?? null;
       last.count++;
@@ -546,7 +559,7 @@ function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
         canonicalToolName: tool.canonicalToolName ?? null,
         displayNameZh: tool.displayNameZh ?? null,
         mergeKey,
-        description: extractDescription(tool.detail),
+        description: extractToolDescription(tool),
         status: tool.status ?? "done",
         durationSeconds: tool.durationSeconds ?? null,
         count: 1,
@@ -633,49 +646,51 @@ function assistantTone(message: ChatMessage | null) {
     return "";
   }
 
-  if (isAssistantTimeoutRetrying(message)) {
-    return "text-rose-800";
-  }
-
-  if (message.status === "pending") {
-    return "text-stone-800";
-  }
-
-  if (message.status === "error") {
-    return "text-rose-800";
-  }
-
   return "text-stone-800";
 }
 
-function isAssistantTimeoutRetrying(message: ChatMessage | null) {
-  if (!message || message.status !== "pending") {
+function latestTraceForTurn(turnId: string) {
+  return [...turnTraceHistory.value].reverse().find((trace) => trace.turnId === turnId) ?? null;
+}
+
+function assistantErrorDetail(turn: TurnBucket): string {
+  if (turn.assistant?.status !== "error") return "";
+
+  const latestTrace = latestTraceForTurn(turn.turnId);
+  const modelError = [...(latestTrace?.traceTimeline ?? [])]
+    .reverse()
+    .find((entry) => entry.kind === "call_model" && entry.error?.trim())
+    ?.error?.trim();
+
+  return modelError || "";
+}
+
+function shouldRenderAssistantAsError(turn: TurnBucket): boolean {
+  if (turn.assistant?.status !== "error") {
     return false;
   }
 
-  const errorDetail = message.errorDetail?.trim().toLowerCase() ?? "";
-  return Boolean(errorDetail) && (
-    errorDetail.includes("timeout")
-    || errorDetail.includes("timed out")
-    || errorDetail.includes("deadline has elapsed")
-    || errorDetail.includes("超时")
-  );
-}
-
-function assistantPendingStatusLabel(message: ChatMessage | null) {
-  if (!message || message.status !== "pending") {
-    return "";
+  const latestTrace = latestTraceForTurn(turn.turnId);
+  if (latestTrace?.phase === "completed") {
+    return false;
   }
 
-  return isAssistantTimeoutRetrying(message) ? "超时后错误重连中..." : "";
+  return true;
 }
 
-function assistantErrorDetail(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
+function isAssistantRetryPending(message: ChatMessage | null): boolean {
+  return message?.status === "retry_pending";
+}
 
-  return message.errorDetail?.trim() || message.content.trim();
+function canCancelRetry(): boolean {
+  return !!retryState.value && !retryState.value.aborted;
+}
+
+function cancelRetry() {
+  runtimeStore.cancelRetry();
+  runtimeStore.phase = "failed";
+  runtimeStore.isSubmitting = false;
+  runtimeStore.activeTurnId = null;
 }
 
 function assistantErrorCopyKey(turnId: string) {
@@ -1457,21 +1472,29 @@ watch(
                 :initial="{ opacity: 0, y: 4 }"
                 :animate="{ opacity: 1, y: 0 }"
                 :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.04 + idx * 0.025 }"
-                class="flex items-center gap-2 py-0.5 text-[12px] leading-5"
+                class="flex flex-col py-0.5 text-[12px] leading-5"
               >
-                <Wrench class="h-3 w-3 shrink-0 text-stone-400" />
-                <span v-if="tool.description" class="min-w-0 truncate text-stone-400">{{ tool.description }}</span>
-                <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
-                <span class="flex shrink-0 items-center gap-1 leading-none">
-                  <span v-if="tool.durationSeconds != null" class="text-[11px] text-stone-400">{{ (tool.durationSeconds).toFixed(1) }}s</span>
-                  <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
-                  <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
-                  <span v-else class="text-[11px] leading-none text-rose-500">!</span>
-                </span>
+                <div class="flex items-center gap-2">
+                  <Wrench class="h-3 w-3 shrink-0 text-stone-400" />
+                  <span
+                    v-if="tool.description"
+                    class="min-w-0 truncate"
+                    :class="tool.status === 'error' ? 'text-rose-600' : 'text-stone-400'"
+                  >
+                    {{ tool.description }}
+                  </span>
+                  <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
+                  <span class="flex shrink-0 items-center gap-1 leading-none">
+                    <span v-if="tool.durationSeconds != null" class="text-[11px] text-stone-400">{{ (tool.durationSeconds).toFixed(1) }}s</span>
+                    <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
+                    <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
+                    <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
+                  </span>
+                </div>
               </div>
             </div>
             <div
-              v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
+              v-if="turn.assistant && assistantHasVisibleContent(turn.assistant) && !shouldRenderAssistantAsError(turn) && turn.assistant.status !== 'retry_pending'"
               v-motion
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
@@ -1479,6 +1502,7 @@ watch(
               class="assistant-response-panel my-0.5"
             >
               <MarkdownRenderer
+                v-if="!isAssistantRetryPending(turn.assistant)"
                 :content="isAssistantStreaming(turn.assistant) ? assistantDisplayStableContent(turn.assistant) : turn.assistant.content"
                 wrapper-class="assistant-markdown text-sm"
                 :tone-class="assistantTone(turn.assistant)"
@@ -1493,29 +1517,44 @@ watch(
               >
                 {{ assistantDisplayFadeContent(turn.assistant) }}
               </span>
-              <p
-                v-if="assistantPendingStatusLabel(turn.assistant)"
-                class="mt-2 text-[11px] leading-5 text-rose-700"
-                data-testid="workspace-assistant-pending-status"
-              >
-                {{ assistantPendingStatusLabel(turn.assistant) }}
-              </p>
             </div>
+
+            <!-- Retry pending content -->
+            <div
+              v-if="turn.assistant?.status === 'retry_pending'"
+              role="status"
+              aria-live="polite"
+              class="assistant-response-panel my-0.5 border-l-2 border-rose-400 pl-3 py-1 text-sm text-rose-800"
+              data-testid="workspace-retry-pending"
+            >
+              <span>{{ turn.assistant.content }}</span>
+              <button
+                v-if="canCancelRetry()"
+                class="ml-3 inline-flex items-center gap-1 rounded-[0.35rem] px-2 py-0.5 text-[11px] text-stone-600 hover:bg-rose-50 hover:text-rose-700"
+                type="button"
+                @click="cancelRetry()"
+              >
+                <Square class="h-3 w-3" />
+                取消重试
+              </button>
+            </div>
+
+            <!-- Error detail panel (raw error for debugging) -->
             <details
-              v-if="turn.assistant?.status === 'error' && assistantErrorDetail(turn.assistant)"
+              v-if="shouldRenderAssistantAsError(turn) && assistantErrorDetail(turn)"
               class="conversation-disclosure conversation-error-panel mt-3 group"
             >
               <summary class="conversation-disclosure-summary text-rose-700">
                 <div class="flex min-w-0 items-center gap-2">
                   <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-rose-500" />
-                  <span>错误详情</span>
+                  <span class="text-rose-700">错误详情</span>
                 </div>
                 <div class="ml-auto flex items-center gap-1">
                   <button
                     class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-rose-50 hover:text-rose-600"
                     type="button"
                     :data-testid="`workspace-error-copy-${turn.turnId}`"
-                    @click.stop="copyErrorDetail(turn.turnId, assistantErrorDetail(turn.assistant))"
+                    @click.stop="copyErrorDetail(turn.turnId, assistantErrorDetail(turn))"
                   >
                     <component
                       :is="copiedErrorDetailKey === assistantErrorCopyKey(turn.turnId) ? Check : Copy"
@@ -1529,7 +1568,7 @@ watch(
                 class="whitespace-pre-wrap break-words px-3 py-2 text-[11px] leading-4 text-rose-900"
                 data-testid="workspace-error-detail"
               >
-                {{ assistantErrorDetail(turn.assistant) }}
+                {{ assistantErrorDetail(turn) }}
               </div>
             </details>
 
