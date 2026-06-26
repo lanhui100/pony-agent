@@ -46,7 +46,7 @@ const SUMMARY_ITEM_LIMIT: usize = 3;
 const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000;
 const MAX_RUN_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_WEB_TIMEOUT_MS: u64 = 15_000;
-const TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 5;
+const TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
