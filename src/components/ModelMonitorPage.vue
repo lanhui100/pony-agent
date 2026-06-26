@@ -665,7 +665,7 @@ onMounted(() => {
                         <div class="mt-1">{{ capabilityFailureLabel(activity.capabilityInvocation?.failureKind) }}</div>
                       </div>
                     </div>
-                    <div class="mt-2 text-[12px] leading-6 text-stone-300">{{ activity.summary }}</div>
+                    <div class="mt-2 text-[12px] leading-6 text-stone-300">{{ activity.description }}</div>
                     <div class="mt-2 text-[11px] text-stone-400">
                       permission: {{ permissionScopeLabel(activity) }} · approval:
                       {{ approvalLabel(activity) }} · source: {{ permissionSourceLabel(activity) }}

@@ -51,7 +51,8 @@ pub struct TurnToolActivity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name_zh: Option<String>,
     pub status: String,
-    pub summary: String,
+    #[serde(alias = "summary")]
+    pub description: String,
     pub arguments_text: Option<String>,
     pub result_text: Option<String>,
     pub duration_seconds: Option<f64>,
@@ -282,7 +283,8 @@ fn tool_activities_running(active_call: &ToolCall) -> Vec<TurnToolActivity> {
         canonical_tool_name: Some(product_canonical_tool_name(&active_call.name).to_string()),
         display_name_zh: tool_display_metadata_for_name(&active_call.name).display_name_zh,
         status: "running".to_string(),
-        summary: running_summary(active_call),
+        description: extract_llm_description(&active_call.arguments)
+            .unwrap_or_else(|| running_summary(active_call)),
         arguments_text: Some(pretty_json(&active_call.arguments)),
         result_text: None,
         duration_seconds: None,
@@ -307,7 +309,9 @@ fn tool_activities_after_result(
         canonical_tool_name: Some(product_canonical_tool_name(&active_call.name).to_string()),
         display_name_zh: tool_display_metadata_for_name(&active_call.name).display_name_zh,
         status: activity_status(result.status.as_str(), composite_result_status(&parsed)),
-        summary: completed_summary(active_call, result.status.as_str(), &parsed),
+        description: extract_llm_description(&active_call.arguments)
+            .or_else(|| extract_description_from_result(&parsed))
+            .unwrap_or_else(|| completed_summary(active_call, result.status.as_str(), &parsed)),
         arguments_text: Some(pretty_json(&active_call.arguments)),
         result_text: Some(parent_result_text(&parsed, &result.output)),
         duration_seconds: Some(result.duration_ms as f64 / 1000.0),
@@ -335,6 +339,22 @@ fn pretty_json(value: &Value) -> String {
 
 fn parse_tool_output(output: &str) -> Value {
     serde_json::from_str::<Value>(output).unwrap_or_else(|_| Value::String(output.to_string()))
+}
+
+fn extract_llm_description(arguments: &Value) -> Option<String> {
+    arguments
+        .get("description")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn extract_description_from_result(parsed: &Value) -> Option<String> {
+    parsed
+        .get("description")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
 }
 
 fn running_summary(active_call: &ToolCall) -> String {
@@ -415,7 +435,8 @@ fn planned_child_activities(active_call: &ToolCall) -> Vec<TurnToolActivity> {
             canonical_tool_name: Some(product_canonical_tool_name(&step.name).to_string()),
             display_name_zh: tool_display_metadata_for_name(&step.name).display_name_zh,
             status: "planned".to_string(),
-            summary: step.summary,
+            description: extract_llm_description(&step.arguments)
+                .unwrap_or_else(|| step.summary.clone()),
             arguments_text: Some(pretty_json(&step.arguments)),
             result_text: None,
             duration_seconds: None,
@@ -486,7 +507,8 @@ fn nested_result_to_activity(
             "partial" | "error" | "aborted" => "error".to_string(),
             _ => "done".to_string(),
         },
-        summary: nested_summary(position, tool_name, aggregate_status, error_message),
+        description: extract_llm_description(&arguments)
+            .unwrap_or_else(|| nested_summary(position, tool_name, aggregate_status, error_message)),
         arguments_text: Some(pretty_json(&arguments)),
         result_text: Some(nested_result_text(&output, error_message)),
         duration_seconds,

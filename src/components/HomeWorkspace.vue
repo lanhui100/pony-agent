@@ -45,6 +45,18 @@ type TurnBucket = {
   user: ChatMessage | null;
   assistant: ChatMessage | null;
   tools: ChatMessage[];
+  mergedTools: MergedToolCall[];
+};
+
+type MergedToolCall = {
+  id: string;
+  toolName: string;
+  canonicalToolName: string | null;
+  displayNameZh: string | null;
+  description: string;
+  status: ChatMessage["status"];
+  durationSeconds: number | null;
+  count: number;
 };
 
 type ComposerActionKind = "submit" | "resume" | "continue" | "restart";
@@ -326,7 +338,8 @@ const turns = computed<TurnBucket[]>(() => {
       turnId: message.turnId,
       user: null,
       assistant: null,
-      tools: []
+      tools: [],
+      mergedTools: []
     };
 
     if (message.role === "user") {
@@ -338,6 +351,10 @@ const turns = computed<TurnBucket[]>(() => {
     }
 
     buckets.set(message.turnId, bucket);
+  }
+
+  for (const bucket of buckets.values()) {
+    bucket.mergedTools = mergeToolCalls(bucket.tools);
   }
 
   if (buckets.size === 0 && hasVisibleHistorySession.value && latestFailedTrace.value) {
@@ -357,7 +374,8 @@ const turns = computed<TurnBucket[]>(() => {
           : failedTrace.providerName ?? failedTrace.providerModel ?? null,
         errorDetail: errorSummary
       },
-      tools: []
+      tools: [],
+      mergedTools: []
     });
   }
 
@@ -387,7 +405,8 @@ const latestVisibleTurnLayoutSignature = computed(() => {
     latestTurn.turnId,
     latestTurn.user ? `user:${latestTurn.user.id}` : "user:-",
     latestTurn.assistant ? `assistant:${latestTurn.assistant.id}:${latestTurn.assistant.status ?? "done"}` : "assistant:-",
-    `tools:${latestTurn.tools.map((tool) => tool.id).join(",")}`
+    `tools:${latestTurn.tools.map((tool) => tool.id).join(",")}`,
+    `mtools:${latestTurn.mergedTools.map((t) => `${t.id}:${t.description}`).join(",")}`
   ].join("|");
 });
 
@@ -500,16 +519,34 @@ function formatAssistantModelLabel(modelName?: string | null) {
   return modelName?.trim() || "";
 }
 
-function formatTokenBadge(tokenCount?: number | null) {
-  return `T:${tokenCount != null ? tokenCount : "--"}`;
+function extractDescription(detail: string | null | undefined): string {
+  return detail?.split("\n")[0]?.trim() ?? "";
 }
 
-function formatToolDuration(durationSeconds?: number | null) {
-  if (durationSeconds == null) {
-    return "--";
+function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
+  const result: MergedToolCall[] = [];
+  for (const tool of tools) {
+    const last = result[result.length - 1];
+    if (last && last.canonicalToolName === tool.canonicalToolName && last.status !== "error") {
+      last.description = extractDescription(tool.detail);
+      last.status = tool.status ?? "done";
+      last.durationSeconds = tool.durationSeconds ?? null;
+      last.count++;
+      last.id = tool.id;
+    } else {
+      result.push({
+        id: tool.id,
+        toolName: tool.toolName ?? "",
+        canonicalToolName: tool.canonicalToolName ?? null,
+        displayNameZh: tool.displayNameZh ?? null,
+        description: extractDescription(tool.detail),
+        status: tool.status ?? "done",
+        durationSeconds: tool.durationSeconds ?? null,
+        count: 1,
+      });
+    }
   }
-
-  return `${Math.round(durationSeconds)}s`;
+  return result;
 }
 
 function assistantHeaderModel(message: ChatMessage | null) {
@@ -668,18 +705,6 @@ function copyAssistantResponse(turnId: string, content: string) {
       }
     }, 1200);
   }
-}
-
-function toolStatusIcon(message: ChatMessage) {
-  if (message.status === "error") {
-    return "error";
-  }
-
-  if (message.status === "done") {
-    return "done";
-  }
-
-  return "pending";
 }
 
 function checkpointEntryForTurn(turnId: string) {
@@ -1373,45 +1398,6 @@ watch(
             </div>
             <div class="mt-2 h-px w-full bg-stone-200/70"></div>
 
-            <details v-if="turn.tools.length" v-motion :initial="{ opacity: 0, y: 6 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }" class="conversation-disclosure conversation-tool-panel mt-2 group">
-              <summary class="conversation-disclosure-summary">
-                <Wrench class="h-3.5 w-3.5 shrink-0 text-stone-400" />
-                <span>工具调用</span>
-                <span class="inline-flex items-center rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] normal-case tracking-normal text-stone-500">{{ turn.tools.length }} 项</span>
-                <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
-              </summary>
-              <div class="conversation-tool-list mt-1 space-y-0.5">
-                <div
-                  v-for="(tool, idx) in turn.tools"
-                  :key="tool.id"
-                  v-motion
-                  :initial="{ opacity: 0, y: 4 }"
-                  :animate="{ opacity: 1, y: 0 }"
-                  :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.04 + idx * 0.025 }"
-                  class="conversation-tool-row flex items-center justify-between gap-3 px-1 py-0.5 text-[12px] leading-5 text-stone-500"
-                >
-                  <div class="flex min-w-0 items-center gap-2">
-                    <span class="truncate">{{ tool.toolName || "Tool" }}</span>
-                    <LoaderCircle
-                      v-if="toolStatusIcon(tool) === 'pending'"
-                      class="h-3.5 w-3.5 shrink-0 animate-spin text-stone-400"
-                    />
-                    <Check v-else-if="toolStatusIcon(tool) === 'done'" class="h-3.5 w-3.5 shrink-0 text-stone-500" />
-                    <span v-else class="text-[13px] leading-none text-rose-500">!</span>
-                  </div>
-                  <div class="flex shrink-0 items-center gap-2 text-[11px] text-stone-400">
-                    <span
-                      v-if="tool.tokenCount != null"
-                      class="inline-flex rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] normal-case tracking-normal text-stone-500"
-                    >
-                      {{ formatTokenBadge(tool.tokenCount) }}
-                    </span>
-                    <span v-if="tool.durationSeconds != null">{{ formatToolDuration(tool.durationSeconds) }}</span>
-                  </div>
-                </div>
-              </div>
-            </details>
-
             <details
               v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
               :open="shouldOpenReasoningBlock(turn.assistant)"
@@ -1419,27 +1405,22 @@ watch(
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
               :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }"
-              class="conversation-disclosure conversation-reasoning-panel mt-2 group"
+              class="conversation-disclosure conversation-reasoning-panel mt-1 mb-0.5 group p-0"
             >
               <summary class="conversation-disclosure-summary">
                 <div class="flex min-w-0 items-center gap-2">
-                  <Brain class="h-3.5 w-3.5 shrink-0 text-stone-400" />
+                  <Brain class="h-3 w-3 shrink-0 text-stone-400" />
                   <span>思考过程</span>
                 </div>
                 <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
               </summary>
-              <div class="mt-2">
+              <div class="mt-1 pl-5 whitespace-pre-wrap break-words text-[13px] leading-[1.4] text-stone-400">
                 <template v-if="assistantReasoning(turn.assistant)">
-              <MarkdownRenderer
-                :content="isAssistantReasoningStreaming(turn.assistant) ? assistantDisplayedReasoningStable(turn.assistant) : assistantReasoning(turn.assistant)"
-                wrapper-class="assistant-markdown assistant-reasoning-markdown text-[13px]"
-                :streaming="isAssistantReasoningStreaming(turn.assistant)"
-                @render-complete="handleMarkdownRenderComplete"
-              />
+                  <span class="reasoning-italic">{{ isAssistantReasoningStreaming(turn.assistant) ? assistantDisplayedReasoningStable(turn.assistant) : assistantReasoning(turn.assistant) }}</span>
                   <span
                     v-if="isAssistantReasoningStreaming(turn.assistant) && assistantDisplayedReasoningFade(turn.assistant)"
                     :key="`rfade-${turn.assistant.id}-${assistantDisplayedReasoningFadeKey(turn.assistant)}`"
-                    class="assistant-streaming-fade"
+                    class="assistant-streaming-fade reasoning-italic"
                     :style="assistantDisplayedReasoningFadeStyle(turn.assistant)"
                   >
                     {{ assistantDisplayedReasoningFade(turn.assistant) }}
@@ -1453,13 +1434,42 @@ watch(
                 </p>
               </div>
             </details>
+
+            <div
+              v-if="turn.mergedTools.length"
+              v-motion
+              :initial="{ opacity: 0, y: 6 }"
+              :animate="{ opacity: 1, y: 0 }"
+              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }"
+              class="conversation-tool-panel my-0.5 space-y-0.5"
+            >
+              <div
+                v-for="(tool, idx) in turn.mergedTools"
+                :key="tool.id"
+                v-motion
+                :initial="{ opacity: 0, y: 4 }"
+                :animate="{ opacity: 1, y: 0 }"
+                :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.04 + idx * 0.025 }"
+                class="flex items-center gap-2 py-0.5 text-[12px] leading-5"
+              >
+                <Wrench class="h-3 w-3 shrink-0 text-stone-400" />
+                <span v-if="tool.description" class="min-w-0 truncate text-stone-400">{{ tool.description }}</span>
+                <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
+                <span class="flex shrink-0 items-center gap-1 leading-none">
+                  <span v-if="tool.durationSeconds != null" class="text-[11px] text-stone-400">{{ (tool.durationSeconds).toFixed(1) }}s</span>
+                  <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
+                  <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
+                  <span v-else class="text-[11px] leading-none text-rose-500">!</span>
+                </span>
+              </div>
+            </div>
             <div
               v-if="turn.assistant && assistantHasVisibleContent(turn.assistant)"
               v-motion
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
               :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.04 }"
-              class="assistant-response-panel mt-4"
+              class="assistant-response-panel my-0.5"
             >
               <MarkdownRenderer
                 :content="isAssistantStreaming(turn.assistant) ? assistantDisplayStableContent(turn.assistant) : turn.assistant.content"
@@ -2125,39 +2135,6 @@ watch(
   font-style: italic;
 }
 
-:deep(.assistant-reasoning-markdown) {
-  color: #8d857a;
-  font-style: italic;
-  line-height: 1;
-}
-
-:deep(.assistant-reasoning-markdown p) {
-  line-height: 1;
-  margin: 0 0 1em;
-}
-
-:deep(.assistant-reasoning-markdown h1),
-:deep(.assistant-reasoning-markdown h2) {
-  font-size: inherit;
-  font-weight: 520;
-  line-height: 1;
-  color: #746d64;
-}
-
-:deep(.assistant-reasoning-markdown h3),
-:deep(.assistant-reasoning-markdown h4),
-:deep(.assistant-reasoning-markdown h5),
-:deep(.assistant-reasoning-markdown h6) {
-  font-size: inherit;
-  font-weight: 380;
-  line-height: 1;
-  color: #746d64;
-}
-
-:deep(.assistant-reasoning-markdown strong) {
-  color: #746d64;
-}
-
 :deep(.assistant-reasoning-markdown pre),
 :deep(.assistant-reasoning-markdown table),
 :deep(.assistant-reasoning-markdown blockquote) {
@@ -2380,6 +2357,10 @@ watch(
   to {
     transform: rotate(-360deg);
   }
+}
+
+.reasoning-italic {
+  font-style: italic !important;
 }
 
 </style>

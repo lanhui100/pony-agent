@@ -7454,11 +7454,11 @@ fn build_stream_progress_trace_timeline(
                 provider_mode: None,
                 build_context_observation: None,
                 tool_activities: grouped_tool_activities,
-                text: Some(parent_tool.summary.clone()),
+                text: Some(parent_tool.description.clone()),
                 reasoning_content: None,
                 fallback_reason: None,
                 error: if parent_tool.status == "error" {
-                    Some(parent_tool.summary.clone())
+                    Some(parent_tool.description.clone())
                 } else {
                     None
                 },
@@ -7658,11 +7658,11 @@ fn build_persisted_trace_timeline(
                 provider_mode: None,
                 build_context_observation: None,
                 tool_activities: grouped_tool_activities,
-                text: Some(parent_tool.summary.clone()),
+                text: Some(parent_tool.description.clone()),
                 reasoning_content: None,
                 fallback_reason: None,
                 error: if parent_tool.status == "error" {
-                    Some(parent_tool.summary.clone())
+                    Some(parent_tool.description.clone())
                 } else {
                     None
                 },
@@ -14159,7 +14159,7 @@ mod tests {
             canonical_tool_name: Some("Read".to_string()),
             display_name_zh: Some("读取".to_string()),
             status: "done".to_string(),
-            summary: "read file done".to_string(),
+            description: "read file done".to_string(),
             arguments_text: Some("{\"path\":\"src/main.ts\"}".to_string()),
             result_text: Some("{\"content\":\"ok\"}".to_string()),
             duration_seconds: Some(0.2),

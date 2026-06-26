@@ -95,7 +95,7 @@ export type ToolActivity = {
   canonicalToolName?: string | null;
   displayNameZh?: string | null;
   status: "planned" | "running" | "done" | "error";
-  summary: string;
+  description: string;
   argumentsText?: string | null;
   resultText?: string | null;
   durationSeconds?: number | null;

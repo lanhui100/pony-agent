@@ -2580,21 +2580,37 @@ impl ToolResult {
     }
 }
 
+fn with_description(schema: Value) -> Value {
+    let desc = json!({
+        "type": "string",
+        "description": "用中文极简描述本次工具调用的目的（可选），用于用户界面展示。例如「读取 config.json」「搜索 TokenManager」「运行单元测试」。"
+    });
+    if let Some(properties) = schema.as_object().and_then(|o| o.get("properties")).and_then(|p| p.as_object()) {
+        let mut props = properties.clone();
+        props.insert("description".to_string(), desc);
+        let mut schema = Value::Object(schema.as_object().unwrap().clone());
+        schema.as_object_mut().unwrap().insert("properties".to_string(), Value::Object(props));
+        schema
+    } else {
+        schema
+    }
+}
+
 pub fn builtin_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: TOOL_TIME_NOW,
             description: "返回当前本机 UNIX 时间戳，适合最小时间查询演示。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_ECHO_INPUT,
             description: "把传入的 text 原样返回，适合验证 tool roundtrip。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "text": {
@@ -2604,12 +2620,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["text"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_READ_FILE,
             description: "读取当前工作区内的文本文件内容预览，需要提供相对路径；大文件会被拒绝并引导改用分段读取。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -2619,12 +2635,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_READ_FILE_SEGMENT,
             description: "按行读取当前工作区文件的一段内容，适合大文件局部查看。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -2642,12 +2658,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_LIST_FILES,
             description: "列出当前工作区目录下的文件和子目录，可指定相对路径和返回条数。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -2660,12 +2676,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_PATH_INFO,
             description: "返回工作区内文件或目录的路径元信息，适合快速判断它是什么、大小和层级。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -2674,12 +2690,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_SEARCH_TEXT,
             description: "递归搜索工作区目录内的文本内容，返回命中的路径、行号和预览。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "query": {
@@ -2709,12 +2725,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["query"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_GLOB_FILES,
             description: "按路径 pattern 递归匹配工作区内文件，适合大代码库中的文件发现。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "pattern": {
@@ -2732,12 +2748,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["pattern"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WEB_FETCH_URL,
             description: "抓取指定 http/https URL 的正文内容预览，不承担搜索排序职责。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "url": {
@@ -2751,12 +2767,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["url"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WEB_SEARCH_QUERY,
             description: "执行外部搜索并返回结构化结果列表，不把抓取和搜索混为一个工具。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "query": {
@@ -2774,12 +2790,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["query"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_MCP_RESOURCE_READ,
             description: "通过 capability registry 读取指定 MCP 资源 capability 的只读内容，不混入普通工具执行。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "capabilityId": {
@@ -2793,12 +2809,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["capabilityId"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_TOOL_SEARCH,
             description: "搜索 capability registry 中可用的工具候选，作为 deferred / dynamic tool discovery 入口。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "query": {
@@ -2815,12 +2831,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_WRITE_FILE,
             description: "在当前工作区内新建或整文件覆写文本文件，可控制是否允许覆盖现有文件。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -2838,12 +2854,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_EDIT_FILE,
             description: "在当前工作区内按 oldText/newText 对文本文件做受控替换；默认只允许单一匹配。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -2865,12 +2881,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["path", "oldText", "newText"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_RUN_COMMAND,
             description: "在当前工作区内受控执行命令，返回 cwd、timeout、exitCode、stdout 和 stderr。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "command": {
@@ -2888,12 +2904,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["command"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_BATCH,
             description: "批量执行多个工具子调用，可选并发和 continueOnError，用于一次性收集多个上下文片段。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "parallel": {
@@ -2920,12 +2936,12 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 },
                 "required": ["calls"],
                 "additionalProperties": false
-            }),
+            })),
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_GATHER_CONTEXT,
             description: "围绕一个路径自动收集最合适的上下文：文件会拿 path info 和首段内容，目录会拿 path info 和文件列表，带 query 时会连同搜索结果一起返回。",
-            input_schema: json!({
+            input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -2953,7 +2969,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     }
                 },
                 "additionalProperties": false
-            }),
+            })),
         },
     ]
 }

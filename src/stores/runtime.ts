@@ -691,8 +691,8 @@ function buildFallbackRuntimeTraceTimeline(options: {
         label: `CALL TOOL #${modelIndex + 1} · ${parentTool.name}`,
         state: toolState,
         toolActivities: toolActivitiesForHop(normalizedToolActivities, parentTool.id),
-        text: parentTool.summary ?? null,
-        error: parentTool.status === "error" ? parentTool.summary : null
+        text: parentTool.description ?? null,
+        error: parentTool.status === "error" ? parentTool.description : null
       }));
       sequence += 1;
     }
@@ -1030,7 +1030,7 @@ function filterAttachmentAssets(assets: AttachmentAsset[], filter?: AttachmentAs
 }
 
 function buildToolMessageDetail(tool: ToolActivity) {
-  const blocks = [tool.summary.trim()];
+  const blocks = [tool.description.trim()];
 
   if (tool.argumentsText?.trim()) {
     blocks.push(`参数\n${tool.argumentsText.trim()}`);
