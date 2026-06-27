@@ -1655,7 +1655,7 @@ watch(orderedTurnTraceSignature, () => {
           </div>
         </section>
 
-        <section class="collapsible-shell mt-auto pb-1" :data-open="activePanel === 'trace'">
+        <section class="collapsible-shell mt-auto border-b border-stone-200/60 pb-4" :data-open="activePanel === 'trace'">
           <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="trace-panel-toggle" @click="togglePanel('trace')">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <Clock3 class="h-3.5 w-3.5" />

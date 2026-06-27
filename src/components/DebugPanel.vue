@@ -349,7 +349,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section v-if="isDev" class="collapsible-shell border-b border-stone-200/60 pb-4" :data-open="active">
+  <section v-if="isDev" class="collapsible-shell pb-4" :data-open="active">
     <button class="group flex w-full items-center justify-between gap-3 text-left" type="button" @click="emit('toggle')">
       <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
         <Bug class="h-3.5 w-3.5" />
