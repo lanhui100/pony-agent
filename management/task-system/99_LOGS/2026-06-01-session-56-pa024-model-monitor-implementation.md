@@ -6,7 +6,7 @@
 - Added backend aggregation helpers and targeted regression coverage on both Rust and frontend sides.
 
 ## Code Changes
-- Added monitor summary and drill-down contracts in [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs).
+- Added monitor summary and drill-down contracts in [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs).
 - Exposed `load_model_monitor_summary` and `load_model_monitor_session_drilldown` from [lib.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/lib.rs).
 - Added monitor runtime types in [runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/runtime.ts).
 - Rebuilt [ModelMonitorPage.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/ModelMonitorPage.vue) into a real monitor surface.

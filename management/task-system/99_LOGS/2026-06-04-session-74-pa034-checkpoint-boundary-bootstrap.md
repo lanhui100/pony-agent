@@ -17,7 +17,7 @@
    - 审核记录见 [2026-06-04-pa034-spec-review.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-04-pa034-spec-review.md)
    - 已采纳“runtime / session / execution_control / control_plane / runtime store 是最小闭环”与“phase/status 优先级兼容必须显式约束”等意见
 3. 完成第一轮 runtime 边界落地：
-   - `src-tauri/src/agent/runtime.rs` 已在 no-tool completion 与 tool follow-up completion 链路补：
+   - `crates/pony-agent-core/src/agent/runtime.rs` 已在 no-tool completion 与 tool follow-up completion 链路补：
      - `turn:phase_changed` + `checkpointing`
      - `turn:checkpoint_persisted` + `checkpointing`
    - completed persisted trace timeline 已新增 `checkpoint_persist` evidence
@@ -28,7 +28,7 @@
    - `runtime.rs` 现有 completion 测试已补 checkpoint boundary 顺序与 completed trace timeline 断言代码
    - `tests/runtime-store.spec.ts` 已补 checkpoint lifecycle event 消费断言
 6. 完成第二轮 control-plane / runtime-view 收口：
-   - `src-tauri/src/agent/control_plane.rs` 已新增 persisted trace -> `lifecycle_boundary` checkpoint 投影
+   - `crates/pony-agent-core/src/agent/control_plane.rs` 已新增 persisted trace -> `lifecycle_boundary` checkpoint 投影
    - `load_execution_checkpoint(...)` 现在在 `runtime_control` 与 graph `recovery` 都缺席时，可回退到 checkpoint lifecycle evidence
    - `load_session_runtime_view(...)` 现在可把该 checkpoint 暴露给会话读面，但仍保持 `recoveryMode=replay_required`、`resumable=false`、`replayable=false`
    - 已新增 control-plane 测试，覆盖“completed session 不应丢失 checkpoint lifecycle boundary，但也不应被提升为 recovery checkpoint”
@@ -36,7 +36,7 @@
    - 已新增 control-plane 测试，覆盖“仅存在 `lifecycle_boundary` checkpoint 时，submission plan 仍回退到 `default -> start_graph_run_stream`”
    - 这确保 checkpoint lifecycle evidence 不会误触发 `resume_graph_run_stream` 或 `continue_graph_run_stream`
 8. 完成第四轮 reload roundtrip 收口：
-   - `src-tauri/src/agent/control_plane.rs` 已新增文件后端 roundtrip 测试
+   - `crates/pony-agent-core/src/agent/control_plane.rs` 已新增文件后端 roundtrip 测试
    - 该测试使用真实 `FileSessionBackend` 先写入带 `checkpoint_persist` evidence 的 trace，再重建 `AgentRuntime + HostControlPlane`
    - 已断言 reload 后：
      - `load_execution_checkpoint(...)` 仍返回 `checkpoint_kind=lifecycle_boundary`

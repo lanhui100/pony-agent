@@ -5,10 +5,10 @@
 - `management/task-system/03_TASKS/PA-038-build-run-hooks-and-execution-control-boundaries.md`
 - `openspec/changes/add-run-hooks-and-execution-control-boundaries/specs/run-hooks-and-execution-control-boundaries/spec.md`
 - `openspec/changes/add-run-hooks-and-execution-control-boundaries/tasks.md`
-- `src-tauri/src/agent/hooks.rs`
-- `src-tauri/src/agent/graph.rs`
-- `src-tauri/src/agent/execution_control.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/hooks.rs`
+- `crates/pony-agent-core/src/agent/graph.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/components/HomeWorkspace.vue`
 - `src/components/HomeSessionSidebar.vue`
 - `tests/runtime-store.spec.ts`
@@ -33,11 +33,11 @@
 
 代码参考：
 
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:347)
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:377)
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:398)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:1892)
-- [src-tauri/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs:119)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:347)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:377)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:398)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:1892)
+- [crates/pony-agent-core/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/graph.rs:119)
 
 判断：
 
@@ -49,11 +49,11 @@
 
 代码参考：
 
-- [src-tauri/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs:119)
-- [src-tauri/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs:198)
-- [src-tauri/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs:650)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:983)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:1316)
+- [crates/pony-agent-core/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/graph.rs:119)
+- [crates/pony-agent-core/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/graph.rs:198)
+- [crates/pony-agent-core/src/agent/graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/graph.rs:650)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:983)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:1316)
 
 判断：
 
@@ -65,8 +65,8 @@
 
 代码参考：
 
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:2006)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:2288)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:2006)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:2288)
 - [src/components/HomeWorkspace.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/HomeWorkspace.vue)
 - [src/components/HomeSessionSidebar.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/HomeSessionSidebar.vue)
 

@@ -56,7 +56,7 @@
 
 ## 断点续跑提示
 继续前先看：
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
 - `docs/architecture/runtime.md`
 - `docs/learning/0012-stream-runtime-and-future-architecture.md`

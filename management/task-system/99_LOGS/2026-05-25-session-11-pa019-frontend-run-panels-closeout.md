@@ -28,10 +28,10 @@
 - `npx vitest run tests/runtime-store.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts tests/HomeSidebar.spec.ts`
 
 ## 产出文件
-- `src-tauri/src/agent/planner.rs`
-- `src-tauri/src/agent/graph.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/planner.rs`
+- `crates/pony-agent-core/src/agent/graph.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/components/GraphRunControlPanel.vue`
 - `src/components/AttachmentCenterPanel.vue`
 - `src/components/HomeSidebar.vue`

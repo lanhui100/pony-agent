@@ -10,12 +10,12 @@
 ## 本轮改动
 
 - 更新：
-  - `src-tauri/src/agent/session.rs`
-  - `src-tauri/src/agent/context.rs`
-  - `src-tauri/src/agent/runtime.rs`
-  - `src-tauri/src/agent/graph.rs`
-  - `src-tauri/src/agent/control_plane.rs`
-  - `src-tauri/src/agent/planner.rs`
+  - `crates/pony-agent-core/src/agent/session.rs`
+  - `crates/pony-agent-core/src/agent/context.rs`
+  - `crates/pony-agent-core/src/agent/runtime.rs`
+  - `crates/pony-agent-core/src/agent/graph.rs`
+  - `crates/pony-agent-core/src/agent/control_plane.rs`
+  - `crates/pony-agent-core/src/agent/planner.rs`
   - `docs/architecture/context-state-subsystem.md`
   - `management/task-system/00_DASHBOARD.md`
   - `management/task-system/01_TASK_BOARD.md`

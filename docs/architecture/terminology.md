@@ -167,13 +167,13 @@
 ## 当前代码映射
 
 - `TurnContext`
-  主要映射到 [runtime.rs](C:\Users\HUAWEI\Documents\pony-agent\src-tauri\src\agent\runtime.rs) 中围绕 `TurnInput`、工具 follow-up、图片输入与上下文构造的部分
+  主要映射到 [runtime.rs](crates/pony-agent-core/src/agent/runtime.rs) 中围绕 `TurnInput`、工具 follow-up、图片输入与上下文构造的部分
 
 - `SessionContext`
-  主要映射到 [session.rs](C:\Users\HUAWEI\Documents\pony-agent\src-tauri\src\agent\session.rs) 中的 `SessionStore`、`SessionSnapshot`、history、session summary 与附件引用
+  主要映射到 [session.rs](crates/pony-agent-core/src/agent/session.rs) 中的 `SessionStore`、`SessionSnapshot`、history、session summary 与附件引用
 
 - `RunState`
-  主要映射到 [graph.rs](C:\Users\HUAWEI\Documents\pony-agent\src-tauri\src\agent\graph.rs) 中的 `GraphRun`、`GraphRunCheckpoint`、phase、resume_count、handoff
+  主要映射到 [graph.rs](crates/pony-agent-core/src/agent/graph.rs) 中的 `GraphRun`、`GraphRunCheckpoint`、phase、resume_count、handoff
 
 - `ExecutionCheckpoint`
   主要映射到 [runtime.md](C:\Users\HUAWEI\Documents\pony-agent\docs\architecture\runtime.md) 中描述的 turn 级执行快照

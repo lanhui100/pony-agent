@@ -5,10 +5,10 @@
 - [management/task-system/03_TASKS/PA-041-build-history-state-hooks-and-restore-boundaries.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-041-build-history-state-hooks-and-restore-boundaries.md)
 - [openspec/changes/archive/2026-06-05-add-history-state-hooks-and-restore-boundaries/specs/history-state-hooks-and-restore-boundaries/spec.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-05-add-history-state-hooks-and-restore-boundaries/specs/history-state-hooks-and-restore-boundaries/spec.md>)
 - [openspec/changes/archive/2026-06-05-add-history-state-hooks-and-restore-boundaries/tasks.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-05-add-history-state-hooks-and-restore-boundaries/tasks.md>)
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs)
 - [src/types/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/runtime.ts)
 - [src/stores/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/runtime.ts)
 - [src/components/HomeSessionSidebar.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/HomeSessionSidebar.vue)
@@ -37,8 +37,8 @@
 
 证据：
 
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
 
 判断：
 
@@ -57,8 +57,8 @@ history-state hooks 已不再只是 contract 占位或 trace 旁路，而是真�
 
 证据：
 
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
 - [src/types/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/runtime.ts)
 - [src/stores/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/runtime.ts)
 - [src/components/HomeSessionSidebar.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/HomeSessionSidebar.vue)
@@ -79,8 +79,8 @@ history-state evidence 已具备“session truth-source -> control-plane / runti
 
 证据：
 
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
 
 判断：
 

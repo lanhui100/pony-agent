@@ -9,7 +9,7 @@
 
 推荐的续作入口顺序：
 
-1. 先看 [00_DASHBOARD.md](C:/Users/HUAWEI/Documents/New%20project/task-system/00_DASHBOARD.md)
-2. 再看 [01_TASK_BOARD.md](C:/Users/HUAWEI/Documents/New%20project/task-system/01_TASK_BOARD.md)
+1. 先看 [00_DASHBOARD.md](../../00_DASHBOARD.md)
+2. 再看 [01_TASK_BOARD.md](../../01_TASK_BOARD.md)
 3. 再打开当前进行中的任务卡
 4. 最后查看最近一条会话日志

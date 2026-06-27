@@ -9,8 +9,8 @@
 ## 本轮改动
 
 - 更新：
-  - `src-tauri/src/agent/graph.rs`
-  - `src-tauri/src/agent/planner.rs`
+  - `crates/pony-agent-core/src/agent/graph.rs`
+  - `crates/pony-agent-core/src/agent/planner.rs`
   - `docs/architecture/context-state-subsystem.md`
   - `management/task-system/00_DASHBOARD.md`
   - `management/task-system/01_TASK_BOARD.md`

@@ -36,6 +36,6 @@
 
 优先检查：
 
-- [runtime.rs](C:/Users/HUAWEI/Documents/New%20project/src-tauri/src/agent/runtime.rs)
-- [main.ts](C:/Users/HUAWEI/Documents/New%20project/src/main.ts)
-- [styles.css](C:/Users/HUAWEI/Documents/New%20project/src/styles.css)
+- [runtime.rs](../../../../../crates/pony-agent-core/src/agent/runtime.rs)
+- [main.ts](../../../../../src/main.ts)
+- [styles.css](../../../../../src/styles.css)

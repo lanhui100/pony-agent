@@ -11,7 +11,7 @@
 ### 运行时口径修正
 
 文件：
-- [runtime.rs](C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
+- [runtime.rs](crates/pony-agent-core/src/agent/runtime.rs)
 
 实际改动：
 - 对“同步拿完整响应，再本地模拟 `turn:delta`”路径，`first_token_latency_ms` 不再使用同步请求返回耗时

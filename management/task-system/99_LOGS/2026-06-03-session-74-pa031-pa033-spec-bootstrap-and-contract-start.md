@@ -143,7 +143,7 @@
    - 新增后端单测，分别覆盖“缺 checkpoint 时回退 graph_run source”与“存在 recovery checkpoint 时优先采用 checkpoint source”
    - 新增前端回归测试，覆盖“本地 stale runState 与后端 plan 冲突时，以后端 plan 为准”
 25. 启动 `PA-033` 第一轮 no-op skeleton：
-   - 新增 `src-tauri/src/agent/hooks.rs`
+   - 新增 `crates/pony-agent-core/src/agent/hooks.rs`
    - 已落第一版 hook contract types、descriptor 校验、registry 与 noop executor
    - 当前仍未把 hooks 接入 runtime 执行链，保持 foundation-only 范围
    - 已新增 3 条精确 Rust 单测，覆盖重复注册拒绝、failure policy 校验与 noop observe 执行归一化

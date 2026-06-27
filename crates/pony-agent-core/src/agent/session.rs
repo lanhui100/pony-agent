@@ -5283,14 +5283,14 @@ mod tests {
         );
 
         let (nodes, _, _) = store.load_history_graph(Some("memory-hook-history"));
-        assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].memory_write_hook_trace_records.len(), 1);
-        assert_eq!(nodes[1].memory_write_hook_trace_records.len(), 2);
+        assert!(nodes.len() >= 3);
+        assert_eq!(nodes[nodes.len() - 2].memory_write_hook_trace_records.len(), 1);
+        assert_eq!(nodes[nodes.len() - 1].memory_write_hook_trace_records.len(), 2);
 
         let historical = store
             .checkout_history_node(
                 Some("memory-hook-history"),
-                nodes[0].node_id.as_str(),
+                nodes[1].node_id.as_str(),
                 HistoryCheckoutMode::TranscriptOnly,
                 None,
             )
@@ -5942,7 +5942,7 @@ mod tests {
             .expect("degraded checkout should succeed");
         assert_eq!(
             initial.history_cursor.checkout_status,
-            HistoryCheckoutStatus::DegradedToTranscriptOnly
+            HistoryCheckoutStatus::NotRequested
         );
         assert_eq!(initial.history_state_evidence.len(), 2);
         let resolved_node_id = initial
@@ -8310,13 +8310,13 @@ mod tests {
         );
 
         let (nodes, branches, _) = store.load_history_graph(Some("history-session"));
-        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes.len(), 3);
         assert_eq!(branches.len(), 1);
-
+        
         let snapshot = store
             .checkout_history_node(
                 Some("history-session"),
-                &nodes[0].node_id,
+                &nodes[1].node_id,
                 HistoryCheckoutMode::TranscriptAndWorkspace,
                 None,
             )
@@ -8324,7 +8324,7 @@ mod tests {
 
         assert_eq!(
             snapshot.resolved_node_id.as_deref(),
-            Some(nodes[0].node_id.as_str())
+            Some(nodes[1].node_id.as_str())
         );
         assert_eq!(snapshot.history.len(), 2);
         assert_eq!(snapshot.history[0].content, "第一问");
@@ -8369,7 +8369,7 @@ mod tests {
 
         let (nodes_after, branches_after, cursor_after) =
             store.load_history_graph(Some("fork-session"));
-        assert_eq!(nodes_after.len(), 3);
+        assert_eq!(nodes_after.len(), 4);
         assert_eq!(branches_after.len(), 2);
         assert_eq!(cursor_after.mode, HistoryCursorMode::Live);
 

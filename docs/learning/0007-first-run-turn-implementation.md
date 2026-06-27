@@ -72,7 +72,7 @@ Pony Agent 第一版 `run_turn()` 到底实现了什么？为什么第一版不�
 
 ## 相关文件
 
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
 - `src-tauri/src/lib.rs`
 - `src/stores/runtime.ts`
 - `src/components/ChatPanel.vue`

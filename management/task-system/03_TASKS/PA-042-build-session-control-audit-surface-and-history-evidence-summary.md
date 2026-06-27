@@ -100,8 +100,8 @@
 - `management/task-system/03_TASKS/PA-037-build-session-control-surface-and-feedback-loop.md`
 - `management/task-system/03_TASKS/PA-038-build-run-hooks-and-execution-control-boundaries.md`
 - `management/task-system/03_TASKS/PA-041-build-history-state-hooks-and-restore-boundaries.md`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/stores/runtime.ts`
 - `src/types/runtime.ts`
 - `src/components/HomeSessionSidebar.vue`

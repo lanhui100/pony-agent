@@ -10,9 +10,9 @@
 ## 本轮改动
 
 - 更新：
-  - `src-tauri/src/agent/session.rs`
-  - `src-tauri/src/agent/graph.rs`
-  - `src-tauri/src/agent/planner.rs`
+  - `crates/pony-agent-core/src/agent/session.rs`
+  - `crates/pony-agent-core/src/agent/graph.rs`
+  - `crates/pony-agent-core/src/agent/planner.rs`
   - `src/types/runtime.ts`
   - `docs/architecture/context-state-subsystem.md`
   - `management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md`
@@ -43,7 +43,7 @@
 已通过：
 
 ```powershell
-cargo fmt --manifest-path src-tauri/Cargo.toml -- src-tauri/src/agent/session.rs src-tauri/src/agent/graph.rs src-tauri/src/agent/planner.rs
+cargo fmt --manifest-path src-tauri/Cargo.toml -- crates/pony-agent-core/src/agent/session.rs crates/pony-agent-core/src/agent/graph.rs crates/pony-agent-core/src/agent/planner.rs
 npm exec vue-tsc -- --noEmit
 cargo test --manifest-path src-tauri/Cargo.toml --lib append_turn_extracts_acceptance_gate_into_long_term_memory -- --nocapture
 cargo test --manifest-path src-tauri/Cargo.toml --lib append_turn_does_not_extract_acceptance_gate_from_incidental_acceptance_mentions -- --nocapture

@@ -18,10 +18,10 @@
 - 方向正确，适合作为 `PA-031 / 032 / 033` 之后的独立可执行卡
 - 关键实现缺口确实在后端 runtime boundary，而不是前端类型定义
 - 最小可执行闭环应锁定：
-  - `src-tauri/src/agent/runtime.rs`
-  - `src-tauri/src/agent/session.rs`
-  - `src-tauri/src/agent/execution_control.rs`
-  - `src-tauri/src/agent/control_plane.rs`
+  - `crates/pony-agent-core/src/agent/runtime.rs`
+  - `crates/pony-agent-core/src/agent/session.rs`
+  - `crates/pony-agent-core/src/agent/execution_control.rs`
+  - `crates/pony-agent-core/src/agent/control_plane.rs`
   - `src/stores/runtime.ts`
 
 ## 采纳意见

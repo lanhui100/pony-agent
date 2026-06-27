@@ -50,12 +50,12 @@
   - `checkpointing` phase 在架构和 spec 中存在，但正常完成链路尚未形成稳定 persisted evidence
   - 这会让 hooks / trace / execution checkpoint / 前端读面继续各自猜测“持久化边界是否发生”
 - 已完成第一轮实现落地：
-  - `src-tauri/src/agent/runtime.rs` 已在 normal completion 与 tool follow-up completion 链路补 `turn:phase_changed(checkpointing)` 与 `turn:checkpoint_persisted`
+  - `crates/pony-agent-core/src/agent/runtime.rs` 已在 normal completion 与 tool follow-up completion 链路补 `turn:phase_changed(checkpointing)` 与 `turn:checkpoint_persisted`
   - completed trace timeline 已新增 `checkpoint_persist` evidence，确保 persisted trace / reload 能看见 checkpoint lifecycle boundary
   - `src/stores/runtime.ts` 已开始监听 `turn:phase_changed` 与 `turn:checkpoint_persisted`
   - `tests/runtime-store.spec.ts` 已补事件消费回归断言
 - 已完成第二轮后端读面收口：
-  - `src-tauri/src/agent/control_plane.rs` 已新增基于 persisted trace 的 `lifecycle_boundary` checkpoint 投影
+  - `crates/pony-agent-core/src/agent/control_plane.rs` 已新增基于 persisted trace 的 `lifecycle_boundary` checkpoint 投影
   - `load_execution_checkpoint(...)` 现在会在 `runtime_control` 与 graph `recovery` 缺席时，回退到 checkpoint lifecycle evidence
   - `load_session_runtime_view(...)` 已能把这类 boundary checkpoint 暴露给上层读面，同时不把它误判成 recovery capability
   - 已新增 control-plane 测试，覆盖“completed session 暴露 lifecycle boundary checkpoint”的合同
@@ -63,7 +63,7 @@
   - 已新增 control-plane 测试，覆盖“仅存在 `lifecycle_boundary` checkpoint 时，submission plan 仍回退到 `default -> start_graph_run_stream`”
   - 这确保 checkpoint lifecycle evidence 只是读面事实，不会劫持 recovery / continue / resume 决策
 - 已完成第四轮 reload roundtrip 补强：
-  - `src-tauri/src/agent/control_plane.rs` 已新增文件后端 roundtrip 测试，覆盖“session trace 落盘并 reload 后，control plane 仍可投影 `lifecycle_boundary` checkpoint”
+  - `crates/pony-agent-core/src/agent/control_plane.rs` 已新增文件后端 roundtrip 测试，覆盖“session trace 落盘并 reload 后，control plane 仍可投影 `lifecycle_boundary` checkpoint”
   - 该测试同时断言 `load_execution_checkpoint(...)` 与 `load_session_runtime_view(...)` 两个读面在 reload 后都还能恢复 `checkpointing -> connecting` 投影
   - 这把“persisted evidence 存在”推进成了“上层控制面可稳定读回 persisted evidence”
 - 已完成本轮验证：
@@ -95,8 +95,8 @@
 ## 断点续跑提示
 继续前先看：
 - `docs/architecture/turn-lifecycle-hooks-and-recovery.md`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
 - `src/stores/runtime.ts`

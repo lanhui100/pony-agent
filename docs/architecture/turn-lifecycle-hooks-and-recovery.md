@@ -348,10 +348,10 @@ trace 不负责：
 
 ## 与现有代码的直接结论
 
-- `src-tauri/src/agent/runtime.rs` 是当前 turn 执行事实中心
-- `src-tauri/src/agent/turn_flow.rs` 是事件发射面
-- `src-tauri/src/agent/session.rs` 是 session/history/trace 落盘面
-- `src-tauri/src/agent/execution_control.rs` 当前仍以进程内 checkpoint 为主
+- `crates/pony-agent-core/src/agent/runtime.rs` 是当前 turn 执行事实中心
+- `crates/pony-agent-core/src/agent/turn_flow.rs` 是事件发射面
+- `crates/pony-agent-core/src/agent/session.rs` 是 session/history/trace 落盘面
+- `crates/pony-agent-core/src/agent/execution_control.rs` 当前仍以进程内 checkpoint 为主
 - `src/stores/runtime.ts` 当前承担了过多推导与兼容逻辑，应在后续改造中逐步降级为消费层
 
 ## 本文件的用途

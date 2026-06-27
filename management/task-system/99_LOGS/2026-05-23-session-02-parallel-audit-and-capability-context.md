@@ -9,9 +9,9 @@
 
 ## 改了哪些文件
 
-- `src-tauri/src/agent/context.rs`
-- `src-tauri/src/agent/provider.rs`
-- `src-tauri/src/agent/telemetry.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/telemetry.rs`
 - `docs/architecture/runtime.md`
 - `management/task-system/00_DASHBOARD.md`
 - `management/task-system/01_TASK_BOARD.md`
@@ -36,5 +36,5 @@
 ## 断点续跑提示
 
 - 若继续推进 `PA-007`，先看 `management/task-system/02_REVIEWS/2026-05-23-pa007-adapter-boundary-audit.md`
-- 若继续推进 `PA-009`，先看 `src-tauri/src/agent/context.rs`
-- 若继续推进 `PA-008`，先看 `src-tauri/src/agent/telemetry.rs`
+- 若继续推进 `PA-009`，先看 `crates/pony-agent-core/src/agent/context.rs`
+- 若继续推进 `PA-008`，先看 `crates/pony-agent-core/src/agent/telemetry.rs`

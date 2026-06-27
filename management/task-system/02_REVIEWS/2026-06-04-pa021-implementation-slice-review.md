@@ -4,10 +4,10 @@
 
 - [PA-021 任务卡](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-021-build-skills-registry-and-bridge.md)
 - [skills-registry-bridge/tasks.md](/C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/add-skills-registry-bridge/tasks.md)
-- [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/capability_bridge.rs)
-- [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
-- [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
-- [telemetry.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/telemetry.rs)
+- [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/capability_bridge.rs)
+- [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
+- [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs)
+- [telemetry.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/telemetry.rs)
 - [lib.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/lib.rs)
 
 ## 审核结论

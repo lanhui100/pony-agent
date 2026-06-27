@@ -8,7 +8,7 @@
 ## 本轮检查
 - 对照 `00_DASHBOARD.md`、`01_TASK_BOARD.md`、`03_TASKS/PA-018 ~ PA-023`
 - 核对 `src/App.vue`、`src/components/HomeSessionSidebar.vue`、`src/components/ModelMonitorPage.vue`
-- 核对 `src/stores/runtime.ts`、`src-tauri/src/agent/control_plane.rs`
+- 核对 `src/stores/runtime.ts`、`crates/pony-agent-core/src/agent/control_plane.rs`
 - 核对 `tests/HomeSessionSidebar.spec.ts`、`tests/runtime-store.spec.ts`
 - 检查 `99_LOGS/` 是否覆盖 `PA-023` closeout
 

@@ -11,7 +11,7 @@
    - 核对了 `PA-032 / PA-033 / PA-034` 任务卡、OpenSpec tasks 与当前实现
    - 明确近线仍应先收口 lifecycle / recovery 事实源，不提前把 hooks runtime dispatch 硬接进去
 2. 补齐 `PA-034` 后端 reload roundtrip 的 execution-plan 证据：
-   - `src-tauri/src/agent/control_plane.rs` 的 `file_backed_reload_restores_lifecycle_boundary_projection` 已继续补断言
+   - `crates/pony-agent-core/src/agent/control_plane.rs` 的 `file_backed_reload_restores_lifecycle_boundary_projection` 已继续补断言
    - 现在该测试除 checkpoint 投影外，还会断言 `runtimeView.submissionPlan` 为：
      - `command = start_graph_run_stream`
      - `run_id = None`
@@ -23,7 +23,7 @@
      - `latestGraphRunSubmissionPlan` 会被正确 hydrate
      - `activeRunId` 不会被错误复活
 4. 补齐 `PA-032` 后端最终仲裁证据：
-   - `src-tauri/src/agent/control_plane.rs` 已新增：
+   - `crates/pony-agent-core/src/agent/control_plane.rs` 已新增：
      - `submission_plan_starts_fresh_run_when_recovery_contract_requires_replay`
      - `submission_plan_switches_with_session_checkpoint_boundary`
    - 前者验证 `replay_required` recovery contract 会仲裁为 `start_graph_run_stream`

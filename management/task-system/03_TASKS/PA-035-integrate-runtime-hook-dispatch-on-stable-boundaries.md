@@ -159,6 +159,6 @@
 - `management/task-system/03_TASKS/PA-033-build-agent-hooks-pipeline-foundation.md`
 - `management/task-system/03_TASKS/PA-022-build-lifecycle-hooks-pipeline.md`
 - `docs/architecture/turn-lifecycle-hooks-and-recovery.md`
-- `src-tauri/src/agent/hooks.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/hooks.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`

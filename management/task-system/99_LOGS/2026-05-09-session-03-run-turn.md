@@ -10,7 +10,7 @@
 
 ## 改了哪些文件
 
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
 - `src-tauri/src/lib.rs`
 - `src/types/runtime.ts`
 - `src/stores/runtime.ts`
@@ -36,6 +36,6 @@
 
 下次开始时先看：
 
-1. `src-tauri/src/agent/runtime.rs`
+1. `crates/pony-agent-core/src/agent/runtime.rs`
 2. `docs/learning/0007-first-run-turn-implementation.md`
 3. `management/task-system/03_TASKS/PA-004-define-provider-and-tool-abstractions.md`

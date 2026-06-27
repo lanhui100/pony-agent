@@ -53,8 +53,8 @@
 ## 断点续跑提示
 继续前先看：
 - `src/stores/runtime.ts`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
 - `src/types/runtime.ts`
 - `docs/architecture/frontend-workbench.md`
 

@@ -53,7 +53,7 @@ Pony Agent 当前为什么要拆出宿主层、控制面、runtime、graph、pla
 - `resume_graph_run`
 - inspection / health / checkpoint 读取
 
-在 Pony Agent 里，这个角色已经比较明确，由 `src-tauri/src/agent/control_plane.rs` 里的 `HostControlPlane` 承担。
+在 Pony Agent 里，这个角色已经比较明确，由 `crates/pony-agent-core/src/agent/control_plane.rs` 里的 `HostControlPlane` 承担。
 
 所以更准确的说法是：
 
@@ -86,7 +86,7 @@ runtime 负责把一个 turn 跑完整。这里的“跑完整”包括：
 - 这个 goal 是否已经完成
 - run 是否应该暂停等待用户
 
-在 Pony Agent 里，这一层主要对应 `src-tauri/src/agent/runtime.rs` 里的 `AgentRuntime`。
+在 Pony Agent 里，这一层主要对应 `crates/pony-agent-core/src/agent/runtime.rs` 里的 `AgentRuntime`。
 
 ### 4. graph 是什么
 
@@ -102,7 +102,7 @@ graph 不是“再做一次模型调用”，而是“管理 run 级状态机和
 
 在 Pony Agent 里，这一层主要对应：
 
-- `src-tauri/src/agent/graph.rs` 中的 `GraphRun`
+- `crates/pony-agent-core/src/agent/graph.rs` 中的 `GraphRun`
 - `GraphRunner`
 - `GraphRunStore`
 - `GraphRunCheckpoint`
@@ -140,7 +140,7 @@ planner 在当前 Pony Agent 里不是一个统一大脑，而是两个不同粒
 - provider 给出的 tool call 是否要被本地方案替换
 - 哪类高确定性请求可以先走本地工具
 
-当前这层主要由 `src-tauri/src/agent/planner.rs` 中的 `LocalTurnPlanner` 实现。
+当前这层主要由 `crates/pony-agent-core/src/agent/planner.rs` 中的 `LocalTurnPlanner` 实现。
 
 #### `GraphPlanner`
 
@@ -152,7 +152,7 @@ planner 在当前 Pony Agent 里不是一个统一大脑，而是两个不同粒
 - 当前 run 是否已经接近自动推进上限
 - 下一步到底是 `continue` 还是 `wait_user`
 
-当前这层主要由 `src-tauri/src/agent/planner.rs` 中的 `DefaultGraphPlanner` 实现。
+当前这层主要由 `crates/pony-agent-core/src/agent/planner.rs` 中的 `DefaultGraphPlanner` 实现。
 
 所以：
 

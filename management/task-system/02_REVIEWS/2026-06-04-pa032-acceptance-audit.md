@@ -5,9 +5,9 @@
 - `management/task-system/03_TASKS/PA-032-stabilize-trace-persistence-and-recovery-contract.md`
 - `openspec/changes/add-trace-persistence-and-recovery-contract/specs/trace-persistence-and-recovery-contract/spec.md`
 - `openspec/changes/add-trace-persistence-and-recovery-contract/tasks.md`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/execution_control.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/stores/runtime.ts`
 - `tests/runtime-store.spec.ts`
 

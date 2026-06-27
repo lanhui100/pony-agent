@@ -31,7 +31,7 @@
 - `npm run build`
 
 ## 产出文件
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src-tauri/src/lib.rs`
 - `src/stores/runtime.ts`
 - `src/components/HomeWorkspace.vue`

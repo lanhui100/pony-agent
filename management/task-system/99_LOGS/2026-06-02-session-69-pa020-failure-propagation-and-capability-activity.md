@@ -6,18 +6,18 @@
 - Exposed capability activity details in `ModelMonitorPage` drilldown without adding new Tauri commands.
 
 ## Code
-- `src-tauri/src/agent/capability_bridge.rs`
+- `crates/pony-agent-core/src/agent/capability_bridge.rs`
   - `resolve_tool_call()` now returns normalized failure kinds instead of silently dropping them.
   - added `CapabilityFailureKind::as_str()`
   - added normalized failure-result builder for tool execution
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
   - runtime now preserves resolve-time failure classes from capability execution
   - capability metadata is attached to parent `TurnToolActivity`
   - added runtime tests for `SourceUnavailable / PermissionDenied / MalformedResponse`
-- `src-tauri/src/agent/telemetry.rs`
+- `crates/pony-agent-core/src/agent/telemetry.rs`
   - added `CapabilityInvocationRecord`
   - added optional `capability_invocation` field on `TurnToolActivity`
-- `src-tauri/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
   - session trace persistence roundtrip now covers capability activity metadata
 - `src/types/runtime.ts`
   - added frontend types for `CapabilityFailureKind` and `CapabilityInvocationRecord`

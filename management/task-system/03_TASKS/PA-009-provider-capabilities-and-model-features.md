@@ -30,7 +30,7 @@
 - provider 侧可观测性已开始补齐：`provider_source / provider_mode / fallback_reason`
 - provider registry 已接入统一 `SecretStore`：Provider 配置页保存的新 API Key 会直接写入应用密钥存储，而不是继续依赖环境变量热更新
 - 这一轮已经落地第一版能力结构：
-- `capabilities + reasoning` 已进入 [provider.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/provider.ts) 和 [config.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/config.rs)
+- `capabilities + reasoning` 已进入 [provider.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/provider.ts) 和 [config.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/config.rs)
 - 当前已能表达：
 - `contextWindowTokens`
 - `supportsTools`
@@ -84,8 +84,8 @@
 - `src/types/provider.ts`
 - `src/stores/providers.ts`
 - `src/components/ProviderConfigPage.vue`
-- `src-tauri/src/agent/config.rs`
-- `src-tauri/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/config.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
 - `docs/learning/0011-provider-config-and-env.md`
 ## 2026-05-23 补充进展
 - 前后端都已把 provider 配置继续拆成“模型事实 / 能力声明”和“用户策略”两层语义：

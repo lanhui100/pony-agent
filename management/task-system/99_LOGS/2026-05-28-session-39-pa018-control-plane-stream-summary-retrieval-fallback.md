@@ -9,7 +9,7 @@
 ## 本轮改动
 
 - 更新：
-  - `src-tauri/src/agent/control_plane.rs`
+  - `crates/pony-agent-core/src/agent/control_plane.rs`
   - `docs/architecture/context-state-subsystem.md`
   - `management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md`
   - `management/task-system/03_TASKS/PA-018-build-context-state-subsystem-and-retrieval-boundary.md`

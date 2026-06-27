@@ -5,10 +5,10 @@
 - `management/task-system/03_TASKS/PA-036-harden-terminal-trace-envelope-and-monitor-truth-source.md`
 - `openspec/changes/add-terminal-trace-envelope-and-monitor-truth-source/specs/terminal-trace-envelope-and-monitor-truth-source/spec.md`
 - `openspec/changes/add-terminal-trace-envelope-and-monitor-truth-source/tasks.md`
-- `src-tauri/src/agent/turn_flow.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/components/ModelMonitorPage.vue`
 - `src/stores/runtime.ts`
 - `tests/ModelMonitorPage.spec.ts`

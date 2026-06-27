@@ -10,9 +10,9 @@
 ## 本轮改动
 
 - 更新：
-  - `src-tauri/src/agent/context.rs`
-  - `src-tauri/src/agent/runtime.rs`
-  - `src-tauri/src/agent/turn_flow.rs`
+  - `crates/pony-agent-core/src/agent/context.rs`
+  - `crates/pony-agent-core/src/agent/runtime.rs`
+  - `crates/pony-agent-core/src/agent/turn_flow.rs`
   - `docs/INDEX.md`
   - `docs/architecture/overview.md`
   - `management/task-system/00_DASHBOARD.md`

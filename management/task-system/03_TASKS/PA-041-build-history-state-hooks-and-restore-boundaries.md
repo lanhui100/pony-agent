@@ -113,6 +113,6 @@
 - `management/task-system/03_TASKS/PA-028-build-history-node-management-and-branching.md`
 - `management/task-system/03_TASKS/PA-032-stabilize-trace-persistence-and-recovery-contract.md`
 - `management/task-system/03_TASKS/PA-037-build-session-control-surface-and-feedback-loop.md`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `docs/architecture/turn-lifecycle-hooks-and-recovery.md`

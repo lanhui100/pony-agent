@@ -6,7 +6,7 @@
 
 ## 已完成
 
-- 扩展 `src-tauri/src/agent/capability_bridge.rs`
+- 扩展 `crates/pony-agent-core/src/agent/capability_bridge.rs`
   - `CapabilityView` 新增 `permission_scope`
   - 新增 `CapabilityResourceAction`
   - 新增 `CapabilityPromptTemplateAction`

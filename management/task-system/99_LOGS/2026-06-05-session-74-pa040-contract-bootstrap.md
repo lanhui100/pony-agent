@@ -86,8 +86,8 @@
 
 ## 当前验证情况
 
-- `rustfmt src-tauri/src/agent/hooks.rs`：通过
-- `rustfmt src-tauri/src/agent/runtime.rs src-tauri/src/agent/turn_flow.rs`：通过
+- `rustfmt crates/pony-agent-core/src/agent/hooks.rs`：通过
+- `rustfmt crates/pony-agent-core/src/agent/runtime.rs crates/pony-agent-core/src/agent/turn_flow.rs`：通过
 - `cargo test --manifest-path src-tauri/Cargo.toml --lib agent::hooks::tests::planner_transform_whitelist_keeps_scheduler_fields_readonly --target-dir src-tauri/target-codex-pa040-contract -- --exact --nocapture`
   - 本轮在本机环境下 5 分钟内未完成，因超时被截断
   - 当前已形成代码与文档层面的 contract 证据，但 Rust 编译级验证仍需下一轮继续补齐

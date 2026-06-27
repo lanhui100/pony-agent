@@ -10,8 +10,8 @@
   - [tests/HomeWorkspace.spec.ts](/C:/Users/HUAWEI/Documents/pony-agent/tests/HomeWorkspace.spec.ts)
   - [tests/HomeSessionSidebar.spec.ts](/C:/Users/HUAWEI/Documents/pony-agent/tests/HomeSessionSidebar.spec.ts)
 - 收口 Rust warning：
-  - [src-tauri/src/agent/provider.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/provider.rs)
-  - [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+  - [crates/pony-agent-core/src/agent/provider.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/provider.rs)
+  - [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
   - [src-tauri/src/bin/decision_probe.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/bin/decision_probe.rs)
   - [src-tauri/src/bin/direct_turn_probe.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/bin/direct_turn_probe.rs)
 - 跑通真实 `tauri dev --no-watch` 冒烟，确认不是“只会 build/check”
@@ -26,8 +26,8 @@
   - [tests/HomeWorkspace.spec.ts](/C:/Users/HUAWEI/Documents/pony-agent/tests/HomeWorkspace.spec.ts)
   - [tests/HomeSessionSidebar.spec.ts](/C:/Users/HUAWEI/Documents/pony-agent/tests/HomeSessionSidebar.spec.ts)
 - Rust：
-  - [src-tauri/src/agent/provider.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/provider.rs)
-  - [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+  - [crates/pony-agent-core/src/agent/provider.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/provider.rs)
+  - [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
   - [src-tauri/src/bin/decision_probe.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/bin/decision_probe.rs)
   - [src-tauri/src/bin/direct_turn_probe.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/bin/direct_turn_probe.rs)
 
@@ -45,8 +45,8 @@
 
 ## 断点续跑提示
 - 如果继续推进 adapter 抽离，先看：
-  - [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
-  - [src-tauri/src/agent/turn_flow.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/turn_flow.rs)
+  - [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs)
+  - [crates/pony-agent-core/src/agent/turn_flow.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/turn_flow.rs)
   - [src/stores/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/runtime.ts)
 - 如果继续推进 provider 能力落地，先看：
   - [src/stores/providers.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/providers.ts)

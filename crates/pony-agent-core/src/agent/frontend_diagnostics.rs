@@ -214,6 +214,7 @@ impl FrontendDiagnosticsStore {
             }
         }
         tx.commit().map_err(|e| format!("commit: {e}"))?;
+        drop(slot);
         self.clear_before(now_ms() - retention_window_ms())?;
         Ok(())
     }
@@ -493,11 +494,12 @@ mod tests {
         let dir = unique_dir("roundtrip");
         fs::create_dir_all(&dir).unwrap();
         let store = FrontendDiagnosticsStore::new(dir.join("diag.db"));
+        let now = now_ms();
         store
             .append(FrontendTraceAppendCommand {
                 events: vec![FrontendTraceEvent {
                     seq: 1,
-                    ts_wall_ms: 1000,
+                    ts_wall_ms: now - 1000,
                     ts_perf_ms: 10.0,
                     session_id: Some("session-1".to_string()),
                     turn_id: Some("turn-1".to_string()),
@@ -514,7 +516,7 @@ mod tests {
                 stall_snapshots: vec![FrontendStallSnapshot {
                     session_id: Some("session-1".to_string()),
                     turn_id: Some("turn-1".to_string()),
-                    ts_wall_ms: 1010,
+                    ts_wall_ms: now - 990,
                     ts_perf_ms: 11.0,
                     stall_level: "light".to_string(),
                     trigger_kind: "raf-gap".to_string(),
@@ -550,12 +552,13 @@ mod tests {
         let dir = unique_dir("chrome-trace");
         fs::create_dir_all(&dir).unwrap();
         let store = FrontendDiagnosticsStore::new(dir.join("diag.db"));
+        let now = now_ms();
         store
             .append(FrontendTraceAppendCommand {
                 events: vec![
                     FrontendTraceEvent {
                         seq: 1,
-                        ts_wall_ms: 5_000,
+                        ts_wall_ms: now - 1000,
                         ts_perf_ms: 10.0,
                         session_id: Some("session-1".to_string()),
                         turn_id: Some("turn-1".to_string()),
@@ -571,7 +574,7 @@ mod tests {
                     },
                     FrontendTraceEvent {
                         seq: 2,
-                        ts_wall_ms: 5_125,
+                        ts_wall_ms: now - 875,
                         ts_perf_ms: 135.0,
                         session_id: Some("session-1".to_string()),
                         turn_id: Some("turn-1".to_string()),
@@ -602,7 +605,7 @@ mod tests {
 
         assert_eq!(trace_events[0]["ts"].as_i64(), Some(0));
         assert_eq!(trace_events[1]["ts"].as_i64(), Some(125_000));
-        assert_eq!(parsed["metadata"]["traceOriginWallMs"].as_i64(), Some(5_000));
+        assert_eq!(parsed["metadata"]["traceOriginWallMs"].as_i64(), Some(now - 1000));
 
         fs::remove_dir_all(&dir).ok();
     }

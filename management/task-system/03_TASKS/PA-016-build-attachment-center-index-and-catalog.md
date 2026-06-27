@@ -48,6 +48,6 @@
 继续前先看：
 - `management/task-system/03_TASKS/PA-011-expand-multimodal-session-memory.md`
 - `docs/architecture/overview.md`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
 - `src/stores/runtime.ts`

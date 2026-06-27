@@ -11,7 +11,7 @@
 ## 本轮改动
 
 - 更新：
-  - `src-tauri/src/agent/control_plane.rs`
+  - `crates/pony-agent-core/src/agent/control_plane.rs`
   - `src/stores/runtime.ts`
   - `tests/runtime-store.spec.ts`
   - `docs/architecture/context-state-subsystem.md`

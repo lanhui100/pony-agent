@@ -16,7 +16,7 @@
 ## Code / Docs
 - [src/components/ModelMonitorPage.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/ModelMonitorPage.vue)
 - [tests/ModelMonitorPage.spec.ts](/C:/Users/HUAWEI/Documents/pony-agent/tests/ModelMonitorPage.spec.ts)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
 - [management/task-system/01_TASK_BOARD.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
 - [management/task-system/00_DASHBOARD.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/00_DASHBOARD.md)
 - [openspec/specs/model-monitor-telemetry/spec.md](/C:/Users/HUAWEI/Documents/pony-agent/openspec/specs/model-monitor-telemetry/spec.md)

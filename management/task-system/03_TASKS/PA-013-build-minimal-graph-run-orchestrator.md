@@ -48,5 +48,5 @@
 - `management/task-system/03_TASKS/PA-012-define-graph-run-contract-and-runtime-handoff.md`
 - `management/task-system/03_TASKS/PA-010-build-runtime-loop-and-stop-conditions.md`
 - `docs/architecture/runtime.md`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/session.rs`

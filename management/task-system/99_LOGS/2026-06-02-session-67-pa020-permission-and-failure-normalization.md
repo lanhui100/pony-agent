@@ -6,7 +6,7 @@
 
 ## 已完成
 
-- 扩展 `src-tauri/src/agent/capability_bridge.rs`
+- 扩展 `crates/pony-agent-core/src/agent/capability_bridge.rs`
   - `resolve_invocation()` 现在会先检查 source availability
   - `unreachable / disabled` source 会统一返回 `CapabilityFailureKind::SourceUnavailable`
   - `requires_approval = true` 且 `host_mediated = false` 的 capability 会统一返回 `CapabilityFailureKind::PermissionDenied`

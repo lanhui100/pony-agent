@@ -10,8 +10,8 @@
 
 ## 改了哪些文件
 
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
 - `src-tauri/src/lib.rs`
 - `src-tauri/src/tauri_adapter.rs`
 - `docs/architecture/runtime.md`
@@ -39,6 +39,6 @@
 
 ## 断点续跑提示
 
-- 若继续看 adapter 边界，先读 `src-tauri/src/agent/turn_flow.rs`
+- 若继续看 adapter 边界，先读 `crates/pony-agent-core/src/agent/turn_flow.rs`
 - 若继续看 Tauri 壳层实现，先读 `src-tauri/src/tauri_adapter.rs`
 - 若继续看任务结论，先读 `management/task-system/03_TASKS/PA-007-split-core-adapters.md`

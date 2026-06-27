@@ -9,7 +9,7 @@
 ## 本轮改动
 
 - 更新：
-  - `src-tauri/src/agent/session.rs`
+  - `crates/pony-agent-core/src/agent/session.rs`
   - `docs/architecture/context-state-subsystem.md`
   - `management/task-system/00_DASHBOARD.md`
   - `management/task-system/01_TASK_BOARD.md`
@@ -37,7 +37,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib append_turn_
 cargo test --manifest-path src-tauri/Cargo.toml --lib context::tests -- --nocapture
 cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check
 npm run verify
-git diff --check -- src-tauri/src/agent/session.rs
+git diff --check -- crates/pony-agent-core/src/agent/session.rs
 ```
 
 结果：

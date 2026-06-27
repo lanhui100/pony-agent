@@ -49,4 +49,4 @@
 - `management/task-system/03_TASKS/PA-016-build-attachment-center-index-and-catalog.md`
 - `management/task-system/03_TASKS/PA-011-expand-multimodal-session-memory.md`
 - `docs/architecture/overview.md`
-- `src-tauri/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/session.rs`

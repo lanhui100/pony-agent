@@ -13,14 +13,14 @@
 - Builtin aliases keep precedence; MCP-backed tool resolution is the fallback path for non-builtin tool labels.
 
 ## Code
-- `src-tauri/src/agent/capability_bridge.rs`
+- `crates/pony-agent-core/src/agent/capability_bridge.rs`
   - added `McpSourceSnapshot`
   - added source-scoped replacement in `CapabilityRegistry`
   - added MCP tool-label fallback in `resolve_tool_call()`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
   - added `ApplyMcpSourceSnapshotCommand`
   - added host-internal snapshot validation and synchronized apply path
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
   - added runtime snapshot apply helper for registry sync
 - `openspec/changes/add-mcp-capability-bridge/design.md`
   - documented host-internal snapshot write surface and replacement semantics

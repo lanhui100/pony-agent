@@ -29,7 +29,7 @@
 - 架构文档已明确区分 `turn loop` 与未来 `graph loop`
 - 已明确 stop / checkpoint 也必须按 runtime 与 graph 分层
 - `src-tauri/src/lib.rs` 已暴露 `stop_turn` 与 `load_execution_checkpoint` Tauri 命令
-- `src-tauri/src/agent/execution_control.rs` 已实现 `ExecutionControlRegistry` 与 `ExecutionCheckpoint`
+- `crates/pony-agent-core/src/agent/execution_control.rs` 已实现 `ExecutionControlRegistry` 与 `ExecutionCheckpoint`
 - checkpoint 已覆盖 `status / phase / provider meta / completed_hops / max_hops / active_tool_name / trace_steps / tool_activities / stop_requested_at_ms`
 - `runtime.rs` 已在流式执行关键节点检查 `is_stop_requested(turn_id)`，以 cooperative cancel 方式结束当前 turn
 - `turn_flow.rs` 已新增 `emit_stream_cancelled()`，统一发出 `turn:cancelled`
@@ -77,8 +77,8 @@
 继续前先看：
 - `docs/architecture/runtime.md`
 - `docs/architecture/overview.md`
-- `src-tauri/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
 - `src-tauri/src/lib.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
 - `src/stores/runtime.ts`

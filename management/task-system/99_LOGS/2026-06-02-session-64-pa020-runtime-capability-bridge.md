@@ -6,7 +6,7 @@
 
 ## 已完成
 
-- 扩展 `src-tauri/src/agent/capability_bridge.rs`
+- 扩展 `crates/pony-agent-core/src/agent/capability_bridge.rs`
   - 新增 `CapabilityInvocationMode::as_str()`
   - 新增 `CapabilityFailureKind`
   - 新增 `CapabilityToolAction`
@@ -14,7 +14,7 @@
   - 新增 `CapabilityRegistry::resolve_tool_call()`
   - 新增 `CapabilityRegistry::capability_not_found_result()`
   - 支持把 dotted tool name（如 `time.now`）归一化匹配到 builtin capability（如 `builtin:time_now`）
-- 扩展 `src-tauri/src/agent/runtime.rs`
+- 扩展 `crates/pony-agent-core/src/agent/runtime.rs`
   - `AgentRuntime` 新增 `capability_registry`
   - 新增 `execute_capability_tool_call()`
   - sync / stream 两条工具执行路径都改为先 resolve capability，再进入既有 `tool_executor`

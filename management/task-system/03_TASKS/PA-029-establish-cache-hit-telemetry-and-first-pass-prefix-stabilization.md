@@ -66,14 +66,14 @@
 
 ## 关键落地文件
 - 后端：
-  - `src-tauri/src/agent/telemetry.rs`
-  - `src-tauri/src/agent/session.rs`
-  - `src-tauri/src/agent/runtime.rs`
-  - `src-tauri/src/agent/context.rs`
-  - `src-tauri/src/agent/provider.rs`
-  - `src-tauri/src/agent/turn_flow.rs`
-  - `src-tauri/src/agent/control_plane.rs`
-  - `src-tauri/src/agent/graph.rs`
+  - `crates/pony-agent-core/src/agent/telemetry.rs`
+  - `crates/pony-agent-core/src/agent/session.rs`
+  - `crates/pony-agent-core/src/agent/runtime.rs`
+  - `crates/pony-agent-core/src/agent/context.rs`
+  - `crates/pony-agent-core/src/agent/provider.rs`
+  - `crates/pony-agent-core/src/agent/turn_flow.rs`
+  - `crates/pony-agent-core/src/agent/control_plane.rs`
+  - `crates/pony-agent-core/src/agent/graph.rs`
   - `src-tauri/src/sse_adapter.rs`
 - 前端：
   - `src/types/runtime.ts`
@@ -120,8 +120,8 @@
 ## 断点续跑提示
 继续前优先看：
 
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/context.rs`
-- `src-tauri/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
 - `src/stores/runtime.ts`
 - `tests/runtime-store.spec.ts`

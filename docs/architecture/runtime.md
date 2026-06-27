@@ -198,12 +198,14 @@
 - `LocalTurnPlanner` 在显式多路径请求下会产出带 `plan` 的 `workspace_batch`，而 runtime 允许这类“显式计划型 preflight”在 native tool flow 下优先生效。
 - OpenAI follow-up 现在对超大工具结果先做摘要 + 头尾裁剪；若 sync/stream follow-up 仍失败，则回退到本地整合响应，并显式暴露 `provider_mode=fallback` 与 `fallback_reason`。
 - 本轮完成的验证：
-- `cargo test --manifest-path src-tauri/Cargo.toml`
+- `npm run cargo:test:shared`
 - `npm run verify`
 - `cargo run --manifest-path src-tauri/Cargo.toml --bin direct_turn_probe -- multipath-context`
 - `cargo run --manifest-path src-tauri/Cargo.toml --bin direct_turn_probe -- large-result`
 - `cargo run --manifest-path src-tauri/Cargo.toml --bin sse_turn_probe -- adapter-multipath`
 - `cargo run --manifest-path src-tauri/Cargo.toml --bin sse_turn_probe -- adapter-large-result --raw`
+
+（注：probe 二进制依然在 `src-tauri` crate 中，因此 `--manifest-path src-tauri/Cargo.toml` 保留正确。）
 
 ## 2026-05-23 流式补充
 

@@ -13,14 +13,14 @@
 
 ## 改动的关键文件
 
-- [src/main.ts](C:/Users/HUAWEI/Documents/New%20project/src/main.ts)
-- [src/styles.css](C:/Users/HUAWEI/Documents/New%20project/src/styles.css)
-- [src-tauri/src/lib.rs](C:/Users/HUAWEI/Documents/New%20project/src-tauri/src/lib.rs)
-- [src-tauri/src/config.rs](C:/Users/HUAWEI/Documents/New%20project/src-tauri/src/config.rs)
-- [src-tauri/src/credentials.rs](C:/Users/HUAWEI/Documents/New%20project/src-tauri/src/credentials.rs)
-- [README.md](C:/Users/HUAWEI/Documents/New%20project/README.md)
-- [docs/decisions/0003-api-key-evolution.md](C:/Users/HUAWEI/Documents/New%20project/docs/decisions/0003-api-key-evolution.md)
-- [docs/learning/0004-provider-config-and-env.md](C:/Users/HUAWEI/Documents/New%20project/docs/learning/0004-provider-config-and-env.md)
+- [src/main.ts](../../../../../src/main.ts)
+- [src/styles.css](../../../../../src/styles.css)
+- [src-tauri/src/lib.rs](../../../../../src-tauri/src/lib.rs)
+- [src-tauri/src/config.rs](../../../../../src-tauri/src/config.rs)
+- [src-tauri/src/credentials.rs](../../../../../src-tauri/src/credentials.rs)
+- [README.md](../../../../../README.md)
+- [docs/decisions/0003-api-key-evolution.md](../../../../../docs/decisions/0003-api-key-evolution.md)
+- [docs/learning/0004-provider-config-and-env.md](../../../../../docs/learning/0004-provider-config-and-env.md)
 
 ## 当前结果
 
@@ -39,7 +39,7 @@
 
 下次进入新对话时，优先看这些文件：
 
-1. [task-system/00_DASHBOARD.md](C:/Users/HUAWEI/Documents/New%20project/task-system/00_DASHBOARD.md)
-2. [task-system/01_TASK_BOARD.md](C:/Users/HUAWEI/Documents/New%20project/task-system/01_TASK_BOARD.md)
-3. [task-system/03_TASKS/TASK-001-provider-runtime-source.md](C:/Users/HUAWEI/Documents/New%20project/task-system/03_TASKS/TASK-001-provider-runtime-source.md)
-4. [docs/learning/0004-provider-config-and-env.md](C:/Users/HUAWEI/Documents/New%20project/docs/learning/0004-provider-config-and-env.md)
+1. [task-system/00_DASHBOARD.md](../../../00_DASHBOARD.md)
+2. [task-system/01_TASK_BOARD.md](../../../01_TASK_BOARD.md)
+3. [task-system/03_TASKS/TASK-001-provider-runtime-source.md](../../../03_TASKS/TASK-001-provider-runtime-source.md)
+4. [docs/learning/0004-provider-config-and-env.md](../../../../../docs/learning/0004-provider-config-and-env.md)

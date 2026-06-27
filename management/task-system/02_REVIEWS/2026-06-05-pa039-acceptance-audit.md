@@ -5,10 +5,10 @@
 - `management/task-system/03_TASKS/PA-039-build-memory-write-hooks-and-persisted-side-effect-contract.md`
 - `openspec/changes/add-memory-write-hooks-and-persisted-side-effect-contract/specs/memory-write-hooks-and-persisted-side-effect-contract/spec.md`
 - `openspec/changes/add-memory-write-hooks-and-persisted-side-effect-contract/tasks.md`
-- `src-tauri/src/agent/hooks.rs`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/control_plane.rs`
-- `src-tauri/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/hooks.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
 
 ## 审核口径
 
@@ -28,8 +28,8 @@
 
 代码参考：
 
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:195)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:1865)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:195)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:1865)
 
 判断：
 
@@ -41,9 +41,9 @@ memory-write hooks 已挂在规范化 write intent 上，不再依赖对 session
 
 代码参考：
 
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:2108)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:5209)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:5277)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:2108)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:5209)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:5277)
 
 判断：
 
@@ -55,9 +55,9 @@ memory-write hooks 已挂在规范化 write intent 上，不再依赖对 session
 
 代码参考：
 
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:112)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:1364)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:1726)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:112)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:1364)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:1726)
 
 验证：
 

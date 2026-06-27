@@ -2,8 +2,8 @@
 
 ## 审核范围
 
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
 - `src-tauri/src/lib.rs`
 - `src/stores/runtime.ts`
 - `src/types/runtime.ts`

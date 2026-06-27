@@ -29,3 +29,9 @@
 - 实现新的 workspace rollback 能力
 - 重做 provider/model 菜单、消息 markdown 样式或整个 sidebar 信息架构
 - 引入跨 session 的可视化分支图或 diff viewer
+
+---
+
+## Archive Note (2026-06-27)
+
+归档原因：核心 checkpoint UX 已在 `HomeWorkspace.vue` 中基本实现（per-message 回退控制、checkpoint picker、fork 摘要、键盘快捷键 Ctrl/Cmd+K）。剩余改进（agent 消息级 affordance、bottom-bar picker 收口）属于前端打磨，与当前基础设施优先级（PA-069 锁优化、PA-070 重试边界、PA-071 架构文档）不匹配。待前端 UX 阶段重启后可重新评估。

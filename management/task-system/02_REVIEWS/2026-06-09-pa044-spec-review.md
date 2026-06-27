@@ -8,11 +8,11 @@
 - [tasks.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary/tasks.md>)
 - [delta spec](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary/specs/agent-core-infrastructure-boundary/spec.md>)
 - 相关实现现状：
-  - [runtime.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs>)
-  - [control_plane.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs>)
-  - [tools.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/tools.rs>)
-  - [session.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs>)
-  - [graph.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs>)
+  - [runtime.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs>)
+  - [control_plane.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs>)
+  - [tools.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/tools.rs>)
+  - [session.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs>)
+  - [graph.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/graph.rs>)
   - [tauri_adapter.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/tauri_adapter.rs>)
   - [sse_adapter.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/sse_adapter.rs>)
 

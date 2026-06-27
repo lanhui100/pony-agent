@@ -8,11 +8,11 @@
 
 ## 已完成
 
-- 在 `src-tauri/src/agent/tools.rs` 中新增 `ToolPlan / ToolPlanStep`
+- 在 `crates/pony-agent-core/src/agent/tools.rs` 中新增 `ToolPlan / ToolPlanStep`
 - `workspace_batch / workspace_gather_context` 结果中已显式输出 `plan`
-- 在 `src-tauri/src/agent/planner.rs` 中，显式多路径批量请求已写入 `toolPlan`
-- 在 `src-tauri/src/agent/telemetry.rs` 中，tool activity 已优先消费显式 `toolPlan`
-- 在 `src-tauri/src/agent/config.rs` 与 `src/stores/providers.ts` 中引入集中式 capability catalog
+- 在 `crates/pony-agent-core/src/agent/planner.rs` 中，显式多路径批量请求已写入 `toolPlan`
+- 在 `crates/pony-agent-core/src/agent/telemetry.rs` 中，tool activity 已优先消费显式 `toolPlan`
+- 在 `crates/pony-agent-core/src/agent/config.rs` 与 `src/stores/providers.ts` 中引入集中式 capability catalog
 - 新增 `src-tauri/src/sse_adapter.rs`
 - 新增 `src-tauri/src/bin/sse_turn_probe.rs`
 - 对 OpenAI 兼容 reasoning 模型补了“stream follow-up 失败时回退 sync follow-up”的保守兜底
@@ -39,11 +39,11 @@
 
 ## 影响文件
 
-- `src-tauri/src/agent/tools.rs`
-- `src-tauri/src/agent/planner.rs`
-- `src-tauri/src/agent/telemetry.rs`
-- `src-tauri/src/agent/provider.rs`
-- `src-tauri/src/agent/config.rs`
+- `crates/pony-agent-core/src/agent/tools.rs`
+- `crates/pony-agent-core/src/agent/planner.rs`
+- `crates/pony-agent-core/src/agent/telemetry.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/config.rs`
 - `src-tauri/src/sse_adapter.rs`
 - `src-tauri/src/bin/sse_turn_probe.rs`
 - `src/stores/providers.ts`

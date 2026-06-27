@@ -92,8 +92,8 @@
 
 ## 断点续跑提示
 继续前先看：
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/control_plane.rs`
-- `src-tauri/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
 - `src/components/ModelMonitorPage.vue`
 - `tests/runtime-store.spec.ts`

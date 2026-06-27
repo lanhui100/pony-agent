@@ -47,7 +47,7 @@
 - 已完成独立 spec 审核并采纳修订，见：
   [2026-06-03-pa031-pa032-pa033-spec-review.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-03-pa031-pa032-pa033-spec-review.md)
 - 已完成第一轮 no-op foundation 骨架：
-  - 新增 `src-tauri/src/agent/hooks.rs`
+  - 新增 `crates/pony-agent-core/src/agent/hooks.rs`
   - 已落第一版 hook contract types：`TurnHookPoint / HookClass / HookFailurePolicy / HookRecoveryMode / HookResultKind`
   - 已落 `AgentHookDescriptor / AgentHookRegistry / NoopHookExecutor`
   - 已补 descriptor 校验与 no-op 执行的最小 Rust 单测
@@ -124,5 +124,5 @@
 继续前先看：
 - `management/task-system/03_TASKS/PA-022-build-lifecycle-hooks-pipeline.md`
 - `docs/architecture/turn-lifecycle-hooks-and-recovery.md`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`

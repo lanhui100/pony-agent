@@ -92,9 +92,9 @@
 - `management/task-system/03_TASKS/PA-037-build-session-control-surface-and-feedback-loop.md`
 - `management/task-system/03_TASKS/PA-038-build-run-hooks-and-execution-control-boundaries.md`
 - `management/task-system/03_TASKS/PA-042-build-session-control-audit-surface-and-history-evidence-summary.md`
-- `src-tauri/src/agent/control_plane.rs`
-- `src-tauri/src/agent/execution_control.rs`
-- `src-tauri/src/agent/graph.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/graph.rs`
 - `src/stores/runtime.ts`
 - `src/components/HomeSessionSidebar.vue`
 - `src/components/HomeWorkspace.vue`

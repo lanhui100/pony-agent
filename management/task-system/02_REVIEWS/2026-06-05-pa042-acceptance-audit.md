@@ -6,8 +6,8 @@
 - [openspec/changes/archive/2026-06-05-add-session-control-audit-surface-and-history-evidence-summary/specs/session-control-audit-surface-and-history-evidence-summary/spec.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-05-add-session-control-audit-surface-and-history-evidence-summary/specs/session-control-audit-surface-and-history-evidence-summary/spec.md>)
 - [openspec/changes/archive/2026-06-05-add-session-control-audit-surface-and-history-evidence-summary/tasks.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/archive/2026-06-05-add-session-control-audit-surface-and-history-evidence-summary/tasks.md>)
 - [docs/architecture/session-control-plane-and-audit-surface.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/session-control-plane-and-audit-surface.md)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
 - [src/stores/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/runtime.ts)
 - [src/types/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/runtime.ts)
 - [src/components/HomeSessionSidebar.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/HomeSessionSidebar.vue)
@@ -41,7 +41,7 @@
 
 证据：
 
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
 - [src/types/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/runtime.ts)
 - [docs/architecture/session-control-plane-and-audit-surface.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/session-control-plane-and-audit-surface.md)
 
@@ -68,7 +68,7 @@
 
 证据：
 
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
 - [src/stores/runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/runtime.ts)
 
 验证：
@@ -93,7 +93,7 @@ summary 已具备 “persisted truth-source -> snapshot/runtime view/response ->
 
 证据：
 
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
 
 验证：
 

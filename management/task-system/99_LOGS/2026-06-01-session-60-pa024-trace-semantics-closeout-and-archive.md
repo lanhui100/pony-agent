@@ -14,8 +14,8 @@
 - 前端 `runtime store`、`HomeSidebar` 与 `ModelMonitorPage` 测试口径同步到 canonical trace semantics。
 
 ## 涉及文件
-- [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
-- [session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+- [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs)
+- [session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs)
 - [runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/types/runtime.ts)
 - [runtime.ts](/C:/Users/HUAWEI/Documents/pony-agent/src/stores/runtime.ts)
 - [HomeSidebar.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/HomeSidebar.vue)

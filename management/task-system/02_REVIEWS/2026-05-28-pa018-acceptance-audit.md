@@ -4,12 +4,12 @@
 
 - `management/task-system/03_TASKS/PA-018-build-context-state-subsystem-and-retrieval-boundary.md`
 - `docs/architecture/context-state-subsystem.md`
-- `src-tauri/src/agent/context.rs`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/graph.rs`
-- `src-tauri/src/agent/planner.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/graph.rs`
+- `crates/pony-agent-core/src/agent/planner.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src-tauri/src/lib.rs`
 
 ## 审核口径

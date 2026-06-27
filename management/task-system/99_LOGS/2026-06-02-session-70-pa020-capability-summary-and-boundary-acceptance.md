@@ -6,12 +6,12 @@
 - Added an acceptance test proving MCP remains a runtime capability-ingress layer rather than planner scheduler state.
 
 ## Code
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
   - added `ModelMonitorActivityRow`
   - extended `ModelMonitorSummaryView` with `capability_sources`, `capability_invocation_modes`, and `capability_failure_classes`
   - aggregated capability activity from persisted `TurnToolActivity.capability_invocation`
   - added summary aggregation test for capability usage dimensions
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
   - added planner/runtime boundary acceptance test covering normalized `ToolCall` handoff into capability bridge resolve
 - `src/types/runtime.ts`
   - added `ModelMonitorActivityRow`

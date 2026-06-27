@@ -94,6 +94,6 @@
 - `management/task-system/03_TASKS/PA-018-build-context-state-subsystem-and-retrieval-boundary.md`
 - `management/task-system/03_TASKS/PA-032-stabilize-trace-persistence-and-recovery-contract.md`
 - `management/task-system/03_TASKS/PA-033-build-agent-hooks-pipeline-foundation.md`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/context.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`

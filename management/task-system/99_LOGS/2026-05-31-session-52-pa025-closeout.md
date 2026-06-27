@@ -31,14 +31,14 @@
 
 ### 1. 后端
 
-- `src-tauri/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
   - 为 request observation 明确三层：
     - `stablePrefixText`
     - `semiStableContextText`
     - `volatileInputText`
   - 普通 request 与 provider-native transcript 两条路径都补齐观测构造
   - provider-native transcript 被截断时，observation 继续保留真实发送过的 truncation note
-- `src-tauri/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
   - 暴露 `ProviderRequestObservation`
   - `BuildContextObservation` 承接三层语义
 - `src-tauri/src/bin/decision_probe.rs`

@@ -21,10 +21,10 @@
   - 修复测试附件根目录隔离，消除 `session_regression` 的跨测试污染
 
 ## 关键文件
-- `src-tauri/src/agent/graph.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/graph.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src-tauri/src/lib.rs`
-- `src-tauri/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
 - `src-tauri/tests/session_regression.rs`
 - `src/stores/runtime.ts`
 - `src/types/runtime.ts`

@@ -1,5 +1,9 @@
 # Spec: Runtime-History State Consistency (v2 — After Adversarial Review)
 
+> **Status: Implemented** (via PA-060/PA-061/PA-062/PA-063, 2026-06-22)
+> 本 spec 与 session-cursor-view-contract canonical spec 对应，
+> 已通过 PA-061 host-authoritative hard-cut 与 PA-062 browser preview fallback retirement 完成收口。
+
 ## Overview
 
 Ensure frontend state consistency between runtime and historical conversation views.  

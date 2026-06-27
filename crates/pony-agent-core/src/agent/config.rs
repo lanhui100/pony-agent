@@ -1408,7 +1408,7 @@ mod tests {
         let normalized = normalize_storage(storage);
         let model = &normalized.providers[0].models[0];
 
-        assert_eq!(model.capabilities.context_window_tokens, Some(128_000));
+        assert_eq!(model.capabilities.context_window_tokens, Some(256_000));
         assert!(model.capabilities.supports_tools);
         assert!(model.capabilities.supports_streaming);
         assert!(model.capabilities.supports_reasoning);
@@ -1460,7 +1460,7 @@ mod tests {
             model.capability_preset,
             ProviderCapabilityPreset::Auto
         ));
-        assert_eq!(model.capabilities.context_window_tokens, Some(128_000));
+        assert_eq!(model.capabilities.context_window_tokens, Some(256_000));
         assert!(model.capabilities.supports_reasoning);
     }
 
@@ -1506,7 +1506,7 @@ mod tests {
         assert!(model.reasoning_effort.is_none());
         assert!(model.reasoning_budget_tokens.is_none());
         assert_eq!(model.temperature, 0.2);
-        assert_eq!(model.max_output_tokens, 8192);
+        assert_eq!(model.max_output_tokens, 64000);
     }
 
     #[test]

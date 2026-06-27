@@ -132,8 +132,8 @@
 
 ## 断点续跑提示
 继续前先看：
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/execution_control.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/stores/runtime.ts`
 - `docs/architecture/turn-lifecycle-hooks-and-recovery.md`

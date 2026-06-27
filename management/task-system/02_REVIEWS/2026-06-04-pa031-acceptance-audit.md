@@ -6,11 +6,11 @@
 - `openspec/changes/add-turn-lifecycle-event-contract/specs/turn-lifecycle-event-contract/spec.md`
 - `openspec/changes/add-turn-lifecycle-event-contract/tasks.md`
 - `docs/architecture/turn-lifecycle-hooks-and-recovery.md`
-- `src-tauri/src/agent/turn_flow.rs`
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
 - `src-tauri/src/sse_adapter.rs`
-- `src-tauri/src/agent/execution_control.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/types/runtime.ts`
 - `src/stores/runtime.ts`
 - `tests/runtime-store.spec.ts`

@@ -5,11 +5,11 @@
 - [PA-021 任务卡](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-021-build-skills-registry-and-bridge.md)
 - [skills-registry-bridge/spec.md](/C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/add-skills-registry-bridge/specs/skills-registry-bridge/spec.md)
 - [skills-registry-bridge/tasks.md](/C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/add-skills-registry-bridge/tasks.md)
-- [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/capability_bridge.rs)
-- [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/context.rs)
-- [planner.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/planner.rs)
-- [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
-- [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+- [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/capability_bridge.rs)
+- [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/context.rs)
+- [planner.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/planner.rs)
+- [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs)
+- [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
 - [ModelMonitorPage.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/ModelMonitorPage.vue)
 
 ## 验收结论
@@ -27,37 +27,37 @@
 
 1. skills 通过 unified capability-registry boundary 进入系统
    - 证据：
-     [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/capability_bridge.rs)
+     [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/capability_bridge.rs)
      中的 `SkillSourceSnapshot / replace_skill_source_snapshot / normalize_skill_source_snapshot`
    - 结论：通过
 
 2. composed capability kinds 语义被保留，且 `v1` 只执行 tool-composed skills
    - 证据：
-     [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/capability_bridge.rs)
+     [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/capability_bridge.rs)
      中的 `composed_capability_kinds / executable_in_v1 / resolve_skill_tool_actions`
    - 结论：通过
 
 3. planner 只消费 normalized skill facts
    - 证据：
-     [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/context.rs)
+     [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/context.rs)
      中 `build_request(..., planner_skills)` 与 `render_planner_skills_note(...)`
    - 结论：通过
 
 4. host/control-plane 保持 host-agnostic read/write surface
    - 证据：
-     [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+     [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
      中 `apply_skill_source_snapshot / list_skills / inspect_skill`
    - 结论：通过
 
 5. failure / permission / host-mediation 沿用统一语义
    - 证据：
-     [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/capability_bridge.rs)
+     [capability_bridge.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/capability_bridge.rs)
      中 `SkillFailureLayer`、权限聚合与 failure mapping
    - 结论：通过
 
 6. skill usage 进入现有 monitor summary/drilldown 链路
    - 证据：
-     [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+     [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs)
      中 `append_skill_aggregates(...)`
      与 [ModelMonitorPage.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/ModelMonitorPage.vue)
      中的 skill summary / drilldown 展示

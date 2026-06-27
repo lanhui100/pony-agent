@@ -1,130 +1,102 @@
-# 重构阶段计划
+# 重构阶段计划（当前状态总览）
 
-## Phase 0：骨架阶段
+## Phase 0：骨架阶段 ✅ 已完成
 
 目标：
-
-- 整理目录
-- 保留 Hermes 参考区
+- 整理目录，保留 Hermes 参考区
 - 建立 Tauri + Rust 基础骨架
 
-状态：
-
-- 已完成
-
-## Phase 1：前端调试台
+## Phase 1：前端调试台 ✅ 已完成
 
 目标：
+- 接入 Vue 3 + Pinia + TypeScript + Tailwind CSS + shadcn-vue
+- 三栏工作台：左侧导航、中间对话区、右侧可观测性面板
+- 独立页面：Provider 配置页（ProviderConfigPage）、模型监控页（ModelMonitorPage）、设置面板（SettingsPanel）
+- 附件中心（AttachmentCenterPanel）、Markdown 渲染、前端飞行记录仪
 
-- 接入 Vue 3
-- 接入 Pinia
-- 做出智能体调试台基本布局
-
-状态：
-
-- 下一步执行
-
-## Phase 2：单轮 Runtime
+## Phase 2：单轮 Runtime ✅ 已完成
 
 目标：
+- run_turn() 与 start_turn_stream() 核心链路
+- 多 provider 接入（OpenAI、Anthropic、DeepSeek 等）
+- Provider 配置与凭证管理（SecretStore）
+- 流式响应、turn loop（model → tool → model...）、cancellation
+- 执行控制底座（stop_turn、load_execution_checkpoint）
 
-- 实现 `run_turn()`
-- 接入一个 provider
-- 在 UI 中可看到状态流
-
-缓存命中要求：
-
-- 此阶段先建立“缓存友好默认结构”，不做复杂自动优化
-- 请求前缀中的 system prompt、provider 能力描述、工具定义顺序应尽量稳定
-- 开始记录基础 token usage / cached token usage，为后续阶段建立对比基线
-- 不允许在请求最前部混入频繁变化的临时状态
-
-此阶段不做：
-
-- 自动 compaction
-- 高频摘要重写
-- 为未来 graph / 子代理提前引入复杂缓存机制
-
-## Phase 3：工具调用
+## Phase 3：工具调用 ✅ 已完成
 
 目标：
+- ToolRouter 与 builtin_tools（17 个内部原语）
+- 第一波产品级工具面（Plan/Read/Search/List/Edit/Write/Run/Ask）
+- 第二波工具面（Glob/Grep/WebFetch/WebSearch/MCP Resource/ToolSearch）
+- 工具权限模型与审批语义
+- 工具观测读面与 telemetry
 
-- 建立 ToolRouter
-- 支持结构化工具调用
-- 在 UI 中显示工具调用日志
-
-缓存命中要求：
-
-- 工具结果注入要与稳定前缀分层，避免 follow-up 污染主前缀
-- 观测口径要从“整轮累计”升级到“首请求 / follow-up 分离”
-- 工具结果压缩策略要面向缓存友好，而不只是面向 token 变短
-
-此阶段不做：
-
-- 全量历史重写
-- 高频自动 compact
-
-## Phase 4：会话与记忆
+## Phase 4：会话与记忆 ✅ 已完成
 
 目标：
+- 多轮会话管理、摘要、本地持久化（SQLite + JSON 双后端）
+- 分层 context/state subsystem（PA-018）
+- LongTermMemory 独立边界与稳定事实
+- 附件生命周期（active/missing_payload/reclaimable/expired）
+- 会话控制审计面（history-control + run-control summary）
+- 历史分支、checkout、restore、fork、switch branch
 
-- 多轮会话
-- 摘要
-- 本地持久化
-
-缓存命中要求：
-
-- 这是缓存命中正式进入主线架构设计的第一阶段
-- 建立稳定层、半稳定层、易变层，避免会话状态全部混进前缀
-- 摘要默认冻结，不允许每轮重写
-- 第一版 compaction 只允许在明确边界发生，不允许按每轮预算动态切边界
-
-交付标准：
-
-- 能解释每种上下文结构对 cache 的影响
-- 能在 trace 中看出 compaction 触发原因、影响范围和命中变化
-
-## Phase 5：Graph 编排
+## Phase 5：Graph 编排 ✅ 已完成
 
 目标：
+- GraphRun 合同、状态机、runtime handoff 边界
+- Graph orchestrator（GraphRunner、GraphRunStore）
+- Graph stop/resume/checkpoint
+- GraphPlanner（continue/wait_user 决策）
+- HostControlPlane 统一控制面
 
-- 显式状态机
-- 更清晰的推理 / 工具 / 观察流程
-
-缓存命中要求：
-
-- graph run、planner、executor 的上下文边界必须显式化
-- 不同角色应优先使用独立会话或独立稳定前缀
-- run state、checkpoint、retrieved context 不能持续污染主对话前缀
-
-交付标准：
-
-- graph 编排能力上线时，缓存命中已成为默认设计约束，而不是事后补救项
-
-## Phase 6：高级能力
+## Phase 6：生命周期横切与能力接入 ✅ 已完成
 
 目标：
+- Agent hooks pipeline（observe/guard/transform/side_effect）
+- 12 个 canonical hook boundary + run/memory/planner/capability/history-state hooks
+- MCP capability bridge（统一 registry、tool/resource/prompt_template）
+- Skills registry bridge（统一 skill 发现与执行）
+- 缓存命中 telemetry（PA-029）
+- Trace 面板 call model 可观测性（PA-030）
 
-- 子代理
+## Phase 7：基础设施加固 ✅ 已完成
+
+目标：
+- PA-044：core 独立为 Tauri-free workspace member（crates/pony-agent-core）
+- PA-064：降低 session 切换与宿主读取压力（缓存优先）
+- PA-065：拆分 runtime ownership 与锁分离
+- PA-066：provider/tools 异步化（reqwest blocking → async）
+- PA-067：收口 blocking 工作，建立统一 BlockingHelper
+- PA-068：接入 per-session async turn task 模型
+- PA-069 系列：Mutex RwLock、SQLite 写优化、锁序文档化
+
+## Phase 8：高级能力 进行中
+
+### 已完成
+- 子代理系统（规划中）
+- 图片查看（规划中）
+- 权限请求（规划中）
+
+### 进行中
+- `PA-070` 统一 provider retry 与退避边界
+- `PA-069-A~E` core 基础设施加固
+
+### 规划中
+- Workflow Mode（用户自定义流程编排）
+- 子代理系统
+- LSP 代码智能
+- TodoWrite 任务管理
+- Config 运行时配置管理
 - 更丰富工具生态
-- 更强调试能力
 
-缓存命中要求：
+## 缓存命中约束（横跨所有阶段）
 
-- 子代理、后台任务、并行 agent 默认走独立上下文或可复用 fork 前缀
-- 引入 cache guard、回归测试、成本预算门槛
-- 将缓存命中纳入性能回归和产品验收
+缓存命中是 Pony Agent 架构设计的一等约束：
+- Phase 2~3：避免反缓存结构，记录基础指标
+- Phase 4：缓存友好结构正式进入设计（稳定层/半稳定层/易变层）
+- Phase 5：graph run/planner/executor 会话边界显式化
+- Phase 6+：子代理独立上下文、cache guard、回归测试
 
-## Phase 7：行业 Workflow 扩展
-
-目标：
-
-- 在 agent harness 主线完成并稳定后，扩展用户自定义 `workflow` 模式
-- 支持面向行业场景的流程编排，而不只是不受约束的 agentic 模式
-- 允许用户定义节点、分支、审批、重试、人工介入与可调用能力边界
-- 复用既有 graph / runtime / checkpoint / trace / resume 底座，形成可审计、可恢复、可复用的流程执行能力
-
-缓存命中要求：
-
-- workflow 模式继承主线的缓存分层原则
-- 节点切换、人工介入、恢复执行都要明确哪些前缀保持稳定、哪些状态允许重建
+详见 ADR-0007（`docs/decisions/0007-cache-hit-as-first-class-product-metric.md`）。

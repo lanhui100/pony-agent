@@ -9,7 +9,7 @@
 
 1. `PA-039` 的首个真实 truth-source 已收敛
    - memory-write hooks 不应先挂在 planner、graph arbitration 或 capability bridge
-   - 首个真实接线点优先落在 [session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs) 的 `update_long_term_memory_from_user_message(...)`
+   - 首个真实接线点优先落在 [session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs) 的 `update_long_term_memory_from_user_message(...)`
    - persisted evidence / reload / recovery 应沿：
      - `SessionSnapshot.long_term_memory_entries`
      - `FileSessionBackend` roundtrip

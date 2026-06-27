@@ -84,6 +84,6 @@
 - `management/task-system/03_TASKS/PA-022-build-lifecycle-hooks-pipeline.md`
 - `management/task-system/03_TASKS/PA-033-build-agent-hooks-pipeline-foundation.md`
 - `management/task-system/03_TASKS/PA-035-integrate-runtime-hook-dispatch-on-stable-boundaries.md`
-- `src-tauri/src/agent/graph.rs`
-- `src-tauri/src/agent/execution_control.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/graph.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`

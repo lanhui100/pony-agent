@@ -55,8 +55,8 @@
 
 ## 断点续跑提示
 继续前先看：
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
 - `src/stores/runtime.ts`
 - `src/components/HomeSessionSidebar.vue`
 - `docs/architecture/runtime.md`

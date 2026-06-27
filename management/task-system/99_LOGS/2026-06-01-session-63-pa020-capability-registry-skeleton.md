@@ -7,7 +7,7 @@
 
 ## 已完成
 
-- 新增后端 `src-tauri/src/agent/capability_bridge.rs`
+- 新增后端 `crates/pony-agent-core/src/agent/capability_bridge.rs`
   - 定义 `CapabilitySourceView / CapabilityView / CapabilityRegistry`
   - 先把 builtin tools 规范化为 `builtin-tools` source 下的 capability records
   - 预留 `register_mcp_source / register_mcp_capability` 供后续真实 MCP 接入

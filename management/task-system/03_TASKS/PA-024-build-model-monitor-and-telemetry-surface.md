@@ -28,7 +28,7 @@
 - Rust 与前端定向测试补齐
 
 ## 完成情况
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
   已新增 monitor summary / drill-down contract、聚合 helper、排序逻辑与定向测试。
 - `src-tauri/src/lib.rs`
   已新增并注册 monitor 相关 Tauri commands。
@@ -36,7 +36,7 @@
   已补齐 monitor overview / dimension / tool / session / drill-down 类型。
 - `src/components/ModelMonitorPage.vue`
   已从占位页升级为真实监控页，不依赖 runtime store 重算聚合。
-- `src-tauri/src/agent/runtime.rs` / `src-tauri/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs` / `crates/pony-agent-core/src/agent/session.rs`
   已将 trace timeline `kind` 收敛为 `prepare_retrieval / build_context / call_model / call_tool / return_result`，并兼容历史旧值归一化。
 - `src/stores/runtime.ts` / `src/components/HomeSidebar.vue`
   已统一消费 canonical trace semantics，避免 monitor drill-down 与主 trace UI 的语义口径继续漂移。

@@ -25,40 +25,33 @@
 
 如果没有集中状态管理，后续组件一多会很乱。
 
-## 为什么现在不急着上 vue-router
+## 路由策略
 
-第一阶段大概率只需要一个主工作台：
+当前通过 `App.vue` 的 `currentPage` 条件渲染实现 4 个页面的切换（home / providers / model-monitor / settings），未引入 vue-router。
 
-- 左侧聊天
-- 中间主输出
-- 右侧运行轨迹 / 工具日志
-
-这更像一个工作台，而不是一个网站。
+如果后续页面继续增长（workflow 设计器、附件中心独立页等），应重新评估引入 vue-router 的必要性。
 
 ## 页面建议
 
-### Chat Panel
+### 对话工作区（HomeWorkspace.vue）
 
-- 用户输入
-- 消息列表
+- 消息流展示（按 TurnBucket 分组：user/assistant/tools）
+- 用户输入与提交
+- 流式消息实时展示
+- checkpoint/history 控制
 
-### Runtime Panel
+### 左侧导航栏（HomeSessionSidebar.vue）
 
-- 当前阶段
-- 当前 provider
-- 当前 turn 状态
+- 品牌入口、新对话、对话历史
+- 模型管理入口（模型配置、模型监控）
 
-### Tool Panel
+### 右侧可观测性面板（HomeSidebar.vue）
 
-- 工具名
-- 参数
-- 结果
-- 时长
-
-### Graph Trace Panel
-
-- 当前节点
-- 历史轨迹
+- Status：当前阶段、provider、session 状态
+- Tools：工具调用记录
+- Trace：Turn 执行轨迹与 timeline
+- Retrieval：上下文取用事实
+- Diagnostics：诊断信息
 
 ## 当前 UI 风格约束
 

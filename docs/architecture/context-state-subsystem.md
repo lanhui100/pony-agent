@@ -201,10 +201,10 @@
 完成态验证命令：
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --lib planner::tests -- --nocapture
-cargo test --manifest-path src-tauri/Cargo.toml --lib graph::tests -- --nocapture
-cargo test --manifest-path src-tauri/Cargo.toml --lib append_turn_extracts_ -- --nocapture
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+npm run cargo:test:exact -- --lib planner::tests -- --nocapture
+npm run cargo:test:exact -- --lib graph::tests -- --nocapture
+npm run cargo:test:exact -- --lib append_turn_extracts_ -- --nocapture
+npm run cargo:test:shared
 npm run verify
 ```
 
@@ -219,14 +219,14 @@ npm run verify
 ## 代码入口
 
 - retrieval contract 与默认实现：
-  [context.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/context.rs)
+  [context.rs](crates/pony-agent-core/src/agent/context.rs)
 - long-term memory 存储边界与稳定事实提取：
-  [session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs)
+  [session.rs](crates/pony-agent-core/src/agent/session.rs)
 - runtime 接入：
-  [runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs)
+  [runtime.rs](crates/pony-agent-core/src/agent/runtime.rs)
 - graph / planner 收口：
-  [graph.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/graph.rs)
-  [planner.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/planner.rs)
+  [graph.rs](crates/pony-agent-core/src/agent/graph.rs)
+  [planner.rs](crates/pony-agent-core/src/agent/planner.rs)
 - 宿主 retrieval-first 查询面：
-  [control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs)
+  [control_plane.rs](crates/pony-agent-core/src/agent/control_plane.rs)
   [lib.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/lib.rs)

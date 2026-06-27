@@ -9,7 +9,7 @@
 - `src/components/HomeSessionSidebar.vue`
 - `src/components/ModelMonitorPage.vue`
 - `src/stores/runtime.ts`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `tests/HomeSessionSidebar.spec.ts`
 - `tests/runtime-store.spec.ts`
 

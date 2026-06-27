@@ -64,10 +64,10 @@
 
 ## 断点续跑提示
 继续前先看：
-- `src-tauri/src/agent/tools.rs`
-- `src-tauri/src/agent/planner.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/tools.rs`
+- `crates/pony-agent-core/src/agent/planner.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
 - `docs/learning/0013-native-tools-protocols.md`
 - `docs/learning/0016-tool-call-as-data-not-direct-function-call.md`
 ## 2026-05-23 补充进展

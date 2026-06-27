@@ -48,13 +48,8 @@ Pony Agent 是一个基于 `Tauri + Rust + Vue + TypeScript` 重构的桌面智�
 
 ### 暂不优先
 
-- `vue-router`
-- TUI 作为主交互层
-
-说明：
-
-- 第一阶段使用 Tauri UI 作为智能体运行时调试台
-- 如果后续需要开发者模式或远程终端场景，再考虑补充 TUI
+- `vue-router`（当前通过条件渲染实现 4 个页面的切换，后续若页面继续增长可重新评估）
+- TUI 作为主交互层（如果后续需要开发者模式或远程终端场景，再考虑补充 TUI）
 
 ## 架构原则
 
@@ -109,13 +104,16 @@ Pony Agent 是一个基于 `Tauri + Rust + Vue + TypeScript` 重构的桌面智�
 - 项目正式名：`Pony Agent`
 - 包名、标识符、窗口标题统一使用 `Pony Agent` 及其对应 slug
 
-### 实施顺序
+### 实际完成顺序
 
-- 先前端框架与调试台
-- 再 Rust 单轮运行时
-- 再工具系统
-- 再会话与记忆
-- 最后扩展多代理和复杂编排
+1. ✅ 前端框架与调试台（Phase 1）
+2. ✅ Rust 单轮运行时（Phase 2）
+3. ✅ 工具系统（第一波 + 第二波，Phase 3）
+4. ✅ 会话与记忆（Phase 4）
+5. ✅ Graph 编排（Phase 5）
+6. ✅ 生命周期横切与能力接入（hooks/MCP/skills，Phase 6）
+7. ✅ 基础设施加固（异步化、锁分离、core 解耦，Phase 7）
+8. 🔄 高级能力（子代理、workflow、代码智能等，Phase 8）
 
 ### 决策原则
 

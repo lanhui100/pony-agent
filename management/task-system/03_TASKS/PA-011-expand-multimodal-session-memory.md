@@ -74,6 +74,6 @@
 - `src/stores/runtime.ts`
 - `src/components/HomeWorkspace.vue`
 - `src/types/runtime.ts`
-- `src-tauri/src/agent/context.rs`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`

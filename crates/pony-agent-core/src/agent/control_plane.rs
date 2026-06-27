@@ -4298,7 +4298,8 @@ mod tests {
 
     fn build_test_control_plane(
         responses: Vec<MockHttpResponse>,
-    ) -> (HostControlPlane, MockHttpServer) {
+    ) -> (HostControlPlane, MockHttpServer, crate::agent::runtime_helper::TestRuntimeGuard) {
+        let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let server = MockHttpServer::start(responses);
         let runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
@@ -4310,7 +4311,7 @@ mod tests {
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),
         );
-        (HostControlPlane::with_runtime(runtime), server)
+        (HostControlPlane::with_runtime(runtime), server, rt_guard)
     }
 
     fn temp_sessions_path() -> std::path::PathBuf {
@@ -4400,7 +4401,7 @@ mod tests {
 
     #[test]
     fn inspection_can_join_turn_and_session_views() {
-        let (control_plane, server) = build_test_control_plane(vec![json_completion("inspected")]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![json_completion("inspected")]);
         control_plane.execution_control.register_turn(
             "turn-inspect",
             Some("session-inspect"),
@@ -4481,7 +4482,7 @@ mod tests {
 
     #[test]
     fn session_runtime_view_queries_flow_through_control_plane() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("runtime-view")]);
 
         {
@@ -4847,7 +4848,7 @@ mod tests {
 
     #[test]
     fn completed_session_can_project_checkpoint_lifecycle_boundary_without_recovery() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("checkpoint lifecycle ready")]);
 
         {
@@ -4904,7 +4905,7 @@ mod tests {
 
     #[test]
     fn retrieved_context_queries_flow_through_control_plane() {
-        let (control_plane, server) = build_test_control_plane(vec![json_completion("retrieved")]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![json_completion("retrieved")]);
 
         {
             let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
@@ -4942,7 +4943,7 @@ mod tests {
 
     #[test]
     fn retrieved_context_can_infer_active_graph_run_from_session_id() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("session-aware retrieval")]);
         let started = control_plane
             .start_graph_run(StartGraphRunCommand {
@@ -5023,7 +5024,7 @@ mod tests {
 
     #[test]
     fn graph_run_can_start_and_wait_for_next_user_turn() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("first response")]);
         let response = control_plane
             .start_graph_run(StartGraphRunCommand {
@@ -5075,7 +5076,7 @@ mod tests {
 
     #[test]
     fn graph_run_planner_graph_decision_hooks_can_rewrite_decision_summary() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("first response")]);
         {
             let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
@@ -5135,7 +5136,7 @@ mod tests {
 
     #[test]
     fn graph_run_can_continue_across_multiple_turns() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_completion("first response"),
             json_completion("second response"),
         ]);
@@ -5186,7 +5187,7 @@ mod tests {
 
     #[test]
     fn graph_run_can_stop_resume_and_expose_checkpoint() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_completion("first response"),
             json_completion("second response"),
         ]);
@@ -5373,7 +5374,7 @@ mod tests {
 
     #[test]
     fn graph_run_stream_can_start_continue_and_resume() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_completion("ignored stream response one"),
             json_completion("stream response one"),
             json_completion("ignored stream response two"),
@@ -5537,7 +5538,7 @@ mod tests {
 
     #[test]
     fn running_graph_stream_uses_runtime_checkpoint_until_waiting_user_boundary() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_completion("ignored stream response"),
             json_completion("single streamed response"),
         ]);
@@ -5595,7 +5596,7 @@ mod tests {
 
     #[test]
     fn ordinary_start_graph_run_stream_does_not_enter_run_control_summary() {
-        let (control_plane, server) = build_test_control_plane(vec![]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let (started, _prepared) = control_plane
             .prepare_start_graph_run_stream(StartGraphRunStreamCommand {
@@ -5652,7 +5653,7 @@ mod tests {
 
     #[test]
     fn session_checkpoint_query_switches_from_runtime_control_to_recovery_after_turn_boundary() {
-        let (control_plane, server) = build_test_control_plane(vec![]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
             let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
@@ -5766,7 +5767,7 @@ mod tests {
 
     #[test]
     fn submission_plan_falls_back_to_graph_run_when_checkpoint_is_absent() {
-        let (control_plane, server) = build_test_control_plane(vec![]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
             let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
@@ -5808,7 +5809,7 @@ mod tests {
 
     #[test]
     fn submission_plan_prefers_checkpoint_projection_when_available() {
-        let (control_plane, server) = build_test_control_plane(vec![]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
             let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
@@ -5958,7 +5959,7 @@ mod tests {
 
     #[test]
     fn submission_plan_does_not_resume_when_run_is_not_resumable() {
-        let (control_plane, server) = build_test_control_plane(vec![]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
             let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
@@ -6018,7 +6019,7 @@ mod tests {
 
     #[test]
     fn lifecycle_boundary_checkpoint_does_not_override_default_submission_plan() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("lifecycle boundary completed")]);
 
         {
@@ -6068,7 +6069,7 @@ mod tests {
 
     #[test]
     fn lifecycle_boundary_checkpoint_projects_memory_write_evidence_from_session_snapshot() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("我会记住这条信息。")]);
 
         {
@@ -6138,7 +6139,7 @@ mod tests {
     #[test]
     fn lifecycle_boundary_checkpoint_keeps_replay_required_when_latest_node_has_no_memory_write_evidence(
     ) {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_completion("我会记住这条信息。"),
             json_completion("好的，我继续推进。"),
         ]);
@@ -6457,7 +6458,7 @@ mod tests {
 
     #[test]
     fn submission_plan_switches_with_session_checkpoint_boundary() {
-        let (control_plane, server) = build_test_control_plane(vec![]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
             let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
@@ -6569,7 +6570,7 @@ mod tests {
 
     #[test]
     fn inspection_can_include_graph_run_views() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("summary response")]);
         let _ = control_plane.start_graph_run(StartGraphRunCommand {
             run_id: Some("run-gamma".to_string()),
@@ -6616,7 +6617,7 @@ mod tests {
 
     #[test]
     fn inspection_can_infer_session_run_without_explicit_run_id() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("summary response")]);
         let _ = control_plane.start_graph_run(StartGraphRunCommand {
             run_id: Some("run-delta".to_string()),
@@ -6662,7 +6663,7 @@ mod tests {
 
     #[test]
     fn history_commands_and_runtime_view_follow_persisted_history_graph() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_completion("第一答"),
             json_completion("第二答"),
             json_completion("分叉回答"),
@@ -6848,7 +6849,7 @@ mod tests {
 
     #[test]
     fn history_checkout_response_and_runtime_view_share_same_history_state_evidence_projection() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
@@ -6980,7 +6981,7 @@ mod tests {
 
     #[test]
     fn history_restore_fork_switch_responses_project_history_state_evidence() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
@@ -7147,7 +7148,7 @@ mod tests {
 
     #[test]
     fn history_checkout_degrade_truth_source_does_not_depend_on_hooks_evidence() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
@@ -7261,7 +7262,7 @@ mod tests {
 
     #[test]
     fn load_model_monitor_summary_aggregates_existing_session_traces() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_completion("第一轮总结"),
             json_completion("第二轮总结"),
         ]);
@@ -7778,7 +7779,7 @@ mod tests {
 
     #[test]
     fn load_model_monitor_summary_reads_capability_activity_from_runtime_generated_trace() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_response(json!({
                 "choices": [
                     {
@@ -8014,7 +8015,7 @@ mod tests {
 
     #[test]
     fn monitor_and_drilldown_read_runtime_generated_capability_hook_evidence() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_response(json!({
                 "choices": [
                     {
@@ -8104,7 +8105,7 @@ mod tests {
 
     #[test]
     fn monitor_and_drilldown_read_runtime_generated_planner_hook_evidence() {
-        let (control_plane, server) =
+        let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("目录已分析。")]);
 
         let result = control_plane.run_turn(RunTurnCommand {
@@ -8173,7 +8174,7 @@ mod tests {
 
     #[test]
     fn monitor_and_drilldown_read_runtime_generated_skill_hook_evidence() {
-        let (control_plane, server) = build_test_control_plane(vec![
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![
             json_response(json!({
                 "choices": [
                     {
@@ -8865,7 +8866,7 @@ mod tests {
 
     #[test]
     fn load_model_monitor_session_drilldown_returns_metrics_and_runtime_view() {
-        let (control_plane, server) = build_test_control_plane(vec![json_completion("下钻摘要")]);
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![json_completion("下钻摘要")]);
 
         {
             let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");

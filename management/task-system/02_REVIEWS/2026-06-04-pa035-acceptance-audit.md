@@ -5,11 +5,11 @@
 - `management/task-system/03_TASKS/PA-035-integrate-runtime-hook-dispatch-on-stable-boundaries.md`
 - `openspec/changes/add-runtime-hook-dispatch-on-stable-boundaries/specs/runtime-hook-dispatch-on-stable-boundaries/spec.md`
 - `openspec/changes/add-runtime-hook-dispatch-on-stable-boundaries/tasks.md`
-- `src-tauri/src/agent/hooks.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/turn_flow.rs`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/hooks.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/turn_flow.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
 - `src/stores/runtime.ts`
 - `tests/runtime-store.spec.ts`
 

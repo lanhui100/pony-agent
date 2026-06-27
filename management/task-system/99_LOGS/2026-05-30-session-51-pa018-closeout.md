@@ -12,22 +12,22 @@
 
 ### 1. planner 依赖收窄
 
-- `src-tauri/src/agent/planner.rs`
+- `crates/pony-agent-core/src/agent/planner.rs`
   - 新增 `GraphPlanningRunView`
   - `GraphPlanningContext` 不再默认携带完整 `GraphRun`
   - planner continue 摘要补充消费 `closeout_focus`
 
 ### 2. graph / runtime retrieval-first 收口
 
-- `src-tauri/src/agent/graph.rs`
+- `crates/pony-agent-core/src/agent/graph.rs`
   - `build_turn_handoff()` 的 checkpoint 信息来自 `retrieved.run_state`
   - graph 测试同步改为显式设置 retrieval run state
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
   - runtime handoff 构建不再传 raw checkpoint 给 graph
 
 ### 3. LongTermMemory 稳定事实来源补齐
 
-- `src-tauri/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
   - 新增：
     - `project_dependency.prerequisite`
     - `project_workflow.closeout_requirement`
@@ -36,7 +36,7 @@
 
 ### 4. retrieval 稳定性与默认读面
 
-- `src-tauri/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
   - long-term memory 读取测试改为检查事实存在，而不是依赖写入顺序
 - `src-tauri/src/lib.rs`
   - 前端命令面继续维持不暴露 `load_session_snapshot`

@@ -19,7 +19,7 @@
      - control-plane 与 runtime view 必须投影同一口径 evidence
      - 增加 source-of-truth non-regression test 任务
 3. 启动第一段 contract/scaffolding 实现
-   - `src-tauri/src/agent/hooks.rs` 已新增：
+   - `crates/pony-agent-core/src/agent/hooks.rs` 已新增：
      - `HistoryStateHookPoint`
      - `HistoryStateCommandKind`
      - `HistoryStateCursorSummary`
@@ -29,7 +29,7 @@
    - 已新增最小测试：
      - `agent::hooks::tests::noop_history_state_executor_returns_empty_results`
 4. 打通第一条 session-level history-state hook 闭环
-   - `src-tauri/src/agent/session.rs` 已新增 `history_state_evidence` 的 state/snapshot 持久化字段
+   - `crates/pony-agent-core/src/agent/session.rs` 已新增 `history_state_evidence` 的 state/snapshot 持久化字段
    - `SessionStore` 已接入 `HistoryStateHookExecutor`
    - `checkout_history_node(...)` 已在 `history.checkout.start / history.checkout.resolved` 调度 hooks 并持久化 evidence
    - blocked checkout 会只保留 start evidence，且不会改写既有 history cursor/live truth-source

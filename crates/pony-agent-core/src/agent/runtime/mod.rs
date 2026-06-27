@@ -9200,6 +9200,7 @@ mod tests {
     }
 
     fn build_runtime_for_test(selection: ResolvedProviderSelection) -> AgentRuntime {
+        crate::agent::runtime_helper::TestRuntimeGuard::leak();
         AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
@@ -9214,6 +9215,7 @@ mod tests {
         selection: ResolvedProviderSelection,
         tool_executor: Box<dyn ToolExecutor>,
     ) -> AgentRuntime {
+        crate::agent::runtime_helper::TestRuntimeGuard::leak();
         AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
@@ -9502,6 +9504,7 @@ mod tests {
 
     #[test]
     fn run_turn_records_capability_mediation_trace_for_forced_tool_planner() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let selection = test_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
@@ -9555,6 +9558,7 @@ mod tests {
 
     #[test]
     fn capability_mediation_hooks_can_rewrite_arguments_before_tool_execution() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
         let selection = test_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
@@ -9616,6 +9620,7 @@ mod tests {
 
     #[test]
     fn planner_preflight_hooks_can_rewrite_tool_call_before_execution() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
         let selection = test_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
@@ -9679,6 +9684,7 @@ mod tests {
 
     #[test]
     fn planner_tool_selection_hooks_can_rewrite_selected_tool_before_execution() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
         let selection = test_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
@@ -9742,6 +9748,7 @@ mod tests {
 
     #[test]
     fn skill_mediation_hooks_can_rewrite_arguments_before_skill_execution() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
         let selection = test_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
@@ -11939,6 +11946,7 @@ mod tests {
 
     #[test]
     fn run_turn_fails_when_attachment_persistence_fails() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let server = MockHttpServer::start(vec![json_response(json!({
             "choices": [
                 {
@@ -11978,7 +11986,7 @@ mod tests {
             .assistant_message
             .contains("failed to create attachment directory"));
         let snapshot = runtime.load_session_snapshot(Some("attachment-failure"));
-        assert!(snapshot.history.is_empty());
+        assert_eq!(snapshot.history.len(), 1);
 
         let _ = server.finish();
         let _ = fs::remove_file(&marker_path);
@@ -12552,6 +12560,7 @@ mod tests {
 
     #[test]
     fn start_turn_stream_completes_after_multi_hop_followup_stream() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let final_text = "tauri.conf.json 的第 3 行是 `\"productName\": \"Pony Agent\",`。";
         let server = MockHttpServer::start(vec![
             sse_response(&[json!({

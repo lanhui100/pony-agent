@@ -115,6 +115,6 @@
 - `management/task-system/03_TASKS/PA-020-build-mcp-capability-bridge.md`
 - `management/task-system/03_TASKS/PA-021-build-skills-registry-and-bridge.md`
 - `management/task-system/03_TASKS/PA-033-build-agent-hooks-pipeline-foundation.md`
-- `src-tauri/src/agent/planner.rs`
-- `src-tauri/src/agent/capability_bridge.rs`
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/planner.rs`
+- `crates/pony-agent-core/src/agent/capability_bridge.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`

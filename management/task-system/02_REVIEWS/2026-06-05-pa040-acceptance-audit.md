@@ -5,11 +5,11 @@
 - `management/task-system/03_TASKS/PA-040-build-planner-and-capability-mediation-hooks.md`
 - `openspec/changes/add-planner-and-capability-mediation-hooks/specs/planner-and-capability-mediation-hooks/spec.md`
 - `openspec/changes/add-planner-and-capability-mediation-hooks/tasks.md`
-- `src-tauri/src/agent/hooks.rs`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/session.rs`
-- `src-tauri/src/agent/control_plane.rs`
-- `src-tauri/src/agent/capability_bridge.rs`
+- `crates/pony-agent-core/src/agent/hooks.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/session.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/capability_bridge.rs`
 - `src/components/ModelMonitorPage.vue`
 - `src/types/runtime.ts`
 - `tests/ModelMonitorPage.spec.ts`
@@ -39,19 +39,19 @@
 
 证据：
 
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:1984)
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:2000)
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:2027)
-- [src-tauri/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/hooks.rs:2045)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:633)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:716)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:4220)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:7548)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:7605)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:4278)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:7312)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:816)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:836)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:1984)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:2000)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:2027)
+- [crates/pony-agent-core/src/agent/hooks.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/hooks.rs:2045)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:633)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:716)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:4220)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:7548)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:7605)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:4278)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:7312)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:816)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:836)
 
 判断：
 
@@ -71,10 +71,10 @@ planner `preflight / tool selection / graph decision` 与 capability / skill med
 
 - [management/task-system/03_TASKS/PA-040-build-planner-and-capability-mediation-hooks.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-040-build-planner-and-capability-mediation-hooks.md:35)
 - [openspec/changes/add-planner-and-capability-mediation-hooks/specs/planner-and-capability-mediation-hooks/spec.md](/C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/add-planner-and-capability-mediation-hooks/specs/planner-and-capability-mediation-hooks/spec.md:49)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:883)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:8039)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:6415)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:5075)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:883)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:8039)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:6415)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:5075)
 
 判断：
 
@@ -91,11 +91,11 @@ planner `preflight / tool selection / graph decision` 与 capability / skill med
 
 证据：
 
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:6399)
-- [src-tauri/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/runtime.rs:6408)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:4138)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:6415)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:6503)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:6399)
+- [crates/pony-agent-core/src/agent/runtime.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs:6408)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:4138)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:6415)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:6503)
 
 判断：
 
@@ -113,10 +113,10 @@ planner `preflight / tool selection / graph decision` 与 capability / skill med
 
 证据：
 
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:5152)
-- [src-tauri/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/session.rs:5214)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:5199)
-- [src-tauri/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/agent/control_plane.rs:6274)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:5152)
+- [crates/pony-agent-core/src/agent/session.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs:5214)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:5199)
+- [crates/pony-agent-core/src/agent/control_plane.rs](/C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs:6274)
 - [src/components/ModelMonitorPage.vue](/C:/Users/HUAWEI/Documents/pony-agent/src/components/ModelMonitorPage.vue:463)
 - [tests/ModelMonitorPage.spec.ts](/C:/Users/HUAWEI/Documents/pony-agent/tests/ModelMonitorPage.spec.ts:500)
 

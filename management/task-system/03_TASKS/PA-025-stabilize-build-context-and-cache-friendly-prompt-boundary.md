@@ -87,8 +87,8 @@ npm run build
 
 ## 断点续跑提示
 如果后续需要复核本卡完成态，优先查看：
-- `src-tauri/src/agent/context.rs`
-- `src-tauri/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
 - `src/components/HomeSidebar.vue`
 - `src/types/runtime.ts`
 - `tests/HomeSidebar.spec.ts`

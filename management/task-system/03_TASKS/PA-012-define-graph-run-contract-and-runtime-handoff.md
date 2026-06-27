@@ -45,5 +45,5 @@
 - `docs/architecture/runtime.md`
 - `docs/architecture/overview.md`
 - `management/task-system/03_TASKS/PA-010-build-runtime-loop-and-stop-conditions.md`
-- `src-tauri/src/agent/runtime.rs`
-- `src-tauri/src/agent/execution_control.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/execution_control.rs`

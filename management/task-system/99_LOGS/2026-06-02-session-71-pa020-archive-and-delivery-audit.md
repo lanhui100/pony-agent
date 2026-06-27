@@ -7,7 +7,7 @@
 - Promoted the MCP capability bridge delta spec into the stable spec tree and archived the OpenSpec change.
 
 ## Code and Docs
-- `src-tauri/src/agent/control_plane.rs`
+- `crates/pony-agent-core/src/agent/control_plane.rs`
   - added `load_model_monitor_summary_reads_capability_activity_from_runtime_generated_trace`
   - proves runtime-generated capability activity is persisted and aggregated into monitor summary
 - `src/stores/runtime.ts`

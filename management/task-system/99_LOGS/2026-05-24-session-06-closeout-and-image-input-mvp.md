@@ -14,10 +14,10 @@
 - `src/components/HomeSessionSidebar.vue`
 - `tests/runtime-store.spec.ts`
 - `tests/HomeSessionSidebar.spec.ts`
-- `src-tauri/src/agent/input.rs`
-- `src-tauri/src/agent/context.rs`
-- `src-tauri/src/agent/provider.rs`
-- `src-tauri/src/agent/runtime.rs`
+- `crates/pony-agent-core/src/agent/input.rs`
+- `crates/pony-agent-core/src/agent/context.rs`
+- `crates/pony-agent-core/src/agent/provider.rs`
+- `crates/pony-agent-core/src/agent/runtime.rs`
 - `src-tauri/src/bin/direct_turn_probe.rs`
 - `src-tauri/src/bin/decision_probe.rs`
 - `src-tauri/src/bin/sse_turn_probe.rs`
