@@ -1447,7 +1447,7 @@ watch(
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
               :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }"
-              class="conversation-tool-panel my-0.5 space-y-0.5"
+               class="conversation-tool-panel mt-0.5 mb-4 space-y-0.5"
             >
               <div
                 v-for="(tool, idx) in turn.mergedTools"
