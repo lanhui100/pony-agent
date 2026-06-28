@@ -206,6 +206,24 @@ const orderedTurnTraces = computed(() => {
 });
 const latestTurn = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1] ?? null);
 const latestTurnId = computed(() => orderedTurnTraces.value[orderedTurnTraces.value.length - 1]?.turnId ?? "");
+const contextDisplayTokens = computed(() => {
+  if (inputTokens.value != null) return inputTokens.value;
+  if (isSubmitting.value && traceTimeline.value?.length) {
+    for (let i = traceTimeline.value.length - 1; i >= 0; i--) {
+      const entry = traceTimeline.value[i];
+      if (canonicalTraceTimelineKind(entry.kind) === "call_model" && entry.inputTokens != null) {
+        return entry.inputTokens;
+      }
+    }
+  }
+  for (let i = turnTraceHistory.value.length - 1; i >= 0; i--) {
+    const turn = turnTraceHistory.value[i];
+    if (turn.turnId !== runtimeActiveTurnId.value && turn.inputTokens != null) {
+      return turn.inputTokens;
+    }
+  }
+  return latestTurn.value?.inputTokens ?? null;
+});
 const currentContextWindowTokens = computed(
   () => retrievedSessionContext.value?.contextWindowTokens ?? providerStore.currentModel?.capabilities?.contextWindowTokens ?? null
 );
@@ -1549,16 +1567,16 @@ watch(orderedTurnTraceSignature, () => {
               </span>
               <span class="inline-flex items-center gap-1">
                 <span
-                  v-if="latestTurn.inputTokens && currentContextWindowTokens"
+                  v-if="contextDisplayTokens && currentContextWindowTokens"
                   class="inline-block h-1.5 w-16 overflow-hidden rounded-full bg-stone-200"
                 >
                   <span
                     class="block h-full rounded-full bg-stone-400 transition-all"
-                    :style="{ width: Math.min(100, (latestTurn.inputTokens / currentContextWindowTokens) * 100) + '%' }"
+                    :style="{ width: Math.min(100, (contextDisplayTokens / currentContextWindowTokens) * 100) + '%' }"
                   />
                 </span>
-                <Tooltip :text="`上下文 · ${formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || '未知'}`">
-                  <span>{{ formatContextUsage(latestTurn.inputTokens, currentContextWindowTokens) || "未知" }}</span>
+                <Tooltip :text="`上下文 · ${formatContextUsage(contextDisplayTokens, currentContextWindowTokens) || '未知'}`">
+                  <span>{{ formatContextUsage(contextDisplayTokens, currentContextWindowTokens) || "未知" }}</span>
                 </Tooltip>
               </span>
             </div>

@@ -3079,6 +3079,31 @@ impl AgentRuntime {
                 accumulated_fallback_reason,
                 response.fallback_reason.clone(),
             );
+            let (hop_input_tokens, hop_cache_hit, hop_reasoning, hop_output, hop_total) =
+                token_usage_parts(accumulated_token_usage.as_ref());
+            emit_stream_event(
+                sink,
+                "turn:hop_complete",
+                turn_id.to_string(),
+                "hop_complete",
+                Some("streaming_response"),
+                None,
+                None,
+                Some(provider_meta),
+                Some(response.provider_source.clone()),
+                Some(response.provider_mode.clone()),
+                None,
+                None,
+                hop_input_tokens,
+                hop_cache_hit,
+                hop_reasoning,
+                hop_output,
+                hop_total,
+                first_token_latency.get(),
+                Some(turn_started_at.elapsed().as_millis() as u64),
+                None, None, None, None, None, None,
+                input.session_id.clone(),
+            );
             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
             self.update_execution_checkpoint(
                 control,

@@ -674,23 +674,18 @@ impl ProviderManager {
                             )
                         }) {
                             Ok(response) => Ok(response),
-                            Err(sync_error) => {
-                                provider_log(format!(
-                                    "followup:stream-error protocol=openai provider={} model={} reason={}",
-                                    self.config.provider_name, request.model, sync_error
-                                ));
-                                Ok(ProviderResponse {
-                                    output_text: String::new(),
-                                    tool_call: None,
-                                    reasoning_content: None,
-                                    reasoning_content_value: None,
-                                    assistant_message: None,
-                                    provider_source: "provider_followup_stream_sync_fallback".to_string(),
-                                    provider_mode: "fallback".to_string(),
-                                    fallback_reason: Some(format!("stream_followup_failed;provider_followup_failed;{sync_error}")),
-                                    token_usage: None,
-                                })
-                            }
+                                Err(sync_error) => {
+                                    provider_log(format!(
+                                        "followup:stream-error protocol=openai provider={} model={} reason={}",
+                                        self.config.provider_name, request.model, sync_error
+                                    ));
+                                    Ok(local_tool_followup_fallback_response(
+                                        request,
+                                        tool_call,
+                                        tool_result,
+                                        sync_error,
+                                    ))
+                                }
                         };
                         response
                     }
@@ -2336,8 +2331,9 @@ fn merge_openai_stream_tool_calls(
             // 只在 name 非空时覆盖。ppx 等 provider 可能在后续 chunk 中发送空 name，
             // 导致之前已经正确设置的 name 被覆盖。
             if let Some(name) = function.get("name").and_then(Value::as_str) {
-                if !name.is_empty() {
-                    partial.name = Some(name.to_string());
+                let trimmed = name.trim();
+                if partial.name.is_none() || !trimmed.is_empty() {
+                    partial.name = Some(trimmed.to_string());
                 }
             }
 

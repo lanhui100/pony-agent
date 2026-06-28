@@ -394,7 +394,7 @@ async function measureHostRead<T>(
   }
 }
 
-const STREAM_FLUSH_INTERVAL_MS = 32;
+const STREAM_FLUSH_INTERVAL_MS = 16;
 
 function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
   switch (status) {
@@ -5859,6 +5859,26 @@ export const useRuntimeStore = defineStore("runtime", {
         });
       });
 
+      const hopCompleteUnlisten = await safeListen<TurnStreamEvent>("turn:hop_complete", ({ payload }) => {
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+        if (!this.shouldProcessTurnEvent(payload)) {
+          return;
+        }
+        this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
+        this.inputTokens = payload.inputTokens ?? this.inputTokens;
+        this.outputTokens = payload.outputTokens ?? this.outputTokens;
+        this.totalTokens = payload.totalTokens ?? this.totalTokens;
+        this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+        debugLog("event:hop_complete", {
+          turnId: payload.turnId,
+          inputTokens: payload.inputTokens ?? null,
+          outputTokens: payload.outputTokens ?? null
+        });
+      });
+
       const completedUnlisten = await safeListen<TurnStreamEvent>("turn:completed", ({ payload }) => {
         // Detect terminal event for a background session's turn
         if (payload.sessionId) {
@@ -6401,6 +6421,7 @@ export const useRuntimeStore = defineStore("runtime", {
       void checkpointPersistedUnlisten;
       void toolUnlisten;
       void outputEndUnlisten;
+      void hopCompleteUnlisten;
       void completedUnlisten;
       void failedUnlisten;
       void cancelledUnlisten;
