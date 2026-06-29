@@ -1323,7 +1323,7 @@ watch(
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
       viewport-class="px-4 sm:px-5"
     >
-      <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[58rem]" data-testid="workspace-content-column">
+      <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[46.4rem]" data-testid="workspace-content-column">
         <div
           v-if="rollbackInFlight"
           class="rollback-progress-overlay"
@@ -1347,7 +1347,7 @@ watch(
           </h2>
         </section>
         <section v-for="turn in visibleTurns" :key="turn.turnId" class="space-y-3">
-          <article v-if="turn.user" :ref="(element) => setLatestUserMessageRef(element, turn.turnId)" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-user-message ml-auto w-fit max-w-[86%] sm:max-w-[68%]">
+          <article v-if="turn.user" :ref="(element) => setLatestUserMessageRef(element, turn.turnId)" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-user-message ml-auto w-fit max-w-[68.8%] sm:max-w-[54.4%]">
             <div class="flex flex-col items-end">
               <div :class="actorLabelClass()" class="mb-1">
                 <span>User</span>
@@ -1645,7 +1645,7 @@ watch(
     <div class="absolute bottom-0 left-0 right-0 z-10 px-4 py-3 sm:px-5 pointer-events-none">
       <div
         ref="composerShellRef"
-        class="relative mx-auto w-full max-w-[48rem] rounded-[0.6rem] bg-white/76 px-4 py-3 shadow-[0_-4px_20px_-2px_rgba(60,40,20,0.06)] backdrop-blur-[8px]"
+        class="relative mx-auto w-full max-w-[38.4rem] rounded-[0.6rem] bg-white/76 px-4 py-3 shadow-[0_-4px_20px_-2px_rgba(60,40,20,0.06)] backdrop-blur-[8px]"
         data-testid="workspace-composer-shell"
         style="pointer-events: auto;"
       >

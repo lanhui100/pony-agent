@@ -905,11 +905,23 @@
           "from": "0.1.43"
         }
       ]
+    },
+    {
+      "commit": "5cdde3c",
+      "bumps": [
+        {
+          "to": "0.1.45",
+          "segment": "patch",
+          "component": "tauri",
+          "from": "0.1.44"
+        }
+      ],
+      "timestamp": "2026-06-29T16:14:37+08:00"
     }
   ],
-  "lastBump": "2026-06-29T15:59:04+08:00",
+  "lastBump": "2026-06-29T16:14:37+08:00",
   "tauri": {
-    "patch": 44,
+    "patch": 45,
     "minor": 1,
     "major": 0
   },
