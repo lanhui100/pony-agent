@@ -141,6 +141,8 @@ const latestUserMessageRef = ref<HTMLElement | null>(null);
 const latestAgentMessageRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
 const checkpointPickerOpen = ref(false);
+const scrollToLatestHovered = ref(false);
+let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const forkSummaryOpenForNodeId = ref<string | null>(null);
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const COMPOSER_BUFFER_PX = 220;
@@ -1236,6 +1238,26 @@ const {
   handleMessageCountChange
 } = timelineAutoScroll;
 
+const scrollToLatestHoverClass = computed(() => {
+  const w = unreadCount.value > 0 ? 'w-[145px]' : 'w-[110px]';
+  return `${w} h-[34px] px-3 py-2 justify-start gap-1.5 bg-white text-stone-900 shadow-[0_4px_12px_rgba(0,0,0,0.12)]`;
+});
+
+function handleScrollToLatestMouseEnter() {
+  if (hoverDebounceTimer) {
+    clearTimeout(hoverDebounceTimer);
+    hoverDebounceTimer = null;
+  }
+  scrollToLatestHovered.value = true;
+}
+
+function handleScrollToLatestMouseLeave() {
+  hoverDebounceTimer = setTimeout(() => {
+    scrollToLatestHovered.value = false;
+    hoverDebounceTimer = null;
+  }, 400);
+}
+
 onMounted(() => {
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
@@ -1247,6 +1269,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (hoverDebounceTimer) clearTimeout(hoverDebounceTimer);
   window.removeEventListener("click", handleClickOutside);
   window.removeEventListener("keydown", handleWindowKeydown);
   window.removeEventListener("resize", updateFloatingUiPositions);
@@ -1630,16 +1653,31 @@ watch(
 
     <button
       v-show="showScrollToBottom"
-      class="absolute right-6 top-1/2 z-20 -translate-y-1/2 flex items-center gap-1.5 rounded-full border border-stone-200 bg-white/90 px-3 py-2 text-[12px] font-medium text-stone-600 shadow-[0_2px_8px_rgba(0,0,0,0.08)] backdrop-blur-sm transition-all duration-200 hover:bg-white hover:text-stone-900 hover:shadow-[0_4px_12px_rgba(0,0,0,0.12)]"
+      :class="[
+        'absolute right-6 top-1/2 z-20 -translate-y-1/2 flex items-center rounded-full border border-stone-200 bg-white/90 text-[12px] font-medium text-stone-600 backdrop-blur-sm transition-all duration-500 ease-out cursor-pointer',
+        scrollToLatestHovered
+          ? scrollToLatestHoverClass
+          : 'w-[34px] h-[34px] p-0 justify-center gap-0 shadow-[0_2px_8px_rgba(0,0,0,0.08)]'
+      ]"
       data-testid="workspace-scroll-to-bottom"
       @click="handleScrollToBottom"
+      @mouseenter="handleScrollToLatestMouseEnter"
+      @mouseleave="handleScrollToLatestMouseLeave"
     >
-      <ArrowDown class="h-3.5 w-3.5" />
-      <span>滚动到最新</span>
+      <ArrowDown class="h-3.5 w-3.5 shrink-0" />
+      <span
+        :class="[
+          'overflow-hidden whitespace-nowrap transition-all duration-500 ease-out',
+          scrollToLatestHovered ? 'max-w-[5em] opacity-100' : 'max-w-0 opacity-0'
+        ]"
+      >滚动到最新</span>
       <span
         v-if="unreadCount > 0"
-        class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white"
-      >{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+        :class="[
+          'overflow-hidden whitespace-nowrap transition-all duration-500 ease-out',
+          scrollToLatestHovered ? 'max-w-[3.5em] opacity-100' : 'max-w-0 opacity-0'
+        ]"
+      ><span class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white">{{ unreadCount > 99 ? '99+' : unreadCount }}</span></span>
     </button>
 
     <div class="absolute bottom-0 left-0 right-0 z-10 px-4 py-3 sm:px-5 pointer-events-none">
