@@ -1389,20 +1389,7 @@ watch(
             </article>
 
           <article v-if="turn.assistant || turn.tools.length" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-agent-shell w-full px-0 py-1">
-            <div v-motion :initial="{ opacity: 0, y: 6 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.02 }" class="conversation-agent-header flex items-center justify-between gap-3">
-              <div :class="actorLabelClass()" class="min-w-0">
-                <Bot class="h-3.5 w-3.5" />
-                <span>Agent</span>
-              </div>
-              <div class="flex items-center gap-2 text-right normal-case tracking-normal">
-                <span v-if="assistantHeaderModel(turn.assistant)" class="truncate">
-                  <span class="inline-flex rounded-full border border-[#e6d7c3] bg-[#f6efe3] px-2 py-0.5 text-[10px] text-[#8b6b47]">
-                    {{ assistantHeaderModel(turn.assistant) }}
-                  </span>
-                </span>
-              </div>
-            </div>
-            <div class="mt-2 h-px w-full bg-stone-200/70"></div>
+
 
             <details
               v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
@@ -1483,7 +1470,7 @@ watch(
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
               :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.04 }"
-              class="assistant-response-panel my-0.5"
+               class="assistant-response-panel my-0.5"
             >
               <MarkdownRenderer
                 :content="isAssistantStreaming(turn.assistant) ? assistantDisplayStableContent(turn.assistant) : turn.assistant.content"
@@ -2093,19 +2080,21 @@ watch(
 .assistant-streaming-fade {
   display: inline;
   will-change: opacity;
-  animation-duration: 180ms;
+  animation-duration: 350ms;
   animation-timing-function: ease-out;
   animation-fill-mode: both;
 }
 
-@keyframes assistant-stream-fade-in-a {
+@keyframes assistant-stream-fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
 
-@keyframes assistant-stream-fade-in-b {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .assistant-streaming-fade {
+    animation: none !important;
+    opacity: 1 !important;
+  }
 }
 
 .conversation-disclosure {
