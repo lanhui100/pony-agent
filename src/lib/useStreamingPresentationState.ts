@@ -1,10 +1,15 @@
 import { shallowReactive, type ComputedRef, type Ref } from "vue";
 import type { ChatMessage } from "@/types/runtime";
+import { countUnclosedCodeFences } from "./markdown";
 
-const STREAM_FADE_MIN_CHARS = 3;
+const STREAM_FADE_BATCH_CHARS = 50;
+const STREAM_FADE_TIME_MS = 350;
+const STREAM_FADE_FIRST_BATCH_CHARS = 12;
+const STREAM_FADE_CODE_FENCE_CHARS = 18;
+const STREAM_REASONING_FADE_CHARS = 3;
 
-function shouldKeepInitialStreamingContentStable(content: string) {
-  return /[*_`#[\]()]/.test(content);
+function detectCodeFenceActive(content: string): boolean {
+  return countUnclosedCodeFences(content) > 0;
 }
 
 export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[]> | Ref<ChatMessage[]>) {
@@ -12,6 +17,7 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
   const streamSnapshotReasoningByMessageId = shallowReactive<Record<string, string>>({});
   const streamFadeTextByMessageId = shallowReactive<Record<string, string>>({});
   const streamFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
+  const streamFadeLastTimeByMessageId = shallowReactive<Record<string, number>>({});
   const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string>>({});
   const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
 
@@ -20,6 +26,7 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
     streamSnapshotReasoningByMessageId,
     streamFadeTextByMessageId,
     streamFadeKeyByMessageId,
+    streamFadeLastTimeByMessageId,
     streamReasoningFadeTextByMessageId,
     streamReasoningFadeKeyByMessageId
   ];
@@ -56,35 +63,63 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
     }
 
     for (const message of pendingAssistants) {
+      // Reasoning content (unchanged, simple delta model)
       const nextReasoning = message.reasoningContent ?? "";
-      const nextText = message.content;
-      const previousText = streamSnapshotTextByMessageId[message.id] ?? "";
       const previousReasoning = streamSnapshotReasoningByMessageId[message.id] ?? "";
-      const hasOtherStreamingTextSnapshot = Object.keys(streamSnapshotTextByMessageId).some((id) => id !== message.id);
-      const hasOtherStreamingReasoningSnapshot = Object.keys(streamSnapshotReasoningByMessageId).some((id) => id !== message.id);
-
-      const appendedText = previousText.length > 0
-        ? (nextText.length > previousText.length ? nextText.slice(previousText.length) : "")
-        : (hasOtherStreamingTextSnapshot || !shouldKeepInitialStreamingContentStable(nextText) ? nextText : "");
-      syncPresentationMapValue(streamFadeTextByMessageId, message.id, appendedText.length >= STREAM_FADE_MIN_CHARS ? appendedText : "");
-      if (streamFadeTextByMessageId[message.id]) {
-        streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
-      }
+      const hasOtherReasoningSnapshot = Object.keys(streamSnapshotReasoningByMessageId).some((id) => id !== message.id);
 
       const appendedReasoning = previousReasoning.length > 0
         ? (nextReasoning.length > previousReasoning.length ? nextReasoning.slice(previousReasoning.length) : "")
-        : (hasOtherStreamingReasoningSnapshot ? nextReasoning : "");
+        : (hasOtherReasoningSnapshot ? nextReasoning : "");
       syncPresentationMapValue(
-        streamReasoningFadeTextByMessageId,
-        message.id,
-        appendedReasoning.length >= STREAM_FADE_MIN_CHARS ? appendedReasoning : ""
+        streamReasoningFadeTextByMessageId, message.id,
+        appendedReasoning.length >= STREAM_REASONING_FADE_CHARS ? appendedReasoning : ""
       );
       if (streamReasoningFadeTextByMessageId[message.id]) {
         streamReasoningFadeKeyByMessageId[message.id] = (streamReasoningFadeKeyByMessageId[message.id] ?? 0) + 1;
       }
-
-      syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
       syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, nextReasoning);
+
+      // Main text with batch fade: snapshot only advances on flush
+      const nextText = message.content;
+      const snapshotText = streamSnapshotTextByMessageId[message.id] ?? "";
+      const isFirstSync = snapshotText.length === 0;
+
+      if (isFirstSync) {
+        if (nextText.length >= STREAM_FADE_FIRST_BATCH_CHARS) {
+          syncPresentationMapValue(streamFadeTextByMessageId, message.id, nextText);
+          streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
+          streamFadeLastTimeByMessageId[message.id] = Date.now();
+          syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
+        } else {
+          syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
+          streamFadeLastTimeByMessageId[message.id] = Date.now();
+          // snapshot stays empty
+        }
+      } else {
+        const pendingChars = nextText.length - snapshotText.length;
+
+        if (pendingChars <= 0) {
+          syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
+          continue;
+        }
+
+        const batchChars = detectCodeFenceActive(nextText)
+          ? STREAM_FADE_CODE_FENCE_CHARS
+          : STREAM_FADE_BATCH_CHARS;
+        const elapsed = Date.now() - (streamFadeLastTimeByMessageId[message.id] ?? 0);
+
+        if (pendingChars >= batchChars || elapsed >= STREAM_FADE_TIME_MS) {
+          const fadeText = nextText.slice(snapshotText.length);
+          syncPresentationMapValue(streamFadeTextByMessageId, message.id, fadeText);
+          streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
+          streamFadeLastTimeByMessageId[message.id] = Date.now();
+          syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
+        } else {
+          syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
+          // snapshot unchanged — content accumulates in stable
+        }
+      }
     }
 
     for (const map of PRESENTATION_MAPS) {
@@ -111,9 +146,8 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
 
   function assistantDisplayFadeStyle(message: ChatMessage | null) {
     if (!message) return undefined;
-    const key = streamFadeKeyByMessageId[message.id] ?? 0;
     return {
-      animationName: key % 2 === 0 ? "assistant-stream-fade-in-a" : "assistant-stream-fade-in-b"
+      animationName: "assistant-stream-fade-in"
     };
   }
 
@@ -139,9 +173,8 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
 
   function assistantDisplayedReasoningFadeStyle(message: ChatMessage | null) {
     if (!message) return undefined;
-    const key = streamReasoningFadeKeyByMessageId[message.id] ?? 0;
     return {
-      animationName: key % 2 === 0 ? "assistant-stream-fade-in-a" : "assistant-stream-fade-in-b"
+      animationName: "assistant-stream-fade-in"
     };
   }
 

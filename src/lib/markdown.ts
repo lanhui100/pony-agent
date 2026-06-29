@@ -413,12 +413,60 @@ function wrapTablesInScrollableContainer(html: string): string {
 }
 
 export async function renderMarkdown(content: string): Promise<string> {
-  const normalizedContent = normalizeMarkdownSource(content);
-  const html = await marked.parse(normalizedContent, {
-    breaks: true,
-    gfm: true,
-    async: true
-  }) as string;
+  try {
+    const normalizedContent = normalizeMarkdownSource(content);
+    const html = await marked.parse(normalizedContent, {
+      breaks: true,
+      gfm: true,
+      async: true
+    }) as string;
 
-  return wrapTablesInScrollableContainer(sanitizeMarkdownHtml(html));
+    return wrapTablesInScrollableContainer(sanitizeMarkdownHtml(html));
+  } catch (err) {
+    console.error("[markdown] renderMarkdown failed:", err);
+    return escapeHtml(content);
+  }
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+const FENCE_OPEN_RE = /^\s{0,3}(`{3,}|~{3,})(?!\s*$)(.*)$/;
+const FENCE_CLOSE_RE = /^\s{0,3}(`{3,}|~{3,})\s*$/;
+
+export function countUnclosedCodeFences(content: string): number {
+  const lines = content.split(/\r?\n/);
+  let openCount = 0;
+  let closeCount = 0;
+
+  for (const line of lines) {
+    if (FENCE_CLOSE_RE.test(line)) {
+      closeCount++;
+    } else if (FENCE_OPEN_RE.test(line)) {
+      openCount++;
+    }
+  }
+
+  return openCount - closeCount;
+}
+
+export function autoCloseBoundaries(content: string): string {
+  const unclosed = countUnclosedCodeFences(content);
+  if (unclosed <= 0) return content;
+
+  const firstFence = content.match(/^\s{0,3}([`~])/)?.[1] ?? "`";
+  const closeToken = firstFence === "~" ? "~~~" : "```";
+  const suffix = Array.from({ length: unclosed }, () => closeToken).join("\n");
+
+  return content.endsWith("\n") ? content + suffix : content + "\n" + suffix;
+}
+
+export async function renderPartialMarkdown(partialContent: string): Promise<string> {
+  return renderMarkdown(autoCloseBoundaries(partialContent));
 }

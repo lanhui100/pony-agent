@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
-import { renderMarkdown, endsWithNaturalBoundary } from "@/lib/markdown";
+import { renderMarkdown, renderPartialMarkdown, endsWithNaturalBoundary } from "@/lib/markdown";
 
 const props = defineProps<{
   content: string;
@@ -65,21 +65,32 @@ function shouldRenderNow(content: string): boolean {
 }
 
 async function executeRender(version: number) {
-  const html = await renderMarkdown(props.content);
-  if (version !== renderVersion) {
-    return;
+  try {
+    const renderFn = props.streaming ? renderPartialMarkdown : renderMarkdown;
+    const html = await renderFn(props.content);
+    if (version !== renderVersion) return;
+    renderedHtml.value = html;
+    lastRenderedFullContent = props.content;
+    renderPending.value = false;
+    streamRenderScheduled = false;
+    lastRenderTime = Date.now();
+    lastRenderedContentLength = props.content.length;
+    unrenderedSuffix.value = "";
+    emit("render-complete", {
+      contentLength: props.content.length,
+      streaming: Boolean(props.streaming)
+    });
+  } catch (err) {
+    console.error("[MarkdownRenderer] executeRender failed:", err);
+    if (version !== renderVersion) return;
+    renderedHtml.value = "";
+    lastRenderedFullContent = props.content;
+    renderPending.value = false;
+    streamRenderScheduled = false;
+    lastRenderTime = Date.now();
+    lastRenderedContentLength = props.content.length;
+    unrenderedSuffix.value = props.content;
   }
-  renderedHtml.value = html;
-  lastRenderedFullContent = props.content;
-  renderPending.value = false;
-  streamRenderScheduled = false;
-  lastRenderTime = Date.now();
-  lastRenderedContentLength = props.content.length;
-  unrenderedSuffix.value = "";
-  emit("render-complete", {
-    contentLength: props.content.length,
-    streaming: Boolean(props.streaming)
-  });
 }
 
 function scheduleStreamingRender() {
@@ -137,19 +148,23 @@ function scheduleNonStreamingRender() {
 
 function handleContentChange(content: string) {
   if (props.streaming) {
+    if (content.length < lastRenderedContentLength) {
+      // Batch flush: content was moved to the fade span.
+      // Clear renderedHtml to prevent duplication with the separate fade <span>.
+      renderedHtml.value = "";
+      lastRenderedContentLength = 0;
+    }
+
     if (streamRenderScheduled) {
-      // A render is already pending — just update the suffix with new content
       unrenderedSuffix.value = content.slice(lastRenderedContentLength);
       return;
     }
 
     if (!shouldRenderNow(content)) {
-      // No boundary or time fallback — show suffix as plain text
       unrenderedSuffix.value = content.slice(lastRenderedContentLength);
       return;
     }
 
-    // Conditions met — schedule a render
     unrenderedSuffix.value = content.slice(lastRenderedContentLength);
     scheduleStreamingRender();
   } else if (lastRenderedFullContent !== content) {
