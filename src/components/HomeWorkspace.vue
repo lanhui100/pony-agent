@@ -11,16 +11,28 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ClipboardList,
+  FileSearch,
+  FileText,
   GitBranch,
   GitFork,
+  Globe,
   History,
+  List,
   LoaderCircle,
   Copy,
+  MessageSquareMore,
+  Pen,
+  PenLine,
+  Plug,
   RotateCcw,
+  ScanSearch,
+  Search,
   Square,
+  Terminal,
   Undo2,
   UserRound,
-  Wrench
+  Wrench,
 } from "lucide-vue-next";
 import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
 import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode, HistoryNode } from "@/types/runtime";
@@ -567,6 +579,22 @@ function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
   }
   return result;
 }
+
+const toolIconByCanonicalName: Record<string, any> = {
+  Run: Terminal,
+  Ask: MessageSquareMore,
+  Read: FileText,
+  Search: Search,
+  List: List,
+  Glob: FileSearch,
+  WebFetch: Globe,
+  WebSearch: ScanSearch,
+  MCPResource: Plug,
+  ToolSearch: Wrench,
+  Write: Pen,
+  Edit: PenLine,
+  Plan: ClipboardList,
+};
 
 function assistantHeaderModel(message: ChatMessage | null) {
   if (!message) {
@@ -1446,7 +1474,7 @@ watch(
                 class="flex flex-col py-0.5 text-[12px] leading-5"
               >
                 <div class="flex items-center gap-2">
-                  <Wrench class="h-3 w-3 shrink-0 text-stone-400" />
+                  <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
                   <span
                     v-if="tool.description || tool.toolName"
                     class="min-w-0 truncate"
