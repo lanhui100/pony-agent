@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight } from "lucide-vue-next";
 import HomeSidebar from "@/components/HomeSidebar.vue";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
+import TitleBar from "@/components/TitleBar.vue";
 import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
 import ProviderConfigPage from "@/components/ProviderConfigPage.vue";
 import SettingsPanel from "@/components/SettingsPanel.vue";
@@ -149,11 +150,13 @@ watch(rightSidebarOpen, (value) => {
 <template>
   <TooltipProvider>
     <main
-      class="h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] text-stone-900"
+      class="flex flex-col gap-2 h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] text-stone-900"
       :class="{ resizing: isResizing }"
     >
+      <TitleBar />
+
       <section
-        class="flex h-full min-h-0 w-full min-w-0 gap-4 py-3"
+        class="flex min-h-0 flex-1 w-full min-w-0 gap-4 pb-3"
         data-testid="app-layout-shell"
       >
         <HomeSessionSidebar :current-page="currentPage" @navigate="currentPage = $event" />
