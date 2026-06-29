@@ -631,7 +631,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   function handleScrollToBottom() {
     showScrollToBottom.value = false;
     unreadCount.value = 0;
-    resumeTimelineAutoFollow("smooth", "latest-user");
+    resumeTimelineAutoFollow("smooth", "latest-agent");
   }
 
   function handleMarkdownRenderComplete(payload: MarkdownRenderPayload) {
