@@ -1448,11 +1448,11 @@ watch(
                 <div class="flex items-center gap-2">
                   <Wrench class="h-3 w-3 shrink-0 text-stone-400" />
                   <span
-                    v-if="tool.description"
+                    v-if="tool.description || tool.toolName"
                     class="min-w-0 truncate"
                     :class="tool.status === 'error' ? 'text-rose-600' : 'text-stone-400'"
                   >
-                    {{ tool.description }}
+                    {{ tool.description || tool.displayNameZh || tool.canonicalToolName || tool.toolName }}
                   </span>
                   <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
                   <span class="flex shrink-0 items-center gap-1 leading-none">
