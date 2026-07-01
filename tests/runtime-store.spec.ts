@@ -6313,7 +6313,7 @@ describe("runtime session resilience", () => {
     eventHandlers.get("turn:cancelled")?.({
       payload: {
         turnId: "8080",
-        text: "This turn was cancelled.",
+        text: "用户终止，发送消息可继续。",
         error: "stopped_by_user",
         providerName: "OpenAI",
         providerModel: "gpt-5",
@@ -6325,7 +6325,7 @@ describe("runtime session resilience", () => {
     expect(store.phase).toBe("cancelled");
     expect(store.isSubmitting).toBe(false);
     expect(store.activeTurnId).toBeNull();
-    expect(store.messages[1]?.content).toBe("This turn was cancelled.");
+    expect(store.messages[1]?.content).toBe("用户终止，发送消息可继续。");
     expect(store.turnTraceHistory[0]?.phase).toBe("cancelled");
     expect(store.turnTraceHistory[0]?.error).toBe("stopped_by_user");
     expect(store.traceSteps.map((step) => step.state)).toEqual([

@@ -235,7 +235,7 @@ pub fn emit_stream_cancelled(
             sequence: None,
             emitted_at_ms: None,
             phase: Some("cancelled".to_string()),
-            text: Some("This turn was cancelled.".to_string()),
+            text: Some("用户终止，发送消息可继续。".to_string()),
             reasoning_content: None,
             error: Some(error),
             provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),

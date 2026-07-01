@@ -3047,7 +3047,7 @@ fn replay_long_term_memory(history: &[TurnHistoryMessage]) -> Vec<LongTermMemory
 }
 
 fn classify_turn_node_kind(assistant_message: &str) -> HistoryNodeKind {
-    if assistant_message.trim() == "This turn was cancelled." {
+    if assistant_message.trim() == "用户终止，发送消息可继续。" {
         HistoryNodeKind::TurnCancelled
     } else {
         HistoryNodeKind::TurnCommitted

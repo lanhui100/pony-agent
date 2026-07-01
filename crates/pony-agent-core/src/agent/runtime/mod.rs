@@ -227,7 +227,7 @@ const MAX_TOOL_FOLLOWUPS_ENV: &str = "PONY_AGENT_MAX_TOOL_FOLLOWUPS_PER_TURN";
 const STREAM_REASONING_BATCH_CHARS: usize = 96;
 const MAX_TURN_IMAGES: usize = 3;
 const MAX_TURN_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
-const CANCELLED_TURN_MESSAGE: &str = "This turn was cancelled.";
+const CANCELLED_TURN_MESSAGE: &str = "用户终止，发送消息可继续。";
 const HOOK_FAILTURN_HANDLED_SENTINEL: &str = "__hook_failturn_handled__";
 
 #[derive(Clone)]
