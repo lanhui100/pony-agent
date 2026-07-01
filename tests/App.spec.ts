@@ -397,7 +397,7 @@ describe("App", () => {
       const wrapper = mountApp();
       const shell = wrapper.get('[data-testid="app-layout-shell"]');
 
-      expect(shell.classes()).toContain("py-3");
+      expect(shell.classes()).toContain("pb-3");
     });
 
     it("preserves inter-element gap (gap-4) on the layout shell", () => {
@@ -413,7 +413,7 @@ describe("App", () => {
 
       expect(shell.classes()).toContain("flex");
       expect(shell.classes()).toContain("w-full");
-      expect(shell.classes()).toContain("h-full");
+      expect(shell.classes()).not.toContain("h-full");
     });
 
     it("places the left session sidebar and right-sidebar shell as direct children of the layout shell", () => {

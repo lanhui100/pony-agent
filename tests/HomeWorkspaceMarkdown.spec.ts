@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { defineComponent, nextTick } from "vue";
+import { defineComponent, h, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
+import { TooltipProvider } from "reka-ui";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
@@ -156,7 +157,13 @@ describe("HomeWorkspace markdown rendering", () => {
       ]
     });
 
-    const wrapper = mount(HomeWorkspace, {
+    const wrapper = mount({
+      render() {
+        return h(TooltipProvider, null, {
+          default: () => h(HomeWorkspace)
+        });
+      }
+    }, {
       global: {
         stubs: {
           ScrollArea: ScrollAreaStub,

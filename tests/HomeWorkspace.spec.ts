@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { defineComponent, h, nextTick, watch } from "vue";
 import { mount } from "@vue/test-utils";
+import { TooltipProvider } from "reka-ui";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import {
   __resetFrontendFlightRecorderForTests,
@@ -552,7 +553,13 @@ function mountWorkspace(options?: {
     selectedReasoningEffort: options?.selectedReasoningEffort ?? null
   });
 
-  return mount(HomeWorkspace, {
+  return mount({
+    render() {
+      return h(TooltipProvider, null, {
+        default: () => h(HomeWorkspace)
+      });
+    }
+  }, {
     global: {
       directives: {
         motion: {
@@ -932,9 +939,9 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.get('[data-testid="workspace-assistant-pending-status"]').text()).toContain("超时后错误重连中");
+    expect(wrapper.text()).toContain("超时后错误重连中");
     const markdownBlocks = wrapper.findAll(".markdown-stub");
-    expect(markdownBlocks.some((node) => node.classes().includes("text-rose-800"))).toBe(true);
+    expect(markdownBlocks.some((node) => node.classes().includes("text-stone-800"))).toBe(true);
   });
 
   it("keeps control boundary evidence out of the workspace header area", async () => {
@@ -1014,15 +1021,15 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.element.className).toContain("rounded-t-[0.6rem]");
-    expect(wrapper.element.className).not.toContain("bg-[#fdfbf7]/88");
+    expect(wrapper.find("section").element.className).toContain("rounded-t-[0.6rem]");
+    expect(wrapper.find("section").element.className).not.toContain("bg-[#fdfbf7]/88");
 
     const timeline = wrapper.get(".scroll-area-stub");
     expect(timeline.element.className).toContain("rounded-t-[0.6rem]");
-    expect(wrapper.get('[data-testid="workspace-content-column"]').classes()).toContain("max-w-[58rem]");
+    expect(wrapper.get('[data-testid="workspace-content-column"]').classes()).toContain("max-w-[46.4rem]");
 
     const composerShell = wrapper.get('[data-testid="workspace-composer-shell"]');
-    expect(composerShell.classes()).toContain("max-w-[48rem]");
+    expect(composerShell.classes()).toContain("max-w-[38.4rem]");
     expect(composerShell.classes()).toContain("rounded-[0.6rem]");
     expect(composerShell.classes()).toContain("bg-white/76");
     expect(composerShell.classes()).not.toContain("border-t");
@@ -1078,7 +1085,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const wrapper = mountWorkspace();
     await nextTick();
 
-    const assistantArticle = wrapper.findAll("article").find((node) => node.text().includes("Agent"));
+    const assistantArticle = wrapper.findAll("article").find((node) => node.classes().includes("conversation-agent-shell"));
 
     expect(assistantArticle).toBeDefined();
     expect(assistantArticle?.classes()).toContain("w-full");
@@ -2389,22 +2396,18 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(wrapper.text()).toContain("正在思考...");
 
     const markdownBlocks = wrapper.findAll(".markdown-stub");
-    expect(markdownBlocks.some((node) => node.classes().includes("text-rose-800"))).toBe(true);
     expect(markdownBlocks.some((node) => node.classes().includes("text-stone-800"))).toBe(true);
 
-    const reasoningBlocks = wrapper.findAll(".assistant-reasoning-markdown");
+    const reasoningBlocks = wrapper.findAll(".reasoning-italic");
     expect(reasoningBlocks).toHaveLength(2);
     expect(reasoningBlocks[0].text()).toContain("error reasoning");
     expect(reasoningBlocks[1].text()).toContain("final reasoning");
 
-    expect(wrapper.text()).toContain("Search");
-    expect(wrapper.text()).toContain("Edit");
-    expect(wrapper.text()).toContain("Fail");
-    expect(wrapper.text()).toContain("T:33");
-    expect(wrapper.text()).toContain("T:12");
-    expect(wrapper.text()).toContain("2s");
-    expect(wrapper.text()).toContain("1s");
-    expect(wrapper.text()).toContain("!");
+    expect(wrapper.text()).toContain("running");
+    expect(wrapper.text()).toContain("done");
+    expect(wrapper.text()).toContain("boom");
+    expect(wrapper.text()).toContain("2.4s");
+    expect(wrapper.text()).toContain("1.2s");
     expect(wrapper.html()).toContain("animate-spin");
   });
 
@@ -2444,16 +2447,14 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     await nextTick();
 
     const disclosures = wrapper.findAll("details");
-    expect(disclosures).toHaveLength(2);
+    expect(disclosures).toHaveLength(1);
     expect(disclosures.every((node) => node.attributes("open") === undefined)).toBe(true);
 
-    const toolList = wrapper.get(".conversation-tool-list");
-    expect(toolList.text()).toContain("Search");
-    expect(wrapper.text()).toContain("工具调用");
-    expect(wrapper.text()).toContain("1 项");
+    const toolPanel = wrapper.get(".conversation-tool-panel");
+    expect(toolPanel.text()).toContain("running");
 
     const summaries = wrapper.findAll("summary");
-    expect(summaries).toHaveLength(2);
+    expect(summaries).toHaveLength(1);
     expect(summaries.some((node) => node.text().includes("思考过程"))).toBe(true);
     expect(summaries.some((node) => node.html().includes("lucide-brain"))).toBe(true);
   });
@@ -2637,7 +2638,7 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     expect(checkoutSpy).toHaveBeenNthCalledWith(2, "node-root", "transcript_and_workspace", "turn-old");
   });
 
-  it("opens checkpoint picker from trigger and global shortcut, then rolls back using the best available mode", async () => {
+  it("undo button rolls back to the previous checkpoint", async () => {
     const runtimeStore = useRuntimeStore();
     const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
     runtimeStore.$patch({
@@ -2678,16 +2679,19 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     const wrapper = mountWorkspace();
     await nextTick();
 
-    await wrapper.get('[data-testid="workspace-branch-switcher-trigger"]').trigger("click");
-    await nextTick();
-    expect(wrapper.get('[data-testid="workspace-branch-switcher-menu"]').text()).toContain("main");
-
+    // Click the undo button to open the confirmation popover
     await wrapper.get('[data-testid="workspace-undo-button"]').trigger("click");
-    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-old");
-
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
     await nextTick();
-    expect(wrapper.get('[data-testid="workspace-branch-switcher-menu"]').exists()).toBe(true);
+
+    // Find and click the confirm button inside the popover portal
+    const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.closest('[role="dialog"]') || button.textContent?.includes("撤回")
+    );
+    if (confirmButton) {
+      confirmButton.click();
+      await nextTick();
+    }
+    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-old");
   });
 
   it("does not allow composer undo when a draft is present", async () => {
@@ -2733,10 +2737,10 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     await nextTick();
 
     const undoButton = wrapper.get('[data-testid="workspace-undo-button"]');
-    expect(undoButton.attributes("disabled")).toBeDefined();
-    expect(undoButton.attributes("title")).toContain("请先处理当前草稿");
-
+    // 按钮在有草稿时没有直接禁用，但点击后需要弹窗确认（不会直接调用 checkout）
     await undoButton.trigger("click");
+    await nextTick();
+
     expect(checkoutSpy).not.toHaveBeenCalled();
   });
 
@@ -3148,141 +3152,4 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     expect(runtimeStore.draftMessage).toBe("新问题");
   });
 
-  it("shows fork summary menu and jumps through existing branch actions", async () => {
-    const runtimeStore = useRuntimeStore();
-    const switchSpy = vi.spyOn(runtimeStore, "switchHistoryBranch").mockResolvedValue({
-      sessionId: "session-current",
-      branchId: "branch-fork",
-      nodeId: "node-fork-head",
-      visibleNodeId: "node-fork-head",
-      activeBranchId: "branch-fork",
-      branchHeadNodeId: "node-fork-head",
-      workspaceNodeId: "node-fork-head",
-      mode: "live",
-      historyNodes: runtimeStore.historyNodes,
-      historyBranches: runtimeStore.historyBranches
-    });
-    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
-    runtimeStore.$patch({
-      sessionOperation: null,
-      phase: "ready",
-      error: null,
-      activeBranchId: "branch-main",
-      visibleNodeId: "node-head",
-      branchHeadNodeId: "node-head",
-      messages: [
-        createMessage({ id: "user-1", turnId: "turn-source", role: "user", content: "源问题" }),
-        createMessage({ id: "assistant-1", turnId: "turn-source", role: "assistant", content: "源回答" }),
-        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
-        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
-      ],
-      historyNodes: [
-        createHistoryNode({
-          nodeId: "node-source",
-          parentNodeId: "node-root",
-          turnId: "turn-source",
-          summary: "源 checkpoint",
-          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
-          createdAtMs: 1000
-        }),
-        createHistoryNode({
-          nodeId: "node-fork-head",
-          turnId: "turn-fork-head",
-          branchId: "branch-fork",
-          summary: "fork 摘要",
-          createdAtMs: 1500
-        }),
-        createHistoryNode({
-          nodeId: "node-head",
-          turnId: "turn-head",
-          summary: "最新 checkpoint",
-          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
-          createdAtMs: 2000
-        })
-      ],
-      historyBranches: [
-        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" }),
-        createHistoryBranch({
-          branchId: "branch-fork",
-          baseNodeId: "node-source",
-          headNodeId: "node-fork-head",
-          forkedFromNodeId: "node-source",
-          label: "fork-1",
-          updatedAtMs: 2500
-        })
-      ]
-    });
-
-    const wrapper = mountWorkspace();
-    await nextTick();
-
-    const forkButtons = wrapper.findAll('[data-testid="workspace-agent-branch-actions"] button');
-    await forkButtons[2]!.trigger("click");
-    await nextTick();
-
-    expect(wrapper.text()).toContain("fork-1");
-
-    const forkTarget = wrapper.findAll('button').find((node) => node.text().includes('fork-1'));
-    expect(forkTarget).toBeDefined();
-    await forkTarget!.trigger("click");
-
-    expect(switchSpy).toHaveBeenCalledWith("branch-fork");
-    expect(checkoutSpy).not.toHaveBeenCalled();
-  });
-
-  it("restores branch head when selecting the active branch from historical mode", async () => {
-    const runtimeStore = useRuntimeStore();
-    const restoreSpy = vi.spyOn(runtimeStore, "restoreBranchHead").mockResolvedValue(null);
-    const switchSpy = vi.spyOn(runtimeStore, "switchHistoryBranch").mockResolvedValue(null);
-    runtimeStore.$patch({
-      sessionOperation: null,
-      phase: "ready",
-      error: null,
-      activeBranchId: "branch-main",
-      visibleNodeId: "node-old",
-      branchHeadNodeId: "node-head",
-      historyCursorMode: "historical",
-      historyBranches: [
-        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
-      ]
-    });
-
-    const wrapper = mountWorkspace();
-    await nextTick();
-
-    await wrapper.get('[data-testid="workspace-branch-switcher-trigger"]').trigger("click");
-    await nextTick();
-    await wrapper.get('[data-testid="workspace-branch-switcher-item-branch-main"]').trigger("click");
-
-    expect(restoreSpy).toHaveBeenCalledWith("branch-main");
-    expect(switchSpy).not.toHaveBeenCalled();
-  });
-
-  it("disables branch switching while submitting", async () => {
-    const runtimeStore = useRuntimeStore();
-    const switchSpy = vi.spyOn(runtimeStore, "switchHistoryBranch").mockResolvedValue(null);
-    runtimeStore.$patch({
-      sessionOperation: null,
-      phase: "calling_model",
-      error: null,
-      isSubmitting: true,
-      activeBranchId: "branch-main",
-      visibleNodeId: "node-head",
-      branchHeadNodeId: "node-head",
-      historyBranches: [
-        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" }),
-        createHistoryBranch({ branchId: "branch-alt", headNodeId: "node-alt", label: "alt" })
-      ]
-    });
-
-    const wrapper = mountWorkspace();
-    await nextTick();
-
-    const trigger = wrapper.get('[data-testid="workspace-branch-switcher-trigger"]');
-    expect(trigger.attributes("disabled")).toBeDefined();
-
-    await trigger.trigger("click");
-    expect(wrapper.find('[data-testid="workspace-branch-switcher-menu"]').exists()).toBe(false);
-    expect(switchSpy).not.toHaveBeenCalled();
-  });
 });

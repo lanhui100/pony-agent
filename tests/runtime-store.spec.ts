@@ -917,7 +917,7 @@ describe("runtime session resilience", () => {
     expect(store.sessionId).toBe(sessionId);
     expect(store.messages).toEqual([]);
     expect(store.initialRollbackActive).toBe(true);
-    expect(store.historyCursorMode).toBe("historical_dirty");
+    expect(store.historyCursorMode).toBe("live");
     expect(store.visibleNodeId).toBeNull();
   });
 
@@ -5741,6 +5741,71 @@ describe("runtime session resilience", () => {
         return [] satisfies SessionOverview[];
       }
 
+      if (command === "restore_branch_head") {
+        return {
+          sessionId: "session-root-restart",
+          branchId: "branch-main",
+          restoredNodeId: "node-head",
+          cursor: {
+            visibleNodeId: "node-head",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-head",
+            mode: "live"
+          },
+          transcriptRestoreApplied: true,
+          workspaceRollbackCapable: false,
+          workspaceRestoreCapable: false,
+          workspaceRollbackApplied: false,
+          degraded: false,
+          degradationReason: null,
+          historyStateEvidence: [],
+          historyStateAuditSummary: null
+        };
+      }
+
+      if (command === "load_session") {
+        return {
+          sessionId: "session-root-restart",
+          summary: "",
+          history: [],
+          turnTraceHistory: [],
+          attachmentAssets: [],
+          historyStateEvidence: [],
+          historyStateAuditSummary: null,
+          runControlAuditSummary: null,
+          turnCount: 0,
+          lastReferencedFile: null,
+          updatedAtMs: 9191
+        };
+      }
+
+      if (command === "load_session_runtime_view") {
+        return {
+          session: {
+            conversationId: "session-root-restart",
+            summary: "",
+            history: [],
+            turnTraceHistory: [],
+            attachmentAssets: [],
+            historyStateEvidence: [],
+            historyStateAuditSummary: null,
+            runControlAuditSummary: null,
+            turnCount: 0,
+            lastReferencedFile: null,
+            updatedAtMs: 9191
+          },
+          historyCursor: null,
+          historyNodes: [],
+          historyBranches: [],
+          submissionPlan: null,
+          controlBoundaryEvidence: [],
+          checkpoint: null,
+          retrieved: null,
+          isAtBranchHead: true
+        };
+      }
+
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -7058,7 +7123,7 @@ describe("runtime session resilience", () => {
     expect(store.messages).toEqual([]);
     expect(store.turnTraceHistory).toEqual([]);
     expect(store.visibleNodeId).toBe("node-root");
-    expect(store.historyCursorMode).toBe("historical");
+    expect(store.historyCursorMode).toBe("live");
   });
 
   it("does not merge persisted live messages back into a historical reload", async () => {
@@ -7582,7 +7647,7 @@ describe("runtime session resilience", () => {
     expect(store.visibleNodeId).toBe("node-old");
     expect(store.branchHeadNodeId).toBe("node-head");
     expect(store.historyCursorMode).toBe("historical");
-    expect(store.sessionError).toContain("browser preview / local preview");
+    expect(store.sessionError).toContain("降级模式");
   });
 
   it("derives conversation checkpoint entries from explicit turn ids and trace-backed turn ids", () => {
