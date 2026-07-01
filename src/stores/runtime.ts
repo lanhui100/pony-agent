@@ -764,7 +764,7 @@ function hasHostManagedHistoryState(runtimeView?: Pick<SessionRuntimeView, "hist
 }
 
 function previewHistoryMutationUnavailable() {
-  return "当前为 browser preview / local preview 降级模式，不支持 branch / restore / fork 等正式宿主历史控制动作。";
+  return "当前为降级模式，不支持历史状态恢复操作。";
 }
 
 function historyCursorVersion(cursor?: Pick<HistoryCursorState, "cursorVersion"> | null) {
@@ -1031,7 +1031,7 @@ function filterAttachmentAssets(assets: AttachmentAsset[], filter?: AttachmentAs
 }
 
 function buildToolMessageDetail(tool: ToolActivity) {
-  const blocks = [tool.description.trim()];
+  const blocks = [(tool.description ?? "").trim()];
 
   if (tool.argumentsText?.trim()) {
     blocks.push(`参数\n${tool.argumentsText.trim()}`);
@@ -4498,8 +4498,12 @@ export const useRuntimeStore = defineStore("runtime", {
       this.latestHistoryStateAuditSummary = null;
       this.visibleNodeId = null;
       this.cursorVersion = null;
-      this.historyCursorMode = "historical_dirty";
+      this.historyCursorMode = "live";
       this.messages = [];
+      this.activeBranchId = null;
+      this.branchHeadNodeId = null;
+      this.historyNodes = [];
+      this.historyBranches = [];
       this.attachmentAssets = [];
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
@@ -4589,6 +4593,7 @@ export const useRuntimeStore = defineStore("runtime", {
         }
         if (targetIsInitialState) {
           this.rollbackToInitialState();
+          this.initialRollbackActive = false;
         } else if (truncationIndex >= 0) {
           this.messages = this.messages.slice(0, truncationIndex + 1);
           this.turnTraceHistory = this.turnTraceHistory.filter(
@@ -4600,6 +4605,9 @@ export const useRuntimeStore = defineStore("runtime", {
           this.traceTimeline = lastTrace?.traceTimeline?.length
             ? cloneTraceTimeline(lastTrace.traceTimeline)
             : createDefaultTraceTimeline();
+          // 1-branch 模式：撤回后 checkout 的 checkpoint 成为新的当前状态
+          this.branchHeadNodeId = nodeId;
+          this.historyCursorMode = "live";
           this.initialRollbackActive = false;
           this.persistHistory();
         }
@@ -4609,10 +4617,9 @@ export const useRuntimeStore = defineStore("runtime", {
           nodeId,
           visibleNodeId: nodeId,
           activeBranchId: this.activeBranchId,
-          branchHeadNodeId: this.branchHeadNodeId,
+          branchHeadNodeId: nodeId,
           workspaceNodeId: this.visibleNodeId,
-          mode:
-            this.branchHeadNodeId && this.branchHeadNodeId !== nodeId ? "historical" : "live",
+          mode: "live",
           requestedMode: mode,
           appliedMode: "transcript_only",
           transcriptRestoreApplied: true,
@@ -6567,18 +6574,15 @@ export const useRuntimeStore = defineStore("runtime", {
 
       const mode = this.historyCursorMode;
       const needsRestore = this.initialRollbackActive || mode === "historical";
-      this.historyCursorMode = "live";
       if (needsRestore && isTauriAvailable()) {
         const restored = await this.restoreBranchHead();
         if (!restored) {
-          if (this.initialRollbackActive) {
-            this.isSubmitting = false;
-            this.sessionError = "无法提交：对话处于历史浏览模式，恢复最新状态失败";
-            return false;
-          }
+          this.isSubmitting = false;
+          this.sessionError = "无法提交：对话处于历史浏览模式，恢复最新状态失败";
+          return false;
         }
       }
-
+      this.historyCursorMode = "live";
       this.initialRollbackActive = false;
 
       const lastAssistantMessage = [...this.messages]
