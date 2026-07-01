@@ -8,14 +8,11 @@ import {
   ArrowDown,
   ArrowUp,
   Brain,
-  Bot,
   Check,
   ChevronDown,
   ClipboardList,
   FileSearch,
   FileText,
-  GitBranch,
-  GitFork,
   Globe,
   History,
   List,
@@ -35,7 +32,7 @@ import {
   Wrench,
 } from "lucide-vue-next";
 import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
-import type { ChatMessage, ConversationCheckpointEntry, HistoryCheckoutMode, HistoryNode } from "@/types/runtime";
+import type { ChatMessage, ConversationCheckpointEntry, HistoryNode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { extractErrorMessage } from "@/lib/error-utils";
@@ -50,7 +47,11 @@ import {
   PopoverContent,
   PopoverPortal,
   PopoverRoot,
-  PopoverTrigger
+  PopoverTrigger,
+  TooltipContent,
+  TooltipPortal,
+  TooltipRoot,
+  TooltipTrigger
 } from "reka-ui";
 
 type TurnBucket = {
@@ -81,20 +82,16 @@ const providerStore = useProviderStore();
 const runtimeStoreSessionList = storeToRefs(runtimeStore).sessionList;
 
 const {
-  activeBranchId,
   conversationCheckpointEntries,
   draftMessage,
   historyNodes,
   historyBranches,
-  branchHeadNodeId,
-  historyCursorMode,
   isSubmitting,
   latestExecutionCheckpoint,
   latestGraphRunSubmissionPlan,
   latestRunControlAuditSummary,
   messages,
   sessionOperation,
-  visibleNodeId,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
@@ -118,6 +115,7 @@ function isTransientSessionOverview(session: {
 const providerMenuOpen = ref(false);
 const hoveredProviderId = ref<string | null>(null);
 const reasoningMenuOpen = ref(false);
+const undoPopoverOpen = ref(false);
 const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
 const copiedAssistantTurnId = ref<string | null>(null);
@@ -125,12 +123,10 @@ const workspaceContentColumnRef = ref<HTMLElement | null>(null);
 const rollbackInFlight = ref<{ turnId: string; action: CheckpointRollbackAction } | null>(null);
 const rollbackProgressStyle = ref<Record<string, string | undefined>>({});
 const optimisticRollbackTurnId = ref<string | null>(null);
-const forkInFlightNodeId = ref<string | null>(null);
 const providerMenuRef = ref<HTMLElement | null>(null);
 const modelSubmenuStyle = ref<Record<string, string>>({ top: '0' });
 const reasoningMenuRef = ref<HTMLElement | null>(null);
-const checkpointPickerMenuRef = ref<HTMLElement | null>(null);
-const forkSummaryMenuRef = ref<HTMLElement | null>(null);
+
 const timelineScrollAreaRef = ref<{
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   viewportEl: HTMLElement | null;
@@ -140,10 +136,8 @@ const composerShellRef = ref<HTMLElement | null>(null);
 const latestUserMessageRef = ref<HTMLElement | null>(null);
 const latestAgentMessageRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
-const checkpointPickerOpen = ref(false);
 const scrollToLatestHovered = ref(false);
 let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-const forkSummaryOpenForNodeId = ref<string | null>(null);
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const COMPOSER_BUFFER_PX = 220;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
@@ -483,21 +477,9 @@ const historyNodeById = computed(() => {
   return lookup;
 });
 
-const branchList = computed(() => {
-  return historyBranches.value.map((branch, index) => ({
-    ...branch,
-    displayName: branch.label?.trim() || (index === 0 ? "主分支" : `分支 ${index}`)
-  }));
-});
-
-const currentBranchDisplay = computed(() => {
-  const current = branchList.value.find((b) => b.branchId === activeBranchId.value);
-  return current?.displayName || (branchList.value.length > 0 ? branchList.value[0]!.displayName : "主分支");
-});
-
 const canUndoLastTurn = computed(() => {
   const nonLatest = checkpointEntries.value.filter(
-    (entry) => !entry.isLatest && entry.branchId === activeBranchId.value
+    (entry) => !entry.isLatest
   );
   return (
     nonLatest.length > 0 &&
@@ -507,10 +489,6 @@ const canUndoLastTurn = computed(() => {
     draftMessage.value.trim().length === 0
   );
 });
-
-const branchSwitcherDisabled = computed(
-  () => branchList.value.length === 0 || isSubmitting.value || Boolean(sessionOperation.value) || Boolean(rollbackInFlight.value)
-);
 
 const undoShortcutLabel = computed(() => {
   if (typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac")) {
@@ -530,10 +508,6 @@ const latestTurnSignature = computed(() => {
   if (!latestMessage) return "";
   return `${latestMessage.id}:${latestMessage.content.length}:${latestMessage.reasoningContent?.length ?? ""}`;
 });
-
-function formatAssistantModelLabel(modelName?: string | null) {
-  return modelName?.trim() || "";
-}
 
 function extractDescription(detail: string | null | undefined): string {
   return detail?.split("\n")[0]?.trim() ?? "";
@@ -597,14 +571,6 @@ const toolIconByCanonicalName: Record<string, any> = {
   Edit: PenLine,
   Plan: ClipboardList,
 };
-
-function assistantHeaderModel(message: ChatMessage | null) {
-  if (!message) {
-    return "";
-  }
-
-  return formatAssistantModelLabel(message.modelName);
-}
 
 function assistantReasoning(message: ChatMessage | null) {
   return message?.reasoningContent ?? "";
@@ -691,7 +657,7 @@ function assistantErrorDetail(turn: TurnBucket): string {
     .find((entry) => entry.kind === "call_model" && entry.error?.trim())
     ?.error?.trim();
 
-  return modelError || "";
+  return modelError || latestTrace?.error?.trim() || turn.assistant.errorDetail?.trim() || "";
 }
 
 function shouldRenderAssistantAsError(turn: TurnBucket): boolean {
@@ -745,18 +711,6 @@ function copyAssistantResponse(turnId: string, content: string) {
 
 function checkpointEntryForTurn(turnId: string) {
   return checkpointEntryByTurnId.value.get(turnId) ?? null;
-}
-
-function requireCheckpointEntryForTurn(turnId: string) {
-  const entry = checkpointEntryForTurn(turnId);
-  if (!entry) {
-    throw new Error(`Missing checkpoint entry for turn ${turnId}`);
-  }
-  return entry;
-}
-
-function checkpointModeForPickerEntry(entry: ConversationCheckpointEntry): HistoryCheckoutMode {
-  return entry.workspaceRollbackCapable ? "transcript_and_workspace" : "transcript_only";
 }
 
 function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | null) {
@@ -866,8 +820,6 @@ async function confirmRollback(turnId: string, action: CheckpointRollbackAction)
   const userContent = sourceTurn?.user?.content ?? "";
 
   try {
-    forkSummaryOpenForNodeId.value = null;
-    checkpointPickerOpen.value = false;
     optimisticRollbackTurnId.value = turnId;
     rollbackInFlight.value = { turnId, action };
     updateRollbackProgressPosition();
@@ -930,123 +882,23 @@ function rollbackProgressLabel() {
     : "正在撤回对话...";
 }
 
-function toggleCheckpointPicker() {
-  checkpointPickerOpen.value = !checkpointPickerOpen.value;
-  if (checkpointPickerOpen.value) {
-    providerMenuOpen.value = false;
-    hoveredProviderId.value = null;
-    reasoningMenuOpen.value = false;
-    forkSummaryOpenForNodeId.value = null;
-  }
-}
-
-function toggleForkSummary(nodeId: string) {
-  forkSummaryOpenForNodeId.value = forkSummaryOpenForNodeId.value === nodeId ? null : nodeId;
-  checkpointPickerOpen.value = false;
-}
-
-async function jumpToForkTarget(
-  entry: ConversationCheckpointEntry,
-  target: ConversationCheckpointEntry["forkTargets"][number]
-) {
-  forkSummaryOpenForNodeId.value = null;
-
-  if (target.branchId && !target.isActive) {
-    const switched = await runtimeStore.switchHistoryBranch(target.branchId);
-    if (switched?.visibleNodeId === target.nodeId || switched?.branchHeadNodeId === target.nodeId) {
-      return;
-    }
-  }
-
-  await runtimeStore.checkoutHistoryNode(target.nodeId, checkpointModeForPickerEntry(entry));
-}
-
-function branchLabelForDisplay(branch: { label?: string | null; branchId: string }, index: number) {
-  return branch.label?.trim() || (index === 0 ? "主分支" : `分支 ${index}`);
-}
-
-async function handleCreateBranch(turnId: string) {
-  if (isSubmitting.value || sessionOperation.value || rollbackInFlight.value || forkInFlightNodeId.value) {
-    return;
-  }
-
-  const entry = checkpointEntryForTurn(turnId);
-  if (!entry) {
-    return;
-  }
-
-  forkInFlightNodeId.value = entry.nodeId;
-  try {
-    await runtimeStore.forkHistoryNode(entry.nodeId);
-  } finally {
-    forkInFlightNodeId.value = null;
-  }
-}
-
 async function handleUndoLastTurn() {
   if (!canUndoLastTurn.value || rollbackInFlight.value) {
     return;
   }
 
   const sortedEntries = [...checkpointEntries.value]
-    .filter((e) => !e.isLatest && e.branchId === activeBranchId.value)
+    .filter((e) => !e.isLatest)
     .sort((a, b) => b.createdAtMs - a.createdAtMs);
   const previousEntry = sortedEntries[0];
   if (!previousEntry) {
     return;
   }
 
-  forkSummaryOpenForNodeId.value = null;
-  checkpointPickerOpen.value = false;
   await runtimeStore.checkoutHistoryNode(previousEntry.nodeId, "transcript_only", previousEntry.turnId);
 }
 
-async function handleSwitchBranch(branchId: string) {
-  if (isSubmitting.value || sessionOperation.value || rollbackInFlight.value) {
-    return;
-  }
-
-  if (branchId === activeBranchId.value) {
-    if (
-      historyCursorMode.value !== "live" &&
-      visibleNodeId.value &&
-      branchHeadNodeId.value &&
-      visibleNodeId.value !== branchHeadNodeId.value
-    ) {
-      checkpointPickerOpen.value = false;
-      await runtimeStore.restoreBranchHead(branchId);
-    }
-    return;
-  }
-
-  checkpointPickerOpen.value = false;
-  await runtimeStore.switchHistoryBranch(branchId);
-}
-
-function handleCheckpointShortcut(event: KeyboardEvent) {
-  const isMac = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
-  const shortcutPressed = event.key.toLowerCase() === "k" && (isMac ? event.metaKey : event.ctrlKey);
-
-  if (shortcutPressed && !event.shiftKey && !event.altKey) {
-    event.preventDefault();
-    if (branchList.value.length > 0) {
-      checkpointPickerOpen.value = true;
-      providerMenuOpen.value = false;
-      hoveredProviderId.value = null;
-      reasoningMenuOpen.value = false;
-      forkSummaryOpenForNodeId.value = null;
-    }
-    return true;
-  }
-
-  return false;
-}
-
 function handleComposerKeydown(event: KeyboardEvent) {
-  if (handleCheckpointShortcut(event)) {
-    return;
-  }
-
   const isUndoShortcut =
     event.key.toLowerCase() === "z" &&
     (event.ctrlKey || event.metaKey) &&
@@ -1088,8 +940,6 @@ function handleWindowKeydown(event: KeyboardEvent) {
     handleUndoLastTurn();
     return;
   }
-
-  handleCheckpointShortcut(event);
 }
 
 async function handlePrimaryAction() {
@@ -1201,14 +1051,6 @@ function handleClickOutside(event: MouseEvent) {
 
   if (reasoningMenuRef.value && target && !reasoningMenuRef.value.contains(target)) {
     reasoningMenuOpen.value = false;
-  }
-
-  if (checkpointPickerMenuRef.value && target && !checkpointPickerMenuRef.value.contains(target)) {
-    checkpointPickerOpen.value = false;
-  }
-
-  if (forkSummaryMenuRef.value && target && !forkSummaryMenuRef.value.contains(target)) {
-    forkSummaryOpenForNodeId.value = null;
   }
 }
 
@@ -1576,7 +1418,7 @@ watch(
             <div
               v-if="turn.assistant"
               class="agent-action-bar ml-auto mt-3 flex flex-wrap items-center justify-end gap-2"
-              data-testid="workspace-agent-branch-actions"
+              data-testid="workspace-agent-actions"
             >
               <button
                 class="checkpoint-icon-button"
@@ -1587,61 +1429,6 @@ watch(
                 <component :is="copiedAssistantTurnId === turn.turnId ? Check : Copy" class="h-3.5 w-3.5" />
                 <span class="sr-only">复制回复</span>
               </button>
-
-                <button
-                  v-if="!isLastTurn(turn.turnId)"
-                  class="checkpoint-icon-button"
-                  type="button"
-                  :disabled="isSubmitting || !!sessionOperation || !!rollbackInFlight || !!forkInFlightNodeId"
-                  title="创建分支"
-                  @click="handleCreateBranch(turn.turnId)"
-                >
-                <GitBranch class="h-3.5 w-3.5" />
-                <span class="sr-only">创建分支</span>
-              </button>
-
-              <div
-                v-if="!isLastTurn(turn.turnId) && checkpointEntryForTurn(turn.turnId)?.forkTargets.length"
-                ref="forkSummaryMenuRef"
-                class="relative"
-              >
-                <button
-                  class="checkpoint-icon-button"
-                  type="button"
-                  title="查看和切换分支"
-                  @click="toggleForkSummary(requireCheckpointEntryForTurn(turn.turnId).nodeId)"
-                >
-                  <GitFork class="h-3.5 w-3.5" />
-                  <span class="sr-only">查看分支</span>
-                </button>
-
-                <div
-                  v-if="forkSummaryOpenForNodeId === checkpointEntryForTurn(turn.turnId)?.nodeId"
-                  class="checkpoint-popover absolute left-0 top-[calc(100%+0.45rem)] z-20 w-[19rem] max-w-[calc(100vw-2rem)]"
-                >
-                  <div class="checkpoint-popover-caption">分支</div>
-                  <div class="checkpoint-popover-divider"></div>
-                  <button
-                    v-for="(target, targetIdx) in checkpointEntryForTurn(turn.turnId)?.forkTargets ?? []"
-                    :key="`${checkpointEntryForTurn(turn.turnId)?.nodeId}-${target.branchId}-${target.nodeId}`"
-                    class="checkpoint-picker-item"
-                    type="button"
-                    @click="jumpToForkTarget(requireCheckpointEntryForTurn(turn.turnId), target)"
-                  >
-                    <div class="flex min-w-0 flex-1 flex-col text-left">
-                      <span class="truncate text-[12px] text-stone-800">{{ branchLabelForDisplay({ label: target.label, branchId: target.branchId }, targetIdx + 1) }}</span>
-                      <span class="mt-0.5 line-clamp-2 text-[10px] leading-4 text-stone-500">
-                        {{ target.summary }}
-                      </span>
-                    </div>
-                    <span
-                      class="shrink-0 rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] text-stone-500"
-                    >
-                      {{ target.isActive ? "当前" : "转到" }}
-                    </span>
-                  </button>
-                </div>
-              </div>
             </div>
           </article>
         </section>
@@ -1699,65 +1486,7 @@ watch(
 
       <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200/70 pt-2.5">
         <div class="flex min-w-0 flex-wrap items-center gap-2">
-          <div ref="checkpointPickerMenuRef" class="relative">
-            <button
-              class="composer-select-trigger"
-              type="button"
-              :disabled="branchSwitcherDisabled"
-              :title="
-                branchList.length
-                  ? '切换对话分支'
-                  : '当前还没有分支'
-              "
-              data-testid="workspace-branch-switcher-trigger"
-              @click.stop="toggleCheckpointPicker"
-            >
-              <GitBranch class="h-3.5 w-3.5 text-stone-500" />
-              <span class="truncate">{{ currentBranchDisplay }}</span>
-              <ChevronDown class="h-2.5 w-2.5 text-stone-400" />
-            </button>
 
-            <div
-              v-if="checkpointPickerOpen"
-              class="composer-menu-panel absolute bottom-[calc(100%+0.45rem)] left-0 z-20 min-w-[18rem] max-w-[min(28rem,calc(100vw-2rem))]"
-              data-testid="workspace-branch-switcher-menu"
-            >
-              <div class="composer-menu-caption">分支</div>
-              <div class="composer-menu-divider"></div>
-              <button
-                v-for="branch in branchList"
-                :key="`branch-switcher-${branch.branchId}`"
-                class="checkpoint-picker-item"
-                type="button"
-                :data-testid="`workspace-branch-switcher-item-${branch.branchId}`"
-                @click="handleSwitchBranch(branch.branchId)"
-              >
-                <div class="flex min-w-0 flex-1 flex-col text-left">
-                  <span class="truncate text-[12px] text-stone-800">{{ branch.displayName }}</span>
-                  <span class="mt-0.5 text-[10px] leading-4 text-stone-500">
-                    {{ branch.branchId }}
-                  </span>
-                </div>
-                <span
-                  class="shrink-0 rounded-full border border-stone-200/80 px-2 py-0.5 text-[10px] text-stone-500"
-                >
-                  {{ branch.branchId === activeBranchId ? "当前" : "切换" }}
-                </span>
-              </button>
-            </div>
-          </div>
-
-            <button
-              class="composer-select-trigger"
-              type="button"
-              :disabled="!canUndoLastTurn"
-              :title="canUndoLastTurn ? `撤回上一轮（${undoShortcutLabel}）` : (draftMessage.trim().length > 0 ? '请先处理当前草稿' : '没有可撤回的操作')"
-              data-testid="workspace-undo-button"
-              @click.stop="handleUndoLastTurn"
-            >
-            <Undo2 class="h-3.5 w-3.5 text-stone-500" />
-            <span class="truncate">撤回</span>
-          </button>
 
           <div ref="providerMenuRef" class="relative">
             <button
@@ -1878,6 +1607,43 @@ watch(
               </button>
             </div>
           </div>
+
+          <TooltipRoot :delay-duration="300" :disabled="undoPopoverOpen">
+            <TooltipTrigger as-child>
+              <span tabindex="0" class="inline-flex">
+                <PopoverRoot v-model:open="undoPopoverOpen">
+                  <PopoverTrigger as-child>
+                    <button
+                      class="checkpoint-icon-button !rounded-full"
+                      type="button"
+                      :disabled="!canUndoLastTurn"
+                      data-testid="workspace-undo-button"
+                    >
+                      <Undo2 class="h-3.5 w-3.5" />
+                      <span class="sr-only">{{ canUndoLastTurn ? '撤回' : '撤回不可用' }}</span>
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverPortal>
+                    <PopoverContent side="top" align="center" :side-offset="6" class="z-50 rounded-[0.3rem] border border-stone-200/70 bg-white/97 px-2.5 py-1.5 shadow-md backdrop-blur">
+                      <div class="flex items-center gap-1 text-nowrap">
+                        <span class="text-[11px] leading-none text-stone-400 select-none">确认撤回对话？</span>
+                        <PopoverClose as-child>
+                          <button type="button" class="inline-flex items-center justify-center w-5 h-5 rounded-[0.25rem] text-rose-500 hover:bg-rose-100/80 hover:text-rose-600 transition cursor-pointer" @click="handleUndoLastTurn">
+                            <Check class="h-3 w-3" />
+                          </button>
+                        </PopoverClose>
+                      </div>
+                    </PopoverContent>
+                  </PopoverPortal>
+                </PopoverRoot>
+              </span>
+            </TooltipTrigger>
+            <TooltipPortal>
+              <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 shadow-sm">
+                {{ canUndoLastTurn ? `${undoShortcutLabel} 撤回` : '没有可撤回的对话' }}
+              </TooltipContent>
+            </TooltipPortal>
+          </TooltipRoot>
         </div>
 
         <Button
@@ -2345,39 +2111,6 @@ watch(
 
 .conversation-agent-shell:hover .agent-action-bar {
   opacity: 1;
-}
-
-.checkpoint-popover {
-  border: 1px solid rgba(231, 229, 228, 0.95);
-  border-radius: 0.8rem;
-  background: rgba(255, 255, 255, 0.98);
-  box-shadow: 0 16px 36px rgba(41, 37, 36, 0.12);
-  backdrop-filter: blur(14px);
-}
-
-.checkpoint-popover-caption {
-  padding: 0.75rem 0.9rem 0.45rem;
-  font-size: 10px;
-  line-height: 1;
-  color: rgb(168 162 158);
-}
-
-.checkpoint-popover-divider {
-  margin: 0 0.65rem;
-  border-top: 1px solid rgba(231, 229, 228, 0.92);
-}
-
-.checkpoint-picker-item {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.65rem 0.9rem;
-  transition: background-color 0.16s ease;
-}
-
-.checkpoint-picker-item:hover {
-  background: rgba(245, 245, 244, 0.9);
 }
 
 .rollback-progress-overlay {
