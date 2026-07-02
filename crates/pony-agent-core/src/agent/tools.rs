@@ -2586,7 +2586,7 @@ impl ToolResult {
 fn with_description(schema: Value) -> Value {
     let desc = json!({
         "type": "string",
-        "description": "用中文极简描述本次工具调用的目的（可选），用于用户界面展示。例如「读取 config.json」「搜索 TokenManager」「运行单元测试」。"
+        "description": "用中文极简描述本次工具调用的目的，用于用户界面展示。每次调用工具时必须提供此字段。例如「读取 config.json」「搜索 TokenManager」「运行单元测试」。"
     });
     if let Some(properties) = schema.as_object().and_then(|o| o.get("properties")).and_then(|p| p.as_object()) {
         let mut props = properties.clone();
