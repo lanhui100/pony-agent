@@ -204,6 +204,40 @@ fn save_and_reload_keep_custom_only_registry_without_default_reinsertion() {
 }
 
 #[test]
+fn default_deepseek_provider_resolves_v4_pro_without_falling_back_to_flash() {
+    let _guard = lock_env();
+    let (temp_root, store) = temp_provider_store();
+    fs::create_dir_all(&temp_root).expect("create temp config root");
+    std::env::remove_var("DEEPSEEK_API_KEY");
+
+    let loaded = store.load_view();
+    let deepseek = loaded
+        .providers
+        .iter()
+        .find(|provider| provider.id == "provider-deepseek")
+        .expect("default deepseek provider should exist");
+
+    assert!(
+        deepseek
+            .models
+            .iter()
+            .any(|model| model.id == "model-deepseek-v4-pro" && model.model == "deepseek-v4-pro"),
+        "default deepseek provider should expose v4 pro as a selectable model"
+    );
+
+    let resolved =
+        store.resolve_selection(Some("provider-deepseek"), Some("model-deepseek-v4-pro"));
+
+    assert_eq!(resolved.provider_name, "deepseek");
+    assert_eq!(resolved.model, "deepseek-v4-pro");
+    assert_ne!(resolved.model, "deepseek-v4-flash");
+    assert!(resolved.capabilities.supports_reasoning);
+
+    std::env::remove_var("DEEPSEEK_API_KEY");
+    let _ = fs::remove_dir_all(temp_root);
+}
+
+#[test]
 fn resolve_selection_falls_back_to_env_when_secret_store_is_empty() {
     let _guard = lock_env();
     let (temp_root, store) = temp_provider_store();

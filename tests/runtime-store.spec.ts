@@ -21,6 +21,7 @@ import type {
 } from "@/types/runtime";
 import { __resetFrontendFlightRecorderForTests, getFrontendRecorderCapabilitySnapshot as getFrontendRecorderCapability, getFrontendRecorderStats } from "@/lib/frontend-flight-recorder";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useProviderStore } from "@/stores/providers";
 import { useSettingsStore } from "@/stores/settings";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -3272,6 +3273,127 @@ describe("runtime session resilience", () => {
     expect(restoredStore.sessionId).toBe("browser-cancelled-session");
     expect(restoredStore.phase).toBe("cancelled");
     expect(restoredStore.messages[1]?.content).toBe("本轮已停止。");
+
+    nowSpy.mockRestore();
+  });
+
+  it("freezes the selected model into the new turn before backend stream events arrive", async () => {
+    const store = useRuntimeStore();
+    const providerStore = useProviderStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8088);
+
+    providerStore.$patch({
+      registry: {
+        selectedProviderId: "provider-openai",
+        providers: [
+          {
+            id: "provider-openai",
+            name: "OpenAI",
+            protocol: "openai",
+            baseUrl: "https://api.openai.com/v1",
+            apiKeyEnvVar: "OPENAI_API_KEY",
+            apiKeyValue: "",
+            apiKeyPresent: false,
+            selectedModelId: "model-gpt5",
+            models: [
+              {
+                id: "model-gpt5",
+                name: "GPT-5",
+                model: "gpt-5",
+                temperature: 0,
+                maxOutputTokens: 4096,
+                reasoningEffort: null,
+                reasoningBudgetTokens: null,
+                capabilityPreset: "open-ai-reasoning",
+                capabilities: {
+                  contextWindowTokens: 128000,
+                  supportsTools: true,
+                  supportsStreaming: true,
+                  supportsImageInput: false,
+                  supportsReasoning: true
+                }
+              }
+            ]
+          },
+          {
+            id: "provider-anthropic",
+            name: "Anthropic",
+            protocol: "anthropic",
+            baseUrl: "https://api.anthropic.com/v1",
+            apiKeyEnvVar: "ANTHROPIC_API_KEY",
+            apiKeyValue: "",
+            apiKeyPresent: false,
+            selectedModelId: "model-claude-4",
+            models: [
+              {
+                id: "model-claude-4",
+                name: "Claude 4",
+                model: "claude-4",
+                temperature: 0,
+                maxOutputTokens: 4096,
+                reasoningEffort: "medium",
+                reasoningBudgetTokens: null,
+                capabilityPreset: "anthropic-thinking",
+                capabilities: {
+                  contextWindowTokens: 200000,
+                  supportsTools: true,
+                  supportsStreaming: true,
+                  supportsImageInput: true,
+                  supportsReasoning: true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      selectedReasoningEffort: "medium"
+    });
+    providerStore.selectModel("provider-anthropic", "model-claude-4");
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "resolve_graph_run_submission_plan") {
+        return { command: "start_graph_run_stream", runId: null };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-model-switch" },
+          turnId: "8088"
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "model-switch-session",
+      draftMessage: "use the newly selected model",
+      phase: "ready",
+      providerName: "OpenAI",
+      providerProtocol: "openai",
+      providerModel: "gpt-5",
+      messages: []
+    });
+
+    const started = await store.submitTurn();
+
+    expect(started).toBe(true);
+    expect(store.providerName).toBe("Anthropic");
+    expect(store.providerProtocol).toBe("anthropic");
+    expect(store.providerModel).toBe("claude-4");
+    expect(store.turnTraceHistory[0]?.providerName).toBe("Anthropic");
+    expect(store.turnTraceHistory[0]?.providerModel).toBe("claude-4");
+    expect(store.turnTraceHistory[0]?.traceTimeline.find((entry) => entry.kind === "call_model")?.providerModel).toBe("claude-4");
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("start_graph_run_stream", {
+      turnId: "8088",
+      runId: null,
+      goal: "use the newly selected model",
+      input: expect.objectContaining({
+        providerId: "provider-anthropic",
+        modelId: "model-claude-4",
+        reasoningEffort: "medium"
+      })
+    });
 
     nowSpy.mockRestore();
   });

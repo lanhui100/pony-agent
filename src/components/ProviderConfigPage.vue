@@ -651,7 +651,7 @@ async function saveModelForm() {
     capabilities,
   );
 
-  providerStore.upsertModel(
+  const savedModel = providerStore.upsertModel(
     editorState.providerId,
     buildProviderModelConfig(
       {
@@ -669,13 +669,16 @@ async function saveModelForm() {
       userPolicy,
     ),
   );
-  providerStore.selectModel(editorState.providerId, payloadId);
+  if (!savedModel) {
+    return;
+  }
+  providerStore.selectModel(editorState.providerId, savedModel.id);
 
   await providerStore.saveRegistry();
 
   if (!providerStore.error) {
     providerStore.notice = editorState.mode === "edit" ? "模型已更新。" : "模型已新增。";
-    beginViewModel(editorState.providerId, payloadId);
+    beginViewModel(editorState.providerId, savedModel.id);
     setModelSaveSuccess();
   }
 }

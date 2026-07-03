@@ -808,6 +808,23 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             model.reasoning_effort = user_policy.reasoning_effort;
             model.reasoning_budget_tokens = user_policy.reasoning_budget_tokens;
         }
+        if provider.id == "provider-deepseek" {
+            let mut has_deepseek_v4_pro = false;
+            provider.models.retain(|model| {
+                if !is_deepseek_v4_pro_model_value(&model.model) {
+                    return true;
+                }
+                if has_deepseek_v4_pro {
+                    return false;
+                }
+                has_deepseek_v4_pro = true;
+                true
+            });
+            if !has_deepseek_v4_pro {
+                provider.models.push(default_deepseek_v4_pro_model());
+            }
+        }
+        dedupe_provider_models(provider);
         if provider.selected_model_id.is_none()
             || provider
                 .models
@@ -831,6 +848,61 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
     }
 
     storage
+}
+
+fn dedupe_provider_models(provider: &mut ProviderConfigStorage) {
+    let selected_model_id = provider.selected_model_id.clone();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut selected_replacement_id: Option<String> = None;
+
+    provider.models.retain(|model| {
+        let key = model_uniqueness_key(&model.model);
+        if let Some((_, kept_id)) = seen.iter().find(|(seen_key, _)| seen_key == &key) {
+            if Some(model.id.as_str()) == selected_model_id.as_deref() {
+                selected_replacement_id = Some(kept_id.clone());
+            }
+            return false;
+        }
+
+        seen.push((key, model.id.clone()));
+        true
+    });
+
+    if selected_model_id
+        .as_deref()
+        .is_some_and(|selected| provider.models.iter().all(|model| model.id != selected))
+    {
+        provider.selected_model_id = selected_replacement_id
+            .or_else(|| provider.models.first().map(|model| model.id.clone()));
+    }
+}
+
+fn default_deepseek_v4_pro_model() -> ProviderModelConfig {
+    ProviderModelConfig {
+        id: "model-deepseek-v4-pro".to_string(),
+        name: "DeepSeek V4 Pro".to_string(),
+        model: "deepseek-v4-pro".to_string(),
+        temperature: 0.2,
+        max_output_tokens: DEFAULT_MODERN_MAX_OUTPUT_TOKENS,
+        capability_preset: ProviderCapabilityPreset::DeepseekReasoner,
+        reasoning_effort: Some(ProviderReasoningEffort::Medium),
+        reasoning_budget_tokens: None,
+        protocol: Some(ProviderProtocol::OpenAi),
+        capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "deepseek-v4-pro"),
+    }
+}
+
+fn is_deepseek_v4_pro_model_value(model_name: &str) -> bool {
+    let lower = model_name.trim().to_ascii_lowercase();
+    lower == "deepseek-v4-pro" || lower.ends_with("/deepseek-v4-pro")
+}
+
+fn model_uniqueness_key(model_name: &str) -> String {
+    if is_deepseek_v4_pro_model_value(model_name) {
+        "deepseek-v4-pro".to_string()
+    } else {
+        model_name.trim().to_ascii_lowercase()
+    }
 }
 
 fn default_provider_templates() -> Vec<ProviderConfigStorage> {
@@ -947,21 +1019,24 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
             secret_ref: default_secret_ref("provider-deepseek"),
             api_key_value: String::new(),
             selected_model_id: Some("model-deepseek-default".to_string()),
-            models: vec![ProviderModelConfig {
-                id: "model-deepseek-default".to_string(),
-                name: "DeepSeek V4 Flash".to_string(),
-                model: "deepseek-v4-flash".to_string(),
-                temperature: 0.2,
-                max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-                capability_preset: ProviderCapabilityPreset::DeepseekChat,
-                reasoning_effort: None,
-                reasoning_budget_tokens: None,
-                protocol: Some(ProviderProtocol::OpenAi),
-                capabilities: default_model_capabilities(
-                    &ProviderProtocol::OpenAi,
-                    "deepseek-v4-flash",
-                ),
-            }],
+            models: vec![
+                ProviderModelConfig {
+                    id: "model-deepseek-default".to_string(),
+                    name: "DeepSeek V4 Flash".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    temperature: 0.2,
+                    max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                    capability_preset: ProviderCapabilityPreset::DeepseekChat,
+                    reasoning_effort: None,
+                    reasoning_budget_tokens: None,
+                    protocol: Some(ProviderProtocol::OpenAi),
+                    capabilities: default_model_capabilities(
+                        &ProviderProtocol::OpenAi,
+                        "deepseek-v4-flash",
+                    ),
+                },
+                default_deepseek_v4_pro_model(),
+            ],
             supported_protocols: vec![ProviderProtocol::OpenAi],
             endpoints: vec![
                 ProviderProtocolEndpoint {
@@ -1600,5 +1675,193 @@ mod tests {
             normalized.selected_provider_id.as_deref(),
             Some("acme-router")
         );
+    }
+
+    #[test]
+    fn default_deepseek_template_includes_distinct_v4_pro_model() {
+        let storage = normalize_storage(ProviderRegistryStorage {
+            providers: Vec::new(),
+            selected_provider_id: Some("provider-deepseek".to_string()),
+        });
+        let deepseek = storage
+            .providers
+            .iter()
+            .find(|provider| provider.id == "provider-deepseek")
+            .expect("default deepseek provider should exist");
+        let pro = deepseek
+            .models
+            .iter()
+            .find(|model| model.id == "model-deepseek-v4-pro")
+            .expect("deepseek v4 pro model should be present");
+
+        assert_eq!(pro.model, "deepseek-v4-pro");
+        assert_ne!(pro.model, "deepseek-v4-flash");
+        assert!(matches!(
+            pro.capability_preset,
+            ProviderCapabilityPreset::DeepseekReasoner
+        ));
+        assert!(pro.capabilities.supports_reasoning);
+
+        let migrated = normalize_storage(ProviderRegistryStorage {
+            providers: vec![ProviderConfigStorage {
+                id: "provider-deepseek".to_string(),
+                name: "deepseek".to_string(),
+                protocol: ProviderProtocol::OpenAi,
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
+                api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+                secret_ref: default_secret_ref("provider-deepseek"),
+                api_key_value: String::new(),
+                selected_model_id: Some("model-deepseek-default".to_string()),
+                models: vec![ProviderModelConfig {
+                    id: "model-deepseek-default".to_string(),
+                    name: "DeepSeek V4 Flash".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    temperature: 0.2,
+                    max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                    capability_preset: ProviderCapabilityPreset::DeepseekChat,
+                    reasoning_effort: None,
+                    reasoning_budget_tokens: None,
+                    protocol: Some(ProviderProtocol::OpenAi),
+                    capabilities: ProviderModelCapabilities::default(),
+                }],
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://api.deepseek.com/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
+            }],
+            selected_provider_id: Some("provider-deepseek".to_string()),
+        });
+        let migrated_deepseek = migrated
+            .providers
+            .iter()
+            .find(|provider| provider.id == "provider-deepseek")
+            .expect("migrated provider should exist");
+
+        assert!(migrated_deepseek
+            .models
+            .iter()
+            .any(|model| model.model == "deepseek-v4-pro"));
+
+        let prefixed_existing = normalize_storage(ProviderRegistryStorage {
+            providers: vec![ProviderConfigStorage {
+                id: "provider-deepseek".to_string(),
+                name: "deepseek".to_string(),
+                protocol: ProviderProtocol::OpenAi,
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
+                api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+                secret_ref: default_secret_ref("provider-deepseek"),
+                api_key_value: String::new(),
+                selected_model_id: Some("model-deepseek-v4-pro-prefixed".to_string()),
+                models: vec![
+                    ProviderModelConfig {
+                        id: "model-deepseek-default".to_string(),
+                        name: "DeepSeek V4 Flash".to_string(),
+                        model: "deepseek-v4-flash".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::DeepseekChat,
+                        reasoning_effort: None,
+                        reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::OpenAi),
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                    ProviderModelConfig {
+                        id: "model-deepseek-v4-pro-prefixed".to_string(),
+                        name: "DeepSeek V4 Pro".to_string(),
+                        model: "deepseek/deepseek-v4-pro".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::DeepseekReasoner,
+                        reasoning_effort: Some(ProviderReasoningEffort::Medium),
+                        reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::OpenAi),
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                ],
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://api.deepseek.com/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
+            }],
+            selected_provider_id: Some("provider-deepseek".to_string()),
+        });
+        let prefixed_deepseek = prefixed_existing
+            .providers
+            .iter()
+            .find(|provider| provider.id == "provider-deepseek")
+            .expect("prefixed provider should exist");
+
+        assert_eq!(
+            prefixed_deepseek
+                .models
+                .iter()
+                .filter(|model| is_deepseek_v4_pro_model_value(&model.model))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn normalize_storage_deduplicates_model_values_within_provider() {
+        let normalized = normalize_storage(ProviderRegistryStorage {
+            providers: vec![ProviderConfigStorage {
+                id: "provider-openai".to_string(),
+                name: "openai".to_string(),
+                protocol: ProviderProtocol::OpenAi,
+                base_url: "https://api.openai.com/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
+                api_key_env_var: "OPENAI_API_KEY".to_string(),
+                secret_ref: default_secret_ref("provider-openai"),
+                api_key_value: String::new(),
+                selected_model_id: Some("model-gpt-5-copy".to_string()),
+                models: vec![
+                    ProviderModelConfig {
+                        id: "model-gpt-5".to_string(),
+                        name: "GPT-5".to_string(),
+                        model: "gpt-5".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
+                        reasoning_effort: Some(ProviderReasoningEffort::Medium),
+                        reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::OpenAi),
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                    ProviderModelConfig {
+                        id: "model-gpt-5-copy".to_string(),
+                        name: "GPT-5 Copy".to_string(),
+                        model: " GPT-5 ".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
+                        reasoning_effort: Some(ProviderReasoningEffort::Medium),
+                        reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::OpenAi),
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                ],
+                supported_protocols: vec![ProviderProtocol::OpenAi],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAi,
+                    enabled: true,
+                    base_url: "https://api.openai.com/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
+            }],
+            selected_provider_id: Some("provider-openai".to_string()),
+        });
+        let provider = &normalized.providers[0];
+
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].id, "model-gpt-5");
+        assert_eq!(provider.selected_model_id.as_deref(), Some("model-gpt-5"));
     }
 }

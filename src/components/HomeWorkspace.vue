@@ -1052,10 +1052,11 @@ function toggleReasoningMenu() {
   }
 }
 
-function selectModel(providerId: string, modelId: string) {
+async function selectModel(providerId: string, modelId: string) {
   providerStore.selectModel(providerId, modelId);
   providerMenuOpen.value = false;
   hoveredProviderId.value = providerId;
+  await providerStore.saveRegistry();
 }
 
 function selectReasoningEffort(value: ProviderReasoningEffort | null) {

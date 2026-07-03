@@ -540,6 +540,65 @@ function createPresetProvider(
   };
 }
 
+function createDeepseekV4ProModel(): ProviderModelConfig {
+  return buildProviderModelConfig(
+    {
+      id: createId("model"),
+      name: "DeepSeek V4 Pro",
+      model: "deepseek-v4-pro",
+      protocol: "openai",
+    },
+    resolveCapabilityDeclaration("openai", "deepseek-v4-pro", "deepseek-reasoner", null),
+    {
+      ...createDefaultModelUserPolicy(),
+      temperature: 0.2,
+      reasoningEffort: "medium",
+    },
+  );
+}
+
+function isDeepseekV4ProModelValue(modelValue: string) {
+  const lower = modelValue.trim().toLowerCase();
+  return lower === "deepseek-v4-pro" || lower.endsWith("/deepseek-v4-pro");
+}
+
+function modelUniquenessKey(modelValue: string) {
+  if (isDeepseekV4ProModelValue(modelValue)) {
+    return "deepseek-v4-pro";
+  }
+  return modelValue.trim().toLowerCase();
+}
+
+function dedupeModelsWithinProvider(
+  models: ProviderModelConfig[],
+  selectedModelId: string | null,
+) {
+  const seen = new Map<string, ProviderModelConfig>();
+  let selectedReplacementId: string | null = null;
+  const deduped = models.filter((model) => {
+    const key = modelUniquenessKey(model.model);
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, model);
+      return true;
+    }
+    if (model.id === selectedModelId) {
+      selectedReplacementId = existing.id;
+    }
+    return false;
+  });
+
+  const nextSelectedModelId =
+    selectedModelId && deduped.some((model) => model.id === selectedModelId)
+      ? selectedModelId
+      : selectedReplacementId ?? deduped[0]?.id ?? null;
+
+  return {
+    models: deduped,
+    selectedModelId: nextSelectedModelId,
+  };
+}
+
 function normalizeModel(
   provider: ProviderConfig,
   model: ProviderModelConfig,
@@ -580,10 +639,20 @@ function normalizeProvider(provider: ProviderConfig): ProviderConfig {
     endpoints,
   };
 
+  let models = baseProvider.models.map((model) => normalizeModel(baseProvider, model));
+  let selectedModelId = baseProvider.selectedModelId;
+  if (baseProvider.id === "provider-deepseek") {
+    if (!models.some((model) => isDeepseekV4ProModelValue(model.model))) {
+      models.push(normalizeModel(baseProvider, createDeepseekV4ProModel()));
+    }
+  }
+  ({ models, selectedModelId } = dedupeModelsWithinProvider(models, selectedModelId));
+
   return {
     ...baseProvider,
     apiKeyEnvVar: deriveEnvVarName(baseProvider.name),
-    models: baseProvider.models.map((model) => normalizeModel(baseProvider, model)),
+    models,
+    selectedModelId,
   };
 }
 
@@ -612,6 +681,7 @@ function createBrowserRegistry(): ProviderRegistry {
     "DeepSeek V4 Flash",
     "deepseek-v4-flash",
   );
+  deepseek.models.push(createDeepseekV4ProModel());
 
   return {
     providers: [ppx, deepseek, openrouter].map(normalizeProvider),
@@ -846,10 +916,20 @@ export const useProviderStore = defineStore("providers", {
         (item) => item.id === providerId,
       );
       if (!provider) {
-        return;
+        return null;
       }
 
       const normalizedPayload = normalizeModel(provider, payload);
+      const duplicate = provider.models.find(
+        (item) =>
+          item.id !== normalizedPayload.id &&
+          modelUniquenessKey(item.model) === modelUniquenessKey(normalizedPayload.model),
+      );
+      if (duplicate) {
+        this.error = `同一提供商下已存在模型：${normalizedPayload.model}`;
+        return null;
+      }
+
       const index = provider.models.findIndex(
         (item) => item.id === normalizedPayload.id,
       );
@@ -863,6 +943,8 @@ export const useProviderStore = defineStore("providers", {
       if (!provider.selectedModelId) {
         provider.selectedModelId = normalizedPayload.id;
       }
+      this.error = null;
+      return normalizedPayload;
     },
     updateModelField<K extends keyof ProviderModelConfig>(
       providerId: string,
