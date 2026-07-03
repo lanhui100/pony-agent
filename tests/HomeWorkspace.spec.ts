@@ -2679,19 +2679,170 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     const wrapper = mountWorkspace();
     await nextTick();
 
-    // Click the undo button to open the confirmation popover
+    // The undo button triggers rollback directly (no popover confirmation)
     await wrapper.get('[data-testid="workspace-undo-button"]').trigger("click");
     await nextTick();
 
-    // Find and click the confirm button inside the popover portal
-    const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
-      (button) => button.closest('[role="dialog"]') || button.textContent?.includes("撤回")
-    );
-    if (confirmButton) {
-      confirmButton.click();
-      await nextTick();
-    }
-    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-old");
+    // executeRollback resolves the parent node and calls checkoutHistoryNode
+    // with the FROM turn's turnId (turn-head is the latest turn being rolled back)
+    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-head");
+  });
+
+  it("undo button rolls back a synthetic latest turn to the previous real checkpoint", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-old",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-root",
+          turnId: null,
+          summary: "初始状态",
+          createdAtMs: 500
+        }),
+        createHistoryNode({
+          nodeId: "node-old",
+          parentNodeId: "node-root",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", baseNodeId: "node-root", headNodeId: "node-old", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    await wrapper.get('[data-testid="workspace-undo-button"]').trigger("click");
+    await nextTick();
+
+    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-head");
+    expect(checkoutSpy).not.toHaveBeenCalledWith("node-root", "transcript_only", "turn-head");
+  });
+
+  it("undo button locally keeps the previous turn when all checkpoints are synthetic", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: null,
+      visibleNodeId: null,
+      branchHeadNodeId: null,
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [],
+      historyBranches: []
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    await wrapper.get('[data-testid="workspace-undo-button"]').trigger("click");
+    await nextTick();
+
+    expect(checkoutSpy).not.toHaveBeenCalled();
+    expect(runtimeStore.messages.map((message) => message.content)).toEqual(["旧问题", "旧回答"]);
+    expect(runtimeStore.draftMessage).toBe("新问题");
+  });
+
+  it("undo button remains enabled for the earliest real checkpoint turn", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-old",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "最早问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "最早回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-root",
+          turnId: null,
+          summary: "初始状态",
+          createdAtMs: 500
+        }),
+        createHistoryNode({
+          nodeId: "node-old",
+          parentNodeId: "node-root",
+          turnId: "turn-old",
+          summary: "最早 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", baseNodeId: "node-root", headNodeId: "node-old", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const undoButton = wrapper.get('[data-testid="workspace-undo-button"]');
+    expect(undoButton.attributes("disabled")).toBeUndefined();
+
+    await undoButton.trigger("click");
+    await nextTick();
+
+    expect(checkoutSpy).toHaveBeenCalledWith("node-root", "transcript_only", "turn-old");
+  });
+
+  it("undo button clears the earliest synthetic turn", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: null,
+      visibleNodeId: null,
+      branchHeadNodeId: null,
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "最早问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "最早回答" })
+      ],
+      historyNodes: [],
+      historyBranches: []
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const undoButton = wrapper.get('[data-testid="workspace-undo-button"]');
+    expect(undoButton.attributes("disabled")).toBeUndefined();
+
+    await undoButton.trigger("click");
+    await nextTick();
+
+    expect(checkoutSpy).not.toHaveBeenCalled();
+    expect(runtimeStore.messages).toEqual([]);
+    expect(runtimeStore.draftMessage).toBe("");
   });
 
   it("does not allow composer undo when a draft is present", async () => {
@@ -2737,11 +2888,14 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     await nextTick();
 
     const undoButton = wrapper.get('[data-testid="workspace-undo-button"]');
-    // 按钮在有草稿时没有直接禁用，但点击后需要弹窗确认（不会直接调用 checkout）
+    // Draft restriction removed: undo works even with a draft, overwriting it.
     await undoButton.trigger("click");
     await nextTick();
 
-    expect(checkoutSpy).not.toHaveBeenCalled();
+    // The draft is immediately overwritten with the rolled-back user's message,
+    // and checkoutHistoryNode is called to roll back.
+    expect(runtimeStore.draftMessage).toBe("新问题");
+    expect(checkoutSpy).toHaveBeenCalled();
   });
 
   it("restores the initial empty state when rolling back the first turn", async () => {
@@ -2938,7 +3092,8 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     clickLatestRollbackConfirm('确认仅撤回对话？');
     await nextTick();
     expect(wrapper.get('[data-testid="workspace-rollback-progress"]').text()).toContain("正在撤回对话...");
-    await new Promise(r => setTimeout(r, 400));
+    // Wait for the minimum 2s loading duration (plus margin) to elapse
+    await new Promise(r => setTimeout(r, 2500));
     await nextTick();
 
     expect(runtimeStore.messages).toEqual([]);

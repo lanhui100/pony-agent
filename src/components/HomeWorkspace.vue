@@ -2,7 +2,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
 import type { ComponentPublicInstance } from "vue";
 import { storeToRefs } from "pinia";
-import { isTauriAvailable } from "@/lib/tauri";
 import {
   AlertTriangle,
   ArrowDown,
@@ -76,6 +75,7 @@ type MergedToolCall = {
 
 type ComposerActionKind = "submit" | "resume" | "continue" | "restart";
 type CheckpointRollbackAction = "transcript_only" | "transcript_and_workspace";
+const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
 
 const runtimeStore = useRuntimeStore();
 const providerStore = useProviderStore();
@@ -85,7 +85,6 @@ const {
   conversationCheckpointEntries,
   draftMessage,
   historyNodes,
-  historyBranches,
   isSubmitting,
   latestExecutionCheckpoint,
   latestGraphRunSubmissionPlan,
@@ -477,11 +476,9 @@ const historyNodeById = computed(() => {
 });
 
 const canUndoLastTurn = computed(() => {
-  const nonLatest = checkpointEntries.value.filter(
-    (entry) => !entry.isLatest
-  );
+  const latestTurn = turns.value[turns.value.length - 1] ?? null;
   return (
-    nonLatest.length > 0 &&
+    Boolean(latestTurn?.turnId && checkpointEntryForTurn(latestTurn.turnId)) &&
     !isSubmitting.value &&
     !sessionOperation.value &&
     !rollbackInFlight.value
@@ -711,10 +708,32 @@ function checkpointEntryForTurn(turnId: string) {
   return checkpointEntryByTurnId.value.get(turnId) ?? null;
 }
 
+function previousTurnIdForRollback(turnId: string) {
+  const turnIndex = turns.value.findIndex((turn) => turn.turnId === turnId);
+  if (turnIndex <= 0) {
+    return null;
+  }
+
+  return turns.value[turnIndex - 1]?.turnId ?? null;
+}
+
 function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | null) {
   const entryNodeId = fallbackNodeId ?? checkpointEntryForTurn(turnId)?.nodeId ?? null;
   if (!entryNodeId) {
     return null;
+  }
+
+  if (entryNodeId.startsWith("synthetic-")) {
+    const previousTurnId = previousTurnIdForRollback(turnId);
+    const previousEntryNodeId = previousTurnId ? checkpointEntryForTurn(previousTurnId)?.nodeId?.trim() : null;
+    if (previousEntryNodeId && !previousEntryNodeId.startsWith("synthetic-")) {
+      return previousEntryNodeId;
+    }
+    if (previousTurnId && previousEntryNodeId) {
+      return `${SYNTHETIC_KEEP_NODE_PREFIX}${encodeURIComponent(previousTurnId)}`;
+    }
+
+    return `synthetic-initial-${turnId}`;
   }
 
   const entryNode = historyNodeById.value.get(entryNodeId) ?? null;
@@ -723,22 +742,28 @@ function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | 
     return parentNodeId;
   }
 
-  const branchBaseNodeId = historyBranches.value
-    .find((branch) => branch.branchId === entryNode?.branchId)
-    ?.baseNodeId?.trim() || null;
-  if (branchBaseNodeId) {
-    if (branchBaseNodeId !== entryNodeId) {
-      return branchBaseNodeId;
-    }
-    if (isTauriAvailable()) {
-      return branchBaseNodeId;
-    }
+  // No parent node means this is the first history node (first turn).
+  // The backend always seeds a legacy root node as parent, so this path
+  // should only be reached for sessions created before that migration.
+  // Fall back to a synthetic initial-state node — the caller will handle
+  // it by calling loadSessionState to reload the backend-truncated
+  // (empty) snapshot.
+  return `synthetic-initial-${turnId}`;
+}
+
+function checkoutNodeResetsToInitialState(nodeId: string) {
+  if (nodeId.startsWith(SYNTHETIC_KEEP_NODE_PREFIX)) {
+    return false;
   }
-  if (branchBaseNodeId && branchBaseNodeId !== entryNodeId) {
-    return branchBaseNodeId;
+  if (nodeId.startsWith("synthetic-initial-")) {
+    return true;
+  }
+  if (nodeId.startsWith("synthetic-")) {
+    return true;
   }
 
-  return `synthetic-initial-${turnId}`;
+  const targetNode = historyNodeById.value.get(nodeId) ?? null;
+  return targetNode ? !targetNode.turnId?.trim() : false;
 }
 
 function updateRollbackProgressPosition() {
@@ -816,13 +841,11 @@ async function executeRollback(turnId: string, action: CheckpointRollbackAction)
     return;
   }
 
-  // Capture the user's message content BEFORE truncation so we can
-  // restore it into the draft input after the rollback completes.
-  // Always fill the draft with the rolled-back message — even when
-  // rolling back to the initial state, the user should see their
-  // original message so they can edit and resend.
+  // Capture the user's message content before truncation. When rolling
+  // back to a previous turn, restore that content into the draft so it
+  // can be edited and resent; initial-state rollback keeps the draft empty.
   const sourceTurn = turns.value.find(t => t.turnId === turnId);
-  const nextDraft = sourceTurn?.user?.content ?? "";
+  const nextDraft = checkoutNodeResetsToInitialState(nodeId) ? "" : sourceTurn?.user?.content ?? "";
 
   // Fill draft immediately so the user sees their message restored.
   draftMessage.value = nextDraft;
@@ -836,17 +859,24 @@ async function executeRollback(turnId: string, action: CheckpointRollbackAction)
     updateRollbackProgressPosition();
     void nextTick().then(() => updateRollbackProgressPosition());
 
-    const isSynthetic = nodeId.startsWith("synthetic-");
-
-    if (!isSynthetic) {
-      // Backend truncates the history graph (marks descendant nodes as
-      // TurnCancelled, updates branch head) and reloadSessionState inside
-      // checkoutHistoryNode syncs the frontend store.
+    // With the backend always seeding a legacy root node, the synthetic
+    // path should be unreachable in normal operation.  If reached (stale
+    // data / legacy session), try to find the root node and checkout
+    // through the backend; fall back to a local reset as a last resort.
+    if (nodeId.startsWith(SYNTHETIC_KEEP_NODE_PREFIX)) {
+      const keepTurnId = decodeURIComponent(nodeId.slice(SYNTHETIC_KEEP_NODE_PREFIX.length));
+      if (!runtimeStore.rollbackToTurnBoundary(keepTurnId)) {
+        runtimeStore.rollbackToInitialState();
+      }
+    } else if (!nodeId.startsWith("synthetic-")) {
       await runtimeStore.checkoutHistoryNode(nodeId, action, turnId);
     } else {
-      // Synthetic initial state: no backend node exists for "before the
-      // first turn". Reset the local store to a blank conversation.
-      runtimeStore.rollbackToInitialState();
+      const rootNode = runtimeStore.historyNodes.find((n) => !n.parentNodeId?.trim() && !n.turnId?.trim());
+      if (rootNode) {
+        await runtimeStore.checkoutHistoryNode(rootNode.nodeId, action, turnId);
+      } else {
+        runtimeStore.rollbackToInitialState();
+      }
     }
   } catch (err) {
     console.error("[rollback] checkoutHistoryNode failed:", err);

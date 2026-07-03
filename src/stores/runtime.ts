@@ -1256,6 +1256,23 @@ function createDefaultTraceTimeline() {
   ];
 }
 
+function applyProviderPatchToTraceTimeline(
+  traceTimeline: TraceTimelineEntry[],
+  providerPatch: Pick<TraceTimelineEntry, "providerName" | "providerProtocol" | "providerModel">
+) {
+  return traceTimeline.map((entry) => {
+    const kind = canonicalizeTraceTimelineKind(entry.kind);
+    if (kind === "input" || kind === "call_tool") {
+      return { ...entry };
+    }
+
+    return {
+      ...entry,
+      ...providerPatch
+    };
+  });
+}
+
 function createBrowserPreviewTraceTimeline() {
   return [
     createTimelineEntry("input", 1, undefined, { state: "completed" }),
@@ -4519,6 +4536,49 @@ export const useRuntimeStore = defineStore("runtime", {
       this.initialRollbackActive = true;
       this.persistHistory();
     },
+    rollbackToTurnBoundary(turnId: string) {
+      const targetTurnId = turnId.trim();
+      if (!targetTurnId) {
+        return false;
+      }
+
+      let truncationIndex = -1;
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        if (this.messages[i]?.turnId === targetTurnId) {
+          truncationIndex = i;
+          break;
+        }
+      }
+      if (truncationIndex < 0) {
+        return false;
+      }
+
+      this.cancelDeferredPersist();
+      this.cancelStreamFlush();
+      this.messages = this.messages.slice(0, truncationIndex + 1);
+      const retainedTurnIds = new Set(this.messages.map((message) => message.turnId));
+      this.turnTraceHistory = this.turnTraceHistory.filter((trace) => retainedTurnIds.has(trace.turnId));
+      this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
+      this.traceSteps = createDefaultTraceSteps();
+      const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
+      this.traceTimeline = lastTrace?.traceTimeline?.length
+        ? cloneTraceTimeline(lastTrace.traceTimeline)
+        : createDefaultTraceTimeline();
+      this.toolActivities = [];
+      this.error = null;
+      this.isSubmitting = false;
+      this.activeTurnId = null;
+      this.activeRunId = null;
+      this.latestExecutionCheckpoint = null;
+      this.latestGraphRunSubmissionPlan = null;
+      this.latestGraphRunControlBoundaryEvidence = [];
+      this.latestRunControlAuditSummary = null;
+      this.latestHistoryStateAuditSummary = null;
+      this.initialRollbackActive = false;
+      this.phase = this.messages.length > 0 ? "ready" : "idle";
+      this.persistHistory();
+      return true;
+    },
     async performHistoryOperation<TInvokeArgs extends Record<string, unknown>, TResult extends HistoryCursorState & { historyStateAuditSummary?: HistoryStateAuditSummary | null }>(
       options: {
         cmd: string;
@@ -4571,19 +4631,77 @@ export const useRuntimeStore = defineStore("runtime", {
           return null;
         }
 
-        // Backend is the single source of truth after truncation.
-        // Reload the full session state from the backend to get the correctly
-        // truncated messages, traces, history nodes, and cursor.
-        await this.loadSessionState(sessionId, {
-          refreshCatalog: false,
-          nodeId
-        });
+        // ── Smooth local truncation ──
+        // The backend has confirmed the truncation.  We apply the same
+        // truncation locally so the UI transitions smoothly (the
+        // optimisticRollbackTurnId in the component hides the removed
+        // turns during the backend round-trip; by the time it is cleared
+        // the local arrays already match the backend-truncated state).
+        //
+        // Resolve the turn we are keeping: the target node's own turn
+        // (the state AFTER that turn completed).  We truncate messages
+        // to *include* this turn and remove everything after it.
+        const targetTurnId = this.findCheckpointTurnIdByNodeId(nodeId);
+        const resolvedTurnId = targetTurnId?.trim() || null;
+        const targetNode = this.historyNodes.find((item) => item.nodeId === nodeId) ?? null;
+        // A node without a turnId (e.g. the legacy root that represents
+        // the empty initial state) cannot be used for local truncation
+        // because we don't know which messages belong to it.  Fall back
+        // to loadSessionState which will return the backend-truncated
+        // (potentially empty) snapshot.
+        const targetIsInitialState = !targetNode?.turnId?.trim();
+
+        let truncatedLocally = false;
+        if (!targetIsInitialState && resolvedTurnId) {
+          let truncationIndex = -1;
+          for (let i = this.messages.length - 1; i >= 0; i--) {
+            if ((this.messages[i] as ChatMessage).turnId === resolvedTurnId) {
+              truncationIndex = i;
+              break;
+            }
+          }
+          if (truncationIndex >= 0) {
+            this.messages = this.messages.slice(0, truncationIndex + 1);
+            this.turnTraceHistory = this.turnTraceHistory.filter(
+              (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
+            );
+            this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
+            this.traceSteps = createDefaultTraceSteps();
+            const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
+            this.traceTimeline = lastTrace?.traceTimeline?.length
+              ? cloneTraceTimeline(lastTrace.traceTimeline)
+              : createDefaultTraceTimeline();
+            // Filter historyNodes to only ancestors of the target node
+            const ancestorIds = new Set<string>();
+            const collectAncestors = (startId: string) => {
+              let currentId: string | null = startId;
+              while (currentId) {
+                ancestorIds.add(currentId);
+                const node = this.historyNodes.find((n) => n.nodeId === currentId);
+                currentId = node?.parentNodeId?.trim() || null;
+              }
+            };
+            collectAncestors(nodeId);
+            this.historyNodes = this.historyNodes.filter((n) => ancestorIds.has(n.nodeId));
+            truncatedLocally = true;
+          }
+        }
+
+        // If local truncation could not find the target messages (e.g.
+        // the checkpoint entry is not yet available), fall back to a full
+        // backend reload.  This is a safety net — the smooth path above
+        // should cover all normal cases.
+        if (!truncatedLocally) {
+          await this.loadSessionState(sessionId, {
+            refreshCatalog: false,
+            nodeId
+          });
+        }
+
+        this.historyCursorMode = "live";
+        this.initialRollbackActive = false;
 
         result = normalizeHistoryCheckoutResult(payload, this.historyNodes, this.historyBranches);
-        // After loadSessionState, historyCursorMode is already "live" from the
-        // backend snapshot. Ensure initialRollbackActive is cleared since the
-        // backend has permanently truncated the branch.
-        this.initialRollbackActive = false;
       } else {
         const targetTurnId = this.findCheckpointTurnIdByNodeId(nodeId);
         const resolvedTurnId = targetTurnId?.trim() || turnId?.trim() || null;
@@ -6592,6 +6710,16 @@ export const useRuntimeStore = defineStore("runtime", {
       await this.initializeTurnEvents();
       const providerStore = useProviderStore();
       const settingsStore = useSettingsStore();
+      const selectedProvider = providerStore.currentProvider;
+      const selectedModel = providerStore.currentModel;
+      const selectedProviderName = selectedProvider?.name ?? null;
+      const selectedProviderProtocol = selectedProvider?.protocol ?? null;
+      const selectedModelName = selectedModel?.model ?? selectedModel?.name ?? null;
+      const selectedProviderTracePatch = {
+        providerName: selectedProviderName,
+        providerProtocol: selectedProviderProtocol,
+        providerModel: selectedModelName
+      };
 
       // After backend truncation, the cursor is always at the live branch head.
       // No restore is needed — the truncated state IS the current state.
@@ -6607,8 +6735,8 @@ export const useRuntimeStore = defineStore("runtime", {
       const payload: TurnInput = {
         message: providerMessage,
         displayMessage,
-        providerId: providerStore.currentProvider?.id ?? null,
-        modelId: providerStore.currentModel?.id ?? null,
+        providerId: selectedProvider?.id ?? null,
+        modelId: selectedModel?.id ?? null,
         reasoningEffort: providerStore.currentReasoningEffort ?? null,
         workspaceMode: settingsStore.workspaceMode,
         sessionId: this.sessionId,
@@ -6649,27 +6777,41 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "calling_model";
       this.activeTurnId = requestId;
       this.draftMessage = "";
+      this.providerRequestedName = selectedProviderName ?? "";
+      this.providerName = selectedProviderName ?? "";
+      this.providerProtocol = selectedProviderProtocol ?? "";
+      this.providerModel = selectedModelName ?? "";
+      this.providerSource = "";
+      this.providerMode = "";
+      this.fallbackReason = null;
       this.inputTokens = null;
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
       this.traceSteps = createSubmitTraceSteps();
-      this.traceTimeline = createDefaultTraceTimeline();
+      this.traceTimeline = applyProviderPatchToTraceTimeline(
+        createDefaultTraceTimeline(),
+        selectedProviderTracePatch
+      );
       this.toolActivities = [];
       this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
         phase: "calling_model",
         traceSteps: this.traceSteps,
         toolActivities: [],
+        providerRequestedName: selectedProviderName,
+        providerName: selectedProviderName,
+        providerProtocol: selectedProviderProtocol,
+        providerModel: selectedModelName,
+        providerSource: null,
+        providerMode: null,
+        fallbackReason: null,
         error: null
       });
 
       if (retryingAfterTimeout) {
         const assistantMessage = this.ensureAssistantMessage(
           requestId,
-          buildAssistantModelLabel(
-            providerStore.currentProvider?.name ?? null,
-            providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null
-          )
+          buildAssistantModelLabel(selectedProviderName, selectedModelName)
         );
         assistantMessage.content = TIMEOUT_RETRY_PENDING_MESSAGE;
         assistantMessage.reasoningContent = null;
@@ -6785,28 +6927,29 @@ export const useRuntimeStore = defineStore("runtime", {
       } catch (error) {
         const assistantMessage = this.ensureAssistantMessage(
           requestId,
-          buildAssistantModelLabel(
-            providerStore.currentProvider?.name ?? null,
-            providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null
-          )
+          buildAssistantModelLabel(selectedProviderName, selectedModelName)
         );
         assistantMessage.content = DEFAULT_FAILED_TURN_MESSAGE;
         assistantMessage.reasoningContent = null;
         assistantMessage.status = "error";
-        assistantMessage.modelName = buildAssistantModelLabel(
-          providerStore.currentProvider?.name ?? null,
-          providerStore.currentModel?.model ?? providerStore.currentModel?.name ?? null
-        );
+        assistantMessage.modelName = buildAssistantModelLabel(selectedProviderName, selectedModelName);
         this.error = `本轮执行失败：${String(error)}`;
         this.phase = "failed";
         this.activeTurnId = null;
         this.activeRunId = null;
         this.traceSteps = createSubmitFailureTraceSteps();
-        this.traceTimeline = createSubmitFailureTraceTimeline();
+        this.traceTimeline = applyProviderPatchToTraceTimeline(
+          createSubmitFailureTraceTimeline(),
+          selectedProviderTracePatch
+        );
         this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
           phase: "failed",
           traceSteps: this.traceSteps,
           toolActivities: this.toolActivities,
+          providerRequestedName: selectedProviderName,
+          providerName: selectedProviderName,
+          providerProtocol: selectedProviderProtocol,
+          providerModel: selectedModelName,
           error: this.error
         });
         this.persistHistory();
