@@ -115,7 +115,6 @@ function isTransientSessionOverview(session: {
 const providerMenuOpen = ref(false);
 const hoveredProviderId = ref<string | null>(null);
 const reasoningMenuOpen = ref(false);
-const undoPopoverOpen = ref(false);
 const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
 const copiedAssistantTurnId = ref<string | null>(null);
@@ -485,8 +484,7 @@ const canUndoLastTurn = computed(() => {
     nonLatest.length > 0 &&
     !isSubmitting.value &&
     !sessionOperation.value &&
-    !rollbackInFlight.value &&
-    draftMessage.value.trim().length === 0
+    !rollbackInFlight.value
   );
 });
 
@@ -801,25 +799,38 @@ function updateFloatingUiPositions() {
   updateRollbackProgressPosition();
 }
 
-async function confirmRollback(turnId: string, action: CheckpointRollbackAction) {
-  if (rollbackInFlight.value) return;
+async function executeRollback(turnId: string, action: CheckpointRollbackAction) {
+  if (rollbackInFlight.value) {
+    console.warn("[rollback] already in flight, skipping");
+    return;
+  }
 
   const entry = checkpointEntryForTurn(turnId);
   const nodeId = resolveRollbackCheckoutNodeId(turnId, entry?.nodeId ?? null);
 
   if (!nodeId) {
-    console.warn("[rollback] Cannot resolve parent nodeId for turn", turnId);
+    console.warn("[rollback] Cannot resolve parent nodeId for turn", turnId, {
+      entry: entry ? { nodeId: entry.nodeId, turnId: entry.turnId, isLatest: entry.isLatest } : null,
+      checkpointEntryByTurnIdKeys: [...checkpointEntryByTurnId.value.keys()]
+    });
     return;
   }
 
-  const targetIsInitialState = nodeId.startsWith("synthetic-initial-")
-    || (!nodeId.startsWith("synthetic-") && !(historyNodeById.value.get(nodeId)?.turnId?.trim()));
-
-  // Source turn message: the one the user clicked on
+  // Capture the user's message content BEFORE truncation so we can
+  // restore it into the draft input after the rollback completes.
+  // Always fill the draft with the rolled-back message — even when
+  // rolling back to the initial state, the user should see their
+  // original message so they can edit and resend.
   const sourceTurn = turns.value.find(t => t.turnId === turnId);
-  const userContent = sourceTurn?.user?.content ?? "";
+  const nextDraft = sourceTurn?.user?.content ?? "";
+
+  // Fill draft immediately so the user sees their message restored.
+  draftMessage.value = nextDraft;
+  runtimeStore.setDraftMessage(nextDraft);
 
   try {
+    // optimisticRollbackTurnId provides pure visual hiding during the
+    // backend round-trip — no state mutation, just a cutoff for visibleTurns.
     optimisticRollbackTurnId.value = turnId;
     rollbackInFlight.value = { turnId, action };
     updateRollbackProgressPosition();
@@ -827,49 +838,30 @@ async function confirmRollback(turnId: string, action: CheckpointRollbackAction)
 
     const isSynthetic = nodeId.startsWith("synthetic-");
 
-    if (isSynthetic) {
-      const turnIndex = turns.value.findIndex((t) => t.turnId === turnId);
-      if (turnIndex <= 0) {
-        runtimeStore.rollbackToInitialState();
-      } else {
-        const previousTurn = turns.value[turnIndex - 1];
-        if (previousTurn) {
-          let lastMsgIdx = -1;
-          for (let idx = messages.value.length - 1; idx >= 0; idx--) {
-            if (messages.value[idx]!.turnId === previousTurn.turnId) {
-              lastMsgIdx = idx;
-              break;
-            }
-          }
-          if (lastMsgIdx >= 0) {
-            runtimeStore.$patch({
-              messages: messages.value.slice(0, lastMsgIdx + 1),
-              turnTraceHistory: []
-            });
-            runtimeStore.persistHistory();
-          }
-        }
-      }
+    if (!isSynthetic) {
+      // Backend truncates the history graph (marks descendant nodes as
+      // TurnCancelled, updates branch head) and reloadSessionState inside
+      // checkoutHistoryNode syncs the frontend store.
+      await runtimeStore.checkoutHistoryNode(nodeId, action, turnId);
     } else {
-      await Promise.all([
-        runtimeStore.checkoutHistoryNode(nodeId, action, turnId),
-        new Promise<void>(resolve => setTimeout(resolve, 350))
-      ]);
+      // Synthetic initial state: no backend node exists for "before the
+      // first turn". Reset the local store to a blank conversation.
+      runtimeStore.rollbackToInitialState();
     }
   } catch (err) {
+    console.error("[rollback] checkoutHistoryNode failed:", err);
+  } finally {
     optimisticRollbackTurnId.value = null;
     rollbackInFlight.value = null;
-    console.error("[rollback] checkoutHistoryNode failed:", err);
-    return;
+
+    // Ensure the draft survives regardless of success/failure path
+    draftMessage.value = nextDraft;
+    runtimeStore.setDraftMessage(nextDraft);
   }
+}
 
-  optimisticRollbackTurnId.value = null;
-  rollbackInFlight.value = null;
-
-  // Rolling back to the root checkpoint should restore the empty conversation state.
-  const nextDraft = targetIsInitialState ? "" : userContent;
-  draftMessage.value = nextDraft;
-  runtimeStore.setDraftMessage(nextDraft);
+async function confirmRollback(turnId: string, action: CheckpointRollbackAction) {
+  await executeRollback(turnId, action);
 }
 
 function rollbackProgressLabel() {
@@ -884,18 +876,23 @@ function rollbackProgressLabel() {
 
 async function handleUndoLastTurn() {
   if (!canUndoLastTurn.value || rollbackInFlight.value) {
+    console.warn("[undo] canUndoLastTurn false or rollbackInFlight in progress", {
+      canUndo: canUndoLastTurn.value,
+      rollbackInFlight: !!rollbackInFlight.value
+    });
     return;
   }
 
-  const sortedEntries = [...checkpointEntries.value]
-    .filter((e) => !e.isLatest)
-    .sort((a, b) => b.createdAtMs - a.createdAtMs);
-  const previousEntry = sortedEntries[0];
-  if (!previousEntry) {
+  // The latest turn is the one being rolled back.
+  // executeRollback will resolve the checkpoint to roll back TO via the turn's entry.
+  const latestTurn = turns.value[turns.value.length - 1];
+  if (!latestTurn?.turnId) {
+    console.warn("[undo] no latest turn found, turns count:", turns.value.length);
     return;
   }
 
-  await runtimeStore.checkoutHistoryNode(previousEntry.nodeId, "transcript_only", previousEntry.turnId);
+  console.warn("[undo] rolling back turn:", latestTurn.turnId, "available checkpoints:", checkpointEntries.value.length);
+  await executeRollback(latestTurn.turnId, "transcript_only");
 }
 
 function handleComposerKeydown(event: KeyboardEvent) {
@@ -904,7 +901,7 @@ function handleComposerKeydown(event: KeyboardEvent) {
     (event.ctrlKey || event.metaKey) &&
     !event.shiftKey &&
     !event.altKey;
-  if (isUndoShortcut && draftMessage.value.trim() === "") {
+  if (isUndoShortcut) {
     event.preventDefault();
     handleUndoLastTurn();
     return;
@@ -1608,34 +1605,19 @@ watch(
             </div>
           </div>
 
-          <TooltipRoot :delay-duration="300" :disabled="undoPopoverOpen">
+          <TooltipRoot :delay-duration="300">
             <TooltipTrigger as-child>
               <span tabindex="0" class="inline-flex">
-                <PopoverRoot v-model:open="undoPopoverOpen">
-                  <PopoverTrigger as-child>
-                    <button
-                      class="checkpoint-icon-button !rounded-full"
-                      type="button"
-                      :disabled="!canUndoLastTurn"
-                      data-testid="workspace-undo-button"
-                    >
-                      <Undo2 class="h-3.5 w-3.5" />
-                      <span class="sr-only">{{ canUndoLastTurn ? '撤回' : '撤回不可用' }}</span>
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverPortal>
-                    <PopoverContent side="top" align="center" :side-offset="6" class="z-50 rounded-[0.3rem] border border-stone-200/70 bg-white/97 px-2.5 py-1.5 shadow-md backdrop-blur">
-                      <div class="flex items-center gap-1 text-nowrap">
-                        <span class="text-[11px] leading-none text-stone-400 select-none">确认撤回对话？</span>
-                        <PopoverClose as-child>
-                          <button type="button" class="inline-flex items-center justify-center w-5 h-5 rounded-[0.25rem] text-rose-500 hover:bg-rose-100/80 hover:text-rose-600 transition cursor-pointer" @click="handleUndoLastTurn">
-                            <Check class="h-3 w-3" />
-                          </button>
-                        </PopoverClose>
-                      </div>
-                    </PopoverContent>
-                  </PopoverPortal>
-                </PopoverRoot>
+                <button
+                  class="checkpoint-icon-button !rounded-full"
+                  type="button"
+                  :disabled="!canUndoLastTurn"
+                  data-testid="workspace-undo-button"
+                  @click="handleUndoLastTurn"
+                >
+                  <Undo2 class="h-3.5 w-3.5" />
+                  <span class="sr-only">{{ canUndoLastTurn ? '撤回' : '撤回不可用' }}</span>
+                </button>
               </span>
             </TooltipTrigger>
             <TooltipPortal>

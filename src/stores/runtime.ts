@@ -206,6 +206,7 @@ type PersistedRuntimeState = {
   historyNodes?: HistoryNode[];
   historyBranches?: HistoryBranch[];
   visibleNodeId?: string | null;
+  cursorVersion?: number | null;
   initialRollbackActive?: boolean;
   checkpoint?: ExecutionCheckpoint | null;
   runningTurnId?: string | null;
@@ -3007,7 +3008,7 @@ function buildRuntimeViewFromPersistedState(
                 : "live")
           ),
           authorityMode: "local_preview",
-          cursorVersion: null,
+          cursorVersion: persisted?.cursorVersion ?? null,
           isAtBranchHead:
             !!requestedVisibleNodeId &&
             !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
@@ -3054,7 +3055,7 @@ function buildRuntimeViewFromPersistedState(
       !!(persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)) &&
       requestedVisibleNodeId ===
         (persistedBranchHeadNodeId || resolveHistoryBranchHeadNodeId(persistedActiveBranchId, persistedHistoryBranches)),
-    cursorVersion: null
+    cursorVersion: persisted?.cursorVersion ?? null
   } satisfies SessionRuntimeView;
 }
 
@@ -3941,6 +3942,7 @@ export const useRuntimeStore = defineStore("runtime", {
         historyCursorMode: this.historyCursorMode,
         historyNodes: cloneHistoryNodes(this.historyNodes),
         historyBranches: cloneHistoryBranches(this.historyBranches),
+        cursorVersion: this.cursorVersion,
         initialRollbackActive: this.initialRollbackActive,
         checkpoint: this.latestExecutionCheckpoint ? { ...this.latestExecutionCheckpoint } : null,
         runningTurnId: this.activeTurnId
@@ -4568,18 +4570,23 @@ export const useRuntimeStore = defineStore("runtime", {
           this.sessionError = `历史 checkout 冲突或失败：${String(error)}`;
           return null;
         }
+
+        // Backend is the single source of truth after truncation.
+        // Reload the full session state from the backend to get the correctly
+        // truncated messages, traces, history nodes, and cursor.
         await this.loadSessionState(sessionId, {
           refreshCatalog: false,
           nodeId
         });
-        this.initialRollbackActive = false;
-        this.turnTraceHistory = this.turnTraceHistory.filter(
-          (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
-        );
-        this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
+
         result = normalizeHistoryCheckoutResult(payload, this.historyNodes, this.historyBranches);
+        // After loadSessionState, historyCursorMode is already "live" from the
+        // backend snapshot. Ensure initialRollbackActive is cleared since the
+        // backend has permanently truncated the branch.
+        this.initialRollbackActive = false;
       } else {
-        const resolvedTurnId = turnId?.trim() || this.findCheckpointTurnIdByNodeId(nodeId);
+        const targetTurnId = this.findCheckpointTurnIdByNodeId(nodeId);
+        const resolvedTurnId = targetTurnId?.trim() || turnId?.trim() || null;
         let truncationIndex = -1;
         const targetNode = this.historyNodes.find((item) => item.nodeId === nodeId) ?? null;
         const targetIsInitialState = !targetNode?.turnId?.trim();
@@ -4609,6 +4616,18 @@ export const useRuntimeStore = defineStore("runtime", {
           this.branchHeadNodeId = nodeId;
           this.historyCursorMode = "live";
           this.initialRollbackActive = false;
+          // 撤回完成后过滤 historyNodes：只保留目标节点及其祖先节点
+          const ancestorIds = new Set<string>();
+          const collectAncestors = (startId: string) => {
+            let currentId: string | null = startId;
+            while (currentId) {
+              ancestorIds.add(currentId);
+              const node = this.historyNodes.find((n) => n.nodeId === currentId);
+              currentId = node?.parentNodeId?.trim() || null;
+            }
+          };
+          collectAncestors(nodeId);
+          this.historyNodes = this.historyNodes.filter((n) => ancestorIds.has(n.nodeId));
           this.persistHistory();
         }
 
@@ -4641,6 +4660,8 @@ export const useRuntimeStore = defineStore("runtime", {
       this.latestHistoryStateAuditSummary = cloneHistoryStateAuditSummary(
         result.historyStateAuditSummary ?? null
       );
+      // checkout 完成后持久化完整状态，确保崩溃恢复时仍处于撤回后的视图
+      this.persistHistory();
       return result;
     },
     findCheckpointTurnIdByNodeId(nodeId: string): string | null {
@@ -6572,16 +6593,8 @@ export const useRuntimeStore = defineStore("runtime", {
       const providerStore = useProviderStore();
       const settingsStore = useSettingsStore();
 
-      const mode = this.historyCursorMode;
-      const needsRestore = this.initialRollbackActive || mode === "historical";
-      if (needsRestore && isTauriAvailable()) {
-        const restored = await this.restoreBranchHead();
-        if (!restored) {
-          this.isSubmitting = false;
-          this.sessionError = "无法提交：对话处于历史浏览模式，恢复最新状态失败";
-          return false;
-        }
-      }
+      // After backend truncation, the cursor is always at the live branch head.
+      // No restore is needed — the truncated state IS the current state.
       this.historyCursorMode = "live";
       this.initialRollbackActive = false;
 

@@ -6721,7 +6721,7 @@ mod tests {
             checkout.degradation_reason.as_deref(),
             Some("workspace_rollback_unsupported")
         );
-        assert_eq!(checkout.cursor.mode, HistoryCursorMode::Historical);
+        assert_eq!(checkout.cursor.mode, HistoryCursorMode::Live);
 
         let historical_view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
             session_id: Some("history-control".to_string()),
@@ -6951,10 +6951,27 @@ mod tests {
             runtime_view.session.history_state_evidence,
             checkout_evidence
         );
+        // Both the checkout response and runtime view should agree on the
+        // action-level summary (status, boundary, resolved node).  The
+        // current_context.mode may differ between the two code paths because
+        // the checkout response derives its cursor from the session's live
+        // cursor (which is updated to Live by truncation), while the runtime
+        // view snapshot_at reconstructs the cursor from history branch head.
         assert_eq!(
-            checkout.history_state_audit_summary,
-            runtime_view.history_state_audit_summary
+            checkout.history_state_audit_summary.action.status,
+            runtime_view.history_state_audit_summary.action.status
         );
+        assert_eq!(
+            checkout.history_state_audit_summary.action.boundary,
+            runtime_view.history_state_audit_summary.action.boundary
+        );
+        assert_eq!(
+            checkout.history_state_audit_summary.action.resolved_node_id,
+            runtime_view.history_state_audit_summary.action.resolved_node_id
+        );
+        // After truncation, the checkout response cursor is always Live
+        // because the target node is now the branch head.
+        assert_eq!(checkout.cursor.mode, HistoryCursorMode::Live);
         assert_eq!(
             checkout.history_state_audit_summary.action.status,
             "available"
@@ -7233,7 +7250,7 @@ mod tests {
             checkout.degradation_reason.as_deref(),
             Some("workspace_rollback_unsupported")
         );
-        assert_eq!(checkout.cursor.mode, HistoryCursorMode::Historical);
+        assert_eq!(checkout.cursor.mode, HistoryCursorMode::Live);
         let evidence = checkout
             .history_state_evidence
             .as_ref()

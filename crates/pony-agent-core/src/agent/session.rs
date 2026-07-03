@@ -1186,24 +1186,35 @@ impl SessionStore {
                 let Some(node) = history_node(session, node_id).cloned() else {
                     return Err(format!("unknown history node: {node_id}"));
                 };
-                hydrate_session_from_node(session, &node);
-                let branch_head_node_id = session
+                // ── Truncate history: mark descendant nodes as cancelled ──
+                // Collect all ancestor node IDs (including the target node itself).
+                // Any node on the same branch that is NOT an ancestor is a descendant
+                // of the target and should be marked as TurnCancelled.
+                let ancestor_ids = collect_ancestor_ids(session, &node.node_id);
+                let branch_id = node.branch_id.clone();
+                for n in &mut session.history_nodes {
+                    if n.branch_id == branch_id && !ancestor_ids.contains(&n.node_id) {
+                        n.kind = HistoryNodeKind::TurnCancelled;
+                    }
+                }
+                // ── Update branch head to point to the target node ──
+                // This makes the truncation permanent: the target node IS now the
+                // branch head, so subsequent restore_branch_head / new turns will
+                // build from here instead of resurrecting the cancelled nodes.
+                if let Some(branch) = session
                     .history_branches
-                    .iter()
-                    .find(|branch| branch.branch_id == node.branch_id)
-                    .and_then(|branch| branch.head_node_id.clone());
+                    .iter_mut()
+                    .find(|b| b.branch_id == branch_id)
+                {
+                    branch.head_node_id = Some(node.node_id.clone());
+                }
+                hydrate_session_from_node(session, &node);
                 session.history_cursor.visible_node_id = Some(node.node_id.clone());
-                session.history_cursor.active_branch_id = Some(node.branch_id.clone());
-                session.history_cursor.branch_head_node_id = branch_head_node_id;
+                session.history_cursor.active_branch_id = Some(branch_id.clone());
+                session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
                 session.history_cursor.workspace_node_id = Some(node.node_id.clone());
-                session.history_cursor.mode =
-                    if session.history_cursor.branch_head_node_id.as_deref()
-                        == Some(node.node_id.as_str())
-                    {
-                        HistoryCursorMode::Live
-                    } else {
-                        HistoryCursorMode::Historical
-                    };
+                // Target node is now the branch head, so mode is always Live.
+                session.history_cursor.mode = HistoryCursorMode::Live;
                 session.history_cursor.checkout_mode = requested_mode.clone();
                 session.history_cursor.checkout_status = match requested_mode {
                     HistoryCheckoutMode::TranscriptOnly => HistoryCheckoutStatus::Applied,
@@ -1972,6 +1983,13 @@ impl SessionStore {
             }
         }
 
+        if matches!(result, SessionBackendMutationResult::Failed) {
+            eprintln!(
+                "[pony-agent][session] persist_session_and_trace_change backend write failed for session {}; falling back to separate blob+table writes",
+                session_id
+            );
+        }
+
         self.persist_trace_change(session_id, trace_action_from_mutation(mutation));
         self.save_session_to_backend(session_id);
     }
@@ -2222,13 +2240,10 @@ fn snapshot_from_state(
             .iter()
             .find(|branch| branch.branch_id == selected_node.branch_id)
             .and_then(|branch| branch.head_node_id.clone());
-        let checkout_status = if matches!(
-            session.history_cursor.checkout_status,
-            HistoryCheckoutStatus::DegradedToTranscriptOnly
-        ) && session.history_cursor.visible_node_id.as_deref()
+        let checkout_status = if session.history_cursor.visible_node_id.as_deref()
             == Some(selected_node.node_id.as_str())
         {
-            HistoryCheckoutStatus::DegradedToTranscriptOnly
+            session.history_cursor.checkout_status.clone()
         } else {
             HistoryCheckoutStatus::NotRequested
         };
@@ -3052,6 +3067,22 @@ fn classify_turn_node_kind(assistant_message: &str) -> HistoryNodeKind {
     } else {
         HistoryNodeKind::TurnCommitted
     }
+}
+
+/// Collect all ancestor node IDs of the given node (including the node itself)
+/// by walking the `parent_node_id` chain.
+fn collect_ancestor_ids(session: &SessionState, node_id: &str) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let mut current = Some(node_id.to_string());
+    while let Some(id) = current {
+        ids.insert(id.clone());
+        current = session
+            .history_nodes
+            .iter()
+            .find(|n| n.node_id == id)
+            .and_then(|n| n.parent_node_id.clone());
+    }
+    ids
 }
 
 fn history_node<'a>(session: &'a SessionState, node_id: &str) -> Option<&'a HistoryNode> {
@@ -5853,7 +5884,8 @@ mod tests {
             snapshot.history_cursor.checkout_status,
             HistoryCheckoutStatus::DegradedToTranscriptOnly
         );
-        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Historical);
+        // After truncation the target node IS the branch head, so mode is Live.
+        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Live);
         assert_eq!(snapshot.history_state_evidence.len(), 2);
         assert_eq!(
             snapshot.history_state_evidence[1].boundary,
@@ -5875,7 +5907,7 @@ mod tests {
         assert!(snapshot.history_state_audit_summary.action.degraded);
         assert_eq!(
             snapshot.history_state_audit_summary.current_context.mode,
-            "historical"
+            "live"
         );
     }
 
