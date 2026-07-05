@@ -28,9 +28,11 @@ type NavigationPage = "home" | "providers" | "model-monitor" | "settings";
 const props = withDefaults(
   defineProps<{
     currentPage?: NavigationPage;
+    forceCollapsed?: boolean;
   }>(),
   {
-    currentPage: "home"
+    currentPage: "home",
+    forceCollapsed: false
   }
 );
 
@@ -94,10 +96,12 @@ const canShowMoreConversations = computed(
   () => displayedSessions.value.length < visibleSessions.value.length
 );
 
+const sidebarCollapsed = computed(() => collapsed.value || props.forceCollapsed);
+
 const asideClass = computed(() =>
-  collapsed.value
+  sidebarCollapsed.value
     ? "w-[3.4rem] shrink-0"
-    : "w-full shrink-0 lg:w-[17.5rem] xl:w-[18.5rem]"
+    : "w-[17.5rem] shrink-0 xl:w-[18.5rem]"
 );
 
 function loadStoredBoolean(key: string, fallback: boolean) {
@@ -254,11 +258,11 @@ function clearPendingDeleteSession(session: SessionOverview) {
   >
     <div
       class="flex h-full min-h-0 flex-col transition-[padding] duration-200 ease-in-out"
-      :class="collapsed ? 'items-center px-1 py-4' : 'px-3 py-4 sm:px-3.5'"
+      :class="sidebarCollapsed ? 'items-center px-1 py-4' : 'px-3 py-4 sm:px-3.5'"
     >
-      <div class="flex w-full items-center gap-2" :class="collapsed ? 'justify-center' : 'justify-between'">
+      <div class="flex w-full items-center gap-2" :class="sidebarCollapsed ? 'justify-center' : 'justify-between'">
         <button
-          v-if="!collapsed"
+          v-if="!sidebarCollapsed"
           class="flex min-w-0 items-center gap-2 text-left"
           type="button"
           data-testid="session-sidebar-brand"
@@ -280,7 +284,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
       </div>
 
       <div
-        v-if="collapsed"
+        v-if="sidebarCollapsed"
         class="mt-4 flex flex-1 flex-col items-center gap-2"
         data-testid="session-sidebar-collapsed"
       >

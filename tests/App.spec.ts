@@ -16,12 +16,20 @@ const HomeSessionSidebarStub = defineComponent({
     currentPage: {
       type: String,
       default: "home"
+    },
+    forceCollapsed: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ["navigate"],
   setup(props, { emit }) {
     return () =>
-      h("div", { "data-testid": "home-session-sidebar-stub", "data-current-page": props.currentPage }, [
+      h("div", {
+        "data-testid": "home-session-sidebar-stub",
+        "data-current-page": props.currentPage,
+        "data-force-collapsed": props.forceCollapsed ? "true" : "false"
+      }, [
         h(
           "button",
           {
@@ -223,6 +231,30 @@ describe("App", () => {
 
     await wrapper.get('[data-testid="workspace-right-sidebar-toggle"]').trigger("click");
     expect(window.localStorage.getItem("pony-agent.ui.right-sidebar-open")).toBe("true");
+  });
+
+  it("adapts narrow layouts by closing the right sidebar before forcing the left sidebar collapsed", async () => {
+    const originalWidth = window.innerWidth;
+    const wrapper = mountApp();
+
+    expect(wrapper.get('[data-testid="home-right-sidebar-shell"]').attributes("data-open")).toBe("true");
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-force-collapsed")).toBe("false");
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 960 });
+    window.dispatchEvent(new Event("resize"));
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="home-right-sidebar-shell"]').attributes("data-open")).toBe("false");
+    expect(wrapper.find('[data-testid="workspace-right-sidebar-toggle"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-force-collapsed")).toBe("false");
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 780 });
+    window.dispatchEvent(new Event("resize"));
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-force-collapsed")).toBe("true");
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
   });
 
   it("keeps rendering even if one startup task fails", async () => {

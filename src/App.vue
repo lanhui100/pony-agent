@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { TooltipProvider } from "reka-ui";
 import { ChevronLeft, ChevronRight } from "lucide-vue-next";
 import HomeSidebar from "@/components/HomeSidebar.vue";
@@ -16,8 +16,11 @@ import { useSettingsStore } from "@/stores/settings";
 type AppPage = "home" | "providers" | "model-monitor" | "settings";
 
 const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "pony-agent.ui.right-sidebar-open";
+const AUTO_CLOSE_RIGHT_SIDEBAR_WIDTH = 1000;
+const AUTO_COLLAPSE_LEFT_SIDEBAR_WIDTH = 820;
 const currentPage = ref<AppPage>("home");
-const rightSidebarOpen = ref(true);
+const rightSidebarPreferredOpen = ref(true);
+const windowWidth = ref(typeof window !== "undefined" ? window.innerWidth : Number.POSITIVE_INFINITY);
 const providerStore = useProviderStore();
 const runtimeStore = useRuntimeStore();
 const settingsStore = useSettingsStore();
@@ -27,6 +30,10 @@ let onBeforeUnload: (() => void) | null = null;
 let onPageHide: (() => void) | null = null;
 let onVisibility: (() => void) | null = null;
 let longTaskObserver: PerformanceObserver | null = null;
+
+const forceCloseRightSidebar = computed(() => windowWidth.value < AUTO_CLOSE_RIGHT_SIDEBAR_WIDTH);
+const forceCollapseLeftSidebar = computed(() => windowWidth.value < AUTO_COLLAPSE_LEFT_SIDEBAR_WIDTH);
+const rightSidebarOpen = computed(() => rightSidebarPreferredOpen.value && !forceCloseRightSidebar.value);
 
 function logLifecycle(event: string) {
   console.info(`[pony-agent][app] ${event}`, {
@@ -39,6 +46,7 @@ function logLifecycle(event: string) {
 }
 
 function handleWindowResize() {
+  windowWidth.value = window.innerWidth;
   if (!isResizing.value) {
     isResizing.value = true;
   }
@@ -94,8 +102,9 @@ onMounted(async () => {
   if (typeof window !== "undefined") {
     const storedSidebarPreference = window.localStorage.getItem(RIGHT_SIDEBAR_OPEN_STORAGE_KEY);
     if (storedSidebarPreference != null) {
-      rightSidebarOpen.value = storedSidebarPreference !== "false";
+      rightSidebarPreferredOpen.value = storedSidebarPreference !== "false";
     }
+    windowWidth.value = window.innerWidth;
   }
   onBeforeUnload = () => {
     logLifecycle("beforeunload");
@@ -140,7 +149,7 @@ onBeforeUnmount(() => {
   logLifecycle("beforeUnmount");
 });
 
-watch(rightSidebarOpen, (value) => {
+watch(rightSidebarPreferredOpen, (value) => {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(RIGHT_SIDEBAR_OPEN_STORAGE_KEY, value ? "true" : "false");
   }
@@ -150,16 +159,16 @@ watch(rightSidebarOpen, (value) => {
 <template>
   <TooltipProvider>
     <main
-      class="flex flex-col gap-2 h-screen overflow-hidden bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] text-stone-900"
+      class="flex flex-col h-screen overflow-hidden bg-transparent text-stone-900"
       :class="{ resizing: isResizing }"
     >
       <TitleBar />
 
       <section
-        class="flex min-h-0 flex-1 w-full min-w-0 gap-4 pb-3"
+        class="flex min-h-0 flex-1 w-full min-w-0 gap-4 bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.18),transparent_26%),linear-gradient(180deg,#fbf8f3_0%,#f6f1ea_48%,#f1ece4_100%)] pb-3"
         data-testid="app-layout-shell"
       >
-        <HomeSessionSidebar :current-page="currentPage" @navigate="currentPage = $event" />
+        <HomeSessionSidebar :current-page="currentPage" :force-collapsed="forceCollapseLeftSidebar" @navigate="currentPage = $event" />
 
         <section class="flex flex-col min-h-0 min-w-0 flex-1">
           <Transition
@@ -195,15 +204,16 @@ watch(rightSidebarOpen, (value) => {
                   <HomeSidebar />
                 </div>
               </div>
-              <button
-                type="button"
-                class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
-                :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
-                :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
-                :data-open="rightSidebarOpen ? 'true' : 'false'"
-                data-testid="workspace-right-sidebar-toggle"
-                @click="rightSidebarOpen = !rightSidebarOpen"
-              >
+                <button
+                  v-if="!forceCloseRightSidebar"
+                  type="button"
+                  class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
+                  :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+                  :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
+                  :data-open="rightSidebarOpen ? 'true' : 'false'"
+                  data-testid="workspace-right-sidebar-toggle"
+                  @click="rightSidebarPreferredOpen = !rightSidebarPreferredOpen"
+                >
                 <ChevronRight v-if="rightSidebarOpen" class="h-4 w-4" />
                 <ChevronLeft v-else class="h-4 w-4" />
               </button>

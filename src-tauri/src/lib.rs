@@ -779,6 +779,21 @@ pub fn run() {
                 // since Tauri's set_icon() only sends ICON_SMALL.
                 #[cfg(target_os = "windows")]
                 set_taskbar_icon_win32(app.handle());
+
+                #[cfg(target_os = "windows")]
+                {
+                    use window_vibrancy::{apply_acrylic, apply_blur};
+
+                    if apply_acrylic(&window, Some((20, 24, 34, 135))).is_err() {
+                        let _ = apply_blur(&window, Some((20, 24, 34, 120)));
+                    }
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                    let _ = apply_vibrancy(&window, NSVisualEffectMaterial::HudWindow, None, None);
+                }
             }
 
             Ok(())

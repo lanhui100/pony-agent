@@ -24,7 +24,7 @@ async function closeWindow() {
 
 <template>
   <div
-    class="flex h-9 shrink-0 items-center justify-between bg-[#eee5d9] mb-2 px-3 select-none"
+    class="flex h-9 shrink-0 items-center justify-between bg-[#eee5d9] px-3 select-none"
     data-tauri-drag-region
   >
     <div class="flex items-center gap-2 text-sm font-medium text-stone-700" data-tauri-drag-region>

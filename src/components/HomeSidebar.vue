@@ -531,7 +531,7 @@ function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: n
   }
 
   const percentage = ((inputTokens / contextWindowTokens) * 100).toFixed(1);
-  return `已用 ${percentage}%（${formatCompactInteger(inputTokens)} / ${formatCompactInteger(contextWindowTokens)}）`;
+  return `${percentage}% · ${formatCompactInteger(inputTokens)} / ${formatCompactInteger(contextWindowTokens)}`;
 }
 
 function readNumericValue(value: unknown) {

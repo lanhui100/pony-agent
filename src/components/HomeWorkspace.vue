@@ -1216,7 +1216,7 @@ watch(
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
       viewport-class="px-4 sm:px-5"
     >
-      <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[46.4rem]" data-testid="workspace-content-column">
+      <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[46.4rem] pt-4 sm:pt-5" data-testid="workspace-content-column">
         <div
           v-if="rollbackInFlight"
           class="rollback-progress-overlay"

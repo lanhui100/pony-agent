@@ -570,6 +570,16 @@ describe("HomeSessionSidebar", () => {
     expect(innerShell.element.className).not.toContain("px-2");
   });
 
+  it("keeps a fixed-width sidebar in expanded mode instead of stretching full width", async () => {
+    seedSidebarSessions();
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.element.className).toContain("w-[17.5rem]");
+    expect(wrapper.element.className).not.toContain("w-full");
+  });
+
   it("collapsed home icon routes back to home workspace", async () => {
     seedSidebarSessions();
 

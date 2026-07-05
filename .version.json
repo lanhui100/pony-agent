@@ -1043,11 +1043,23 @@
         }
       ],
       "commit": "ea18948"
+    },
+    {
+      "timestamp": "2026-07-05T20:44:39+08:00",
+      "commit": "a2636da",
+      "bumps": [
+        {
+          "from": "0.1.52",
+          "segment": "patch",
+          "to": "0.1.53",
+          "component": "tauri"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-07-03T22:08:07+08:00",
+  "lastBump": "2026-07-05T20:44:39+08:00",
   "tauri": {
-    "patch": 52,
+    "patch": 53,
     "minor": 1,
     "major": 0
   },

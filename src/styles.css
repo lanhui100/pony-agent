@@ -14,12 +14,13 @@ body,
   min-height: 100%;
   width: 100%;
   overscroll-behavior: none;
+  background: transparent;
 }
 
 body {
   margin: 0;
   min-width: 320px;
-  background: #f4f0e9;
+  background: transparent;
   color: #2f261d;
   font-weight: 330;
   overflow-x: hidden;
