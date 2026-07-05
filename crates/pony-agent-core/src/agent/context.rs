@@ -19,6 +19,8 @@ const BASE_SYSTEM_PROMPT: &str = r#"You are Pony Agent, an AI agent that collabo
 - Verify environment-specific or changeable facts instead of guessing.
 - Respect existing code, project conventions, and user changes.
 - Keep progress updates concise during longer work.
+- Do not use Markdown formatting in replies; output plain text only unless the user explicitly asks for Markdown.
+- Be extremely concise by default to save tokens; provide detailed explanations only when requested or necessary.
 - When calling a tool, always include a Chinese "description" field briefly explaining the purpose of this invocation (e.g. "读取配置文件 tauri.conf.json", "搜索 TokenManager 类"). This description is displayed to the user in the UI — without it, only a generic message appears.
 - This base prompt must stay stable; environment facts, workspace instructions, memory, and temporary reminders are injected in later layers."#;
 const SESSION_CONTEXT_HISTORY_LIMIT: usize = 12;
@@ -1681,6 +1683,14 @@ mod tests {
             .observation
             .stable_prefix_text
             .contains(BASE_SYSTEM_PROMPT));
+        assert!(request
+            .observation
+            .stable_prefix_text
+            .contains("Do not use Markdown formatting in replies"));
+        assert!(request
+            .observation
+            .stable_prefix_text
+            .contains("Be extremely concise by default"));
         assert!(request
             .observation
             .stable_prefix_text

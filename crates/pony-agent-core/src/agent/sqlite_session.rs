@@ -193,19 +193,18 @@ impl SqliteSessionBackend {
                 }
                 let data = serde_json::to_string(&normalized_session)
                     .map_err(|e| format!("serialize session: {e}"))?;
-                stmt.execute(params![
+stmt.execute(params![
                     id,
                     normalized_session.title,
                     normalized_session.updated_at_ms as i64,
                     data
                 ])
                 .map_err(|e| format!("insert session: {e}"))?;
-                if !matches!(
-                    normalized_session.trace_migration_state,
-                    TraceMigrationState::TraceTableAuthoritative
-                ) {
-                    self.replace_session_traces_tx(&tx, id, &normalized_session.turn_trace_history)?;
-                }
+                // Always write traces to keep session blob and trace table in sync,
+                // regardless of trace_migration_state. This prevents stale traces
+                // from lingering in the trace table after checkout/rollback
+                // when the fallback persist path is taken.
+                self.replace_session_traces_tx(&tx, id, &normalized_session.turn_trace_history)?;
             }
         }
 
@@ -635,7 +634,7 @@ impl SessionBackend for SqliteSessionBackend {
                 return false;
             }
         };
-        if let Err(e) = tx.execute(
+if let Err(e) = tx.execute(
             "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
              VALUES (?1, ?2, ?3, ?4)",
             params![session_id, session.title, session.updated_at_ms as i64, data],
@@ -643,15 +642,11 @@ impl SessionBackend for SqliteSessionBackend {
             eprintln!("[pony-agent][session] SQLite upsert session error: {e}");
             return false;
         }
-        if !matches!(
-            session.trace_migration_state,
-            TraceMigrationState::TraceTableAuthoritative
-        ) {
-            if let Err(e) = self.replace_session_traces_tx(&tx, session_id, &session.turn_trace_history)
-            {
-                eprintln!("[pony-agent][session] SQLite replace traces error: {e}");
-                return false;
-            }
+        // Always write traces to keep session blob and trace table in sync.
+        if let Err(e) = self.replace_session_traces_tx(&tx, session_id, &session.turn_trace_history)
+        {
+            eprintln!("[pony-agent][session] SQLite replace traces error: {e}");
+            return false;
         }
         if let Err(e) = tx.commit() {
             eprintln!("[pony-agent][session] SQLite upsert commit error: {e}");

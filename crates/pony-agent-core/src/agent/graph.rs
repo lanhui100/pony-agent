@@ -413,10 +413,16 @@ impl GraphRunStore {
 
     pub fn persistent(storage_path: impl Into<PathBuf>) -> Self {
         let storage_path = storage_path.into();
-        Self {
-            runs: load_runs_from_path(&storage_path),
+        let mut runs = load_runs_from_path(&storage_path);
+        let modified = reconcile_stale_runs(&mut runs);
+        let store = Self {
+            runs,
             storage_path: Some(storage_path),
+        };
+        if modified {
+            store.persist_runs();
         }
+        store
     }
 
     pub fn load_run(&self, run_id: &str) -> Option<GraphRun> {
@@ -794,6 +800,48 @@ fn load_runs_from_path(path: &PathBuf) -> GraphRunMap {
     serde_json::from_str::<PersistedGraphRunStore>(&contents)
         .map(|persisted| persisted.runs)
         .unwrap_or_default()
+}
+
+/// 检测并修复因进程崩溃/异常关闭导致的 stale graph run 状态。
+///
+/// 如果 run 的 phase 为 Running 但 active_turn_id 仍存在，说明上一个
+/// turn 执行中被中断（进程崩溃、强制关闭等），`apply_turn_result` 从未
+/// 被调用。此时：
+/// - 清除 `active_turn_id`（不存在进行中的 turn）
+/// - 将 phase 降级为 `Paused`（可 resume 继续对话）
+/// - 清除 `last_decision`（保留旧决策会导致 phase 与决策不一致）
+/// - 不设 `stop_reason`（这不是用户主动停止，也不是运行时错误）
+///
+/// 幂等的：第二次调用对已修复的 run 不产生任何修改。
+///
+/// 返回 `true` 表示至少修复了一个 run。
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn reconcile_stale_runs(runs: &mut GraphRunMap) -> bool {
+    let mut modified = false;
+    for run in runs.values_mut() {
+        let stale = run.phase == GraphRunPhase::Running;
+        if stale {
+            let turn_id = run.active_turn_id.take();
+            run.phase = GraphRunPhase::Paused;
+            run.last_decision = None;
+            run.updated_at_ms = now_timestamp_ms();
+            modified = true;
+            if let Some(tid) = turn_id {
+                eprintln!(
+                    "[pony-agent] reconciled stale graph run `{}`: \
+                     active turn `{tid}` interrupted by process exit; moved to Paused.",
+                    run.id,
+                );
+            } else {
+                eprintln!(
+                    "[pony-agent] reconciled stale graph run `{}`: \
+                     phase=Running with no active turn; moved to Paused.",
+                    run.id,
+                );
+            }
+        }
+    }
+    modified
 }
 
 fn build_run_event(run: &GraphRun, kind: GraphRunEventKind, summary: String) -> GraphRunEvent {
@@ -1387,5 +1435,158 @@ mod tests {
         if let Some(parent) = path.parent() {
             let _ = fs::remove_dir_all(parent);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // reconcile_stale_runs tests
+    // ------------------------------------------------------------------
+
+    fn stale_run(run_id: &str, phase: GraphRunPhase) -> GraphRun {
+        GraphRun {
+            id: run_id.to_string(),
+            goal: "test".to_string(),
+            session_id: Some("session-1".to_string()),
+            phase,
+            steps: Vec::new(),
+            active_turn_id: Some("turn-1".to_string()),
+            last_completed_turn_id: Some("turn-0".to_string()),
+            stop_reason: None,
+            last_handoff: None,
+            resume_count: 0,
+            last_decision: Some(GraphDecision {
+                kind: GraphDecisionKind::Continue,
+                reason: GraphDecisionReason::PlannerRequestedContinue,
+                summary: "previous decision".to_string(),
+                target_phase: GraphRunPhase::Running,
+            }),
+            control_boundary_evidence: Vec::new(),
+            created_at_ms: 1000,
+            updated_at_ms: 1000,
+        }
+    }
+
+    fn healthy_run(run_id: &str, phase: GraphRunPhase) -> GraphRun {
+        GraphRun {
+            id: run_id.to_string(),
+            goal: "test".to_string(),
+            session_id: Some("session-1".to_string()),
+            phase,
+            steps: Vec::new(),
+            active_turn_id: None,
+            last_completed_turn_id: Some("turn-1".to_string()),
+            stop_reason: None,
+            last_handoff: None,
+            resume_count: 1,
+            last_decision: Some(GraphDecision {
+                kind: GraphDecisionKind::Pause,
+                reason: GraphDecisionReason::ExplicitPause,
+                summary: "stopped".to_string(),
+                target_phase: GraphRunPhase::Paused,
+            }),
+            control_boundary_evidence: Vec::new(),
+            created_at_ms: 1000,
+            updated_at_ms: 2000,
+        }
+    }
+
+    #[test]
+    fn reconcile_stale_runs_fixes_running_with_active_turn() {
+        let mut runs = GraphRunMap::new();
+        runs.insert("run-1".into(), stale_run("run-1", GraphRunPhase::Running));
+
+        let modified = reconcile_stale_runs(&mut runs);
+        assert!(modified, "should have modified the stale run");
+
+        let run = runs.get("run-1").unwrap();
+        assert_eq!(run.phase, GraphRunPhase::Paused, "phase should be Paused");
+        assert_eq!(
+            run.active_turn_id, None,
+            "active_turn_id should be cleared"
+        );
+        assert_eq!(run.last_decision, None, "last_decision should be cleared");
+        assert_eq!(run.stop_reason, None, "stop_reason should remain None");
+        assert!(
+            run.updated_at_ms > 1000,
+            "updated_at_ms should be refreshed"
+        );
+    }
+
+    #[test]
+    fn reconcile_stale_runs_fixes_running_without_active_turn() {
+        let mut runs = GraphRunMap::new();
+        let mut run = stale_run("run-1", GraphRunPhase::Running);
+        run.active_turn_id = None; // Running but no active turn — safety net
+        runs.insert("run-1".into(), run);
+
+        let modified = reconcile_stale_runs(&mut runs);
+        assert!(modified, "should have modified the stale run");
+
+        let run = runs.get("run-1").unwrap();
+        assert_eq!(run.phase, GraphRunPhase::Paused);
+        assert_eq!(run.last_decision, None);
+    }
+
+    #[test]
+    fn reconcile_stale_runs_skips_terminal_runs() {
+        let mut runs = GraphRunMap::new();
+
+        for (phase_key, phase) in [
+            ("completed", GraphRunPhase::Completed),
+            ("failed", GraphRunPhase::Failed),
+            ("cancelled", GraphRunPhase::Cancelled),
+        ] {
+            runs.insert(
+                format!("run-{phase_key}"),
+                stale_run(&format!("run-{phase_key}"), phase),
+            );
+        }
+
+        let modified = reconcile_stale_runs(&mut runs);
+        assert!(!modified, "terminal runs should not be modified");
+    }
+
+    #[test]
+    fn reconcile_stale_runs_skips_healthy_paused_run() {
+        let mut runs = GraphRunMap::new();
+        runs.insert("run-1".into(), healthy_run("run-1", GraphRunPhase::Paused));
+
+        let modified = reconcile_stale_runs(&mut runs);
+        assert!(!modified, "healthy Paused run should not be modified");
+    }
+
+    #[test]
+    fn reconcile_stale_runs_skips_healthy_waiting_run() {
+        let mut runs = GraphRunMap::new();
+        runs.insert(
+            "run-1".into(),
+            healthy_run("run-1", GraphRunPhase::WaitingUser),
+        );
+
+        let modified = reconcile_stale_runs(&mut runs);
+        assert!(!modified, "healthy WaitingUser run should not be modified");
+    }
+
+    #[test]
+    fn reconcile_stale_runs_is_idempotent() {
+        let mut runs = GraphRunMap::new();
+        runs.insert("run-1".into(), stale_run("run-1", GraphRunPhase::Running));
+
+        // First call
+        reconcile_stale_runs(&mut runs);
+        let snapshot = runs.clone();
+
+        // Second call — should be no-op
+        let modified = reconcile_stale_runs(&mut runs);
+        assert!(!modified, "second call should not modify anything");
+        assert_eq!(runs, snapshot, "state should be identical after second call");
+    }
+
+    #[test]
+    fn reconcile_stale_runs_skips_ready_run() {
+        let mut runs = GraphRunMap::new();
+        runs.insert("run-1".into(), healthy_run("run-1", GraphRunPhase::Ready));
+
+        let modified = reconcile_stale_runs(&mut runs);
+        assert!(!modified, "Ready run should not be modified");
     }
 }

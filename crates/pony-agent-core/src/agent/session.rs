@@ -4032,6 +4032,10 @@ fn session_is_persistable(session: &SessionState) -> bool {
         || !session.memory_write_evidence.is_empty()
         || !session.memory_write_hook_trace_records.is_empty()
         || !session.history_state_evidence.is_empty()
+        // A session that has been truncated to the initial (empty) state
+        // still has a non-empty history graph (the legacy root node) and
+        // must be persisted so the truncation survives a restart.
+        || !session.history_nodes.is_empty()
 }
 
 fn build_title(history: &[TurnHistoryMessage]) -> String {
