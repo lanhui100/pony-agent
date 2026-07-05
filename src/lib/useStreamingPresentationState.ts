@@ -2,12 +2,11 @@ import { shallowReactive, type ComputedRef, type Ref } from "vue";
 import type { ChatMessage } from "@/types/runtime";
 import { countUnclosedCodeFences } from "./markdown";
 
-const STREAM_FADE_BATCH_CHARS = 50;
-const STREAM_FADE_TIME_MS = 350;
-const STREAM_FADE_FIRST_BATCH_CHARS = 12;
+const STREAM_FADE_BATCH_CHARS = 80;
+const STREAM_FADE_TIME_MS = 420;
+const STREAM_FADE_FIRST_BATCH_CHARS = 24;
 const STREAM_FADE_CODE_FENCE_CHARS = 18;
 const STREAM_REASONING_FADE_CHARS = 3;
-
 function detectCodeFenceActive(content: string): boolean {
   return countUnclosedCodeFences(content) > 0;
 }

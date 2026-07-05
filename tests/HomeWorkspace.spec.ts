@@ -583,11 +583,22 @@ function mountWorkspace(options?: {
 }
 
 function findStreamingMarkdown(wrapper: ReturnType<typeof mount>) {
-  return wrapper.find('.markdown-stub[streaming="true"]');
+  return wrapper.find('.assistant-plain-text[data-streaming="true"]');
 }
 
 function flushAsyncUiWork() {
   return new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+}
+
+async function waitForCondition(check: () => boolean, attempts = 8) {
+  for (let index = 0; index < attempts; index += 1) {
+    if (check()) {
+      return true;
+    }
+    await flushAsyncUiWork();
+    await nextTick();
+  }
+  return check();
 }
 
 function clickLatestRollbackConfirm(label: string) {
@@ -940,7 +951,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await nextTick();
 
     expect(wrapper.text()).toContain("超时后错误重连中");
-    const markdownBlocks = wrapper.findAll(".markdown-stub");
+    const markdownBlocks = wrapper.findAll(".assistant-plain-text");
     expect(markdownBlocks.some((node) => node.classes().includes("text-stone-800"))).toBe(true);
   });
 
@@ -1144,9 +1155,10 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
     await nextTick();
 
-    const streamingContent = wrapper.get('.markdown-stub[streaming="true"]');
+    const streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toContain("**正在** 输出中");
     expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
+    expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
   // KNOWN TEST DEBT: streaming content rendering changed after component restructure
@@ -1199,7 +1211,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
       ]
     });
     await nextTick();
-    let streamingContent = wrapper.get('.markdown-stub[streaming="true"]');
+    let streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toBe("hello");
     expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
 
@@ -1223,12 +1235,12 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     });
     await nextTick();
 
-    streamingContent = wrapper.get('.markdown-stub[streaming="true"]');
+    streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toBe("hello");
     expect(wrapper.get(".assistant-streaming-fade").text()).toBe("this is a longer streamed assistant delta");
   });
 
-  it("switches from streaming text to final markdown when assistant completes", async () => {
+  it("switches from streaming text to final plain text when assistant completes", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
@@ -1277,6 +1289,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
+    expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
 
     runtimeStore.$patch({
       phase: "ready",
@@ -1300,12 +1313,13 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
-    const markdownBlock = wrapper.get(".markdown-stub");
-    expect(markdownBlock.text()).toContain("**完成** 输出");
-    expect(markdownBlock.classes()).toContain("text-stone-800");
+    const plainTextBlock = wrapper.get(".assistant-plain-text");
+    expect(plainTextBlock.text()).toContain("**完成** 输出");
+    expect(plainTextBlock.classes()).toContain("text-stone-800");
+    expect(wrapper.get('[data-testid="workspace-agent-actions"]').exists()).toBe(true);
   });
 
-  it("does not auto-scroll again when a pending assistant flips to final markdown without new content", async () => {
+  it("does not auto-scroll again when a pending assistant flips to final plain text without new content", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
@@ -1358,7 +1372,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
-    expect(wrapper.find(".markdown-stub").exists()).toBe(true);
+    expect(wrapper.find(".assistant-plain-text").exists()).toBe(true);
     expect(viewportScrollToSpy).not.toHaveBeenCalled();
   });
 
@@ -1390,8 +1404,9 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.get('.markdown-stub[streaming="true"]').text()).toBe("");
-    expect(wrapper.get(".assistant-streaming-fade").text()).toBe("hello this is a longer streamed assistant delta");
+    expect(wrapper.get('.assistant-plain-text[data-streaming="true"]').text()).toContain("hello this is a longer streamed assistant delta");
+    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
+    expect(wrapper.findAll(".assistant-streaming-char")).toHaveLength(0);
 
     runtimeStore.$patch({
       messages: [
@@ -1418,7 +1433,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     }
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
-    const markdownBlocks = wrapper.findAll(".markdown-stub");
+    const markdownBlocks = wrapper.findAll(".assistant-plain-text");
     const finalAssistantBlock = markdownBlocks.find((node) => node.text().includes("**完成** 输出"));
     expect(finalAssistantBlock).toBeDefined();
     expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
@@ -1475,6 +1490,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await advanceAnimationFrames(5);
     expect(viewportMetrics.scrollTop).toBeGreaterThan(700);
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
+    expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
   it("re-arms auto-follow when submitting a new turn after user scrolls away", async () => {
@@ -2395,7 +2411,7 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
 
     expect(wrapper.text()).toContain("正在思考...");
 
-    const markdownBlocks = wrapper.findAll(".markdown-stub");
+    const markdownBlocks = wrapper.findAll(".assistant-plain-text");
     expect(markdownBlocks.some((node) => node.classes().includes("text-stone-800"))).toBe(true);
 
     const reasoningBlocks = wrapper.findAll(".reasoning-italic");
@@ -3091,7 +3107,7 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     await nextTick();
     clickLatestRollbackConfirm('确认仅撤回对话？');
     await nextTick();
-    expect(wrapper.get('[data-testid="workspace-rollback-progress"]').text()).toContain("正在撤回对话...");
+    expect(wrapper.get('[data-testid="workspace-rollback-progress"]').text()).toContain("撤回");
     // Wait for the minimum 2s loading duration (plus margin) to elapse
     await new Promise(r => setTimeout(r, 2500));
     await nextTick();
@@ -3158,11 +3174,12 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     await nextTick();
     await new Promise(r => setTimeout(r, 400));
     await nextTick();
+    await nextTick();
 
     expect(runtimeStore.messages).toEqual([]);
     expect(runtimeStore.draftMessage).toBe("");
     expect((wrapper.get('[data-testid="workspace-composer-input"]').element as HTMLTextAreaElement).value).toBe("");
-    expect(wrapper.find('[data-testid="workspace-empty-state"]').exists()).toBe(true);
+    expect(await waitForCondition(() => wrapper.find('[data-testid="workspace-empty-state"]').exists())).toBe(true);
   });
 
   it("overwrites existing draft text when rollback completes", async () => {

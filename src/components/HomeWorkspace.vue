@@ -118,6 +118,7 @@ const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
 const copiedAssistantTurnId = ref<string | null>(null);
 const workspaceContentColumnRef = ref<HTMLElement | null>(null);
+const ROLLBACK_PROGRESS_MIN_VISIBLE_MS = 2000;
 const rollbackInFlight = ref<{ turnId: string; action: CheckpointRollbackAction } | null>(null);
 const rollbackProgressStyle = ref<Record<string, string | undefined>>({});
 const optimisticRollbackTurnId = ref<string | null>(null);
@@ -581,8 +582,6 @@ const {
   assistantDisplayContent,
   assistantDisplayStableContent,
   assistantDisplayFadeContent,
-  assistantDisplayFadeStyle,
-  assistantDisplayFadeKey,
   assistantDisplayedReasoning,
   assistantDisplayedReasoningStable,
   assistantDisplayedReasoningFade,
@@ -850,6 +849,7 @@ async function executeRollback(turnId: string, action: CheckpointRollbackAction)
   // Fill draft immediately so the user sees their message restored.
   draftMessage.value = nextDraft;
   runtimeStore.setDraftMessage(nextDraft);
+  const rollbackStartedAt = Date.now();
 
   try {
     // optimisticRollbackTurnId provides pure visual hiding during the
@@ -881,6 +881,11 @@ async function executeRollback(turnId: string, action: CheckpointRollbackAction)
   } catch (err) {
     console.error("[rollback] checkoutHistoryNode failed:", err);
   } finally {
+    const remainingProgressMs = ROLLBACK_PROGRESS_MIN_VISIBLE_MS - (Date.now() - rollbackStartedAt);
+    if (remainingProgressMs > 0) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, remainingProgressMs));
+    }
+
     optimisticRollbackTurnId.value = null;
     rollbackInFlight.value = null;
 
@@ -899,9 +904,7 @@ function rollbackProgressLabel() {
     return "";
   }
 
-  return rollbackInFlight.value.action === "transcript_and_workspace"
-    ? "正在撤回对话和文件..."
-    : "正在撤回对话...";
+  return "撤回";
 }
 
 async function handleUndoLastTurn() {
@@ -1102,7 +1105,6 @@ const {
   unreadCount,
   streamAutoFollowEnabled,
   handleScrollToBottom,
-  handleMarkdownRenderComplete,
   handleLatestTurnSignatureChange,
   handleSubmittingChange,
   handleMessageCountChange
@@ -1394,20 +1396,14 @@ watch(
                class="assistant-response-panel my-0.5"
             >
               <MarkdownRenderer
-                :content="isAssistantStreaming(turn.assistant) ? assistantDisplayStableContent(turn.assistant) : turn.assistant.content"
-                wrapper-class="assistant-markdown text-sm"
-                :tone-class="assistantTone(turn.assistant)"
+                :content="isAssistantStreaming(turn.assistant)
+                  ? `${assistantDisplayStableContent(turn.assistant)}${assistantDisplayFadeContent(turn.assistant)}`
+                  : turn.assistant.content"
                 :streaming="isAssistantStreaming(turn.assistant)"
-                @render-complete="handleMarkdownRenderComplete"
+                wrapper-class="assistant-plain-text assistant-markdown text-sm"
+                :tone-class="assistantTone(turn.assistant)"
+                :data-streaming="isAssistantStreaming(turn.assistant) ? 'true' : undefined"
               />
-              <span
-                v-if="isAssistantStreaming(turn.assistant) && assistantDisplayFadeContent(turn.assistant)"
-                :key="`fade-${turn.assistant.id}-${assistantDisplayFadeKey(turn.assistant)}`"
-                class="assistant-streaming-fade"
-                :style="assistantDisplayFadeStyle(turn.assistant)"
-              >
-                {{ assistantDisplayFadeContent(turn.assistant) }}
-              </span>
             </div>
 
             <!-- Error detail panel (raw error for debugging) -->
@@ -1444,7 +1440,7 @@ watch(
             </details>
 
             <div
-              v-if="turn.assistant"
+              v-if="turn.assistant && !isAssistantStreaming(turn.assistant)"
               class="agent-action-bar ml-auto mt-3 flex flex-wrap items-center justify-end gap-2"
               data-testid="workspace-agent-actions"
             >
@@ -1682,7 +1678,7 @@ watch(
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
-  line-height: 1.2;
+  line-height: 1.7;
   color: #3d342d;
 }
 
@@ -1709,23 +1705,23 @@ watch(
 :deep(.assistant-markdown h4),
 :deep(.assistant-markdown h5),
 :deep(.assistant-markdown h6) {
-  margin: 1.15rem 0 0.65rem;
+  margin: 1rem 0 0.45rem;
   font-size: inherit;
-  line-height: 1.2;
-  letter-spacing: -0.015em;
+  line-height: 1.5;
+  letter-spacing: 0;
   color: #241b14;
 }
 
 :deep(.assistant-markdown h1),
 :deep(.assistant-markdown h2) {
-  font-weight: 520;
+  font-weight: 600;
 }
 
 :deep(.assistant-markdown h3),
 :deep(.assistant-markdown h4),
 :deep(.assistant-markdown h5),
 :deep(.assistant-markdown h6) {
-  font-weight: 380;
+  font-weight: 520;
   color: #3c3028;
 }
 
@@ -1744,9 +1740,9 @@ watch(
 }
 
 :deep(.assistant-markdown pre) {
-  margin: 1rem 0;
+  margin: 0.8rem 0;
   overflow-x: auto;
-  border-radius: 0.9rem;
+  border-radius: 0.45rem;
   background: transparent;
   padding: 0;
   font-size: 0.82rem;
@@ -1755,17 +1751,17 @@ watch(
 }
 
 :deep(.assistant-markdown code) {
-  border-radius: 0.42rem;
-  background: #f6efe3;
+  border-radius: 0.3rem;
+  background: #f8e9cf;
   padding: 0.08rem 0.34rem;
   font-size: 0.82em;
   color: #5b4330;
 }
 
 :deep(.assistant-markdown pre code) {
-  background: #fefcf6;
-  padding: 1rem 1.05rem;
-  border-radius: 0.9rem;
+  background: #fbf7ef;
+  padding: 0.8rem 0.9rem;
+  border-radius: 0.45rem;
   display: block;
   color: #2f261d;
   font-size: 1em;
@@ -1776,44 +1772,29 @@ watch(
 
 :deep(.assistant-markdown .table-scroll-wrapper) {
   overflow-x: auto;
-  margin: 1rem 0;
+  margin: 0.8rem 0;
 }
 
 :deep(.assistant-markdown .table-scroll-wrapper table) {
   width: 100%;
   table-layout: auto;
-  border-collapse: separate;
+  border-collapse: collapse;
   border-spacing: 0;
-  background: rgba(255, 251, 244, 0.92);
-  border-radius: 0.9rem;
-}
-
-:deep(.assistant-markdown .table-scroll-wrapper thead tr:first-child th:first-child) {
-  border-top-left-radius: 0.9rem;
-}
-
-:deep(.assistant-markdown .table-scroll-wrapper thead tr:first-child th:last-child) {
-  border-top-right-radius: 0.9rem;
-}
-
-:deep(.assistant-markdown .table-scroll-wrapper tbody tr:last-child td:first-child) {
-  border-bottom-left-radius: 0.9rem;
-}
-
-:deep(.assistant-markdown .table-scroll-wrapper tbody tr:last-child td:last-child) {
-  border-bottom-right-radius: 0.9rem;
+  background: transparent;
+  border-radius: 0;
 }
 
 :deep(.assistant-markdown .table-scroll-wrapper thead th) {
-  background: rgba(244, 234, 221, 0.88);
-  font-weight: 380;
+  background: transparent;
+  font-weight: 520;
   color: #56463a;
+  border-bottom: 2px solid rgba(112, 76, 40, 0.98);
 }
 
 
 :deep(.assistant-markdown .table-scroll-wrapper th),
 :deep(.assistant-markdown .table-scroll-wrapper td) {
-  padding: 0.62rem 0.8rem;
+  padding: 0.2rem 0.8rem;
   vertical-align: top;
   text-align: left;
   white-space: normal;
@@ -1822,8 +1803,16 @@ watch(
   max-width: 320px;
 }
 
-:deep(.assistant-markdown .table-scroll-wrapper tbody tr:nth-child(even)) {
-  background: rgba(246, 240, 231, 0.7);
+:deep(.assistant-markdown .table-scroll-wrapper tbody td) {
+  border-bottom: 0;
+}
+
+:deep(.assistant-markdown .table-scroll-wrapper tbody tr:last-child td) {
+  border-bottom: 1px solid rgba(232, 210, 175, 0.98);
+  background-image: none;
+  background-position: initial;
+  background-size: auto;
+  background-repeat: repeat;
 }
 
 :deep(.assistant-markdown a) {
@@ -1833,12 +1822,13 @@ watch(
 }
 
 :deep(.assistant-markdown blockquote) {
-  margin: 1rem 0;
-  padding: 0.8rem 1rem;
+  margin: 0.8rem 0;
+  padding: 0.2rem 0 0.2rem 0.8rem;
   color: #71665c;
-  background: linear-gradient(135deg, rgba(245, 239, 231, 0.92), rgba(250, 246, 240, 0.86));
-  border-radius: 0.95rem;
-  font-style: italic;
+  background: transparent;
+  border-left: 2px solid rgba(139, 94, 52, 0.28);
+  border-radius: 0;
+  font-style: normal;
 }
 
 :deep(.assistant-markdown blockquote p:last-child) {
@@ -1872,6 +1862,13 @@ watch(
   margin: 0 0.35rem 0 0;
   transform: translateY(1px);
   accent-color: #8b5e34;
+}
+
+.assistant-plain-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.7;
+  color: #3d342d;
 }
 
 .turn-flow-enter-active,
@@ -1935,10 +1932,23 @@ watch(
   to   { opacity: 1; }
 }
 
+@keyframes assistant-stream-char-fade-in {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .assistant-streaming-fade {
+  .assistant-streaming-fade,
+  .assistant-streaming-char {
     animation: none !important;
     opacity: 1 !important;
+    filter: none !important;
   }
 }
 
@@ -2140,22 +2150,22 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 1rem;
-  border: 1px solid rgba(231, 229, 228, 0.72);
-  border-radius: 1rem;
-  background: rgba(255, 255, 255, 0.92);
-  color: rgb(87 83 78);
-  box-shadow: 0 6px 18px rgba(41, 37, 36, 0.08);
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  background: #fff;
+  color: rgba(87, 83, 78, 0.48);
+  box-shadow: none;
   padding: 1.15rem 1.5rem;
   font-size: 22px;
   font-weight: 500;
   line-height: 1;
-  backdrop-filter: blur(8px);
+  backdrop-filter: none;
 }
 
 .rollback-progress-icon {
   width: 1.6rem;
   height: 1.6rem;
-  color: rgb(180 138 112);
+  color: rgba(87, 83, 78, 0.38);
   animation: rollback-progress-spin 0.9s linear infinite;
 }
 
