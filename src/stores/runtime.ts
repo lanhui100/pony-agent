@@ -395,7 +395,7 @@ async function measureHostRead<T>(
   }
 }
 
-const STREAM_FLUSH_INTERVAL_MS = 16;
+const STREAM_FLUSH_INTERVAL_MS = 120;
 
 function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
   switch (status) {
@@ -1118,7 +1118,7 @@ function appendNormalizedReasoningContent(current: string | null, delta: string)
   return combined;
 }
 
-const STREAM_FLUSH_EAGER_CHARS = 50;
+const STREAM_FLUSH_EAGER_CHARS = 120;
 
 const TRACE_STEP_IDS = {
   plan: "step-plan",

@@ -4537,7 +4537,7 @@ describe("runtime session resilience", () => {
       }
     });
 
-    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    await new Promise((resolve) => window.setTimeout(resolve, 130));
 
     expect(store.firstTokenLatencyMs).toBe(321);
     expect(store.messages.find((message) => message.role === "assistant")?.content).toBe("partial answer");
@@ -4709,7 +4709,7 @@ describe("runtime session resilience", () => {
       }
     });
 
-    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    await new Promise((resolve) => window.setTimeout(resolve, 130));
 
     eventHandlers.get("turn:output_end")?.({
       payload: {
@@ -4865,6 +4865,30 @@ describe("runtime session resilience", () => {
     expect(assistant?.reasoningContent).toBe("stable reasoning");
     expect(assistant?.status).toBe("done");
     nowSpy.mockRestore();
+  });
+
+  it("buffers small streamed text chunks before flushing to assistant content", async () => {
+    vi.useFakeTimers();
+    const store = useRuntimeStore();
+
+    store.$patch({
+      providerName: "OpenAI",
+      providerModel: "gpt-5",
+      messages: []
+    });
+    store.streamBufferTurnId = "turn-buffer";
+    store.streamBufferText = "short chunk";
+    store.streamBufferReasoning = "";
+
+    store.scheduleStreamFlush("turn-buffer");
+    expect(store.messages.find((message) => message.role === "assistant")?.content ?? "").toBe("");
+
+    await vi.advanceTimersByTimeAsync(119);
+    expect(store.messages.find((message) => message.role === "assistant")?.content ?? "").toBe("");
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(store.messages.find((message) => message.role === "assistant")?.content).toBe("short chunk");
+    vi.useRealTimers();
   });
 
   it("defers persistence for delta stream updates instead of flushing every chunk immediately", async () => {
@@ -5959,7 +5983,7 @@ describe("runtime session resilience", () => {
       }
     });
 
-    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    await new Promise((resolve) => window.setTimeout(resolve, 130));
 
     expect(store.messages.find((message) => message.role === "assistant")?.content).toBe("partial answer");
 
