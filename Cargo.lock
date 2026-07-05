@@ -2450,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "pony-agent"
-version = "0.1.50"
+version = "0.1.54"
 dependencies = [
  "pony-agent-core",
  "raw-window-handle",
@@ -2458,11 +2458,12 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "window-vibrancy",
 ]
 
 [[package]]
 name = "pony-agent-core"
-version = "0.1.35"
+version = "0.1.39"
 dependencies = [
  "chrono",
  "dirs",
