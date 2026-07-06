@@ -209,11 +209,6 @@ watch(
       streamRenderScheduled = false;
       unrenderedSuffix.value = "";
 
-      // If streaming already rendered the full content, skip re-render.
-      if (lastRenderedFullContent === props.content && lastRenderedContentLength >= props.content.length) {
-        return;
-      }
-
       // Otherwise force a final full render
       lastRenderedContentLength = 0;
       scheduleNonStreamingRender();

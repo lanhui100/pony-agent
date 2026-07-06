@@ -137,6 +137,7 @@ const latestAgentMessageRef = ref<HTMLElement | null>(null);
 const stopRequested = ref(false);
 const scrollToLatestHovered = ref(false);
 let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let streamingPresentationTimer: ReturnType<typeof setTimeout> | null = null;
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const COMPOSER_BUFFER_PX = 220;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
@@ -505,6 +506,10 @@ const latestTurnSignature = computed(() => {
   return `${latestMessage.id}:${latestMessage.content.length}:${latestMessage.reasoningContent?.length ?? ""}`;
 });
 
+const messageIdentitySignature = computed(() =>
+  messages.value.map((message) => `${message.id}:${message.turnId}:${message.role}`).join("|")
+);
+
 function extractDescription(detail: string | null | undefined): string {
   return detail?.split("\n")[0]?.trim() ?? "";
 }
@@ -582,6 +587,8 @@ const {
   assistantDisplayContent,
   assistantDisplayStableContent,
   assistantDisplayFadeContent,
+  assistantDisplayFadeStyle,
+  assistantDisplayFadeKey,
   assistantDisplayedReasoning,
   assistantDisplayedReasoningStable,
   assistantDisplayedReasoningFade,
@@ -622,6 +629,29 @@ function isAssistantStreaming(message: ChatMessage | null) {
   return message?.status === "pending";
 }
 
+function hasPendingAssistantMessage() {
+  return messages.value.some((message) => message.role === "assistant" && message.status === "pending");
+}
+
+function stopStreamingPresentationTimer() {
+  if (streamingPresentationTimer) {
+    clearTimeout(streamingPresentationTimer);
+    streamingPresentationTimer = null;
+  }
+}
+
+function scheduleStreamingPresentationTimer() {
+  stopStreamingPresentationTimer();
+  if (!hasPendingAssistantMessage()) {
+    return;
+  }
+  streamingPresentationTimer = setTimeout(() => {
+    streamingPresentationTimer = null;
+    syncStreamingPresentationState();
+    scheduleStreamingPresentationTimer();
+  }, 120);
+}
+
 function userShellClass() {
   return "rounded-[0.45rem] bg-stone-900 px-3 py-2 text-stone-50 shadow-[0_1px_0_rgba(28,25,23,0.03)] sm:px-4";
 }
@@ -636,6 +666,16 @@ function assistantTone(message: ChatMessage | null) {
   }
 
   return "text-stone-800";
+}
+
+function assistantFadeCharacters(message: ChatMessage | null) {
+  return Array.from(assistantDisplayFadeContent(message));
+}
+
+function assistantFadeCharacterStyle(index: number) {
+  return {
+    animationDelay: `${Math.min(index, 36) * 18}ms`
+  };
 }
 
 function latestTraceForTurn(turnId: string) {
@@ -1135,6 +1175,7 @@ onMounted(() => {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
   }
   syncStreamingPresentationState();
+  scheduleStreamingPresentationTimer();
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("keydown", handleWindowKeydown);
   window.addEventListener("resize", updateFloatingUiPositions);
@@ -1142,6 +1183,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (hoverDebounceTimer) clearTimeout(hoverDebounceTimer);
+  stopStreamingPresentationTimer();
   window.removeEventListener("click", handleClickOutside);
   window.removeEventListener("keydown", handleWindowKeydown);
   window.removeEventListener("resize", updateFloatingUiPositions);
@@ -1156,8 +1198,21 @@ watch(latestTurnSignature, (signature, previousSignature) => {
     return;
   }
   syncStreamingPresentationState();
+  scheduleStreamingPresentationTimer();
   handleLatestTurnSignatureChange(signature, previousSignature);
 }, { flush: "pre" });
+
+watch(
+  messageIdentitySignature,
+  (signature, previousSignature) => {
+    if (signature === previousSignature) {
+      return;
+    }
+    syncStreamingPresentationState();
+    scheduleStreamingPresentationTimer();
+  },
+  { flush: "pre" }
+);
 
 watch(showReasoningContent, (value) => {
   if (typeof window !== "undefined") {
@@ -1199,6 +1254,7 @@ watch(isSubmitting, (submitting, wasSubmitting) => {
     flushStreamMetricsToStorage();
   }
   syncStreamingPresentationState();
+  scheduleStreamingPresentationTimer();
   if (!submitting) {
     stopRequested.value = false;
   }
@@ -1395,14 +1451,39 @@ watch(
               :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.04 }"
                class="assistant-response-panel my-0.5"
             >
+              <template v-if="isAssistantStreaming(turn.assistant)">
+                <div
+                  class="assistant-plain-text text-sm"
+                  :class="assistantTone(turn.assistant)"
+                  data-streaming="true"
+                >
+                  <MarkdownRenderer
+                    v-if="assistantDisplayStableContent(turn.assistant)"
+                    :content="assistantDisplayStableContent(turn.assistant)"
+                    :streaming="true"
+                    wrapper-class="assistant-markdown"
+                    :tone-class="assistantTone(turn.assistant)"
+                  />
+                  <span
+                    v-if="assistantDisplayFadeContent(turn.assistant)"
+                    :key="`afade-${turn.assistant.id}-${assistantDisplayFadeKey(turn.assistant)}`"
+                    class="assistant-streaming-fade assistant-streaming-content"
+                    :style="assistantDisplayFadeStyle(turn.assistant)"
+                  >
+                    <span
+                      v-for="(character, index) in assistantFadeCharacters(turn.assistant)"
+                      :key="`afade-char-${turn.assistant.id}-${assistantDisplayFadeKey(turn.assistant)}-${index}`"
+                      class="assistant-streaming-char"
+                      :style="assistantFadeCharacterStyle(index)"
+                    >{{ character }}</span>
+                  </span>
+                </div>
+              </template>
               <MarkdownRenderer
-                :content="isAssistantStreaming(turn.assistant)
-                  ? `${assistantDisplayStableContent(turn.assistant)}${assistantDisplayFadeContent(turn.assistant)}`
-                  : turn.assistant.content"
-                :streaming="isAssistantStreaming(turn.assistant)"
+                v-else
+                :content="turn.assistant.content"
                 wrapper-class="assistant-plain-text assistant-markdown text-sm"
                 :tone-class="assistantTone(turn.assistant)"
-                :data-streaming="isAssistantStreaming(turn.assistant) ? 'true' : undefined"
               />
             </div>
 
@@ -1907,7 +1988,7 @@ watch(
 .streaming-unrendered-suffix {
   word-break: break-word;
   overflow-wrap: anywhere;
-  line-height: 1.2;
+  line-height: 1.7;
   color: #3d342d;
 }
 
@@ -1915,7 +1996,7 @@ watch(
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
-  line-height: 1.2;
+  line-height: 1.7;
   transition: color 140ms ease;
 }
 
@@ -1930,6 +2011,15 @@ watch(
 @keyframes assistant-stream-fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }
+}
+
+.assistant-streaming-char {
+  display: inline;
+  white-space: pre-wrap;
+  animation-name: assistant-stream-char-fade-in;
+  animation-duration: 220ms;
+  animation-timing-function: ease-out;
+  animation-fill-mode: both;
 }
 
 @keyframes assistant-stream-char-fade-in {

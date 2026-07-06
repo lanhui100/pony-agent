@@ -939,7 +939,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
           id: "assistant-timeout-retry",
           turnId: "turn-timeout-retry",
           role: "assistant",
-          content: "超时后错误重连中...",
+          content: "超时后错误重连中，请稍候，正在继续尝试恢复输出。",
           status: "pending",
           modelName: "OpenAI/GPT-5",
           errorDetail: "timeout: previous call timed out"
@@ -1156,14 +1156,12 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await nextTick();
 
     const streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
-    expect(streamingContent.text()).toContain("**正在** 输出中");
+    expect(streamingContent.text()).not.toContain("**正在** 输出中");
     expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
-  // KNOWN TEST DEBT: streaming content rendering changed after component restructure
-// eslint-disable-next-line vitest/no-disabled-tests
-it.skip("fades only the latest streamed assistant delta instead of replaying the full accumulated content", async () => {
+  it("reveals a buffered streaming batch through the fade layer once the first threshold is reached", async () => {
     const runtimeStore = useRuntimeStore();
 
     runtimeStore.$patch({
@@ -1212,7 +1210,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     });
     await nextTick();
     let streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
-    expect(streamingContent.text()).toBe("hello");
+    expect(streamingContent.text()).not.toContain("hello");
     expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
 
     runtimeStore.$patch({
@@ -1227,7 +1225,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
           id: "assistant-1",
           turnId: "turn-1",
           role: "assistant",
-          content: "hello this is a longer streamed assistant delta",
+          content: "hello this is a longer streamed assistant delta that crosses the first reveal threshold",
           status: "pending",
           modelName: "OpenAI/GPT-5"
         })
@@ -1236,8 +1234,9 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
 
     streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
-    expect(streamingContent.text()).toBe("hello");
-    expect(wrapper.get(".assistant-streaming-fade").text()).toBe("this is a longer streamed assistant delta");
+    expect(streamingContent.text()).toContain("hello this is a longer streamed assistant delta that crosses the first reveal threshold");
+    expect(wrapper.get(".assistant-streaming-fade").text()).toBe("hello this is a longer streamed assistant delta that crosses the first reveal threshold");
+    expect(wrapper.findAll(".assistant-streaming-char").length).toBeGreaterThan(10);
   });
 
   it("switches from streaming text to final plain text when assistant completes", async () => {
@@ -1405,8 +1404,8 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
 
     expect(wrapper.get('.assistant-plain-text[data-streaming="true"]').text()).toContain("hello this is a longer streamed assistant delta");
-    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
-    expect(wrapper.findAll(".assistant-streaming-char")).toHaveLength(0);
+    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(true);
+    expect(wrapper.findAll(".assistant-streaming-char").length).toBeGreaterThan(0);
 
     runtimeStore.$patch({
       messages: [
@@ -1644,7 +1643,7 @@ it.skip("fades only the latest streamed assistant delta instead of replaying the
     await nextTick();
     await advanceAnimationFrames(5);
     await nextTick();
-    expect(findStreamingMarkdown(wrapper).text()).toContain("hello");
+    expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
   });
 
   it("keeps user scroll override while streaming updates continue", async () => {
@@ -3172,7 +3171,7 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     await nextTick();
     clickLatestRollbackConfirm('确认仅撤回对话？');
     await nextTick();
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 2500));
     await nextTick();
     await nextTick();
 

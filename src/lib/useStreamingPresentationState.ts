@@ -7,6 +7,7 @@ const STREAM_FADE_TIME_MS = 420;
 const STREAM_FADE_FIRST_BATCH_CHARS = 24;
 const STREAM_FADE_CODE_FENCE_CHARS = 18;
 const STREAM_REASONING_FADE_CHARS = 3;
+
 function detectCodeFenceActive(content: string): boolean {
   return countUnclosedCodeFences(content) > 0;
 }
@@ -65,11 +66,10 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
       // Reasoning content (unchanged, simple delta model)
       const nextReasoning = message.reasoningContent ?? "";
       const previousReasoning = streamSnapshotReasoningByMessageId[message.id] ?? "";
-      const hasOtherReasoningSnapshot = Object.keys(streamSnapshotReasoningByMessageId).some((id) => id !== message.id);
 
       const appendedReasoning = previousReasoning.length > 0
         ? (nextReasoning.length > previousReasoning.length ? nextReasoning.slice(previousReasoning.length) : "")
-        : (hasOtherReasoningSnapshot ? nextReasoning : "");
+        : "";
       syncPresentationMapValue(
         streamReasoningFadeTextByMessageId, message.id,
         appendedReasoning.length >= STREAM_REASONING_FADE_CHARS ? appendedReasoning : ""
@@ -136,7 +136,15 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
     if (!message) return "";
     const displayText = assistantDisplayContent(message);
     const fadeText = streamFadeTextByMessageId[message.id] ?? "";
-    return fadeText ? displayText.slice(0, Math.max(0, displayText.length - fadeText.length)) : displayText;
+    if (fadeText) {
+      return displayText.slice(0, Math.max(0, displayText.length - fadeText.length));
+    }
+
+    if (message.status === "pending") {
+      return streamSnapshotTextByMessageId[message.id] ?? "";
+    }
+
+    return displayText;
   }
 
   function assistantDisplayFadeContent(message: ChatMessage | null) {
