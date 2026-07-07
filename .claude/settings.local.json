@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(npx vue-tsc *)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(cargo test *)"
+    ]
+  }
+}
