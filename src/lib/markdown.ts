@@ -1,4 +1,13 @@
+import { ref } from "vue";
 import { marked } from "marked";
+
+export const markdownRenderEpoch = ref(0);
+
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    markdownRenderEpoch.value += 1;
+  });
+}
 
 const SAFE_TAGS = new Set([
   "a",
@@ -405,6 +414,10 @@ export function endsWithNaturalBoundary(content: string): boolean {
   return false;
 }
 
+function wrapCodeBlocks(html: string): string {
+  return html.replace(/<pre(\s[^>]*)?>/g, '<pre class="code-block-cream"$1>');
+}
+
 function wrapTablesInScrollableContainer(html: string): string {
   return html.replace(
     /<table([^>]*)>([\s\S]*?)<\/table>/g,
@@ -421,7 +434,7 @@ export async function renderMarkdown(content: string): Promise<string> {
       async: true
     }) as string;
 
-    return wrapTablesInScrollableContainer(sanitizeMarkdownHtml(html));
+    return wrapTablesInScrollableContainer(sanitizeMarkdownHtml(wrapCodeBlocks(html)));
   } catch (err) {
     console.error("[markdown] renderMarkdown failed:", err);
     return escapeHtml(content);

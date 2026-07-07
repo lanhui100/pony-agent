@@ -118,10 +118,11 @@ const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
 const copiedAssistantTurnId = ref<string | null>(null);
 const workspaceContentColumnRef = ref<HTMLElement | null>(null);
-const ROLLBACK_PROGRESS_MIN_VISIBLE_MS = 2000;
+const ROLLBACK_PROGRESS_MIN_VISIBLE_MS = 360;
 const rollbackInFlight = ref<{ turnId: string; action: CheckpointRollbackAction } | null>(null);
 const rollbackProgressStyle = ref<Record<string, string | undefined>>({});
 const optimisticRollbackTurnId = ref<string | null>(null);
+const rollbackExitingTurnIds = ref<Set<string>>(new Set());
 const providerMenuRef = ref<HTMLElement | null>(null);
 const modelSubmenuStyle = ref<Record<string, string>>({ top: '0' });
 const reasoningMenuRef = ref<HTMLElement | null>(null);
@@ -399,8 +400,8 @@ const visibleTurns = computed<TurnBucket[]>(() => {
   }
 
   const cutoffIndex = turns.value.findIndex((turn) => turn.turnId === cutoffTurnId);
-  if (cutoffIndex <= 0) {
-    return [];
+  if (cutoffIndex < 0) {
+    return turns.value;
   }
 
   return turns.value.slice(0, cutoffIndex);
@@ -428,7 +429,7 @@ const hasVisibleHistorySession = computed(() =>
   )
 );
 const isEmptyWorkspace = computed(() =>
-  visibleTurns.value.length === 0 && !rollbackInFlight.value
+  visibleTurns.value.length === 0 && rollbackExitingTurnIds.value.size === 0
 );
 const isLastTurn = computed(() => {
   const t = visibleTurns.value;
@@ -849,6 +850,38 @@ function checkoutNodeResetsToInitialState(nodeId: string) {
   return targetNode ? !targetNode.turnId?.trim() : false;
 }
 
+function markRollbackExitingTurns(turnId: string) {
+  const cutoffIndex = turns.value.findIndex((turn) => turn.turnId === turnId);
+  if (cutoffIndex < 0) {
+    rollbackExitingTurnIds.value = new Set();
+    return;
+  }
+
+  rollbackExitingTurnIds.value = new Set(
+    turns.value.slice(cutoffIndex).map((turn) => turn.turnId)
+  );
+}
+
+function clearRollbackExitingTurn(turnId: string | null) {
+  if (!turnId || !rollbackExitingTurnIds.value.has(turnId)) {
+    return;
+  }
+
+  const next = new Set(rollbackExitingTurnIds.value);
+  next.delete(turnId);
+  rollbackExitingTurnIds.value = next;
+}
+
+function handleTurnFlowAfterLeave(element: Element) {
+  const turnId = element instanceof HTMLElement ? element.dataset.turnId ?? null : null;
+  clearRollbackExitingTurn(turnId);
+}
+
+async function scrollToRemainingConversationTail() {
+  await nextTick();
+  timelineScrollAreaRef.value?.scrollToBottom("smooth");
+}
+
 function updateRollbackProgressPosition() {
   if (typeof window === "undefined") {
     rollbackProgressStyle.value = {};
@@ -952,10 +985,12 @@ async function executeRollback(turnId: string, action: CheckpointRollbackAction)
   const rollbackStartedAt = Date.now();
 
   try {
-    // optimisticRollbackTurnId provides pure visual hiding during the
-    // backend round-trip — no state mutation, just a cutoff for visibleTurns.
+    // Keep the store untouched during the backend round-trip while the
+    // removed turns leave through TransitionGroup.
+    markRollbackExitingTurns(turnId);
     optimisticRollbackTurnId.value = turnId;
     rollbackInFlight.value = { turnId, action };
+    void scrollToRemainingConversationTail();
     updateRollbackProgressPosition();
     void nextTick().then(() => updateRollbackProgressPosition());
 
@@ -988,6 +1023,7 @@ async function executeRollback(turnId: string, action: CheckpointRollbackAction)
 
     optimisticRollbackTurnId.value = null;
     rollbackInFlight.value = null;
+    rollbackExitingTurnIds.value = new Set();
 
     // Ensure the draft survives regardless of success/failure path
     draftMessage.value = nextDraft;
@@ -1348,7 +1384,7 @@ watch(
       viewport-class="workspace-timeline-viewport px-4 sm:px-5"
     >
       <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[46.4rem] pt-4 sm:pt-5" data-testid="workspace-content-column">
-        <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5">
+        <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5" @after-leave="handleTurnFlowAfterLeave">
         <section
           v-if="isEmptyWorkspace"
           key="workspace-empty-state"
@@ -1359,7 +1395,7 @@ watch(
             我能帮你做些什么？
           </h2>
         </section>
-        <section v-for="turn in visibleTurns" :key="turn.turnId" class="space-y-3">
+        <section v-for="turn in visibleTurns" :key="turn.turnId" class="space-y-3" :data-turn-id="turn.turnId">
           <article v-if="turn.user" :ref="(element) => setLatestUserMessageRef(element, turn.turnId)" class="conversation-user-message ml-auto w-fit max-w-[68.8%] sm:max-w-[54.4%]">
             <div class="flex flex-col items-end">
               <div :class="actorLabelClass()" class="mb-1">
@@ -2378,9 +2414,10 @@ watch(
 }
 
 .rollback-progress-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 30;
+  position: fixed;
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: calc(7.25rem + env(safe-area-inset-bottom));
+  z-index: 40;
   pointer-events: none;
   display: flex;
   align-items: center;
@@ -2390,23 +2427,23 @@ watch(
 .rollback-progress-card {
   display: inline-flex;
   align-items: center;
-  gap: 1rem;
-  border: 1px solid transparent;
-  border-radius: 0.5rem;
-  background: #fff;
-  color: rgba(87, 83, 78, 0.48);
-  box-shadow: none;
-  padding: 1.15rem 1.5rem;
-  font-size: 22px;
+  gap: 0.45rem;
+  border: 1px solid rgba(231, 229, 228, 0.9);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  color: rgba(87, 83, 78, 0.72);
+  box-shadow: 0 8px 22px rgba(68, 64, 60, 0.1);
+  padding: 0.45rem 0.7rem;
+  font-size: 12px;
   font-weight: 500;
   line-height: 1;
-  backdrop-filter: none;
+  backdrop-filter: blur(10px);
 }
 
 .rollback-progress-icon {
-  width: 1.6rem;
-  height: 1.6rem;
-  color: rgba(87, 83, 78, 0.38);
+  width: 0.9rem;
+  height: 0.9rem;
+  color: rgba(87, 83, 78, 0.56);
   animation: rollback-progress-spin 0.9s linear infinite;
 }
 

@@ -30,6 +30,17 @@ code {
   font-family: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", monospace;
 }
 
+/* agent 消息 markdown 代码块米白色背景 */
+.code-block-cream {
+  background: #faf5eb !important;
+  color: #2f261d;
+}
+
+.code-block-cream code {
+  background: transparent;
+  color: #2f261d;
+}
+
 * {
   box-sizing: border-box;
 }

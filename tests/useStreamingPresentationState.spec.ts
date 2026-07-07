@@ -30,14 +30,27 @@ describe("useStreamingPresentationState", () => {
     vi.useRealTimers();
   });
 
-  it("keeps pending text buffered before the first reveal threshold", () => {
+  it("reveals the first short pending batch immediately through fade", () => {
     const messages = ref<ChatMessage[]>([createAssistantMessage("hello")]);
     const state = useStreamingPresentationState(computed(() => messages.value));
 
     state.syncStreamingPresentationState();
 
     expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("");
-    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("");
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("hello");
+  });
+
+  it("does not restart the first short fade animation while content is unchanged", () => {
+    const messages = ref<ChatMessage[]>([createAssistantMessage("hello")]);
+    const state = useStreamingPresentationState(computed(() => messages.value));
+
+    state.syncStreamingPresentationState();
+    const firstFadeKey = state.assistantDisplayFadeKey(messages.value[0]!);
+    vi.advanceTimersByTime(120);
+    state.syncStreamingPresentationState();
+
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("hello");
+    expect(state.assistantDisplayFadeKey(messages.value[0]!)).toBe(firstFadeKey);
   });
 
   it("reveals the first pending batch through fade when the first threshold is reached", () => {

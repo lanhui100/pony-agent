@@ -91,9 +91,13 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
           streamFadeLastTimeByMessageId[message.id] = Date.now();
           syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
         } else {
-          syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
+          const previousFadeText = streamFadeTextByMessageId[message.id] ?? "";
+          syncPresentationMapValue(streamFadeTextByMessageId, message.id, nextText);
+          if (previousFadeText !== nextText) {
+            streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
+          }
           streamFadeLastTimeByMessageId[message.id] = Date.now();
-          // snapshot stays empty
+          // snapshot stays empty until the first real batch threshold or time flush is reached.
         }
       } else {
         const pendingChars = nextText.length - snapshotText.length;

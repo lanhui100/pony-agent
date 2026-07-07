@@ -37,7 +37,7 @@ describe("markdown rendering", () => {
     expect(html).toContain("<h1>Pony Agent</h1>");
     expect(html).toContain("<blockquote>");
     expect(html).toContain("<strong>完成</strong>");
-    expect(html).toContain("<pre><code class=\"language-bash\">npm run tauri dev");
+    expect(html).toContain('<pre class="code-block-cream"><code class="language-bash">npm run tauri dev');
   });
 
   it("unwraps a plain outer fence when the body is markdown", async () => {

@@ -34,6 +34,7 @@ const SCROLL_LERP_DURATION_MS = 320;
 const COMPENSATION_SCROLL_LERP_DURATION_MS = 160;
 const SCROLL_RAF_STUCK_TIMEOUT_MS = 500;
 const AUTO_FOLLOW_MIN_FORWARD_PX = 2;
+const STREAMING_RESIZE_FALLBACK_WINDOW_MS = 180;
 
 function easeOutScroll(t: number): number {
   return 1 - Math.pow(1 - t, 3.2);
@@ -80,6 +81,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   let layoutDirtyWhileQueued = false;
   let contentDirtyWhileAnimating = false;
   let isDestroyed = false;
+  let lastStreamingFollowQueuedAt = Number.NEGATIVE_INFINITY;
 
   function getViewport() {
     const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
@@ -798,6 +800,9 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     }
 
     emit("markdown-render-complete:queue-follow");
+    if (payload.streaming) {
+      lastStreamingFollowQueuedAt = Date.now();
+    }
     queueScrollToLatestTurn("auto", userScrollOverrideVersion, "anchor");
   }
 
@@ -839,6 +844,10 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       if (programmaticScrollActive) {
         contentDirtyWhileAnimating = true;
         emit("resize-observer:defer", { reason: "programmatic-scroll-active" });
+        return;
+      }
+      if (isSubmitting.value && Date.now() - lastStreamingFollowQueuedAt <= STREAMING_RESIZE_FALLBACK_WINDOW_MS) {
+        emit("resize-observer:skip", { reason: "recent-stream-follow" });
         return;
       }
       emit("resize-observer:queue-scroll", { behavior: "auto" });
@@ -885,9 +894,20 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         return;
       }
 
+      const isStreamingAssistantUpdate = isSubmitting.value && latestMessageRole.value === "assistant";
       const targetMode: ScrollTargetMode = latestMessageRole.value === "user" ? "latest-user" : "anchor";
-      emit("latest-turn-signature:queue-follow-scroll", { signature, previousSignature, targetMode });
-      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, targetMode);
+      const behavior: ScrollBehavior = isStreamingAssistantUpdate ? "auto" : "smooth";
+      if (isStreamingAssistantUpdate) {
+        lastStreamingFollowQueuedAt = Date.now();
+      }
+      emit("latest-turn-signature:queue-follow-scroll", {
+        signature,
+        previousSignature,
+        targetMode,
+        behavior,
+        streamingAssistantUpdate: isStreamingAssistantUpdate
+      });
+      queueScrollToLatestTurn(behavior, userScrollOverrideVersion, targetMode);
     });
   }
 

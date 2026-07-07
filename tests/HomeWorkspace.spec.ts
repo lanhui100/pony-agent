@@ -2410,6 +2410,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await advanceAnimationFrames(5);
     const scrollDebugEvent = latestScrollDebugEvent("latest-turn-signature:queue-follow-scroll");
     expect(scrollDebugEvent).toBeDefined();
+    expect(scrollDebugEvent?.behavior).toBe("auto");
+    expect(scrollDebugEvent?.streamingAssistantUpdate).toBe(true);
     expect(viewportMetrics.scrollTop).toBeGreaterThan(700);
   });
 
