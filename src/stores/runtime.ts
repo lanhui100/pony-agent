@@ -25,6 +25,9 @@ import type {
   HistoryStateHookEvidence,
   HookStructuredResult,
   HookTraceRecord,
+  MessageStateDelta,
+  MessageStateEntry,
+  MessageStateSnapshot,
   GraphRunStreamStartResponse,
   HealthPayload,
   HistoryBranch,
@@ -65,6 +68,8 @@ type HistoryCheckoutWireResult = {
   degradationReason?: string | null;
   historyStateEvidence?: HistoryStateHookEvidence[] | null;
   historyStateAuditSummary?: HistoryStateAuditSummary | null;
+  messageDelta?: MessageStateDelta | null;
+  messageRevision?: string | null;
   cursor: HistoryCursorState;
 };
 
@@ -79,6 +84,8 @@ type HistoryRestoreWireResult = {
   degradationReason?: string | null;
   historyStateEvidence?: HistoryStateHookEvidence[] | null;
   historyStateAuditSummary?: HistoryStateAuditSummary | null;
+  messageDelta?: MessageStateDelta | null;
+  messageRevision?: string | null;
   cursor: HistoryCursorState;
 };
 
@@ -88,6 +95,8 @@ type HistoryForkWireResult = {
   branch: HistoryBranch;
   historyStateEvidence?: HistoryStateHookEvidence[] | null;
   historyStateAuditSummary?: HistoryStateAuditSummary | null;
+  messageDelta?: MessageStateDelta | null;
+  messageRevision?: string | null;
   cursor: HistoryCursorState;
 };
 
@@ -107,6 +116,8 @@ type HistoryBranchSwitchWireResult = {
   nodeId?: string | null;
   historyStateEvidence?: HistoryStateHookEvidence[] | null;
   historyStateAuditSummary?: HistoryStateAuditSummary | null;
+  messageDelta?: MessageStateDelta | null;
+  messageRevision?: string | null;
   cursor: HistoryCursorState;
 };
 
@@ -157,6 +168,7 @@ type RuntimeState = {
   branchHeadNodeId: string | null;
   activeBranchId: string | null;
   cursorVersion: number | null;
+  messageRevision: string | null;
   historyCursorMode: HistoryCursorMode;
   historyNodes: HistoryNode[];
   historyBranches: HistoryBranch[];
@@ -244,6 +256,7 @@ type SessionRuntimeSnapshot = {
   branchHeadNodeId: string | null;
   activeBranchId: string | null;
   cursorVersion: number | null;
+  messageRevision: string | null;
   historyCursorMode: HistoryCursorMode;
   historyNodes: HistoryNode[];
   historyBranches: HistoryBranch[];
@@ -734,6 +747,91 @@ function buildFallbackRuntimeTraceTimeline(options: {
 
 function cloneMessages(messages?: ChatMessage[] | null) {
   return (messages ?? []).map((message) => ({ ...message }));
+}
+
+function chatMessageAttachmentsMatch(left?: ChatMessage["attachments"], right?: ChatMessage["attachments"]) {
+  const leftAttachments = left ?? [];
+  const rightAttachments = right ?? [];
+  if (leftAttachments.length !== rightAttachments.length) {
+    return false;
+  }
+
+  return leftAttachments.every((attachment, index) => {
+    const other = rightAttachments[index];
+    return (
+      attachment.id === other?.id &&
+      attachment.assetId === other?.assetId &&
+      attachment.name === other?.name &&
+      attachment.mimeType === other?.mimeType &&
+      attachment.relativePath === other?.relativePath &&
+      attachment.sizeBytes === other?.sizeBytes &&
+      attachment.createdAtMs === other?.createdAtMs
+    );
+  });
+}
+
+function chatMessagesMatch(left: ChatMessage, right: ChatMessage) {
+  return (
+    left.id === right.id &&
+    left.turnId === right.turnId &&
+    left.role === right.role &&
+    left.content === right.content &&
+    left.status === right.status &&
+    left.reasoningContent === right.reasoningContent &&
+    left.modelName === right.modelName &&
+    left.tokenCount === right.tokenCount &&
+    left.toolName === right.toolName &&
+    left.canonicalToolName === right.canonicalToolName &&
+    left.displayNameZh === right.displayNameZh &&
+    left.detail === right.detail &&
+    left.durationSeconds === right.durationSeconds &&
+    left.errorDetail === right.errorDetail &&
+    chatMessageAttachmentsMatch(left.attachments, right.attachments)
+  );
+}
+
+function reuseStableChatMessages(previous: ChatMessage[], next: ChatMessage[]) {
+  const previousById = new Map(previous.map((message) => [message.id, message]));
+  return next.map((message) => {
+    const previousMessage = previousById.get(message.id);
+    return previousMessage && chatMessagesMatch(previousMessage, message)
+      ? previousMessage
+      : message;
+  });
+}
+
+function normalizeMessageStateStatus(status?: MessageStateEntry["status"]): ChatMessage["status"] {
+  return status === "pending" || status === "error" || status === "done" ? status : "done";
+}
+
+function chatMessageFromMessageStateEntry(entry: MessageStateEntry): ChatMessage | null {
+  if (entry.role !== "user" && entry.role !== "assistant" && entry.role !== "tool") {
+    return null;
+  }
+
+  return {
+    id: entry.messageId,
+    turnId: entry.turnId,
+    role: entry.role,
+    content: entry.content,
+    attachments: (entry.attachments ?? []).map((attachment) => ({ ...attachment })),
+    reasoningContent: entry.reasoningContent ?? null,
+    status: normalizeMessageStateStatus(entry.status),
+    modelName: entry.modelName ?? null,
+    tokenCount: entry.tokenCount ?? null,
+    toolName: entry.toolName ?? null,
+    canonicalToolName: entry.canonicalToolName ?? null,
+    displayNameZh: entry.displayNameZh ?? null,
+    detail: entry.detail ?? null,
+    durationSeconds: entry.durationSeconds ?? null,
+    errorDetail: entry.errorDetail ?? null
+  };
+}
+
+function chatMessagesFromMessageState(snapshot?: MessageStateSnapshot | null) {
+  return (snapshot?.messages ?? [])
+    .map((entry) => chatMessageFromMessageStateEntry(entry))
+    .filter((message): message is ChatMessage => message != null);
 }
 
 function cloneAttachmentAssets(assets?: AttachmentAsset[] | null) {
@@ -1846,6 +1944,7 @@ function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntimeSnapsh
     branchHeadNodeId: state.branchHeadNodeId,
     activeBranchId: state.activeBranchId,
     cursorVersion: state.cursorVersion,
+    messageRevision: state.messageRevision,
     historyCursorMode: state.historyCursorMode,
     historyNodes: cloneHistoryNodes(state.historyNodes),
     historyBranches: cloneHistoryBranches(state.historyBranches),
@@ -1907,6 +2006,7 @@ function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRun
   state.visibleNodeId = snapshot.visibleNodeId;
   state.branchHeadNodeId = snapshot.branchHeadNodeId;
   state.activeBranchId = snapshot.activeBranchId;
+  state.messageRevision = snapshot.messageRevision;
   state.historyCursorMode = snapshot.historyCursorMode;
   state.historyNodes = cloneHistoryNodes(snapshot.historyNodes);
   state.historyBranches = cloneHistoryBranches(snapshot.historyBranches);
@@ -3603,6 +3703,7 @@ export const useRuntimeStore = defineStore("runtime", {
       branchHeadNodeId: null,
       activeBranchId: null,
       cursorVersion: null,
+      messageRevision: null,
       historyCursorMode: "live",
       historyNodes: [],
       historyBranches: [],
@@ -3743,6 +3844,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.visibleNodeId = null;
       this.branchHeadNodeId = null;
       this.activeBranchId = null;
+      this.messageRevision = null;
       this.historyCursorMode = "live";
       this.historyNodes = [];
       this.historyBranches = [];
@@ -4099,6 +4201,73 @@ export const useRuntimeStore = defineStore("runtime", {
         payload?.mode ?? (visibleNodeId && branchHeadNodeId && visibleNodeId !== branchHeadNodeId ? "historical" : "live")
       );
     },
+    applyMessageStateSnapshot(snapshot?: MessageStateSnapshot | null) {
+      if (!snapshot || snapshot.sessionId !== this.sessionId) {
+        return false;
+      }
+
+      this.messages = reuseStableChatMessages(this.messages, chatMessagesFromMessageState(snapshot));
+      this.messageRevision = snapshot.revision;
+      return true;
+    },
+    applyMessageStateDelta(delta?: MessageStateDelta | null) {
+      if (!delta || delta.sessionId !== this.sessionId) {
+        return false;
+      }
+      if (this.messageRevision !== null && delta.baseRevision !== this.messageRevision) {
+        return false;
+      }
+
+      let nextMessages = [...this.messages];
+      for (const op of delta.ops) {
+        if (op.kind === "truncateAfter") {
+          if (!op.messageId) {
+            nextMessages = [];
+            continue;
+          }
+          const index = nextMessages.findIndex((message) => message.id === op.messageId);
+          if (index < 0) {
+            return false;
+          }
+          nextMessages = nextMessages.slice(0, index + 1);
+          continue;
+        }
+
+        if (op.kind === "append") {
+          nextMessages = [
+            ...nextMessages,
+            ...op.messages
+              .map((entry) => chatMessageFromMessageStateEntry(entry))
+              .filter((message): message is ChatMessage => message != null)
+          ];
+          continue;
+        }
+
+        if (op.kind === "replaceAll") {
+          nextMessages = op.messages
+            .map((entry) => chatMessageFromMessageStateEntry(entry))
+            .filter((message): message is ChatMessage => message != null);
+        }
+      }
+
+      this.messages = reuseStableChatMessages(this.messages, nextMessages);
+      this.messageRevision = delta.targetRevision;
+      const retainedTurnIds = new Set(this.messages.map((message) => message.turnId));
+      this.turnTraceHistory = this.turnTraceHistory.filter((trace) => retainedTurnIds.has(trace.turnId));
+      this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
+      this.traceSteps = createDefaultTraceSteps();
+      const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
+      this.traceTimeline = lastTrace?.traceTimeline?.length
+        ? cloneTraceTimeline(lastTrace.traceTimeline)
+        : createDefaultTraceTimeline();
+      this.toolActivities = [];
+      this.error = null;
+      this.isSubmitting = false;
+      this.activeTurnId = null;
+      this.activeRunId = null;
+      this.latestExecutionCheckpoint = null;
+      return true;
+    },
     async loadSessionCatalog() {
       if (isTauriAvailable()) {
         this.sessionList = filterDeletingSessions(
@@ -4364,6 +4533,7 @@ export const useRuntimeStore = defineStore("runtime", {
             | "historyNodes"
             | "historyBranches"
             | "historyCursor"
+            | "messageState"
             | "submissionPlan"
             | "controlBoundaryEvidence"
             | "runControlAuditSummary"
@@ -4409,12 +4579,18 @@ export const useRuntimeStore = defineStore("runtime", {
       this.draftMessage = "";
       this.sessionSummary = sessionSummary;
       this.retrievedContext = cloneRetrievedContext(retrieved ?? deriveRetrievedContextFromSnapshot(snapshot));
-      if (!options?.preserveMessages || !this.messages.length) {
-        this.messages = hydrateMessagesFromHistory(
-          snapshot.history,
-          canMergePersistedMessages ? persisted?.messages : null,
-          effectiveTurnTraceHistory
+      if (runtimeView?.messageState) {
+        this.applyMessageStateSnapshot(runtimeView.messageState);
+      } else if (!options?.preserveMessages || !this.messages.length) {
+        this.messages = reuseStableChatMessages(
+          this.messages,
+          hydrateMessagesFromHistory(
+            snapshot.history,
+            canMergePersistedMessages ? persisted?.messages : null,
+            effectiveTurnTraceHistory
+          )
         );
+        this.messageRevision = null;
       }
       this.attachmentAssets = snapshot.attachmentAssets ?? restoredState?.attachmentAssets ?? [];
       this.turnTraceHistory = effectiveTurnTraceHistory;
@@ -4517,6 +4693,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.latestHistoryStateAuditSummary = null;
       this.visibleNodeId = null;
       this.cursorVersion = null;
+      this.messageRevision = null;
       this.historyCursorMode = "live";
       this.messages = [];
       this.activeBranchId = null;
@@ -4574,6 +4751,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.latestGraphRunControlBoundaryEvidence = [];
       this.latestRunControlAuditSummary = null;
       this.latestHistoryStateAuditSummary = null;
+      this.messageRevision = null;
       this.initialRollbackActive = false;
       this.phase = this.messages.length > 0 ? "ready" : "idle";
       this.persistHistory();
@@ -4594,10 +4772,15 @@ export const useRuntimeStore = defineStore("runtime", {
           expectedCursorVersion: this.cursorVersion,
           ...options.invokeArgs
         });
-        await this.loadSessionState(this.sessionId, {
-          refreshCatalog: false,
-          nodeId: options.selectNodeId?.(payload) ?? null
-        });
+        const messageDelta = (payload as { messageDelta?: MessageStateDelta | null }).messageDelta ?? null;
+        if (!this.applyMessageStateDelta(messageDelta)) {
+          const preservedDraft = this.draftMessage;
+          await this.loadSessionState(this.sessionId, {
+            refreshCatalog: false,
+            nodeId: options.selectNodeId?.(payload) ?? null
+          });
+          this.draftMessage = preservedDraft;
+        }
         const result = options.normalize(payload, this.historyNodes, this.historyBranches);
         this.initialRollbackActive = false;
         this.applyHistoryState(this.sessionId, result);
@@ -4631,71 +4814,36 @@ export const useRuntimeStore = defineStore("runtime", {
           return null;
         }
 
-        // ── Smooth local truncation ──
-        // The backend has confirmed the truncation.  We apply the same
-        // truncation locally so the UI transitions smoothly (the
-        // optimisticRollbackTurnId in the component hides the removed
-        // turns during the backend round-trip; by the time it is cleared
-        // the local arrays already match the backend-truncated state).
-        //
-        // Resolve the turn we are keeping: the target node's own turn
-        // (the state AFTER that turn completed).  We truncate messages
-        // to *include* this turn and remove everything after it.
-        const targetTurnId = this.findCheckpointTurnIdByNodeId(nodeId);
-        const resolvedTurnId = targetTurnId?.trim() || null;
-        const targetNode = this.historyNodes.find((item) => item.nodeId === nodeId) ?? null;
-        // A node without a turnId (e.g. the legacy root that represents
-        // the empty initial state) cannot be used for local truncation
-        // because we don't know which messages belong to it.  Fall back
-        // to loadSessionState which will return the backend-truncated
-        // (potentially empty) snapshot.
-        const targetIsInitialState = !targetNode?.turnId?.trim();
+        const messageCountBefore = this.messages.length;
+        const deltaApplied = this.applyMessageStateDelta(payload.messageDelta ?? null);
 
-        let truncatedLocally = false;
-        if (!targetIsInitialState && resolvedTurnId) {
-          let truncationIndex = -1;
-          for (let i = this.messages.length - 1; i >= 0; i--) {
-            if ((this.messages[i] as ChatMessage).turnId === resolvedTurnId) {
-              truncationIndex = i;
-              break;
-            }
-          }
-          if (truncationIndex >= 0) {
-            this.messages = this.messages.slice(0, truncationIndex + 1);
-            this.turnTraceHistory = this.turnTraceHistory.filter(
-              (trace) => this.messages.some((msg) => msg.turnId === trace.turnId)
-            );
-            this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
-            this.traceSteps = createDefaultTraceSteps();
-            const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
-            this.traceTimeline = lastTrace?.traceTimeline?.length
-              ? cloneTraceTimeline(lastTrace.traceTimeline)
-              : createDefaultTraceTimeline();
-            // Filter historyNodes to only ancestors of the target node
-            const ancestorIds = new Set<string>();
-            const collectAncestors = (startId: string) => {
-              let currentId: string | null = startId;
-              while (currentId) {
-                ancestorIds.add(currentId);
-                const node = this.historyNodes.find((n) => n.nodeId === currentId);
-                currentId = node?.parentNodeId?.trim() || null;
-              }
-            };
-            collectAncestors(nodeId);
-            this.historyNodes = this.historyNodes.filter((n) => ancestorIds.has(n.nodeId));
-            truncatedLocally = true;
-          }
-        }
-
-        // If local truncation could not find the target messages (e.g.
-        // the checkpoint entry is not yet available), fall back to a full
-        // backend reload.  This is a safety net — the smooth path above
-        // should cover all normal cases.
-        if (!truncatedLocally) {
+        if (!deltaApplied) {
+          const preservedDraft = this.draftMessage;
           await this.loadSessionState(sessionId, {
             refreshCatalog: false,
             nodeId
           });
+          this.draftMessage = preservedDraft;
+        }
+
+        // Safety net: when the delta succeeded but messages became empty (e.g. the
+        // backend projection hit a blank node) — or when the fallback loadSessionState
+        // also produced an empty result for a non-root checkout — force one more
+        // host round-trip so the frontend stays in sync with what the backend truly
+        // committed.
+        if (this.messages.length === 0 && messageCountBefore > 0) {
+          debugLog("checkout:safety-reload", {
+            sessionId,
+            nodeId,
+            messageCountBefore,
+            deltaApplied
+          });
+          const preservedDraft = this.draftMessage;
+          await this.loadSessionState(sessionId, {
+            refreshCatalog: false,
+            nodeId: null
+          });
+          this.draftMessage = preservedDraft;
         }
 
         this.historyCursorMode = "live";
@@ -5377,10 +5525,12 @@ export const useRuntimeStore = defineStore("runtime", {
 
       if (userMessage && inputTokens != null) {
         userMessage.tokenCount = inputTokens;
+        this.messageRevision = null;
       }
 
       if (assistantMessage && outputTokens != null) {
         assistantMessage.tokenCount = outputTokens;
+        this.messageRevision = null;
       }
 
       if (persist) {
@@ -5398,15 +5548,18 @@ export const useRuntimeStore = defineStore("runtime", {
       const finalText = payload.text?.trim();
       if (finalText && payload.text !== assistantMessage.content) {
         assistantMessage.content = payload.text ?? assistantMessage.content;
+        this.messageRevision = null;
       }
       const nextReasoningContent = normalizeReasoningContent(
         payload.reasoningContent ?? assistantMessage.reasoningContent ?? null
       );
       if (nextReasoningContent !== assistantMessage.reasoningContent) {
         assistantMessage.reasoningContent = nextReasoningContent;
+        this.messageRevision = null;
       }
       assistantMessage.status = "done";
       assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
+      this.messageRevision = null;
 
       this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
       this.providerName = payload.providerName ?? this.providerName;
@@ -5445,6 +5598,7 @@ export const useRuntimeStore = defineStore("runtime", {
       };
 
       this.messages.push(assistantMessage);
+      this.messageRevision = null;
       this.persistHistory();
       return this.messages.find((item) => item.id === messageId && item.role === "assistant") ?? assistantMessage;
     },
@@ -5522,6 +5676,10 @@ export const useRuntimeStore = defineStore("runtime", {
 
       if (pendingMessages.length > 0) {
         this.messages.push(...pendingMessages);
+      }
+
+      if (didMutate) {
+        this.messageRevision = null;
       }
 
       if (persist && didMutate) {
@@ -6764,6 +6922,7 @@ export const useRuntimeStore = defineStore("runtime", {
         status: "done",
         tokenCount: null
       });
+      this.messageRevision = null;
       this.persistHistory();
       debugLog("submit", {
         turnId: requestId,

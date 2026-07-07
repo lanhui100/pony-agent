@@ -36,6 +36,8 @@ use crate::agent::session::{
 use crate::agent::turn_flow::TurnEventSink;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -279,6 +281,7 @@ pub struct HostInspectionSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct SessionRuntimeView {
     pub session: SessionSnapshot,
+    pub message_state: MessageStateSnapshot,
     pub history_state_evidence: Option<Vec<HistoryStateHookEvidence>>,
     pub history_state_audit_summary: HistoryStateAuditSummary,
     pub run_control_audit_summary: RunControlAuditSummary,
@@ -294,6 +297,51 @@ pub struct SessionRuntimeView {
     pub active_branch_head_node_id: Option<String>,
     pub is_at_branch_head: bool,
     pub cursor_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageStateSnapshot {
+    pub session_id: String,
+    pub revision: String,
+    pub messages: Vec<MessageStateEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageStateEntry {
+    pub message_id: String,
+    pub turn_id: String,
+    pub role: String,
+    pub content: String,
+    pub attachments: Vec<crate::agent::session::AttachmentReference>,
+    pub status: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub model_name: Option<String>,
+    pub token_count: Option<u64>,
+    pub tool_name: Option<String>,
+    pub canonical_tool_name: Option<String>,
+    pub display_name_zh: Option<String>,
+    pub detail: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub error_detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageStateDelta {
+    pub session_id: String,
+    pub base_revision: String,
+    pub target_revision: String,
+    pub ops: Vec<MessageDeltaOp>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum MessageDeltaOp {
+    TruncateAfter { message_id: Option<String> },
+    Append { messages: Vec<MessageStateEntry> },
+    ReplaceAll { messages: Vec<MessageStateEntry> },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -513,6 +561,8 @@ pub struct HistoryCheckoutResponse {
     pub degradation_reason: Option<String>,
     pub history_state_evidence: Option<Vec<HistoryStateHookEvidence>>,
     pub history_state_audit_summary: HistoryStateAuditSummary,
+    pub message_delta: MessageStateDelta,
+    pub message_revision: String,
     pub cursor: HistoryCursorState,
 }
 
@@ -529,6 +579,8 @@ pub struct RestoreBranchHeadResponse {
     pub degradation_reason: Option<String>,
     pub history_state_evidence: Option<Vec<HistoryStateHookEvidence>>,
     pub history_state_audit_summary: HistoryStateAuditSummary,
+    pub message_delta: MessageStateDelta,
+    pub message_revision: String,
     pub cursor: HistoryCursorState,
 }
 
@@ -540,6 +592,8 @@ pub struct ForkFromHistoryNodeResponse {
     pub branch: HistoryBranchView,
     pub history_state_evidence: Option<Vec<HistoryStateHookEvidence>>,
     pub history_state_audit_summary: HistoryStateAuditSummary,
+    pub message_delta: MessageStateDelta,
+    pub message_revision: String,
     pub cursor: HistoryCursorState,
 }
 
@@ -551,6 +605,8 @@ pub struct SwitchHistoryBranchResponse {
     pub node_id: Option<String>,
     pub history_state_evidence: Option<Vec<HistoryStateHookEvidence>>,
     pub history_state_audit_summary: HistoryStateAuditSummary,
+    pub message_delta: MessageStateDelta,
+    pub message_revision: String,
     pub cursor: HistoryCursorState,
 }
 
@@ -643,9 +699,9 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         fallback_session_summary: String,
     ) -> Option<TurnResult> {
         let terminal = self.terminal.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         let phase = terminal.phase.clone()?;
         let user_message = input
             .display_message
@@ -694,9 +750,9 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
 
     fn record_terminal_payload(&self, payload: &TurnStreamEvent) {
         let mut terminal = self.terminal.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         terminal.event_id = payload.event_id.clone();
         terminal.event_type = payload.event_type.clone();
         terminal.event_version = payload.event_version.clone();
@@ -740,9 +796,9 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         Option<u64>,
     )> {
         let terminal = self.terminal.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         Some((
             terminal.session_id.clone(),
             terminal.turn_id.clone()?,
@@ -844,7 +900,9 @@ impl HostControlPlaneBuilder {
                 .graph_planner
                 .unwrap_or_else(|| Box::new(DefaultGraphPlanner)),
             capability_registry: RwLock::new(capability_registry),
-            frontend_diagnostics: FrontendDiagnosticsStore::new(default_frontend_diagnostics_sqlite_path()),
+            frontend_diagnostics: FrontendDiagnosticsStore::new(
+                default_frontend_diagnostics_sqlite_path(),
+            ),
         }
     }
 }
@@ -888,15 +946,244 @@ impl HostControlPlane {
         }
     }
 
-    pub fn append_frontend_trace_events(&self, command: FrontendTraceAppendCommand) -> Result<(), String> {
+    fn project_message_state(snapshot: &SessionSnapshot) -> MessageStateSnapshot {
+        let mut messages = Vec::new();
+        let mut trace_index = 0usize;
+        let mut turn_index = 0usize;
+        let mut current_turn_id: Option<String> = None;
+
+        for history_message in &snapshot.history {
+            if history_message.role == "user" {
+                turn_index += 1;
+                let trace = snapshot.turn_trace_history.get(trace_index);
+                let turn_id = history_message
+                    .turn_id
+                    .clone()
+                    .or_else(|| trace.map(|item| item.turn_id.clone()))
+                    .unwrap_or_else(|| format!("history-turn-{turn_index}"));
+                current_turn_id = Some(turn_id.clone());
+                messages.push(MessageStateEntry {
+                    message_id: format!("user-{turn_id}"),
+                    turn_id,
+                    role: "user".to_string(),
+                    content: history_message.content.clone(),
+                    attachments: history_message.attachments.clone(),
+                    status: Some("done".to_string()),
+                    reasoning_content: None,
+                    model_name: None,
+                    token_count: history_message.token_count,
+                    tool_name: None,
+                    canonical_tool_name: None,
+                    display_name_zh: None,
+                    detail: None,
+                    duration_seconds: None,
+                    error_detail: None,
+                });
+                continue;
+            }
+
+            if history_message.role != "assistant" {
+                continue;
+            }
+
+            let trace = snapshot.turn_trace_history.get(trace_index);
+            let turn_id = history_message
+                .turn_id
+                .clone()
+                .or_else(|| current_turn_id.clone())
+                .or_else(|| trace.map(|item| item.turn_id.clone()))
+                .unwrap_or_else(|| format!("history-turn-{}", turn_index.max(1)));
+            let trace_error = trace.and_then(|item| item.error.clone());
+            let has_error = history_message.status.as_ref().is_some_and(|status| {
+                matches!(status, crate::agent::session::MessageStatus::Error)
+            }) || trace
+                .as_ref()
+                .is_some_and(|item| item.phase == "failed" || item.error.is_some());
+            messages.push(MessageStateEntry {
+                message_id: format!("assistant-{turn_id}"),
+                turn_id: turn_id.clone(),
+                role: "assistant".to_string(),
+                content: history_message.content.clone(),
+                attachments: Vec::new(),
+                status: Some(if has_error { "error" } else { "done" }.to_string()),
+                reasoning_content: history_message.reasoning_content.clone(),
+                model_name: history_message.model_name.clone(),
+                token_count: history_message
+                    .token_count
+                    .or_else(|| trace.and_then(|item| item.output_tokens)),
+                tool_name: None,
+                canonical_tool_name: None,
+                display_name_zh: None,
+                detail: None,
+                duration_seconds: None,
+                error_detail: trace_error,
+            });
+
+            if let Some(trace) = trace {
+                for tool in trace
+                    .tool_activities
+                    .iter()
+                    .filter(|tool| tool.status != "planned")
+                {
+                    let detail = Self::message_tool_detail(tool);
+                    messages.push(MessageStateEntry {
+                        message_id: format!("tool-{turn_id}-{}", tool.id),
+                        turn_id: turn_id.clone(),
+                        role: "tool".to_string(),
+                        content: tool.result_text.clone().unwrap_or_default(),
+                        attachments: Vec::new(),
+                        status: Some(Self::message_tool_status(&tool.status).to_string()),
+                        reasoning_content: None,
+                        model_name: None,
+                        token_count: None,
+                        tool_name: Some(tool.name.clone()),
+                        canonical_tool_name: tool.canonical_tool_name.clone(),
+                        display_name_zh: tool.display_name_zh.clone(),
+                        detail: (!detail.is_empty()).then_some(detail),
+                        duration_seconds: tool.duration_seconds,
+                        error_detail: tool.error.as_ref().map(|value| value.to_string()),
+                    });
+                }
+            }
+
+            current_turn_id = None;
+            trace_index += 1;
+        }
+
+        let mut state = MessageStateSnapshot {
+            session_id: snapshot.conversation_id.clone(),
+            revision: String::new(),
+            messages,
+        };
+        state.revision = Self::message_state_revision(&state).to_string();
+        state
+    }
+
+    fn message_tool_status(status: &str) -> &str {
+        match status {
+            "done" => "done",
+            "error" => "error",
+            _ => "pending",
+        }
+    }
+
+    fn message_tool_detail(tool: &crate::agent::telemetry::TurnToolActivity) -> String {
+        let mut blocks = Vec::new();
+        let description = tool.description.trim();
+        if !description.is_empty() {
+            blocks.push(description.to_string());
+        }
+        if let Some(arguments) = tool
+            .arguments_text
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            blocks.push(format!("参数\n{arguments}"));
+        }
+        if let Some(result) = tool
+            .result_text
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            blocks.push(format!("结果\n{result}"));
+        }
+        blocks.join("\n")
+    }
+
+    fn message_state_revision(state: &MessageStateSnapshot) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        state.session_id.hash(&mut hasher);
+        for message in &state.messages {
+            message.message_id.hash(&mut hasher);
+            message.turn_id.hash(&mut hasher);
+            message.role.hash(&mut hasher);
+            message.content.hash(&mut hasher);
+            message.status.hash(&mut hasher);
+            message.reasoning_content.hash(&mut hasher);
+            message.model_name.hash(&mut hasher);
+            message.token_count.hash(&mut hasher);
+            message.tool_name.hash(&mut hasher);
+            message.canonical_tool_name.hash(&mut hasher);
+            message.display_name_zh.hash(&mut hasher);
+            message.detail.hash(&mut hasher);
+            message.duration_seconds.map(f64::to_bits).hash(&mut hasher);
+            message.error_detail.hash(&mut hasher);
+            for attachment in &message.attachments {
+                attachment.id.hash(&mut hasher);
+                attachment.asset_id.hash(&mut hasher);
+                attachment.name.hash(&mut hasher);
+                attachment.mime_type.hash(&mut hasher);
+                attachment.relative_path.hash(&mut hasher);
+                attachment.size_bytes.hash(&mut hasher);
+                attachment.created_at_ms.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn diff_message_state(
+        before: &MessageStateSnapshot,
+        after: &MessageStateSnapshot,
+    ) -> MessageStateDelta {
+        let ops = if before.messages == after.messages {
+            Vec::new()
+        } else if after
+            .messages
+            .iter()
+            .zip(before.messages.iter())
+            .all(|(left, right)| left == right)
+            && after.messages.len() < before.messages.len()
+        {
+            vec![MessageDeltaOp::TruncateAfter {
+                message_id: after
+                    .messages
+                    .last()
+                    .map(|message| message.message_id.clone()),
+            }]
+        } else if before
+            .messages
+            .iter()
+            .zip(after.messages.iter())
+            .all(|(left, right)| left == right)
+            && before.messages.len() < after.messages.len()
+        {
+            vec![MessageDeltaOp::Append {
+                messages: after.messages[before.messages.len()..].to_vec(),
+            }]
+        } else {
+            vec![MessageDeltaOp::ReplaceAll {
+                messages: after.messages.clone(),
+            }]
+        };
+
+        MessageStateDelta {
+            session_id: after.session_id.clone(),
+            base_revision: before.revision.clone(),
+            target_revision: after.revision.clone(),
+            ops,
+        }
+    }
+
+    pub fn append_frontend_trace_events(
+        &self,
+        command: FrontendTraceAppendCommand,
+    ) -> Result<(), String> {
         self.frontend_diagnostics.append(command)
     }
 
-    pub fn query_frontend_trace_window(&self, query: FrontendTraceQuery) -> Result<FrontendTraceQueryResult, String> {
+    pub fn query_frontend_trace_window(
+        &self,
+        query: FrontendTraceQuery,
+    ) -> Result<FrontendTraceQueryResult, String> {
         self.frontend_diagnostics.query_window(query)
     }
 
-    pub fn query_frontend_stall_snapshots(&self, query: FrontendTraceQuery) -> Result<Vec<FrontendStallSnapshot>, String> {
+    pub fn query_frontend_stall_snapshots(
+        &self,
+        query: FrontendTraceQuery,
+    ) -> Result<Vec<FrontendStallSnapshot>, String> {
         self.frontend_diagnostics.query_stall_snapshots(query)
     }
 
@@ -904,11 +1191,17 @@ impl HostControlPlane {
         self.frontend_diagnostics.clear_before(ts_wall_ms)
     }
 
-    pub fn export_frontend_trace_json(&self, query: FrontendTraceQuery) -> Result<FrontendTraceExportPayload, String> {
+    pub fn export_frontend_trace_json(
+        &self,
+        query: FrontendTraceQuery,
+    ) -> Result<FrontendTraceExportPayload, String> {
         self.frontend_diagnostics.export_json(query)
     }
 
-    pub fn export_frontend_trace_chrome_trace(&self, query: FrontendTraceQuery) -> Result<FrontendTraceExportPayload, String> {
+    pub fn export_frontend_trace_chrome_trace(
+        &self,
+        query: FrontendTraceQuery,
+    ) -> Result<FrontendTraceExportPayload, String> {
         self.frontend_diagnostics.export_chrome_trace(query)
     }
 
@@ -1000,13 +1293,10 @@ impl HostControlPlane {
             runtime.apply_mcp_source_snapshot(command.snapshot.clone());
         }
 
-        let mut registry = self
-            .capability_registry
-            .write()
-            .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+        let mut registry = self.capability_registry.write().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         registry.replace_mcp_source_snapshot(command.snapshot.clone());
 
         Ok(command.snapshot.source)
@@ -1019,10 +1309,7 @@ impl HostControlPlane {
         validate_skill_source_snapshot(&command.snapshot)?;
 
         let normalized_snapshot = {
-            let registry = self
-                .capability_registry
-                .read()
-                .unwrap_or_else(|e| {
+            let registry = self.capability_registry.read().unwrap_or_else(|e| {
                 eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
                 e.into_inner()
             });
@@ -1041,17 +1328,12 @@ impl HostControlPlane {
         // Re-acquire as write lock and re-normalize: the registry may have changed
         // between the read-lock normalization above and this write-lock application,
         // so we re-normalize under the write lock to maintain consistency.
-        let mut registry = self
-            .capability_registry
-            .write()
-            .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
-        let normalized_snapshot = normalize_skill_source_snapshot_against_capabilities(
-            &registry,
-            command.snapshot,
-        )?;
+        let mut registry = self.capability_registry.write().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let normalized_snapshot =
+            normalize_skill_source_snapshot_against_capabilities(&registry, command.snapshot)?;
         registry.replace_skill_source_snapshot(normalized_snapshot.clone())?;
 
         Ok(normalized_snapshot.source)
@@ -1385,9 +1667,9 @@ impl HostControlPlane {
                 .load_checkpoint(Some(prepared.turn_id.as_str()), None);
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
                 graph_runs.load_run(&prepared.run_id).ok_or_else(|| {
                     format!(
                         "Graph run `{}` failed to load planner state.",
@@ -1490,7 +1772,7 @@ impl HostControlPlane {
         );
 
         let runtime = self.runtime.read().expect("runtime lock poisoned");
-            runtime.start_turn_stream_with_control(
+        runtime.start_turn_stream_with_control(
             sink,
             &self.execution_control,
             command.turn_id,
@@ -1650,7 +1932,8 @@ impl HostControlPlane {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let session_overviews = self.sessions_rwlock
+        let session_overviews = self
+            .sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
@@ -1695,9 +1978,9 @@ impl HostControlPlane {
                 .sessions_rwlock
                 .write()
                 .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            })
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    e.into_inner()
+                })
                 .snapshot_at(Some(session_overview.conversation_id.as_str()), None, &[]);
             let session_metrics = aggregate_session_metrics(&snapshot);
             merge_monitor_overview(
@@ -1915,18 +2198,18 @@ impl HostControlPlane {
 
     pub fn load_graph_run(&self, query: GraphRunQuery) -> Option<GraphRun> {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         let run_id = query.run_id?;
         graph_runs.load_run(&run_id)
     }
 
     pub fn list_graph_runs(&self) -> Vec<GraphRun> {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         graph_runs.list_runs()
     }
 
@@ -2301,9 +2584,9 @@ impl HostControlPlane {
             .map(str::trim)
             .filter(|session_id| !session_id.is_empty())?;
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         graph_runs.list_runs().into_iter().find(|run| {
             run.session_id.as_deref() == Some(session_id)
                 && !matches!(
@@ -2470,9 +2753,9 @@ impl HostControlPlane {
                 self.sessions_rwlock
                     .write()
                     .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            })
+                        eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                        e.into_inner()
+                    })
                     .snapshot_at(None, None, &[])
                     .conversation_id
             })
@@ -2521,7 +2804,10 @@ impl HostControlPlane {
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
                 .unwrap_or_else(|| "turn_committed".to_string()),
-            turn_id: node.turn_trace_history.last().map(|trace| trace.turn_id.clone()),
+            turn_id: node
+                .turn_trace_history
+                .last()
+                .map(|trace| trace.turn_id.clone()),
             workspace_ref: node.workspace_ref.clone(),
             summary: Some(node.summary.clone()),
             title: Some(node.title.clone()),
@@ -2564,9 +2850,9 @@ impl HostControlPlane {
         query: GraphRunCheckpointQuery,
     ) -> Option<GraphRunCheckpoint> {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         let run_id = query.run_id?;
         let run = graph_runs.load_run(&run_id)?;
         Some(self.graph_runner.build_checkpoint(&run))
@@ -2640,19 +2926,24 @@ impl HostControlPlane {
     ) -> Result<HistoryCheckoutResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
         let requested_mode = command.mode;
-        let snapshot = self
-            .sessions_rwlock
-            .write()
-            .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            })
-            .checkout_history_node(
+        let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let before_state = Self::project_message_state(&sessions.snapshot_at(
+            Some(session_id.as_str()),
+            None,
+            &[],
+        ));
+        let snapshot = sessions.checkout_history_node(
             Some(session_id.as_str()),
             &command.node_id,
             Self::history_checkout_mode_to_session(requested_mode),
             command.expected_cursor_version,
         )?;
+        drop(sessions);
+        let message_state = Self::project_message_state(&snapshot);
+        let message_delta = Self::diff_message_state(&before_state, &message_state);
         let cursor = Self::history_cursor_state(&snapshot.history_cursor);
         let applied_mode =
             Self::history_checkout_mode_from_session(snapshot.history_cursor.checkout_mode.clone());
@@ -2680,6 +2971,8 @@ impl HostControlPlane {
             degradation_reason: degraded.then(|| "workspace_rollback_unsupported".to_string()),
             history_state_evidence,
             history_state_audit_summary: Self::project_history_state_audit_summary(&snapshot),
+            message_revision: message_state.revision,
+            message_delta,
             cursor,
         })
     }
@@ -2689,29 +2982,42 @@ impl HostControlPlane {
         command: RestoreBranchHeadCommand,
     ) -> Result<RestoreBranchHeadResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
-        let snapshot = self
-            .sessions_rwlock
-            .write()
-            .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            })
-            .restore_branch_head(
+        let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let before_state = Self::project_message_state(&sessions.snapshot_at(
+            Some(session_id.as_str()),
+            None,
+            &[],
+        ));
+        let snapshot = sessions.restore_branch_head(
             Some(session_id.as_str()),
             command.branch_id.as_deref(),
             command.expected_cursor_version,
         )?;
+        drop(sessions);
+        let message_state = Self::project_message_state(&snapshot);
+        let message_delta = Self::diff_message_state(&before_state, &message_state);
+        let workspace_rollback_capable = snapshot
+            .history_nodes
+            .iter()
+            .find(|node| Some(node.node_id.as_str()) == snapshot.resolved_node_id.as_deref())
+            .map(|node| node.workspace_ref.rollback_capable)
+            .unwrap_or(false);
         Ok(RestoreBranchHeadResponse {
             session_id,
             branch_id: snapshot.history_cursor.active_branch_id.clone(),
             restored_node_id: snapshot.resolved_node_id.clone(),
             transcript_restore_applied: true,
-            workspace_rollback_capable: false,
+            workspace_rollback_capable,
             workspace_rollback_applied: false,
             degraded: false,
             degradation_reason: None,
             history_state_evidence: Self::project_history_state_evidence(&snapshot),
             history_state_audit_summary: Self::project_history_state_audit_summary(&snapshot),
+            message_revision: message_state.revision,
+            message_delta,
             cursor: Self::history_cursor_state(&snapshot.history_cursor),
         })
     }
@@ -2721,13 +3027,15 @@ impl HostControlPlane {
         command: ForkFromHistoryNodeCommand,
     ) -> Result<ForkFromHistoryNodeResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
-        let mut sessions = self
-            .sessions_rwlock
-            .write()
-            .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+        let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let before_state = Self::project_message_state(&sessions.snapshot_at(
+            Some(session_id.as_str()),
+            None,
+            &[],
+        ));
         let before = sessions.load_history_cursor(Some(session_id.as_str()));
         let snapshot = sessions.fork_from_history_node(
             Some(session_id.as_str()),
@@ -2735,6 +3043,8 @@ impl HostControlPlane {
             command.expected_cursor_version,
         )?;
         drop(sessions);
+        let message_state = Self::project_message_state(&snapshot);
+        let message_delta = Self::diff_message_state(&before_state, &message_state);
         let created_branch_id = snapshot
             .history_cursor
             .active_branch_id
@@ -2756,6 +3066,8 @@ impl HostControlPlane {
             branch: branch_view,
             history_state_evidence: Self::project_history_state_evidence(&snapshot),
             history_state_audit_summary: Self::project_history_state_audit_summary(&snapshot),
+            message_revision: message_state.revision,
+            message_delta,
             cursor: Self::history_cursor_state(&snapshot.history_cursor),
         })
     }
@@ -2765,24 +3077,31 @@ impl HostControlPlane {
         command: SwitchHistoryBranchCommand,
     ) -> Result<SwitchHistoryBranchResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
-        let snapshot = self
-            .sessions_rwlock
-            .write()
-            .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            })
-            .switch_history_branch(
+        let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let before_state = Self::project_message_state(&sessions.snapshot_at(
+            Some(session_id.as_str()),
+            None,
+            &[],
+        ));
+        let snapshot = sessions.switch_history_branch(
             Some(session_id.as_str()),
             &command.branch_id,
             command.expected_cursor_version,
         )?;
+        drop(sessions);
+        let message_state = Self::project_message_state(&snapshot);
+        let message_delta = Self::diff_message_state(&before_state, &message_state);
         Ok(SwitchHistoryBranchResponse {
             session_id,
             branch_id: command.branch_id,
             node_id: snapshot.resolved_node_id.clone(),
             history_state_evidence: Self::project_history_state_evidence(&snapshot),
             history_state_audit_summary: Self::project_history_state_audit_summary(&snapshot),
+            message_revision: message_state.revision,
+            message_delta,
             cursor: Self::history_cursor_state(&snapshot.history_cursor),
         })
     }
@@ -2833,23 +3152,29 @@ impl HostControlPlane {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .snapshot_at(Some(resolved_session_id.as_str()), resolved_node_id.as_deref(), &[]);
+            .snapshot_at(
+                Some(resolved_session_id.as_str()),
+                resolved_node_id.as_deref(),
+                &[],
+            );
         let retrieved = self
             .runtime
             .read()
             .expect("runtime lock poisoned")
             .inspect_retrieved_context_at(
-            Some(resolved_session_id.as_str()),
-            resolved_node_id.as_deref(),
-            run.as_ref(),
-            checkpoint.as_ref(),
-            None,
-        );
+                Some(resolved_session_id.as_str()),
+                resolved_node_id.as_deref(),
+                run.as_ref(),
+                checkpoint.as_ref(),
+                None,
+            );
 
         let resolved_visible_node_id = session.history_cursor.visible_node_id.clone();
         let active_branch_head_node_id = session.history_cursor.branch_head_node_id.clone();
         let is_at_branch_head = resolved_visible_node_id == active_branch_head_node_id;
+        let message_state = Self::project_message_state(&session);
         SessionRuntimeView {
+            message_state,
             history_state_evidence: Self::project_history_state_evidence(&session),
             history_state_audit_summary: Self::project_history_state_audit_summary(&session),
             run_control_audit_summary: Self::project_run_control_audit_summary(
@@ -2979,12 +3304,12 @@ impl HostControlPlane {
             .read()
             .expect("runtime lock poisoned")
             .inspect_retrieved_context_at(
-            Some(resolved_session_id.as_str()),
-            query.node_id.as_deref(),
-            run.as_ref(),
-            checkpoint.as_ref(),
-            None,
-        )
+                Some(resolved_session_id.as_str()),
+                query.node_id.as_deref(),
+                run.as_ref(),
+                checkpoint.as_ref(),
+                None,
+            )
     }
 
     pub fn delete_session(&self, command: DeleteSessionCommand) -> Vec<SessionOverview> {
@@ -3113,9 +3438,9 @@ impl HostControlPlane {
         let turn_id = {
             let next_turn_id = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
                 let run = graph_runs
                     .load_run(&run_id)
                     .ok_or_else(|| format!("Graph run `{run_id}` cannot accept a new turn."))?;
@@ -3142,9 +3467,9 @@ impl HostControlPlane {
             let mut turn_result = runtime.run_turn(input.clone());
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
                 graph_runs
                     .load_run(&run_id)
                     .ok_or_else(|| format!("Graph run `{run_id}` failed to load planner state."))?
@@ -4298,7 +4623,11 @@ mod tests {
 
     fn build_test_control_plane(
         responses: Vec<MockHttpResponse>,
-    ) -> (HostControlPlane, MockHttpServer, crate::agent::runtime_helper::TestRuntimeGuard) {
+    ) -> (
+        HostControlPlane,
+        MockHttpServer,
+        crate::agent::runtime_helper::TestRuntimeGuard,
+    ) {
         let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let server = MockHttpServer::start(responses);
         let runtime = AgentRuntime::with_dependencies(
@@ -4380,7 +4709,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("session-fallback".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -4401,7 +4730,8 @@ mod tests {
 
     #[test]
     fn inspection_can_join_turn_and_session_views() {
-        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![json_completion("inspected")]);
+        let (control_plane, server, _rt_guard) =
+            build_test_control_plane(vec![json_completion("inspected")]);
         control_plane.execution_control.register_turn(
             "turn-inspect",
             Some("session-inspect"),
@@ -4409,14 +4739,17 @@ mod tests {
         );
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "check Cargo.toml".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-inspect".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -4486,14 +4819,17 @@ mod tests {
             build_test_control_plane(vec![json_completion("runtime-view")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请继续推进 PA-018。".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-runtime-view".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -4528,7 +4864,10 @@ mod tests {
     fn session_runtime_view_reads_runtime_generated_hook_traces_and_metrics() {
         let control_plane = HostControlPlane::new();
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.record_turn_trace_for_test(
                 Some("session-hook-view"),
                 crate::agent::session::TurnTraceRecord {
@@ -4613,7 +4952,10 @@ mod tests {
     fn model_monitor_session_drilldown_preserves_failed_and_cancelled_terminal_evidence() {
         let control_plane = HostControlPlane::new();
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.record_turn_trace_for_test(
                 Some("session-terminal-evidence"),
                 crate::agent::session::TurnTraceRecord {
@@ -4852,14 +5194,17 @@ mod tests {
             build_test_control_plane(vec![json_completion("checkpoint lifecycle ready")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请验证 checkpoint boundary".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("trace-boundary-session".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -4905,17 +5250,21 @@ mod tests {
 
     #[test]
     fn retrieved_context_queries_flow_through_control_plane() {
-        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![json_completion("retrieved")]);
+        let (control_plane, server, _rt_guard) =
+            build_test_control_plane(vec![json_completion("retrieved")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请记住这个项目优先推进 PA-018。".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-retrieved".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -4955,7 +5304,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("session-aware".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -4993,7 +5342,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("stream-session".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5036,7 +5385,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("graph-session".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5079,7 +5428,10 @@ mod tests {
         let (control_plane, server, _rt_guard) =
             build_test_control_plane(vec![json_completion("first response")]);
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.set_hook_executor_for_test(Box::new(TransformingPlannerHookExecutor));
             runtime
                 .register_hook_descriptor(transform_hook_descriptor(
@@ -5100,7 +5452,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("graph-decision-hook".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5150,7 +5502,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("graph-continue".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5167,7 +5519,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: None,
                     node_id: None,
                     history: Vec::new(),
@@ -5201,7 +5553,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("graph-pause".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5304,7 +5656,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: None,
                     node_id: None,
                     history: Vec::new(),
@@ -5394,7 +5746,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("graph-stream".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5443,7 +5795,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: None,
                     node_id: None,
                     history: Vec::new(),
@@ -5478,7 +5830,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: None,
                     node_id: None,
                     history: Vec::new(),
@@ -5554,7 +5906,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("graph-stream-boundary".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5609,7 +5961,7 @@ mod tests {
                     provider_id: None,
                     model_id: None,
                     reasoning_effort: None,
-        workspace_mode: None,
+                    workspace_mode: None,
                     session_id: Some("ordinary-start-session".to_string()),
                     node_id: None,
                     history: Vec::new(),
@@ -5656,7 +6008,10 @@ mod tests {
         let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.start_graph_run(
                 "run-boundary-internal",
                 "boundary contract",
@@ -5770,7 +6125,10 @@ mod tests {
         let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.start_graph_run("run-plan-ready", "plan fallback", Some("plan-session"))
         };
 
@@ -5812,7 +6170,10 @@ mod tests {
         let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.start_graph_run("run-plan-recovery", "plan recovery", Some("plan-recovery"))
         };
 
@@ -5962,7 +6323,10 @@ mod tests {
         let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.start_graph_run(
                 "run-not-resumable",
                 "plan reconcile",
@@ -6023,14 +6387,17 @@ mod tests {
             build_test_control_plane(vec![json_completion("lifecycle boundary completed")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "完成一个普通 turn".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("plan-lifecycle-boundary".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6073,14 +6440,17 @@ mod tests {
             build_test_control_plane(vec![json_completion("我会记住这条信息。")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请记住这个项目当前优先推进 PA-039。".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("checkpoint-memory-evidence".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6145,14 +6515,17 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请记住这个项目当前优先推进 PA-039。".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("checkpoint-memory-evidence-stale".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6164,7 +6537,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("checkpoint-memory-evidence-stale".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6461,7 +6834,10 @@ mod tests {
         let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
 
         let run = {
-            let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.start_graph_run(
                 "run-plan-boundary",
                 "boundary plan check",
@@ -6581,7 +6957,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("graph-inspect".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6628,7 +7004,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("graph-infer".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6670,14 +7046,17 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "第一问".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-control".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6689,7 +7068,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-control".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6784,14 +7163,17 @@ mod tests {
         );
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "在分叉上继续".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-control".to_string()),
                 node_id: fork.cursor.visible_node_id.clone(),
                 history: Vec::new(),
@@ -6853,7 +7235,10 @@ mod tests {
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.set_history_state_hook_executor_for_test(Box::new(
                 StaticHistoryStateHookExecutor {
                     start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -6894,7 +7279,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-evidence-control".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6906,7 +7291,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-evidence-control".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -6967,7 +7352,10 @@ mod tests {
         );
         assert_eq!(
             checkout.history_state_audit_summary.action.resolved_node_id,
-            runtime_view.history_state_audit_summary.action.resolved_node_id
+            runtime_view
+                .history_state_audit_summary
+                .action
+                .resolved_node_id
         );
         // After truncation, the checkout response cursor is always Live
         // because the target node is now the branch head.
@@ -7002,7 +7390,10 @@ mod tests {
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.set_history_state_hook_executor_for_test(Box::new(
                 StaticHistoryStateHookExecutor {
                     start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -7043,7 +7434,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-command-evidence".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -7055,7 +7446,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-command-evidence".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -7169,7 +7560,10 @@ mod tests {
             build_test_control_plane(vec![json_completion("第一答"), json_completion("第二答")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.set_history_state_hook_executor_for_test(Box::new(
                 StaticHistoryStateHookExecutor {
                     start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -7210,7 +7604,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-degrade-control".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -7222,7 +7616,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("history-degrade-control".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -7285,14 +7679,17 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "先看第一轮".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("monitor-summary".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -7304,7 +7701,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("monitor-summary".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -7826,14 +8223,17 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let result = runtime.run_turn(TurnInput {
                 message: "列出当前目录文件".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("monitor-runtime-capability".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -8068,7 +8468,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("monitor-capability-hook".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -8132,7 +8532,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("monitor-planner-hook".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -8263,7 +8663,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("monitor-skill-hook".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -8391,7 +8791,10 @@ mod tests {
         assert_eq!(capabilities.len(), 1);
         assert_eq!(capabilities[0].capability_id, "mcp:tool:workspace-search");
 
-        let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+        let runtime = control_plane
+            .runtime
+            .write()
+            .expect("runtime lock poisoned");
         let runtime_source = runtime
             .inspect_capability_source("mcp-local")
             .expect("runtime source registry should be synchronized");
@@ -8681,7 +9084,10 @@ mod tests {
         assert_eq!(ingress.candidate_ids, vec!["skill:search".to_string()]);
         assert!(ingress.summary.contains("host-skills"));
 
-        let runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+        let runtime = control_plane
+            .runtime
+            .write()
+            .expect("runtime lock poisoned");
         let runtime_source = runtime
             .inspect_skill_source("host-skills")
             .expect("runtime skill source registry should be synchronized");
@@ -8706,7 +9112,10 @@ mod tests {
     fn skill_source_ingress_hooks_can_block_snapshot_apply_without_persisting_source() {
         let control_plane = HostControlPlane::new();
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             runtime.set_hook_executor_for_test(Box::new(BlockingSkillSourceIngressHookExecutor));
             runtime
                 .register_hook_descriptor(guard_hook_descriptor(
@@ -8883,17 +9292,21 @@ mod tests {
 
     #[test]
     fn load_model_monitor_session_drilldown_returns_metrics_and_runtime_view() {
-        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![json_completion("下钻摘要")]);
+        let (control_plane, server, _rt_guard) =
+            build_test_control_plane(vec![json_completion("下钻摘要")]);
 
         {
-            let mut runtime = control_plane.runtime.write().expect("runtime lock poisoned");
+            let mut runtime = control_plane
+                .runtime
+                .write()
+                .expect("runtime lock poisoned");
             let _ = runtime.run_turn(TurnInput {
                 message: "请准备一个下钻样本".to_string(),
                 display_message: None,
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("monitor-drilldown".to_string()),
                 node_id: None,
                 history: Vec::new(),

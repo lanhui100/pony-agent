@@ -6976,6 +6976,212 @@ describe("runtime session resilience", () => {
     );
   });
 
+  it("检查 checkoutHistoryNode 应用 messageDelta (truncateAfter) 避免全量 reload load_session_runtime_view", async () => {
+    const store = useRuntimeStore();
+
+    // 初始状态：两轮 messages + messageRevision + 活跃运行态属性
+    store.$patch({
+      sessionId: "delta-session",
+      messageRevision: "rev-1",
+      cursorVersion: 5,
+      activeBranchId: "branch-main",
+      branchHeadNodeId: "node-head",
+      visibleNodeId: "node-head",
+      historyCursorMode: "live",
+      isSubmitting: true,
+      activeTurnId: "turn-2",
+      activeRunId: "run-2",
+      latestExecutionCheckpoint: createCheckpoint({ turnId: "turn-2", status: "running" }),
+      error: "some old error",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-1", role: "user", content: "first question" }),
+        createMessage({ id: "assistant-1", turnId: "turn-1", role: "assistant", content: "first answer" }),
+        createMessage({ id: "user-2", turnId: "turn-2", role: "user", content: "second question" }),
+        createMessage({ id: "assistant-2", turnId: "turn-2", role: "assistant", content: "second answer" })
+      ],
+      turnTraceHistory: [
+        createTrace({ turnId: "turn-1", title: "first turn", updatedAt: 1000 }),
+        createTrace({ turnId: "turn-2", title: "second turn", updatedAt: 2000 })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", sessionId: "delta-session", headNodeId: "node-head" })
+      ],
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId: "delta-session", turnId: "turn-1", createdAtMs: 1000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId: "delta-session", turnId: "turn-2", createdAtMs: 2000 })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
+      if (command === "checkout_history_node") {
+        expect(payload).toEqual({
+          sessionId: "delta-session",
+          nodeId: "node-old",
+          mode: "transcript_only",
+          expectedCursorVersion: 5
+        });
+        return {
+          sessionId: "delta-session",
+          nodeId: "node-old",
+          requestedMode: "transcript_only",
+          appliedMode: "transcript_only",
+          transcriptRestoreApplied: true,
+          workspaceRollbackCapable: false,
+          workspaceRollbackApplied: false,
+          degraded: false,
+          degradationReason: null,
+          messageDelta: {
+            sessionId: "delta-session",
+            baseRevision: "rev-1",
+            targetRevision: "rev-2",
+            ops: [{ kind: "truncateAfter", messageId: "assistant-1" }]
+          },
+          cursor: createHistoryCursor({
+            sessionId: "delta-session",
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-head",
+            workspaceNodeId: "node-old",
+            mode: "historical"
+          })
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const retainedUserMessage = store.messages[0];
+    const retainedAssistantMessage = store.messages[1];
+    const result = await store.checkoutHistoryNode("node-old");
+
+    expect(result).not.toBeNull();
+    // 验证消息被截断：只保留 turn-1 的两条消息
+    expect(store.messages).toHaveLength(2);
+    expect(store.messages[0]?.id).toBe("user-1");
+    expect(store.messages[1]?.id).toBe("assistant-1");
+    expect(store.messages[0]).toBe(retainedUserMessage);
+    expect(store.messages[1]).toBe(retainedAssistantMessage);
+    // 验证 messageRevision 更新为 delta 的 targetRevision
+    expect(store.messageRevision).toBe("rev-2");
+    // 验证不会调用 load_session_runtime_view（仅 checkout_history_node 被调用一次）
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledTimes(1);
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("checkout_history_node", expect.anything());
+    // 验证 applyMessageStateDelta 清理了运行态属性
+    expect(store.isSubmitting).toBe(false);
+    expect(store.activeTurnId).toBeNull();
+    expect(store.activeRunId).toBeNull();
+    expect(store.latestExecutionCheckpoint).toBeNull();
+    expect(store.error).toBeNull();
+    expect(store.toolActivities).toEqual([]);
+    // 验证 turnTraceHistory 只包含保留 turn 的记录
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.turnId).toBe("turn-1");
+    // 验证 applyHistoryState 更新了 visibleNodeId 和 cursor mode
+    expect(store.visibleNodeId).toBe("node-old");
+    expect(store.historyCursorMode).toBe("historical");
+  });
+
+  it("当 messageDelta 的 baseRevision 与当前 revision 不匹配时回退到 load_session_runtime_view", async () => {
+    const store = useRuntimeStore();
+
+    store.$patch({
+      sessionId: "delta-session",
+      messageRevision: "rev-current",
+      cursorVersion: 5,
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-1", role: "user", content: "first question" }),
+        createMessage({ id: "assistant-1", turnId: "turn-1", role: "assistant", content: "first answer" }),
+        createMessage({ id: "user-2", turnId: "turn-2", role: "user", content: "second question" }),
+        createMessage({ id: "assistant-2", turnId: "turn-2", role: "assistant", content: "second answer" })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", sessionId: "delta-session", headNodeId: "node-head" })
+      ],
+      historyNodes: [
+        createHistoryNode({ nodeId: "node-old", sessionId: "delta-session", turnId: "turn-1", createdAtMs: 1000 }),
+        createHistoryNode({ nodeId: "node-head", sessionId: "delta-session", turnId: "turn-2", createdAtMs: 2000 })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "checkout_history_node") {
+        return {
+          sessionId: "delta-session",
+          nodeId: "node-old",
+          requestedMode: "transcript_only",
+          appliedMode: "transcript_only",
+          transcriptRestoreApplied: true,
+          workspaceRollbackCapable: false,
+          workspaceRollbackApplied: false,
+          degraded: false,
+          degradationReason: null,
+          messageDelta: {
+            sessionId: "delta-session",
+            baseRevision: "rev-stale",
+            targetRevision: "rev-next",
+            ops: [{ kind: "truncateAfter", messageId: "assistant-1" }]
+          },
+          cursor: createHistoryCursor({
+            sessionId: "delta-session",
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-old",
+            workspaceNodeId: "node-old",
+            mode: "historical"
+          })
+        };
+      }
+
+      if (command === "load_session_runtime_view") {
+        const snapshot = createSnapshot({
+          conversationId: "delta-session",
+          history: [
+            { role: "user", content: "first question", turnId: "turn-1" },
+            { role: "assistant", content: "first answer", turnId: "turn-1" }
+          ],
+          turnCount: 1
+        });
+        return {
+          session: snapshot,
+          messageState: {
+            sessionId: "delta-session",
+            revision: "rev-next",
+            messages: [
+              { messageId: "user-1", turnId: "turn-1", role: "user", content: "first question", status: "done" },
+              { messageId: "assistant-1", turnId: "turn-1", role: "assistant", content: "first answer", status: "done" }
+            ]
+          },
+          retrieved: createRetrievedContext(snapshot),
+          checkpoint: null,
+          submissionPlan: null,
+          controlBoundaryEvidence: null,
+          historyStateAuditSummary: null,
+          runControlAuditSummary: null,
+          historyNodes: store.historyNodes,
+          historyBranches: store.historyBranches,
+          historyCursor: createHistoryCursor({
+            sessionId: "delta-session",
+            visibleNodeId: "node-old",
+            activeBranchId: "branch-main",
+            branchHeadNodeId: "node-old",
+            workspaceNodeId: "node-old",
+            mode: "historical"
+          })
+        };
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    await store.checkoutHistoryNode("node-old");
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("load_session_runtime_view", expect.anything());
+    expect(store.messages).toHaveLength(2);
+    expect(store.messages[0]?.id).toBe("user-1");
+    expect(store.messages[1]?.id).toBe("assistant-1");
+    expect(store.messageRevision).toBe("rev-next");
+  });
+
   it("checks out a history node with backward-compatible cursor fallback", async () => {
     const store = useRuntimeStore();
     const snapshot = createSnapshot({

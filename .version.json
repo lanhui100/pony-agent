@@ -1103,16 +1103,28 @@
       ],
       "timestamp": "2026-07-07T21:24:31+08:00",
       "commit": "edb457e"
+    },
+    {
+      "timestamp": "2026-07-07T21:30:54+08:00",
+      "commit": "d0daac0",
+      "bumps": [
+        {
+          "from": "0.1.39",
+          "to": "0.1.40",
+          "component": "core",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-07-07T21:24:30+08:00",
+  "lastBump": "2026-07-07T21:30:54+08:00",
   "tauri": {
     "patch": 56,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 39,
+    "patch": 40,
     "minor": 1,
     "major": 0
   }

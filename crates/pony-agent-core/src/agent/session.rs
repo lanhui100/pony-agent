@@ -191,7 +191,11 @@ impl TurnHistoryMessage {
     /// 格式："{turn_id}-{role}"，turn_id 缺失时 fallback "unknown-{role}"。
     /// 注意：方法不参与序列化，仅内存投影。
     pub fn stable_id(&self) -> String {
-        format!("{}-{}", self.turn_id.as_deref().unwrap_or("unknown"), self.role)
+        format!(
+            "{}-{}",
+            self.turn_id.as_deref().unwrap_or("unknown"),
+            self.role
+        )
     }
 }
 
@@ -867,11 +871,7 @@ impl SessionStore {
                 memory_write_hook_executor.as_ref(),
             );
             refresh_session_metadata(session, true);
-            commit_history_node_from_live_state(
-                session,
-                HistoryNodeKind::TurnCommitted,
-                None,
-            );
+            commit_history_node_from_live_state(session, HistoryNodeKind::TurnCommitted, None);
         }
         self.refresh_attachment_catalog();
         let snapshot = self.snapshot_for_session(&session_key);
@@ -1888,10 +1888,15 @@ impl SessionStore {
     }
 
     fn save_to_backend(&self) {
-        if matches!(self.backend.trace_storage_mode(), SeparateTraceTableMode::WriteSeparate) {
+        if matches!(
+            self.backend.trace_storage_mode(),
+            SeparateTraceTableMode::WriteSeparate
+        ) {
             for (session_id, session) in &self.sessions {
-                if matches!(session.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
-                {
+                if matches!(
+                    session.trace_migration_state,
+                    TraceMigrationState::TraceTableAuthoritative
+                ) {
                     let _ = self
                         .backend
                         .replace_session_traces(session_id, &session.turn_trace_history);
@@ -1924,18 +1929,19 @@ impl SessionStore {
             return;
         };
         let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
-        if matches!(prepared.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
-            && matches!(
-                self.backend.persist_session_with_trace_mutation(
-                    session_id,
-                    &prepared,
-                    SessionTraceMutation::ReplaceAll {
-                        traces: session.turn_trace_history.clone(),
-                    },
-                ),
-                SessionBackendMutationResult::Succeeded
-            )
-        {
+        if matches!(
+            prepared.trace_migration_state,
+            TraceMigrationState::TraceTableAuthoritative
+        ) && matches!(
+            self.backend.persist_session_with_trace_mutation(
+                session_id,
+                &prepared,
+                SessionTraceMutation::ReplaceAll {
+                    traces: session.turn_trace_history.clone(),
+                },
+            ),
+            SessionBackendMutationResult::Succeeded
+        ) {
             return;
         }
         if session_is_persistable(session) && self.backend.upsert_session(session_id, &prepared) {
@@ -1944,14 +1950,21 @@ impl SessionStore {
         self.save_to_backend();
     }
 
-    fn persist_session_and_trace_change(&mut self, session_id: &str, mutation: SessionTraceMutation) {
+    fn persist_session_and_trace_change(
+        &mut self,
+        session_id: &str,
+        mutation: SessionTraceMutation,
+    ) {
         let Some(session) = self.sessions.get(session_id) else {
             return;
         };
         let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
         let result = if session_is_persistable(session) {
-            self.backend
-                .persist_session_with_trace_mutation(session_id, &prepared, mutation.clone())
+            self.backend.persist_session_with_trace_mutation(
+                session_id,
+                &prepared,
+                mutation.clone(),
+            )
         } else {
             SessionBackendMutationResult::Unsupported
         };
@@ -1969,14 +1982,20 @@ impl SessionStore {
         }
 
         if matches!(result, SessionBackendMutationResult::NotFound)
-            && matches!(prepared.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
+            && matches!(
+                prepared.trace_migration_state,
+                TraceMigrationState::TraceTableAuthoritative
+            )
         {
             let replace_all = SessionTraceMutation::ReplaceAll {
                 traces: session.turn_trace_history.clone(),
             };
             if matches!(
-                self.backend
-                    .persist_session_with_trace_mutation(session_id, &prepared, replace_all),
+                self.backend.persist_session_with_trace_mutation(
+                    session_id,
+                    &prepared,
+                    replace_all
+                ),
                 SessionBackendMutationResult::Succeeded
             ) {
                 return;
@@ -2004,9 +2023,9 @@ impl SessionStore {
                         .replace_session_traces(session_id, &session.turn_trace_history)
                 })
                 .unwrap_or(SessionBackendMutationResult::Unsupported),
-            TracePersistenceAction::UpsertOne { trace, trace_order } => {
-                self.backend.upsert_turn_trace(session_id, &trace, trace_order)
-            }
+            TracePersistenceAction::UpsertOne { trace, trace_order } => self
+                .backend
+                .upsert_turn_trace(session_id, &trace, trace_order),
             TracePersistenceAction::UpdateTerminalEvent {
                 turn_id,
                 event_id,
@@ -2532,7 +2551,10 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
         .history_nodes
         .iter()
         .position(|node| node.branch_id == DEFAULT_HISTORY_BRANCH_ID && node.turn_count > 0);
-    let has_root_node = session.history_nodes.iter().any(|node| node.node_id == root_node_id);
+    let has_root_node = session
+        .history_nodes
+        .iter()
+        .any(|node| node.node_id == root_node_id);
     if !has_root_node {
         if let Some(first_index) = first_main_branch_turn_index {
             let first_node_id = session.history_nodes[first_index].node_id.clone();
@@ -2541,15 +2563,15 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 .iter()
                 .find(|branch| branch.branch_id == DEFAULT_HISTORY_BRANCH_ID)
                 .and_then(|branch| branch.base_node_id.clone());
-            let should_insert_root = session.history_nodes[first_index]
-                .parent_node_id
-                .is_none()
+            let should_insert_root = session.history_nodes[first_index].parent_node_id.is_none()
                 && main_branch_base_node_id
                     .as_deref()
                     .map(|base| base == first_node_id)
                     .unwrap_or(true);
             if should_insert_root {
-                let created_at_ms = session.history_nodes[first_index].created_at_ms.saturating_sub(1);
+                let created_at_ms = session.history_nodes[first_index]
+                    .created_at_ms
+                    .saturating_sub(1);
                 session.history_nodes.insert(
                     first_index,
                     HistoryNode {
@@ -2597,13 +2619,18 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
         .first()
         .map(|node| node.node_id.clone());
     let updated_at_ms = session.updated_at_ms;
-    let has_legacy_root_node = session.history_nodes.iter().any(|node| node.node_id == root_node_id);
+    let has_legacy_root_node = session
+        .history_nodes
+        .iter()
+        .any(|node| node.node_id == root_node_id);
     if let Some(main_branch) = history_branch_mut(session, DEFAULT_HISTORY_BRANCH_ID) {
         if main_branch.base_node_id.is_none() {
             main_branch.base_node_id = first_node_id;
             changed = true;
         }
-        if main_branch.base_node_id.as_deref() != Some(root_node_id.as_str()) && has_legacy_root_node {
+        if main_branch.base_node_id.as_deref() != Some(root_node_id.as_str())
+            && has_legacy_root_node
+        {
             main_branch.base_node_id = Some(root_node_id.clone());
             changed = true;
         }
@@ -2835,7 +2862,10 @@ fn session_state_for_backend(
         }
     }
     if matches!(trace_mode, SeparateTraceTableMode::WriteSeparate)
-        && matches!(prepared.trace_migration_state, TraceMigrationState::TraceTableAuthoritative)
+        && matches!(
+            prepared.trace_migration_state,
+            TraceMigrationState::TraceTableAuthoritative
+        )
     {
         prepared.turn_trace_history.clear();
     }
@@ -4645,21 +4675,22 @@ mod tests {
             reasoning_content: Some("thinking...".to_string()),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
-        let deserialized: TurnHistoryMessage =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: TurnHistoryMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(deserialized.turn_id, Some("turn-1".to_string()));
         assert_eq!(deserialized.status, Some(MessageStatus::Done));
         assert_eq!(deserialized.model_name, Some("gpt-5".to_string()));
         assert_eq!(deserialized.token_count, Some(42));
-        assert_eq!(deserialized.reasoning_content, Some("thinking...".to_string()));
+        assert_eq!(
+            deserialized.reasoning_content,
+            Some("thinking...".to_string())
+        );
         assert_eq!(deserialized.stable_id(), "turn-1-assistant");
     }
 
     #[test]
     fn serde_roundtrip_old_blob_compatible() {
         let old_json = r#"{"role":"user","content":"hello","attachments":[]}"#;
-        let msg: TurnHistoryMessage =
-            serde_json::from_str(old_json).expect("old blob deserialize");
+        let msg: TurnHistoryMessage = serde_json::from_str(old_json).expect("old blob deserialize");
         assert_eq!(msg.role, "user");
         assert_eq!(msg.content, "hello");
         assert!(msg.turn_id.is_none());
@@ -4702,16 +4733,14 @@ mod tests {
                     },
                 ],
                 provider_native_transcript: Vec::new(),
-                turn_trace_history: vec![
-                    TurnTraceRecord {
-                        turn_id: "turn-1".to_string(),
-                        phase: "completed".to_string(),
-                        title: "test turn".to_string(),
-                        provider_model: Some("gpt-5".to_string()),
-                        output_tokens: Some(42),
-                        ..Default::default()
-                    },
-                ],
+                turn_trace_history: vec![TurnTraceRecord {
+                    turn_id: "turn-1".to_string(),
+                    phase: "completed".to_string(),
+                    title: "test turn".to_string(),
+                    provider_model: Some("gpt-5".to_string()),
+                    output_tokens: Some(42),
+                    ..Default::default()
+                }],
                 trace_migration_state: TraceMigrationState::default(),
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
@@ -4728,24 +4757,12 @@ mod tests {
         let snapshot = store.snapshot(Some(session_id), &[]);
         assert_eq!(snapshot.history.len(), 2);
         assert_eq!(snapshot.history[0].role, "user");
-        assert_eq!(
-            snapshot.history[0].turn_id.as_deref(),
-            Some("turn-1")
-        );
+        assert_eq!(snapshot.history[0].turn_id.as_deref(), Some("turn-1"));
         assert_eq!(snapshot.history[1].role, "assistant");
-        assert_eq!(
-            snapshot.history[1].turn_id.as_deref(),
-            Some("turn-1")
-        );
-        assert_eq!(
-            snapshot.history[1].model_name.as_deref(),
-            Some("gpt-5")
-        );
+        assert_eq!(snapshot.history[1].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(snapshot.history[1].model_name.as_deref(), Some("gpt-5"));
         assert_eq!(snapshot.history[1].token_count, Some(42));
-        assert_eq!(
-            snapshot.history[1].status,
-            Some(MessageStatus::Done)
-        );
+        assert_eq!(snapshot.history[1].status, Some(MessageStatus::Done));
     }
 
     #[test]
@@ -4784,12 +4801,15 @@ mod tests {
             output_tokens: Some(1),
             ..Default::default()
         }];
-        let mut history2 = vec![TurnHistoryMessage {
-            role: "user".to_string(),
-            content: "hi".to_string(),
-            attachments: Vec::new(),
-            ..Default::default()
-        }, msg2];
+        let mut history2 = vec![
+            TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                attachments: Vec::new(),
+                ..Default::default()
+            },
+            msg2,
+        ];
         enrich_history_from_traces(&mut history2, &traces);
         assert_eq!(history2[0].turn_id, Some("trace-turn".to_string()));
         assert_eq!(history2[1].turn_id, Some("preserved-turn".to_string()));
@@ -4904,15 +4924,9 @@ mod tests {
             Some("turn-1"),
             "assistant message should have turn_id after enrichment"
         );
-        assert_eq!(
-            snapshot.history[1].model_name.as_deref(),
-            Some("gpt-5")
-        );
+        assert_eq!(snapshot.history[1].model_name.as_deref(), Some("gpt-5"));
         assert_eq!(snapshot.history[1].token_count, Some(42));
-        assert_eq!(
-            snapshot.history[1].status,
-            Some(MessageStatus::Done)
-        );
+        assert_eq!(snapshot.history[1].status, Some(MessageStatus::Done));
     }
 
     #[test]
@@ -5009,8 +5023,14 @@ mod tests {
         assert_eq!(history_nodes.len(), 2);
         assert_eq!(history_nodes[0].node_id, root_node_id);
         assert_eq!(history_nodes[0].turn_count, 0);
-        assert_eq!(history_nodes[1].parent_node_id.as_deref(), Some(history_nodes[0].node_id.as_str()));
-        assert_eq!(history_branches[0].base_node_id.as_deref(), Some(history_nodes[0].node_id.as_str()));
+        assert_eq!(
+            history_nodes[1].parent_node_id.as_deref(),
+            Some(history_nodes[0].node_id.as_str())
+        );
+        assert_eq!(
+            history_branches[0].base_node_id.as_deref(),
+            Some(history_nodes[0].node_id.as_str())
+        );
     }
 
     #[test]
@@ -5319,8 +5339,14 @@ mod tests {
 
         let (nodes, _, _) = store.load_history_graph(Some("memory-hook-history"));
         assert!(nodes.len() >= 3);
-        assert_eq!(nodes[nodes.len() - 2].memory_write_hook_trace_records.len(), 1);
-        assert_eq!(nodes[nodes.len() - 1].memory_write_hook_trace_records.len(), 2);
+        assert_eq!(
+            nodes[nodes.len() - 2].memory_write_hook_trace_records.len(),
+            1
+        );
+        assert_eq!(
+            nodes[nodes.len() - 1].memory_write_hook_trace_records.len(),
+            2
+        );
 
         let historical = store
             .checkout_history_node(
@@ -5719,7 +5745,11 @@ mod tests {
             .expect("latest visible node before blocked fork");
         let (nodes, branches, _) = store.load_history_graph(Some("history-fork-blocked"));
         let error = store
-            .fork_from_history_node(Some("history-fork-blocked"), nodes[0].node_id.as_str(), None)
+            .fork_from_history_node(
+                Some("history-fork-blocked"),
+                nodes[0].node_id.as_str(),
+                None,
+            )
             .expect_err("fork should be blocked by hook");
         assert!(error.contains("history branch fork blocked by hook"));
 
@@ -5760,7 +5790,11 @@ mod tests {
         );
         let (nodes, _, _) = store.load_history_graph(Some("history-switch-session"));
         store
-            .fork_from_history_node(Some("history-switch-session"), nodes[0].node_id.as_str(), None)
+            .fork_from_history_node(
+                Some("history-switch-session"),
+                nodes[0].node_id.as_str(),
+                None,
+            )
             .expect("fork should succeed before switch test");
         store.set_history_state_hook_executor_for_test(Box::new(StaticHistoryStateHookExecutor {
             start_results: vec![crate::agent::hooks::HookExecutionResult {
@@ -6797,13 +6831,28 @@ mod tests {
             attachments,
         );
 
-        assert_eq!(store.list_attachment_assets(Some("remove-attachments")).len(), 1);
-        assert_eq!(store.session_attachment_index.get("remove-attachments").map(Vec::len), Some(1));
+        assert_eq!(
+            store
+                .list_attachment_assets(Some("remove-attachments"))
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .session_attachment_index
+                .get("remove-attachments")
+                .map(Vec::len),
+            Some(1)
+        );
 
         store.remove_session("remove-attachments");
 
-        assert!(store.list_attachment_assets(Some("remove-attachments")).is_empty());
-        assert!(!store.session_attachment_index.contains_key("remove-attachments"));
+        assert!(store
+            .list_attachment_assets(Some("remove-attachments"))
+            .is_empty());
+        assert!(!store
+            .session_attachment_index
+            .contains_key("remove-attachments"));
         assert!(store
             .attachment_assets
             .values()
@@ -8348,7 +8397,7 @@ mod tests {
         let (nodes, branches, _) = store.load_history_graph(Some("history-session"));
         assert_eq!(nodes.len(), 3);
         assert_eq!(branches.len(), 1);
-        
+
         let snapshot = store
             .checkout_history_node(
                 Some("history-session"),

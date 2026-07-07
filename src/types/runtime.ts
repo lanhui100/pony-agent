@@ -495,6 +495,42 @@ export type ChatMessage = {
   errorDetail?: string | null;
 };
 
+export type MessageStateEntry = {
+  messageId: string;
+  turnId: string;
+  role: "user" | "assistant" | "tool" | string;
+  content: string;
+  attachments?: AttachmentMeta[];
+  status?: "pending" | "done" | "error" | string | null;
+  reasoningContent?: string | null;
+  modelName?: string | null;
+  tokenCount?: number | null;
+  toolName?: string | null;
+  canonicalToolName?: string | null;
+  displayNameZh?: string | null;
+  detail?: string | null;
+  durationSeconds?: number | null;
+  errorDetail?: string | null;
+};
+
+export type MessageStateSnapshot = {
+  sessionId: string;
+  revision: string;
+  messages: MessageStateEntry[];
+};
+
+export type MessageDeltaOp =
+  | { kind: "truncateAfter"; messageId?: string | null }
+  | { kind: "append"; messages: MessageStateEntry[] }
+  | { kind: "replaceAll"; messages: MessageStateEntry[] };
+
+export type MessageStateDelta = {
+  sessionId: string;
+  baseRevision: string;
+  targetRevision: string;
+  ops: MessageDeltaOp[];
+};
+
 export type HookClass = "observe" | "guard" | "transform" | "side_effect";
 
 export type TurnHookPoint =
@@ -1079,6 +1115,7 @@ export type ExecutionCheckpoint = {
 
 export type SessionRuntimeView = {
   session: SessionSnapshot;
+  messageState?: MessageStateSnapshot | null;
   historyStateEvidence?: HistoryStateHookEvidence[] | null;
   historyStateAuditSummary?: HistoryStateAuditSummary | null;
   runControlAuditSummary?: RunControlAuditSummary | null;

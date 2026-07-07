@@ -7,9 +7,9 @@ use rusqlite::{params, Connection};
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 
 use super::session::{
-    AttachmentAsset, FileSessionBackend, PersistedStore, SeparateTraceTableMode,
-    SessionBackend, SessionBackendMutationResult, SessionBackendTraceLoadResult,
-    SessionState, SessionTraceMutation, TraceMigrationState, TurnTraceRecord,
+    AttachmentAsset, FileSessionBackend, PersistedStore, SeparateTraceTableMode, SessionBackend,
+    SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionState,
+    SessionTraceMutation, TraceMigrationState, TurnTraceRecord,
 };
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
@@ -193,7 +193,7 @@ impl SqliteSessionBackend {
                 }
                 let data = serde_json::to_string(&normalized_session)
                     .map_err(|e| format!("serialize session: {e}"))?;
-stmt.execute(params![
+                stmt.execute(params![
                     id,
                     normalized_session.title,
                     normalized_session.updated_at_ms as i64,
@@ -436,7 +436,12 @@ stmt.execute(params![
         tx.execute(
             "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
              VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, session.title, session.updated_at_ms as i64, data],
+            params![
+                session_id,
+                session.title,
+                session.updated_at_ms as i64,
+                data
+            ],
         )
         .map_err(|e| format!("upsert session row: {e}"))?;
         Ok(())
@@ -634,10 +639,15 @@ impl SessionBackend for SqliteSessionBackend {
                 return false;
             }
         };
-if let Err(e) = tx.execute(
+        if let Err(e) = tx.execute(
             "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
              VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, session.title, session.updated_at_ms as i64, data],
+            params![
+                session_id,
+                session.title,
+                session.updated_at_ms as i64,
+                data
+            ],
         ) {
             eprintln!("[pony-agent][session] SQLite upsert session error: {e}");
             return false;
@@ -725,7 +735,9 @@ if let Err(e) = tx.execute(
             for (key, value) in &metadata_entries {
                 if let Some(val) = value {
                     if let Err(error) = meta_stmt.execute(params![key, val]) {
-                        eprintln!("[pony-agent][session] SQLite metadata delete-upsert error: {error}");
+                        eprintln!(
+                            "[pony-agent][session] SQLite metadata delete-upsert error: {error}"
+                        );
                         return false;
                     }
                 }
@@ -901,7 +913,9 @@ if let Err(e) = tx.execute(
         };
         let updated = match self.update_turn_trace_row_tx(&tx, session_id, turn_id, |trace| {
             trace.session_id = Some(session_id.to_string());
-            trace.hook_trace_records.extend(hook_trace_records.iter().cloned());
+            trace
+                .hook_trace_records
+                .extend(hook_trace_records.iter().cloned());
             trace.updated_at = updated_at;
         }) {
             Ok(updated) => updated,
@@ -948,21 +962,22 @@ if let Err(e) = tx.execute(
         }
 
         let mutation_result = match mutation {
-            SessionTraceMutation::ReplaceAll { traces } => {
-                self.replace_session_traces_tx(&tx, session_id, &traces)
-                    .map(|_| SessionBackendMutationResult::Succeeded)
-            }
-            SessionTraceMutation::UpsertOne { trace, trace_order } => {
-                self.upsert_turn_trace_tx(
+            SessionTraceMutation::ReplaceAll { traces } => self
+                .replace_session_traces_tx(&tx, session_id, &traces)
+                .map(|_| SessionBackendMutationResult::Succeeded),
+            SessionTraceMutation::UpsertOne { trace, trace_order } => self
+                .upsert_turn_trace_tx(
                     &tx,
                     session_id,
                     &trace,
                     trace_order,
                     matches!(self.trace_mode, SeparateTraceTableMode::WriteSeparate)
-                        && matches!(session.trace_migration_state, TraceMigrationState::TraceTableAuthoritative),
+                        && matches!(
+                            session.trace_migration_state,
+                            TraceMigrationState::TraceTableAuthoritative
+                        ),
                 )
-                    .map(|_| SessionBackendMutationResult::Succeeded)
-            }
+                .map(|_| SessionBackendMutationResult::Succeeded),
             SessionTraceMutation::UpdateTerminalEvent {
                 turn_id,
                 event_id,
@@ -1142,10 +1157,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("delete.db");
 
-        let backend = SqliteSessionBackend::new_with_trace_mode(
-            db_path,
-            SeparateTraceTableMode::DualWrite,
-        );
+        let backend =
+            SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::DualWrite);
 
         let mut store = PersistedStore::default();
         store
@@ -1173,10 +1186,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("upsert-session.db");
 
-        let backend = SqliteSessionBackend::new_with_trace_mode(
-            db_path,
-            SeparateTraceTableMode::DualWrite,
-        );
+        let backend =
+            SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::DualWrite);
 
         let mut store = PersistedStore::default();
         store
@@ -1188,7 +1199,9 @@ mod tests {
         backend.save_store(&store);
 
         let mut updated = minimal_session("s1", "first-updated", 3000);
-        updated.turn_trace_history.push(trace("turn-1", "trace title", 42));
+        updated
+            .turn_trace_history
+            .push(trace("turn-1", "trace title", 42));
 
         assert!(backend.upsert_session("s1", &updated));
 
@@ -1207,10 +1220,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("remove-session-incremental.db");
 
-        let backend = SqliteSessionBackend::new_with_trace_mode(
-            db_path,
-            SeparateTraceTableMode::DualWrite,
-        );
+        let backend =
+            SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::DualWrite);
 
         let mut store = PersistedStore::default();
         store
@@ -1232,10 +1243,9 @@ mod tests {
                 ..AttachmentAsset::default()
             },
         );
-        store.session_attachment_index.insert(
-            "s1".to_string(),
-            vec!["asset:s1/file.dataurl".to_string()],
-        );
+        store
+            .session_attachment_index
+            .insert("s1".to_string(), vec!["asset:s1/file.dataurl".to_string()]);
         backend.save_store(&store);
 
         let mut attachment_assets = store.attachment_assets.clone();
@@ -1266,10 +1276,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("normalize-conversation-id.db");
 
-        let backend = SqliteSessionBackend::new_with_trace_mode(
-            db_path,
-            SeparateTraceTableMode::DualWrite,
-        );
+        let backend =
+            SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::DualWrite);
 
         let mut store = PersistedStore::default();
         let mut mismatched = minimal_session("payload-id", "mismatch", 1000);
@@ -1290,13 +1298,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("trace-merge.db");
 
-        let backend = SqliteSessionBackend::new_with_trace_mode(
-            db_path,
-            SeparateTraceTableMode::DualWrite,
-        );
+        let backend =
+            SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::DualWrite);
 
         let mut session = minimal_session("s1", "first", 1000);
-        session.turn_trace_history.push(trace("turn-1", "legacy", 1));
+        session
+            .turn_trace_history
+            .push(trace("turn-1", "legacy", 1));
 
         let mut store = PersistedStore::default();
         store.sessions.insert("s1".to_string(), session.clone());
@@ -1305,13 +1313,18 @@ mod tests {
         let mut updated = session.clone();
         updated.trace_migration_state = TraceMigrationState::DualWrite;
         updated.turn_trace_history[0].title = "table".to_string();
-        updated.turn_trace_history.push(trace("turn-2", "second", 2));
+        updated
+            .turn_trace_history
+            .push(trace("turn-2", "second", 2));
         assert!(backend.upsert_session("s1", &updated));
 
         let loaded = backend.load_store().unwrap();
         assert_eq!(loaded.sessions["s1"].turn_trace_history.len(), 2);
         assert_eq!(loaded.sessions["s1"].turn_trace_history[0].title, "table");
-        assert_eq!(loaded.sessions["s1"].turn_trace_history[1].turn_id, "turn-2");
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history[1].turn_id,
+            "turn-2"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1341,17 +1354,17 @@ mod tests {
         authoritative_blob.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
         conn.execute(
             "UPDATE sessions SET session_data = ?2 WHERE conversation_id = ?1",
-            params![
-                "s1",
-                serde_json::to_string(&authoritative_blob).unwrap()
-            ],
+            params!["s1", serde_json::to_string(&authoritative_blob).unwrap()],
         )
         .unwrap();
         drop(slot);
 
         let loaded = backend.load_store().unwrap();
         assert_eq!(loaded.sessions["s1"].turn_trace_history.len(), 1);
-        assert_eq!(loaded.sessions["s1"].turn_trace_history[0].turn_id, "turn-legacy");
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history[0].turn_id,
+            "turn-legacy"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1381,7 +1394,10 @@ mod tests {
 
         let loaded = backend.load_store().unwrap();
         assert_eq!(loaded.sessions["s1"].turn_trace_history.len(), 1);
-        assert_eq!(loaded.sessions["s1"].turn_trace_history[0].title, "first-trace");
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history[0].title,
+            "first-trace"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1490,10 +1506,7 @@ mod tests {
         ));
         let mut store = SessionStore::with_backend(backend);
 
-        store.record_turn_trace(
-            Some("s1"),
-            trace("turn-1", "first-trace", 11),
-        );
+        store.record_turn_trace(Some("s1"), trace("turn-1", "first-trace", 11));
         store.annotate_turn_trace_terminal_event(
             Some("s1"),
             "turn-1",
@@ -1532,7 +1545,10 @@ mod tests {
 
         assert_eq!(snapshot.turn_trace_history.len(), 1);
         assert_eq!(snapshot.turn_trace_history[0].turn_id, "turn-1");
-        assert_eq!(snapshot.turn_trace_history[0].event_id.as_deref(), Some("turn-1:4"));
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_id.as_deref(),
+            Some("turn-1:4")
+        );
         assert_eq!(snapshot.turn_trace_history[0].hook_trace_records.len(), 1);
         assert_eq!(
             snapshot.turn_trace_history[0].hook_trace_records[0].hook_name,
@@ -1621,9 +1637,18 @@ mod tests {
         }
 
         let loaded = backend.load_store().unwrap();
-        assert_eq!(loaded.sessions["s1"].turn_trace_history.len(), SQLITE_TRACE_HISTORY_LIMIT);
-        assert_eq!(loaded.sessions["s1"].turn_trace_history[0].turn_id, "turn-16");
-        assert_eq!(loaded.sessions["s1"].turn_trace_history[23].turn_id, "turn-39");
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history.len(),
+            SQLITE_TRACE_HISTORY_LIMIT
+        );
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history[0].turn_id,
+            "turn-16"
+        );
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history[23].turn_id,
+            "turn-39"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1676,14 +1701,20 @@ mod tests {
         ));
         let mut reloaded_main = SessionStore::with_backend(reloaded_main_backend);
         let main_snapshot = reloaded_main.snapshot(Some("switch-session"), &[]);
-        assert_eq!(main_snapshot.resolved_node_id.as_deref(), Some(second_node_id.as_str()));
+        assert_eq!(
+            main_snapshot.resolved_node_id.as_deref(),
+            Some(second_node_id.as_str())
+        );
         assert_eq!(main_snapshot.turn_trace_history.len(), 2);
         assert_eq!(main_snapshot.turn_trace_history[1].turn_id, "turn-main-2");
 
         let restored = store
             .restore_branch_head(Some("switch-session"), Some(fork_branch_id.as_str()), None)
             .expect("restore fork branch head should succeed");
-        assert_ne!(restored.resolved_node_id.as_deref(), Some(second_node_id.as_str()));
+        assert_ne!(
+            restored.resolved_node_id.as_deref(),
+            Some(second_node_id.as_str())
+        );
 
         let reloaded_fork_backend = Box::new(SqliteSessionBackend::new_with_trace_mode(
             db_path,
@@ -1716,8 +1747,10 @@ mod tests {
         let mut store = SessionStore::with_backend(backend);
         store.record_turn_trace(Some("s1"), trace("turn-1", "first-trace", 11));
 
-        let inspect_backend =
-            SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::WriteSeparate);
+        let inspect_backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
         let slot = inspect_backend.connection().unwrap();
         let conn = slot.as_ref().expect("connection initialized");
         let raw: String = conn
@@ -1750,8 +1783,10 @@ mod tests {
         let mut store = SessionStore::with_backend(backend);
         store.record_turn_trace(Some("s1"), trace("turn-1", "first-trace", 11));
 
-        let inspect_backend =
-            SqliteSessionBackend::new_with_trace_mode(db_path.clone(), SeparateTraceTableMode::WriteSeparate);
+        let inspect_backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        );
         let slot = inspect_backend.connection().unwrap();
         let conn = slot.as_ref().expect("connection initialized");
         conn.execute(
@@ -1778,7 +1813,10 @@ mod tests {
         let mut reloaded = SessionStore::with_backend(reloaded_backend);
         let snapshot = reloaded.snapshot(Some("s1"), &[]);
         assert_eq!(snapshot.turn_trace_history.len(), 1);
-        assert_eq!(snapshot.turn_trace_history[0].event_id.as_deref(), Some("turn-1:4"));
+        assert_eq!(
+            snapshot.turn_trace_history[0].event_id.as_deref(),
+            Some("turn-1:4")
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
