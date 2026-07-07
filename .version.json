@@ -1079,11 +1079,23 @@
           "to": "0.1.39"
         }
       ]
+    },
+    {
+      "commit": "57a784c",
+      "timestamp": "2026-07-07T17:08:08+08:00",
+      "bumps": [
+        {
+          "component": "tauri",
+          "from": "0.1.54",
+          "to": "0.1.55",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-07-05T22:16:26+08:00",
+  "lastBump": "2026-07-07T17:08:08+08:00",
   "tauri": {
-    "patch": 54,
+    "patch": 55,
     "minor": 1,
     "major": 0
   },

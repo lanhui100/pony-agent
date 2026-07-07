@@ -30,8 +30,14 @@ type ScrollTargetMode = "anchor" | "latest-user" | "latest-agent";
 const AUTO_SCROLL_THRESHOLD_PX = 260;
 const PROGRAMMATIC_SCROLL_MAX_MS = 1600;
 const USER_SCROLL_IDLE_MS = 3000;
-const SCROLL_LERP_DURATION_MS = 200;
+const SCROLL_LERP_DURATION_MS = 320;
+const COMPENSATION_SCROLL_LERP_DURATION_MS = 160;
 const SCROLL_RAF_STUCK_TIMEOUT_MS = 500;
+const AUTO_FOLLOW_MIN_FORWARD_PX = 2;
+
+function easeOutScroll(t: number): number {
+  return 1 - Math.pow(1 - t, 3.2);
+}
 
 export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   const {
@@ -64,8 +70,12 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   let programmaticScrollUntilMs = 0;
   let userScrollOverrideVersion = 0;
   let lastUserPausedSignature = "";
+  let contentChangedSincePause = false;
   let lastUserScrollAtMs = 0;
-  let scrollLerpRafId: number | null = null;
+  let navigationLerpRafId: number | null = null;
+  let compensationLerpRafId: number | null = null;
+  let outerCompensationRafId: number | null = null;
+  let compensationLerpRestartCount = 0;
   let scrollQueueWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   let layoutDirtyWhileQueued = false;
   let contentDirtyWhileAnimating = false;
@@ -261,6 +271,23 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     return getAnchorTargetTop();
   }
 
+  function getForwardOnlyAnchorTargetTop(targetTop: number, startTop: number) {
+    if (!Number.isFinite(targetTop) || !Number.isFinite(startTop)) {
+      return targetTop;
+    }
+
+    if (targetTop >= startTop + AUTO_FOLLOW_MIN_FORWARD_PX) {
+      return targetTop;
+    }
+
+    emit("anchor-target:skip-reverse", {
+      targetTop,
+      startTop,
+      distance: targetTop - startTop
+    });
+    return startTop;
+  }
+
   function isLatestUserMessageBelowViewport() {
     const viewport = getViewport();
     const latestUserMessage = getLatestUserMessageElement();
@@ -278,12 +305,27 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   }
 
   function cancelScrollLerp() {
-    if (scrollLerpRafId != null) {
-      window.cancelAnimationFrame(scrollLerpRafId);
-      scrollLerpRafId = null;
+    if (navigationLerpRafId != null) {
+      window.cancelAnimationFrame(navigationLerpRafId);
+      navigationLerpRafId = null;
     }
     clearScrollQueueWatchdog();
     scrollQueued.value = false;
+  }
+
+  function cancelCompensationLerp() {
+    if (compensationLerpRafId != null) {
+      window.cancelAnimationFrame(compensationLerpRafId);
+      compensationLerpRafId = null;
+    }
+    compensationLerpRestartCount = 0;
+  }
+
+  function cancelOuterCompensationRaf() {
+    if (outerCompensationRafId != null) {
+      window.cancelAnimationFrame(outerCompensationRafId);
+      outerCompensationRafId = null;
+    }
   }
 
   function clearAutoFollowIdleTimer() {
@@ -296,7 +338,9 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   }
 
   function scheduleAnchorCompensationScroll() {
-    window.requestAnimationFrame(() => {
+    cancelOuterCompensationRaf();
+    outerCompensationRafId = window.requestAnimationFrame(() => {
+      outerCompensationRafId = null;
       if (!streamAutoFollowEnabled.value || isDestroyed) {
         return;
       }
@@ -307,18 +351,70 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         return;
       }
 
-      const anchorTarget = getAnchorTargetTop();
+      const startTop = viewport.scrollTop;
+      const anchorTarget = getForwardOnlyAnchorTargetTop(getAnchorTargetTop(), startTop);
       if (!Number.isFinite(anchorTarget)) {
         emit("anchor-compensation-scroll:invalid-target", { targetTop: anchorTarget });
         return;
       }
-      emit("anchor-compensation-scroll", { targetTop: anchorTarget });
+
+      const distance = anchorTarget - startTop;
+      if (!Number.isFinite(startTop) || !Number.isFinite(distance) || distance < AUTO_FOLLOW_MIN_FORWARD_PX) {
+        emit("anchor-compensation-scroll:skip", { targetTop: anchorTarget, startTop, distance });
+        return;
+      }
+
+      emit("anchor-compensation-scroll", { targetTop: anchorTarget, startTop, distance });
+
+      // 仅在导航滚动未激活时启动补偿滚动，避免竞争
+      if (navigationLerpRafId != null || scrollQueued.value) {
+        emit("anchor-compensation-scroll:defer", { reason: "navigation-active" });
+        return;
+      }
+
+      cancelCompensationLerp();
       programmaticScrollActive = true;
       programmaticScrollTargetMode = "anchor";
       programmaticScrollTargetTop = anchorTarget;
       programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_MAX_MS;
-      viewport.scrollTo({ top: anchorTarget, behavior: "auto" });
-      finalizeProgrammaticScrollCycle();
+      compensationLerpRestartCount = 0;
+
+      let lerpStartMs = performance.now();
+      let lerpStartTop = startTop;
+      let lerpDistance = distance;
+      compensationLerpRafId = window.requestAnimationFrame(function lerp(now: number) {
+        if (!streamAutoFollowEnabled.value || isDestroyed) {
+          compensationLerpRafId = null;
+          finalizeProgrammaticScrollCycle();
+          return;
+        }
+        const elapsed = now - lerpStartMs;
+        const t = Math.min(elapsed / COMPENSATION_SCROLL_LERP_DURATION_MS, 1);
+        const eased = easeOutScroll(t);
+        viewport.scrollTop = lerpStartTop + lerpDistance * eased;
+        if (t < 1) {
+          compensationLerpRafId = window.requestAnimationFrame(lerp);
+          return;
+        }
+
+        const currentTarget = getForwardOnlyAnchorTargetTop(getAnchorTargetTop(), viewport.scrollTop);
+        if (currentTarget > viewport.scrollTop + 2 && compensationLerpRestartCount < 3) {
+          compensationLerpRestartCount += 1;
+          lerpStartMs = performance.now();
+          lerpStartTop = viewport.scrollTop;
+          lerpDistance = currentTarget - lerpStartTop;
+          compensationLerpRafId = window.requestAnimationFrame(lerp);
+          return;
+        }
+
+        if (currentTarget > viewport.scrollTop + 2) {
+          viewport.scrollTo({ top: currentTarget, behavior: "auto" });
+        }
+
+        compensationLerpRafId = null;
+        compensationLerpRestartCount = 0;
+        finalizeProgrammaticScrollCycle();
+      });
     });
   }
 
@@ -352,6 +448,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     unreadCount.value = 0;
     streamAutoFollowEnabled.value = true;
     lastUserPausedSignature = "";
+    contentChangedSincePause = false;
     clearAutoFollowIdleTimer();
     flushDeferredFollowIfNeeded("auto");
   }
@@ -364,6 +461,8 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     programmaticScrollTargetTop = 0;
     programmaticScrollUntilMs = 0;
     cancelScrollLerp();
+    cancelCompensationLerp();
+    cancelOuterCompensationRaf();
     if (scrollAfterPaintFrameId.value != null) {
       window.cancelAnimationFrame(scrollAfterPaintFrameId.value);
       scrollAfterPaintFrameId.value = null;
@@ -376,6 +475,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     userScrollOverrideVersion += 1;
     streamAutoFollowEnabled.value = false;
     lastUserPausedSignature = latestTurnSignature.value;
+    contentChangedSincePause = false;
     cancelPendingTimelineScroll("pause-auto-follow");
     emit("pause-auto-follow");
     lastUserScrollAtMs = Date.now();
@@ -389,6 +489,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   function resumeTimelineAutoFollow(behavior: ScrollBehavior = "auto", targetMode: ScrollTargetMode = "anchor") {
     streamAutoFollowEnabled.value = true;
     lastUserPausedSignature = "";
+    contentChangedSincePause = false;
     clearAutoFollowIdleTimer();
     emit("resume-auto-follow", { behavior, targetMode });
     queueScrollToLatestTurn(behavior, userScrollOverrideVersion, targetMode);
@@ -455,72 +556,99 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
           const scrollArea = timelineScrollAreaRef.value;
           const viewport = getViewport();
           if (viewport) {
-          const targetTop = getTargetTop(targetMode);
-          if (!Number.isFinite(targetTop)) {
-            emit("scroll-to-latest-turn:invalid-target", { requestId, behavior, targetMode, targetTop });
-            finalizeProgrammaticScrollCycle();
-            return;
-          }
-          programmaticScrollActive = true;
-          programmaticScrollTargetMode = targetMode;
-          programmaticScrollTargetTop = targetTop;
-          programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_MAX_MS;
-          emit("scroll-to-latest-turn", {
-            requestId,
-            behavior,
-            targetMode,
-            targetTop,
-            expiresAt: programmaticScrollUntilMs
-          });
-          if (behavior === "auto") {
-            viewport.scrollTo({ top: targetTop, behavior: "auto" });
-            finalizeProgrammaticScrollCycle();
-            return;
-          }
+            const startTop = viewport.scrollTop;
+            const rawTargetTop = getTargetTop(targetMode);
+            const targetTop =
+              targetMode === "anchor" ? getForwardOnlyAnchorTargetTop(rawTargetTop, startTop) : rawTargetTop;
 
-          cancelScrollLerp();
-          const startTop = viewport.scrollTop;
-          const distance = targetTop - startTop;
-          if (!Number.isFinite(startTop) || !Number.isFinite(distance)) {
-            emit("scroll-to-latest-turn:invalid-distance", { requestId, behavior, targetMode, startTop, targetTop });
-            finalizeProgrammaticScrollCycle();
-            return;
-          }
-          if (Math.abs(distance) < 5) {
-            finalizeProgrammaticScrollCycle();
-            return;
-          }
-
-          let lerpStartMs = performance.now();
-          let lerpStartTop = startTop;
-          let lerpDistance = distance;
-          scrollLerpRafId = window.requestAnimationFrame(function lerp(now: number) {
-            if (!streamAutoFollowEnabled.value || expectedOverrideVersion !== userScrollOverrideVersion) {
-              scrollLerpRafId = null;
+            if (!Number.isFinite(targetTop)) {
+              emit("scroll-to-latest-turn:invalid-target", { requestId, behavior, targetMode, targetTop });
               finalizeProgrammaticScrollCycle();
               return;
             }
-            const elapsed = now - lerpStartMs;
-            const t = Math.min(elapsed / SCROLL_LERP_DURATION_MS, 1);
-            const eased = 1 - Math.pow(1 - t, 3);
-            viewport.scrollTop = lerpStartTop + lerpDistance * eased;
-            if (t < 1) {
-              scrollLerpRafId = window.requestAnimationFrame(lerp);
+
+            programmaticScrollActive = true;
+            programmaticScrollTargetMode = targetMode;
+            programmaticScrollTargetTop = targetTop;
+            programmaticScrollUntilMs = Date.now() + PROGRAMMATIC_SCROLL_MAX_MS;
+            emit("scroll-to-latest-turn", {
+              requestId,
+              behavior,
+              targetMode,
+              targetTop,
+              expiresAt: programmaticScrollUntilMs
+            });
+
+            if (behavior === "auto") {
+              if (targetMode === "anchor" && targetTop <= startTop + AUTO_FOLLOW_MIN_FORWARD_PX) {
+                emit("scroll-to-latest-turn:skip-reverse-auto", { requestId, targetMode, targetTop, startTop });
+                finalizeProgrammaticScrollCycle();
+                return;
+              }
+              viewport.scrollTo({ top: targetTop, behavior: "auto" });
+              finalizeProgrammaticScrollCycle();
               return;
             }
 
-            const finalTarget = getTargetTop(targetMode);
-            if (finalTarget > viewport.scrollTop + 5) {
-              lerpStartMs = performance.now();
-              lerpStartTop = viewport.scrollTop;
-              lerpDistance = finalTarget - lerpStartTop;
-              scrollLerpRafId = window.requestAnimationFrame(lerp);
+            cancelScrollLerp();
+            cancelCompensationLerp();
+            const distance = targetTop - startTop;
+            if (!Number.isFinite(startTop) || !Number.isFinite(distance)) {
+              emit("scroll-to-latest-turn:invalid-distance", { requestId, behavior, targetMode, startTop, targetTop });
+              finalizeProgrammaticScrollCycle();
+              return;
+            }
+            if (distance < 5) {
+              emit("scroll-to-latest-turn:skip-reverse-or-small", {
+                requestId,
+                behavior,
+                targetMode,
+                startTop,
+                targetTop,
+                distance
+              });
+              finalizeProgrammaticScrollCycle();
               return;
             }
 
-            scrollLerpRafId = null;
-            finalizeProgrammaticScrollCycle();
-          });
+            if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+              viewport.scrollTo({ top: targetTop, behavior: "auto" });
+              finalizeProgrammaticScrollCycle();
+              return;
+            }
+
+            let lerpStartMs = performance.now();
+            let lerpStartTop = startTop;
+            let lerpDistance = distance;
+            navigationLerpRafId = window.requestAnimationFrame(function lerp(now: number) {
+              if (!streamAutoFollowEnabled.value || expectedOverrideVersion !== userScrollOverrideVersion) {
+                navigationLerpRafId = null;
+                finalizeProgrammaticScrollCycle();
+                return;
+              }
+              const elapsed = now - lerpStartMs;
+              const t = Math.min(elapsed / SCROLL_LERP_DURATION_MS, 1);
+              const eased = easeOutScroll(t);
+              viewport.scrollTop = lerpStartTop + lerpDistance * eased;
+              if (t < 1) {
+                navigationLerpRafId = window.requestAnimationFrame(lerp);
+                return;
+              }
+
+              const rawFinalTarget = getTargetTop(targetMode);
+              const finalTarget =
+                targetMode === "anchor" ? getForwardOnlyAnchorTargetTop(rawFinalTarget, viewport.scrollTop) : rawFinalTarget;
+              if (finalTarget > viewport.scrollTop + 5) {
+                lerpStartMs = performance.now();
+                lerpStartTop = viewport.scrollTop;
+                lerpDistance = finalTarget - lerpStartTop;
+                navigationLerpRafId = window.requestAnimationFrame(lerp);
+                return;
+              }
+
+              navigationLerpRafId = null;
+              finalizeProgrammaticScrollCycle();
+            });
         } else if (scrollArea && typeof scrollArea.scrollToBottom === "function") {
           emit("scroll-to-latest-turn:fallback", { requestId, behavior, targetMode });
           scrollArea.scrollToBottom(behavior);
@@ -535,6 +663,14 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     const viewport = getViewport();
     const metrics = readViewportMetrics(viewport);
     if (programmaticScrollActive && viewport) {
+      if (navigationLerpRafId != null || compensationLerpRafId != null) {
+        emit("viewport-scroll:programmatic-lerp-progress", {
+          targetMode: programmaticScrollTargetMode,
+          targetDelta: metrics != null ? programmaticScrollTargetTop - metrics.scrollTop : null
+        });
+        return;
+      }
+
       const nearBottom = isTimelineNearBottom();
       const reachedProgrammaticTarget = programmaticScrollTargetMode === "anchor"
         ? nearBottom || (metrics != null && metrics.scrollTop >= Math.max(programmaticScrollTargetTop - metrics.clientHeight - AUTO_SCROLL_THRESHOLD_PX, 0))
@@ -556,6 +692,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       if (reachedProgrammaticTarget) {
         streamAutoFollowEnabled.value = true;
         lastUserPausedSignature = "";
+        contentChangedSincePause = false;
         clearAutoFollowIdleTimer();
         emit("viewport-scroll:programmatic-complete", {
           targetMode: programmaticScrollTargetMode,
@@ -577,6 +714,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
       showScrollToBottom.value = false;
       unreadCount.value = 0;
       lastUserPausedSignature = "";
+      contentChangedSincePause = false;
       lastUserScrollAtMs = 0;
       clearAutoFollowIdleTimer();
       emit("viewport-scroll:near-bottom");
@@ -673,6 +811,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         idleMs >= USER_SCROLL_IDLE_MS &&
         isSubmitting.value &&
         !streamAutoFollowEnabled.value &&
+        contentChangedSincePause &&
         latestTurnSignature.value &&
         latestTurnSignature.value !== lastUserPausedSignature
       ) {
@@ -727,10 +866,14 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     emit("latest-turn-signature:changed", { signature, previousSignature });
     void nextTick().then(() => {
       if (!streamAutoFollowEnabled.value) {
+        if (signature !== lastUserPausedSignature) {
+          contentChangedSincePause = true;
+        }
         if (
           lastUserScrollAtMs > 0 &&
           isSubmitting.value &&
           autoFollowIdleTimer == null &&
+          contentChangedSincePause &&
           signature !== lastUserPausedSignature &&
           Date.now() - lastUserScrollAtMs >= USER_SCROLL_IDLE_MS
         ) {
@@ -742,8 +885,9 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         return;
       }
 
-      emit("latest-turn-signature:queue-follow-scroll", { signature, previousSignature });
-      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "anchor");
+      const targetMode: ScrollTargetMode = latestMessageRole.value === "user" ? "latest-user" : "anchor";
+      emit("latest-turn-signature:queue-follow-scroll", { signature, previousSignature, targetMode });
+      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, targetMode);
     });
   }
 
@@ -775,7 +919,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
 
     if (latestMessageRole.value === "user") {
       emit("message-count:user-message-follow", { newLen, oldLen });
-      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "anchor");
+      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "latest-user");
     }
   }
 
@@ -815,6 +959,7 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
         previousElement.removeEventListener("pointerdown", handleTimelinePointerIntent);
       }
       if (viewportElement) {
+        viewportElement.style.scrollBehavior = "auto";
         viewportElement.addEventListener("scroll", handleTimelineViewportScroll, { passive: true });
         viewportElement.addEventListener("wheel", handleTimelineUserScrollIntent, { passive: true });
         viewportElement.addEventListener("touchstart", handleTimelineUserScrollIntent, { passive: true });
@@ -849,6 +994,8 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     }
     clearScrollQueueWatchdog();
     cancelScrollLerp();
+    cancelCompensationLerp();
+    cancelOuterCompensationRaf();
     clearAutoFollowIdleTimer();
     teardownContentResizeObserver();
   });

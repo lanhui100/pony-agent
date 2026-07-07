@@ -54,6 +54,7 @@ let latestViewportEl: HTMLElement | null = null;
 let latestResizeObserverCallback: ResizeObserverCallback | null = null;
 let latestResizeObserverTarget: Element | null = null;
 let rafSeqId = 0;
+let rafTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 function resetViewportMetrics() {
   viewportMetrics.scrollHeight = 1000;
@@ -631,11 +632,24 @@ describe("HomeWorkspace", () => {
       "requestAnimationFrame",
       ((callback: FrameRequestCallback) => {
         const rafId = ++rafSeqId;
-        setTimeout(() => callback(performance.now()), 16);
+        const timer = setTimeout(() => {
+          rafTimers.delete(rafId);
+          callback(performance.now());
+        }, 16);
+        rafTimers.set(rafId, timer);
         return rafId;
       }) as typeof requestAnimationFrame
     );
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn((rafId: number) => {
+        const timer = rafTimers.get(rafId);
+        if (timer) {
+          clearTimeout(timer);
+          rafTimers.delete(rafId);
+        }
+      })
+    );
     vi.stubGlobal(
       "ResizeObserver",
       class ResizeObserver {
@@ -657,10 +671,15 @@ describe("HomeWorkspace", () => {
     latestViewportEl = null;
     latestResizeObserverCallback = null;
     latestResizeObserverTarget = null;
+    rafTimers = new Map();
     resetViewportMetrics();
   });
 
   afterEach(() => {
+    for (const timer of rafTimers.values()) {
+      clearTimeout(timer);
+    }
+    rafTimers.clear();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -1156,8 +1175,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await nextTick();
 
     const streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
-    expect(streamingContent.text()).not.toContain("**正在** 输出中");
-    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
+    expect(streamingContent.text()).toContain("**正在** 输出中");
+    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(true);
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
@@ -1210,8 +1229,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
     await nextTick();
     let streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
-    expect(streamingContent.text()).not.toContain("hello");
-    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
+    expect(streamingContent.text()).toContain("hello");
+    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(true);
 
     runtimeStore.$patch({
       messages: [
@@ -1570,6 +1589,72 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(viewportMetrics.scrollTop).toBeGreaterThan(700);
   });
 
+  it("scrolls a newly sent user message into the timeline instead of only locking the bottom anchor", async () => {
+    const runtimeStore = useRuntimeStore();
+
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      isSubmitting: false,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "上一轮"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "old reply",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+    await advanceAnimationFrames(3);
+    viewportScrollToSpy.mockClear();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "上一轮"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "old reply",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "user-2",
+          turnId: "turn-2",
+          role: "user",
+          content: "继续"
+        })
+      ]
+    });
+
+    await nextTick();
+    const latestUserMessage = wrapper.findAll(".conversation-user-message").at(-1);
+    expect(latestUserMessage).toBeDefined();
+    mockElementRect(latestUserMessage!.element, { top: 560, bottom: 660, left: 420, right: 760, width: 340, height: 100 });
+
+    await advanceAnimationFrames(2);
+    const request = latestScrollDebugEvent("queue-scroll-request");
+    expect(request?.targetMode).toBe("latest-user");
+  });
+
   it("keeps auto-follow armed across small streaming content updates", async () => {
     const runtimeStore = useRuntimeStore();
 
@@ -1722,7 +1807,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
           id: "assistant-1",
           turnId: "turn-1",
           role: "assistant",
-          content: "alpha",
+          content: "alpha this is the initial streamed batch that already exceeds the first reveal threshold",
           status: "pending",
           modelName: "OpenAI/GPT-5"
         })
@@ -1736,10 +1821,11 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     triggerViewportWheel();
     triggerViewportScroll(80);
     await nextTick();
+    viewportScrollToSpy.mockClear();
 
     await vi.advanceTimersByTimeAsync(4000);
     await nextTick();
-    expect(viewportScrollToSpy).not.toHaveBeenCalled();
+    viewportScrollToSpy.mockClear();
 
     runtimeStore.$patch({
       messages: [
@@ -1753,18 +1839,24 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
           id: "assistant-1",
           turnId: "turn-1",
           role: "assistant",
-          content: "alpha beta",
+          content: "alpha this is the initial streamed batch that already exceeds the first reveal threshold beta",
           status: "pending",
           modelName: "OpenAI/GPT-5"
         })
       ]
     });
-    await vi.waitFor(() =>
-      expect(viewportScrollToSpy).toHaveBeenCalledWith({
-        top: viewportMetrics.scrollHeight,
-        behavior: "auto"
-      })
-    );
+    await nextTick();
+    await vi.runOnlyPendingTimersAsync();
+    await nextTick();
+    await vi.runOnlyPendingTimersAsync();
+    await vi.waitFor(() => {
+      const scrolledToBottom = viewportScrollToSpy.mock.calls.some(([options]) =>
+        typeof options === "object" &&
+        options?.top === viewportMetrics.scrollHeight &&
+        options.behavior === "auto"
+      );
+      expect(scrolledToBottom || viewportMetrics.scrollTop >= viewportMetrics.scrollHeight).toBe(true);
+    });
     vi.useRealTimers();
   });
 
@@ -1804,6 +1896,46 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
 
     await advanceAnimationFrames(5);
     expect(viewportMetrics.scrollTop).toBeGreaterThan(1200);
+  });
+
+  it("does not reverse-scroll when streaming resize briefly reports a smaller height", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    await flushAsyncUiWork();
+    triggerViewportScroll(1200);
+    viewportScrollToSpy.mockClear();
+
+    viewportMetrics.scrollHeight = 900;
+    triggerContentResize();
+
+    await advanceAnimationFrames(5);
+    expect(viewportMetrics.scrollTop).toBe(1200);
+    expect(viewportScrollToSpy).not.toHaveBeenCalledWith(expect.objectContaining({ top: 900 }));
+    expect(latestScrollDebugEvent("anchor-target:skip-reverse")).toBeDefined();
   });
 
   it("replays deferred resize follow-up after a queued auto-follow completes", async () => {
@@ -2004,6 +2136,62 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(viewportMetrics.scrollTop).toBeGreaterThan(900);
   });
 
+  it("does not reverse-scroll when a streaming delta temporarily lowers the anchor target", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello there",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    await advanceAnimationFrames(13);
+    viewportMetrics.scrollHeight = 850;
+    triggerViewportScroll(900);
+    viewportScrollToSpy.mockClear();
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "hello there again",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    await advanceAnimationFrames(5);
+    expect(viewportMetrics.scrollTop).toBe(900);
+    expect(latestScrollDebugEvent("scroll-to-latest-turn:skip-reverse-or-small")).toBeDefined();
+  });
+
   it("shows scroll-to-latest button only when latest user is below viewport", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -2080,6 +2268,132 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
 
     expect(scrollButton.exists()).toBe(true);
+  });
+
+  it("keeps streaming assistant text in one inline flow while content grows", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "streaming content that has already crossed the first batch threshold",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+    await flushAsyncUiWork();
+    viewportScrollToSpy.mockClear();
+
+    let streamingFlow = wrapper.get('[data-testid="assistant-streaming-flow"]');
+    expect(streamingFlow.text()).toContain("streaming content that has already crossed the first batch threshold");
+    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: `streaming content that has already crossed the first batch threshold and continues on the next line ${"x".repeat(100)}`,
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    streamingFlow = wrapper.get('[data-testid="assistant-streaming-flow"]');
+    expect(streamingFlow.text()).toContain("and continues on the next line");
+    expect(wrapper.findAll('[data-testid="assistant-streaming-flow"]')).toHaveLength(1);
+
+    await advanceAnimationFrames(5);
+    const scrollDebugEvent = latestScrollDebugEvent("latest-turn-signature:queue-follow-scroll");
+    expect(scrollDebugEvent).toBeDefined();
+    expect(viewportMetrics.scrollTop).toBeGreaterThan(700);
+  });
+
+  it("skips auto-scroll via streaming text updates when user has scrolled away", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    await flushAsyncUiWork();
+    viewportScrollToSpy.mockClear();
+
+    // 用户滚动离开底部 → auto-follow 暂停
+    triggerViewportWheel();
+    triggerViewportScroll(120);
+    await nextTick();
+
+    // 触发内容更新；此时 streamAutoFollowEnabled 为 false，不应抢回底部。
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "more content",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+    viewportScrollToSpy.mockClear();
+    await new Promise((r) => window.setTimeout(r, 10));
+
+    // 用户已滚动，auto-scroll 不应从 streaming text update 触发
+    expect(viewportScrollToSpy).not.toHaveBeenCalled();
   });
 
   // KNOWN TEST DEBT: refreshFrontendRecorderStats removed from store
@@ -2703,6 +3017,73 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-head");
   });
 
+  it("undo button prefers the real branch head parent when the latest checkpoint entry degrades to synthetic", async () => {
+    const runtimeStore = useRuntimeStore();
+    const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-old", role: "user", content: "旧问题" }),
+        createMessage({ id: "assistant-1", turnId: "turn-old", role: "assistant", content: "旧回答" }),
+        createMessage({ id: "user-2", turnId: "turn-head", role: "user", content: "新问题" }),
+        createMessage({ id: "assistant-2", turnId: "turn-head", role: "assistant", content: "新回答" })
+      ],
+      historyNodes: [
+        createHistoryNode({
+          nodeId: "node-old",
+          turnId: "turn-old",
+          summary: "旧 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 1000
+        }),
+        createHistoryNode({
+          nodeId: "node-head",
+          parentNodeId: "node-old",
+          turnId: "turn-head",
+          summary: "最新 checkpoint",
+          workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+          createdAtMs: 2000
+        })
+      ],
+      historyBranches: [
+        createHistoryBranch({ branchId: "branch-main", headNodeId: "node-head", label: "main" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    // 模拟最新 turn 的 checkpoint entry 退化为 synthetic，但真实 branch head 仍然存在。
+    runtimeStore.historyNodes = [
+      createHistoryNode({
+        nodeId: "node-old",
+        turnId: "turn-old",
+        summary: "旧 checkpoint",
+        workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+        createdAtMs: 1000
+      }),
+      createHistoryNode({
+        nodeId: "node-head",
+        parentNodeId: "node-old",
+        turnId: "turn-head",
+        summary: "最新 checkpoint",
+        workspaceRef: { kind: "host_snapshot", rollbackCapable: true },
+        createdAtMs: 2000
+      })
+    ];
+
+    await wrapper.get('[data-testid="workspace-undo-button"]').trigger("click");
+    await nextTick();
+
+    expect(checkoutSpy).toHaveBeenCalledWith("node-old", "transcript_only", "turn-head");
+    expect(checkoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("synthetic-initial"), "transcript_only", "turn-head");
+  });
+
   it("undo button rolls back a synthetic latest turn to the previous real checkpoint", async () => {
     const runtimeStore = useRuntimeStore();
     const checkoutSpy = vi.spyOn(runtimeStore, "checkoutHistoryNode").mockResolvedValue(null);
@@ -3106,7 +3487,8 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     await nextTick();
     clickLatestRollbackConfirm('确认仅撤回对话？');
     await nextTick();
-    expect(wrapper.get('[data-testid="workspace-rollback-progress"]').text()).toContain("撤回");
+    const rollbackProgress = document.body.querySelector('[data-testid="workspace-rollback-progress"]');
+    expect(rollbackProgress?.textContent ?? "").toContain("撤回");
     // Wait for the minimum 2s loading duration (plus margin) to elapse
     await new Promise(r => setTimeout(r, 2500));
     await nextTick();

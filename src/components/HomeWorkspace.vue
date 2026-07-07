@@ -674,7 +674,7 @@ function assistantFadeCharacters(message: ChatMessage | null) {
 
 function assistantFadeCharacterStyle(index: number) {
   return {
-    animationDelay: `${Math.min(index, 36) * 18}ms`
+    animationDelay: `${Math.min(index, 100) * 16}ms`
   };
 }
 
@@ -757,6 +757,28 @@ function previousTurnIdForRollback(turnId: string) {
 }
 
 function resolveRollbackCheckoutNodeId(turnId: string, fallbackNodeId: string | null) {
+  const latestTurn = turns.value[turns.value.length - 1] ?? null;
+  const latestHeadNodeId = runtimeStore.branchHeadNodeId?.trim() || null;
+  const latestHeadNode = latestHeadNodeId ? (historyNodeById.value.get(latestHeadNodeId) ?? null) : null;
+  if (
+    latestTurn?.turnId === turnId &&
+    latestHeadNode &&
+    latestHeadNode.turnId?.trim() === turnId
+  ) {
+    const latestParentNodeId = latestHeadNode.parentNodeId?.trim() || null;
+    if (latestParentNodeId) {
+      const latestParentNode = historyNodeById.value.get(latestParentNodeId) ?? null;
+      // Only shortcut when the parent is a real, committed history node with a
+      // concrete turnId.  If the parent is the empty root node (no turnId),
+      // fall through to the original checkpoint / synthetic logic so the caller
+      // still receives a synthetic-initial-like node when there is no meaningful
+      // parent to roll back to.
+      if (latestParentNode && latestParentNode.turnId?.trim()) {
+        return latestParentNodeId;
+      }
+    }
+  }
+
   const entryNodeId = fallbackNodeId ?? checkpointEntryForTurn(turnId)?.nodeId ?? null;
   if (!entryNodeId) {
     return null;
@@ -842,7 +864,23 @@ function updateRollbackProgressPosition() {
   }
 
   if (width < 20 || height < 20) {
-    rollbackProgressStyle.value = {};
+    rollbackProgressStyle.value = viewportRect
+      ? {
+          left: `${viewportRect.left}px`,
+          top: `${viewportRect.top}px`,
+          width: `${Math.max(0, viewportRect.width)}px`,
+          height: `${Math.max(0, viewportRect.height)}px`,
+          right: "auto",
+          bottom: "auto"
+        }
+      : {
+          left: "0px",
+          top: "0px",
+          width: "100vw",
+          height: "100vh",
+          right: "auto",
+          bottom: "auto"
+        };
     if (import.meta.env.DEV) {
       console.log("[debug-rollback] progress overlay: zero-area fallback to full viewport");
     }
@@ -1145,6 +1183,7 @@ const {
   unreadCount,
   streamAutoFollowEnabled,
   handleScrollToBottom,
+  handleMarkdownRenderComplete,
   handleLatestTurnSignatureChange,
   handleSubmittingChange,
   handleMessageCountChange
@@ -1269,24 +1308,25 @@ watch(
 
 <template>
   <section class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-[0.6rem]">
+    <Teleport to="body">
+      <div
+        v-if="rollbackInFlight"
+        class="rollback-progress-overlay"
+        data-testid="workspace-rollback-progress"
+      >
+        <div class="rollback-progress-card">
+          <RotateCcw class="rollback-progress-icon h-4 w-4" />
+          <span>{{ rollbackProgressLabel() }}</span>
+        </div>
+      </div>
+    </Teleport>
     <ScrollArea
       ref="timelineScrollAreaRef"
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
-      viewport-class="px-4 sm:px-5"
+      viewport-class="workspace-timeline-viewport px-4 sm:px-5"
     >
       <div ref="workspaceContentColumnRef" class="mx-auto w-full max-w-[46.4rem] pt-4 sm:pt-5" data-testid="workspace-content-column">
-        <div
-          v-if="rollbackInFlight"
-          class="rollback-progress-overlay"
-          :style="rollbackProgressStyle"
-          data-testid="workspace-rollback-progress"
-        >
-          <div class="rollback-progress-card">
-            <RotateCcw class="rollback-progress-icon h-4 w-4" />
-            <span>{{ rollbackProgressLabel() }}</span>
-          </div>
-        </div>
-      <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5">
+        <TransitionGroup name="turn-flow" tag="div" class="relative space-y-5">
         <section
           v-if="isEmptyWorkspace"
           key="workspace-empty-state"
@@ -1298,7 +1338,7 @@ watch(
           </h2>
         </section>
         <section v-for="turn in visibleTurns" :key="turn.turnId" class="space-y-3">
-          <article v-if="turn.user" :ref="(element) => setLatestUserMessageRef(element, turn.turnId)" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-user-message ml-auto w-fit max-w-[68.8%] sm:max-w-[54.4%]">
+          <article v-if="turn.user" :ref="(element) => setLatestUserMessageRef(element, turn.turnId)" class="conversation-user-message ml-auto w-fit max-w-[68.8%] sm:max-w-[54.4%]">
             <div class="flex flex-col items-end">
               <div :class="actorLabelClass()" class="mb-1">
                 <span>User</span>
@@ -1367,7 +1407,7 @@ watch(
               </div>
             </article>
 
-          <article v-if="turn.assistant || turn.tools.length" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" v-motion :initial="{ opacity: 0, y: 8 }" :animate="{ opacity: 1, y: 0 }" :transition="{ duration: 0.22, ease: 'easeOut' }" class="conversation-agent-shell w-full px-0 py-1">
+          <article v-if="turn.assistant || turn.tools.length" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" class="conversation-agent-shell w-full px-0 py-1">
 
 
             <details
@@ -1376,7 +1416,7 @@ watch(
               v-motion
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
-              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }"
+              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
               class="conversation-disclosure conversation-reasoning-panel mt-1 mb-0.5 group p-0"
             >
               <summary class="conversation-disclosure-summary">
@@ -1412,7 +1452,7 @@ watch(
               v-motion
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
-              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.04 }"
+              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
                class="conversation-tool-panel mt-0.5 mb-4 space-y-0.5"
             >
               <div
@@ -1421,7 +1461,7 @@ watch(
                 v-motion
                 :initial="{ opacity: 0, y: 4 }"
                 :animate="{ opacity: 1, y: 0 }"
-                :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.04 + idx * 0.025 }"
+                :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.32 + idx * 0.025 }"
                 class="flex flex-col py-0.5 text-[12px] leading-5"
               >
                 <div class="flex items-center gap-2">
@@ -1448,26 +1488,25 @@ watch(
               v-motion
               :initial="{ opacity: 0, y: 6 }"
               :animate="{ opacity: 1, y: 0 }"
-              :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.04 }"
+              :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.32 }"
                class="assistant-response-panel my-0.5"
             >
-              <template v-if="isAssistantStreaming(turn.assistant)">
-                <div
-                  class="assistant-plain-text text-sm"
-                  :class="assistantTone(turn.assistant)"
-                  data-streaming="true"
+              <!-- 统一 shell：流式/完成共享同一外容器，避免 v-if/v-else 导致的 DOM 子树替换 -->
+              <div
+                class="assistant-plain-text text-sm"
+                :class="assistantTone(turn.assistant)"
+                :data-streaming="isAssistantStreaming(turn.assistant) ? 'true' : undefined"
+              >
+                <span
+                  v-if="isAssistantStreaming(turn.assistant)"
+                  class="assistant-streaming-content"
+                  data-testid="assistant-streaming-flow"
                 >
-                  <MarkdownRenderer
-                    v-if="assistantDisplayStableContent(turn.assistant)"
-                    :content="assistantDisplayStableContent(turn.assistant)"
-                    :streaming="true"
-                    wrapper-class="assistant-markdown"
-                    :tone-class="assistantTone(turn.assistant)"
-                  />
+                  {{ assistantDisplayStableContent(turn.assistant) }}
                   <span
                     v-if="assistantDisplayFadeContent(turn.assistant)"
                     :key="`afade-${turn.assistant.id}-${assistantDisplayFadeKey(turn.assistant)}`"
-                    class="assistant-streaming-fade assistant-streaming-content"
+                    class="assistant-streaming-fade"
                     :style="assistantDisplayFadeStyle(turn.assistant)"
                   >
                     <span
@@ -1477,14 +1516,16 @@ watch(
                       :style="assistantFadeCharacterStyle(index)"
                     >{{ character }}</span>
                   </span>
-                </div>
-              </template>
-              <MarkdownRenderer
-                v-else
-                :content="turn.assistant.content"
-                wrapper-class="assistant-plain-text assistant-markdown text-sm"
-                :tone-class="assistantTone(turn.assistant)"
-              />
+                </span>
+                <MarkdownRenderer
+                  v-else
+                  :content="turn.assistant.content"
+                  :streaming="false"
+                  wrapper-class="assistant-markdown"
+                  :tone-class="assistantTone(turn.assistant)"
+                  @render-complete="handleMarkdownRenderComplete"
+                />
+              </div>
             </div>
 
             <!-- Error detail panel (raw error for debugging) -->
@@ -1824,8 +1865,8 @@ watch(
   margin: 0.8rem 0;
   overflow-x: auto;
   border-radius: 0.45rem;
-  background: transparent;
-  padding: 0;
+  background: #faf5eb;
+  padding: 0.8rem 0.9rem;
   font-size: 0.82rem;
   line-height: 1.55;
   color: #2f261d;
@@ -1833,16 +1874,16 @@ watch(
 
 :deep(.assistant-markdown code) {
   border-radius: 0.3rem;
-  background: #f8e9cf;
+  background: #faf5eb;
   padding: 0.08rem 0.34rem;
   font-size: 0.82em;
   color: #5b4330;
 }
 
 :deep(.assistant-markdown pre code) {
-  background: #fbf7ef;
-  padding: 0.8rem 0.9rem;
-  border-radius: 0.45rem;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
   display: block;
   color: #2f261d;
   font-size: 1em;
@@ -1952,11 +1993,21 @@ watch(
   color: #3d342d;
 }
 
+/* 内容列创建布局隔离边界，减少流式输出时的连锁重排 */
+[data-testid="workspace-content-column"] {
+  contain: layout style;
+  overflow-anchor: none;
+}
+
+:deep(.workspace-timeline-viewport) {
+  overflow-anchor: none;
+}
+
 .turn-flow-enter-active,
 .turn-flow-leave-active {
   transition:
-    opacity 280ms ease,
-    transform 280ms ease;
+    opacity 320ms cubic-bezier(0.25, 0.46, 0.45, 0.94),
+    transform 320ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 .turn-flow-leave-active {
@@ -1965,20 +2016,21 @@ watch(
   right: 0;
 }
 
-.turn-flow-enter-from,
+.turn-flow-enter-from {
+  opacity: 0;
+  transform: translateY(0.55rem);
+}
+
 .turn-flow-leave-to {
   opacity: 0;
-  transform: translateY(0.45rem);
+  transform: translateY(-0.35rem);
 }
 
 .turn-flow-move {
-  transition: transform 260ms ease;
+  transition: transform 360ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
-.conversation-user-message,
-.conversation-agent-shell,
-.conversation-agent-header,
-.conversation-tool-panel,
+/* v-motion 面板：预声明 transform 层以减少首次动画跳变 */
 .conversation-tool-row,
 .conversation-reasoning-panel,
 .assistant-response-panel {
@@ -2017,7 +2069,7 @@ watch(
   display: inline;
   white-space: pre-wrap;
   animation-name: assistant-stream-char-fade-in;
-  animation-duration: 220ms;
+  animation-duration: 200ms;
   animation-timing-function: ease-out;
   animation-fill-mode: both;
 }
@@ -2025,11 +2077,9 @@ watch(
 @keyframes assistant-stream-char-fade-in {
   from {
     opacity: 0;
-    filter: blur(2px);
   }
   to {
     opacity: 1;
-    filter: blur(0);
   }
 }
 
@@ -2038,7 +2088,18 @@ watch(
   .assistant-streaming-char {
     animation: none !important;
     opacity: 1 !important;
-    filter: none !important;
+  }
+
+  .turn-flow-enter-active,
+  .turn-flow-leave-active,
+  .turn-flow-move {
+    transition: none !important;
+  }
+
+  .turn-flow-enter-from,
+  .turn-flow-leave-to {
+    opacity: 1;
+    transform: none;
   }
 }
 
@@ -2227,7 +2288,7 @@ watch(
 }
 
 .rollback-progress-overlay {
-  position: fixed;
+  position: absolute;
   inset: 0;
   z-index: 30;
   pointer-events: none;
