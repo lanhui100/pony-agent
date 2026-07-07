@@ -3,10 +3,12 @@ use crate::agent::config::{
 };
 use crate::agent::input::TurnInputImage;
 use crate::agent::retry::{
-    compute_delay, BackoffConfig, JitterKind, ProviderRetryPolicy, RetryBudget, RetryDecision, StreamState,
+    compute_delay, BackoffConfig, JitterKind, ProviderRetryPolicy, RetryBudget, RetryDecision,
+    StreamState,
 };
 use crate::agent::runtime_helper::block_on;
 use crate::agent::tools::{builtin_tool_contract_views, ToolCall, ToolDefinition, ToolResult};
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,7 +17,6 @@ use std::error::Error;
 #[cfg(test)]
 use std::io::BufRead;
 use std::time::Duration;
-use futures_util::StreamExt;
 use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,14 +492,12 @@ impl ProviderManager {
             }
 
             match self.config.protocol {
-                ProviderProtocol::OpenAi => self.send_openai_tool_decision_stream_request(
-                    request,
-                    tools,
-                    &mut |chunk| {
+                ProviderProtocol::OpenAi => {
+                    self.send_openai_tool_decision_stream_request(request, tools, &mut |chunk| {
                         streamed_any_delta = true;
                         on_delta(chunk);
-                    },
-                ),
+                    })
+                }
                 ProviderProtocol::Anthropic => {
                     self.send_anthropic_tool_decision_request(request, tools)
                 }
@@ -565,18 +564,18 @@ impl ProviderManager {
                     tool_result,
                 )
             })
-                .or_else(|error| {
-                    provider_log(format!(
-                        "followup:local-fallback protocol=openai provider={} model={} reason={}",
-                        self.config.provider_name, request.model, error
-                    ));
-                    Ok(local_tool_followup_fallback_response(
-                        request,
-                        tool_call,
-                        tool_result,
-                        error,
-                    ))
-                }),
+            .or_else(|error| {
+                provider_log(format!(
+                    "followup:local-fallback protocol=openai provider={} model={} reason={}",
+                    self.config.provider_name, request.model, error
+                ));
+                Ok(local_tool_followup_fallback_response(
+                    request,
+                    tool_call,
+                    tool_result,
+                    error,
+                ))
+            }),
             ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_request(
                 request,
                 tools,
@@ -663,29 +662,32 @@ impl ProviderManager {
                             "followup:stream-fallback protocol=openai provider={} model={} reason={}",
                             self.config.provider_name, request.model, stream_error
                         ));
-                        let response = match retry_provider_timeout("followup_sync_fallback", || {
-                            self.send_openai_tool_followup_request(
-                                request,
-                                tools,
-                                accumulated_messages,
-                                assistant_message,
-                                tool_call,
-                                tool_result,
-                            )
-                        }) {
+                        let response = match retry_provider_timeout(
+                            "followup_sync_fallback",
+                            || {
+                                self.send_openai_tool_followup_request(
+                                    request,
+                                    tools,
+                                    accumulated_messages,
+                                    assistant_message,
+                                    tool_call,
+                                    tool_result,
+                                )
+                            },
+                        ) {
                             Ok(response) => Ok(response),
-                                Err(sync_error) => {
-                                    provider_log(format!(
+                            Err(sync_error) => {
+                                provider_log(format!(
                                         "followup:stream-error protocol=openai provider={} model={} reason={}",
                                         self.config.provider_name, request.model, sync_error
                                     ));
-                                    Ok(local_tool_followup_fallback_response(
-                                        request,
-                                        tool_call,
-                                        tool_result,
-                                        sync_error,
-                                    ))
-                                }
+                                Ok(local_tool_followup_fallback_response(
+                                    request,
+                                    tool_call,
+                                    tool_result,
+                                    sync_error,
+                                ))
+                            }
                         };
                         response
                     }
@@ -1995,10 +1997,7 @@ fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelecti
             }
         }
         ThinkingParamPattern::AnthropicThinking => {
-            if let Some(budget) = config
-                .reasoning_budget_tokens
-                .filter(|b| *b > 0)
-            {
+            if let Some(budget) = config.reasoning_budget_tokens.filter(|b| *b > 0) {
                 body["thinking"] = json!({
                     "type": "enabled",
                     "budget_tokens": budget
@@ -2785,16 +2784,15 @@ where
             Err(err) => {
                 let last_error = extract_provider_error_detail(&err);
                 let failure = policy.classify(&err);
-                let decision = policy.decide(
-                    &failure,
-                    &budget,
-                    attempt,
-                    None,
-                    StreamState::NoDelta,
-                );
+                let decision =
+                    policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
                 provider_log(format!(
                     "{}:attempt={}/{} failed class={:?} decision={:?}",
-                    label, attempt + 1, config.max_retries + 1, failure, decision
+                    label,
+                    attempt + 1,
+                    config.max_retries + 1,
+                    failure,
+                    decision
                 ));
                 if !matches!(decision, RetryDecision::Retry { .. }) {
                     return Err(last_error);
@@ -4667,11 +4665,9 @@ mod tests {
         // Wrap in BufReader so BufRead::lines() works incrementally
         let reader = std::io::BufReader::new(SmallChunks(raw_text.as_bytes(), 3));
 
-        let message = collect_openai_sse_message_from_reader(
-            reader,
-            "unit-test",
-            &mut |delta| deltas.push(delta),
-        )
+        let message = collect_openai_sse_message_from_reader(reader, "unit-test", &mut |delta| {
+            deltas.push(delta)
+        })
         .expect("fragmented stream should parse");
 
         assert_eq!(message.output_text, "Hello World");
@@ -4714,11 +4710,9 @@ mod tests {
 
         let reader = std::io::BufReader::new(SmallChunks(raw_text.as_bytes(), 3));
 
-        let message = collect_openai_sse_message_from_reader(
-            reader,
-            "unit-test",
-            &mut |delta| deltas.push(delta),
-        )
+        let message = collect_openai_sse_message_from_reader(reader, "unit-test", &mut |delta| {
+            deltas.push(delta)
+        })
         .expect("UTF-8 split across read boundaries should parse");
 
         assert_eq!(message.output_text, "你好世界");

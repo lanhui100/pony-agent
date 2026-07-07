@@ -332,7 +332,9 @@ fn build_layered_turn_context(
         runtime_fact_messages[0].clone(),
     ];
     reserved_messages.extend(domain_profile_messages.clone());
-    reserved_messages.push(ProviderMessage::developer(base_semistable_context.note.clone()));
+    reserved_messages.push(ProviderMessage::developer(
+        base_semistable_context.note.clone(),
+    ));
     reserved_messages.extend(memory_messages.clone());
     reserved_messages.extend(build_volatile_context_messages(
         retrieved,
@@ -344,8 +346,9 @@ fn build_layered_turn_context(
     let (history_messages, history_truncated_count) =
         truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens);
     let history_truncation_note = truncation_note(history_truncated_count, "history messages");
-    let project_instruction_messages =
-        vec![ProviderMessage::developer(base_semistable_context.note.clone())];
+    let project_instruction_messages = vec![ProviderMessage::developer(
+        base_semistable_context.note.clone(),
+    )];
     let conversation_carry_messages = history_messages;
     let volatile_context_messages = build_volatile_context_messages(
         retrieved,
@@ -842,7 +845,13 @@ fn collect_prefix_mutation_reasons(
     history_truncation_note: Option<&str>,
     provider_native_tool_flow: bool,
 ) -> Vec<PrefixMutationReason> {
-    let _ = (retrieved, planner_skills, image_note, history_truncation_note, provider_native_tool_flow);
+    let _ = (
+        retrieved,
+        planner_skills,
+        image_note,
+        history_truncation_note,
+        provider_native_tool_flow,
+    );
     Vec::new()
 }
 
@@ -2133,7 +2142,9 @@ mod tests {
             .expect("native messages should serialize");
 
         assert!(serialized.contains("recent user asks for summary"));
-        assert!(serialized.contains("old user") || serialized.contains("Older context was truncated"));
+        assert!(
+            serialized.contains("old user") || serialized.contains("Older context was truncated")
+        );
     }
 
     #[test]

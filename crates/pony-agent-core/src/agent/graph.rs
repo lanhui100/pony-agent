@@ -1499,10 +1499,7 @@ mod tests {
 
         let run = runs.get("run-1").unwrap();
         assert_eq!(run.phase, GraphRunPhase::Paused, "phase should be Paused");
-        assert_eq!(
-            run.active_turn_id, None,
-            "active_turn_id should be cleared"
-        );
+        assert_eq!(run.active_turn_id, None, "active_turn_id should be cleared");
         assert_eq!(run.last_decision, None, "last_decision should be cleared");
         assert_eq!(run.stop_reason, None, "stop_reason should remain None");
         assert!(
@@ -1578,7 +1575,10 @@ mod tests {
         // Second call — should be no-op
         let modified = reconcile_stale_runs(&mut runs);
         assert!(!modified, "second call should not modify anything");
-        assert_eq!(runs, snapshot, "state should be identical after second call");
+        assert_eq!(
+            runs, snapshot,
+            "state should be identical after second call"
+        );
     }
 
     #[test]

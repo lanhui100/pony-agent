@@ -50,10 +50,19 @@ pub fn compute_delay(attempt: u32, config: &BackoffConfig, jitter_sample: f64) -
 /// Retry decision for the escalation contract.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RetryDecision {
-    Retry { delay_ms: u64 },
-    Fallback { target: FallbackTarget, reason: String },
-    Escalate { reason: String },
-    Abort { reason: String },
+    Retry {
+        delay_ms: u64,
+    },
+    Fallback {
+        target: FallbackTarget,
+        reason: String,
+    },
+    Escalate {
+        reason: String,
+    },
+    Abort {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +83,10 @@ pub enum StreamState {
 
 impl StreamState {
     pub fn may_auto_retry(self) -> bool {
-        matches!(self, Self::PreConnection | Self::NoDelta | Self::ReasoningOnly)
+        matches!(
+            self,
+            Self::PreConnection | Self::NoDelta | Self::ReasoningOnly
+        )
     }
 
     pub fn may_stream_to_sync_fallback(self) -> bool {
@@ -92,7 +104,9 @@ impl StreamState {
             return Self::VisibleTextStarted;
         }
         match kind {
-            StreamEventKind::Reasoning if self == Self::NoDelta || self == Self::PreConnection => Self::ReasoningOnly,
+            StreamEventKind::Reasoning if self == Self::NoDelta || self == Self::PreConnection => {
+                Self::ReasoningOnly
+            }
             StreamEventKind::ToolCall => Self::ToolCallStarted,
             StreamEventKind::ConnectionEstablished if self == Self::PreConnection => Self::NoDelta,
             _ => self,
@@ -131,13 +145,21 @@ pub struct Cancelled;
 /// Sleeper trait for injectable sleep in tests.
 /// Returns `Err(Cancelled)` if the sleep was interrupted.
 pub trait Sleeper: Send + Sync {
-    fn sleep(&self, duration: Duration, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), Cancelled>;
+    fn sleep(
+        &self,
+        duration: Duration,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), Cancelled>;
 }
 
 pub struct StdThreadSleeper;
 
 impl Sleeper for StdThreadSleeper {
-    fn sleep(&self, duration: Duration, cancelled: &std::sync::atomic::AtomicBool) -> Result<(), Cancelled> {
+    fn sleep(
+        &self,
+        duration: Duration,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), Cancelled> {
         let start = std::time::Instant::now();
         while start.elapsed() < duration {
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -158,13 +180,22 @@ pub struct FakeSleeper {
 
 impl FakeSleeper {
     pub fn new() -> Self {
-        Self { total_slept: std::sync::atomic::AtomicU64::new(0) }
+        Self {
+            total_slept: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 }
 
 impl Sleeper for FakeSleeper {
-    fn sleep(&self, duration: Duration, _cancelled: &std::sync::atomic::AtomicBool) -> Result<(), Cancelled> {
-        self.total_slept.fetch_add(duration.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    fn sleep(
+        &self,
+        duration: Duration,
+        _cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), Cancelled> {
+        self.total_slept.fetch_add(
+            duration.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Ok(())
     }
 }
@@ -180,7 +211,12 @@ pub struct RetryBudget {
 
 impl RetryBudget {
     pub fn new(max_retries: u32, total_budget_ms: u64) -> Self {
-        Self { max_retries, total_budget_ms, elapsed_ms: 0, attempts_used: 0 }
+        Self {
+            max_retries,
+            total_budget_ms,
+            elapsed_ms: 0,
+            attempts_used: 0,
+        }
     }
 
     pub fn is_exhausted(&self) -> bool {
@@ -218,7 +254,9 @@ pub struct RetryAfter {
 impl RetryAfter {
     pub fn parse(header_value: &str) -> Self {
         if let Ok(secs) = header_value.trim().parse::<u64>() {
-            return Self { seconds: Some(secs) };
+            return Self {
+                seconds: Some(secs),
+            };
         }
         // HTTP-date format parsing is deferred to a follow-up.
         // The seconds format covers the majority of Retry-After usage (429/503).
@@ -243,7 +281,10 @@ pub struct ProviderRetryPolicy {
 
 impl ProviderRetryPolicy {
     pub fn new(config: BackoffConfig) -> Self {
-        Self { config, sleeper: Box::new(StdThreadSleeper) }
+        Self {
+            config,
+            sleeper: Box::new(StdThreadSleeper),
+        }
     }
 
     pub fn with_sleeper(config: BackoffConfig, sleeper: Box<dyn Sleeper>) -> Self {
@@ -254,25 +295,61 @@ impl ProviderRetryPolicy {
     /// This does NOT consider stream state; stream safety is handled by `decide`.
     pub fn classify(&self, err: &str) -> FailureKind {
         let lower = err.to_ascii_lowercase();
-        if lower.contains("type=timeout") || lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline has elapsed") {
-            return FailureKind::TransientRetryable { details: err.to_string() };
+        if lower.contains("type=timeout")
+            || lower.contains("timeout")
+            || lower.contains("timed out")
+            || lower.contains("deadline has elapsed")
+        {
+            return FailureKind::TransientRetryable {
+                details: err.to_string(),
+            };
         }
         if lower.contains("429") || lower.contains("rate limit") || lower.contains("rate_limit") {
-            return FailureKind::TransientRetryable { details: err.to_string() };
+            return FailureKind::TransientRetryable {
+                details: err.to_string(),
+            };
         }
-        if lower.contains("502") || lower.contains("503") || lower.contains("504") || lower.contains("408") {
-            return FailureKind::TransientRetryable { details: err.to_string() };
+        if lower.contains("502")
+            || lower.contains("503")
+            || lower.contains("504")
+            || lower.contains("408")
+        {
+            return FailureKind::TransientRetryable {
+                details: err.to_string(),
+            };
         }
-        if lower.contains("connection reset") || lower.contains("connection refused") || lower.contains("dns") {
-            return FailureKind::TransientRetryable { details: err.to_string() };
+        if lower.contains("connection reset")
+            || lower.contains("connection refused")
+            || lower.contains("dns")
+        {
+            return FailureKind::TransientRetryable {
+                details: err.to_string(),
+            };
         }
-        if lower.contains("400") || lower.contains("401") || lower.contains("403") || lower.contains("404") || lower.contains("422") || lower.contains("407") || lower.contains("413") {
-            return FailureKind::NonRetryable { details: err.to_string() };
+        if lower.contains("400")
+            || lower.contains("401")
+            || lower.contains("403")
+            || lower.contains("404")
+            || lower.contains("422")
+            || lower.contains("407")
+            || lower.contains("413")
+        {
+            return FailureKind::NonRetryable {
+                details: err.to_string(),
+            };
         }
-        if lower.contains("context too large") || lower.contains("context_length") || lower.contains("max_tokens") || lower.contains("payload too large") {
-            return FailureKind::RequiresRequestMutation { details: err.to_string() };
+        if lower.contains("context too large")
+            || lower.contains("context_length")
+            || lower.contains("max_tokens")
+            || lower.contains("payload too large")
+        {
+            return FailureKind::RequiresRequestMutation {
+                details: err.to_string(),
+            };
         }
-        FailureKind::NonRetryable { details: err.to_string() }
+        FailureKind::NonRetryable {
+            details: err.to_string(),
+        }
     }
 
     /// Decide what to do with a failure given stream state and budget.
@@ -289,7 +366,11 @@ impl ProviderRetryPolicy {
     ) -> RetryDecision {
         if !stream_state.may_auto_retry() {
             return RetryDecision::Abort {
-                reason: format!("stream state {:?} prohibits auto-retry: {}", stream_state, failure.details()),
+                reason: format!(
+                    "stream state {:?} prohibits auto-retry: {}",
+                    stream_state,
+                    failure.details()
+                ),
             };
         }
         if !failure.is_retryable() {
@@ -304,20 +385,29 @@ impl ProviderRetryPolicy {
         }
         let base_delay = compute_delay(attempt, &self.config, 0.5);
         let delay = if let Some(ra) = retry_after {
-            let remaining = self.config.total_budget_ms.saturating_sub(budget.elapsed_ms);
+            let remaining = self
+                .config
+                .total_budget_ms
+                .saturating_sub(budget.elapsed_ms);
             ra.effective_delay(base_delay.as_millis() as u64, remaining)
                 .unwrap_or(base_delay.as_millis() as u64)
         } else {
             base_delay.as_millis() as u64
         };
-        RetryDecision::Retry { delay_ms: delay.min(self.config.max_delay_ms) }
+        RetryDecision::Retry {
+            delay_ms: delay.min(self.config.max_delay_ms),
+        }
     }
 
     /// Check if fallback to sync mode is appropriate for this failure+stream combination.
     /// Stream→sync fallback is safe when the stream has not yet committed visible text
     /// (NoDelta or ReasoningOnly) AND the error is non-retryable.
     /// This is a higher-level policy decision, not part of the auto-retry loop.
-    pub fn should_fallback_to_sync(&self, failure: &FailureKind, stream_state: StreamState) -> bool {
+    pub fn should_fallback_to_sync(
+        &self,
+        failure: &FailureKind,
+        stream_state: StreamState,
+    ) -> bool {
         !failure.is_retryable() && stream_state.may_stream_to_sync_fallback()
     }
 }
@@ -353,18 +443,24 @@ where
     F: FnMut() -> Result<T, (String, StreamState)>,
 {
     let mut budget = RetryBudget::new(policy.config.max_retries, policy.config.total_budget_ms);
-    let mut last_decision = RetryDecision::Abort { reason: "no attempts made".to_string() };
+    let mut last_decision = RetryDecision::Abort {
+        reason: "no attempts made".to_string(),
+    };
     let start = std::time::Instant::now();
 
     for attempt in 0..=policy.config.max_retries {
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(RetryDecision::Abort { reason: "cancelled".to_string() });
+            return Err(RetryDecision::Abort {
+                reason: "cancelled".to_string(),
+            });
         }
 
         let delay = compute_delay(attempt, &policy.config, 0.5);
         if attempt > 0 {
             if let Err(d) = policy.sleeper.sleep(delay, cancelled) {
-                return Err(RetryDecision::Abort { reason: format!("sleep cancelled: {:?}", d) });
+                return Err(RetryDecision::Abort {
+                    reason: format!("sleep cancelled: {:?}", d),
+                });
             }
             budget.record_attempt(delay.as_millis() as u64);
         }
@@ -372,7 +468,10 @@ where
         match operation() {
             Ok(value) => {
                 if attempt > 0 {
-                    eprintln!("{}: succeeded on attempt {}/{}", label, attempt, policy.config.max_retries);
+                    eprintln!(
+                        "{}: succeeded on attempt {}/{}",
+                        label, attempt, policy.config.max_retries
+                    );
                 }
                 budget.record_execution(start.elapsed().as_millis() as u64);
                 return Ok(value);
@@ -380,7 +479,10 @@ where
             Err((err, stream_state)) => {
                 let failure = policy.classify(&err);
                 if attempt > 0 {
-                    eprintln!("{}: attempt {}/{} failed: {} (class={:?})", label, attempt, policy.config.max_retries, err, failure);
+                    eprintln!(
+                        "{}: attempt {}/{} failed: {} (class={:?})",
+                        label, attempt, policy.config.max_retries, err, failure
+                    );
                 }
                 let decision = policy.decide(&failure, &budget, attempt, None, stream_state);
                 match &decision {
@@ -388,7 +490,9 @@ where
                         last_decision = decision;
                         // continue loop
                     }
-                    RetryDecision::Fallback { .. } | RetryDecision::Escalate { .. } | RetryDecision::Abort { .. } => {
+                    RetryDecision::Fallback { .. }
+                    | RetryDecision::Escalate { .. }
+                    | RetryDecision::Abort { .. } => {
                         return Err(decision);
                     }
                 }
@@ -439,15 +543,30 @@ mod tests {
     #[test]
     fn stream_state_transitions() {
         let s = StreamState::PreConnection;
-        assert_eq!(s.transition(StreamEventKind::ConnectionEstablished), StreamState::NoDelta);
+        assert_eq!(
+            s.transition(StreamEventKind::ConnectionEstablished),
+            StreamState::NoDelta
+        );
         let s = StreamState::NoDelta;
-        assert_eq!(s.transition(StreamEventKind::Reasoning), StreamState::ReasoningOnly);
+        assert_eq!(
+            s.transition(StreamEventKind::Reasoning),
+            StreamState::ReasoningOnly
+        );
         let s = StreamState::ReasoningOnly;
-        assert_eq!(s.transition(StreamEventKind::Text), StreamState::VisibleTextStarted);
+        assert_eq!(
+            s.transition(StreamEventKind::Text),
+            StreamState::VisibleTextStarted
+        );
         let s = StreamState::ReasoningOnly;
-        assert_eq!(s.transition(StreamEventKind::MixedReasoningText), StreamState::VisibleTextStarted);
+        assert_eq!(
+            s.transition(StreamEventKind::MixedReasoningText),
+            StreamState::VisibleTextStarted
+        );
         let s = StreamState::NoDelta;
-        assert_eq!(s.transition(StreamEventKind::ToolCall), StreamState::ToolCallStarted);
+        assert_eq!(
+            s.transition(StreamEventKind::ToolCall),
+            StreamState::ToolCallStarted
+        );
     }
 
     #[test]
@@ -545,7 +664,9 @@ mod tests {
     #[test]
     fn decide_aborts_on_non_retryable() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::NonRetryable { details: "400".to_string() };
+        let failure = FailureKind::NonRetryable {
+            details: "400".to_string(),
+        };
         let budget = RetryBudget::new(3, 10000);
         let decision = policy.decide(&failure, &budget, 1, None, StreamState::NoDelta);
         assert!(matches!(decision, RetryDecision::Abort { .. }));
@@ -554,7 +675,9 @@ mod tests {
     #[test]
     fn decide_escalates_on_exhausted_budget() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::TransientRetryable { details: "timeout".to_string() };
+        let failure = FailureKind::TransientRetryable {
+            details: "timeout".to_string(),
+        };
         let mut budget = RetryBudget::new(1, 10000);
         budget.record_attempt(500);
         let decision = policy.decide(&failure, &budget, 2, None, StreamState::NoDelta);
@@ -564,7 +687,9 @@ mod tests {
     #[test]
     fn decide_aborts_on_unsafe_with_any_state() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::UnsafeToRetry { details: "stream error".to_string() };
+        let failure = FailureKind::UnsafeToRetry {
+            details: "stream error".to_string(),
+        };
         let budget = RetryBudget::new(3, 10000);
         // UnsafeToRetry + any state → Abort (may_auto_retry doesn't matter for UnsafeToRetry)
         let decision = policy.decide(&failure, &budget, 1, None, StreamState::NoDelta);
@@ -574,7 +699,9 @@ mod tests {
     #[test]
     fn decide_aborts_on_visible_text_state() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::TransientRetryable { details: "timeout".to_string() };
+        let failure = FailureKind::TransientRetryable {
+            details: "timeout".to_string(),
+        };
         let budget = RetryBudget::new(3, 10000);
         // VisibleTextStarted prohibits auto-retry even for transient errors
         let decision = policy.decide(&failure, &budget, 1, None, StreamState::VisibleTextStarted);
@@ -584,7 +711,9 @@ mod tests {
     #[test]
     fn should_fallback_to_sync_returns_true_for_non_retryable_in_reasoning() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::NonRetryable { details: "server error".to_string() };
+        let failure = FailureKind::NonRetryable {
+            details: "server error".to_string(),
+        };
         assert!(policy.should_fallback_to_sync(&failure, StreamState::ReasoningOnly));
         assert!(policy.should_fallback_to_sync(&failure, StreamState::NoDelta));
     }
@@ -592,7 +721,9 @@ mod tests {
     #[test]
     fn should_fallback_to_sync_returns_false_for_visible_text() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::NonRetryable { details: "server error".to_string() };
+        let failure = FailureKind::NonRetryable {
+            details: "server error".to_string(),
+        };
         assert!(!policy.should_fallback_to_sync(&failure, StreamState::VisibleTextStarted));
         assert!(!policy.should_fallback_to_sync(&failure, StreamState::ToolCallStarted));
     }
@@ -600,7 +731,9 @@ mod tests {
     #[test]
     fn decide_retries_on_retryable() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::TransientRetryable { details: "timeout".to_string() };
+        let failure = FailureKind::TransientRetryable {
+            details: "timeout".to_string(),
+        };
         let budget = RetryBudget::new(3, 10000);
         let decision = policy.decide(&failure, &budget, 1, None, StreamState::NoDelta);
         assert!(matches!(decision, RetryDecision::Retry { .. }));
@@ -609,7 +742,9 @@ mod tests {
     #[test]
     fn decide_aborts_on_requires_mutation() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::RequiresRequestMutation { details: "context too large".to_string() };
+        let failure = FailureKind::RequiresRequestMutation {
+            details: "context too large".to_string(),
+        };
         let budget = RetryBudget::new(3, 10000);
         let decision = policy.decide(&failure, &budget, 1, None, StreamState::NoDelta);
         assert!(matches!(decision, RetryDecision::Abort { .. }));
@@ -617,7 +752,9 @@ mod tests {
 
     #[test]
     fn failure_kind_details_is_pub() {
-        let f = FailureKind::TransientRetryable { details: "test-detail".to_string() };
+        let f = FailureKind::TransientRetryable {
+            details: "test-detail".to_string(),
+        };
         assert_eq!(f.details(), "test-detail");
     }
 
@@ -626,42 +763,72 @@ mod tests {
         use std::sync::atomic::AtomicBool;
         let sleeper = FakeSleeper::new();
         let cancelled = AtomicBool::new(false);
-        assert!(sleeper.sleep(Duration::from_millis(150), &cancelled).is_ok());
-        assert_eq!(sleeper.total_slept.load(std::sync::atomic::Ordering::Relaxed), 150);
+        assert!(sleeper
+            .sleep(Duration::from_millis(150), &cancelled)
+            .is_ok());
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            150
+        );
     }
 
     #[test]
     fn retry_with_policy_succeeds_on_first_try() {
         use std::sync::atomic::AtomicBool;
-        let policy = ProviderRetryPolicy::with_sleeper(BackoffConfig::default(), Box::new(FakeSleeper::new()));
+        let policy = ProviderRetryPolicy::with_sleeper(
+            BackoffConfig::default(),
+            Box::new(FakeSleeper::new()),
+        );
         let cancelled = AtomicBool::new(false);
-        let result = retry_with_policy("test", &policy, || Ok::<_, (String, StreamState)>(42), &cancelled);
+        let result = retry_with_policy(
+            "test",
+            &policy,
+            || Ok::<_, (String, StreamState)>(42),
+            &cancelled,
+        );
         assert_eq!(result, Ok(42));
     }
 
     #[test]
     fn retry_with_policy_aborts_on_non_retryable() {
         use std::sync::atomic::AtomicBool;
-        let config = BackoffConfig { max_retries: 1, ..Default::default() };
+        let config = BackoffConfig {
+            max_retries: 1,
+            ..Default::default()
+        };
         let policy = ProviderRetryPolicy::with_sleeper(config, Box::new(FakeSleeper::new()));
         let cancelled = AtomicBool::new(false);
-        let result = retry_with_policy("test", &policy, || {
-            Err::<i32, _>(("HTTP 400".to_string(), StreamState::NoDelta))
-        }, &cancelled);
+        let result = retry_with_policy(
+            "test",
+            &policy,
+            || Err::<i32, _>(("HTTP 400".to_string(), StreamState::NoDelta)),
+            &cancelled,
+        );
         assert!(matches!(result, Err(RetryDecision::Abort { .. })));
     }
 
     #[test]
     fn retry_with_policy_exhausts_and_escalates() {
         use std::sync::atomic::AtomicBool;
-        let config = BackoffConfig { max_retries: 3, initial_delay_ms: 1, ..Default::default() };
+        let config = BackoffConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            ..Default::default()
+        };
         let policy = ProviderRetryPolicy::with_sleeper(config, Box::new(FakeSleeper::new()));
         let cancelled = AtomicBool::new(false);
         let tries = std::cell::Cell::new(0);
-        let result = retry_with_policy("test", &policy, || {
-            tries.set(tries.get() + 1);
-            Err::<i32, _>(("timeout".to_string(), StreamState::NoDelta))
-        }, &cancelled);
+        let result = retry_with_policy(
+            "test",
+            &policy,
+            || {
+                tries.set(tries.get() + 1);
+                Err::<i32, _>(("timeout".to_string(), StreamState::NoDelta))
+            },
+            &cancelled,
+        );
         assert!(matches!(result, Err(RetryDecision::Escalate { .. })));
         // max_retries=3 means: 1 initial + up to 3 retries = 4 total calls
         assert_eq!(tries.get(), 4);
@@ -676,14 +843,22 @@ mod tests {
     #[test]
     fn retry_with_policy_cancelled_returns_abort_immediately() {
         use std::sync::atomic::AtomicBool;
-        let config = BackoffConfig { max_retries: 3, ..Default::default() };
+        let config = BackoffConfig {
+            max_retries: 3,
+            ..Default::default()
+        };
         let policy = ProviderRetryPolicy::with_sleeper(config, Box::new(FakeSleeper::new()));
         let cancelled = AtomicBool::new(true);
         let tries = std::cell::Cell::new(0);
-        let result = retry_with_policy("test", &policy, || {
-            tries.set(tries.get() + 1);
-            Err::<i32, _>(("timeout".to_string(), StreamState::NoDelta))
-        }, &cancelled);
+        let result = retry_with_policy(
+            "test",
+            &policy,
+            || {
+                tries.set(tries.get() + 1);
+                Err::<i32, _>(("timeout".to_string(), StreamState::NoDelta))
+            },
+            &cancelled,
+        );
         assert!(matches!(result, Err(RetryDecision::Abort { .. })));
         // Should not have called the operation at all
         assert_eq!(tries.get(), 0);
@@ -693,28 +868,60 @@ mod tests {
     fn stream_state_transition_policing_prevents_rollback() {
         // Once visible text started, no event should roll back
         let s = StreamState::VisibleTextStarted;
-        assert_eq!(s.transition(StreamEventKind::Reasoning), StreamState::VisibleTextStarted);
-        assert_eq!(s.transition(StreamEventKind::Text), StreamState::VisibleTextStarted);
-        assert_eq!(s.transition(StreamEventKind::MixedReasoningText), StreamState::VisibleTextStarted);
-        assert_eq!(s.transition(StreamEventKind::ToolCall), StreamState::ToolCallStarted);
+        assert_eq!(
+            s.transition(StreamEventKind::Reasoning),
+            StreamState::VisibleTextStarted
+        );
+        assert_eq!(
+            s.transition(StreamEventKind::Text),
+            StreamState::VisibleTextStarted
+        );
+        assert_eq!(
+            s.transition(StreamEventKind::MixedReasoningText),
+            StreamState::VisibleTextStarted
+        );
+        assert_eq!(
+            s.transition(StreamEventKind::ToolCall),
+            StreamState::ToolCallStarted
+        );
         // Once tool call started, no event should roll back
         let s = StreamState::ToolCallStarted;
-        assert_eq!(s.transition(StreamEventKind::Reasoning), StreamState::ToolCallStarted);
-        assert_eq!(s.transition(StreamEventKind::Text), StreamState::ToolCallStarted);
+        assert_eq!(
+            s.transition(StreamEventKind::Reasoning),
+            StreamState::ToolCallStarted
+        );
+        assert_eq!(
+            s.transition(StreamEventKind::Text),
+            StreamState::ToolCallStarted
+        );
         // PreConnection direct to tool call is allowed
         let s = StreamState::PreConnection;
-        assert_eq!(s.transition(StreamEventKind::ToolCall), StreamState::ToolCallStarted);
-        assert_eq!(s.transition(StreamEventKind::Text), StreamState::VisibleTextStarted);
+        assert_eq!(
+            s.transition(StreamEventKind::ToolCall),
+            StreamState::ToolCallStarted
+        );
+        assert_eq!(
+            s.transition(StreamEventKind::Text),
+            StreamState::VisibleTextStarted
+        );
         // NoDelta text directly jumps to visible text
         let s = StreamState::NoDelta;
-        assert_eq!(s.transition(StreamEventKind::Text), StreamState::VisibleTextStarted);
-        assert_eq!(s.transition(StreamEventKind::MixedReasoningText), StreamState::VisibleTextStarted);
+        assert_eq!(
+            s.transition(StreamEventKind::Text),
+            StreamState::VisibleTextStarted
+        );
+        assert_eq!(
+            s.transition(StreamEventKind::MixedReasoningText),
+            StreamState::VisibleTextStarted
+        );
     }
 
     #[test]
     fn decide_uses_retry_after_parameter() {
         let policy = ProviderRetryPolicy::new(BackoffConfig::default());
-        let failure = FailureKind::TransientRetryable { details: "timeout".to_string() };
+        let failure = FailureKind::TransientRetryable {
+            details: "timeout".to_string(),
+        };
         let budget = RetryBudget::new(3, 10000);
         let ra = RetryAfter { seconds: Some(2) };
         let decision = policy.decide(&failure, &budget, 1, Some(&ra), StreamState::NoDelta);
@@ -738,10 +945,14 @@ mod tests {
 
     #[test]
     fn failure_kind_methods() {
-        let u = FailureKind::UnsafeToRetry { details: "mid-stream".to_string() };
+        let u = FailureKind::UnsafeToRetry {
+            details: "mid-stream".to_string(),
+        };
         assert!(u.is_unsafe_to_retry());
         assert!(!u.requires_request_mutation());
-        let m = FailureKind::RequiresRequestMutation { details: "context too large".to_string() };
+        let m = FailureKind::RequiresRequestMutation {
+            details: "context too large".to_string(),
+        };
         assert!(m.requires_request_mutation());
         assert!(!m.is_unsafe_to_retry());
     }

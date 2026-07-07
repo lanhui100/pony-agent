@@ -1,19 +1,19 @@
-use std::sync::{Arc, RwLock};
 use crate::agent::capability_bridge::CapabilityRegistry;
+use crate::agent::context::TurnContextBuilder;
 use crate::agent::execution_control::ExecutionControlRegistry;
 use crate::agent::hooks::{
-    turn_hook_point_for_capability_mediation_hook_point,
-    turn_hook_point_for_planner_hook_point, AgentHookExecutor, AgentHookRegistry,
-    CapabilityMediationEnvelope, CapabilityMediationHookPoint, HookFailurePolicy,
-    HookStructuredResult, HookTraceRecord, PlannerFactsEnvelope, PlannerHookPoint, TurnHookPoint,
+    turn_hook_point_for_capability_mediation_hook_point, turn_hook_point_for_planner_hook_point,
+    AgentHookExecutor, AgentHookRegistry, CapabilityMediationEnvelope,
+    CapabilityMediationHookPoint, HookFailurePolicy, HookStructuredResult, HookTraceRecord,
+    PlannerFactsEnvelope, PlannerHookPoint, TurnHookPoint,
 };
+use crate::agent::planner::TurnPlanner;
 use crate::agent::provider::{ProviderDecision, TokenUsage};
 use crate::agent::session::SessionStore;
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
 use crate::agent::tools::{ToolCall, ToolExecutor};
-use crate::agent::context::TurnContextBuilder;
-use crate::agent::planner::TurnPlanner;
 use serde_json::Value;
+use std::sync::{Arc, RwLock};
 
 // ── Shared context snapshot from AgentRuntime ──
 pub struct TurnContext {
@@ -84,7 +84,10 @@ pub fn dispatch_hook_trace_records(
         }
     }
 
-    HookDispatchOutcome { trace_records: records, fail_turn_error }
+    HookDispatchOutcome {
+        trace_records: records,
+        fail_turn_error,
+    }
 }
 
 pub struct CapabilityMediationDispatchOutcome {
@@ -161,7 +164,9 @@ pub fn dispatch_capability_mediation_hooks(
 
     let arguments = if fail_turn_error.is_none() && blocked_error.is_none() {
         super::apply_capability_argument_patches(
-            &hook_point, &envelope.argument_summary, &execution_results,
+            &hook_point,
+            &envelope.argument_summary,
+            &execution_results,
         )
         .unwrap_or_else(|error| {
             fail_turn_error = Some(error);
@@ -171,7 +176,12 @@ pub fn dispatch_capability_mediation_hooks(
         super::normalized_arguments_from_summary(&envelope.argument_summary)
     };
 
-    CapabilityMediationDispatchOutcome { arguments, trace_records: records, blocked_error, fail_turn_error }
+    CapabilityMediationDispatchOutcome {
+        arguments,
+        trace_records: records,
+        blocked_error,
+        fail_turn_error,
+    }
 }
 
 pub struct PlannerDispatchOutcome {
@@ -250,16 +260,27 @@ pub fn dispatch_planner_hooks(
     }
 
     let (decision, selected_tool_call) = if fail_turn_error.is_none() && blocked_error.is_none() {
-        super::apply_planner_patches(&hook_point, decision, selected_tool_call, &execution_results)
-            .unwrap_or_else(|error| {
-                fail_turn_error = Some(error);
-                (None, None)
-            })
+        super::apply_planner_patches(
+            &hook_point,
+            decision,
+            selected_tool_call,
+            &execution_results,
+        )
+        .unwrap_or_else(|error| {
+            fail_turn_error = Some(error);
+            (None, None)
+        })
     } else {
         (decision, selected_tool_call)
     };
 
-    PlannerDispatchOutcome { decision, selected_tool_call, trace_records: records, blocked_error, fail_turn_error }
+    PlannerDispatchOutcome {
+        decision,
+        selected_tool_call,
+        trace_records: records,
+        blocked_error,
+        fail_turn_error,
+    }
 }
 
 // ── Tool loop outcome collected during execution ──

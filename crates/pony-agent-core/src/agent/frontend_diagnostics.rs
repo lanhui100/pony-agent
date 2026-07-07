@@ -168,9 +168,9 @@ impl FrontendDiagnosticsStore {
                 )
                 .map_err(|e| format!("prepare trace insert: {e}"))?;
             for event in command.events {
-                let data_json = event
-                    .data
-                    .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()));
+                let data_json = event.data.map(|value| {
+                    serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+                });
                 stmt.execute(params![
                     event.session_id,
                     event.turn_id,
@@ -185,7 +185,11 @@ impl FrontendDiagnosticsStore {
                     event.stall_level,
                     event.trigger_kind,
                     data_json,
-                    if event.truncated.unwrap_or(false) { 1 } else { 0 }
+                    if event.truncated.unwrap_or(false) {
+                        1
+                    } else {
+                        0
+                    }
                 ])
                 .map_err(|e| format!("insert trace event: {e}"))?;
             }
@@ -208,7 +212,11 @@ impl FrontendDiagnosticsStore {
                     snapshot.trigger_kind,
                     snapshot.stall_gap_ms,
                     serde_json::to_string(&snapshot.snapshot).unwrap_or_else(|_| "{}".to_string()),
-                    if snapshot.truncated.unwrap_or(false) { 1 } else { 0 }
+                    if snapshot.truncated.unwrap_or(false) {
+                        1
+                    } else {
+                        0
+                    }
                 ])
                 .map_err(|e| format!("insert stall snapshot: {e}"))?;
             }
@@ -219,7 +227,10 @@ impl FrontendDiagnosticsStore {
         Ok(())
     }
 
-    pub fn query_window(&self, query: FrontendTraceQuery) -> Result<FrontendTraceQueryResult, String> {
+    pub fn query_window(
+        &self,
+        query: FrontendTraceQuery,
+    ) -> Result<FrontendTraceQueryResult, String> {
         let limit = query.limit.unwrap_or(500).clamp(1, 5000);
         let offset = query
             .cursor
@@ -239,7 +250,9 @@ impl FrontendDiagnosticsStore {
              LIMIT ?5 OFFSET ?6",
         );
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare query: {e}"))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare query: {e}"))?;
         let rows = stmt
             .query_map(
                 params![
@@ -272,9 +285,7 @@ impl FrontendDiagnosticsStore {
                 },
             )
             .map_err(|e| format!("query rows: {e}"))?;
-        let events: Vec<FrontendTraceEvent> = rows
-            .filter_map(Result::ok)
-            .collect();
+        let events: Vec<FrontendTraceEvent> = rows.filter_map(Result::ok).collect();
         let has_more = events.len() as u32 == limit;
         let next_cursor = if has_more {
             Some((offset + limit).to_string())
@@ -327,7 +338,8 @@ impl FrontendDiagnosticsStore {
                         stall_level: row.get(4)?,
                         trigger_kind: row.get(5)?,
                         stall_gap_ms: row.get(6)?,
-                        snapshot: serde_json::from_str(&snapshot_json).unwrap_or_else(|_| json!({})),
+                        snapshot: serde_json::from_str(&snapshot_json)
+                            .unwrap_or_else(|_| json!({})),
                         truncated: Some(row.get::<_, i64>(8)? != 0),
                     })
                 },
@@ -336,7 +348,10 @@ impl FrontendDiagnosticsStore {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
-    pub fn export_json(&self, query: FrontendTraceQuery) -> Result<FrontendTraceExportPayload, String> {
+    pub fn export_json(
+        &self,
+        query: FrontendTraceQuery,
+    ) -> Result<FrontendTraceExportPayload, String> {
         let events = self.query_window(FrontendTraceQuery {
             limit: Some(query.limit.unwrap_or(5000)),
             cursor: None,
@@ -369,7 +384,11 @@ impl FrontendDiagnosticsStore {
             cursor: None,
             ..query.clone()
         })?;
-        let trace_origin_wall_ms = events.events.first().map(|event| event.ts_wall_ms).unwrap_or(0);
+        let trace_origin_wall_ms = events
+            .events
+            .first()
+            .map(|event| event.ts_wall_ms)
+            .unwrap_or(0);
         let trace_events: Vec<Value> = events
             .events
             .iter()
@@ -605,7 +624,10 @@ mod tests {
 
         assert_eq!(trace_events[0]["ts"].as_i64(), Some(0));
         assert_eq!(trace_events[1]["ts"].as_i64(), Some(125_000));
-        assert_eq!(parsed["metadata"]["traceOriginWallMs"].as_i64(), Some(now - 1000));
+        assert_eq!(
+            parsed["metadata"]["traceOriginWallMs"].as_i64(),
+            Some(now - 1000)
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

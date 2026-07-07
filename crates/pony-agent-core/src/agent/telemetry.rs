@@ -507,8 +507,9 @@ fn nested_result_to_activity(
             "partial" | "error" | "aborted" => "error".to_string(),
             _ => "done".to_string(),
         },
-        description: extract_llm_description(&arguments)
-            .unwrap_or_else(|| nested_summary(position, tool_name, aggregate_status, error_message)),
+        description: extract_llm_description(&arguments).unwrap_or_else(|| {
+            nested_summary(position, tool_name, aggregate_status, error_message)
+        }),
         arguments_text: Some(pretty_json(&arguments)),
         result_text: Some(nested_result_text(&output, error_message)),
         duration_seconds,

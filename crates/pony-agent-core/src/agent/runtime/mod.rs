@@ -1216,11 +1216,7 @@ impl AgentRuntime {
             .switch_history_branch(session_id, branch_id, expected_cursor_version)
     }
 
-    fn prepare_turn(
-        &self,
-        input: &TurnInput,
-        reject_empty: bool,
-    ) -> Result<PreparedTurn, String> {
+    fn prepare_turn(&self, input: &TurnInput, reject_empty: bool) -> Result<PreparedTurn, String> {
         let user_message = if reject_empty {
             let trimmed = input.message.trim();
             if trimmed.is_empty() {
@@ -1231,17 +1227,18 @@ impl AgentRuntime {
             normalize_user_message(&input.message)
         };
 
-        let session = self.sessions
+        let session = self
+            .sessions
             .write()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
             .snapshot_at(
-            input.session_id.as_deref(),
-            input.node_id.as_deref(),
-            &input.history,
-        );
+                input.session_id.as_deref(),
+                input.node_id.as_deref(),
+                &input.history,
+            );
         let workspace_mode = input.workspace_mode.as_deref();
         let provider = self.resolve_provider(input);
         let preliminary_retrieved = self.context_builder.retrieve_context_state(
@@ -1795,9 +1792,9 @@ impl AgentRuntime {
                 .sessions
                 .read()
                 .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            })
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    e.into_inner()
+                })
                 .load_recent_images(input.session_id.as_deref(), recall_limit);
         }
 
@@ -1817,19 +1814,20 @@ impl AgentRuntime {
         attachments: Vec<SessionAttachment>,
         workspace_mode: Option<&str>,
     ) -> PersistedTurnOutcome {
-        let updated_session = self.sessions
+        let updated_session = self
+            .sessions
             .write()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
             .append_turn(
-            session_id,
-            user_message,
-            assistant_message,
-            provider_native_transcript,
-            attachments,
-        );
+                session_id,
+                user_message,
+                assistant_message,
+                provider_native_transcript,
+                attachments,
+            );
         let retrieved = self.context_builder.retrieve_context_state(
             user_message,
             &[],
@@ -1965,42 +1963,42 @@ impl AgentRuntime {
                 e.into_inner()
             })
             .record_turn_trace(
-            session_id,
-            TurnTraceRecord {
-                turn_id: turn_id.to_string(),
-                session_id: session_id.map(str::to_string),
-                event_id: None,
-                event_type: None,
-                event_version: None,
-                sequence: None,
-                emitted_at_ms: None,
-                title: build_turn_trace_title(user_message),
-                phase: phase.to_string(),
-                trace_steps,
-                trace_timeline,
-                tool_activities,
-                provider_call_records,
-                hook_trace_records,
-                provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
-                provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
-                provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
-                provider_model: provider_meta.map(|meta| meta.model.clone()),
-                provider_source,
-                provider_mode,
-                build_context_observation,
-                session_summary,
-                fallback_reason,
-                error,
-                input_tokens,
-                cache_hit_input_tokens,
-                reasoning_tokens,
-                output_tokens,
-                total_tokens,
-                first_token_latency_ms,
-                turn_duration_ms,
-                updated_at: 0,
-            },
-        );
+                session_id,
+                TurnTraceRecord {
+                    turn_id: turn_id.to_string(),
+                    session_id: session_id.map(str::to_string),
+                    event_id: None,
+                    event_type: None,
+                    event_version: None,
+                    sequence: None,
+                    emitted_at_ms: None,
+                    title: build_turn_trace_title(user_message),
+                    phase: phase.to_string(),
+                    trace_steps,
+                    trace_timeline,
+                    tool_activities,
+                    provider_call_records,
+                    hook_trace_records,
+                    provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+                    provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+                    provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+                    provider_model: provider_meta.map(|meta| meta.model.clone()),
+                    provider_source,
+                    provider_mode,
+                    build_context_observation,
+                    session_summary,
+                    fallback_reason,
+                    error,
+                    input_tokens,
+                    cache_hit_input_tokens,
+                    reasoning_tokens,
+                    output_tokens,
+                    total_tokens,
+                    first_token_latency_ms,
+                    turn_duration_ms,
+                    updated_at: 0,
+                },
+            );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2135,10 +2133,7 @@ impl AgentRuntime {
         );
     }
 
-    fn save_input_attachments(
-        &self,
-        input: &TurnInput,
-    ) -> Result<Vec<SessionAttachment>, String> {
+    fn save_input_attachments(&self, input: &TurnInput) -> Result<Vec<SessionAttachment>, String> {
         self.save_input_attachments_for_session(input.session_id.as_deref(), &input.images)
     }
 
@@ -2262,44 +2257,44 @@ impl AgentRuntime {
                 e.into_inner()
             })
             .append_failed_turn(
-            session_id,
-            user_message,
-            &assistant_message,
-            TurnTraceRecord {
-                turn_id: turn_id.to_string(),
-                session_id: session_id.map(str::to_string),
-                event_id: None,
-                event_type: None,
-                event_version: None,
-                sequence: None,
-                emitted_at_ms: None,
-                title: build_turn_trace_title(user_message),
-                phase: "failed".to_string(),
-                trace_steps,
-                trace_timeline,
-                tool_activities,
-                provider_call_records,
-                hook_trace_records,
-                provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
-                provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
-                provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
-                provider_model: provider_meta.map(|meta| meta.model.clone()),
-                provider_source,
-                provider_mode,
-                build_context_observation,
-                session_summary: Some(error_message.clone()),
-                fallback_reason,
-                error: Some(error_message),
-                input_tokens: None,
-                cache_hit_input_tokens: None,
-                reasoning_tokens: None,
-                output_tokens: None,
-                total_tokens: None,
-                first_token_latency_ms,
-                turn_duration_ms,
-                updated_at: 0,
-            },
-        );
+                session_id,
+                user_message,
+                &assistant_message,
+                TurnTraceRecord {
+                    turn_id: turn_id.to_string(),
+                    session_id: session_id.map(str::to_string),
+                    event_id: None,
+                    event_type: None,
+                    event_version: None,
+                    sequence: None,
+                    emitted_at_ms: None,
+                    title: build_turn_trace_title(user_message),
+                    phase: "failed".to_string(),
+                    trace_steps,
+                    trace_timeline,
+                    tool_activities,
+                    provider_call_records,
+                    hook_trace_records,
+                    provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+                    provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+                    provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+                    provider_model: provider_meta.map(|meta| meta.model.clone()),
+                    provider_source,
+                    provider_mode,
+                    build_context_observation,
+                    session_summary: Some(error_message.clone()),
+                    fallback_reason,
+                    error: Some(error_message),
+                    input_tokens: None,
+                    cache_hit_input_tokens: None,
+                    reasoning_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                    first_token_latency_ms,
+                    turn_duration_ms,
+                    updated_at: 0,
+                },
+            );
     }
 
     fn annotate_sync_terminal_trace_with_envelope(
@@ -3046,9 +3041,7 @@ impl AgentRuntime {
                 let gap = now.saturating_sub(prev);
                 const MIN_CLIENT_GAP_MS: u64 = 16;
                 if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        MIN_CLIENT_GAP_MS - gap,
-                    ));
+                    std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
                 }
             }
             let mut response = response;
@@ -3101,7 +3094,12 @@ impl AgentRuntime {
                 hop_total,
                 first_token_latency.get(),
                 Some(turn_started_at.elapsed().as_millis() as u64),
-                None, None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
                 input.session_id.clone(),
             );
             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
@@ -5564,7 +5562,8 @@ impl AgentRuntime {
             );
             return;
         }
-        let finalize_hook_outcome = self.dispatch_hook_trace_records(TurnHookPoint::TurnFinalizeEnd);
+        let finalize_hook_outcome =
+            self.dispatch_hook_trace_records(TurnHookPoint::TurnFinalizeEnd);
         let finalize_hook_trace_records = finalize_hook_outcome.trace_records.clone();
         let mut terminal_hook_trace_records = planner_hook_trace_records.clone();
         terminal_hook_trace_records.extend(checkpoint_hook_trace_records.clone());
@@ -7013,8 +7012,7 @@ fn normalize_tool_directive(
     } else {
         runtime_log(format!(
             "turn:tool-call-empty-name call_id={:?} arguments={} raw_assistant_message=none",
-            tool_call.call_id,
-            tool_call.arguments,
+            tool_call.call_id, tool_call.arguments,
         ));
     }
 
@@ -7958,9 +7956,7 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
                 let gap = now.saturating_sub(prev);
                 const MIN_CLIENT_GAP_MS: u64 = 16;
                 if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        MIN_CLIENT_GAP_MS - gap,
-                    ));
+                    std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
                 }
                 last_emit_for_client_clone.set(now);
             }
@@ -7989,9 +7985,7 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
         let gap = now.saturating_sub(prev);
         const MIN_CLIENT_GAP_MS: u64 = 16;
         if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-            std::thread::sleep(std::time::Duration::from_millis(
-                MIN_CLIENT_GAP_MS - gap,
-            ));
+            std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
         }
     }
 
@@ -9494,7 +9488,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("planner-trace-session".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -9549,7 +9543,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("capability-trace-session".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -9614,7 +9608,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("capability-hook-rewrite".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -9676,7 +9670,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("planner-preflight-rewrite".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -9740,7 +9734,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("planner-tool-selection-rewrite".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -9838,7 +9832,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("skill-hook-rewrite".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -9935,7 +9929,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-unstable-boundary-not-dispatched".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -10021,7 +10015,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-hook-failturn".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -10130,7 +10124,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-tool-start-failturn".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -10224,7 +10218,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-tool-end-failturn".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -10325,7 +10319,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-checkpoint-failturn".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -10435,7 +10429,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("session-finalize-failturn".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -10508,7 +10502,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-model-failturn".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -10557,7 +10551,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-tool-start-failturn".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -10611,7 +10605,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-tool-end-failturn".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -10670,7 +10664,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-hook-trace-terminal".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -10757,7 +10751,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-checkpoint-failturn".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -10848,7 +10842,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-finalize-failturn".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -10956,7 +10950,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-hook-trace-terminal".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -11799,7 +11793,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("test-session".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -11842,7 +11836,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stop-session".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -11995,7 +11989,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("attachment-failure".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -12166,7 +12160,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-reasoning-latency".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -12219,7 +12213,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-tool-hop-latency".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -12268,7 +12262,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-multi-hop".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -12397,7 +12391,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("sync-usage-accumulated".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -12464,7 +12458,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("repair-blank-tool-sync".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -12726,7 +12720,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-multi-hop".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -12945,7 +12939,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-tool-hop-limit".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13035,7 +13029,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-cancel-during-tool".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13121,7 +13115,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-tool-error".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13230,7 +13224,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-reasoning-latency".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13378,7 +13372,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-sync-fallback-no-fake-ttft".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13479,7 +13473,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-tool-hop-latency".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13602,7 +13596,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("deepseek-followup-compat".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13754,7 +13748,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-duplicate-tool-recovery".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -13932,7 +13926,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("stream-usage-accumulated".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -14062,7 +14056,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("repair-blank-tool-stream".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -14107,7 +14101,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("runtime-history".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -14119,7 +14113,7 @@ mod tests {
             provider_id: None,
             model_id: None,
             reasoning_effort: None,
-        workspace_mode: None,
+            workspace_mode: None,
             session_id: Some("runtime-history".to_string()),
             node_id: None,
             history: Vec::new(),
@@ -14322,7 +14316,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("deepseek-followup-compat".to_string()),
                 node_id: None,
                 history: Vec::new(),
@@ -14510,7 +14504,7 @@ mod tests {
                 provider_id: None,
                 model_id: None,
                 reasoning_effort: None,
-        workspace_mode: None,
+                workspace_mode: None,
                 session_id: Some("deepseek-structured-followup".to_string()),
                 node_id: None,
                 history: Vec::new(),

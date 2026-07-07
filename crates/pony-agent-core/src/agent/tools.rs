@@ -3,8 +3,8 @@ use encoding_rs::{Encoding, GBK};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::error::Error;
 use std::env;
+use std::error::Error;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -850,7 +850,7 @@ impl ToolRouter {
                     code,
                     error,
                     Some("请确认目标地址可访问，或稍后重试。".to_string()),
-                )
+                );
             }
         };
 
@@ -989,7 +989,7 @@ impl ToolRouter {
                     code,
                     error,
                     Some("请确认 API Key 有效且网络可访问 api.exa.ai。".to_string()),
-                )
+                );
             }
         };
 
@@ -1031,11 +1031,7 @@ impl ToolRouter {
             return error_result(
                 TOOL_WEB_SEARCH_QUERY,
                 "api_error",
-                format!(
-                    "Exa API 错误（状态码 {}）：{}",
-                    status.as_u16(),
-                    error_msg
-                ),
+                format!("Exa API 错误（状态码 {}）：{}", status.as_u16(), error_msg),
                 Some("请检查 API Key 和查询参数。".to_string()),
             );
         }
@@ -2588,11 +2584,18 @@ fn with_description(schema: Value) -> Value {
         "type": "string",
         "description": "用中文极简描述本次工具调用的目的，用于用户界面展示。每次调用工具时必须提供此字段。例如「读取 config.json」「搜索 TokenManager」「运行单元测试」。"
     });
-    if let Some(properties) = schema.as_object().and_then(|o| o.get("properties")).and_then(|p| p.as_object()) {
+    if let Some(properties) = schema
+        .as_object()
+        .and_then(|o| o.get("properties"))
+        .and_then(|p| p.as_object())
+    {
         let mut props = properties.clone();
         props.insert("description".to_string(), desc);
         let mut schema = Value::Object(schema.as_object().unwrap().clone());
-        schema.as_object_mut().unwrap().insert("properties".to_string(), Value::Object(props));
+        schema
+            .as_object_mut()
+            .unwrap()
+            .insert("properties".to_string(), Value::Object(props));
         schema
     } else {
         schema
@@ -3514,7 +3517,12 @@ fn is_reqwest_timeout_error(error: &reqwest::Error) -> bool {
     error.is_timeout()
         || error
             .source()
-            .map(|source| source.to_string().to_ascii_lowercase().contains("timed out"))
+            .map(|source| {
+                source
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("timed out")
+            })
             .unwrap_or(false)
 }
 
@@ -3585,8 +3593,6 @@ fn decode_content(headers: &reqwest::header::HeaderMap, bytes: &[u8]) -> String 
     let (cow, _, _) = GBK.decode(bytes);
     cow.into_owned()
 }
-
-
 
 fn spawn_workspace_command(command: &str, cwd: &Path) -> std::io::Result<std::process::Child> {
     if cfg!(windows) {
@@ -4121,11 +4127,7 @@ mod tests {
             .get("timezone")
             .and_then(Value::as_str)
             .expect("timezone should exist");
-        assert!(
-            tz.len() >= 3,
-            "timezone offset should be present: {}",
-            tz
-        );
+        assert!(tz.len() >= 3, "timezone offset should be present: {}", tz);
     }
 
     fn serve_single_http_response(status_line: &str, body: &str, content_type: &str) -> String {
@@ -5186,8 +5188,8 @@ mod tests {
         });
 
         assert_eq!(result.status, "error");
-        let payload = serde_json::from_str::<Value>(&result.output)
-            .expect("web fetch timeout output json");
+        let payload =
+            serde_json::from_str::<Value>(&result.output).expect("web fetch timeout output json");
         assert_eq!(
             payload
                 .get("error")
@@ -5226,8 +5228,8 @@ mod tests {
         });
 
         assert_eq!(result.status, "error");
-        let payload = serde_json::from_str::<Value>(&result.output)
-            .expect("web search timeout output json");
+        let payload =
+            serde_json::from_str::<Value>(&result.output).expect("web search timeout output json");
         assert_eq!(
             payload
                 .get("error")
@@ -5406,12 +5408,18 @@ mod tests {
         assert_eq!(result.status, "ok");
         let payload: Value =
             serde_json::from_str(&result.output).expect("path_info output should be json");
-        assert_eq!(
-            payload.get("kind").and_then(Value::as_str),
-            Some("file")
+        assert_eq!(payload.get("kind").and_then(Value::as_str), Some("file"));
+        assert!(
+            payload
+                .get("sizeBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0
         );
-        assert!(payload.get("sizeBytes").and_then(Value::as_u64).unwrap_or(0) > 0);
-        assert!(payload.get("modifiedUnixSeconds").and_then(Value::as_u64).is_some());
+        assert!(payload
+            .get("modifiedUnixSeconds")
+            .and_then(Value::as_u64)
+            .is_some());
         assert_eq!(payload.get("childCount"), Some(&Value::Null));
     }
 

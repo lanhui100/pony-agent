@@ -66,9 +66,9 @@ impl ExecutionControlRegistry {
     pub fn register_turn(&self, turn_id: &str, session_id: Option<&str>, run_id: Option<&str>) {
         let now = now_timestamp_ms();
         let mut state = self.state.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         let mut checkpoint = ExecutionCheckpoint {
             contract_version: execution_checkpoint_contract_version().to_string(),
             turn_id: turn_id.to_string(),
@@ -109,9 +109,9 @@ impl ExecutionControlRegistry {
         F: FnOnce(&mut ExecutionCheckpoint),
     {
         let mut state = self.state.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         let Some(checkpoint) = state.turns.get_mut(turn_id) else {
             return;
         };
@@ -123,9 +123,9 @@ impl ExecutionControlRegistry {
 
     pub fn request_stop(&self, turn_id: &str) -> StopTurnResponse {
         let mut state = self.state.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         let Some(checkpoint) = state.turns.get_mut(turn_id) else {
             return StopTurnResponse {
                 turn_id: turn_id.to_string(),
@@ -158,9 +158,9 @@ impl ExecutionControlRegistry {
 
     pub fn is_stop_requested(&self, turn_id: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         state
             .turns
             .get(turn_id)
@@ -174,9 +174,9 @@ impl ExecutionControlRegistry {
         session_id: Option<&str>,
     ) -> Option<ExecutionCheckpoint> {
         let state = self.state.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
-                e.into_inner()
-            });
+            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
         if let Some(turn_id) = turn_id {
             return state.turns.get(turn_id).cloned();
         }
