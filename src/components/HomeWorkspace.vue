@@ -601,19 +601,15 @@ function shouldShowReasoningBlock(message: ChatMessage | null) {
     return false;
   }
 
-  return message.status === "pending" || assistantDisplayedReasoning(message).length > 0;
+  return assistantDisplayedReasoning(message).trim().length > 0;
 }
 
 function shouldOpenReasoningBlock(_message: ChatMessage | null) {
   return false;
 }
 
-function reasoningPlaceholder(message: ChatMessage | null) {
-  if (!message || message.status !== "pending") {
-    return "";
-  }
-
-  return "正在思考...";
+function assistantHasReasoningSignal(message: ChatMessage | null) {
+  return assistantDisplayedReasoning(message).trim().length > 0;
 }
 
 function assistantHasVisibleContent(message: ChatMessage | null) {
@@ -623,6 +619,32 @@ function assistantHasVisibleContent(message: ChatMessage | null) {
 
   const visibleContent = message.status === "pending" ? assistantDisplayContent(message) : message.content;
   return Boolean(visibleContent.trim());
+}
+
+function assistantAwaitingFirstSignal(turn: TurnBucket) {
+  if (!isLastTurn.value(turn.turnId) || turn.tools.length > 0 || turn.mergedTools.length > 0) {
+    return false;
+  }
+
+  if (turn.assistant) {
+    return (
+      turn.assistant.status === "pending" &&
+      !assistantHasVisibleContent(turn.assistant) &&
+      !assistantHasReasoningSignal(turn.assistant)
+    );
+  }
+
+  const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
+  return Boolean(
+    turn.user &&
+    isSubmitting.value &&
+    !sessionOperation.value &&
+    (!activeTurnId || activeTurnId === turn.turnId)
+  );
+}
+
+function shouldShowAgentArticle(turn: TurnBucket) {
+  return Boolean(turn.assistant || turn.tools.length || assistantAwaitingFirstSignal(turn));
 }
 
 function isAssistantStreaming(message: ChatMessage | null) {
@@ -1407,7 +1429,7 @@ watch(
               </div>
             </article>
 
-          <article v-if="turn.assistant || turn.tools.length" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" class="conversation-agent-shell w-full px-0 py-1">
+          <article v-if="shouldShowAgentArticle(turn)" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" class="conversation-agent-shell w-full px-0 py-1">
 
 
             <details
@@ -1438,14 +1460,27 @@ watch(
                     {{ assistantDisplayedReasoningFade(turn.assistant) }}
                   </span>
                 </template>
-                <p
-                  v-else-if="reasoningPlaceholder(turn.assistant)"
-                  class="assistant-reasoning"
-                >
-                  {{ reasoningPlaceholder(turn.assistant) }}
-                </p>
               </div>
             </details>
+
+            <Transition name="assistant-waiting-signal">
+              <div
+                v-if="assistantAwaitingFirstSignal(turn)"
+                class="assistant-waiting-panel my-0.5"
+                role="status"
+                aria-label="等待回复开始"
+                data-testid="assistant-awaiting-first-signal"
+              >
+                <span class="assistant-waiting-dots" aria-hidden="true">
+                  <span
+                    v-for="index in 3"
+                    :key="index"
+                    class="assistant-waiting-dot"
+                    :style="{ animationDelay: `${(index - 1) * 150}ms` }"
+                  ></span>
+                </span>
+              </div>
+            </Transition>
 
             <div
               v-if="turn.mergedTools.length"
@@ -2083,11 +2118,66 @@ watch(
   }
 }
 
+.assistant-waiting-panel {
+  display: inline-flex;
+  min-height: 1.7rem;
+  align-items: center;
+  padding: 0.1rem 0;
+}
+
+.assistant-waiting-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+}
+
+.assistant-waiting-dot {
+  width: 0.46rem;
+  height: 0.46rem;
+  border-radius: 9999px;
+  background: rgba(87, 83, 78, 0.58);
+  animation: assistant-waiting-dot-bounce 900ms cubic-bezier(0.2, 0.7, 0.35, 1) infinite both;
+}
+
+.assistant-waiting-signal-enter-active,
+.assistant-waiting-signal-leave-active {
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease;
+}
+
+.assistant-waiting-signal-enter-from,
+.assistant-waiting-signal-leave-to {
+  opacity: 0;
+  transform: translateY(0.25rem);
+}
+
+@keyframes assistant-waiting-dot-bounce {
+  0%,
+  70%,
+  100% {
+    opacity: 0.42;
+    transform: translateY(0) scale(0.86);
+  }
+
+  35% {
+    opacity: 1;
+    transform: translateY(-0.34rem) scale(1.08);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .assistant-streaming-fade,
-  .assistant-streaming-char {
+  .assistant-streaming-char,
+  .assistant-waiting-dot {
     animation: none !important;
     opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .assistant-waiting-signal-enter-active,
+  .assistant-waiting-signal-leave-active {
+    transition: opacity 120ms ease !important;
   }
 
   .turn-flow-enter-active,

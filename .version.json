@@ -1091,11 +1091,23 @@
           "segment": "patch"
         }
       ]
+    },
+    {
+      "bumps": [
+        {
+          "from": "0.1.55",
+          "to": "0.1.56",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ],
+      "timestamp": "2026-07-07T21:24:31+08:00",
+      "commit": "edb457e"
     }
   ],
-  "lastBump": "2026-07-07T17:08:08+08:00",
+  "lastBump": "2026-07-07T21:24:30+08:00",
   "tauri": {
-    "patch": 55,
+    "patch": 56,
     "minor": 1,
     "major": 0
   },

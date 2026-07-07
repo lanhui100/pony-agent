@@ -1180,6 +1180,85 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
+  it("shows a jumping-dot waiting state before the first assistant signal arrives", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "calling_model",
+      isSubmitting: true,
+      activeTurnId: "turn-1",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const waitingState = wrapper.get('[data-testid="assistant-awaiting-first-signal"]');
+    expect(waitingState.findAll(".assistant-waiting-dot")).toHaveLength(3);
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists()).toBe(true);
+
+    runtimeStore.$patch({
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "tool-1",
+          turnId: "turn-1",
+          role: "tool",
+          content: "",
+          status: "pending",
+          toolName: "Search",
+          detail: "searching"
+        })
+      ]
+    });
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("searching");
+  });
+
   it("reveals a buffered streaming batch through the fade layer once the first threshold is reached", async () => {
     const runtimeStore = useRuntimeStore();
 
@@ -2722,7 +2801,8 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     await nextTick();
     await nextTick();
 
-    expect(wrapper.text()).toContain("正在思考...");
+    expect(wrapper.text()).not.toContain("正在思考...");
+    expect(wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists()).toBe(false);
 
     const markdownBlocks = wrapper.findAll(".assistant-plain-text");
     expect(markdownBlocks.some((node) => node.classes().includes("text-stone-800"))).toBe(true);
@@ -2863,7 +2943,7 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(toolRows[2]?.text()).not.toContain("(2x)");
   });
 
-  it("shows reasoning placeholder for pending assistant with empty reasoning", async () => {
+  it("shows the first-signal waiting dots instead of a reasoning text placeholder for an empty pending assistant", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 
     const runtimeStore = useRuntimeStore();
@@ -2886,7 +2966,9 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.find(".assistant-reasoning").exists()).toBe(true);
+    expect(wrapper.find(".assistant-reasoning").exists()).toBe(false);
+    expect(wrapper.find('[data-testid="assistant-awaiting-first-signal"]').exists()).toBe(true);
+    expect(wrapper.findAll(".assistant-waiting-dot")).toHaveLength(3);
   });
 
   // KNOWN TEST DEBT: PopoverPortal rendering in jsdom environment is flaky
