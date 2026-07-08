@@ -31,7 +31,7 @@ import {
   Wrench,
 } from "lucide-vue-next";
 import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
-import type { ChatMessage, ConversationCheckpointEntry, HistoryNode } from "@/types/runtime";
+import type { ChatMessage, ConversationCheckpointEntry, HistoryNode, TraceTimelineEntry } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { extractErrorMessage } from "@/lib/error-utils";
@@ -60,6 +60,13 @@ type TurnBucket = {
   tools: ChatMessage[];
   mergedTools: MergedToolCall[];
 };
+
+type AgentTurnEvent =
+  | { kind: "reasoning"; key: string; order: number; assistant: ChatMessage }
+  | { kind: "waiting"; key: string; order: number }
+  | { kind: "tools"; key: string; order: number; tools: MergedToolCall[] }
+  | { kind: "content"; key: string; order: number; assistant: ChatMessage }
+  | { kind: "error"; key: string; order: number };
 
 type MergedToolCall = {
   id: string;
@@ -91,6 +98,7 @@ const {
   latestRunControlAuditSummary,
   messages,
   sessionOperation,
+  traceTimeline,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
@@ -140,8 +148,12 @@ const scrollToLatestHovered = ref(false);
 let hoverDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let streamingPresentationTimer: ReturnType<typeof setTimeout> | null = null;
 const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
+const STREAM_RENDER_DISABLE_STORAGE_KEY = "pony-agent.stream-render.disable-optimization";
+const STREAM_RENDER_CONFIG_CHANGED_EVENT = "pony:stream-render-config-changed";
+const STREAMING_MARKDOWN_FOLLOW_DISTANCE_PX = 96;
 const COMPOSER_BUFFER_PX = 220;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
+const streamingRenderOptimizationDisabled = ref(false);
 
 function resolveTimelineViewport(): HTMLElement | null {
   const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
@@ -416,8 +428,12 @@ const latestVisibleTurnLayoutSignature = computed(() => {
     latestTurn.turnId,
     latestTurn.user ? `user:${latestTurn.user.id}` : "user:-",
     latestTurn.assistant ? `assistant:${latestTurn.assistant.id}:${latestTurn.assistant.status ?? "done"}` : "assistant:-",
-    `tools:${latestTurn.tools.map((tool) => tool.id).join(",")}`,
-    `mtools:${latestTurn.mergedTools.map((t) => `${t.id}:${t.description}`).join(",")}`
+    `events:${agentTurnEvents(latestTurn).map((event) => {
+      if (event.kind === "tools") {
+        return `tools:${event.tools.map((tool) => `${tool.id}:${tool.description}`).join(",")}`;
+      }
+      return `${event.kind}:${event.key}`;
+    }).join(",")}`
   ].join("|");
 });
 
@@ -558,6 +574,171 @@ function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
   return result;
 }
 
+function messageIndexInTurn(message: ChatMessage | null) {
+  if (!message) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const index = messages.value.findIndex((item) => item.id === message.id);
+  return index >= 0 ? index : Number.POSITIVE_INFINITY;
+}
+
+function canonicalTraceKind(entry: TraceTimelineEntry) {
+  if (entry.kind === "model") {
+    return "call_model";
+  }
+  if (entry.kind === "tool") {
+    return "call_tool";
+  }
+  return entry.kind;
+}
+
+function traceToolMatchKey(entry: TraceTimelineEntry) {
+  const activity = entry.toolActivities?.[entry.toolActivities.length - 1] ?? null;
+  return [
+    activity?.canonicalToolName?.trim(),
+    activity?.name?.trim(),
+    entry.label?.trim()
+  ].find(Boolean) ?? "";
+}
+
+function traceSequenceForToolMessage(tool: ChatMessage, traceTimeline: TraceTimelineEntry[]) {
+  const toolKey = toolMergeKey(tool);
+  const toolIdSuffix = tool.id.startsWith(`tool-${tool.turnId}-`)
+    ? tool.id.slice(`tool-${tool.turnId}-`.length)
+    : tool.id;
+
+  const matchedEntry = traceTimeline.find((entry) => {
+    if (canonicalTraceKind(entry) !== "call_tool") {
+      return false;
+    }
+
+    if (entry.toolActivities?.some((activity) => activity.id === toolIdSuffix || `tool-${tool.turnId}-${activity.id}` === tool.id)) {
+      return true;
+    }
+
+    return Boolean(toolKey && traceToolMatchKey(entry) === toolKey);
+  });
+
+  return matchedEntry?.sequence ?? null;
+}
+
+function latestModelTraceEntry(traceTimeline: TraceTimelineEntry[]) {
+  for (let index = traceTimeline.length - 1; index >= 0; index--) {
+    const entry = traceTimeline[index]!;
+    if (canonicalTraceKind(entry) === "call_model") {
+      return entry;
+    }
+  }
+  return null;
+}
+
+function traceTimelineForTurn(turnId: string) {
+  const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
+  if (activeTurnId === turnId && traceTimeline.value.length) {
+    return traceTimeline.value;
+  }
+
+  const historicalTimeline = latestTraceForTurn(turnId)?.traceTimeline ?? [];
+  if (historicalTimeline.length) {
+    return historicalTimeline;
+  }
+
+  return [];
+}
+
+function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
+  const turnTraceTimeline = traceTimelineForTurn(turn.turnId);
+  const modelEntry = latestModelTraceEntry(turnTraceTimeline);
+  const assistantOrder = messageIndexInTurn(turn.assistant);
+  const modelOrder = modelEntry?.sequence ?? assistantOrder;
+  const isActiveStreamingTurn = runtimeStore.activeTurnId === turn.turnId && turn.assistant?.status === "pending";
+  const events: AgentTurnEvent[] = [];
+
+  if (turn.assistant && shouldShowReasoningBlock(turn.assistant)) {
+    events.push({
+      kind: "reasoning",
+      key: `reasoning-${turn.assistant.id}`,
+      order: Number.isFinite(modelOrder) ? modelOrder - 0.2 : assistantOrder - 0.2,
+      assistant: turn.assistant
+    });
+  }
+
+  for (const tool of turn.tools) {
+    const traceSequence = traceSequenceForToolMessage(tool, turnTraceTimeline);
+    const fallbackOrder = messageIndexInTurn(tool);
+    const normalizedFallbackOrder =
+      modelEntry && Number.isFinite(assistantOrder) && Number.isFinite(fallbackOrder)
+        ? modelOrder + (fallbackOrder - assistantOrder)
+        : fallbackOrder;
+    const streamFallbackOrder =
+      isActiveStreamingTurn && modelEntry && tool.status === "done"
+        ? modelOrder - 0.1
+        : normalizedFallbackOrder;
+    events.push({
+      kind: "tools",
+      key: `tools-${tool.id}`,
+      order: modelEntry ? traceSequence ?? streamFallbackOrder : fallbackOrder,
+      tools: mergeToolCalls([tool])
+    });
+  }
+
+  if (assistantAwaitingFirstSignal(turn)) {
+    events.push({
+      kind: "waiting",
+      key: `waiting-${turn.turnId}`,
+      order: Number.isFinite(assistantOrder) ? assistantOrder : Number.MAX_SAFE_INTEGER - 2
+    });
+  }
+
+  if (turn.assistant && assistantHasVisibleContent(turn.assistant) && !shouldRenderAssistantAsError(turn)) {
+    events.push({
+      kind: "content",
+      key: `content-${turn.assistant.id}`,
+      order: modelOrder,
+      assistant: turn.assistant
+    });
+  }
+
+  if (shouldRenderAssistantAsError(turn) && assistantErrorDetail(turn)) {
+    events.push({
+      kind: "error",
+      key: `error-${turn.turnId}`,
+      order: Number.isFinite(modelOrder) ? modelOrder + 0.1 : assistantOrder + 0.1
+    });
+  }
+
+  const orderedEvents = events.sort((left, right) => {
+    if (left.order !== right.order) {
+      return left.order - right.order;
+    }
+    return left.key.localeCompare(right.key);
+  });
+
+  const mergedEvents: AgentTurnEvent[] = [];
+  for (const event of orderedEvents) {
+    const last = mergedEvents[mergedEvents.length - 1];
+    if (event.kind === "tools" && last?.kind === "tools") {
+      const tail = last.tools[last.tools.length - 1];
+      const head = event.tools[0];
+      if (tail && head && tail.mergeKey && tail.mergeKey === head.mergeKey && tail.status !== "error") {
+        tail.id = head.id;
+        tail.description = head.description;
+        tail.status = head.status;
+        tail.durationSeconds = head.durationSeconds;
+        tail.count += head.count;
+      } else {
+        last.tools.push(...event.tools);
+      }
+      last.key = `tools-${last.tools.map((tool) => tool.id).join("-")}`;
+      continue;
+    }
+    mergedEvents.push(event);
+  }
+
+  return mergedEvents;
+}
+
 const toolIconByCanonicalName: Record<string, any> = {
   Run: Terminal,
   Ask: MessageSquareMore,
@@ -586,10 +767,6 @@ const streamingPresentation = useStreamingPresentationState(messages);
 const {
   syncStreamingPresentationState,
   assistantDisplayContent,
-  assistantDisplayStableContent,
-  assistantDisplayFadeContent,
-  assistantDisplayFadeStyle,
-  assistantDisplayFadeKey,
   assistantDisplayedReasoning,
   assistantDisplayedReasoningStable,
   assistantDisplayedReasoningFade,
@@ -691,14 +868,24 @@ function assistantTone(message: ChatMessage | null) {
   return "text-stone-800";
 }
 
-function assistantFadeCharacters(message: ChatMessage | null) {
-  return Array.from(assistantDisplayFadeContent(message));
+function loadStreamingRenderConfig() {
+  if (typeof window === "undefined") {
+    streamingRenderOptimizationDisabled.value = false;
+    return;
+  }
+
+  streamingRenderOptimizationDisabled.value =
+    window.localStorage.getItem(STREAM_RENDER_DISABLE_STORAGE_KEY) === "true";
 }
 
-function assistantFadeCharacterStyle(index: number) {
-  return {
-    animationDelay: `${Math.min(index, 100) * 16}ms`
-  };
+function handleStreamingRenderConfigChanged() {
+  loadStreamingRenderConfig();
+  syncStreamingPresentationState();
+  scheduleStreamingPresentationTimer();
+}
+
+function shouldUseOptimizedAssistantStreaming(message: ChatMessage | null) {
+  return Boolean(message && isAssistantStreaming(message) && !streamingRenderOptimizationDisabled.value);
 }
 
 function latestTraceForTurn(turnId: string) {
@@ -1241,11 +1428,36 @@ const {
   unreadCount,
   streamAutoFollowEnabled,
   handleScrollToBottom,
-  handleMarkdownRenderComplete,
+  handleMarkdownRenderComplete: handleTimelineMarkdownRenderComplete,
   handleLatestTurnSignatureChange,
   handleSubmittingChange,
   handleMessageCountChange
 } = timelineAutoScroll;
+
+function handleMarkdownRenderComplete(payload: { contentLength: number; streaming: boolean }) {
+  const scrollMetrics = payload.streaming ? collectTimelineScrollMetrics() : null;
+  updateStreamDebugReveal({
+    markdownRenderCompletedAt: Date.now(),
+    markdownRenderContentLength: payload.contentLength,
+    markdownRenderStreaming: payload.streaming,
+    markdownRenderDistanceToBottom: scrollMetrics?.distanceToBottom ?? null,
+    streamingRenderOptimized: !streamingRenderOptimizationDisabled.value
+  });
+
+  if (payload.streaming && !streamAutoFollowEnabled.value) {
+    return;
+  }
+
+  if (
+    payload.streaming
+    && typeof scrollMetrics?.distanceToBottom === "number"
+    && scrollMetrics.distanceToBottom > STREAMING_MARKDOWN_FOLLOW_DISTANCE_PX
+  ) {
+    return;
+  }
+
+  handleTimelineMarkdownRenderComplete(payload);
+}
 
 const scrollToLatestHoverClass = computed(() => {
   const w = unreadCount.value > 0 ? 'w-[145px]' : 'w-[110px]';
@@ -1270,12 +1482,15 @@ function handleScrollToLatestMouseLeave() {
 onMounted(() => {
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
+    loadStreamingRenderConfig();
   }
   syncStreamingPresentationState();
   scheduleStreamingPresentationTimer();
   window.addEventListener("click", handleClickOutside);
   window.addEventListener("keydown", handleWindowKeydown);
   window.addEventListener("resize", updateFloatingUiPositions);
+  window.addEventListener("storage", handleStreamingRenderConfigChanged);
+  window.addEventListener(STREAM_RENDER_CONFIG_CHANGED_EVENT, handleStreamingRenderConfigChanged);
 });
 
 onBeforeUnmount(() => {
@@ -1284,6 +1499,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("click", handleClickOutside);
   window.removeEventListener("keydown", handleWindowKeydown);
   window.removeEventListener("resize", updateFloatingUiPositions);
+  window.removeEventListener("storage", handleStreamingRenderConfigChanged);
+  window.removeEventListener(STREAM_RENDER_CONFIG_CHANGED_EVENT, handleStreamingRenderConfigChanged);
 });
 
 watch(rollbackInFlight, () => {
@@ -1327,7 +1544,9 @@ function collectStreamMetrics() {
     streamAutoFollowEnabled: streamAutoFollowEnabled.value,
     viewportScrollTop: viewport?.scrollTop ?? null,
     viewportScrollHeight: viewport?.scrollHeight ?? null,
-    viewportClientHeight: viewport?.clientHeight ?? null
+    viewportClientHeight: viewport?.clientHeight ?? null,
+    streamDebugState: { ...streamDebugState },
+    streamingRenderOptimized: !streamingRenderOptimizationDisabled.value
   };
 }
 
@@ -1468,169 +1687,176 @@ watch(
           <article v-if="shouldShowAgentArticle(turn)" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" class="conversation-agent-shell w-full px-0 py-1">
 
 
-            <details
-              v-if="turn.assistant && shouldShowReasoningBlock(turn.assistant)"
-              :open="shouldOpenReasoningBlock(turn.assistant)"
-              v-motion
-              :initial="{ opacity: 0, y: 6 }"
-              :animate="{ opacity: 1, y: 0 }"
-              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
-              class="conversation-disclosure conversation-reasoning-panel mt-1 mb-0.5 group p-0"
-            >
-              <summary class="conversation-disclosure-summary">
-                <div class="flex min-w-0 items-center gap-2">
-                  <Brain class="h-3 w-3 shrink-0 text-stone-400" />
-                  <span>思考过程</span>
-                </div>
-                <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
-              </summary>
-              <div class="mt-1 pl-5 whitespace-pre-wrap break-words text-[13px] leading-[1.4] text-stone-400">
-                <template v-if="assistantReasoning(turn.assistant)">
-                  <span class="reasoning-italic">{{ isAssistantReasoningStreaming(turn.assistant) ? assistantDisplayedReasoningStable(turn.assistant) : assistantReasoning(turn.assistant) }}</span>
-                  <span
-                    v-if="isAssistantReasoningStreaming(turn.assistant) && assistantDisplayedReasoningFade(turn.assistant)"
-                    :key="`rfade-${turn.assistant.id}-${assistantDisplayedReasoningFadeKey(turn.assistant)}`"
-                    class="assistant-streaming-fade reasoning-italic"
-                    :style="assistantDisplayedReasoningFadeStyle(turn.assistant)"
-                  >
-                    {{ assistantDisplayedReasoningFade(turn.assistant) }}
-                  </span>
-                </template>
-              </div>
-            </details>
-
-            <Transition name="assistant-waiting-signal">
-              <div
-                v-if="assistantAwaitingFirstSignal(turn)"
-                class="assistant-waiting-panel my-0.5"
-                role="status"
-                aria-label="等待回复开始"
-                data-testid="assistant-awaiting-first-signal"
-              >
-                <span class="assistant-waiting-dots" aria-hidden="true">
-                  <span
-                    v-for="index in 3"
-                    :key="index"
-                    class="assistant-waiting-dot"
-                    :style="{ animationDelay: `${(index - 1) * 150}ms` }"
-                  ></span>
-                </span>
-              </div>
-            </Transition>
-
-            <div
-              v-if="turn.mergedTools.length"
-              v-motion
-              :initial="{ opacity: 0, y: 6 }"
-              :animate="{ opacity: 1, y: 0 }"
-              :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
-               class="conversation-tool-panel mt-0.5 mb-4 space-y-0.5"
-            >
-              <div
-                v-for="(tool, idx) in turn.mergedTools"
-                :key="tool.id"
+            <template v-for="event in agentTurnEvents(turn)" :key="event.key">
+              <details
+                v-if="event.kind === 'reasoning'"
+                :open="shouldOpenReasoningBlock(event.assistant)"
                 v-motion
-                :initial="{ opacity: 0, y: 4 }"
+                :initial="{ opacity: 0, y: 6 }"
                 :animate="{ opacity: 1, y: 0 }"
-                :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.32 + idx * 0.025 }"
-                class="flex flex-col py-0.5 text-[12px] leading-5"
+                :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
+                class="conversation-disclosure conversation-reasoning-panel mt-1 mb-0.5 group p-0"
               >
-                <div class="flex items-center gap-2">
-                  <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
-                  <span
-                    v-if="tool.description || tool.toolName"
-                    class="min-w-0 truncate"
-                    :class="tool.status === 'error' ? 'text-rose-600' : 'text-stone-400'"
-                  >
-                    {{ tool.description || tool.displayNameZh || tool.canonicalToolName || tool.toolName }}
-                  </span>
-                  <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
-                  <span class="flex shrink-0 items-center gap-1 leading-none">
-                    <span v-if="tool.durationSeconds != null" class="text-[11px] text-stone-400">{{ (tool.durationSeconds).toFixed(1) }}s</span>
-                    <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
-                    <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
-                    <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
-                  </span>
-                </div>
-              </div>
-            </div>
-            <div
-              v-if="turn.assistant && assistantHasVisibleContent(turn.assistant) && !shouldRenderAssistantAsError(turn)"
-              v-motion
-              :initial="{ opacity: 0, y: 6 }"
-              :animate="{ opacity: 1, y: 0 }"
-              :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.32 }"
-               class="assistant-response-panel my-0.5"
-            >
-              <!-- 统一 shell：流式/完成共享同一外容器，避免 v-if/v-else 导致的 DOM 子树替换 -->
-              <div
-                class="assistant-plain-text text-sm"
-                :class="assistantTone(turn.assistant)"
-                :data-streaming="isAssistantStreaming(turn.assistant) ? 'true' : undefined"
-              >
-                <span
-                  v-if="isAssistantStreaming(turn.assistant)"
-                  class="assistant-streaming-content"
-                  data-testid="assistant-streaming-flow"
-                >
-                  {{ assistantDisplayStableContent(turn.assistant) }}
-                  <span
-                    v-if="assistantDisplayFadeContent(turn.assistant)"
-                    :key="`afade-${turn.assistant.id}-${assistantDisplayFadeKey(turn.assistant)}`"
-                    class="assistant-streaming-fade"
-                    :style="assistantDisplayFadeStyle(turn.assistant)"
-                  >
-                    <span
-                      v-for="(character, index) in assistantFadeCharacters(turn.assistant)"
-                      :key="`afade-char-${turn.assistant.id}-${assistantDisplayFadeKey(turn.assistant)}-${index}`"
-                      class="assistant-streaming-char"
-                      :style="assistantFadeCharacterStyle(index)"
-                    >{{ character }}</span>
-                  </span>
-                </span>
-                <MarkdownRenderer
-                  v-else
-                  :content="turn.assistant.content"
-                  :streaming="false"
-                  wrapper-class="assistant-markdown"
-                  :tone-class="assistantTone(turn.assistant)"
-                  @render-complete="handleMarkdownRenderComplete"
-                />
-              </div>
-            </div>
-
-            <!-- Error detail panel (raw error for debugging) -->
-            <details
-              v-if="shouldRenderAssistantAsError(turn) && assistantErrorDetail(turn)"
-              class="conversation-disclosure conversation-error-panel mt-3 group"
-            >
-              <summary class="conversation-disclosure-summary text-rose-700">
-                <div class="flex min-w-0 items-center gap-2">
-                  <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-rose-500" />
-                  <span class="text-rose-700">错误详情</span>
-                </div>
-                <div class="ml-auto flex items-center gap-1">
-                  <button
-                    class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-rose-50 hover:text-rose-600"
-                    type="button"
-                    :data-testid="`workspace-error-copy-${turn.turnId}`"
-                    @click.stop="copyErrorDetail(turn.turnId, assistantErrorDetail(turn))"
-                  >
-                    <component
-                      :is="copiedErrorDetailKey === assistantErrorCopyKey(turn.turnId) ? Check : Copy"
-                      class="h-3 w-3"
-                    />
-                  </button>
+                <summary class="conversation-disclosure-summary">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <Brain class="h-3 w-3 shrink-0 text-stone-400" />
+                    <span>思考过程</span>
+                  </div>
                   <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
+                </summary>
+                <div class="mt-1 pl-5 whitespace-pre-wrap break-words text-[13px] leading-[1.4] text-stone-400">
+                  <template v-if="assistantReasoning(event.assistant)">
+                    <span class="reasoning-italic">{{ isAssistantReasoningStreaming(event.assistant) ? assistantDisplayedReasoningStable(event.assistant) : assistantReasoning(event.assistant) }}</span>
+                    <span
+                      v-if="isAssistantReasoningStreaming(event.assistant) && assistantDisplayedReasoningFade(event.assistant)"
+                      :key="`rfade-${event.assistant.id}-${assistantDisplayedReasoningFadeKey(event.assistant)}`"
+                      class="assistant-streaming-fade reasoning-italic"
+                      :style="assistantDisplayedReasoningFadeStyle(event.assistant)"
+                    >
+                      {{ assistantDisplayedReasoningFade(event.assistant) }}
+                    </span>
+                  </template>
                 </div>
-              </summary>
+              </details>
+
+              <Transition v-else-if="event.kind === 'waiting'" name="assistant-waiting-signal">
+                <div
+                  class="assistant-waiting-panel my-0.5"
+                  role="status"
+                  aria-label="等待回复开始"
+                  data-testid="assistant-awaiting-first-signal"
+                >
+                  <span class="assistant-waiting-dots" aria-hidden="true">
+                    <span
+                      v-for="index in 3"
+                      :key="index"
+                      class="assistant-waiting-dot"
+                      :style="{ animationDelay: `${(index - 1) * 150}ms` }"
+                    ></span>
+                  </span>
+                </div>
+              </Transition>
+
               <div
-                class="whitespace-pre-wrap break-words px-3 py-2 text-[11px] leading-4 text-rose-900"
-                data-testid="workspace-error-detail"
+                v-else-if="event.kind === 'tools'"
+                v-motion
+                :initial="{ opacity: 0, y: 6 }"
+                :animate="{ opacity: 1, y: 0 }"
+                :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
+                 class="conversation-tool-panel mt-0.5 mb-4 space-y-0.5"
               >
-                {{ assistantErrorDetail(turn) }}
+                <div
+                  v-for="(tool, idx) in event.tools"
+                  :key="tool.id"
+                  v-motion
+                  :initial="{ opacity: 0, y: 4 }"
+                  :animate="{ opacity: 1, y: 0 }"
+                  :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.32 + idx * 0.025 }"
+                  class="flex flex-col py-0.5 text-[12px] leading-5"
+                >
+                  <div class="flex items-center gap-2">
+                    <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
+                    <span
+                      v-if="tool.description || tool.toolName"
+                      class="min-w-0 truncate"
+                      :class="tool.status === 'error' ? 'text-rose-600' : 'text-stone-400'"
+                    >
+                      {{ tool.description || tool.displayNameZh || tool.canonicalToolName || tool.toolName }}
+                    </span>
+                    <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
+                    <span class="flex shrink-0 items-center gap-1 leading-none">
+                      <span v-if="tool.durationSeconds != null" class="text-[11px] text-stone-400">{{ (tool.durationSeconds).toFixed(1) }}s</span>
+                      <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
+                      <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
+                      <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
+                    </span>
+                  </div>
+                </div>
               </div>
-            </details>
+
+              <div
+                v-else-if="event.kind === 'content'"
+                v-motion
+                :initial="{ opacity: 0, y: 6 }"
+                :animate="{ opacity: 1, y: 0 }"
+                :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.32 }"
+                 class="assistant-response-panel my-0.5"
+              >
+                <!-- 统一 shell：流式/完成共享同一外容器，避免 v-if/v-else 导致的 DOM 子树替换 -->
+                <div
+                  class="assistant-plain-text text-sm"
+                  :class="assistantTone(event.assistant)"
+                  :data-streaming="isAssistantStreaming(event.assistant) ? 'true' : undefined"
+                >
+                  <template v-if="isAssistantStreaming(event.assistant)">
+                    <div
+                      v-if="shouldUseOptimizedAssistantStreaming(event.assistant)"
+                      class="assistant-streaming-content"
+                      data-testid="assistant-streaming-flow"
+                    >
+                      <MarkdownRenderer
+                        :content="event.assistant.content"
+                        :streaming="true"
+                        :force-markdown-streaming="true"
+                        wrapper-class="assistant-markdown assistant-streaming-markdown"
+                        :tone-class="assistantTone(event.assistant)"
+                        @render-complete="handleMarkdownRenderComplete"
+                      />
+                      <span class="assistant-streaming-caret" role="status" aria-label="回复生成中"></span>
+                    </div>
+                    <div
+                      v-else
+                      class="assistant-streaming-content"
+                      data-testid="assistant-streaming-flow"
+                    >
+                      {{ assistantDisplayContent(event.assistant) }}
+                      <span class="assistant-streaming-caret" role="status" aria-label="回复生成中"></span>
+                    </div>
+                  </template>
+                  <MarkdownRenderer
+                    v-else
+                    :content="event.assistant.content"
+                    :streaming="false"
+                    wrapper-class="assistant-markdown"
+                    :tone-class="assistantTone(event.assistant)"
+                    @render-complete="handleMarkdownRenderComplete"
+                  />
+                </div>
+              </div>
+
+              <!-- Error detail panel (raw error for debugging) -->
+              <details
+                v-else-if="event.kind === 'error'"
+                class="conversation-disclosure conversation-error-panel mt-3 group"
+              >
+                <summary class="conversation-disclosure-summary text-rose-700">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <AlertTriangle class="h-3.5 w-3.5 shrink-0 text-rose-500" />
+                    <span class="text-rose-700">错误详情</span>
+                  </div>
+                  <div class="ml-auto flex items-center gap-1">
+                    <button
+                      class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-rose-50 hover:text-rose-600"
+                      type="button"
+                      :data-testid="`workspace-error-copy-${turn.turnId}`"
+                      @click.stop="copyErrorDetail(turn.turnId, assistantErrorDetail(turn))"
+                    >
+                      <component
+                        :is="copiedErrorDetailKey === assistantErrorCopyKey(turn.turnId) ? Check : Copy"
+                        class="h-3 w-3"
+                      />
+                    </button>
+                    <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
+                  </div>
+                </summary>
+                <div
+                  class="whitespace-pre-wrap break-words px-3 py-2 text-[11px] leading-4 text-rose-900"
+                  data-testid="workspace-error-detail"
+                >
+                  {{ assistantErrorDetail(turn) }}
+                </div>
+              </details>
+            </template>
 
             <div
               v-if="turn.assistant && !isAssistantStreaming(turn.assistant)"
@@ -2116,15 +2342,24 @@ watch(
 }
 
 .assistant-streaming-content {
-  white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
   line-height: 1.7;
   transition: color 140ms ease;
 }
 
+.assistant-streaming-markdown {
+  display: block;
+  white-space: normal;
+}
+
+.assistant-streaming-content .assistant-streaming-markdown:empty {
+  display: none;
+}
+
 .assistant-streaming-fade {
   display: inline;
+  white-space: pre-wrap;
   will-change: opacity;
   animation-duration: 350ms;
   animation-timing-function: ease-out;
@@ -2151,6 +2386,31 @@ watch(
   }
   to {
     opacity: 1;
+  }
+}
+
+.assistant-streaming-caret {
+  display: inline-block;
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-left: 0.28rem;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.38;
+  vertical-align: middle;
+  animation: assistant-stream-caret-pulse 1.05s ease-in-out infinite;
+}
+
+@keyframes assistant-stream-caret-pulse {
+  0%,
+  100% {
+    opacity: 0.26;
+    transform: scale(0.82);
+  }
+
+  50% {
+    opacity: 0.58;
+    transform: scale(1);
   }
 }
 
@@ -2205,6 +2465,7 @@ watch(
 @media (prefers-reduced-motion: reduce) {
   .assistant-streaming-fade,
   .assistant-streaming-char,
+  .assistant-streaming-caret,
   .assistant-waiting-dot {
     animation: none !important;
     opacity: 1 !important;

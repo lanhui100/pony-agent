@@ -89,6 +89,40 @@ describe("MarkdownRenderer", () => {
     expect(wrapper.find(".markdown-body").text()).toContain("bold text");
   });
 
+  it("can force the markdown streaming path for simple text", async () => {
+    const wrapper = mount(MarkdownRenderer, {
+      props: {
+        content: "hello world",
+        streaming: true,
+        forceMarkdownStreaming: true,
+        wrapperClass: "assistant-markdown"
+      }
+    });
+
+    await flushStreamingRender();
+
+    expect(wrapper.find(".markdown-body").exists()).toBe(true);
+    expect(wrapper.find(".markdown-body").html()).toContain("<p>hello world</p>");
+  });
+
+  it("does not show a raw suffix while force-rendering streaming markdown", async () => {
+    const wrapper = mount(MarkdownRenderer, {
+      props: {
+        content: "**bold text**",
+        streaming: true,
+        forceMarkdownStreaming: true,
+        wrapperClass: "assistant-markdown"
+      }
+    });
+
+    await nextTick();
+    expect(wrapper.find(".streaming-unrendered-suffix").exists()).toBe(false);
+    expect(wrapper.text()).toBe("");
+
+    await flushStreamingRender();
+    expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
+  });
+
   it("transitions from plain text streaming to final markdown render when streaming ends", async () => {
     const wrapper = mount(MarkdownRenderer, {
       props: {

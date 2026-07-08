@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeMarkdownSource, renderMarkdown } from "@/lib/markdown";
+import { autoCloseBoundaries, normalizeMarkdownSource, renderMarkdown, renderPartialMarkdown } from "@/lib/markdown";
 
 describe("markdown rendering", () => {
   it("renders headings, blockquotes and strong text", async () => {
@@ -84,5 +84,23 @@ describe("markdown rendering", () => {
     expect(html).toContain("<h1>标题</h1>");
     expect(html).toContain("<blockquote>");
     expect(html).toContain("<strong>加粗</strong>");
+  });
+
+  it("auto-closes a plain unclosed fenced code block only for partial rendering", async () => {
+    const source = ["```", "const answer = 42;"].join("\n");
+    const completed = autoCloseBoundaries(source);
+    const html = await renderPartialMarkdown(source);
+
+    expect(completed).toBe(["```", "const answer = 42;", "```"].join("\n"));
+    expect(html).toContain('<pre class="code-block-cream"><code>const answer = 42;');
+  });
+
+  it("auto-closes conservative inline markdown wrappers for partial rendering", async () => {
+    const completed = autoCloseBoundaries("这是 **加粗和 `代码");
+    const html = await renderPartialMarkdown("这是 **加粗和 `代码");
+
+    expect(completed).toBe("这是 **加粗和 `代码`**");
+    expect(html).toContain("<strong>");
+    expect(html).toContain("<code>代码</code>");
   });
 });

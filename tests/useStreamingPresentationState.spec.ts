@@ -24,9 +24,11 @@ describe("useStreamingPresentationState", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-05T00:00:00.000Z"));
+    window.localStorage.clear();
   });
 
   afterEach(() => {
+    window.localStorage.clear();
     vi.useRealTimers();
   });
 
@@ -107,5 +109,20 @@ describe("useStreamingPresentationState", () => {
 
     expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe(content);
     expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("");
+  });
+
+  it("uses local threshold overrides for streaming reveal cadence", () => {
+    window.localStorage.setItem("pony-agent.stream-render.first-batch-chars", "5");
+    const messages = ref<ChatMessage[]>([createAssistantMessage("hello")]);
+    const state = useStreamingPresentationState(computed(() => messages.value));
+
+    state.syncStreamingPresentationState();
+
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("hello");
+    messages.value = [createAssistantMessage("hello!")];
+    vi.advanceTimersByTime(100);
+    state.syncStreamingPresentationState();
+
+    expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("hello");
   });
 });

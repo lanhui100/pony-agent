@@ -450,34 +450,127 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#039;");
 }
 
-const FENCE_OPEN_RE = /^\s{0,3}(`{3,}|~{3,})(?!\s*$)(.*)$/;
-const FENCE_CLOSE_RE = /^\s{0,3}(`{3,}|~{3,})\s*$/;
+const FENCE_LINE_RE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 
-export function countUnclosedCodeFences(content: string): number {
+function getUnclosedCodeFence(content: string): string | null {
   const lines = content.split(/\r?\n/);
-  let openCount = 0;
-  let closeCount = 0;
+  let openFence: string | null = null;
 
   for (const line of lines) {
-    if (FENCE_CLOSE_RE.test(line)) {
-      closeCount++;
-    } else if (FENCE_OPEN_RE.test(line)) {
-      openCount++;
+    const match = line.match(FENCE_LINE_RE);
+    if (!match) {
+      continue;
+    }
+
+    const fence = match[1];
+    const rest = match[2]?.trim() ?? "";
+
+    if (openFence) {
+      const sameMarker = fence[0] === openFence[0];
+      if (sameMarker && fence.length >= openFence.length && !rest) {
+        openFence = null;
+      }
+      continue;
+    }
+
+    openFence = fence;
+  }
+
+  return openFence;
+}
+
+export function countUnclosedCodeFences(content: string): number {
+  return getUnclosedCodeFence(content) ? 1 : 0;
+}
+
+function collectTextOutsideFences(content: string): string {
+  const lines = content.split(/\r?\n/);
+  const outsideLines: string[] = [];
+  let openFence: string | null = null;
+
+  for (const line of lines) {
+    const match = line.match(FENCE_LINE_RE);
+
+    if (match) {
+      const fence = match[1];
+      const rest = match[2]?.trim() ?? "";
+
+      if (openFence) {
+        const sameMarker = fence[0] === openFence[0];
+        if (sameMarker && fence.length >= openFence.length && !rest) {
+          openFence = null;
+        }
+        continue;
+      }
+
+      openFence = fence;
+      continue;
+    }
+
+    if (!openFence) {
+      outsideLines.push(line);
     }
   }
 
-  return openCount - closeCount;
+  return outsideLines.join("\n");
+}
+
+function inlineMarkdownClosers(content: string): string {
+  const outsideFences = collectTextOutsideFences(content);
+  const stack: string[] = [];
+
+  for (let i = 0; i < outsideFences.length; i++) {
+    const char = outsideFences[i];
+    if (char === "\\") {
+      i++;
+      continue;
+    }
+
+    const top = stack[stack.length - 1];
+    if (char === "`") {
+      if (outsideFences[i + 1] === "`") {
+        continue;
+      }
+      if (top === "`") {
+        stack.pop();
+      } else {
+        stack.push("`");
+      }
+      continue;
+    }
+
+    if (top === "`") {
+      continue;
+    }
+
+    const marker = outsideFences.slice(i, i + 2);
+    if (marker === "**" || marker === "__") {
+      if (top === marker) {
+        stack.pop();
+      } else {
+        stack.push(marker);
+      }
+      i++;
+    }
+  }
+
+  return [...stack].reverse().join("");
 }
 
 export function autoCloseBoundaries(content: string): string {
-  const unclosed = countUnclosedCodeFences(content);
-  if (unclosed <= 0) return content;
+  let completed = content;
+  const unclosedFence = getUnclosedCodeFence(content);
 
-  const firstFence = content.match(/^\s{0,3}([`~])/)?.[1] ?? "`";
-  const closeToken = firstFence === "~" ? "~~~" : "```";
-  const suffix = Array.from({ length: unclosed }, () => closeToken).join("\n");
+  if (unclosedFence) {
+    completed = completed.endsWith("\n") ? completed + unclosedFence : completed + "\n" + unclosedFence;
+  }
 
-  return content.endsWith("\n") ? content + suffix : content + "\n" + suffix;
+  const inlineClosers = inlineMarkdownClosers(content);
+  if (inlineClosers) {
+    completed += inlineClosers;
+  }
+
+  return completed;
 }
 
 export async function renderPartialMarkdown(partialContent: string): Promise<string> {

@@ -7,6 +7,33 @@ const STREAM_FADE_TIME_MS = 420;
 const STREAM_FADE_FIRST_BATCH_CHARS = 24;
 const STREAM_FADE_CODE_FENCE_CHARS = 18;
 const STREAM_REASONING_FADE_CHARS = 3;
+const STREAM_BATCH_CHARS_STORAGE_KEY = "pony-agent.stream-render.batch-chars";
+const STREAM_BATCH_TIME_STORAGE_KEY = "pony-agent.stream-render.batch-ms";
+const STREAM_FIRST_BATCH_CHARS_STORAGE_KEY = "pony-agent.stream-render.first-batch-chars";
+const STREAM_CODE_FENCE_CHARS_STORAGE_KEY = "pony-agent.stream-render.code-fence-chars";
+
+function readPositiveIntegerOverride(storageKey: string, fallback: number) {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+
+  const raw = window.localStorage.getItem(storageKey);
+  if (!raw) {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function readStreamingRevealConfig() {
+  return {
+    batchChars: readPositiveIntegerOverride(STREAM_BATCH_CHARS_STORAGE_KEY, STREAM_FADE_BATCH_CHARS),
+    timeMs: readPositiveIntegerOverride(STREAM_BATCH_TIME_STORAGE_KEY, STREAM_FADE_TIME_MS),
+    firstBatchChars: readPositiveIntegerOverride(STREAM_FIRST_BATCH_CHARS_STORAGE_KEY, STREAM_FADE_FIRST_BATCH_CHARS),
+    codeFenceChars: readPositiveIntegerOverride(STREAM_CODE_FENCE_CHARS_STORAGE_KEY, STREAM_FADE_CODE_FENCE_CHARS)
+  };
+}
 
 function detectCodeFenceActive(content: string): boolean {
   return countUnclosedCodeFences(content) > 0;
@@ -83,9 +110,10 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
       const nextText = message.content;
       const snapshotText = streamSnapshotTextByMessageId[message.id] ?? "";
       const isFirstSync = snapshotText.length === 0;
+      const revealConfig = readStreamingRevealConfig();
 
       if (isFirstSync) {
-        if (nextText.length >= STREAM_FADE_FIRST_BATCH_CHARS) {
+        if (nextText.length >= revealConfig.firstBatchChars) {
           syncPresentationMapValue(streamFadeTextByMessageId, message.id, nextText);
           streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
           streamFadeLastTimeByMessageId[message.id] = Date.now();
@@ -108,11 +136,11 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
         }
 
         const batchChars = detectCodeFenceActive(nextText)
-          ? STREAM_FADE_CODE_FENCE_CHARS
-          : STREAM_FADE_BATCH_CHARS;
+          ? revealConfig.codeFenceChars
+          : revealConfig.batchChars;
         const elapsed = Date.now() - (streamFadeLastTimeByMessageId[message.id] ?? 0);
 
-        if (pendingChars >= batchChars || elapsed >= STREAM_FADE_TIME_MS) {
+        if (pendingChars >= batchChars || elapsed >= revealConfig.timeMs) {
           const fadeText = nextText.slice(snapshotText.length);
           syncPresentationMapValue(streamFadeTextByMessageId, message.id, fadeText);
           streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;

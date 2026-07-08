@@ -2,14 +2,14 @@
 
 ## Decision Summary
 
-Use a two-layer streaming presentation model:
+Use a single streaming markdown presentation model:
 
-1. `stable` content continues to be rendered by the existing markdown renderer.
-2. `flushed pending` content is revealed through a controlled presentation layer instead of immediately forcing the entire streamed delta into a final-looking markdown block.
+1. Pending assistant content is rendered by one `MarkdownRenderer` instance in streaming mode.
+2. The renderer suppresses raw markdown fallback while forced markdown rendering is active, so raw text and parsed markdown are never visible at the same time.
 
 The design must preserve two product truths:
 
-- streaming content should feel continuous and smooth;
+- streaming content should feel continuous and stable;
 - terminal transcript content must remain truthful and must not contain fabricated markdown closures.
 
 ## Chosen Direction
@@ -18,7 +18,8 @@ The design must preserve two product truths:
 
 - Keep `renderMarkdown()` pure.
 - Use a streaming-only wrapper such as `renderPartialMarkdown()` to auto-close fenced code blocks while the message is still `pending`.
-- Restrict this stabilization to fenced code blocks in the first phase.
+- Keep synthetic completions render-only: never append them to message content, copy payloads, or persisted transcript state.
+- Stabilize only conservative tail wrappers in this phase: fenced code blocks, inline code, and strong markers. Links, tables, HTML, and ambiguous nesting remain truthful raw streaming text until a safe boundary.
 - When the message reaches `done`, `error`, or `cancelled`, force a final render through the original non-auto-closed markdown path.
 
 ### 2. Buffered reveal remains batch-driven, not raw-chunk-driven
@@ -41,11 +42,13 @@ Therefore the reveal layer must not assume that any arbitrary character boundary
 
 The implementation should prefer one of these safe approaches:
 
-- reveal raw pending text as a temporary presentation layer, then merge into the markdown-stable layer on batch commit; or
+- render the entire pending assistant message through a single streaming markdown surface; or
 - reveal only safe trailing text outside unstable markdown structures; or
 - keep batch-level fade for markdown-rich segments and reserve staggered reveal for plain trailing text segments.
 
 This change explicitly does **not** require fully character-level markdown DOM animation across arbitrary rendered HTML.
+
+Implementation note: the main conversation now renders pending assistant content through one streaming markdown component. It no longer uses a separate raw tail/fade layer for the main response, which avoids raw markdown and parsed markdown being visible together and removes remount-driven flashing.
 
 ### 4. In-progress affordance
 

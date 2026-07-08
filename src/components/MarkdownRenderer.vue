@@ -12,6 +12,7 @@ const props = defineProps<{
   wrapperClass?: string;
   streaming?: boolean;
   preferPlainTextStreaming?: boolean;
+  forceMarkdownStreaming?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -62,6 +63,7 @@ function isSimpleTextContent(text: string): boolean {
 /** 流式渲染时是否走纯文本快路径（跳过 markdown 解析） */
 const plainTextMode = computed(() => {
   if (!props.streaming) return false;
+  if (props.forceMarkdownStreaming) return false;
   if (props.preferPlainTextStreaming) return true;
   return isSimpleTextContent(props.content);
 });
@@ -88,6 +90,10 @@ function cancelScheduledRender() {
 
 function shouldRenderNow(content: string): boolean {
   if (!props.streaming) {
+    return true;
+  }
+
+  if (props.forceMarkdownStreaming && content.length > lastRenderedContentLength) {
     return true;
   }
 
@@ -309,8 +315,10 @@ onBeforeUnmount(() => {
     <!-- 流式 + 正常 markdown 渲染路径 -->
     <template v-else-if="streaming">
       <div v-if="renderedHtml" class="markdown-body" v-html="renderedHtml" />
-      <span v-if="unrenderedSuffix" class="streaming-unrendered-suffix whitespace-pre-wrap">{{ unrenderedSuffix }}</span>
-      <div v-else-if="content" class="whitespace-pre-wrap">{{ content }}</div>
+      <template v-if="!forceMarkdownStreaming">
+        <span v-if="unrenderedSuffix" class="streaming-unrendered-suffix whitespace-pre-wrap">{{ unrenderedSuffix }}</span>
+        <div v-else-if="content" class="whitespace-pre-wrap">{{ content }}</div>
+      </template>
     </template>
     <!-- 最终渲染（非流式） -->
     <template v-else>

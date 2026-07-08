@@ -195,6 +195,10 @@ const MarkdownRendererStub = defineComponent({
     toneClass: {
       type: String,
       default: ""
+    },
+    forceMarkdownStreaming: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ["render-complete"],
@@ -215,7 +219,7 @@ const MarkdownRendererStub = defineComponent({
     return {};
   },
   template:
-    '<div class="markdown-stub" :class="[wrapperClass, toneClass]" :streaming="streaming ? \'true\' : undefined">{{ content }}</div>'
+    '<div class="markdown-stub" :class="[wrapperClass, toneClass]" :streaming="streaming ? \'true\' : undefined" :data-force-markdown-streaming="forceMarkdownStreaming ? \'true\' : undefined">{{ content }}</div>'
 });
 
 const ButtonStub = defineComponent({
@@ -1176,7 +1180,9 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
 
     const streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toContain("**正在** 输出中");
-    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(true);
+    expect(wrapper.get(".markdown-stub").attributes("streaming")).toBe("true");
+    expect(wrapper.get(".markdown-stub").attributes("data-force-markdown-streaming")).toBe("true");
+    expect(wrapper.find(".assistant-streaming-caret").exists()).toBe(true);
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
@@ -1259,7 +1265,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(wrapper.text()).toContain("searching");
   });
 
-  it("reveals a buffered streaming batch through the fade layer once the first threshold is reached", async () => {
+  it("keeps a single streaming markdown surface while pending content grows", async () => {
     const runtimeStore = useRuntimeStore();
 
     runtimeStore.$patch({
@@ -1309,7 +1315,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await nextTick();
     let streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toContain("hello");
-    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(true);
+    expect(wrapper.findAll(".markdown-stub")).toHaveLength(1);
 
     runtimeStore.$patch({
       messages: [
@@ -1333,8 +1339,42 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
 
     streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toContain("hello this is a longer streamed assistant delta that crosses the first reveal threshold");
-    expect(wrapper.get(".assistant-streaming-fade").text()).toBe("hello this is a longer streamed assistant delta that crosses the first reveal threshold");
-    expect(wrapper.findAll(".assistant-streaming-char").length).toBeGreaterThan(10);
+    expect(wrapper.findAll(".markdown-stub")).toHaveLength(1);
+  });
+
+  it("falls back to baseline pending text when the streaming markdown optimization is disabled", async () => {
+    window.localStorage.setItem("pony-agent.stream-render.disable-optimization", "true");
+    const runtimeStore = useRuntimeStore();
+
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "**正在** 输出中",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="assistant-streaming-flow"]').text()).toContain("**正在** 输出中");
+    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
+    expect(wrapper.find(".assistant-streaming-caret").exists()).toBe(true);
   });
 
   it("switches from streaming text to final plain text when assistant completes", async () => {
@@ -1502,8 +1542,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await nextTick();
 
     expect(wrapper.get('.assistant-plain-text[data-streaming="true"]').text()).toContain("hello this is a longer streamed assistant delta");
-    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(true);
-    expect(wrapper.findAll(".assistant-streaming-char").length).toBeGreaterThan(0);
+    expect(wrapper.findAll(".markdown-stub")).toHaveLength(1);
 
     runtimeStore.$patch({
       messages: [
@@ -1533,7 +1572,6 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const markdownBlocks = wrapper.findAll(".assistant-plain-text");
     const finalAssistantBlock = markdownBlocks.find((node) => node.text().includes("**完成** 输出"));
     expect(finalAssistantBlock).toBeDefined();
-    expect(wrapper.find(".assistant-streaming-fade").exists()).toBe(false);
   });
 
   it("requests scroll follow-up when streaming content grows", async () => {
@@ -2349,7 +2387,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(scrollButton.exists()).toBe(true);
   });
 
-  it("keeps streaming assistant text in one inline flow while content grows", async () => {
+  it("keeps streaming assistant text in one streaming flow while content grows", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
       sessionOperation: null,
@@ -2381,7 +2419,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
 
     let streamingFlow = wrapper.get('[data-testid="assistant-streaming-flow"]');
     expect(streamingFlow.text()).toContain("streaming content that has already crossed the first batch threshold");
-    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
+    expect(wrapper.get(".markdown-stub").attributes("streaming")).toBe("true");
+    expect(wrapper.get(".markdown-stub").attributes("data-force-markdown-streaming")).toBe("true");
 
     runtimeStore.$patch({
       messages: [
@@ -2868,6 +2907,317 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(summaries).toHaveLength(1);
     expect(summaries.some((node) => node.text().includes("思考过程"))).toBe(true);
     expect(summaries.some((node) => node.html().includes("lucide-brain"))).toBe(true);
+  });
+
+  it("orders assistant content and tool calls by their turn timeline instead of pinning tools above content", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-timeline",
+          turnId: "turn-timeline",
+          role: "user",
+          content: "timeline please"
+        }),
+        createMessage({
+          id: "assistant-timeline",
+          turnId: "turn-timeline",
+          role: "assistant",
+          content: "first answer",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "tool-after-content",
+          turnId: "turn-timeline",
+          role: "tool",
+          toolName: "Read",
+          canonicalToolName: "Read",
+          detail: "read after answer",
+          status: "done",
+          durationSeconds: 0.6
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const contentPanel = wrapper.get(".assistant-response-panel");
+    const toolPanel = wrapper.get(".conversation-tool-panel");
+    expect(contentPanel.text()).toContain("first answer");
+    expect(toolPanel.text()).toContain("read after answer");
+
+    const agentShell = wrapper.get(".conversation-agent-shell");
+    const contentIndex = Array.from(agentShell.element.children).indexOf(contentPanel.element);
+    const toolIndex = Array.from(agentShell.element.children).indexOf(toolPanel.element);
+    expect(contentIndex).toBeGreaterThanOrEqual(0);
+    expect(toolIndex).toBeGreaterThan(contentIndex);
+  });
+
+  it("uses trace timeline sequence when it is available for agent event ordering", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-trace-order",
+          turnId: "turn-trace-order",
+          role: "user",
+          content: "trace order"
+        }),
+        createMessage({
+          id: "tool-before-message",
+          turnId: "turn-trace-order",
+          role: "tool",
+          toolName: "Read",
+          canonicalToolName: "Read",
+          detail: "trace says after model",
+          status: "done",
+          durationSeconds: 0.5
+        }),
+        createMessage({
+          id: "assistant-trace-order",
+          turnId: "turn-trace-order",
+          role: "assistant",
+          content: "model result",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        })
+      ],
+      turnTraceHistory: [
+        {
+          ...createTrace({
+            turnId: "turn-trace-order",
+            phase: "completed",
+            error: null,
+            toolActivities: [
+              {
+                id: "before-message",
+                name: "Read",
+                status: "done"
+              }
+            ]
+          }),
+          traceTimeline: [
+            {
+              id: "model-trace-order",
+              kind: "call_model",
+              label: "MODEL",
+              state: "completed",
+              sequence: 10,
+              text: "model result",
+              reasoningContent: null
+            },
+            {
+              id: "tool-trace-order",
+              kind: "call_tool",
+              label: "Read",
+              state: "completed",
+              sequence: 20,
+              toolActivities: [
+                {
+                  id: "before-message",
+                  name: "Read",
+                  status: "done"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const contentPanel = wrapper.get(".assistant-response-panel");
+    const toolPanel = wrapper.get(".conversation-tool-panel");
+    const agentShell = wrapper.get(".conversation-agent-shell");
+    const contentIndex = Array.from(agentShell.element.children).indexOf(contentPanel.element);
+    const toolIndex = Array.from(agentShell.element.children).indexOf(toolPanel.element);
+    expect(toolPanel.text()).toContain("trace says after model");
+    expect(toolIndex).toBeGreaterThan(contentIndex);
+  });
+
+  it("uses the active trace timeline while streaming so content does not jump after tool calls complete", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      activeTurnId: "turn-stream-order",
+      error: null,
+      traceTimeline: [
+        {
+          id: "tool-stream-order",
+          kind: "call_tool",
+          label: "Read",
+          state: "completed",
+          sequence: 10
+        },
+        {
+          id: "model-stream-order",
+          kind: "call_model",
+          label: "MODEL",
+          state: "active",
+          sequence: 20,
+          text: "streaming model result",
+          reasoningContent: null
+        }
+      ],
+      turnTraceHistory: [
+        {
+          ...createTrace({
+            turnId: "turn-stream-order",
+            phase: "calling_tool",
+            error: null,
+            toolActivities: []
+          }),
+          traceTimeline: [
+            {
+              id: "stale-model-stream-order",
+              kind: "call_model",
+              label: "MODEL",
+              state: "completed",
+              sequence: 3,
+              text: null,
+              reasoningContent: null
+            },
+            {
+              id: "stale-tool-stream-order",
+              kind: "call_tool",
+              label: "Read",
+              state: "completed",
+              sequence: 4
+            }
+          ]
+        }
+      ],
+      messages: [
+        createMessage({
+          id: "user-stream-order",
+          turnId: "turn-stream-order",
+          role: "user",
+          content: "stream order"
+        }),
+        createMessage({
+          id: "assistant-stream-order",
+          turnId: "turn-stream-order",
+          role: "assistant",
+          content: "streaming model result",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "tool-turn-stream-order-stream-tool",
+          turnId: "turn-stream-order",
+          role: "tool",
+          toolName: "Read",
+          canonicalToolName: "Read",
+          detail: "tool finished before streaming text",
+          status: "done",
+          durationSeconds: 0.4
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const streamingPanel = wrapper.get(".assistant-response-panel");
+    const toolPanel = wrapper.get(".conversation-tool-panel");
+    const agentShell = wrapper.get(".conversation-agent-shell");
+    const streamingIndex = Array.from(agentShell.element.children).indexOf(streamingPanel.element);
+    const toolIndex = Array.from(agentShell.element.children).indexOf(toolPanel.element);
+    expect(streamingPanel.text()).toContain("streaming model result");
+    expect(toolPanel.text()).toContain("tool finished before streaming text");
+    expect(streamingIndex).toBeGreaterThan(toolIndex);
+
+    runtimeStore.$patch({
+      isSubmitting: false,
+      phase: "ready",
+      messages: [
+        createMessage({
+          id: "user-stream-order",
+          turnId: "turn-stream-order",
+          role: "user",
+          content: "stream order"
+        }),
+        createMessage({
+          id: "assistant-stream-order",
+          turnId: "turn-stream-order",
+          role: "assistant",
+          content: "streaming model result",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "tool-turn-stream-order-stream-tool",
+          turnId: "turn-stream-order",
+          role: "tool",
+          toolName: "Read",
+          canonicalToolName: "Read",
+          detail: "tool finished before streaming text",
+          status: "done",
+          durationSeconds: 0.4
+        })
+      ],
+      turnTraceHistory: [
+        {
+          ...createTrace({
+            turnId: "turn-stream-order",
+            phase: "completed",
+            error: null,
+            toolActivities: [
+              {
+                id: "stream-tool",
+                name: "Read",
+                status: "done"
+              }
+            ]
+          }),
+          traceTimeline: [
+            {
+              id: "tool-stream-order-final",
+              kind: "call_tool",
+              label: "Read",
+              state: "completed",
+              sequence: 10,
+              toolActivities: [
+                {
+                  id: "stream-tool",
+                  name: "Read",
+                  status: "done"
+                }
+              ]
+            },
+            {
+              id: "model-stream-order-final",
+              kind: "call_model",
+              label: "MODEL",
+              state: "completed",
+              sequence: 20,
+              text: "streaming model result",
+              reasoningContent: null
+            }
+          ]
+        }
+      ]
+    });
+    await nextTick();
+
+    const finalContentPanel = wrapper.get(".assistant-response-panel");
+    const finalToolPanel = wrapper.get(".conversation-tool-panel");
+    const finalAgentShell = wrapper.get(".conversation-agent-shell");
+    const finalContentIndex = Array.from(finalAgentShell.element.children).indexOf(finalContentPanel.element);
+    const finalToolIndex = Array.from(finalAgentShell.element.children).indexOf(finalToolPanel.element);
+    expect(finalContentIndex).toBeGreaterThan(finalToolIndex);
   });
 
   it("only merges consecutive duplicate tool calls and keeps non-consecutive repeats visible", async () => {
