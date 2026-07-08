@@ -55,6 +55,9 @@ let latestResizeObserverCallback: ResizeObserverCallback | null = null;
 let latestResizeObserverTarget: Element | null = null;
 let rafSeqId = 0;
 let rafTimers = new Map<number, ReturnType<typeof setTimeout>>();
+let markdownStubInstanceSeq = 0;
+let toolPanelMotionMountCount = 0;
+let toolPanelMotionUpdateCount = 0;
 
 function resetViewportMetrics() {
   viewportMetrics.scrollHeight = 1000;
@@ -203,6 +206,8 @@ const MarkdownRendererStub = defineComponent({
   },
   emits: ["render-complete"],
   setup(props, { emit }) {
+    const instanceId = ++markdownStubInstanceSeq;
+
     watch(
       () => [props.content, props.streaming] as const,
       ([content, streaming]) => {
@@ -216,10 +221,10 @@ const MarkdownRendererStub = defineComponent({
       { immediate: true }
     );
 
-    return {};
+    return { instanceId };
   },
   template:
-    '<div class="markdown-stub" :class="[wrapperClass, toneClass]" :streaming="streaming ? \'true\' : undefined" :data-force-markdown-streaming="forceMarkdownStreaming ? \'true\' : undefined">{{ content }}</div>'
+    '<div class="markdown-stub" :class="[wrapperClass, toneClass]" :data-instance-id="String(instanceId)" :streaming="streaming ? \'true\' : undefined" :data-force-markdown-streaming="forceMarkdownStreaming ? \'true\' : undefined">{{ content }}</div>'
 });
 
 const ButtonStub = defineComponent({
@@ -568,10 +573,19 @@ function mountWorkspace(options?: {
     global: {
       directives: {
         motion: {
-          mounted() {
+          mounted(element: HTMLElement) {
+            if (element.classList.contains("conversation-tool-panel")) {
+              toolPanelMotionMountCount++;
+            }
             // No-op in unit tests; only suppresses directive resolution noise.
           },
           updated() {
+            // No-op in unit tests; only suppresses directive resolution noise.
+          },
+          beforeUpdate(element: HTMLElement) {
+            if (element.classList.contains("conversation-tool-panel")) {
+              toolPanelMotionUpdateCount++;
+            }
             // No-op in unit tests; only suppresses directive resolution noise.
           }
         }
@@ -626,6 +640,9 @@ function latestScrollDebugEvent(eventName: string) {
 describe("HomeWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    markdownStubInstanceSeq = 0;
+    toolPanelMotionMountCount = 0;
+    toolPanelMotionUpdateCount = 0;
     __resetFrontendFlightRecorderForTests();
     window.localStorage.clear();
     setActivePinia(createPinia());
@@ -1426,6 +1443,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await nextTick();
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
+    const streamingMarkdownInstanceId = wrapper.get(".markdown-stub").attributes("data-instance-id");
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
 
     runtimeStore.$patch({
@@ -1450,6 +1468,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await nextTick();
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
+    expect(wrapper.get(".markdown-stub").attributes("data-instance-id")).toBe(streamingMarkdownInstanceId);
+    expect(wrapper.get(".markdown-stub").attributes("streaming")).toBeUndefined();
     const plainTextBlock = wrapper.get(".assistant-plain-text");
     expect(plainTextBlock.text()).toContain("**完成** 输出");
     expect(plainTextBlock.classes()).toContain("text-stone-800");
@@ -2309,6 +2329,73 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(latestScrollDebugEvent("scroll-to-latest-turn:skip-reverse-or-small")).toBeDefined();
   });
 
+  it("does not start a terminal smooth follow when assistant streaming completes", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      error: null,
+      activeTurnId: "turn-terminal-follow",
+      messages: [
+        createMessage({
+          id: "user-terminal-follow",
+          turnId: "turn-terminal-follow",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-terminal-follow",
+          turnId: "turn-terminal-follow",
+          role: "assistant",
+          content: "streaming answer",
+          status: "pending",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    mountWorkspace();
+    await nextTick();
+    await advanceAnimationFrames(3);
+    (window as typeof window & { __ponyScrollDebugBuffer?: Array<Record<string, unknown>> }).__ponyScrollDebugBuffer = [];
+    viewportScrollToSpy.mockClear();
+
+    runtimeStore.$patch({
+      phase: "ready",
+      isSubmitting: false,
+      activeTurnId: null,
+      messages: [
+        createMessage({
+          id: "user-terminal-follow",
+          turnId: "turn-terminal-follow",
+          role: "user",
+          content: "继续"
+        }),
+        createMessage({
+          id: "assistant-terminal-follow",
+          turnId: "turn-terminal-follow",
+          role: "assistant",
+          content: "streaming answer",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+    await nextTick();
+    await advanceAnimationFrames(3);
+
+    expect(latestScrollDebugEvent("is-submitting:terminal-follow-skip")).toBeDefined();
+    const debugBuffer = (window as typeof window & {
+      __ponyScrollDebugBuffer?: Array<Record<string, unknown>>;
+    }).__ponyScrollDebugBuffer ?? [];
+    expect(debugBuffer.some((entry) =>
+      entry.event === "queue-scroll-request" &&
+      entry.behavior === "smooth" &&
+      entry.targetMode === "anchor"
+    )).toBe(false);
+  });
+
   it("shows scroll-to-latest button only when latest user is below viewport", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -2909,6 +2996,52 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(summaries.some((node) => node.html().includes("lucide-brain"))).toBe(true);
   });
 
+  it("uses a single agent stack gap for reasoning, tools, and content spacing", async () => {
+    window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "tool-spacing",
+          turnId: "turn-spacing",
+          role: "tool",
+          content: "",
+          status: "done",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "search finished",
+          durationSeconds: 0.8
+        }),
+        createMessage({
+          id: "assistant-spacing",
+          turnId: "turn-spacing",
+          role: "assistant",
+          content: "answer",
+          status: "done",
+          reasoningContent: "reasoning trace",
+          modelName: "OpenAI/GPT-5"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const agentShell = wrapper.get(".conversation-agent-shell");
+    expect(agentShell.classes()).toEqual(expect.arrayContaining(["flex", "flex-col", "gap-2"]));
+
+    const reasoningPanel = wrapper.get(".conversation-reasoning-panel");
+    const toolPanel = wrapper.get(".conversation-tool-panel");
+    const responsePanel = wrapper.get(".assistant-response-panel");
+    expect(reasoningPanel.classes()).not.toEqual(expect.arrayContaining(["mt-1", "mb-0.5"]));
+    expect(toolPanel.classes()).not.toEqual(expect.arrayContaining(["mt-0.5", "mb-4"]));
+    expect(responsePanel.classes()).not.toEqual(expect.arrayContaining(["my-0.5"]));
+  });
+
   it("orders assistant content and tool calls by their turn timeline instead of pinning tools above content", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -3138,6 +3271,54 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(streamingPanel.text()).toContain("streaming model result");
     expect(toolPanel.text()).toContain("tool finished before streaming text");
     expect(streamingIndex).toBeGreaterThan(toolIndex);
+    const streamingToolPanelElement = toolPanel.element;
+    const streamingToolPanelMountCount = toolPanelMotionMountCount;
+    const streamingToolPanelUpdateCount = toolPanelMotionUpdateCount;
+    expect(streamingToolPanelMountCount).toBe(0);
+
+    runtimeStore.$patch({
+      isSubmitting: false,
+      phase: "ready",
+      activeTurnId: null,
+      traceTimeline: [],
+      messages: [
+        createMessage({
+          id: "user-stream-order",
+          turnId: "turn-stream-order",
+          role: "user",
+          content: "stream order"
+        }),
+        createMessage({
+          id: "assistant-stream-order",
+          turnId: "turn-stream-order",
+          role: "assistant",
+          content: "streaming model result",
+          status: "done",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "tool-turn-stream-order-stream-tool",
+          turnId: "turn-stream-order",
+          role: "tool",
+          toolName: "Read",
+          canonicalToolName: "Read",
+          detail: "tool finished before streaming text",
+          status: "done",
+          durationSeconds: 0.4
+        })
+      ]
+    });
+    await nextTick();
+
+    const handoffContentPanel = wrapper.get(".assistant-response-panel");
+    const handoffToolPanel = wrapper.get(".conversation-tool-panel");
+    const handoffAgentShell = wrapper.get(".conversation-agent-shell");
+    const handoffContentIndex = Array.from(handoffAgentShell.element.children).indexOf(handoffContentPanel.element);
+    const handoffToolIndex = Array.from(handoffAgentShell.element.children).indexOf(handoffToolPanel.element);
+    expect(handoffContentIndex).toBeGreaterThan(handoffToolIndex);
+    expect(handoffToolPanel.element).toBe(streamingToolPanelElement);
+    expect(toolPanelMotionMountCount).toBe(streamingToolPanelMountCount);
+    expect(toolPanelMotionUpdateCount).toBe(streamingToolPanelUpdateCount);
 
     runtimeStore.$patch({
       isSubmitting: false,
@@ -3218,6 +3399,9 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     const finalContentIndex = Array.from(finalAgentShell.element.children).indexOf(finalContentPanel.element);
     const finalToolIndex = Array.from(finalAgentShell.element.children).indexOf(finalToolPanel.element);
     expect(finalContentIndex).toBeGreaterThan(finalToolIndex);
+    expect(finalToolPanel.element).toBe(streamingToolPanelElement);
+    expect(toolPanelMotionMountCount).toBe(streamingToolPanelMountCount);
+    expect(toolPanelMotionUpdateCount).toBe(streamingToolPanelUpdateCount);
   });
 
   it("only merges consecutive duplicate tool calls and keeps non-consecutive repeats visible", async () => {

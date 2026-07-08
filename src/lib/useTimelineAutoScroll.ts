@@ -921,7 +921,9 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     }
     emit("is-submitting:changed", { submitting });
     if (wasSubmitting && !submitting && streamAutoFollowEnabled.value && latestTurnSignature.value) {
-      queueScrollToLatestTurn("smooth", userScrollOverrideVersion, "anchor");
+      emit("is-submitting:terminal-follow-skip", {
+        reason: "avoid-terminal-smooth-follow"
+      });
     }
   }
 

@@ -154,6 +154,8 @@ const STREAMING_MARKDOWN_FOLLOW_DISTANCE_PX = 96;
 const COMPOSER_BUFFER_PX = 220;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
 const streamingRenderOptimizationDisabled = ref(false);
+const terminalTracePhases = new Set(["completed", "failed", "cancelled"]);
+const lastTrustedTraceTimelineByTurnId = new Map<string, TraceTimelineEntry[]>();
 
 function resolveTimelineViewport(): HTMLElement | null {
   const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
@@ -636,12 +638,29 @@ function latestModelTraceEntry(traceTimeline: TraceTimelineEntry[]) {
 function traceTimelineForTurn(turnId: string) {
   const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
   if (activeTurnId === turnId && traceTimeline.value.length) {
+    lastTrustedTraceTimelineByTurnId.set(turnId, traceTimeline.value);
     return traceTimeline.value;
   }
 
-  const historicalTimeline = latestTraceForTurn(turnId)?.traceTimeline ?? [];
+  const historicalTrace = latestTraceForTurn(turnId);
+  const historicalTimeline = historicalTrace?.traceTimeline ?? [];
   if (historicalTimeline.length) {
+    if (terminalTracePhases.has((historicalTrace?.phase ?? "").trim().toLowerCase())) {
+      lastTrustedTraceTimelineByTurnId.set(turnId, historicalTimeline);
+      return historicalTimeline;
+    }
+
+    const cachedTimeline = lastTrustedTraceTimelineByTurnId.get(turnId);
+    if (cachedTimeline?.length) {
+      return cachedTimeline;
+    }
+
     return historicalTimeline;
+  }
+
+  const cachedTimeline = lastTrustedTraceTimelineByTurnId.get(turnId);
+  if (cachedTimeline?.length) {
+    return cachedTimeline;
   }
 
   return [];
@@ -730,7 +749,6 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       } else {
         last.tools.push(...event.tools);
       }
-      last.key = `tools-${last.tools.map((tool) => tool.id).join("-")}`;
       continue;
     }
     mergedEvents.push(event);
@@ -886,6 +904,14 @@ function handleStreamingRenderConfigChanged() {
 
 function shouldUseOptimizedAssistantStreaming(message: ChatMessage | null) {
   return Boolean(message && isAssistantStreaming(message) && !streamingRenderOptimizationDisabled.value);
+}
+
+function shouldUseMarkdownAssistantRendering(message: ChatMessage | null) {
+  if (!message) {
+    return false;
+  }
+
+  return !isAssistantStreaming(message) || shouldUseOptimizedAssistantStreaming(message);
 }
 
 function latestTraceForTurn(turnId: string) {
@@ -1522,6 +1548,12 @@ watch(
     if (signature === previousSignature) {
       return;
     }
+    const visibleTurnIds = new Set(messages.value.map((message) => message.turnId));
+    for (const turnId of lastTrustedTraceTimelineByTurnId.keys()) {
+      if (!visibleTurnIds.has(turnId)) {
+        lastTrustedTraceTimelineByTurnId.delete(turnId);
+      }
+    }
     syncStreamingPresentationState();
     scheduleStreamingPresentationTimer();
   },
@@ -1684,7 +1716,7 @@ watch(
               </div>
             </article>
 
-          <article v-if="shouldShowAgentArticle(turn)" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" class="conversation-agent-shell w-full px-0 py-1">
+          <article v-if="shouldShowAgentArticle(turn)" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" class="conversation-agent-shell flex w-full flex-col gap-2 px-0 py-1">
 
 
             <template v-for="event in agentTurnEvents(turn)" :key="event.key">
@@ -1695,7 +1727,7 @@ watch(
                 :initial="{ opacity: 0, y: 6 }"
                 :animate="{ opacity: 1, y: 0 }"
                 :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
-                class="conversation-disclosure conversation-reasoning-panel mt-1 mb-0.5 group p-0"
+                class="conversation-disclosure conversation-reasoning-panel group p-0"
               >
                 <summary class="conversation-disclosure-summary">
                   <div class="flex min-w-0 items-center gap-2">
@@ -1721,7 +1753,7 @@ watch(
 
               <Transition v-else-if="event.kind === 'waiting'" name="assistant-waiting-signal">
                 <div
-                  class="assistant-waiting-panel my-0.5"
+                  class="assistant-waiting-panel"
                   role="status"
                   aria-label="等待回复开始"
                   data-testid="assistant-awaiting-first-signal"
@@ -1739,19 +1771,11 @@ watch(
 
               <div
                 v-else-if="event.kind === 'tools'"
-                v-motion
-                :initial="{ opacity: 0, y: 6 }"
-                :animate="{ opacity: 1, y: 0 }"
-                :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
-                 class="conversation-tool-panel mt-0.5 mb-4 space-y-0.5"
+                class="conversation-tool-panel space-y-0.5"
               >
                 <div
-                  v-for="(tool, idx) in event.tools"
+                  v-for="tool in event.tools"
                   :key="tool.id"
-                  v-motion
-                  :initial="{ opacity: 0, y: 4 }"
-                  :animate="{ opacity: 1, y: 0 }"
-                  :transition="{ duration: 0.18, ease: 'easeOut', delay: 0.32 + idx * 0.025 }"
                   class="flex flex-col py-0.5 text-[12px] leading-5"
                 >
                   <div class="flex items-center gap-2">
@@ -1780,7 +1804,7 @@ watch(
                 :initial="{ opacity: 0, y: 6 }"
                 :animate="{ opacity: 1, y: 0 }"
                 :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.32 }"
-                 class="assistant-response-panel my-0.5"
+                class="assistant-response-panel"
               >
                 <!-- 统一 shell：流式/完成共享同一外容器，避免 v-if/v-else 导致的 DOM 子树替换 -->
                 <div
@@ -1788,31 +1812,37 @@ watch(
                   :class="assistantTone(event.assistant)"
                   :data-streaming="isAssistantStreaming(event.assistant) ? 'true' : undefined"
                 >
-                  <template v-if="isAssistantStreaming(event.assistant)">
-                    <div
-                      v-if="shouldUseOptimizedAssistantStreaming(event.assistant)"
-                      class="assistant-streaming-content"
-                      data-testid="assistant-streaming-flow"
-                    >
-                      <MarkdownRenderer
-                        :content="event.assistant.content"
-                        :streaming="true"
-                        :force-markdown-streaming="true"
-                        wrapper-class="assistant-markdown assistant-streaming-markdown"
-                        :tone-class="assistantTone(event.assistant)"
-                        @render-complete="handleMarkdownRenderComplete"
-                      />
-                      <span class="assistant-streaming-caret" role="status" aria-label="回复生成中"></span>
-                    </div>
-                    <div
-                      v-else
-                      class="assistant-streaming-content"
-                      data-testid="assistant-streaming-flow"
-                    >
-                      {{ assistantDisplayContent(event.assistant) }}
-                      <span class="assistant-streaming-caret" role="status" aria-label="回复生成中"></span>
-                    </div>
-                  </template>
+                  <div
+                    v-if="shouldUseMarkdownAssistantRendering(event.assistant)"
+                    :class="isAssistantStreaming(event.assistant) ? 'assistant-streaming-content' : undefined"
+                    :data-testid="isAssistantStreaming(event.assistant) ? 'assistant-streaming-flow' : undefined"
+                  >
+                    <MarkdownRenderer
+                      :content="event.assistant.content"
+                      :streaming="isAssistantStreaming(event.assistant)"
+                      :force-markdown-streaming="isAssistantStreaming(event.assistant)"
+                      :wrapper-class="[
+                        'assistant-markdown',
+                        isAssistantStreaming(event.assistant) ? 'assistant-streaming-markdown' : ''
+                      ].filter(Boolean).join(' ')"
+                      :tone-class="assistantTone(event.assistant)"
+                      @render-complete="handleMarkdownRenderComplete"
+                    />
+                    <span
+                      v-if="isAssistantStreaming(event.assistant)"
+                      class="assistant-streaming-caret"
+                      role="status"
+                      aria-label="回复生成中"
+                    ></span>
+                  </div>
+                  <div
+                    v-else-if="isAssistantStreaming(event.assistant)"
+                    class="assistant-streaming-content"
+                    data-testid="assistant-streaming-flow"
+                  >
+                    {{ assistantDisplayContent(event.assistant) }}
+                    <span class="assistant-streaming-caret" role="status" aria-label="回复生成中"></span>
+                  </div>
                   <MarkdownRenderer
                     v-else
                     :content="event.assistant.content"

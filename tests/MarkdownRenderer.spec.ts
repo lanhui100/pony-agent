@@ -149,6 +149,26 @@ describe("MarkdownRenderer", () => {
     expect(finalEvent).toBeDefined();
   });
 
+  it("keeps the previous rendered markdown visible while final rendering is queued", async () => {
+    const wrapper = mount(MarkdownRenderer, {
+      props: {
+        content: "**bold text**",
+        streaming: true,
+        forceMarkdownStreaming: true,
+        wrapperClass: "assistant-markdown"
+      }
+    });
+
+    await flushStreamingRender();
+    expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
+
+    await wrapper.setProps({ streaming: false });
+    await nextTick();
+
+    expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
+    expect(wrapper.find(".whitespace-pre-wrap").exists()).toBe(false);
+  });
+
   it("re-renders the final truthful markdown when streaming ends", async () => {
     const wrapper = mount(MarkdownRenderer, {
       props: {
