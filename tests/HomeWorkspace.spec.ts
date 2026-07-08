@@ -1199,7 +1199,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(streamingContent.text()).toContain("**正在** 输出中");
     expect(wrapper.get(".markdown-stub").attributes("streaming")).toBe("true");
     expect(wrapper.get(".markdown-stub").attributes("data-force-markdown-streaming")).toBe("true");
-    expect(wrapper.find(".assistant-streaming-caret").exists()).toBe(true);
+    expect(wrapper.find(".assistant-streaming-caret").exists()).toBe(false);
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
   });
 
@@ -1391,7 +1391,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
 
     expect(wrapper.get('[data-testid="assistant-streaming-flow"]').text()).toContain("**正在** 输出中");
     expect(wrapper.find(".markdown-stub").exists()).toBe(false);
-    expect(wrapper.find(".assistant-streaming-caret").exists()).toBe(true);
+    expect(wrapper.find(".assistant-streaming-caret").exists()).toBe(false);
   });
 
   it("switches from streaming text to final plain text when assistant completes", async () => {
@@ -3178,6 +3178,115 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(toolIndex).toBeGreaterThan(contentIndex);
   });
 
+  it("interleaves model reasoning, assistant content, and tool calls by trace sequence", async () => {
+    window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-chronological",
+          turnId: "turn-chronological",
+          role: "user",
+          content: "fix it"
+        }),
+        createMessage({
+          id: "assistant-chronological",
+          turnId: "turn-chronological",
+          role: "assistant",
+          content: "Final answer",
+          status: "done",
+          reasoningContent: "Second thought",
+          modelName: "OpenAI/GPT-5"
+        }),
+        createMessage({
+          id: "tool-turn-chronological-read-config",
+          turnId: "turn-chronological",
+          role: "tool",
+          toolName: "Read",
+          detail: "read config",
+          status: "done",
+          durationSeconds: 0.5
+        })
+      ],
+      turnTraceHistory: [
+        {
+          ...createTrace({
+            turnId: "turn-chronological",
+            phase: "completed",
+            error: null,
+            toolActivities: [
+              {
+                id: "read-config",
+                name: "Read",
+                status: "done"
+              }
+            ]
+          }),
+          traceTimeline: [
+            {
+              id: "model-before-tool",
+              kind: "call_model",
+              label: "MODEL #1",
+              state: "completed",
+              sequence: 10,
+              text: "I need to inspect config.",
+              reasoningContent: "First thought"
+            },
+            {
+              id: "tool-between-models",
+              kind: "call_tool",
+              label: "Read",
+              state: "completed",
+              sequence: 20,
+              toolActivities: [
+                {
+                  id: "read-config",
+                  name: "Read",
+                  status: "done"
+                }
+              ]
+            },
+            {
+              id: "model-after-tool",
+              kind: "call_model",
+              label: "MODEL #2",
+              state: "completed",
+              sequence: 30,
+              text: "Final answer",
+              reasoningContent: "Second thought"
+            }
+          ]
+        }
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const agentShell = wrapper.get(".conversation-agent-shell");
+    const children = Array.from(agentShell.element.children);
+    const reasoningPanels = wrapper.findAll(".conversation-reasoning-panel");
+    const contentPanels = wrapper.findAll(".assistant-response-panel");
+    const toolPanel = wrapper.get(".conversation-tool-panel");
+
+    expect(reasoningPanels).toHaveLength(2);
+    expect(contentPanels).toHaveLength(2);
+    expect(reasoningPanels[0]?.text()).toContain("First thought");
+    expect(contentPanels[0]?.text()).toContain("I need to inspect config.");
+    expect(toolPanel.text()).toContain("read config");
+    expect(reasoningPanels[1]?.text()).toContain("Second thought");
+    expect(contentPanels[1]?.text()).toContain("Final answer");
+
+    expect(children.indexOf(reasoningPanels[0]!.element)).toBeLessThan(children.indexOf(contentPanels[0]!.element));
+    expect(children.indexOf(contentPanels[0]!.element)).toBeLessThan(children.indexOf(toolPanel.element));
+    expect(children.indexOf(toolPanel.element)).toBeLessThan(children.indexOf(reasoningPanels[1]!.element));
+    expect(children.indexOf(reasoningPanels[1]!.element)).toBeLessThan(children.indexOf(contentPanels[1]!.element));
+  });
+
   it("uses the active trace timeline while streaming so content does not jump after tool calls complete", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -3271,6 +3380,7 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(streamingPanel.text()).toContain("streaming model result");
     expect(toolPanel.text()).toContain("tool finished before streaming text");
     expect(streamingIndex).toBeGreaterThan(toolIndex);
+    const streamingContentPanelElement = streamingPanel.element;
     const streamingToolPanelElement = toolPanel.element;
     const streamingToolPanelMountCount = toolPanelMotionMountCount;
     const streamingToolPanelUpdateCount = toolPanelMotionUpdateCount;
@@ -3316,6 +3426,7 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     const handoffContentIndex = Array.from(handoffAgentShell.element.children).indexOf(handoffContentPanel.element);
     const handoffToolIndex = Array.from(handoffAgentShell.element.children).indexOf(handoffToolPanel.element);
     expect(handoffContentIndex).toBeGreaterThan(handoffToolIndex);
+    expect(handoffContentPanel.element).toBe(streamingContentPanelElement);
     expect(handoffToolPanel.element).toBe(streamingToolPanelElement);
     expect(toolPanelMotionMountCount).toBe(streamingToolPanelMountCount);
     expect(toolPanelMotionUpdateCount).toBe(streamingToolPanelUpdateCount);
@@ -3399,6 +3510,7 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     const finalContentIndex = Array.from(finalAgentShell.element.children).indexOf(finalContentPanel.element);
     const finalToolIndex = Array.from(finalAgentShell.element.children).indexOf(finalToolPanel.element);
     expect(finalContentIndex).toBeGreaterThan(finalToolIndex);
+    expect(finalContentPanel.element).toBe(streamingContentPanelElement);
     expect(finalToolPanel.element).toBe(streamingToolPanelElement);
     expect(toolPanelMotionMountCount).toBe(streamingToolPanelMountCount);
     expect(toolPanelMotionUpdateCount).toBe(streamingToolPanelUpdateCount);

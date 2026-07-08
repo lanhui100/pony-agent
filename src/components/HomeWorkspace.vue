@@ -62,10 +62,10 @@ type TurnBucket = {
 };
 
 type AgentTurnEvent =
-  | { kind: "reasoning"; key: string; order: number; assistant: ChatMessage }
+  | { kind: "reasoning"; key: string; order: number; assistant: ChatMessage; reasoningContent: string; streaming: boolean }
   | { kind: "waiting"; key: string; order: number }
   | { kind: "tools"; key: string; order: number; tools: MergedToolCall[] }
-  | { kind: "content"; key: string; order: number; assistant: ChatMessage }
+  | { kind: "content"; key: string; order: number; assistant: ChatMessage; content: string; streaming: boolean }
   | { kind: "error"; key: string; order: number };
 
 type MergedToolCall = {
@@ -635,6 +635,12 @@ function latestModelTraceEntry(traceTimeline: TraceTimelineEntry[]) {
   return null;
 }
 
+function modelTraceEntries(traceTimeline: TraceTimelineEntry[]) {
+  return traceTimeline
+    .filter((entry) => canonicalTraceKind(entry) === "call_model")
+    .sort((left, right) => left.sequence - right.sequence);
+}
+
 function traceTimelineForTurn(turnId: string) {
   const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
   if (activeTurnId === turnId && traceTimeline.value.length) {
@@ -666,20 +672,115 @@ function traceTimelineForTurn(turnId: string) {
   return [];
 }
 
+function isLatestModelEntry(entry: TraceTimelineEntry, modelEntries: TraceTimelineEntry[]) {
+  return modelEntries[modelEntries.length - 1]?.id === entry.id;
+}
+
+function isStreamingModelEntry(turn: TurnBucket, entry: TraceTimelineEntry, modelEntries: TraceTimelineEntry[]) {
+  return Boolean(
+    turn.assistant &&
+    isAssistantStreaming(turn.assistant) &&
+    isLatestModelEntry(entry, modelEntries) &&
+    runtimeStore.activeTurnId === turn.turnId
+  );
+}
+
+function modelEntryReasoningContent(
+  turn: TurnBucket,
+  entry: TraceTimelineEntry,
+  modelEntries: TraceTimelineEntry[]
+) {
+  if (isStreamingModelEntry(turn, entry, modelEntries)) {
+    const reasoning = assistantDisplayedReasoning(turn.assistant);
+    return reasoning.trim() ? reasoning : "";
+  }
+
+  const traceReasoning = entry.reasoningContent ?? "";
+  if (traceReasoning.trim()) {
+    return traceReasoning;
+  }
+
+  if (turn.assistant && isLatestModelEntry(entry, modelEntries)) {
+    const reasoning = assistantReasoning(turn.assistant);
+    return reasoning.trim() ? reasoning : "";
+  }
+
+  return "";
+}
+
+function modelEntryContent(
+  turn: TurnBucket,
+  entry: TraceTimelineEntry,
+  modelEntries: TraceTimelineEntry[]
+) {
+  if (isStreamingModelEntry(turn, entry, modelEntries)) {
+    const content = assistantDisplayContent(turn.assistant);
+    return content.trim() ? content : "";
+  }
+
+  const traceText = entry.text ?? "";
+  if (traceText.trim()) {
+    return traceText;
+  }
+
+  if (turn.assistant && isLatestModelEntry(entry, modelEntries)) {
+    return turn.assistant.content.trim() ? turn.assistant.content : "";
+  }
+
+  return "";
+}
+
+function modelEventKey(prefix: "reasoning" | "content", assistant: ChatMessage, entry: TraceTimelineEntry, stableAssistantKey: boolean) {
+  return stableAssistantKey ? `${prefix}-${assistant.id}` : `${prefix}-${assistant.id}-${entry.id}`;
+}
+
 function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   const turnTraceTimeline = traceTimelineForTurn(turn.turnId);
   const modelEntry = latestModelTraceEntry(turnTraceTimeline);
+  const modelEntries = modelTraceEntries(turnTraceTimeline);
   const assistantOrder = messageIndexInTurn(turn.assistant);
   const modelOrder = modelEntry?.sequence ?? assistantOrder;
   const isActiveStreamingTurn = runtimeStore.activeTurnId === turn.turnId && turn.assistant?.status === "pending";
   const events: AgentTurnEvent[] = [];
 
-  if (turn.assistant && shouldShowReasoningBlock(turn.assistant)) {
+  if (turn.assistant && modelEntries.length > 0) {
+    for (const entry of modelEntries) {
+      const streaming = isStreamingModelEntry(turn, entry, modelEntries);
+      const stableAssistantKey = isLatestModelEntry(entry, modelEntries);
+      const reasoningContent = showReasoningContent.value
+        ? modelEntryReasoningContent(turn, entry, modelEntries)
+        : "";
+      if (reasoningContent) {
+        events.push({
+          kind: "reasoning",
+          key: modelEventKey("reasoning", turn.assistant, entry, stableAssistantKey),
+          order: entry.sequence - 0.2,
+          assistant: turn.assistant,
+          reasoningContent,
+          streaming
+        });
+      }
+
+      const content = modelEntryContent(turn, entry, modelEntries);
+      if (content && !shouldRenderAssistantAsError(turn)) {
+        events.push({
+          kind: "content",
+          key: modelEventKey("content", turn.assistant, entry, stableAssistantKey),
+          order: entry.sequence,
+          assistant: turn.assistant,
+          content,
+          streaming
+        });
+      }
+    }
+  } else if (turn.assistant && shouldShowReasoningBlock(turn.assistant)) {
     events.push({
       kind: "reasoning",
       key: `reasoning-${turn.assistant.id}`,
       order: Number.isFinite(modelOrder) ? modelOrder - 0.2 : assistantOrder - 0.2,
-      assistant: turn.assistant
+      assistant: turn.assistant,
+      reasoningContent: assistantDisplayedReasoning(turn.assistant).trim(),
+      streaming: isAssistantReasoningStreaming(turn.assistant)
     });
   }
 
@@ -710,12 +811,19 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     });
   }
 
-  if (turn.assistant && assistantHasVisibleContent(turn.assistant) && !shouldRenderAssistantAsError(turn)) {
+  if (
+    modelEntries.length === 0 &&
+    turn.assistant &&
+    assistantHasVisibleContent(turn.assistant) &&
+    !shouldRenderAssistantAsError(turn)
+  ) {
     events.push({
       kind: "content",
       key: `content-${turn.assistant.id}`,
       order: modelOrder,
-      assistant: turn.assistant
+      assistant: turn.assistant,
+      content: isAssistantStreaming(turn.assistant) ? assistantDisplayContent(turn.assistant) : turn.assistant.content,
+      streaming: isAssistantStreaming(turn.assistant)
     });
   }
 
@@ -1737,10 +1845,10 @@ watch(
                   <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
                 </summary>
                 <div class="mt-1 pl-5 whitespace-pre-wrap break-words text-[13px] leading-[1.4] text-stone-400">
-                  <template v-if="assistantReasoning(event.assistant)">
-                    <span class="reasoning-italic">{{ isAssistantReasoningStreaming(event.assistant) ? assistantDisplayedReasoningStable(event.assistant) : assistantReasoning(event.assistant) }}</span>
+                  <template v-if="event.reasoningContent">
+                    <span class="reasoning-italic">{{ event.streaming ? assistantDisplayedReasoningStable(event.assistant) : event.reasoningContent }}</span>
                     <span
-                      v-if="isAssistantReasoningStreaming(event.assistant) && assistantDisplayedReasoningFade(event.assistant)"
+                      v-if="event.streaming && assistantDisplayedReasoningFade(event.assistant)"
                       :key="`rfade-${event.assistant.id}-${assistantDisplayedReasoningFadeKey(event.assistant)}`"
                       class="assistant-streaming-fade reasoning-italic"
                       :style="assistantDisplayedReasoningFadeStyle(event.assistant)"
@@ -1810,42 +1918,35 @@ watch(
                 <div
                   class="assistant-plain-text text-sm"
                   :class="assistantTone(event.assistant)"
-                  :data-streaming="isAssistantStreaming(event.assistant) ? 'true' : undefined"
+                  :data-streaming="event.streaming ? 'true' : undefined"
                 >
                   <div
                     v-if="shouldUseMarkdownAssistantRendering(event.assistant)"
-                    :class="isAssistantStreaming(event.assistant) ? 'assistant-streaming-content' : undefined"
-                    :data-testid="isAssistantStreaming(event.assistant) ? 'assistant-streaming-flow' : undefined"
+                    :class="event.streaming ? 'assistant-streaming-content' : undefined"
+                    :data-testid="event.streaming ? 'assistant-streaming-flow' : undefined"
                   >
                     <MarkdownRenderer
-                      :content="event.assistant.content"
-                      :streaming="isAssistantStreaming(event.assistant)"
-                      :force-markdown-streaming="isAssistantStreaming(event.assistant)"
+                      :content="event.content"
+                      :streaming="event.streaming"
+                      :force-markdown-streaming="event.streaming"
                       :wrapper-class="[
                         'assistant-markdown',
-                        isAssistantStreaming(event.assistant) ? 'assistant-streaming-markdown' : ''
+                        event.streaming ? 'assistant-streaming-markdown' : ''
                       ].filter(Boolean).join(' ')"
                       :tone-class="assistantTone(event.assistant)"
                       @render-complete="handleMarkdownRenderComplete"
                     />
-                    <span
-                      v-if="isAssistantStreaming(event.assistant)"
-                      class="assistant-streaming-caret"
-                      role="status"
-                      aria-label="回复生成中"
-                    ></span>
                   </div>
                   <div
-                    v-else-if="isAssistantStreaming(event.assistant)"
+                    v-else-if="event.streaming"
                     class="assistant-streaming-content"
                     data-testid="assistant-streaming-flow"
                   >
-                    {{ assistantDisplayContent(event.assistant) }}
-                    <span class="assistant-streaming-caret" role="status" aria-label="回复生成中"></span>
+                    {{ event.content }}
                   </div>
                   <MarkdownRenderer
                     v-else
-                    :content="event.assistant.content"
+                    :content="event.content"
                     :streaming="false"
                     wrapper-class="assistant-markdown"
                     :tone-class="assistantTone(event.assistant)"
@@ -2419,31 +2520,6 @@ watch(
   }
 }
 
-.assistant-streaming-caret {
-  display: inline-block;
-  width: 0.42rem;
-  height: 0.42rem;
-  margin-left: 0.28rem;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.38;
-  vertical-align: middle;
-  animation: assistant-stream-caret-pulse 1.05s ease-in-out infinite;
-}
-
-@keyframes assistant-stream-caret-pulse {
-  0%,
-  100% {
-    opacity: 0.26;
-    transform: scale(0.82);
-  }
-
-  50% {
-    opacity: 0.58;
-    transform: scale(1);
-  }
-}
-
 .assistant-waiting-panel {
   display: inline-flex;
   min-height: 1.7rem;
@@ -2495,7 +2571,6 @@ watch(
 @media (prefers-reduced-motion: reduce) {
   .assistant-streaming-fade,
   .assistant-streaming-char,
-  .assistant-streaming-caret,
   .assistant-waiting-dot {
     animation: none !important;
     opacity: 1 !important;
