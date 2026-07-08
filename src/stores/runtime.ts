@@ -834,6 +834,54 @@ function chatMessagesFromMessageState(snapshot?: MessageStateSnapshot | null) {
     .filter((message): message is ChatMessage => message != null);
 }
 
+function previewMessageStateDeltaMessages(
+  previousMessages: ChatMessage[],
+  delta: MessageStateDelta | null | undefined,
+  sessionId: string | null,
+  messageRevision: string | null
+) {
+  if (!delta || delta.sessionId !== sessionId) {
+    return null;
+  }
+  if (messageRevision !== null && delta.baseRevision !== messageRevision) {
+    return null;
+  }
+
+  let nextMessages = [...previousMessages];
+  for (const op of delta.ops) {
+    if (op.kind === "truncateAfter") {
+      if (!op.messageId) {
+        nextMessages = [];
+        continue;
+      }
+      const index = nextMessages.findIndex((message) => message.id === op.messageId);
+      if (index < 0) {
+        return null;
+      }
+      nextMessages = nextMessages.slice(0, index + 1);
+      continue;
+    }
+
+    if (op.kind === "append") {
+      nextMessages = [
+        ...nextMessages,
+        ...op.messages
+          .map((entry) => chatMessageFromMessageStateEntry(entry))
+          .filter((message): message is ChatMessage => message != null)
+      ];
+      continue;
+    }
+
+    if (op.kind === "replaceAll") {
+      nextMessages = op.messages
+        .map((entry) => chatMessageFromMessageStateEntry(entry))
+        .filter((message): message is ChatMessage => message != null);
+    }
+  }
+
+  return nextMessages;
+}
+
 function cloneAttachmentAssets(assets?: AttachmentAsset[] | null) {
   return (assets ?? []).map((asset) => ({ ...asset }));
 }
@@ -4211,43 +4259,17 @@ export const useRuntimeStore = defineStore("runtime", {
       return true;
     },
     applyMessageStateDelta(delta?: MessageStateDelta | null) {
-      if (!delta || delta.sessionId !== this.sessionId) {
+      if (!delta) {
         return false;
       }
-      if (this.messageRevision !== null && delta.baseRevision !== this.messageRevision) {
+      const nextMessages = previewMessageStateDeltaMessages(
+        this.messages,
+        delta,
+        this.sessionId,
+        this.messageRevision
+      );
+      if (!nextMessages) {
         return false;
-      }
-
-      let nextMessages = [...this.messages];
-      for (const op of delta.ops) {
-        if (op.kind === "truncateAfter") {
-          if (!op.messageId) {
-            nextMessages = [];
-            continue;
-          }
-          const index = nextMessages.findIndex((message) => message.id === op.messageId);
-          if (index < 0) {
-            return false;
-          }
-          nextMessages = nextMessages.slice(0, index + 1);
-          continue;
-        }
-
-        if (op.kind === "append") {
-          nextMessages = [
-            ...nextMessages,
-            ...op.messages
-              .map((entry) => chatMessageFromMessageStateEntry(entry))
-              .filter((message): message is ChatMessage => message != null)
-          ];
-          continue;
-        }
-
-        if (op.kind === "replaceAll") {
-          nextMessages = op.messages
-            .map((entry) => chatMessageFromMessageStateEntry(entry))
-            .filter((message): message is ChatMessage => message != null);
-        }
       }
 
       this.messages = reuseStableChatMessages(this.messages, nextMessages);
@@ -4815,7 +4837,22 @@ export const useRuntimeStore = defineStore("runtime", {
         }
 
         const messageCountBefore = this.messages.length;
-        const deltaApplied = this.applyMessageStateDelta(payload.messageDelta ?? null);
+        const targetNode = this.historyNodes.find((item) => item.nodeId === nodeId) ?? null;
+        const targetIsInitialState = targetNode ? !targetNode.turnId?.trim() : false;
+        const previewMessages = previewMessageStateDeltaMessages(
+          this.messages,
+          payload.messageDelta ?? null,
+          this.sessionId,
+          this.messageRevision
+        );
+        const shouldSkipBlankIntermediateDelta =
+          !targetIsInitialState &&
+          messageCountBefore > 0 &&
+          previewMessages !== null &&
+          previewMessages.length === 0;
+        const deltaApplied = shouldSkipBlankIntermediateDelta
+          ? false
+          : this.applyMessageStateDelta(payload.messageDelta ?? null);
 
         if (!deltaApplied) {
           const preservedDraft = this.draftMessage;
@@ -4826,12 +4863,11 @@ export const useRuntimeStore = defineStore("runtime", {
           this.draftMessage = preservedDraft;
         }
 
-        // Safety net: when the delta succeeded but messages became empty (e.g. the
-        // backend projection hit a blank node) — or when the fallback loadSessionState
-        // also produced an empty result for a non-root checkout — force one more
-        // host round-trip so the frontend stays in sync with what the backend truly
-        // committed.
-        if (this.messages.length === 0 && messageCountBefore > 0) {
+        // Safety net: when a non-initial checkout unexpectedly empties the
+        // transcript, force one more host round-trip. An initial/root checkout
+        // is expected to clear messages, so reloading there only causes a
+        // visible empty-then-rehydrate jump.
+        if (this.messages.length === 0 && messageCountBefore > 0 && !targetIsInitialState) {
           debugLog("checkout:safety-reload", {
             sessionId,
             nodeId,

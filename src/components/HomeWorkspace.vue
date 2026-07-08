@@ -1172,8 +1172,8 @@ async function executeRollback(turnId: string, action: CheckpointRollbackAction)
   const rollbackStartedAt = Date.now();
 
   try {
-    // Keep the store untouched during the backend round-trip while the
-    // removed turns leave through TransitionGroup.
+    // Optimistically hide the rolled-back tail immediately while the backend
+    // checkout and snapshot correction finish in the background.
     markRollbackExitingTurns(turnId);
     optimisticRollbackTurnId.value = turnId;
     rollbackInFlight.value = { turnId, action };
