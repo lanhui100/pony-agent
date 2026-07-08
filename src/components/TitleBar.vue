@@ -35,7 +35,7 @@ async function closeWindow() {
     <div class="flex items-center" data-tauri-drag-region>
       <button
         type="button"
-        class="inline-flex h-9 w-11 items-center justify-center text-stone-400 transition-colors hover:bg-stone-200 hover:text-stone-600"
+        class="inline-flex h-9 w-11 items-center justify-center text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-600"
         title="最小化"
         @click="minimize"
       >
@@ -43,7 +43,7 @@ async function closeWindow() {
       </button>
       <button
         type="button"
-        class="inline-flex h-9 w-11 items-center justify-center text-stone-400 transition-colors hover:bg-stone-200 hover:text-stone-600"
+        class="inline-flex h-9 w-11 items-center justify-center text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-600"
         title="最大化"
         @click="toggleMaximize"
       >
