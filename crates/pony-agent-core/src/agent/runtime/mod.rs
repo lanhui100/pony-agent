@@ -26,10 +26,12 @@ use crate::agent::provider::{
     build_context_observation, provider_native_assistant_message_with_reasoning,
     provider_native_assistant_message_with_reasoning_value,
     provider_native_assistant_tool_call_message,
+    provider_native_assistant_tool_call_message_for_protocol,
     provider_native_assistant_tool_call_message_with_reasoning_value,
-    provider_native_tool_result_message, provider_native_user_message, BuildContextObservation,
-    ProviderDecision, ProviderManager, ProviderRequest, ProviderResponse, ProviderStreamChunk,
-    TokenUsage,
+    provider_native_tool_result_message_for_protocol, provider_native_user_message,
+    BuildContextObservation, ProviderDecision, ProviderManager, ProviderMessage,
+    ProviderRequest, ProviderRequestObservation, ProviderResponse,
+    ProviderStreamChunk, TokenUsage,
 };
 use crate::agent::session::{
     HistoryBranch, HistoryCheckoutMode, HistoryCursor, HistoryNode, SessionAttachment,
@@ -50,8 +52,8 @@ use crate::agent::turn_flow::{
     emit_stream_failed, emit_turn_failed, normalize_user_message, preview_text, provider_decision,
     provider_decision_stream, provider_event_meta, provider_failure_message, provider_followup,
     provider_followup_stream, runtime_log, stream_reasoning_chunks, stream_text_chunks,
-    token_usage_parts, PersistedTurnOutcome, PlannedTurn, PreparedTurn, ProviderEventMeta,
-    SyncToolTurnOutcome, TurnEventEnvelope, TurnEventSink,
+    token_usage_parts, ModelHopTraceContent, PersistedTurnOutcome, PlannedTurn, PreparedTurn,
+    ProviderEventMeta, SyncToolTurnOutcome, TurnEventEnvelope, TurnEventSink,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -232,11 +234,35 @@ const HOOK_FAILTURN_HANDLED_SENTINEL: &str = "__hook_failturn_handled__";
 
 #[derive(Clone)]
 struct ToolTurnHopRecord {
+    assistant_message: Option<Value>,
     assistant_output_text: String,
     assistant_reasoning_content: Option<String>,
     assistant_reasoning_content_value: Option<Value>,
     tool_call: ToolCall,
     tool_result: crate::agent::tools::ToolResult,
+}
+
+fn model_hop_trace_contents(hop_records: &[ToolTurnHopRecord]) -> Vec<ModelHopTraceContent> {
+    hop_records
+        .iter()
+        .map(|hop| ModelHopTraceContent {
+            text: hop.assistant_output_text.clone(),
+            reasoning_content: hop.assistant_reasoning_content.clone(),
+        })
+        .collect()
+}
+
+fn model_hop_trace_contents_with_current(
+    hop_records: &[ToolTurnHopRecord],
+    current_text: &str,
+    current_reasoning: Option<&str>,
+) -> Vec<ModelHopTraceContent> {
+    let mut contents = model_hop_trace_contents(hop_records);
+    contents.push(ModelHopTraceContent {
+        text: current_text.to_string(),
+        reasoning_content: current_reasoning.map(str::to_string),
+    });
+    contents
 }
 
 struct RecoveredToolFollowup {
@@ -1227,20 +1253,87 @@ impl AgentRuntime {
             normalize_user_message(&input.message)
         };
 
-        let session = self
-            .sessions
-            .write()
-            .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                e.into_inner()
-            })
-            .snapshot_at(
+        let provider = self.resolve_provider(input);
+        let workspace_mode = input.workspace_mode.as_deref();
+
+        // 上下文压缩检查：在构建上下文前，检查是否需要压缩历史
+        let session = {
+            let mut sessions = self
+                .sessions
+                .write()
+                .unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
+
+            // 先获取当前快照，检查是否需要压缩
+            let current_snapshot = sessions.snapshot_at(
                 input.session_id.as_deref(),
                 input.node_id.as_deref(),
                 &input.history,
             );
-        let workspace_mode = input.workspace_mode.as_deref();
-        let provider = self.resolve_provider(input);
+
+            let config = crate::agent::compression::CompressionConfig::default();
+            if crate::agent::compression::should_compress(
+                &current_snapshot.history,
+                &provider,
+                &config,
+            ) {
+                let (to_compress, _to_keep) =
+                    crate::agent::compression::split_history(&current_snapshot.history, &config);
+
+                if !to_compress.is_empty() {
+                    let system_prompt =
+                        crate::agent::compression::build_compression_system_prompt();
+                    let mut compression_messages = vec![ProviderMessage::system(system_prompt)];
+                    for msg in &to_compress {
+                        compression_messages.push(ProviderMessage::user(&msg.content));
+                    }
+
+                    let compression_request = ProviderRequest {
+                        model: provider.model().to_string(),
+                        input: compression_messages,
+                        images: Vec::new(),
+                        native_messages: Vec::new(),
+                        observation: ProviderRequestObservation::default(),
+                        temperature: 0.3,
+                        max_output_tokens: 2048,
+                    };
+
+                    match provider.decide_with_tools(&compression_request, &[]) {
+                        Ok(decision) => {
+                            let summary_msg =
+                                crate::agent::compression::wrap_summary_to_message(
+                                    &decision.output_text,
+                                );
+                            let result = crate::agent::compression::apply_compression(
+                                current_snapshot.history.clone(),
+                                summary_msg,
+                                &config,
+                            );
+                            sessions.replace_session_history(
+                                input.session_id.as_deref(),
+                                result.history,
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[pony-agent] session compression failed: {e}, \
+                                 continuing without compression"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // 获取最终（可能已压缩）的快照
+            sessions.snapshot_at(
+                input.session_id.as_deref(),
+                input.node_id.as_deref(),
+                &input.history,
+            )
+        };
+
         let preliminary_retrieved = self.context_builder.retrieve_context_state(
             &user_message,
             &[],
@@ -1917,6 +2010,7 @@ impl AgentRuntime {
         phase: &str,
         trace_steps: Vec<TurnTraceStep>,
         tool_activities: Vec<TurnToolActivity>,
+        model_hop_trace_contents: &[ModelHopTraceContent],
         provider_call_records: Vec<ProviderCallCacheRecord>,
         hook_trace_records: Vec<HookTraceRecord>,
         provider_meta: Option<&ProviderEventMeta>,
@@ -1944,6 +2038,7 @@ impl AgentRuntime {
             provider_mode.as_deref(),
             build_context_observation.as_ref(),
             &tool_activities,
+            model_hop_trace_contents,
             return_text.as_deref(),
             return_reasoning_content.as_deref(),
             fallback_reason.as_deref(),
@@ -2035,6 +2130,7 @@ impl AgentRuntime {
             phase,
             trace_steps,
             tool_activities,
+            &[],
             provider_call_records,
             Vec::new(),
             provider_meta,
@@ -2097,6 +2193,7 @@ impl AgentRuntime {
             "failed",
             trace_steps.clone(),
             tool_activities.clone(),
+            &[],
             provider_call_records.clone(),
             hook_trace_records.clone(),
             provider_meta,
@@ -2238,6 +2335,7 @@ impl AgentRuntime {
             provider_mode.as_deref(),
             build_context_observation.as_ref(),
             &tool_activities,
+            &[],
             None,
             None,
             fallback_reason.as_deref(),
@@ -2451,6 +2549,7 @@ impl AgentRuntime {
                 None,
                 build_context_observation.as_ref(),
                 &[],
+                &[],
                 None,
                 None,
                 None,
@@ -2569,6 +2668,11 @@ impl AgentRuntime {
                     None,
                     &context_observation,
                     &tool_activities,
+                    &model_hop_trace_contents_with_current(
+                        &hop_records,
+                        current_assistant_output_text.as_str(),
+                        current_assistant_reasoning.as_deref(),
+                    ),
                     Some(current_assistant_output_text.as_str()),
                     current_assistant_reasoning.as_deref(),
                     first_token_latency.get(),
@@ -2618,6 +2722,11 @@ impl AgentRuntime {
                     None,
                     &context_observation,
                     &running_tool_activities,
+                    &model_hop_trace_contents_with_current(
+                        &hop_records,
+                        current_assistant_output_text.as_str(),
+                        current_assistant_reasoning.as_deref(),
+                    ),
                     Some(current_assistant_output_text.as_str()),
                     current_assistant_reasoning.as_deref(),
                     first_token_latency.get(),
@@ -2681,6 +2790,7 @@ impl AgentRuntime {
                 None,
             );
             hop_records.push(ToolTurnHopRecord {
+                assistant_message: current_assistant_message.clone(),
                 assistant_output_text: current_assistant_output_text.clone(),
                 assistant_reasoning_content: current_assistant_reasoning.clone(),
                 assistant_reasoning_content_value: current_assistant_reasoning_value.clone(),
@@ -2737,8 +2847,9 @@ impl AgentRuntime {
                     None,
                     &context_observation,
                     &tool_activities,
-                    Some(current_assistant_output_text.as_str()),
-                    current_assistant_reasoning.as_deref(),
+                    &model_hop_trace_contents(&hop_records),
+                    None,
+                    None,
                     first_token_latency.get(),
                     "calling_model",
                 )),
@@ -2798,8 +2909,9 @@ impl AgentRuntime {
                     None,
                     &context_observation,
                     &tool_activities,
-                    Some(current_assistant_output_text.as_str()),
-                    current_assistant_reasoning.as_deref(),
+                    &model_hop_trace_contents(&hop_records),
+                    None,
+                    None,
                     first_token_latency.get(),
                     "calling_model",
                 )),
@@ -2870,8 +2982,9 @@ impl AgentRuntime {
                     None,
                     &context_observation,
                     &tool_activities,
-                    Some(current_assistant_output_text.as_str()),
-                    current_assistant_reasoning.as_deref(),
+                    &model_hop_trace_contents(&hop_records),
+                    None,
+                    None,
                     first_token_latency.get(),
                     "calling_model",
                 )),
@@ -3312,7 +3425,12 @@ impl AgentRuntime {
                 provider.name(),
                 &completed_mode,
                 accumulated_token_usage.as_ref(),
-                native_transcript_for_tool_turn(user_message, &hop_records, &response),
+                native_transcript_for_tool_turn(
+                    provider.protocol_label(),
+                    user_message,
+                    &hop_records,
+                    &response,
+                ),
                 attachments,
                 input.workspace_mode.as_deref(),
             );
@@ -3493,6 +3611,7 @@ impl AgentRuntime {
                 "completed",
                 trace_steps.clone(),
                 tool_activities.clone(),
+                &model_hop_trace_contents(&hop_records),
                 provider_call_records.clone(),
                 terminal_hook_trace_records.clone(),
                 Some(provider_meta),
@@ -3521,6 +3640,7 @@ impl AgentRuntime {
                 Some(response.provider_mode.as_str()),
                 Some(&context_observation),
                 &tool_activities,
+                &model_hop_trace_contents(&hop_records),
                 Some(response.output_text.as_str()),
                 response.reasoning_content.as_deref(),
                 accumulated_fallback_reason.as_deref(),
@@ -3634,6 +3754,7 @@ impl AgentRuntime {
                 invocation_record,
             ));
             hop_records.push(ToolTurnHopRecord {
+                assistant_message: current_assistant_message.clone(),
                 assistant_output_text: current_assistant_output_text.clone(),
                 assistant_reasoning_content: current_assistant_reasoning.clone(),
                 assistant_reasoning_content_value: current_assistant_reasoning_value.clone(),
@@ -3819,7 +3940,9 @@ impl AgentRuntime {
 
             return Ok(SyncToolTurnOutcome {
                 assistant_message: response.output_text.clone(),
+                assistant_reasoning_content: response.reasoning_content.clone(),
                 provider_native_transcript: native_transcript_for_tool_turn(
+                    provider.protocol_label(),
                     &user_message,
                     &hop_records,
                     &response,
@@ -3831,6 +3954,7 @@ impl AgentRuntime {
                 trace_steps: self
                     .telemetry_builder
                     .completed_trace_with_tool(all_tools_ok),
+                model_hop_trace_contents: model_hop_trace_contents(&hop_records),
                 tool_activities,
                 hook_trace_records,
                 first_token_latency_ms,
@@ -3935,6 +4059,7 @@ impl AgentRuntime {
         planning_hook_trace_records.extend(planner_hook_trace_records.clone());
         let (
             assistant_message,
+            assistant_reasoning_content,
             provider_native_transcript,
             provider_source,
             provider_mode,
@@ -3942,6 +4067,7 @@ impl AgentRuntime {
             token_usage,
             trace_steps,
             tool_activities,
+            model_hop_trace_contents,
             mut hook_trace_records,
             first_token_latency_ms,
         ) = if let Some(tool_call) = resolved_tool_call {
@@ -3962,6 +4088,7 @@ impl AgentRuntime {
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,
+                    outcome.assistant_reasoning_content,
                     outcome.provider_native_transcript,
                     outcome.provider_source,
                     outcome.provider_mode,
@@ -3969,6 +4096,7 @@ impl AgentRuntime {
                     outcome.token_usage,
                     outcome.trace_steps,
                     outcome.tool_activities,
+                    outcome.model_hop_trace_contents,
                     outcome.hook_trace_records,
                     outcome.first_token_latency_ms,
                 ),
@@ -3977,6 +4105,7 @@ impl AgentRuntime {
         } else {
             (
                 first_decision.output_text.clone(),
+                first_decision.reasoning_content.clone(),
                 native_transcript_for_completed_turn(
                     &user_message,
                     &first_decision,
@@ -3987,6 +4116,7 @@ impl AgentRuntime {
                 first_decision.fallback_reason.clone(),
                 first_decision.token_usage.clone(),
                 self.telemetry_builder.completed_trace_without_tool(),
+                Vec::new(),
                 Vec::new(),
                 planning_hook_trace_records.clone(),
                 None,
@@ -4167,6 +4297,7 @@ impl AgentRuntime {
             "completed",
             trace_steps.clone(),
             tool_activities.clone(),
+            &model_hop_trace_contents,
             provider_call_records.clone(),
             hook_trace_records.clone(),
             Some(&provider_meta),
@@ -4174,7 +4305,7 @@ impl AgentRuntime {
             Some(provider_mode.clone()),
             Some(build_context_observation.clone()),
             Some(assistant_message.clone()),
-            None,
+            assistant_reasoning_content.clone(),
             fallback_reason.clone(),
             persisted.input_tokens,
             persisted.cache_hit_input_tokens,
@@ -4207,8 +4338,9 @@ impl AgentRuntime {
             Some(provider_mode.as_str()),
             Some(&build_context_observation),
             &tool_activities,
+            &model_hop_trace_contents,
             Some(assistant_message.as_str()),
-            None,
+            assistant_reasoning_content.as_deref(),
             fallback_reason.as_deref(),
             None,
             persisted.input_tokens,
@@ -4409,6 +4541,7 @@ impl AgentRuntime {
                 "failed",
                 trace_steps.clone(),
                 Vec::new(),
+                &[],
                 Vec::new(),
                 preflight_dispatch.trace_records,
                 Some(&prepared_provider_meta),
@@ -4465,6 +4598,7 @@ impl AgentRuntime {
                 "failed",
                 trace_steps.clone(),
                 Vec::new(),
+                &[],
                 Vec::new(),
                 preflight_dispatch.trace_records,
                 Some(&prepared_provider_meta),
@@ -4550,6 +4684,7 @@ impl AgentRuntime {
                     None,
                     None,
                     &prepared.build_context_observation,
+                    &[],
                     &[],
                     None,
                     None,
@@ -4757,6 +4892,7 @@ impl AgentRuntime {
                     None,
                     None,
                     &prepared.build_context_observation,
+                    &[],
                     &[],
                     None,
                     None,
@@ -5022,6 +5158,7 @@ impl AgentRuntime {
                 "failed",
                 trace_steps.clone(),
                 Vec::new(),
+                &[],
                 Vec::new(),
                 {
                     let mut records = planner_hook_trace_records.clone();
@@ -5082,6 +5219,7 @@ impl AgentRuntime {
                 "failed",
                 trace_steps.clone(),
                 Vec::new(),
+                &[],
                 Vec::new(),
                 {
                     let mut records = planner_hook_trace_records.clone();
@@ -5280,6 +5418,7 @@ impl AgentRuntime {
                 Some(first_decision.provider_source.as_str()),
                 Some(first_decision.provider_mode.as_str()),
                 &build_context_observation,
+                &[],
                 &[],
                 None,
                 None,
@@ -5610,6 +5749,7 @@ impl AgentRuntime {
             "completed",
             trace_steps.clone(),
             Vec::new(),
+            &[],
             provider_call_records.clone(),
             terminal_hook_trace_records.clone(),
             Some(&provider_meta),
@@ -5637,6 +5777,7 @@ impl AgentRuntime {
             Some(first_decision.provider_source.as_str()),
             Some(first_decision.provider_mode.as_str()),
             Some(&build_context_observation),
+            &[],
             &[],
             Some(first_decision.output_text.as_str()),
             first_decision.reasoning_content.as_deref(),
@@ -7056,7 +7197,7 @@ fn infer_tool_name_from_arguments(arguments: &Value) -> Option<String> {
         .and_then(Value::as_array)
         .map_or(false, |calls| !calls.is_empty())
     {
-        return Some("Plan".to_string());
+        return Some("BatchExecute".to_string());
     }
 
     let path = object
@@ -7307,6 +7448,7 @@ fn build_stream_progress_trace_timeline(
     provider_mode: Option<&str>,
     build_context_observation: &BuildContextObservation,
     tool_activities: &[TurnToolActivity],
+    completed_model_hops: &[ModelHopTraceContent],
     model_output_text: Option<&str>,
     model_reasoning_content: Option<&str>,
     first_token_latency_ms: Option<u64>,
@@ -7314,9 +7456,9 @@ fn build_stream_progress_trace_timeline(
 ) -> Vec<TraceTimelineEntry> {
     let top_level_tools = top_level_tool_activities(tool_activities);
     let model_hops = if phase == "calling_tool" {
-        top_level_tools.len().max(1)
+        top_level_tools.len().max(completed_model_hops.len()).max(1)
     } else {
-        top_level_tools.len() + 1
+        (top_level_tools.len() + 1).max(completed_model_hops.len())
     };
     let mut sequence = 1_u64;
     let mut timeline = Vec::new();
@@ -7409,6 +7551,7 @@ fn build_stream_progress_trace_timeline(
 
     for model_index in 0..model_hops {
         let is_last_model = model_index + 1 == model_hops;
+        let completed_model_hop = completed_model_hops.get(model_index);
         let model_state = if phase == "calling_model" && is_last_model {
             "active"
         } else {
@@ -7428,16 +7571,18 @@ fn build_stream_progress_trace_timeline(
             provider_mode: provider_mode.map(str::to_string),
             build_context_observation: None,
             tool_activities: Vec::new(),
-            text: if phase == "calling_model" && is_last_model {
-                model_output_text.map(str::to_string)
-            } else {
-                None
-            },
-            reasoning_content: if phase == "calling_model" && is_last_model {
-                model_reasoning_content.map(str::to_string)
-            } else {
-                None
-            },
+            text: completed_model_hop.map(|hop| hop.text.clone()).or_else(|| {
+                (phase == "calling_model" && is_last_model)
+                    .then(|| model_output_text.map(str::to_string))
+                    .flatten()
+            }),
+            reasoning_content: completed_model_hop
+                .and_then(|hop| hop.reasoning_content.clone())
+                .or_else(|| {
+                    (phase == "calling_model" && is_last_model)
+                        .then(|| model_reasoning_content.map(str::to_string))
+                        .flatten()
+                }),
             fallback_reason: None,
             error: None,
             input_tokens: None,
@@ -7509,6 +7654,7 @@ fn build_persisted_trace_timeline(
     provider_mode: Option<&str>,
     build_context_observation: Option<&BuildContextObservation>,
     tool_activities: &[TurnToolActivity],
+    completed_model_hops: &[ModelHopTraceContent],
     return_text: Option<&str>,
     return_reasoning_content: Option<&str>,
     fallback_reason: Option<&str>,
@@ -7621,6 +7767,7 @@ fn build_persisted_trace_timeline(
     };
 
     for model_index in 0..model_hops {
+        let completed_model_hop = completed_model_hops.get(model_index);
         let state = if phase == "failed" && model_index + 1 == model_hops {
             "error".to_string()
         } else if phase == "cancelled" && model_index + 1 == model_hops {
@@ -7642,8 +7789,8 @@ fn build_persisted_trace_timeline(
             provider_mode: provider_mode.map(str::to_string),
             build_context_observation: None,
             tool_activities: Vec::new(),
-            text: None,
-            reasoning_content: None,
+            text: completed_model_hop.map(|hop| hop.text.clone()),
+            reasoning_content: completed_model_hop.and_then(|hop| hop.reasoning_content.clone()),
             fallback_reason: None,
             error: None,
             input_tokens: None,
@@ -7783,8 +7930,12 @@ fn recover_tool_followup_completion<P: crate::agent::provider::ProviderClient>(
     recovery_reason: &str,
     context_observation: &BuildContextObservation,
 ) -> RecoveredToolFollowup {
-    let recovery_request =
-        build_tool_followup_recovery_request(planning_request, user_message, hop_records);
+    let recovery_request = build_tool_followup_recovery_request(
+        planning_request,
+        provider.protocol_label(),
+        user_message,
+        hop_records,
+    );
     let synthetic_tool_result =
         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
     let started_at = Instant::now();
@@ -7859,8 +8010,12 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
     first_token_latency: &Rc<Cell<Option<u64>>>,
     turn_started_at: &Instant,
 ) -> RecoveredToolFollowup {
-    let recovery_request =
-        build_tool_followup_recovery_request(planning_request, user_message, hop_records);
+    let recovery_request = build_tool_followup_recovery_request(
+        planning_request,
+        provider.protocol_label(),
+        user_message,
+        hop_records,
+    );
     let synthetic_tool_result =
         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
     let started_at = Instant::now();
@@ -8107,23 +8262,27 @@ fn emit_lightweight_delta(
 
 fn build_tool_followup_recovery_request(
     planning_request: &ProviderRequest,
+    protocol_label: &str,
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
 ) -> ProviderRequest {
     let mut request = planning_request.clone();
-    request.native_messages = tool_turn_native_transcript_prefix(user_message, hop_records);
+    request.native_messages =
+        tool_turn_native_transcript_prefix(protocol_label, user_message, hop_records);
     request.observation = Default::default();
     request
 }
 
 fn tool_turn_native_transcript_prefix(
+    protocol_label: &str,
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
 ) -> Vec<Value> {
     let mut transcript = vec![provider_native_user_message(user_message)];
     for hop in hop_records {
-        transcript.push(tool_request_assistant_message(hop));
-        transcript.push(provider_native_tool_result_message(
+        transcript.push(tool_request_assistant_message(protocol_label, hop));
+        transcript.push(provider_native_tool_result_message_for_protocol(
+            protocol_label,
             &hop.tool_call,
             &hop.tool_result,
         ));
@@ -8249,14 +8408,16 @@ fn local_tool_result_summary(tool_result: &crate::agent::tools::ToolResult) -> S
 }
 
 fn native_transcript_for_tool_turn(
+    protocol_label: &str,
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
     final_response: &ProviderResponse,
 ) -> Option<Vec<Value>> {
     let mut transcript = vec![provider_native_user_message(user_message)];
     for hop in hop_records {
-        transcript.push(tool_request_assistant_message(hop));
-        transcript.push(provider_native_tool_result_message(
+        transcript.push(tool_request_assistant_message(protocol_label, hop));
+        transcript.push(provider_native_tool_result_message_for_protocol(
+            protocol_label,
             &hop.tool_call,
             &hop.tool_result,
         ));
@@ -8265,19 +8426,28 @@ fn native_transcript_for_tool_turn(
     Some(transcript)
 }
 
-fn tool_request_assistant_message(hop: &ToolTurnHopRecord) -> Value {
-    match hop.assistant_reasoning_content_value.as_ref() {
-        Some(raw_reasoning) => provider_native_assistant_tool_call_message_with_reasoning_value(
-            text_if_present(&hop.assistant_output_text),
-            Some(raw_reasoning),
-            &hop.tool_call,
-        ),
-        None => provider_native_assistant_tool_call_message(
-            text_if_present(&hop.assistant_output_text),
-            hop.assistant_reasoning_content.as_deref(),
-            &hop.tool_call,
-        ),
+fn tool_request_assistant_message(protocol_label: &str, hop: &ToolTurnHopRecord) -> Value {
+    if protocol_label == "anthropic" {
+        if let Some(message) = hop.assistant_message.as_ref() {
+            if message.get("role").and_then(Value::as_str) == Some("assistant")
+                && message.get("content").and_then(Value::as_array).is_some()
+            {
+                return message.clone();
+            }
+        }
     }
+
+    let reasoning_value = hop.assistant_reasoning_content_value.clone().or_else(|| {
+        hop.assistant_reasoning_content
+            .as_ref()
+            .map(|reasoning| Value::String(reasoning.clone()))
+    });
+    provider_native_assistant_tool_call_message_for_protocol(
+        protocol_label,
+        text_if_present(&hop.assistant_output_text),
+        reasoning_value.as_ref(),
+        &hop.tool_call,
+    )
 }
 
 fn final_assistant_message(response: &ProviderResponse) -> Value {
@@ -8581,6 +8751,72 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn anthropic_tool_turn_transcript_uses_native_tool_blocks() {
+        let tool_call = ToolCall {
+            call_id: Some("toolu_list".to_string()),
+            name: "List".to_string(),
+            arguments: json!({ "path": ".", "description": "列出当前目录" }),
+            plan: None,
+        };
+        let hop = ToolTurnHopRecord {
+            assistant_message: Some(json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_list",
+                    "name": "List",
+                    "input": { "path": ".", "description": "列出当前目录" }
+                }]
+            })),
+            assistant_output_text: String::new(),
+            assistant_reasoning_content: None,
+            assistant_reasoning_content_value: None,
+            tool_call,
+            tool_result: crate::agent::tools::ToolResult {
+                tool_name: "List".to_string(),
+                status: "ok".to_string(),
+                output: "Cargo.toml\nsrc".to_string(),
+                duration_ms: 1,
+            },
+        };
+        let response = ProviderResponse {
+            output_text: "Cargo.toml 和 src。".to_string(),
+            tool_call: None,
+            reasoning_content: None,
+            reasoning_content_value: None,
+            assistant_message: Some(json!({
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "Cargo.toml 和 src。" }]
+            })),
+            provider_source: "test".to_string(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: None,
+        };
+
+        let transcript = native_transcript_for_tool_turn(
+            "anthropic",
+            "当前文件夹下有哪些文件？",
+            &[hop],
+            &response,
+        )
+        .expect("transcript should be built");
+
+        assert_eq!(
+            transcript[1]["content"][0]["type"].as_str(),
+            Some("tool_use")
+        );
+        assert_eq!(transcript[2]["role"].as_str(), Some("user"));
+        assert_eq!(
+            transcript[2]["content"][0]["type"].as_str(),
+            Some("tool_result")
+        );
+        assert!(transcript
+            .iter()
+            .all(|message| { message.get("role").and_then(Value::as_str) != Some("tool") }));
+    }
 
     struct ToolHopLimitOverrideGuard {
         previous: usize,
@@ -11664,11 +11900,11 @@ mod tests {
                     last_ingress_observation: None,
                 },
                 skills: vec![crate::agent::capability_bridge::SkillDescriptor {
-                    skill_id: "skill:plan".to_string(),
+                    skill_id: "skill:batch_execute".to_string(),
                     source_id: "builtin-skills".to_string(),
                     source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
-                    label: "plan".to_string(),
-                    description: "Aggregate workspace plan".to_string(),
+                    label: "batch_execute".to_string(),
+                    description: "批量执行多个工具子调用".to_string(),
                     input_schema_summary: "{\"calls\":\"array\"}".to_string(),
                     safety_class: "".to_string(),
                     visibility: "default".to_string(),
@@ -14205,8 +14441,12 @@ mod tests {
             Some("standard"),
             Some(&build_context_observation),
             &tool_activities,
+            &[ModelHopTraceContent {
+                text: "inspect before tool".to_string(),
+                reasoning_content: Some("need file".to_string()),
+            }],
             Some("final answer"),
-            None,
+            Some("summarize result"),
             None,
             None,
             Some(11),
@@ -14237,6 +14477,83 @@ mod tests {
         assert_eq!(timeline[1].label, "PREPARE RETRIEVAL");
         assert_eq!(timeline[4].label, "CALL TOOL #1 · workspace.read_file");
         assert_eq!(timeline[5].label, "CALL MODEL #2");
+        assert_eq!(timeline[3].text.as_deref(), Some("inspect before tool"));
+        assert_eq!(timeline[3].reasoning_content.as_deref(), Some("need file"));
+        assert_eq!(timeline[5].text.as_deref(), Some("final answer"));
+        assert_eq!(
+            timeline[5].reasoning_content.as_deref(),
+            Some("summarize result")
+        );
+    }
+
+    #[test]
+    fn stream_trace_keeps_each_model_hop_before_its_tool() {
+        let provider_meta = ProviderEventMeta {
+            requested_name: "OpenAI".to_string(),
+            provider_name: "OpenAI".to_string(),
+            protocol: "openai".to_string(),
+            model: "gpt-5".to_string(),
+        };
+        let observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 1,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.0,
+            max_output_tokens: 1024,
+            stable_prefix_text: String::new(),
+            semi_stable_context_text: String::new(),
+            volatile_input_text: "inspect".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "user: inspect".to_string(),
+            tool_definitions_text: "Read(path)".to_string(),
+        };
+        let completed_model_hops = vec![
+            ModelHopTraceContent {
+                text: "first model output".to_string(),
+                reasoning_content: Some("first reasoning".to_string()),
+            },
+            ModelHopTraceContent {
+                text: "second model output".to_string(),
+                reasoning_content: Some("second reasoning".to_string()),
+            },
+        ];
+
+        let timeline = build_stream_progress_trace_timeline(
+            "inspect",
+            &provider_meta,
+            None,
+            None,
+            &observation,
+            &[],
+            &completed_model_hops,
+            Some("second model output"),
+            Some("second reasoning"),
+            None,
+            "calling_tool",
+        );
+        let model_entries = timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+            .collect::<Vec<_>>();
+
+        assert_eq!(model_entries.len(), 2);
+        assert_eq!(model_entries[0].text.as_deref(), Some("first model output"));
+        assert_eq!(
+            model_entries[0].reasoning_content.as_deref(),
+            Some("first reasoning")
+        );
+        assert_eq!(
+            model_entries[1].text.as_deref(),
+            Some("second model output")
+        );
+        assert_eq!(
+            model_entries[1].reasoning_content.as_deref(),
+            Some("second reasoning")
+        );
     }
 
     #[test]

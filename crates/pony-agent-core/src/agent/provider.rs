@@ -7,7 +7,7 @@ use crate::agent::retry::{
     StreamState,
 };
 use crate::agent::runtime_helper::block_on;
-use crate::agent::tools::{builtin_tool_contract_views, ToolCall, ToolDefinition, ToolResult};
+use crate::agent::tools::{builtin_tool_surface, ToolCall, ToolDefinition, ToolResult};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -259,6 +259,15 @@ pub struct ProviderDecision {
 
 #[derive(Debug, Clone)]
 struct OpenAiStreamMessage {
+    output_text: String,
+    tool_call: Option<ToolCall>,
+    reasoning_content: Option<String>,
+    reasoning_content_value: Option<Value>,
+    token_usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone)]
+struct AnthropicStreamMessage {
     output_text: String,
     tool_call: Option<ToolCall>,
     reasoning_content: Option<String>,
@@ -579,6 +588,7 @@ impl ProviderManager {
             ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_request(
                 request,
                 tools,
+                accumulated_messages,
                 assistant_message,
                 tool_call,
                 tool_result,
@@ -696,6 +706,7 @@ impl ProviderManager {
             ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_stream_request(
                 request,
                 tools,
+                accumulated_messages,
                 assistant_message,
                 tool_call,
                 tool_result,
@@ -848,6 +859,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -861,7 +873,7 @@ impl ProviderManager {
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_messages_with_tool_result(request, assistant_message, tool_call, tool_result),
+                "messages": anthropic_messages_with_tool_result(request, accumulated_messages, assistant_message, tool_call, tool_result),
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "tools": anthropic_tools_payload(tools),
@@ -872,6 +884,15 @@ impl ProviderManager {
             }),
             &self.config,
         );
+        let body = apply_anthropic_tool_capability(body, tools, &self.config);
+        provider_log(format!(
+            "request:anthropic followup-sync messages={} body_preview={}",
+            body.get("messages")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            preview_json(&body, 1600)
+        ));
         let payload = self.post_anthropic_json(&endpoint, &body)?;
 
         let output_text = extract_anthropic_output_text(&payload).unwrap_or_default();
@@ -882,23 +903,12 @@ impl ProviderManager {
             .unwrap_or_default();
         let reasoning_content = extract_anthropic_thinking_text(&content);
         let reasoning_content_value = extract_anthropic_thinking_value(&content);
+        ensure_single_anthropic_tool_call(&content)?;
         let tool_call = extract_anthropic_tool_call(&content);
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("anthropic tool follow-up missing text or tool call".to_string());
         }
-        let assistant_message = match tool_call.as_ref() {
-            Some(tool_call) => Some(
-                provider_native_assistant_tool_call_message_with_reasoning_value(
-                    text_if_present(&output_text),
-                    reasoning_content_value.as_ref(),
-                    tool_call,
-                ),
-            ),
-            None => Some(provider_native_assistant_message_with_reasoning_value(
-                &output_text,
-                reasoning_content_value.as_ref(),
-            )),
-        };
+        let assistant_message = Some(anthropic_native_assistant_message(&content));
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
@@ -920,6 +930,7 @@ impl ProviderManager {
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
         tool_call: &ToolCall,
         tool_result: &ToolResult,
@@ -937,7 +948,7 @@ impl ProviderManager {
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_messages_with_tool_result(request, assistant_message, tool_call, tool_result),
+                "messages": anthropic_messages_with_tool_result(request, accumulated_messages, assistant_message, tool_call, tool_result),
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": true,
@@ -949,6 +960,15 @@ impl ProviderManager {
             }),
             &self.config,
         );
+        let body = apply_anthropic_tool_capability(body, tools, &self.config);
+        provider_log(format!(
+            "request:anthropic followup-stream messages={} body_preview={}",
+            body.get("messages")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            preview_json(&body, 1600)
+        ));
 
         self.stream_anthropic_request(&endpoint, &body, request, on_delta)
     }
@@ -1045,6 +1065,56 @@ impl ProviderManager {
         Ok(response)
     }
 
+    fn post_anthropic_stream_response(
+        &self,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, String> {
+        let client = build_streaming_http_client(
+            Duration::from_secs(15),
+            Duration::from_secs(180),
+            Duration::from_secs(180),
+        )?;
+        let started_at = Instant::now();
+
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .ok_or_else(|| "provider 缺少 API Key".to_string())?;
+
+        let mut request = client.post(endpoint);
+        match resolve_anthropic_auth_type(&self.config) {
+            ProviderAuthType::Bearer => {
+                request = request.bearer_auth(api_key);
+            }
+            ProviderAuthType::XApiKey | ProviderAuthType::Auto => {
+                request = request
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01");
+            }
+        }
+        let response = block_on(request.json(body).send()).map_err(|error| {
+            format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = block_on(response.text()).map_err(|error| {
+                format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
+            })?;
+
+            return Err(format!(
+                "provider 返回错误状态：{}；耗时={}ms；响应正文：{}",
+                status,
+                started_at.elapsed().as_millis(),
+                text
+            ));
+        }
+
+        Ok(response)
+    }
+
     fn stream_anthropic_request<F>(
         &self,
         endpoint: &str,
@@ -1055,36 +1125,28 @@ impl ProviderManager {
     where
         F: FnMut(ProviderStreamChunk),
     {
-        let payload = self.post_anthropic_json(endpoint, body)?;
-        let output_text = extract_anthropic_output_text(&payload).unwrap_or_default();
-        let content = payload
-            .get("content")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let reasoning_content = extract_anthropic_thinking_text(&content);
-        let reasoning_content_value = extract_anthropic_thinking_value(&content);
-        let tool_call = extract_anthropic_tool_call(&content);
+        let started_at = Instant::now();
+        let response = self.post_anthropic_stream_response(endpoint, body)?;
+        let message =
+            collect_anthropic_sse_message_from_response(response, started_at, endpoint, on_delta)?;
+
+        let output_text = message.output_text;
+        let reasoning_content = message.reasoning_content;
+        let reasoning_content_value = message.reasoning_content_value;
+        let tool_call = message.tool_call;
+
         if output_text.trim().is_empty() && tool_call.is_none() {
             return Err("anthropic stream follow-up missing text or tool call".to_string());
         }
-        if let Some(reasoning) = reasoning_content.clone() {
-            if !reasoning.is_empty() {
-                on_delta(ProviderStreamChunk::Reasoning(reasoning));
-            }
-        }
-        if !output_text.is_empty() {
-            on_delta(ProviderStreamChunk::Text(output_text.clone()));
-        }
+
         let assistant_message = match tool_call.as_ref() {
-            Some(tool_call) => Some(
-                provider_native_assistant_tool_call_message_with_reasoning_value(
-                    text_if_present(&output_text),
-                    reasoning_content_value.as_ref(),
-                    tool_call,
-                ),
-            ),
-            None => Some(provider_native_assistant_message_with_reasoning_value(
+            Some(tool_call) => Some(provider_native_assistant_tool_call_message_for_protocol(
+                "anthropic",
+                text_if_present(&output_text),
+                reasoning_content_value.as_ref(),
+                tool_call,
+            )),
+            None => Some(anthropic_native_assistant_message_from_parts(
                 &output_text,
                 reasoning_content_value.as_ref(),
             )),
@@ -1100,7 +1162,8 @@ impl ProviderManager {
             provider_mode: "live".to_string(),
             fallback_reason: None,
             token_usage: Some(
-                extract_anthropic_usage(&payload)
+                message
+                    .token_usage
                     .unwrap_or_else(|| estimate_token_usage(request, &output_text)),
             ),
         })
@@ -1301,7 +1364,7 @@ impl ProviderManager {
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_user_messages(request),
+                "messages": anthropic_conversation_messages(request),
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "tools": anthropic_tools_payload(tools),
@@ -1333,24 +1396,13 @@ impl ProviderManager {
         let output_text = extract_anthropic_text_blocks(content);
         let reasoning_content = extract_anthropic_thinking_text(content);
         let reasoning_content_value = extract_anthropic_thinking_value(content);
+        ensure_single_anthropic_tool_call(content)?;
         Ok(ProviderDecision {
             output_text: output_text.clone(),
             tool_call: extract_anthropic_tool_call(content),
             reasoning_content,
             reasoning_content_value: reasoning_content_value.clone(),
-            assistant_message: match extract_anthropic_tool_call(content).as_ref() {
-                Some(tool_call) => Some(
-                    provider_native_assistant_tool_call_message_with_reasoning_value(
-                        text_if_present(&output_text),
-                        reasoning_content_value.as_ref(),
-                        tool_call,
-                    ),
-                ),
-                None => Some(provider_native_assistant_message_with_reasoning_value(
-                    &output_text,
-                    reasoning_content_value.as_ref(),
-                )),
-            },
+            assistant_message: Some(anthropic_native_assistant_message(content)),
             provider_source: "provider_decision".to_string(),
             provider_mode: "live".to_string(),
             fallback_reason: None,
@@ -1945,6 +1997,258 @@ where
     })
 }
 
+fn collect_anthropic_sse_message_from_response<F>(
+    response: reqwest::Response,
+    started_at: Instant,
+    endpoint: &str,
+    on_delta: &mut F,
+) -> Result<AnthropicStreamMessage, String>
+where
+    F: FnMut(ProviderStreamChunk),
+{
+    let mut output_text = String::new();
+    let mut reasoning_content = String::new();
+    let mut reasoning_signature: Option<String> = None;
+    let mut token_usage: Option<TokenUsage> = None;
+    let mut tool_call: Option<ToolCall> = None;
+
+    // Track tool_use content blocks by index (for streaming input_json_delta)
+    let mut partial_tool_calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+    let mut content_block_types: BTreeMap<usize, String> = BTreeMap::new();
+
+    let mut saw_events = false;
+    let mut current_event = String::new();
+    let mut current_data = String::new();
+    let mut line_buf: Vec<u8> = Vec::new();
+    let mut total_bytes: usize = 0;
+
+    let mut stream = response.bytes_stream();
+
+    // Helper closure to process a complete SSE event
+    let mut handle_event = |event_type: &str, data: &str| -> Result<(), String> {
+        match event_type {
+            "content_block_start" => {
+                saw_events = true;
+                let value: Value = serde_json::from_str(data).map_err(|e| {
+                    format!("解析 Anthropic SSE content_block_start data 失败: {}", e)
+                })?;
+
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let block_type = value
+                    .get("content_block")
+                    .and_then(|b| b.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+
+                content_block_types.insert(index, block_type.clone());
+
+                if block_type == "tool_use" {
+                    let block = value.get("content_block").unwrap();
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    partial_tool_calls.insert(index, (name, id, String::new()));
+                }
+            }
+            "content_block_delta" => {
+                saw_events = true;
+                let value: Value = serde_json::from_str(data).map_err(|e| {
+                    format!("解析 Anthropic SSE content_block_delta data 失败: {}", e)
+                })?;
+
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let delta = match value.get("delta") {
+                    Some(d) => d,
+                    None => return Ok(()),
+                };
+
+                let delta_type = delta.get("type").and_then(Value::as_str).unwrap_or("");
+
+                match delta_type {
+                    "text_delta" => {
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                output_text.push_str(text);
+                                on_delta(ProviderStreamChunk::Text(text.to_string()));
+                            }
+                        }
+                    }
+                    "thinking_delta" => {
+                        if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
+                            if !thinking.is_empty() {
+                                reasoning_content.push_str(thinking);
+                                on_delta(ProviderStreamChunk::Reasoning(thinking.to_string()));
+                            }
+                        }
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            reasoning_signature = Some(signature.to_string());
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
+                            partial_tool_calls
+                                .entry(index)
+                                .and_modify(|(_, _, input)| input.push_str(partial));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                saw_events = true;
+                let value: Value = serde_json::from_str(data).map_err(|e| {
+                    format!("解析 Anthropic SSE content_block_stop data 失败: {}", e)
+                })?;
+
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+
+                // Finalize tool call if this block was a tool_use
+                if content_block_types.get(&index).map(|s| s.as_str()) == Some("tool_use") {
+                    if let Some((name, id, raw_input)) = partial_tool_calls.remove(&index) {
+                        if tool_call.is_some() {
+                            return Err(
+                                "Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。"
+                                    .to_string(),
+                            );
+                        }
+                        let arguments: Value =
+                            serde_json::from_str(&raw_input).unwrap_or(Value::Null);
+                        let arguments = if arguments.is_null() {
+                            json!({})
+                        } else {
+                            arguments
+                        };
+                        tool_call = Some(ToolCall {
+                            call_id: Some(id),
+                            name,
+                            arguments,
+                            plan: None,
+                        });
+                    }
+                }
+            }
+            "message_start" | "message_stop" => {
+                saw_events = true;
+            }
+            "message_delta" => {
+                saw_events = true;
+                let value: Value = serde_json::from_str(data)
+                    .map_err(|e| format!("解析 Anthropic SSE message_delta data 失败: {}", e))?;
+
+                if let Some(usage) = value.get("usage") {
+                    token_usage = Some(normalize_token_usage(TokenUsage {
+                        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+                        cache_hit_input_tokens: None,
+                        cache_hit_source: None,
+                        reasoning_tokens: None,
+                        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+                        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+                    }));
+                }
+            }
+            "ping" => {
+                // Keep-alive, ignore
+            }
+            _ => {}
+        }
+        Ok(())
+    };
+
+    loop {
+        match block_on(stream.next()) {
+            Some(Ok(bytes)) => {
+                let chunk_len = bytes.len();
+                for &byte in bytes.iter() {
+                    if byte == b'\n' {
+                        let line_str = String::from_utf8_lossy(&line_buf);
+                        let trimmed = line_str.trim();
+
+                        if trimmed.is_empty() {
+                            // Empty line = end of one SSE event
+                            if !current_event.is_empty() && !current_data.is_empty() {
+                                handle_event(&current_event, &current_data)?;
+                                current_event.clear();
+                                current_data.clear();
+                            }
+                        } else if let Some(event_name) = trimmed.strip_prefix("event:") {
+                            current_event = event_name.trim().to_string();
+                        } else if let Some(data_str) = trimmed.strip_prefix("data:") {
+                            current_data = data_str.trim().to_string();
+                        }
+
+                        line_buf.clear();
+                    } else {
+                        if line_buf.len() >= 1 << 20 {
+                            return Err(format!(
+                                "Anthropic SSE 行缓冲超过 1MB 上限; elapsed={}ms; endpoint={}",
+                                started_at.elapsed().as_millis(),
+                                endpoint,
+                            ));
+                        }
+                        line_buf.push(byte);
+                    }
+                }
+                total_bytes += chunk_len;
+            }
+            Some(Err(error)) => {
+                return Err(format!(
+                    "读取 Anthropic SSE 流失败: {}; elapsed={}ms; parsed_bytes={}; endpoint={}",
+                    error,
+                    started_at.elapsed().as_millis(),
+                    total_bytes,
+                    endpoint,
+                ));
+            }
+            None => break,
+        }
+    }
+
+    // Process any remaining event at end of stream
+    if !current_event.is_empty() && !current_data.is_empty() {
+        handle_event(&current_event, &current_data)?;
+    }
+
+    if !saw_events {
+        return Err(format!(
+            "Anthropic 流式返回中未找到 SSE 事件；endpoint={}",
+            endpoint,
+        ));
+    }
+
+    // Build final reasoning value
+    let final_reasoning = if reasoning_content.trim().is_empty() {
+        None
+    } else {
+        Some(reasoning_content.clone())
+    };
+    let final_reasoning_value = (!reasoning_content.trim().is_empty()).then(|| {
+        let mut block = json!({
+            "type": "thinking",
+            "thinking": reasoning_content
+        });
+        if let Some(signature) = reasoning_signature {
+            block["signature"] = Value::String(signature);
+        }
+        Value::Array(vec![block])
+    });
+
+    Ok(AnthropicStreamMessage {
+        output_text,
+        tool_call,
+        reasoning_content: final_reasoning,
+        reasoning_content_value: final_reasoning_value,
+        token_usage,
+    })
+}
+
 #[test]
 fn openai_usage_extracts_cache_hit_and_reasoning_tokens() {
     let payload = json!({
@@ -2135,10 +2439,8 @@ fn to_chat_role(role: &ProviderRole) -> &'static str {
 }
 
 fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
-    let contract_views = if tools.len() == builtin_tool_contract_views().len()
-        || tools.len() == crate::agent::tools::builtin_tools().len()
-    {
-        builtin_tool_contract_views()
+    let contract_views = if is_builtin_tool_definition_set(tools) {
+        builtin_provider_contract_views()
     } else {
         tools.iter().map(|tool| tool.contract_view()).collect()
     };
@@ -2159,10 +2461,8 @@ fn openai_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
 }
 
 fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
-    let contract_views = if tools.len() == builtin_tool_contract_views().len()
-        || tools.len() == crate::agent::tools::builtin_tools().len()
-    {
-        builtin_tool_contract_views()
+    let contract_views = if is_builtin_tool_definition_set(tools) {
+        builtin_provider_contract_views()
     } else {
         tools.iter().map(|tool| tool.contract_view()).collect()
     };
@@ -2182,11 +2482,27 @@ fn anthropic_tools_payload(tools: &[ToolDefinition]) -> Vec<Value> {
 fn provider_tool_contract_views(
     tools: &[ToolDefinition],
 ) -> Vec<crate::agent::tools::ToolDefinitionContractView> {
-    if tools.len() == crate::agent::tools::builtin_tools().len() {
-        builtin_tool_contract_views()
+    if is_builtin_tool_definition_set(tools) {
+        builtin_provider_contract_views()
     } else {
         tools.iter().map(|tool| tool.contract_view()).collect()
     }
+}
+
+fn builtin_provider_contract_views() -> Vec<crate::agent::tools::ToolDefinitionContractView> {
+    builtin_tool_surface()
+        .provider_contract_views()
+        .expect("default turn tool view must match its registry snapshot")
+}
+
+fn is_builtin_tool_definition_set(tools: &[ToolDefinition]) -> bool {
+    let expected = crate::agent::tools::builtin_tools();
+    tools.len() == expected.len()
+        && tools.iter().zip(expected.iter()).all(|(actual, builtin)| {
+            actual.name == builtin.name
+                && actual.description == builtin.description
+                && actual.input_schema == builtin.input_schema
+        })
 }
 
 fn first_openai_message<'a>(payload: &'a Value) -> Result<&'a Value, String> {
@@ -2397,38 +2713,67 @@ fn anthropic_system_text(input: &[ProviderMessage]) -> String {
     input
         .iter()
         .filter(|message| matches!(message.role, ProviderRole::System | ProviderRole::Developer))
+        // 过滤掉 Previous assistant reply，它们应该出现在 messages 数组中作为 assistant 轮次
+        .filter(|message| !message.content.starts_with("Previous assistant reply:"))
         .map(|message| message.content.clone())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-fn anthropic_user_messages(request: &ProviderRequest) -> Vec<Value> {
-    let user_indexes = request
+/// 构建 Anthropic API 的 messages 数组，按原始顺序包含：
+/// - user 消息（含图片处理）
+/// - "Previous assistant reply" 作为 assistant 角色消息
+/// 这些消息会按它们在 input 中出现的先后顺序排列，确保对话历史连贯。
+fn anthropic_conversation_messages(request: &ProviderRequest) -> Vec<Value> {
+    if !request.native_messages.is_empty()
+        && request.native_messages.iter().all(|message| {
+            matches!(
+                message.get("role").and_then(Value::as_str),
+                Some("user" | "assistant")
+            ) && message.get("tool_calls").is_none()
+                && message.get("reasoning_content").is_none()
+        })
+    {
+        return request.native_messages.clone();
+    }
+
+    let user_indexes: Vec<usize> = request
         .input
         .iter()
         .enumerate()
-        .filter_map(|(index, message)| {
-            if matches!(message.role, ProviderRole::User) {
-                Some(index)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+        .filter_map(|(i, m)| matches!(m.role, ProviderRole::User).then_some(i))
+        .collect();
     let last_user_index = user_indexes.last().copied();
 
-    request
-        .input
-        .iter()
-        .enumerate()
-        .filter(|(_, message)| matches!(message.role, ProviderRole::User))
-        .map(|(index, message)| {
-            json!({
-                "role": "user",
-                "content": anthropic_user_content(message.content.as_str(), is_last_user_with_images(index, last_user_index, &request.images), &request.images)
-            })
-        })
-        .collect::<Vec<_>>()
+    let mut messages = Vec::new();
+    for (index, message) in request.input.iter().enumerate() {
+        match message.role {
+            ProviderRole::User => {
+                messages.push(json!({
+                    "role": "user",
+                    "content": anthropic_user_content(
+                        message.content.as_str(),
+                        is_last_user_with_images(index, last_user_index, &request.images),
+                        &request.images,
+                    )
+                }));
+            }
+            ProviderRole::Developer => {
+                // "Previous assistant reply" 作为 assistant 角色加入 messages 数组
+                if let Some(reply) = message.content.strip_prefix("Previous assistant reply: ") {
+                    messages.push(json!({
+                        "role": "assistant",
+                        "content": reply
+                    }));
+                }
+                // 其他 Developer 消息继续留在 system text 中（由 anthropic_system_text 处理）
+            }
+            ProviderRole::System => {
+                // System 消息留在 system text 中
+            }
+        }
+    }
+    messages
 }
 
 fn extract_anthropic_text_blocks(content: &[Value]) -> String {
@@ -2449,15 +2794,11 @@ fn extract_anthropic_thinking_value(content: &[Value]) -> Option<Value> {
                 return None;
             }
 
-            let thinking = block
+            block
                 .get("thinking")
                 .and_then(Value::as_str)
                 .or_else(|| block.get("text").and_then(Value::as_str))?;
-
-            Some(json!({
-                "type": "thinking",
-                "thinking": thinking
-            }))
+            Some(block.clone())
         })
         .collect::<Vec<_>>();
 
@@ -2485,6 +2826,17 @@ fn extract_anthropic_tool_call(content: &[Value]) -> Option<ToolCall> {
         arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
         plan: None,
     })
+}
+
+fn ensure_single_anthropic_tool_call(content: &[Value]) -> Result<(), String> {
+    let count = content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .count();
+    if count > 1 {
+        return Err("Anthropic 返回了多个工具调用，但当前运行时仅支持单工具调用。".to_string());
+    }
+    Ok(())
 }
 
 fn openai_messages_with_tool_result(
@@ -2732,6 +3084,41 @@ pub fn provider_native_assistant_tool_call_message_with_reasoning_value(
     })
 }
 
+pub fn provider_native_assistant_tool_call_message_for_protocol(
+    protocol_label: &str,
+    content: Option<&str>,
+    reasoning_content: Option<&Value>,
+    tool_call: &ToolCall,
+) -> Value {
+    if protocol_label != "anthropic" {
+        return provider_native_assistant_tool_call_message_with_reasoning_value(
+            content,
+            reasoning_content,
+            tool_call,
+        );
+    }
+
+    let mut blocks = reasoning_content
+        .map(anthropic_reasoning_blocks)
+        .unwrap_or_default();
+    if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
+        blocks.push(json!({
+            "type": "text",
+            "text": content
+        }));
+    }
+    blocks.push(json!({
+        "type": "tool_use",
+        "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+        "name": tool_call.name,
+        "input": tool_call.arguments
+    }));
+    json!({
+        "role": "assistant",
+        "content": blocks
+    })
+}
+
 pub fn provider_native_tool_result_message(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
@@ -2741,6 +3128,56 @@ pub fn provider_native_tool_result_message(
         "tool_call_id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
         "content": tool_result.output.clone()
     })
+}
+
+pub fn provider_native_tool_result_message_for_protocol(
+    protocol_label: &str,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+) -> Value {
+    if protocol_label != "anthropic" {
+        return provider_native_tool_result_message(tool_call, tool_result);
+    }
+
+    json!({
+        "role": "user",
+        "content": [{
+            "type": "tool_result",
+            "tool_use_id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+            "content": anthropic_tool_result_content(tool_result),
+            "is_error": tool_result.status != "ok"
+        }]
+    })
+}
+
+fn anthropic_native_assistant_message(content: &[Value]) -> Value {
+    json!({
+        "role": "assistant",
+        "content": content
+    })
+}
+
+fn anthropic_native_assistant_message_from_parts(
+    output_text: &str,
+    reasoning_content: Option<&Value>,
+) -> Value {
+    let mut content = reasoning_content
+        .map(anthropic_reasoning_blocks)
+        .unwrap_or_default();
+    if !output_text.trim().is_empty() {
+        content.push(json!({
+            "type": "text",
+            "text": output_text
+        }));
+    }
+    anthropic_native_assistant_message(&content)
+}
+
+fn anthropic_tool_result_content(tool_result: &ToolResult) -> Value {
+    json!([{
+        "type": "text",
+        "text": tool_result.output
+    }])
 }
 
 const OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS: usize = 12_000;
@@ -2975,43 +3412,18 @@ fn escape_json_fragment(text: &str) -> String {
 
 fn anthropic_messages_with_tool_result(
     request: &ProviderRequest,
+    accumulated_messages: &mut Vec<Value>,
     assistant_message: Option<&Value>,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Vec<Value> {
-    let mut messages = anthropic_user_messages(request);
-    let mut assistant_content = Vec::new();
-
-    if let Some(reasoning_value) =
-        assistant_message.and_then(|message| message.get("reasoning_content"))
-    {
-        assistant_content.extend(anthropic_reasoning_blocks(reasoning_value));
-    }
-
-    if let Some(text) = assistant_message
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
-        assistant_content.push(json!({
-            "type": "text",
-            "text": text
-        }));
-    }
-
-    if assistant_content.is_empty() {
-        assistant_content.push(json!({
-            "type": "text",
-            "text": ""
-        }));
-    }
-
-    assistant_content.push(json!({
-        "type": "tool_use",
-        "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
-        "name": tool_call.name.clone(),
-        "input": tool_call.arguments.clone()
-    }));
+    let mut messages = if accumulated_messages.is_empty() {
+        anthropic_conversation_messages(request)
+    } else {
+        accumulated_messages.clone()
+    };
+    let assistant_content =
+        anthropic_assistant_content_for_tool_result(assistant_message, tool_call);
 
     messages.push(json!({
         "role": "assistant",
@@ -3024,13 +3436,62 @@ fn anthropic_messages_with_tool_result(
             {
                 "type": "tool_result",
                 "tool_use_id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
-                "content": tool_result.output.clone(),
+                "content": anthropic_tool_result_content(tool_result),
                 "is_error": tool_result.status != "ok"
             }
         ]
     }));
 
+    *accumulated_messages = messages.clone();
+
     messages
+}
+
+fn anthropic_assistant_content_for_tool_result(
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+) -> Vec<Value> {
+    let call_id = tool_call.call_id.as_deref().unwrap_or("toolu_local");
+    if let Some(content) = assistant_message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .filter(|content| {
+            content.iter().any(|block| {
+                block.get("type").and_then(Value::as_str) == Some("tool_use")
+                    && block.get("id").and_then(Value::as_str) == Some(call_id)
+            })
+        })
+    {
+        return content.clone();
+    }
+
+    let mut content = assistant_message
+        .and_then(|message| message.get("reasoning_content"))
+        .map(anthropic_reasoning_blocks)
+        .unwrap_or_default();
+    if let Some(text) = assistant_message
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        content.push(json!({
+            "type": "text",
+            "text": text
+        }));
+    }
+    if content.is_empty() {
+        content.push(json!({
+            "type": "text",
+            "text": ""
+        }));
+    }
+    content.push(json!({
+        "type": "tool_use",
+        "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+        "name": tool_call.name,
+        "input": tool_call.arguments
+    }));
+    content
 }
 
 fn anthropic_reasoning_blocks(reasoning_value: &Value) -> Vec<Value> {
@@ -3439,10 +3900,8 @@ fn render_tool_definitions(tools: &[ToolDefinition]) -> String {
         return "none".to_string();
     }
 
-    let contract_views = if tools.len() == builtin_tool_contract_views().len()
-        || tools.len() == crate::agent::tools::builtin_tools().len()
-    {
-        builtin_tool_contract_views()
+    let contract_views = if is_builtin_tool_definition_set(tools) {
+        builtin_provider_contract_views()
     } else {
         tools.iter().map(|tool| tool.contract_view()).collect()
     };
@@ -3612,6 +4071,10 @@ mod tests {
     use crate::agent::config::ProviderModelCapabilities;
     use crate::agent::config::ResolvedProviderSelection;
     use crate::agent::input::TurnInputImage;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
 
     #[test]
     fn openai_request_messages_encode_image_blocks_for_last_user_message() {
@@ -3649,7 +4112,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_user_messages_encode_base64_image_blocks_for_last_user_message() {
+    fn anthropic_conversation_messages_encode_base64_image_blocks_for_last_user_message() {
         let request = ProviderRequest {
             model: "claude-3-7-sonnet".to_string(),
             input: vec![ProviderMessage::user("请看图回答")],
@@ -3664,7 +4127,7 @@ mod tests {
             max_output_tokens: 1024,
         };
 
-        let messages = anthropic_user_messages(&request);
+        let messages = anthropic_conversation_messages(&request);
         let content = messages[0]
             .get("content")
             .and_then(Value::as_array)
@@ -3759,7 +4222,7 @@ mod tests {
                 "ToolSearch".to_string(),
                 "Write".to_string(),
                 "Edit".to_string(),
-                "Plan".to_string()
+                "BatchExecute".to_string()
             ]
         );
     }
@@ -3792,9 +4255,112 @@ mod tests {
                 "ToolSearch".to_string(),
                 "Write".to_string(),
                 "Edit".to_string(),
-                "Plan".to_string()
+                "BatchExecute".to_string()
             ]
         );
+        assert!(payload.iter().all(|tool| {
+            tool.get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| !description.trim().is_empty())
+        }));
+    }
+
+    #[test]
+    fn anthropic_native_messages_preserve_tool_use_result_and_thinking_signature() {
+        let tool_call = ToolCall {
+            call_id: Some("toolu_123".to_string()),
+            name: "List".to_string(),
+            arguments: json!({ "path": ".", "description": "列出当前目录" }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "List".to_string(),
+            status: "ok".to_string(),
+            output: "Cargo.toml\nsrc".to_string(),
+            duration_ms: 1,
+        };
+        let thinking = json!([{
+            "type": "thinking",
+            "thinking": "先读取目录。",
+            "signature": "signature_123"
+        }]);
+
+        let assistant = provider_native_assistant_tool_call_message_for_protocol(
+            "anthropic",
+            Some("我先列出目录。"),
+            Some(&thinking),
+            &tool_call,
+        );
+        let result =
+            provider_native_tool_result_message_for_protocol("anthropic", &tool_call, &tool_result);
+        let request = ProviderRequest {
+            model: "claude-sonnet-5".to_string(),
+            input: vec![ProviderMessage::user("当前文件夹下有哪些文件？")],
+            images: Vec::new(),
+            native_messages: vec![assistant.clone(), result.clone()],
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 1024,
+        };
+
+        assert_eq!(
+            anthropic_conversation_messages(&request),
+            vec![assistant, result.clone()]
+        );
+        assert_eq!(result["content"][0]["type"].as_str(), Some("tool_result"));
+        assert_eq!(
+            result["content"][0]["tool_use_id"].as_str(),
+            Some("toolu_123")
+        );
+        assert_eq!(
+            request.native_messages[0]["content"][0]["signature"].as_str(),
+            Some("signature_123")
+        );
+    }
+
+    #[test]
+    fn anthropic_conversation_messages_skip_openai_native_transcripts() {
+        let request = ProviderRequest {
+            model: "claude-sonnet-5".to_string(),
+            input: vec![ProviderMessage::user("当前文件夹下有哪些文件？")],
+            images: Vec::new(),
+            native_messages: vec![
+                json!({
+                    "role": "assistant",
+                    "content": "我先列出目录。",
+                    "reasoning_content": null,
+                    "tool_calls": []
+                }),
+                json!({
+                    "role": "tool",
+                    "tool_call_id": "call_list",
+                    "content": "Cargo.toml\nsrc"
+                }),
+            ],
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 1024,
+        };
+
+        assert_eq!(
+            anthropic_conversation_messages(&request),
+            vec![json!({
+                "role": "user",
+                "content": "当前文件夹下有哪些文件？"
+            })]
+        );
+    }
+
+    #[test]
+    fn anthropic_rejects_multiple_tool_calls() {
+        let content = vec![
+            json!({ "type": "tool_use", "id": "toolu_1", "name": "List", "input": {} }),
+            json!({ "type": "tool_use", "id": "toolu_2", "name": "Read", "input": {} }),
+        ];
+
+        assert!(ensure_single_anthropic_tool_call(&content)
+            .expect_err("multiple calls should fail clearly")
+            .contains("多个工具调用"));
     }
 
     #[test]
@@ -3814,7 +4380,7 @@ mod tests {
             "ToolSearch",
             "Write",
             "Edit",
-            "Plan",
+            "BatchExecute",
         ] {
             assert!(
                 rendered.contains(&format!("] {}", tool_name)),
@@ -3843,6 +4409,30 @@ mod tests {
                 "legacy tool heading leaked into rendered definitions: {legacy_name}"
             );
         }
+    }
+
+    #[test]
+    fn provider_does_not_infer_builtin_surface_from_tool_count() {
+        let decoys = (0..crate::agent::tools::builtin_tools().len())
+            .map(|index| ToolDefinition {
+                name: "decoy",
+                description: "decoy",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "index": { "const": index } }
+                }),
+            })
+            .collect::<Vec<_>>();
+
+        let payload = openai_tools_payload(&decoys);
+        assert_eq!(payload.len(), decoys.len());
+        assert!(payload.iter().all(|entry| {
+            entry
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                == Some("decoy")
+        }));
     }
 
     #[test]
@@ -4188,6 +4778,7 @@ mod tests {
 
         let messages = anthropic_messages_with_tool_result(
             &request,
+            &mut Vec::new(),
             Some(&assistant_message),
             &tool_call,
             &tool_result,
@@ -4208,6 +4799,246 @@ mod tests {
         assert!(assistant_content
             .iter()
             .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")));
+    }
+
+    #[test]
+    fn anthropic_tool_followup_accumulates_prior_tool_results_across_hops() {
+        let request = ProviderRequest {
+            model: "claude-sonnet-5".to_string(),
+            input: vec![ProviderMessage::user("当前文件夹下有哪些文件？")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 1024,
+        };
+        let list_call = ToolCall {
+            call_id: Some("toolu_list".to_string()),
+            name: "List".to_string(),
+            arguments: json!({ "path": ".", "description": "列出当前目录" }),
+            plan: None,
+        };
+        let read_call = ToolCall {
+            call_id: Some("toolu_read".to_string()),
+            name: "Read".to_string(),
+            arguments: json!({ "path": "Cargo.toml", "description": "读取项目配置" }),
+            plan: None,
+        };
+        let list_message = json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_list",
+                "name": "List",
+                "input": list_call.arguments
+            }]
+        });
+        let read_message = json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_read",
+                "name": "Read",
+                "input": read_call.arguments
+            }]
+        });
+        let list_result = ToolResult {
+            tool_name: "List".to_string(),
+            status: "ok".to_string(),
+            output: "Cargo.toml\nsrc".to_string(),
+            duration_ms: 1,
+        };
+        let read_result = ToolResult {
+            tool_name: "Read".to_string(),
+            status: "ok".to_string(),
+            output: "[workspace]\nmembers = []".to_string(),
+            duration_ms: 1,
+        };
+        let mut accumulated = Vec::new();
+
+        let first = anthropic_messages_with_tool_result(
+            &request,
+            &mut accumulated,
+            Some(&list_message),
+            &list_call,
+            &list_result,
+        );
+        let second = anthropic_messages_with_tool_result(
+            &request,
+            &mut accumulated,
+            Some(&read_message),
+            &read_call,
+            &read_result,
+        );
+
+        assert_eq!(first.len(), 3);
+        assert_eq!(second.len(), 5);
+        assert_eq!(second[1]["content"][0]["id"].as_str(), Some("toolu_list"));
+        assert_eq!(
+            second[2]["content"][0]["tool_use_id"].as_str(),
+            Some("toolu_list")
+        );
+        assert_eq!(second[3]["content"][0]["id"].as_str(), Some("toolu_read"));
+        assert_eq!(
+            second[4]["content"][0]["tool_use_id"].as_str(),
+            Some("toolu_read")
+        );
+    }
+
+    #[test]
+    fn anthropic_live_followup_sends_tool_use_and_result_in_one_conversation() {
+        let runtime = tokio::runtime::Runtime::new().expect("create Tokio runtime");
+        let _guard = runtime.enter();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Anthropic server");
+        let address = listener.local_addr().expect("read mock server address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_thread = Arc::clone(&requests);
+        let responses = vec![
+            json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_list",
+                    "name": "List",
+                    "input": { "path": ".", "description": "列出当前目录" }
+                }],
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            }),
+            json!({
+                "content": [{ "type": "text", "text": "Cargo.toml 和 src。" }],
+                "usage": { "input_tokens": 2, "output_tokens": 2 }
+            }),
+        ];
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept mock request");
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let mut header_end = None;
+                let mut content_length = 0usize;
+                loop {
+                    let read = stream.read(&mut chunk).expect("read mock request");
+                    if read == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if header_end.is_none() {
+                        header_end = bytes
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|index| index + 4);
+                        if let Some(end) = header_end {
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            content_length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .expect("content length");
+                        }
+                    }
+                    if let Some(end) = header_end {
+                        if bytes.len() >= end + content_length {
+                            break;
+                        }
+                    }
+                }
+                let end = header_end.expect("HTTP header end");
+                requests_for_thread
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&bytes[end..end + content_length]).to_string());
+                let body = response.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+                stream.flush().expect("flush response");
+            }
+        });
+        let config = ResolvedProviderSelection {
+            requested_name: "anthropic-test".to_string(),
+            provider_name: "anthropic-test".to_string(),
+            protocol: ProviderProtocol::Anthropic,
+            base_url: format!("http://{}", address),
+            auth_type: ProviderAuthType::XApiKey,
+            api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
+            api_key: Some("test".to_string()),
+            model: "claude-sonnet-5".to_string(),
+            temperature: 0.0,
+            max_output_tokens: 1024,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                supports_tools: true,
+                supports_streaming: false,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::None,
+        };
+        let manager = ProviderManager::new(config);
+        let request = ProviderRequest {
+            model: "claude-sonnet-5".to_string(),
+            input: vec![ProviderMessage::user("当前文件夹下有哪些文件？")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 1024,
+        };
+        let tools = vec![ToolDefinition {
+            name: "List",
+            description: "列出当前目录。",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        }];
+
+        let decision = manager
+            .decide_with_tools(&request, &tools)
+            .expect("first tool decision");
+        let tool_call = decision.tool_call.expect("List tool call");
+        let response = manager
+            .continue_with_tool_result(
+                &request,
+                &tools,
+                &mut Vec::new(),
+                decision.assistant_message.as_ref(),
+                &tool_call,
+                &ToolResult {
+                    tool_name: "List".to_string(),
+                    status: "ok".to_string(),
+                    output: "Cargo.toml\nsrc".to_string(),
+                    duration_ms: 1,
+                },
+            )
+            .expect("follow-up response");
+        handle.join().expect("join mock server");
+
+        let requests = requests.lock().unwrap();
+        let followup_body: Value = serde_json::from_str(&requests[1]).expect("follow-up JSON");
+        let messages = followup_body["messages"]
+            .as_array()
+            .expect("follow-up messages");
+        assert_eq!(response.output_text, "Cargo.toml 和 src。");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"].as_str(), Some("user"));
+        assert_eq!(messages[1]["role"].as_str(), Some("assistant"));
+        assert_eq!(messages[1]["content"][0]["type"].as_str(), Some("tool_use"));
+        assert_eq!(messages[1]["content"][0]["id"].as_str(), Some("toolu_list"));
+        assert_eq!(messages[2]["role"].as_str(), Some("user"));
+        assert_eq!(
+            messages[2]["content"][0]["tool_use_id"].as_str(),
+            Some("toolu_list")
+        );
+        assert_eq!(
+            messages[2]["content"][0]["content"][0]["text"].as_str(),
+            Some("Cargo.toml\nsrc")
+        );
     }
 
     #[test]

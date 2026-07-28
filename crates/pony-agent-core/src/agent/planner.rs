@@ -5,7 +5,7 @@ use crate::agent::graph::{
 };
 use crate::agent::provider::ProviderDecision;
 use crate::agent::session::TurnHistoryMessage;
-use crate::agent::tools::{model_visible_tool_name, ToolCall, ToolPlan, ToolPlanStep};
+use crate::agent::tools::{builtin_tool_surface, ToolCall, ToolPlan, ToolPlanStep};
 use serde_json::json;
 
 const MAX_LOCAL_BATCH_PATHS: usize = 6;
@@ -58,6 +58,13 @@ pub trait GraphPlanner: Send + Sync {
 pub struct DefaultGraphPlanner;
 
 pub struct LocalTurnPlanner;
+
+fn model_tool_name(primitive_name: &str) -> String {
+    builtin_tool_surface()
+        .model_name_for_primitive(primitive_name)
+        .unwrap_or(primitive_name)
+        .to_string()
+}
 
 impl GraphPlanner for DefaultGraphPlanner {
     fn decide_after_turn(&self, context: GraphPlanningContext<'_>) -> GraphDecision {
@@ -165,7 +172,7 @@ impl LocalTurnPlanner {
         explicit_path_count: usize,
     ) -> bool {
         let local_has_explicit_plan = local_tool_call.plan.is_some();
-        let local_is_multi_path = local_tool_call.name == "Plan"
+        let local_is_multi_path = local_tool_call.name == "BatchExecute"
             || local_tool_call.name == "workspace_batch"
             || local_tool_call.arguments.get("paths").is_some();
         let provider_is_single_path = provider_tool_call.arguments.get("paths").is_none();
@@ -196,7 +203,7 @@ impl LocalTurnPlanner {
         if contains_any(&lowered, &["time", "时间", "几点", "timestamp"]) {
             return Some(ToolCall {
                 call_id: None,
-                name: model_visible_tool_name("time_now").to_string(),
+                name: model_tool_name("time_now"),
                 arguments: json!({}),
                 plan: None,
             });
@@ -208,7 +215,7 @@ impl LocalTurnPlanner {
         ) {
             return Some(ToolCall {
                 call_id: None,
-                name: model_visible_tool_name("workspace_list_files").to_string(),
+                name: model_tool_name("workspace_list_files"),
                 arguments: json!({
                     "path": referenced_path.unwrap_or_else(|| ".".to_string()),
                     "limit": 60,
@@ -224,7 +231,7 @@ impl LocalTurnPlanner {
                 if let Some(path) = referenced_path.clone() {
                     return Some(ToolCall {
                         call_id: None,
-                        name: model_visible_tool_name("workspace_gather_context").to_string(),
+                        name: model_tool_name("workspace_gather_context"),
                         arguments: json!({
                             "path": path,
                             "query": query,
@@ -237,7 +244,7 @@ impl LocalTurnPlanner {
 
                 return Some(ToolCall {
                     call_id: None,
-                    name: model_visible_tool_name("workspace_search_text").to_string(),
+                    name: model_tool_name("workspace_search_text"),
                     arguments: json!({
                         "query": query,
                         "path": ".",
@@ -269,7 +276,7 @@ impl LocalTurnPlanner {
                 if let Some(path) = referenced_path {
                     return Some(ToolCall {
                         call_id: None,
-                        name: model_visible_tool_name("workspace_gather_context").to_string(),
+                        name: model_tool_name("workspace_gather_context"),
                         arguments: json!({
                             "path": path,
                             "query": query,
@@ -282,7 +289,7 @@ impl LocalTurnPlanner {
 
                 return Some(ToolCall {
                     call_id: None,
-                    name: model_visible_tool_name("workspace_search_text").to_string(),
+                    name: model_tool_name("workspace_search_text"),
                     arguments: json!({
                         "query": query,
                         "path": ".",
@@ -318,7 +325,7 @@ impl LocalTurnPlanner {
             ) {
                 return Some(ToolCall {
                     call_id: None,
-                    name: model_visible_tool_name("workspace_gather_context").to_string(),
+                    name: model_tool_name("workspace_gather_context"),
                     arguments: json!({
                         "path": path,
                         "lineCount": 80,
@@ -330,7 +337,7 @@ impl LocalTurnPlanner {
 
             return Some(ToolCall {
                 call_id: None,
-                name: model_visible_tool_name("workspace_gather_context").to_string(),
+                name: model_tool_name("workspace_gather_context"),
                 arguments: json!({
                     "path": path,
                     "lineCount": 80,
@@ -390,7 +397,7 @@ impl LocalTurnPlanner {
                     arguments["query"] = json!(query);
                 }
                 json!({
-                    "name": model_visible_tool_name("workspace_gather_context"),
+                    "name": model_tool_name("workspace_gather_context"),
                     "arguments": arguments,
                 })
             })
@@ -400,7 +407,7 @@ impl LocalTurnPlanner {
             .take(MAX_LOCAL_BATCH_PATHS)
             .enumerate()
             .map(|(index, path)| ToolPlanStep {
-                name: model_visible_tool_name("workspace_gather_context").to_string(),
+                name: model_tool_name("workspace_gather_context"),
                 arguments: json!({
                     "path": path,
                     "query": search_query.clone(),
@@ -413,7 +420,7 @@ impl LocalTurnPlanner {
 
         Some(ToolCall {
             call_id: None,
-            name: model_visible_tool_name("workspace_batch").to_string(),
+            name: model_tool_name("workspace_batch"),
             arguments: json!({
                 "parallel": true,
                 "continueOnError": true,
@@ -434,18 +441,9 @@ impl LocalTurnPlanner {
         history: &[TurnHistoryMessage],
     ) -> Option<ProviderDecision> {
         let tool_call = Self::infer_local_tool_call(user_message, history)?;
-        let context_hint = history
-            .iter()
-            .rev()
-            .find(|message| message.role == "assistant")
-            .map(|message| preview_text(&message.content, 80))
-            .unwrap_or_else(|| "none".to_string());
 
         Some(ProviderDecision {
-            output_text: format!(
-                "Using tool `{}` for more context. Previous assistant context: {}.",
-                tool_call.name, context_hint
-            ),
+            output_text: String::new(),
             tool_call: Some(tool_call),
             reasoning_content: None,
             reasoning_content_value: None,
@@ -747,17 +745,6 @@ fn contains_any(text: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|keyword| text.contains(keyword))
 }
 
-fn preview_text(text: &str, max_chars: usize) -> String {
-    let normalized = text.replace('\n', "\\n");
-    let count = normalized.chars().count();
-    if count <= max_chars {
-        normalized
-    } else {
-        let preview = normalized.chars().take(max_chars).collect::<String>();
-        format!("{}...(+{} chars)", preview, count - max_chars)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +847,18 @@ mod tests {
     }
 
     #[test]
+    fn preflight_tool_decision_keeps_internal_tool_planning_text_out_of_user_output() {
+        let decision = LocalTurnPlanner::preflight_tool_decision("当前文件夹下有哪些文件？", &[])
+            .expect("preflight tool decision");
+
+        assert_eq!(decision.output_text, "");
+        assert_eq!(
+            decision.tool_call.as_ref().map(|call| call.name.as_str()),
+            Some("List")
+        );
+    }
+
+    #[test]
     fn planner_can_follow_last_referenced_path_from_history() {
         let call = LocalTurnPlanner::infer_local_tool_call(
             "这个文件是什么？",
@@ -947,7 +946,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "Plan");
+        assert_eq!(call.name, "BatchExecute");
         assert!(call.plan.is_some());
         assert!(call.arguments.get("toolPlan").is_none());
         let calls = call
@@ -969,7 +968,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "Plan");
+        assert_eq!(call.name, "BatchExecute");
         assert!(call.plan.is_some());
         assert!(call.arguments.get("toolPlan").is_none());
         let calls = call
@@ -1018,7 +1017,7 @@ mod tests {
         )
         .expect("tool call");
 
-        assert_eq!(call.name, "Plan");
+        assert_eq!(call.name, "BatchExecute");
         let calls = call
             .arguments
             .get("calls")
@@ -1047,7 +1046,7 @@ mod tests {
             )
             .expect("selected tool call");
 
-        assert_eq!(call.name, "Plan");
+        assert_eq!(call.name, "BatchExecute");
         assert!(call.plan.is_some());
         assert!(call.arguments.get("calls").is_some());
     }

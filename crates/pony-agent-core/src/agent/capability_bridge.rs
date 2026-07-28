@@ -1,6 +1,7 @@
 use crate::agent::telemetry::CapabilityInvocationRecord;
 use crate::agent::tools::{
-    builtin_tools, canonical_tool_name, ToolCall, ToolDefinition, ToolPermissionFacts, ToolResult,
+    canonical_tool_name, ToolCall, ToolDescriptor, ToolPermissionFacts, ToolRegistrySnapshot,
+    ToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1072,8 +1073,10 @@ impl CapabilityRegistry {
             },
         );
 
-        for tool in builtin_tools() {
-            let capability = capability_from_tool_definition(&source_id, &tool);
+        let registry = ToolRegistrySnapshot::builtin()
+            .expect("static builtin tool registry must have unique descriptor identities");
+        for descriptor in registry.descriptors {
+            let capability = capability_from_tool_descriptor(&source_id, &descriptor);
             self.capabilities
                 .insert(capability.capability_id.clone(), capability);
         }
@@ -1100,22 +1103,26 @@ fn permission_scope_summary(scopes: &BTreeSet<String>) -> String {
     }
 }
 
-fn capability_from_tool_definition(source_id: &str, tool: &ToolDefinition) -> CapabilityView {
+fn capability_from_tool_descriptor(source_id: &str, descriptor: &ToolDescriptor) -> CapabilityView {
+    let permission = descriptor.permission_declaration.contract_facts();
     CapabilityView {
-        capability_id: format!("builtin:{}", tool.name),
+        capability_id: descriptor.identity.descriptor_id.clone(),
         source_id: source_id.to_string(),
         source_kind: CapabilitySourceKind::Builtin,
         kind: CapabilityKind::Tool,
-        label: tool.name.to_string(),
-        description: tool.description.to_string(),
+        label: descriptor.identity.primitive_name.clone(),
+        description: descriptor.description.clone(),
         invocation_mode: CapabilityInvocationMode::DirectToolCall,
-        input_schema_summary: summarize_input_schema(&tool.input_schema),
-        safety_class: "host_tool".to_string(),
-        visibility: "default".to_string(),
+        input_schema_summary: summarize_input_schema(&descriptor.input_schema),
+        safety_class: descriptor.kind.as_str().to_string(),
+        visibility: descriptor.exposure.as_str().to_string(),
         observability_tags: vec!["builtin".to_string(), "tool".to_string()],
-        requires_approval: false,
-        host_mediated: true,
-        permission_scope: "workspace".to_string(),
+        requires_approval: permission.requires_approval.unwrap_or(true),
+        host_mediated: permission.host_mediated.unwrap_or(true),
+        permission_scope: permission
+            .permission_scope
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
     }
 }
 
@@ -1306,12 +1313,62 @@ mod tests {
         let plan = registry
             .resolve_tool_call(&ToolCall {
                 call_id: None,
-                name: "Plan".to_string(),
+                name: "BatchExecute".to_string(),
                 arguments: serde_json::json!({ "calls": [] }),
                 plan: None,
             })
-            .expect("Plan tool call should resolve");
+            .expect("BatchExecute tool call should resolve");
         assert_eq!(plan.capability.capability_id, "builtin:workspace_batch");
+    }
+
+    #[test]
+    fn builtin_capabilities_project_descriptor_permission_facts() {
+        let registry = CapabilityRegistry::new();
+        let expected = [
+            (
+                "builtin:workspace_gather_context",
+                "workspace.read",
+                false,
+                false,
+            ),
+            (
+                "builtin:workspace_write_file",
+                "workspace.write",
+                false,
+                false,
+            ),
+            (
+                "builtin:workspace_edit_file",
+                "workspace.write",
+                false,
+                false,
+            ),
+            (
+                "builtin:workspace_run_command",
+                "workspace.execute",
+                false,
+                false,
+            ),
+            ("builtin:tool_search", "capability.discovery", false, false),
+        ];
+
+        for (capability_id, scope, requires_approval, host_mediated) in expected {
+            let capability = registry
+                .inspect_capability(capability_id)
+                .expect("baseline builtin capability should exist");
+            assert_eq!(
+                capability.permission_scope, scope,
+                "scope for {capability_id}"
+            );
+            assert_eq!(
+                capability.requires_approval, requires_approval,
+                "approval projection for {capability_id}"
+            );
+            assert_eq!(
+                capability.host_mediated, host_mediated,
+                "host mediation projection for {capability_id}"
+            );
+        }
     }
 
     #[test]

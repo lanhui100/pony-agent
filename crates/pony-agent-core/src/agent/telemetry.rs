@@ -759,7 +759,7 @@ mod tests {
         let activities = tool_activities_after_result(&call, &result);
 
         assert_eq!(activities.len(), 3);
-        assert_eq!(activities[0].name, "Plan");
+        assert_eq!(activities[0].name, "BatchExecute");
         assert_eq!(activities[0].status, "done");
         assert_eq!(activities[1].name, "Read");
         assert_eq!(activities[1].status, "done");

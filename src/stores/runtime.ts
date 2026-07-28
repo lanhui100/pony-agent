@@ -2562,13 +2562,13 @@ const defaultAvailableTools: AvailableTool[] = [
     }
   },
   {
-    name: "Plan",
-    canonicalToolName: "Plan",
+    name: "BatchExecute",
+    canonicalToolName: "BatchExecute",
     executionPrimitive: "workspace_batch",
-    description: "表达计划并驱动受控的复合子调用执行；通过 ToolPlan 与 child_results 暴露计划和执行细节。",
+    description: "批量执行多个工具子调用，可选并发和失败继续选项，用于一次性收集多个上下文片段。",
     kind: "composite",
     exposure: "model_visible",
-    displayMetadata: { displayNameZh: "计划" },
+    displayMetadata: { displayNameZh: "批量执行" },
     permissionFacts: {
       requiresApproval: false,
       permissionScope: "workspace.read",
@@ -3952,6 +3952,8 @@ export const useRuntimeStore = defineStore("runtime", {
       }
 
       this.cancelStreamFlush();
+      const flushedTextChars = this.streamBufferText.length;
+      const flushedReasoningChars = this.streamBufferReasoning.length;
 
       const assistantMessage = this.ensureAssistantMessage(
         bufferedTurnId,
@@ -3967,6 +3969,11 @@ export const useRuntimeStore = defineStore("runtime", {
 
       if (this.streamBufferText) {
         assistantMessage.content += this.streamBufferText;
+      }
+
+      if (flushedTextChars > 0 || flushedReasoningChars > 0) {
+        this.streamDebugFlushCount += 1;
+        this.streamDebugTextCharsFlushed += flushedTextChars;
       }
 
       this.streamBufferTurnId = null;
@@ -5545,12 +5552,38 @@ export const useRuntimeStore = defineStore("runtime", {
         return;
       }
 
+      const modelContentForCurrentHop = (content: string | null | undefined, field: "text" | "reasoningContent") => {
+        if (!content) {
+          return null;
+        }
+
+        const completedContents = traceTimeline
+          .slice(0, modelIndex)
+          .filter((entry) => canonicalizeTraceTimelineKind(entry.kind) === "call_model")
+          .map((entry) => entry[field] ?? "");
+        const completedStartIndex = completedContents.findIndex((_, index) => {
+          const candidate = completedContents.slice(index).join("");
+          return Boolean(candidate) && content.startsWith(candidate);
+        });
+        const completedPrefix =
+          completedStartIndex >= 0 ? completedContents.slice(completedStartIndex).join("") : "";
+        if (!completedPrefix || content.startsWith(completedPrefix)) {
+          return content.slice(completedPrefix.length) || null;
+        }
+
+        return content;
+      };
       const modelEntry = traceTimeline[modelIndex]!;
+      const currentText = modelContentForCurrentHop(assistantMessage.content, "text");
+      const currentReasoning = modelContentForCurrentHop(
+        assistantMessage.reasoningContent,
+        "reasoningContent"
+      );
       traceTimeline[modelIndex] = {
         ...modelEntry,
         state: assistantMessage.status === "pending" ? "active" : modelEntry.state,
-        text: assistantMessage.content || modelEntry.text || null,
-        reasoningContent: assistantMessage.reasoningContent ?? modelEntry.reasoningContent ?? null,
+        text: currentText ?? modelEntry.text ?? null,
+        reasoningContent: currentReasoning ?? modelEntry.reasoningContent ?? null,
         firstTokenLatencyMs: this.firstTokenLatencyMs ?? modelEntry.firstTokenLatencyMs ?? null
       };
       this.traceTimeline = traceTimeline;
@@ -5985,6 +6018,11 @@ export const useRuntimeStore = defineStore("runtime", {
 
         const deltaText = payload.text ?? "";
         const deltaReasoning = payload.reasoningContent ?? "";
+
+        if (deltaText || deltaReasoning) {
+          this.streamDebugDeltaCount += 1;
+          this.streamDebugTextCharsReceived += deltaText.length;
+        }
 
         if (deltaReasoning) {
           this.streamBufferReasoning += deltaReasoning;

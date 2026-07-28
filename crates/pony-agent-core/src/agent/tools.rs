@@ -1,4 +1,5 @@
 use crate::agent::runtime_helper::block_on;
+use crate::agent::tool_runtime::TurnToolView;
 use encoding_rs::{Encoding, GBK};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -55,7 +56,7 @@ pub enum ToolKind {
     Search,
     Write,
     Execute,
-    Plan,
+    BatchExecute,
     Interactive,
     Composite,
     External,
@@ -68,7 +69,7 @@ impl ToolKind {
             Self::Search => "search",
             Self::Write => "write",
             Self::Execute => "execute",
-            Self::Plan => "plan",
+            Self::BatchExecute => "batch_execute",
             Self::Interactive => "interactive",
             Self::Composite => "composite",
             Self::External => "external",
@@ -118,6 +119,60 @@ pub struct ToolPermissionFacts {
     pub decision_source: Option<String>,
 }
 
+/// Typed permission facts used for registry and dispatcher decisions. The string-shaped
+/// `ToolPermissionFacts` remains a contract-view adapter for legacy consumers.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPermissionScope {
+    WorkspaceRead,
+    WorkspaceWrite,
+    WorkspaceExecute,
+    CapabilityDiscovery,
+}
+
+impl ToolPermissionScope {
+    fn as_legacy_scope(&self) -> &'static str {
+        match self {
+            Self::WorkspaceRead => "workspace.read",
+            Self::WorkspaceWrite => "workspace.write",
+            Self::WorkspaceExecute => "workspace.execute",
+            Self::CapabilityDiscovery => "capability.discovery",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionDeclaration {
+    #[serde(default)]
+    pub scopes: std::collections::BTreeSet<ToolPermissionScope>,
+    #[serde(default)]
+    pub requires_approval: bool,
+    #[serde(default)]
+    pub host_mediated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
+}
+
+impl ToolPermissionDeclaration {
+    pub fn contract_facts(&self) -> ToolPermissionFacts {
+        ToolPermissionFacts {
+            requires_approval: Some(self.requires_approval),
+            permission_scope: (!self.scopes.is_empty()).then(|| {
+                self.scopes
+                    .iter()
+                    .map(ToolPermissionScope::as_legacy_scope)
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            }),
+            host_mediated: Some(self.host_mediated),
+            permission_profile: None,
+            approval_mode: self.approval_mode.clone(),
+            decision_source: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolError {
@@ -141,7 +196,7 @@ pub struct WorkspaceContext {
     pub policy: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinitionContractView {
     pub name: String,
@@ -200,6 +255,505 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDescriptorSource {
+    Builtin,
+    Mcp,
+    Skill,
+    Dynamic,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolIdentity {
+    pub descriptor_id: String,
+    pub model_name: String,
+    pub canonical_name: String,
+    pub primitive_name: String,
+    pub source: ToolDescriptorSource,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutionPolicy {
+    pub concurrent_safe: bool,
+    pub cancellable: bool,
+    pub default_timeout_ms: u64,
+    pub result_budget_bytes: usize,
+}
+
+impl Default for ToolExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            concurrent_safe: false,
+            cancellable: true,
+            default_timeout_ms: DEFAULT_RUN_TIMEOUT_MS,
+            result_budget_bytes: MAX_FULL_READ_BYTES as usize,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolHandlerProvenance {
+    pub handler_kind: String,
+    pub source_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDescriptor {
+    pub identity: ToolIdentity,
+    pub aliases: Vec<String>,
+    pub description: String,
+    pub input_schema: Value,
+    pub kind: ToolKind,
+    pub exposure: ToolExposure,
+    pub permission_declaration: ToolPermissionDeclaration,
+    pub execution_policy: ToolExecutionPolicy,
+    pub display_metadata: ToolDisplayMetadata,
+    pub handler_provenance: ToolHandlerProvenance,
+    pub source_revision: String,
+    #[serde(default)]
+    pub composed_descriptor_ids: Vec<String>,
+}
+
+impl ToolDescriptor {
+    pub fn contract_view(&self) -> ToolDefinitionContractView {
+        ToolDefinitionContractView {
+            name: self.identity.model_name.clone(),
+            canonical_tool_name: self.identity.canonical_name.clone(),
+            execution_primitive: self.identity.primitive_name.clone(),
+            description: self.description.clone(),
+            input_schema: self.input_schema.clone(),
+            kind: self.kind.as_str().to_string(),
+            exposure: self.exposure.as_str().to_string(),
+            display_metadata: self.display_metadata.clone(),
+            permission_facts: self.permission_declaration.contract_facts(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolRegistrySnapshot {
+    pub snapshot_id: String,
+    pub descriptors: Vec<ToolDescriptor>,
+    aliases: std::collections::BTreeMap<String, usize>,
+}
+
+impl ToolRegistrySnapshot {
+    pub fn builtin() -> Result<Self, String> {
+        Self::from_builtin_definitions(builtin_tools())
+    }
+
+    pub fn from_builtin_definitions(definitions: Vec<ToolDefinition>) -> Result<Self, String> {
+        let mut product_winners: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut product_priorities: std::collections::BTreeMap<String, u8> =
+            std::collections::BTreeMap::new();
+        // The provider tool array order is part of the cache-friendly stable prefix, so a product
+        // name keeps the slot where it first appears even when a later primitive wins exposure.
+        let mut product_first_index: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+
+        for (index, definition) in definitions.iter().enumerate() {
+            let contract = definition.contract_view();
+            let priority = contract_priority(&contract);
+            product_first_index
+                .entry(contract.name.clone())
+                .or_insert(index);
+            let replace = product_priorities
+                .get(&contract.name)
+                .map(|existing| priority > *existing)
+                .unwrap_or(true);
+            if replace {
+                product_priorities.insert(contract.name.clone(), priority);
+                product_winners.insert(contract.name, contract.execution_primitive);
+            }
+        }
+
+        let mut descriptors = Vec::with_capacity(definitions.len());
+        for definition in definitions {
+            let contract = definition.contract_view();
+            let primitive = contract.execution_primitive.clone();
+            let model_visible = product_winners
+                .get(&contract.name)
+                .map(|winner| winner == &primitive)
+                .unwrap_or(false);
+            let exposure = if model_visible {
+                tool_exposure_for_name(&primitive)
+            } else if primitive == TOOL_WORKSPACE_PATH_INFO {
+                ToolExposure::Deferred
+            } else {
+                ToolExposure::Internal
+            };
+            let mut aliases = builtin_aliases_for_primitive(&primitive)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if model_visible {
+                aliases.push(contract.name.clone());
+            }
+            aliases.sort();
+            aliases.dedup();
+
+            descriptors.push(ToolDescriptor {
+                identity: ToolIdentity {
+                    descriptor_id: format!("builtin:{primitive}"),
+                    model_name: contract.name,
+                    canonical_name: contract.canonical_tool_name,
+                    primitive_name: primitive.clone(),
+                    source: ToolDescriptorSource::Builtin,
+                },
+                aliases,
+                description: definition.description.to_string(),
+                input_schema: definition.input_schema,
+                kind: tool_kind_for_name(&primitive),
+                exposure,
+                permission_declaration: default_permission_declaration_for_name(&primitive),
+                execution_policy: execution_policy_for_primitive(&primitive),
+                display_metadata: tool_display_metadata_for_name(&primitive),
+                handler_provenance: ToolHandlerProvenance {
+                    handler_kind: "tool_router".to_string(),
+                    source_id: "builtin-tools".to_string(),
+                },
+                source_revision: "builtin-tool-catalog-v1".to_string(),
+                composed_descriptor_ids: Vec::new(),
+            });
+        }
+
+        // Order descriptors so registry position is the single truth source for every projection:
+        // model-visible descriptors keep their product name's first-appearance slot, and the
+        // remaining internal/deferred descriptors follow in stable definition order.
+        descriptors.sort_by_key(|descriptor| {
+            let visible = descriptor.exposure != ToolExposure::Internal
+                && product_winners
+                    .get(&descriptor.identity.model_name)
+                    .map(|winner| winner == &descriptor.identity.primitive_name)
+                    .unwrap_or(false);
+            let slot = product_first_index
+                .get(&descriptor.identity.model_name)
+                .copied()
+                .unwrap_or(usize::MAX);
+            (!visible, slot)
+        });
+
+        Self::from_descriptors("builtin-tool-catalog-v1", descriptors)
+    }
+
+    pub fn from_descriptors(
+        snapshot_id: impl Into<String>,
+        descriptors: Vec<ToolDescriptor>,
+    ) -> Result<Self, String> {
+        let snapshot_id = snapshot_id.into();
+        if snapshot_id.trim().is_empty() {
+            return Err("tool registry snapshot id cannot be empty".to_string());
+        }
+        let mut descriptor_ids = std::collections::BTreeSet::new();
+        let mut aliases = std::collections::BTreeMap::new();
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            validate_descriptor_identity(descriptor)?;
+            if !descriptor_ids.insert(descriptor.identity.descriptor_id.clone()) {
+                return Err(format!(
+                    "tool registry contains duplicate descriptor id `{}`",
+                    descriptor.identity.descriptor_id
+                ));
+            }
+            for alias in &descriptor.aliases {
+                let normalized = alias.trim();
+                if normalized.is_empty() {
+                    return Err(format!(
+                        "tool registry descriptor `{}` contains an empty alias",
+                        descriptor.identity.descriptor_id
+                    ));
+                }
+                if let Some(existing_index) = aliases.insert(normalized.to_string(), index) {
+                    let existing = &descriptors[existing_index].identity.descriptor_id;
+                    return Err(format!(
+                        "tool registry alias `{normalized}` is ambiguous between `{existing}` and `{}`",
+                        descriptor.identity.descriptor_id
+                    ));
+                }
+            }
+        }
+
+        validate_composite_dependencies(&descriptors, &descriptor_ids)?;
+
+        Ok(Self {
+            snapshot_id,
+            descriptors,
+            aliases,
+        })
+    }
+
+    pub fn resolve(&self, raw_name: &str) -> Option<&ToolDescriptor> {
+        self.aliases
+            .get(raw_name.trim())
+            .and_then(|index| self.descriptors.get(*index))
+    }
+
+    pub fn provider_contract_views(&self) -> Vec<ToolDefinitionContractView> {
+        self.descriptors
+            .iter()
+            // ToolSearch is the one default deferred discovery entry. It remains advertised
+            // during the migration so the model can request a governed elevation.
+            .filter(|descriptor| {
+                descriptor.exposure == ToolExposure::ModelVisible
+                    || descriptor.identity.primitive_name == TOOL_TOOL_SEARCH
+            })
+            .map(ToolDescriptor::contract_view)
+            .collect()
+    }
+
+    pub fn default_turn_tool_view(&self) -> TurnToolView {
+        TurnToolView::from_registry(self)
+    }
+
+    pub fn model_name_for_primitive(&self, primitive_name: &str) -> Option<&str> {
+        self.descriptors
+            .iter()
+            .find(|descriptor| descriptor.identity.primitive_name == primitive_name)
+            .map(|descriptor| descriptor.identity.model_name.as_str())
+    }
+
+    pub fn replace_source(
+        &self,
+        source_id: &str,
+        replacement_snapshot_id: impl Into<String>,
+        replacement: Vec<ToolDescriptor>,
+    ) -> Result<Self, String> {
+        if source_id.trim().is_empty() {
+            return Err("tool registry source id cannot be empty".to_string());
+        }
+        if replacement
+            .iter()
+            .any(|descriptor| descriptor.handler_provenance.source_id != source_id)
+        {
+            return Err(
+                "replacement descriptors must all belong to the replaced source".to_string(),
+            );
+        }
+        if self.descriptors.iter().any(|descriptor| {
+            descriptor.handler_provenance.source_id == source_id
+                && descriptor.identity.source == ToolDescriptorSource::Builtin
+        }) {
+            return Err(
+                "builtin registry descriptors cannot be replaced by an external source".to_string(),
+            );
+        }
+
+        let mut next = self
+            .descriptors
+            .iter()
+            .filter(|descriptor| descriptor.handler_provenance.source_id != source_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        next.extend(replacement);
+        Self::from_descriptors(replacement_snapshot_id, next)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolSurface {
+    pub registry: ToolRegistrySnapshot,
+    pub turn_view: TurnToolView,
+}
+
+impl ToolSurface {
+    pub fn builtin() -> Result<Self, String> {
+        let registry = ToolRegistrySnapshot::builtin()?;
+        let turn_view = registry.default_turn_tool_view();
+        Ok(Self {
+            registry,
+            turn_view,
+        })
+    }
+
+    pub fn provider_contract_views(&self) -> Result<Vec<ToolDefinitionContractView>, String> {
+        self.turn_view.provider_contract_views(&self.registry)
+    }
+
+    pub fn model_name_for_primitive(&self, primitive_name: &str) -> Option<&str> {
+        self.registry.model_name_for_primitive(primitive_name)
+    }
+}
+
+pub fn builtin_tool_surface() -> ToolSurface {
+    ToolSurface::builtin().expect("static builtin tool surface must validate")
+}
+
+pub fn builtin_turn_tool_contract_views() -> Vec<ToolDefinitionContractView> {
+    builtin_tool_surface()
+        .provider_contract_views()
+        .expect("builtin turn tool view must match registry snapshot")
+}
+
+fn validate_descriptor_identity(descriptor: &ToolDescriptor) -> Result<(), String> {
+    let identity = &descriptor.identity;
+    if identity.descriptor_id.trim().is_empty()
+        || identity.model_name.trim().is_empty()
+        || identity.canonical_name.trim().is_empty()
+        || identity.primitive_name.trim().is_empty()
+    {
+        return Err("tool registry descriptor identity fields cannot be empty".to_string());
+    }
+    if descriptor.handler_provenance.handler_kind.trim().is_empty()
+        || descriptor.handler_provenance.source_id.trim().is_empty()
+        || descriptor.source_revision.trim().is_empty()
+    {
+        return Err(format!(
+            "tool registry descriptor `{}` has incomplete source provenance",
+            identity.descriptor_id
+        ));
+    }
+
+    let expected_prefix = match identity.source {
+        ToolDescriptorSource::Builtin => "builtin:",
+        ToolDescriptorSource::Mcp => "mcp:",
+        ToolDescriptorSource::Skill => "skill:",
+        ToolDescriptorSource::Dynamic => "dynamic:",
+    };
+    if !identity.descriptor_id.starts_with(expected_prefix) {
+        return Err(format!(
+            "tool registry descriptor `{}` does not match declared source namespace `{expected_prefix}`",
+            identity.descriptor_id
+        ));
+    }
+    if identity.source == ToolDescriptorSource::Builtin
+        && descriptor.handler_provenance.source_id != "builtin-tools"
+    {
+        return Err(format!(
+            "builtin descriptor `{}` must use the builtin-tools provenance source",
+            identity.descriptor_id
+        ));
+    }
+    if identity.source != ToolDescriptorSource::Builtin
+        && descriptor.handler_provenance.source_id == "builtin-tools"
+    {
+        return Err(format!(
+            "non-builtin descriptor `{}` cannot claim builtin-tools provenance",
+            identity.descriptor_id
+        ));
+    }
+    if matches!(
+        identity.source,
+        ToolDescriptorSource::Mcp | ToolDescriptorSource::Skill
+    ) {
+        let source_prefix = format!(
+            "{}{}:",
+            expected_prefix, descriptor.handler_provenance.source_id
+        );
+        if !identity.descriptor_id.starts_with(&source_prefix) {
+            return Err(format!(
+                "descriptor `{}` does not belong to provenance source `{}`",
+                identity.descriptor_id, descriptor.handler_provenance.source_id
+            ));
+        }
+    }
+    if identity.source != ToolDescriptorSource::Builtin
+        && descriptor
+            .aliases
+            .iter()
+            .any(|alias| is_reserved_builtin_alias(alias))
+    {
+        return Err(format!(
+            "external descriptor `{}` collides with a reserved builtin alias",
+            identity.descriptor_id
+        ));
+    }
+    Ok(())
+}
+
+fn is_reserved_builtin_alias(alias: &str) -> bool {
+    matches!(
+        alias.trim(),
+        "Run"
+            | "Ask"
+            | "Read"
+            | "List"
+            | "Search"
+            | "Glob"
+            | "WebFetch"
+            | "WebSearch"
+            | "MCPResource"
+            | "ToolSearch"
+            | "Write"
+            | "Edit"
+            | "BatchExecute"
+    ) || alias.starts_with("workspace.")
+        || alias.starts_with("workspace_")
+        || alias.starts_with("time.")
+        || alias.starts_with("echo.")
+        || alias.starts_with("web.")
+        || alias.starts_with("tool.")
+        || matches!(
+            alias.trim(),
+            "time_now"
+                | "echo_input"
+                | "web_fetch_url"
+                | "web_search_query"
+                | "mcp_resource_read"
+                | "mcp.resource_read"
+                | "tool_search"
+        )
+}
+
+fn validate_composite_dependencies(
+    descriptors: &[ToolDescriptor],
+    descriptor_ids: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let dependencies = descriptors
+        .iter()
+        .map(|descriptor| {
+            (
+                descriptor.identity.descriptor_id.as_str(),
+                descriptor.composed_descriptor_ids.as_slice(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for descriptor in descriptors {
+        for child_id in &descriptor.composed_descriptor_ids {
+            if !descriptor_ids.contains(child_id) {
+                return Err(format!(
+                    "tool registry descriptor `{}` references unknown child `{child_id}`",
+                    descriptor.identity.descriptor_id
+                ));
+            }
+        }
+    }
+
+    fn visit(
+        descriptor_id: &str,
+        dependencies: &std::collections::BTreeMap<&str, &[String]>,
+        visiting: &mut std::collections::BTreeSet<String>,
+        visited: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        if visited.contains(descriptor_id) {
+            return Ok(());
+        }
+        if !visiting.insert(descriptor_id.to_string()) {
+            return Err(format!(
+                "tool registry composite dependency cycle includes `{descriptor_id}`"
+            ));
+        }
+        for child in dependencies.get(descriptor_id).copied().unwrap_or_default() {
+            visit(child, dependencies, visiting, visited)?;
+        }
+        visiting.remove(descriptor_id);
+        visited.insert(descriptor_id.to_string());
+        Ok(())
+    }
+
+    let mut visiting = std::collections::BTreeSet::new();
+    let mut visited = std::collections::BTreeSet::new();
+    for descriptor_id in dependencies.keys() {
+        visit(descriptor_id, &dependencies, &mut visiting, &mut visited)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub call_id: Option<String>,
@@ -215,6 +769,93 @@ pub struct ToolResult {
     pub status: String,
     pub output: String,
     pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionStatus {
+    Ok,
+    Error,
+    Cancelled,
+}
+
+impl ToolExecutionStatus {
+    pub fn from_legacy_status(status: &str) -> Self {
+        match status {
+            "ok" => Self::Ok,
+            "aborted" | "cancelled" => Self::Cancelled,
+            _ => Self::Error,
+        }
+    }
+
+    pub fn as_legacy_status(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Cancelled => "aborted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolControlKind {
+    WaitingUser,
+    ApprovalRequired,
+    WaitingHost,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolControlOutcome {
+    pub kind: ToolControlKind,
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutcome {
+    pub execution_status: ToolExecutionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_outcome: Option<ToolControlOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ToolResult>,
+}
+
+impl ToolOutcome {
+    pub fn from_legacy_result(result: ToolResult) -> Self {
+        Self {
+            execution_status: ToolExecutionStatus::from_legacy_status(&result.status),
+            control_outcome: None,
+            result: Some(result),
+        }
+    }
+
+    pub fn pending(control_outcome: ToolControlOutcome) -> Self {
+        Self {
+            execution_status: ToolExecutionStatus::Ok,
+            control_outcome: Some(control_outcome),
+            result: None,
+        }
+    }
+
+    pub fn into_legacy_result(self, tool_name: impl Into<String>) -> ToolResult {
+        self.result.unwrap_or_else(|| ToolResult {
+            tool_name: tool_name.into(),
+            // A pending control request is not a provider-consumable tool result. Until the
+            // runtime consumes it and resumes the original call, legacy callers must fail closed.
+            status: "error".to_string(),
+            output: json!({
+                "ok": false,
+                "error": {
+                    "code": "control_outcome_pending",
+                    "message": "工具调用尚处于控制请求状态，尚未产生可供 provider 消费的终态结果。"
+                }
+            })
+            .to_string(),
+            duration_ms: 0,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2514,8 +3155,8 @@ impl ToolExecutor for ToolRouter {
 impl ToolDefinition {
     pub fn contract_view(&self) -> ToolDefinitionContractView {
         ToolDefinitionContractView {
-            name: model_visible_tool_name(self.name).to_string(),
-            canonical_tool_name: product_canonical_tool_name(self.name).to_string(),
+            name: product_visible_tool_name(self.name),
+            canonical_tool_name: product_visible_tool_name(self.name),
             execution_primitive: canonical_tool_name(self.name)
                 .unwrap_or(self.name)
                 .to_string(),
@@ -2533,8 +3174,8 @@ impl ToolCall {
     pub fn contract_view(&self) -> ToolCallContractView {
         ToolCallContractView {
             call_id: self.call_id.clone(),
-            name: model_visible_tool_name(&self.name).to_string(),
-            canonical_tool_name: product_canonical_tool_name(&self.name).to_string(),
+            name: product_visible_tool_name(&self.name),
+            canonical_tool_name: product_visible_tool_name(&self.name),
             execution_primitive: canonical_tool_name(&self.name)
                 .unwrap_or(self.name.as_str())
                 .to_string(),
@@ -2553,8 +3194,8 @@ impl ToolResult {
         let parsed = parse_tool_output(&self.output);
         let summary = tool_result_summary_text(self, &parsed);
         ToolResultContractView {
-            tool_name: model_visible_tool_name(&self.tool_name).to_string(),
-            canonical_tool_name: product_canonical_tool_name(&self.tool_name).to_string(),
+            tool_name: product_visible_tool_name(&self.tool_name),
+            canonical_tool_name: product_visible_tool_name(&self.tool_name),
             execution_primitive: canonical_tool_name(&self.tool_name)
                 .unwrap_or(self.tool_name.as_str())
                 .to_string(),
@@ -2592,10 +3233,20 @@ fn with_description(schema: Value) -> Value {
         let mut props = properties.clone();
         props.insert("description".to_string(), desc);
         let mut schema = Value::Object(schema.as_object().unwrap().clone());
-        schema
-            .as_object_mut()
-            .unwrap()
-            .insert("properties".to_string(), Value::Object(props));
+        let object = schema.as_object_mut().unwrap();
+        object.insert("properties".to_string(), Value::Object(props));
+        let mut required = object
+            .get("required")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !required
+            .iter()
+            .any(|value| value.as_str() == Some("description"))
+        {
+            required.push(Value::String("description".to_string()));
+        }
+        object.insert("required".to_string(), Value::Array(required));
         schema
     } else {
         schema
@@ -3004,36 +3655,18 @@ fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
 }
 
 pub fn builtin_tool_contract_views() -> Vec<ToolDefinitionContractView> {
-    let mut ordered_names: Vec<String> = Vec::new();
-    let mut deduped: std::collections::HashMap<String, ToolDefinitionContractView> =
-        std::collections::HashMap::new();
-
-    for tool in builtin_tools() {
-        let contract = tool.contract_view();
-        let key = contract.name.clone();
-        if let Some(existing) = deduped.get(&key) {
-            if contract_priority(&contract) > contract_priority(existing) {
-                deduped.insert(key, contract);
-            }
-            continue;
-        }
-
-        ordered_names.push(key.clone());
-        deduped.insert(key, contract);
-    }
-
-    ordered_names
-        .into_iter()
-        .filter_map(|name| deduped.remove(&name))
-        .collect()
+    builtin_turn_tool_contract_views()
 }
 
 #[cfg(test)]
 mod contract_view_tests {
     use super::{
-        builtin_tool_contract_views, canonical_tool_name, model_visible_tool_name,
-        product_canonical_tool_name, TOOL_WORKSPACE_RUN_COMMAND,
+        builtin_tool_contract_views, builtin_tools, canonical_tool_name,
+        default_permission_facts_for_name, model_visible_tool_name, product_canonical_tool_name,
+        ToolDescriptor, ToolDescriptorSource, ToolExposure, ToolHandlerProvenance, ToolIdentity,
+        ToolKind, ToolRegistrySnapshot, TOOL_WORKSPACE_PATH_INFO, TOOL_WORKSPACE_RUN_COMMAND,
     };
+    use serde_json::json;
 
     #[test]
     fn builtin_tool_contract_views_deduplicate_to_model_surface() {
@@ -3061,8 +3694,8 @@ mod contract_view_tests {
                 "MCPResource",
                 "ToolSearch",
                 "Write",
-                "Edit",
-                "Plan"
+"Edit",
+                "BatchExecute"
             ]
         );
         assert_eq!(
@@ -3094,6 +3727,328 @@ mod contract_view_tests {
             "Run"
         );
     }
+
+    #[test]
+    fn characterization_product_surface_keeps_unique_names_and_json_object_schemas() {
+        let tools = builtin_tools();
+        let views = builtin_tool_contract_views();
+        let names = views
+            .iter()
+            .map(|view| view.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(tools.len(), 17, "baseline internal primitive count");
+        assert_eq!(names.len(), 13, "baseline product tool count");
+        assert_eq!(
+            names,
+            vec![
+                "Run",
+                "Ask",
+                "Read",
+                "List",
+                "Search",
+                "Glob",
+                "WebFetch",
+                "WebSearch",
+                "MCPResource",
+                "ToolSearch",
+                "Write",
+                "Edit",
+                "BatchExecute",
+            ]
+        );
+        for view in views {
+            assert_eq!(
+                view.input_schema
+                    .get("type")
+                    .and_then(|value| value.as_str()),
+                Some("object")
+            );
+            assert!(
+                view.input_schema.get("properties").is_some(),
+                "{} must retain an object property schema",
+                view.name
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_tool_schemas_require_ui_descriptions() {
+        for tool in builtin_tools() {
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .expect("builtin tool schema should declare required arguments");
+            assert!(
+                required
+                    .iter()
+                    .any(|value| value.as_str() == Some("description")),
+                "{} should require a user-visible invocation description",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn characterization_aliases_resolve_to_the_current_internal_primitives() {
+        let aliases = [
+            ("Run", "workspace_run_command"),
+            ("Ask", "echo_input"),
+            ("Read", "workspace_gather_context"),
+            ("List", "workspace_list_files"),
+            ("Search", "workspace_search_text"),
+            ("Glob", "workspace_glob_files"),
+            ("WebFetch", "web_fetch_url"),
+            ("WebSearch", "web_search_query"),
+            ("MCPResource", "mcp_resource_read"),
+            ("ToolSearch", "tool_search"),
+            ("Write", "workspace_write_file"),
+            ("Edit", "workspace_edit_file"),
+            ("BatchExecute", "workspace_batch"),
+            ("time.now", "time_now"),
+            ("workspace.read_file", "workspace_read_file"),
+        ];
+
+        for (alias, primitive) in aliases {
+            assert_eq!(canonical_tool_name(alias), Some(primitive), "alias {alias}");
+        }
+    }
+
+    #[test]
+    fn characterization_legacy_ask_and_plan_mappings_are_migration_removal_baselines() {
+        // These assertions document the behavior being replaced by PA-076. They are not a
+        // target product contract: Ask must stop echoing and Plan must stop dispatching batches.
+        assert_eq!(canonical_tool_name("Ask"), Some("echo_input"));
+        assert_eq!(canonical_tool_name("BatchExecute"), Some("workspace_batch"));
+    }
+
+    #[test]
+    fn characterization_builtin_permission_projection_matches_current_primitive_classes() {
+        let cases = [
+            (
+                "Read",
+                ToolKind::Read,
+                ToolExposure::ModelVisible,
+                Some("workspace.read"),
+            ),
+            (
+                "Write",
+                ToolKind::Write,
+                ToolExposure::ModelVisible,
+                Some("workspace.write"),
+            ),
+            (
+                "Edit",
+                ToolKind::Write,
+                ToolExposure::ModelVisible,
+                Some("workspace.write"),
+            ),
+            (
+                "Run",
+                ToolKind::Execute,
+                ToolExposure::ModelVisible,
+                Some("workspace.execute"),
+            ),
+            (
+                "ToolSearch",
+                ToolKind::Search,
+                ToolExposure::Deferred,
+                Some("capability.discovery"),
+            ),
+            (
+                "Ask",
+                ToolKind::Interactive,
+                ToolExposure::ModelVisible,
+                None,
+            ),
+            (
+                "BatchExecute",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                Some("workspace.read"),
+            ),
+        ];
+
+        for (name, kind, exposure, scope) in cases {
+            let view = builtin_tool_contract_views()
+                .into_iter()
+                .find(|view| view.name == name)
+                .expect("product tool should exist");
+            assert_eq!(view.kind, kind.as_str(), "kind for {name}");
+            assert_eq!(view.exposure, exposure.as_str(), "exposure for {name}");
+            assert_eq!(
+                default_permission_facts_for_name(name)
+                    .permission_scope
+                    .as_deref(),
+                scope,
+                "permission scope for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_registry_projects_the_existing_product_surface() {
+        let registry = ToolRegistrySnapshot::builtin().expect("builtin registry should build");
+        let names = registry
+            .provider_contract_views()
+            .into_iter()
+            .map(|view| view.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
+        assert_eq!(names.len(), 13);
+        assert!(registry.resolve("Run").is_some());
+        assert!(registry.resolve("workspace.run_command").is_some());
+        assert!(registry.resolve("workspace_path_info").is_some());
+        assert_eq!(
+            registry
+                .resolve("ToolSearch")
+                .map(|descriptor| descriptor.exposure.clone()),
+            Some(ToolExposure::Deferred)
+        );
+    }
+
+    #[test]
+    fn builtin_tool_surface_is_the_single_turn_projection_for_provider_and_host_views() {
+        let surface = super::builtin_tool_surface();
+        let provider = surface
+            .provider_contract_views()
+            .expect("builtin turn view should project");
+        assert_eq!(provider, super::builtin_turn_tool_contract_views());
+        assert_eq!(
+            surface.model_name_for_primitive(TOOL_WORKSPACE_RUN_COMMAND),
+            Some("Run")
+        );
+        // `workspace_path_info` is the deferred descriptor behind the existing `List` product
+        // name. Phase 2 must not rename it; ToolSearch elevation is what exposes it per turn.
+        assert_eq!(
+            surface.model_name_for_primitive(TOOL_WORKSPACE_PATH_INFO),
+            Some("List")
+        );
+    }
+
+    #[test]
+    fn registry_rejects_ambiguous_aliases() {
+        let registry = ToolRegistrySnapshot::builtin().expect("builtin registry should build");
+        let mut first = registry.descriptors[0].clone();
+        first.aliases = vec!["shared".to_string()];
+        let mut duplicate = ToolDescriptor {
+            identity: ToolIdentity {
+                descriptor_id: "dynamic:duplicate".to_string(),
+                model_name: "Duplicate".to_string(),
+                canonical_name: "Duplicate".to_string(),
+                primitive_name: "duplicate".to_string(),
+                source: ToolDescriptorSource::Dynamic,
+            },
+            aliases: vec!["shared".to_string()],
+            description: "duplicate".to_string(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+            kind: ToolKind::Read,
+            exposure: ToolExposure::Internal,
+            permission_declaration: Default::default(),
+            execution_policy: Default::default(),
+            display_metadata: Default::default(),
+            handler_provenance: ToolHandlerProvenance {
+                handler_kind: "test".to_string(),
+                source_id: "test".to_string(),
+            },
+            source_revision: "test".to_string(),
+            composed_descriptor_ids: Vec::new(),
+        };
+        duplicate.aliases.push("Duplicate".to_string());
+
+        let error = ToolRegistrySnapshot::from_descriptors("test", vec![first, duplicate])
+            .expect_err("ambiguous aliases must fail closed");
+
+        assert!(error.contains("ambiguous"));
+    }
+
+    #[test]
+    fn registry_rejects_reserved_namespace_and_source_provenance_mismatch() {
+        let mut external = ToolRegistrySnapshot::builtin()
+            .expect("builtin registry should build")
+            .descriptors[0]
+            .clone();
+        external.identity.descriptor_id = "dynamic:bad".to_string();
+        external.identity.source = ToolDescriptorSource::Dynamic;
+        external.handler_provenance.source_id = "remote-source".to_string();
+        external.aliases = vec!["Run".to_string()];
+        assert!(
+            ToolRegistrySnapshot::from_descriptors("test", vec![external])
+                .expect_err("external aliases cannot occupy builtin product namespace")
+                .contains("reserved builtin alias")
+        );
+
+        let mut builtin = ToolRegistrySnapshot::builtin()
+            .expect("builtin registry should build")
+            .descriptors[0]
+            .clone();
+        builtin.handler_provenance.source_id = "wrong-source".to_string();
+        assert!(
+            ToolRegistrySnapshot::from_descriptors("test", vec![builtin])
+                .expect_err("builtin provenance is part of descriptor identity")
+                .contains("builtin-tools provenance")
+        );
+
+        let mut mcp = ToolRegistrySnapshot::builtin()
+            .expect("builtin registry should build")
+            .descriptors[0]
+            .clone();
+        mcp.identity.descriptor_id = "mcp:claimed-source:tool".to_string();
+        mcp.identity.source = ToolDescriptorSource::Mcp;
+        mcp.handler_provenance.source_id = "actual-source".to_string();
+        mcp.aliases = vec!["remote.tool".to_string()];
+        assert!(ToolRegistrySnapshot::from_descriptors("test", vec![mcp])
+            .expect_err("MCP descriptor identity must bind the provenance source")
+            .contains("does not belong to provenance source"));
+    }
+
+    #[test]
+    fn registry_rejects_composite_cycles_and_replaces_a_source_atomically() {
+        let registry = ToolRegistrySnapshot::builtin().expect("builtin registry should build");
+        let mut first = registry.descriptors[0].clone();
+        first.identity.descriptor_id = "dynamic:one".to_string();
+        first.identity.source = ToolDescriptorSource::Dynamic;
+        first.handler_provenance.source_id = "dynamic-source".to_string();
+        first.aliases = vec!["dynamic.one".to_string()];
+        let mut second = first.clone();
+        second.identity.descriptor_id = "dynamic:two".to_string();
+        second.identity.model_name = "DynamicTwo".to_string();
+        second.identity.canonical_name = "DynamicTwo".to_string();
+        second.identity.primitive_name = "dynamic_two".to_string();
+        second.aliases = vec!["dynamic.two".to_string()];
+        first.composed_descriptor_ids = vec!["dynamic:two".to_string()];
+        second.composed_descriptor_ids = vec!["dynamic:one".to_string()];
+        assert!(
+            ToolRegistrySnapshot::from_descriptors("dynamic-v1", vec![first, second])
+                .expect_err("composite cycles must fail closed")
+                .contains("dependency cycle")
+        );
+
+        let mut old = registry.descriptors[0].clone();
+        old.identity.descriptor_id = "dynamic:old".to_string();
+        old.identity.source = ToolDescriptorSource::Dynamic;
+        old.identity.model_name = "DynamicOld".to_string();
+        old.identity.canonical_name = "DynamicOld".to_string();
+        old.identity.primitive_name = "dynamic_old".to_string();
+        old.handler_provenance.source_id = "dynamic-source".to_string();
+        old.aliases = vec!["dynamic.old".to_string()];
+        let registry = ToolRegistrySnapshot::from_descriptors("dynamic-v1", vec![old])
+            .expect("old dynamic source should be valid");
+        let mut replacement = registry.descriptors[0].clone();
+        replacement.identity.descriptor_id = "dynamic:new".to_string();
+        replacement.identity.model_name = "DynamicNew".to_string();
+        replacement.identity.canonical_name = "DynamicNew".to_string();
+        replacement.identity.primitive_name = "dynamic_new".to_string();
+        replacement.aliases = vec!["dynamic.new".to_string()];
+        replacement.source_revision = "dynamic-v2".to_string();
+        let replaced = registry
+            .replace_source("dynamic-source", "dynamic-v2", vec![replacement])
+            .expect("source replacement should construct one atomic new snapshot");
+        assert!(replaced.resolve("dynamic.old").is_none());
+        assert!(replaced.resolve("dynamic.new").is_some());
+    }
 }
 
 pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
@@ -3110,7 +4065,7 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
         "ToolSearch" => Some(TOOL_TOOL_SEARCH),
         "Write" => Some(TOOL_WORKSPACE_WRITE_FILE),
         "Edit" => Some(TOOL_WORKSPACE_EDIT_FILE),
-        "Plan" => Some(TOOL_WORKSPACE_BATCH),
+        "BatchExecute" => Some(TOOL_WORKSPACE_BATCH),
         TOOL_TIME_NOW | "time.now" => Some(TOOL_TIME_NOW),
         TOOL_ECHO_INPUT | "echo.input" => Some(TOOL_ECHO_INPUT),
         TOOL_WORKSPACE_LIST_FILES | "workspace.list_files" => Some(TOOL_WORKSPACE_LIST_FILES),
@@ -3136,8 +4091,86 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
     }
 }
 
-pub fn model_visible_tool_name(name: &str) -> &'static str {
-    match canonical_tool_name(name).unwrap_or(name) {
+fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
+    match primitive {
+        TOOL_TIME_NOW => vec![TOOL_TIME_NOW, "time.now"],
+        TOOL_ECHO_INPUT => vec![TOOL_ECHO_INPUT, "echo.input"],
+        TOOL_WORKSPACE_LIST_FILES => vec![TOOL_WORKSPACE_LIST_FILES, "workspace.list_files"],
+        TOOL_WORKSPACE_READ_FILE => vec![TOOL_WORKSPACE_READ_FILE, "workspace.read_file"],
+        TOOL_WORKSPACE_READ_FILE_SEGMENT => {
+            vec![
+                TOOL_WORKSPACE_READ_FILE_SEGMENT,
+                "workspace.read_file_segment",
+            ]
+        }
+        TOOL_WORKSPACE_PATH_INFO => vec![TOOL_WORKSPACE_PATH_INFO, "workspace.path_info"],
+        TOOL_WORKSPACE_SEARCH_TEXT => vec![TOOL_WORKSPACE_SEARCH_TEXT, "workspace.search_text"],
+        TOOL_WORKSPACE_GLOB_FILES => vec![TOOL_WORKSPACE_GLOB_FILES, "workspace.glob_files"],
+        TOOL_WEB_FETCH_URL => vec![TOOL_WEB_FETCH_URL, "web.fetch_url"],
+        TOOL_WEB_SEARCH_QUERY => vec![TOOL_WEB_SEARCH_QUERY, "web.search_query"],
+        TOOL_MCP_RESOURCE_READ => vec![TOOL_MCP_RESOURCE_READ, "mcp.resource_read"],
+        TOOL_TOOL_SEARCH => vec![TOOL_TOOL_SEARCH, "tool.search"],
+        TOOL_WORKSPACE_WRITE_FILE => vec![TOOL_WORKSPACE_WRITE_FILE, "workspace.write_file"],
+        TOOL_WORKSPACE_EDIT_FILE => vec![TOOL_WORKSPACE_EDIT_FILE, "workspace.edit_file"],
+        TOOL_WORKSPACE_RUN_COMMAND => vec![TOOL_WORKSPACE_RUN_COMMAND, "workspace.run_command"],
+        TOOL_WORKSPACE_BATCH => vec![TOOL_WORKSPACE_BATCH, "workspace.batch"],
+        TOOL_WORKSPACE_GATHER_CONTEXT => {
+            vec![TOOL_WORKSPACE_GATHER_CONTEXT, "workspace.gather_context"]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn execution_policy_for_primitive(primitive: &str) -> ToolExecutionPolicy {
+    let mut policy = ToolExecutionPolicy::default();
+    match primitive {
+        TOOL_WORKSPACE_LIST_FILES
+        | TOOL_WORKSPACE_READ_FILE
+        | TOOL_WORKSPACE_READ_FILE_SEGMENT
+        | TOOL_WORKSPACE_PATH_INFO
+        | TOOL_WORKSPACE_SEARCH_TEXT
+        | TOOL_WORKSPACE_GLOB_FILES
+        | TOOL_WEB_FETCH_URL
+        | TOOL_WEB_SEARCH_QUERY
+        | TOOL_MCP_RESOURCE_READ
+        | TOOL_TOOL_SEARCH
+        | TOOL_WORKSPACE_GATHER_CONTEXT => policy.concurrent_safe = true,
+        TOOL_WORKSPACE_RUN_COMMAND => {
+            policy.default_timeout_ms = DEFAULT_RUN_TIMEOUT_MS;
+            policy.result_budget_bytes = MAX_FULL_READ_BYTES as usize;
+        }
+        _ => {}
+    }
+    policy
+}
+
+fn default_permission_declaration_for_name(name: &str) -> ToolPermissionDeclaration {
+    let facts = default_permission_facts_for_name(name);
+    let mut scopes = std::collections::BTreeSet::new();
+    if let Some(scope) = facts.permission_scope.as_deref() {
+        let typed_scope = match scope {
+            "workspace.read" => Some(ToolPermissionScope::WorkspaceRead),
+            "workspace.write" => Some(ToolPermissionScope::WorkspaceWrite),
+            "workspace.execute" => Some(ToolPermissionScope::WorkspaceExecute),
+            "capability.discovery" => Some(ToolPermissionScope::CapabilityDiscovery),
+            _ => None,
+        };
+        if let Some(scope) = typed_scope {
+            scopes.insert(scope);
+        }
+    }
+    ToolPermissionDeclaration {
+        scopes,
+        requires_approval: facts.requires_approval.unwrap_or(true),
+        host_mediated: facts.host_mediated.unwrap_or(true),
+        approval_mode: facts.approval_mode,
+    }
+}
+
+/// Maps a known builtin primitive to its product-visible name. Unknown names have no builtin
+/// product identity, so callers must keep the caller-supplied name instead of inventing one.
+pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
+    let mapped = match canonical_tool_name(name).unwrap_or(name) {
         TOOL_WORKSPACE_RUN_COMMAND => "Run",
         TOOL_TIME_NOW => "Run",
         TOOL_ECHO_INPUT => "Ask",
@@ -3152,10 +4185,25 @@ pub fn model_visible_tool_name(name: &str) -> &'static str {
         TOOL_TOOL_SEARCH => "ToolSearch",
         TOOL_WORKSPACE_WRITE_FILE => "Write",
         TOOL_WORKSPACE_EDIT_FILE => "Edit",
-        TOOL_WORKSPACE_BATCH => "Plan",
+        TOOL_WORKSPACE_BATCH => "BatchExecute",
         TOOL_WORKSPACE_GATHER_CONTEXT => "Read",
-        _ => "Run",
-    }
+        _ => return None,
+    };
+    Some(mapped)
+}
+
+pub fn model_visible_tool_name(name: &str) -> &'static str {
+    // Preserved for builtin call sites that already hold a known primitive. Unknown names keep
+    // the legacy `Run` fallback only where a `&'static str` is required; prefer the `_opt` form.
+    model_visible_tool_name_opt(name).unwrap_or("Run")
+}
+
+/// Product-visible name for contract views. Unknown (external/dynamic) tool names pass through
+/// unchanged so no external tool is ever mislabeled as a builtin product tool.
+pub fn product_visible_tool_name(name: &str) -> String {
+    model_visible_tool_name_opt(name)
+        .map(str::to_string)
+        .unwrap_or_else(|| name.to_string())
 }
 
 pub fn product_canonical_tool_name(name: &str) -> &'static str {
@@ -3214,7 +4262,7 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         "WebSearch" => Some("外搜".to_string()),
         "MCPResource" => Some("资源".to_string()),
         "ToolSearch" => Some("找工具".to_string()),
-        "Plan" => Some("计划".to_string()),
+        "BatchExecute" => Some("批量执行".to_string()),
         "Ask" => Some("提问".to_string()),
         "Run" => Some("运行".to_string()),
         "Write" => Some("写入".to_string()),
@@ -4128,6 +5176,50 @@ mod tests {
             .and_then(Value::as_str)
             .expect("timezone should exist");
         assert!(tz.len() >= 3, "timezone offset should be present: {}", tz);
+    }
+
+    #[test]
+    fn tool_outcome_keeps_pending_control_separate_from_legacy_tool_result() {
+        let outcome = ToolOutcome::pending(ToolControlOutcome {
+            kind: ToolControlKind::WaitingUser,
+            request_id: "request-1".to_string(),
+        });
+
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        assert_eq!(
+            outcome
+                .control_outcome
+                .as_ref()
+                .map(|control| &control.kind),
+            Some(&ToolControlKind::WaitingUser)
+        );
+        assert!(outcome.result.is_none());
+
+        let legacy = outcome.into_legacy_result("Ask");
+        assert_eq!(legacy.status, "error");
+        let payload: Value = serde_json::from_str(&legacy.output).expect("legacy payload json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("control_outcome_pending")
+        );
+    }
+
+    #[test]
+    fn tool_outcome_round_trips_legacy_execution_statuses() {
+        for (legacy_status, expected) in [
+            ("ok", ToolExecutionStatus::Ok),
+            ("error", ToolExecutionStatus::Error),
+            ("aborted", ToolExecutionStatus::Cancelled),
+        ] {
+            assert_eq!(
+                ToolExecutionStatus::from_legacy_status(legacy_status),
+                expected,
+                "legacy status {legacy_status}"
+            );
+        }
     }
 
     fn serve_single_http_response(status_line: &str, body: &str, content_type: &str) -> String {
