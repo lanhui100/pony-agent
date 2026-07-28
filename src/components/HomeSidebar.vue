@@ -26,6 +26,7 @@ import {
   Zap
 } from "lucide-vue-next";
 import type {
+  AvailableTool,
   BuildContextObservation,
   ProviderCallCacheRecord,
   ToolActivity,
@@ -76,6 +77,7 @@ const providerStore = useProviderStore();
 
 const {
   activeTurnId: runtimeActiveTurnId,
+  availableTools,
   error,
   fallbackReason,
   firstTokenLatencyMs,
@@ -99,7 +101,7 @@ const {
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"trace" | "debug" | "">("trace");
+const activePanel = ref<"tools" | "trace" | "debug" | "">("trace");
 const activeTurnId = ref("");
 const activeTraceStepKey = ref("");
 const activeTraceDetailKey = ref("");
@@ -278,6 +280,10 @@ const sessionCacheHitRatio = computed(() => {
 // falls back to direct computation (for non-cached turns).
 function getCachedTimeline(turn: TurnTraceRecord): TraceTimelineEntry[] {
   return turnTimelineCache.value.get(turn.turnId) ?? turnTimeline(turn);
+}
+
+function isCheckpointPersistEntry(entry: TraceTimelineEntry) {
+  return entry.label === "PERSIST CHECKPOINT";
 }
 
 function formatDuration(durationSeconds?: number | null) {
@@ -1225,6 +1231,29 @@ function toolDisplayLabel(activity: {
     || activity.name;
 }
 
+function availableToolDisplayLabel(tool: AvailableTool) {
+  return tool.displayMetadata.displayNameZh?.trim()
+    || tool.canonicalToolName?.trim()
+    || tool.name;
+}
+
+function availableToolApprovalLabel(tool: AvailableTool) {
+  const mode = tool.permissionFacts.approvalMode?.trim();
+  if (mode) {
+    return mode;
+  }
+
+  return tool.permissionFacts.requiresApproval ? "required" : "none";
+}
+
+function availableToolPermissionScopeLabel(tool: AvailableTool) {
+  return tool.permissionFacts.permissionScope?.trim() || "--";
+}
+
+function availableToolPermissionSourceLabel(tool: AvailableTool) {
+  return tool.permissionFacts.decisionSource?.trim() || "--";
+}
+
 function buildTimelineCopyText(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const lines = [`${entry.label}`, `状态: ${entry.state}`];
   const preview = timelinePreviewText(turn, entry);
@@ -1321,7 +1350,7 @@ function copyText(key: string, text: string) {
   }, 1400);
 }
 
-function togglePanel(panel: "trace") {
+function togglePanel(panel: "tools" | "trace") {
   activePanel.value = activePanel.value === panel ? "" : panel;
 }
 
@@ -1552,7 +1581,50 @@ watch(orderedTurnTraceSignature, () => {
           </section>
         </section>
 
-        <section class="collapsible-shell mt-auto border-b border-stone-200/60 pb-4" :data-open="activePanel === 'trace'">
+        <section class="collapsible-shell mt-auto border-b border-stone-200/60 pb-4" :data-open="activePanel === 'tools'">
+          <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="tools-panel-toggle" @click="togglePanel('tools')">
+            <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
+              <Wrench class="h-3.5 w-3.5" />
+              <span>Tools</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-[10px] leading-[1.2] text-stone-400">{{ availableTools.length }}</span>
+              <ChevronRight class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': activePanel === 'tools' }" />
+            </div>
+          </button>
+
+          <div class="collapsible-body">
+            <section class="collapsible-content mt-2 space-y-2">
+              <div
+                v-for="tool in availableTools"
+                :key="tool.name"
+                class="rounded-[0.55rem] border border-stone-200/80 bg-[#fbf8f3] px-3 py-2"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <div class="min-w-0 text-[12px] font-medium text-stone-800">
+                    {{ availableToolDisplayLabel(tool) }}
+                  </div>
+                  <span class="shrink-0 text-[10px] uppercase tracking-[0.14em] text-stone-400">
+                    {{ tool.kind }}
+                  </span>
+                </div>
+                <p v-if="tool.description" class="mt-1 text-[10px] leading-[1.3] text-stone-500">
+                  {{ tool.description }}
+                </p>
+                <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] leading-[1.25] text-stone-500">
+                  <span>权限: {{ availableToolPermissionScopeLabel(tool) }}</span>
+                  <span>审批: {{ availableToolApprovalLabel(tool) }}</span>
+                  <span>来源: {{ availableToolPermissionSourceLabel(tool) }}</span>
+                </div>
+              </div>
+              <div v-if="availableTools.length === 0" class="px-1 text-[10px] leading-5 text-stone-400">
+                暂无可用工具
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="collapsible-shell border-b border-stone-200/60 pb-4" :data-open="activePanel === 'trace'">
           <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="trace-panel-toggle" @click="togglePanel('trace')">
             <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
               <Clock3 class="h-3.5 w-3.5" />
@@ -1624,7 +1696,8 @@ watch(orderedTurnTraceSignature, () => {
                         class="group flex w-full items-start justify-between gap-1.5 text-left"
                         type="button"
                         :data-testid="`trace-step-button-${entry.id}`"
-                        @click="toggleTraceStep(turn.turnId, entry.id)"
+                        :disabled="isCheckpointPersistEntry(entry)"
+                        @click="!isCheckpointPersistEntry(entry) && toggleTraceStep(turn.turnId, entry.id)"
                       >
                         <div class="min-w-0 space-y-0.5">
                           <div class="flex min-w-0 items-center gap-1.5 text-[11px] leading-[1.3] text-stone-700">
@@ -1667,6 +1740,7 @@ watch(orderedTurnTraceSignature, () => {
                             {{ timelineDurationText(turn, entry) }}
                           </span>
                           <button
+                            v-if="!isCheckpointPersistEntry(entry)"
                             class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                             type="button"
                             @click.stop="copyText(traceCopyKey(turn.turnId, entry.id), buildTimelineCopyText(turn, entry))"
@@ -1674,13 +1748,14 @@ watch(orderedTurnTraceSignature, () => {
                             <component :is="copiedKey === traceCopyKey(turn.turnId, entry.id) ? Check : Copy" class="h-3 w-3" />
                           </button>
                           <ChevronRight
+                            v-if="!isCheckpointPersistEntry(entry)"
                             class="h-3 w-3 shrink-0 text-stone-300 transition duration-200"
                             :class="{ 'rotate-90': activeTraceStepKey === turnStepKey(turn.turnId, entry.id) }"
                           />
                         </div>
                       </button>
 
-                      <div v-if="activeTraceStepKey === turnStepKey(turn.turnId, entry.id)" class="collapsible-body-open">
+                      <div v-if="!isCheckpointPersistEntry(entry) && activeTraceStepKey === turnStepKey(turn.turnId, entry.id)" class="collapsible-body-open">
                         <div class="collapsible-content mt-1 pl-4">
                           <section>
                             <div class="space-y-1">
