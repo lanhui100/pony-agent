@@ -182,5 +182,71 @@ describe("HomeWorkspace markdown rendering", () => {
     expect(wrapper.html()).toContain("<blockquote>");
     expect(wrapper.html()).toContain("<strong>加粗</strong>");
     expect(wrapper.html()).not.toContain("```md");
-  });
+  }, 15000);
+
+  it("buffers a short streaming response before revealing it as a fading batch", async () => {
+    const providerStore = useProviderStore();
+    providerStore.$patch({
+      registry: createProviderRegistry(),
+      selectedReasoningEffort: null
+    });
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      phase: "streaming_response",
+      activeTurnId: "turn-stream",
+      isSubmitting: true,
+      sessionOperation: null,
+      error: null,
+      messages: [
+        {
+          id: "user-stream",
+          turnId: "turn-stream",
+          role: "user",
+          content: "继续",
+          status: "done",
+          tokenCount: null
+        },
+        {
+          id: "assistant-stream",
+          turnId: "turn-stream",
+          role: "assistant",
+          content: "hello",
+          status: "pending",
+          tokenCount: null,
+          modelName: "ppx/gpt-5.4"
+        }
+      ]
+    });
+
+    const wrapper = mount({
+      render() {
+        return h(TooltipProvider, null, {
+          default: () => h(HomeWorkspace)
+        });
+      }
+    }, {
+      global: {
+        stubs: {
+          ScrollArea: ScrollAreaStub,
+          Button: ButtonStub,
+          Switch: SwitchStub,
+          Transition: false,
+          TransitionGroup: false
+        }
+      }
+    });
+
+    await nextTick();
+    expect(wrapper.find('[data-testid="assistant-streaming-fade-batch"]').exists()).toBe(false);
+
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 280));
+    await nextTick();
+
+    const fadeBatch = wrapper.find('[data-testid="assistant-streaming-fade-batch"]');
+    expect(fadeBatch.exists()).toBe(true);
+    expect(fadeBatch.text()).toBe("hello");
+
+    wrapper.unmount();
+  }, 15000);
 });

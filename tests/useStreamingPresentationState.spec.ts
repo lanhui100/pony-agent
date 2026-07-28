@@ -29,23 +29,37 @@ describe("useStreamingPresentationState", () => {
 
   afterEach(() => {
     window.localStorage.clear();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
-  it("reveals the first short pending batch immediately through fade", () => {
+  it("buffers the first short pending batch until the time threshold", () => {
     const messages = ref<ChatMessage[]>([createAssistantMessage("hello")]);
     const state = useStreamingPresentationState(computed(() => messages.value));
 
     state.syncStreamingPresentationState();
 
     expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("");
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("");
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe("");
+
+    vi.advanceTimersByTime(119);
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe("");
+
+    vi.advanceTimersByTime(1);
+    state.syncStreamingPresentationState();
+
     expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("hello");
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe("hello");
   });
 
   it("does not restart the first short fade animation while content is unchanged", () => {
     const messages = ref<ChatMessage[]>([createAssistantMessage("hello")]);
     const state = useStreamingPresentationState(computed(() => messages.value));
 
+    state.syncStreamingPresentationState();
+    vi.advanceTimersByTime(250);
     state.syncStreamingPresentationState();
     const firstFadeKey = state.assistantDisplayFadeKey(messages.value[0]!);
     vi.advanceTimersByTime(120);
@@ -55,7 +69,7 @@ describe("useStreamingPresentationState", () => {
     expect(state.assistantDisplayFadeKey(messages.value[0]!)).toBe(firstFadeKey);
   });
 
-  it("reveals the first pending batch through fade when the first threshold is reached", () => {
+  it("limits a large provider chunk to paced reveal batches", () => {
     const content = "hello this is a longer streamed assistant delta";
     const messages = ref<ChatMessage[]>([createAssistantMessage(content)]);
     const state = useStreamingPresentationState(computed(() => messages.value));
@@ -63,11 +77,50 @@ describe("useStreamingPresentationState", () => {
     state.syncStreamingPresentationState();
 
     expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("");
-    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe(content);
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe(content.slice(0, 12));
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe(content.slice(0, 12));
+
+    vi.advanceTimersByTime(89);
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe(content.slice(0, 12));
+
+    vi.advanceTimersByTime(1);
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe(content);
   });
 
-  it("commits previously revealed text to stable content after a non-flush update", () => {
-    const initial = "hello this is a longer streamed assistant delta";
+  it("paces a 500-character delta instead of revealing it as one block", () => {
+    const content = "x".repeat(500);
+    const messages = ref<ChatMessage[]>([createAssistantMessage(content)]);
+    const state = useStreamingPresentationState(computed(() => messages.value));
+
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toHaveLength(12);
+
+    vi.advanceTimersByTime(90);
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toHaveLength(60);
+
+    vi.advanceTimersByTime(90);
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toHaveLength(108);
+  });
+
+  it("paces long inline markdown that can be auto-closed safely", () => {
+    const content = `**bold** ${"x".repeat(500)}`;
+    const messages = ref<ChatMessage[]>([createAssistantMessage(content)]);
+    const state = useStreamingPresentationState(computed(() => messages.value));
+
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toHaveLength(12);
+
+    vi.advanceTimersByTime(90);
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toHaveLength(60);
+  });
+
+  it("keeps the previous faded batch visible while the next suffix is buffered", () => {
+    const initial = "hello world!";
     const next = `${initial}!`;
     const messages = ref<ChatMessage[]>([createAssistantMessage(initial)]);
     const state = useStreamingPresentationState(computed(() => messages.value));
@@ -77,23 +130,26 @@ describe("useStreamingPresentationState", () => {
     vi.advanceTimersByTime(100);
     state.syncStreamingPresentationState();
 
-    expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe(initial);
-    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("");
+    expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("");
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe(initial);
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe(initial);
   });
 
   it("flushes pending text when the time fallback threshold is reached", () => {
-    const initial = "hello this is a longer streamed assistant delta";
+    const initial = "hello world!";
     const next = `${initial}!`;
     const messages = ref<ChatMessage[]>([createAssistantMessage(initial)]);
     const state = useStreamingPresentationState(computed(() => messages.value));
 
     state.syncStreamingPresentationState();
     messages.value = [createAssistantMessage(next)];
-    vi.advanceTimersByTime(430);
+    state.syncStreamingPresentationState();
+    vi.advanceTimersByTime(250);
     state.syncStreamingPresentationState();
 
     expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe(initial);
     expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("!");
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe(next);
   });
 
   it("uses the narrower batch threshold while an unclosed code fence is active", () => {
@@ -107,7 +163,7 @@ describe("useStreamingPresentationState", () => {
 
     state.syncStreamingPresentationState();
 
-    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe(content);
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("```ts\n");
     expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("");
   });
 
@@ -123,6 +179,44 @@ describe("useStreamingPresentationState", () => {
     vi.advanceTimersByTime(100);
     state.syncStreamingPresentationState();
 
-    expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe("hello");
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe("hello");
+  });
+
+  it.each(["done", "error", "cancelled"] as const)(
+    "reveals a hidden suffix immediately when the assistant becomes %s",
+    (status) => {
+    const content = "hello this is a longer streamed assistant delta";
+    const messages = ref<ChatMessage[]>([createAssistantMessage(content)]);
+    const state = useStreamingPresentationState(computed(() => messages.value));
+
+    state.syncStreamingPresentationState();
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe(content.slice(0, 12));
+
+    messages.value = [createAssistantMessage(content, status)];
+    state.syncStreamingPresentationState();
+
+    expect(state.assistantDisplayStableContent(messages.value[0]!)).toBe(content);
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("");
+    expect(state.assistantDisplayContent(messages.value[0]!)).toBe(content);
+    }
+  );
+
+  it("reveals pending text immediately when reduced motion is requested", () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true,
+      media: "(prefers-reduced-motion: reduce)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    }));
+    const messages = ref<ChatMessage[]>([createAssistantMessage("hello")]);
+    const state = useStreamingPresentationState(computed(() => messages.value));
+
+    state.syncStreamingPresentationState();
+
+    expect(state.assistantDisplayFadeContent(messages.value[0]!)).toBe("hello");
   });
 });

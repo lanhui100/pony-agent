@@ -423,7 +423,12 @@ fn format_tool_activities(activities: &[TurnToolActivity]) -> String {
                 .unwrap_or_default();
             format!(
                 "{} [{}] {}{}{}{}",
-                activity.name, activity.status, activity.description, arguments, result_text, duration
+                activity.name,
+                activity.status,
+                activity.description,
+                arguments,
+                result_text,
+                duration
             )
         })
         .collect::<Vec<_>>()

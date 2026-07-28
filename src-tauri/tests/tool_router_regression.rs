@@ -113,6 +113,34 @@ fn batch_stops_following_calls_when_continue_on_error_is_false() {
 }
 
 #[test]
+fn characterization_batch_currently_executes_a_write_child() {
+    // This is a migration-removal baseline. PA-076 must replace it with an
+    // unsupported_composite_child rejection before the governed child dispatcher lands.
+    let workspace = temp_workspace();
+    let router = ToolRouter::with_workspace_root(workspace.clone());
+
+    let result = router.execute(&ToolCall {
+        call_id: None,
+        name: "workspace_batch".to_string(),
+        arguments: json!({
+            "calls": [{
+                "name": "workspace_write_file",
+                "arguments": { "path": "baseline.txt", "content": "baseline" }
+            }]
+        }),
+        plan: None,
+    });
+
+    assert_eq!(result.status, "ok");
+    assert_eq!(
+        fs::read_to_string(workspace.join("baseline.txt")).expect("baseline write child"),
+        "baseline"
+    );
+
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
 fn gather_context_with_query_on_file_returns_search_and_segment_results() {
     let workspace = temp_workspace();
     fs::write(

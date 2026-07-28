@@ -8,6 +8,11 @@
 - 当前阶段：`Mainline Stabilizing`
 - 总体状态：`In Progress`
 
+## 当前进行中
+
+- `PA-076` 加固并扩展 Agent Tool Runtime（P0 / C 级）
+  阶段 1（审核门禁）与阶段 2（descriptor / registry 真相源）已全部完成，任务清单 11/48。MSVC 环境阻塞已解除，Rust 测试首次真实执行并修复 3 个 phase-2 缺陷（provider 工具顺序回归、外部工具名被改写成 builtin 产品名、path_info 产品名断言错误）。当前进入 task 3.1 的 governed dispatcher。
+
 ## 当前主线结论
 
 - `PA-018` 已完成并通过完成态验证
@@ -78,6 +83,10 @@
      四卡累计通过 22 次子智能体审核调优，Rust 测试 + 231 项 TS 测试全部通过。OpenSpec changes 已归档：`openspec/changes/archive/2026-06-25-async-refactor-tokio/`。
 26. `PA-070` 已完成 provider request retry 与退避边界治理
     当前已完成 `retry.rs` substrate、provider/tool 退避原语收口、前端 whole-turn 自动重试退场、最终严格代码审核与一轮收尾调优。`call model` 的 request-level retry 现在明确收束在 `pony-agent-core`，而不是前端静默 whole-turn retry。
+27. `PA-076` 阶段 1、2 已收口，工具元数据已有单一真相源
+    `ToolDescriptor / ToolRegistrySnapshot / ToolSurface / TurnToolView` 已成立，provider、capability bridge、planner 与 Tauri `list_available_tools` 统一从 registry 投影，按工具名与工具数量推断元数据的两条路径均已移除。架构说明见 `docs/architecture/tool-runtime-descriptor-registry.md`。
+28. Windows 上的 Rust 测试执行方式已澄清
+    此前记录的 MSVC `link.exe` 阻塞并非缺少 Build Tools，而是 shell 未加载 `vcvars64.bat`；已新增 `scripts/run-rust-msvc.bat`。同时发现 `npm run cargo:test:exact` 因固定 `--manifest-path src-tauri/Cargo.toml` 而无法触达 core crate 测试（会静默输出 `running 0 tests`），core 测试需显式 `-p pony-agent-core`。已写入 `docs/guides/rust-agent.md`。
 
 ## 远期扩展
 
@@ -127,7 +136,7 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 
 ## 下一步最小动作
 
-1. 优先对 `PA-044 / harden-agent-core-infrastructure-boundary` 做一轮独立 spec 审核，确认 core/package/builder/preset/harness 边界足以防止 agent core 回粘 Tauri。
+1. 推进 `PA-076 / harden-and-expand-agent-tool-runtime` 的 task 3.1 governed dispatcher；阶段 1、2 已收口并通过真实 Rust 测试。Run/WebFetch/Ask 在 sandbox、pinned connector 与 PendingControlRequest 落地前保持 fail closed。接线时保持两条不变量：registry descriptor 顺序即 provider 工具数组顺序；外部工具名原样透传。
 2. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049`。
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。

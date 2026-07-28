@@ -332,6 +332,8 @@ function createMessage(partial: Partial<ChatMessage> = {}): ChatMessage {
     reasoningContent: partial.reasoningContent ?? null,
     modelName: partial.modelName ?? null,
     toolName: partial.toolName ?? null,
+    canonicalToolName: partial.canonicalToolName ?? null,
+    displayNameZh: partial.displayNameZh ?? null,
     detail: partial.detail ?? null,
     durationSeconds: partial.durationSeconds ?? null,
     errorDetail: partial.errorDetail ?? null
@@ -607,6 +609,11 @@ function findStreamingMarkdown(wrapper: ReturnType<typeof mount>) {
 
 function flushAsyncUiWork() {
   return new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+}
+
+async function waitForStreamingPresentation(delayMs = 300) {
+  await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+  await nextTick();
 }
 
 async function waitForCondition(check: () => boolean, attempts = 8) {
@@ -1193,7 +1200,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
         })
       ]
     });
-    await nextTick();
+    await waitForStreamingPresentation();
 
     const streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toContain("**正在** 输出中");
@@ -1282,7 +1289,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(wrapper.text()).toContain("searching");
   });
 
-  it("keeps a single streaming markdown surface while pending content grows", async () => {
+  it("keeps a single streaming flow while pending plain text grows", async () => {
     const runtimeStore = useRuntimeStore();
 
     runtimeStore.$patch({
@@ -1329,10 +1336,11 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
         })
       ]
     });
-    await nextTick();
+    await waitForStreamingPresentation();
     let streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
     expect(streamingContent.text()).toContain("hello");
-    expect(wrapper.findAll(".markdown-stub")).toHaveLength(1);
+    expect(wrapper.findAll(".markdown-stub")).toHaveLength(0);
+    expect(wrapper.get('[data-testid="assistant-streaming-fade-batch"]').text()).toBe("hello");
 
     runtimeStore.$patch({
       messages: [
@@ -1352,11 +1360,11 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
         })
       ]
     });
-    await nextTick();
+    await waitForStreamingPresentation(100);
 
     streamingContent = wrapper.get('.assistant-plain-text[data-streaming="true"]');
-    expect(streamingContent.text()).toContain("hello this is a longer streamed assistant delta that crosses the first reveal threshold");
-    expect(wrapper.findAll(".markdown-stub")).toHaveLength(1);
+    expect(streamingContent.text().length).toBeGreaterThan("hello".length);
+    expect(wrapper.findAll(".markdown-stub")).toHaveLength(0);
   });
 
   it("falls back to baseline pending text when the streaming markdown optimization is disabled", async () => {
@@ -1440,7 +1448,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
         })
       ]
     });
-    await nextTick();
+    await waitForStreamingPresentation();
 
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
     const streamingMarkdownInstanceId = wrapper.get(".markdown-stub").attributes("data-instance-id");
@@ -1502,7 +1510,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
 
     const wrapper = mountWorkspace();
-    await nextTick();
+    await waitForStreamingPresentation();
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
 
     viewportScrollToSpy.mockClear();
@@ -1561,8 +1569,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     const wrapper = mountWorkspace();
     await nextTick();
 
-    expect(wrapper.get('.assistant-plain-text[data-streaming="true"]').text()).toContain("hello this is a longer streamed assistant delta");
-    expect(wrapper.findAll(".markdown-stub")).toHaveLength(1);
+    expect(wrapper.get('.assistant-plain-text[data-streaming="true"]').text()).toBe("hello this i");
+    expect(wrapper.findAll(".markdown-stub")).toHaveLength(0);
 
     runtimeStore.$patch({
       messages: [
@@ -1864,7 +1872,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
     await nextTick();
     await advanceAnimationFrames(5);
-    await nextTick();
+    await waitForStreamingPresentation();
     expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
   });
 
@@ -2505,9 +2513,10 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     viewportScrollToSpy.mockClear();
 
     let streamingFlow = wrapper.get('[data-testid="assistant-streaming-flow"]');
-    expect(streamingFlow.text()).toContain("streaming content that has already crossed the first batch threshold");
-    expect(wrapper.get(".markdown-stub").attributes("streaming")).toBe("true");
-    expect(wrapper.get(".markdown-stub").attributes("data-force-markdown-streaming")).toBe("true");
+    const initialVisibleLength = streamingFlow.text().length;
+    expect(initialVisibleLength).toBeGreaterThan(0);
+    expect(initialVisibleLength).toBeLessThan("streaming content that has already crossed the first batch threshold".length);
+    expect(wrapper.find(".markdown-stub").exists()).toBe(false);
 
     runtimeStore.$patch({
       messages: [
@@ -2527,10 +2536,13 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
         })
       ]
     });
-    await nextTick();
+    await waitForStreamingPresentation(100);
 
     streamingFlow = wrapper.get('[data-testid="assistant-streaming-flow"]');
-    expect(streamingFlow.text()).toContain("and continues on the next line");
+    expect(streamingFlow.text().length).toBeGreaterThan(initialVisibleLength);
+    expect(streamingFlow.text().length).toBeLessThan(
+      `streaming content that has already crossed the first batch threshold and continues on the next line ${"x".repeat(100)}`.length
+    );
     expect(wrapper.findAll('[data-testid="assistant-streaming-flow"]')).toHaveLength(1);
 
     await advanceAnimationFrames(5);
@@ -2996,6 +3008,36 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(summaries.some((node) => node.html().includes("lucide-brain"))).toBe(true);
   });
 
+  it("uses the localized tool name instead of its execution detail", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "tool-localized-name",
+          turnId: "turn-localized-name",
+          role: "tool",
+          content: "",
+          status: "done",
+          toolName: "Plan",
+          canonicalToolName: "Plan",
+          displayNameZh: "计划",
+          detail: "Plan: Execute batch of subtasks",
+          durationSeconds: 0.2
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const toolPanel = wrapper.get(".conversation-tool-panel");
+    expect(toolPanel.get(".conversation-tool-name").text()).toBe("计划");
+    expect(toolPanel.get(".conversation-tool-detail").text()).toBe("Plan: Execute batch of subtasks");
+  });
+
   it("uses a single agent stack gap for reasoning, tools, and content spacing", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 
@@ -3287,6 +3329,405 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(children.indexOf(reasoningPanels[1]!.element)).toBeLessThan(children.indexOf(contentPanels[1]!.element));
   });
 
+  it("matches repeated same-name tools to distinct trace entries when activity ids are unavailable", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-repeated-trace-tools",
+          turnId: "turn-repeated-trace-tools",
+          role: "user",
+          content: "search twice"
+        }),
+        createMessage({
+          id: "tool-first-search-message",
+          turnId: "turn-repeated-trace-tools",
+          role: "tool",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "first search",
+          status: "done"
+        }),
+        createMessage({
+          id: "tool-second-search-message",
+          turnId: "turn-repeated-trace-tools",
+          role: "tool",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "second search",
+          status: "done"
+        }),
+        createMessage({
+          id: "assistant-repeated-trace-tools",
+          turnId: "turn-repeated-trace-tools",
+          role: "assistant",
+          content: "final answer",
+          status: "done"
+        })
+      ],
+      turnTraceHistory: [
+        {
+          ...createTrace({
+            turnId: "turn-repeated-trace-tools",
+            phase: "completed",
+            error: null,
+            toolActivities: []
+          }),
+          traceTimeline: [
+            {
+              id: "model-before-first-search",
+              kind: "call_model",
+              label: "MODEL #1",
+              state: "completed",
+              sequence: 10
+            },
+            {
+              id: "trace-first-search",
+              kind: "call_tool",
+              label: "Search",
+              state: "completed",
+              sequence: 20,
+              toolActivities: [{ id: "trace-only-first", name: "Search", status: "done" }]
+            },
+            {
+              id: "model-between-searches",
+              kind: "call_model",
+              label: "MODEL #2",
+              state: "completed",
+              sequence: 30,
+              text: "searching again"
+            },
+            {
+              id: "trace-second-search",
+              kind: "call_tool",
+              label: "Search",
+              state: "completed",
+              sequence: 40,
+              toolActivities: [{ id: "trace-only-second", name: "Search", status: "done" }]
+            },
+            {
+              id: "model-after-second-search",
+              kind: "call_model",
+              label: "MODEL #3",
+              state: "completed",
+              sequence: 50,
+              text: "final answer"
+            }
+          ]
+        }
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const agentShell = wrapper.get(".conversation-agent-shell");
+    const children = Array.from(agentShell.element.children);
+    const toolPanels = wrapper.findAll(".conversation-tool-panel");
+    const contentPanels = wrapper.findAll(".assistant-response-panel");
+
+    expect(toolPanels).toHaveLength(2);
+    expect(contentPanels).toHaveLength(2);
+    expect(toolPanels[0]?.text()).toContain("first search");
+    expect(contentPanels[0]?.text()).toContain("searching again");
+    expect(toolPanels[1]?.text()).toContain("second search");
+    expect(children.indexOf(toolPanels[0]!.element)).toBeLessThan(children.indexOf(contentPanels[0]!.element));
+    expect(children.indexOf(contentPanels[0]!.element)).toBeLessThan(children.indexOf(toolPanels[1]!.element));
+    expect(children.indexOf(toolPanels[1]!.element)).toBeLessThan(children.indexOf(contentPanels[1]!.element));
+  });
+
+  it("reserves exact tool trace matches before assigning legacy same-name fallbacks", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      messages: [
+        createMessage({
+          id: "legacy-search-message",
+          turnId: "turn-mixed-tool-match",
+          role: "tool",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "legacy search",
+          status: "done"
+        }),
+        createMessage({
+          id: "tool-turn-mixed-tool-match-exact-search",
+          turnId: "turn-mixed-tool-match",
+          role: "tool",
+          toolName: "Search",
+          canonicalToolName: "Search",
+          detail: "exact search",
+          status: "done"
+        }),
+        createMessage({
+          id: "assistant-mixed-tool-match",
+          turnId: "turn-mixed-tool-match",
+          role: "assistant",
+          content: "between tools",
+          status: "done"
+        })
+      ],
+      turnTraceHistory: [
+        {
+          ...createTrace({ turnId: "turn-mixed-tool-match", phase: "completed", error: null }),
+          traceTimeline: [
+            {
+              id: "trace-exact-search",
+              kind: "call_tool",
+              label: "Search",
+              state: "completed",
+              sequence: 10,
+              toolActivities: [{ id: "exact-search", name: "Search", status: "done" }]
+            },
+            {
+              id: "trace-between-mixed-tools",
+              kind: "call_model",
+              label: "MODEL",
+              state: "completed",
+              sequence: 20,
+              text: "between tools"
+            },
+            {
+              id: "trace-legacy-search",
+              kind: "call_tool",
+              label: "Search",
+              state: "completed",
+              sequence: 30,
+              toolActivities: [{ id: "legacy-only", name: "Search", status: "done" }]
+            }
+          ]
+        }
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const agentShell = wrapper.get(".conversation-agent-shell");
+    const children = Array.from(agentShell.element.children);
+    const toolPanels = wrapper.findAll(".conversation-tool-panel");
+    const contentPanel = wrapper.get(".assistant-response-panel");
+    expect(toolPanels).toHaveLength(2);
+    expect(toolPanels[0]?.text()).toContain("exact search");
+    expect(toolPanels[1]?.text()).toContain("legacy search");
+    expect(children.indexOf(toolPanels[0]!.element)).toBeLessThan(children.indexOf(contentPanel.element));
+    expect(children.indexOf(contentPanel.element)).toBeLessThan(children.indexOf(toolPanels[1]!.element));
+  });
+
+  it("matches legacy tool messages against every activity in a shared trace entry", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      messages: [
+        createMessage({ id: "legacy-child-tool", turnId: "turn-shared-tool-entry", role: "tool", toolName: "Child", detail: "child complete", status: "done" }),
+        createMessage({ id: "assistant-shared-tool-entry", turnId: "turn-shared-tool-entry", role: "assistant", content: "answer after tools", status: "done" }),
+        createMessage({ id: "legacy-parent-tool", turnId: "turn-shared-tool-entry", role: "tool", toolName: "Parent", detail: "parent complete", status: "done" })
+      ],
+      turnTraceHistory: [
+        {
+          ...createTrace({ turnId: "turn-shared-tool-entry", phase: "completed", error: null }),
+          traceTimeline: [
+            { id: "shared-tool-entry", kind: "call_tool", label: "Parent", state: "completed", sequence: 10, toolActivities: [{ id: "parent", name: "Parent", status: "done" }, { id: "child", name: "Child", status: "done" }] },
+            { id: "shared-tool-model", kind: "call_model", label: "MODEL", state: "completed", sequence: 20, text: "answer after tools" }
+          ]
+        }
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    expect(wrapper.findAll(".conversation-tool-panel")).toHaveLength(1);
+    expect(wrapper.get(".conversation-tool-panel").text()).toContain("parent complete");
+    expect(wrapper.get(".conversation-tool-panel").text()).toContain("child complete");
+    const shellChildren = Array.from(wrapper.get(".conversation-agent-shell").element.children);
+    expect(shellChildren.indexOf(wrapper.get(".conversation-tool-panel").element)).toBeLessThan(
+      shellChildren.indexOf(wrapper.get(".assistant-response-panel").element)
+    );
+  });
+
+  it("renders only the current model hop while streaming cumulative assistant buffers", async () => {
+    window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
+    window.localStorage.setItem("pony-agent.stream-render.disable-optimization", "true");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      activeTurnId: "turn-streaming-hops",
+      error: null,
+      traceTimeline: [
+        {
+          id: "streaming-hop-model-1",
+          kind: "call_model",
+          label: "MODEL #1",
+          state: "completed",
+          sequence: 10,
+          text: "inspect first",
+          reasoningContent: "first thought"
+        },
+        {
+          id: "streaming-hop-tool",
+          kind: "call_tool",
+          label: "Read",
+          state: "completed",
+          sequence: 20,
+          toolActivities: [{ id: "streaming-hop-read", name: "Read", status: "done" }]
+        },
+        {
+          id: "streaming-hop-model-2",
+          kind: "call_model",
+          label: "MODEL #2",
+          state: "active",
+          sequence: 30
+        }
+      ],
+      messages: [
+        createMessage({
+          id: "user-streaming-hops",
+          turnId: "turn-streaming-hops",
+          role: "user",
+          content: "inspect"
+        }),
+        createMessage({
+          id: "assistant-streaming-hops",
+          turnId: "turn-streaming-hops",
+          role: "assistant",
+          content: "inspect firstfinal stream",
+          reasoningContent: "first thoughtsecond thought",
+          status: "pending"
+        }),
+        createMessage({
+          id: "tool-turn-streaming-hops-streaming-hop-read",
+          turnId: "turn-streaming-hops",
+          role: "tool",
+          toolName: "Read",
+          detail: "read complete",
+          status: "done"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const reasoningPanels = wrapper.findAll(".conversation-reasoning-panel");
+    const contentPanels = wrapper.findAll(".assistant-response-panel");
+    expect(reasoningPanels).toHaveLength(2);
+    expect(contentPanels).toHaveLength(2);
+    expect(reasoningPanels[0]?.text()).toContain("first thought");
+    expect(reasoningPanels[1]?.text()).toContain("second thought");
+    expect(reasoningPanels[1]?.text()).not.toContain("first thought");
+    expect(contentPanels[0]?.text()).toContain("inspect first");
+    expect(contentPanels[1]?.text()).toContain("final stream");
+    expect(contentPanels[1]?.text()).not.toContain("inspect first");
+  });
+
+  it("removes only streamed completed hops when an earlier tool decision has no assistant delta", async () => {
+    window.localStorage.setItem("pony-agent.stream-render.disable-optimization", "true");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      activeTurnId: "turn-partial-streaming-hops",
+      error: null,
+      traceTimeline: [
+        { id: "partial-hop-model-1", kind: "call_model", label: "MODEL #1", state: "completed", sequence: 10, text: "tool decision" },
+        { id: "partial-hop-tool-1", kind: "call_tool", label: "Read", state: "completed", sequence: 20, toolActivities: [{ id: "partial-read", name: "Read", status: "done" }] },
+        { id: "partial-hop-model-2", kind: "call_model", label: "MODEL #2", state: "completed", sequence: 30, text: "streamed followup" },
+        { id: "partial-hop-tool-2", kind: "call_tool", label: "Search", state: "completed", sequence: 40, toolActivities: [{ id: "partial-search", name: "Search", status: "done" }] },
+        { id: "partial-hop-model-3", kind: "call_model", label: "MODEL #3", state: "active", sequence: 50 }
+      ],
+      messages: [
+        createMessage({ id: "assistant-partial-streaming-hops", turnId: "turn-partial-streaming-hops", role: "assistant", content: "streamed followupfinal stream", status: "pending" }),
+        createMessage({ id: "tool-turn-partial-streaming-hops-partial-read", turnId: "turn-partial-streaming-hops", role: "tool", toolName: "Read", detail: "read complete", status: "done" }),
+        createMessage({ id: "tool-turn-partial-streaming-hops-partial-search", turnId: "turn-partial-streaming-hops", role: "tool", toolName: "Search", detail: "search complete", status: "done" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const contentPanels = wrapper.findAll(".assistant-response-panel");
+    expect(contentPanels).toHaveLength(3);
+    expect(contentPanels[0]?.text()).toContain("tool decision");
+    expect(contentPanels[1]?.text()).toContain("streamed followup");
+    expect(contentPanels[2]?.text()).toContain("final stream");
+    expect(contentPanels[2]?.text()).not.toContain("streamed followup");
+  });
+
+  it("keeps the current model hop hidden until its optimized streaming batch is revealed", async () => {
+    window.localStorage.removeItem("pony-agent.stream-render.disable-optimization");
+    window.localStorage.setItem("pony-agent.stream-render.first-batch-chars", "1000");
+    window.localStorage.setItem("pony-agent.stream-render.batch-ms", "60000");
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "running",
+      isSubmitting: true,
+      activeTurnId: "turn-hidden-streaming-hop",
+      traceTimeline: [
+        {
+          id: "hidden-hop-model-1",
+          kind: "call_model",
+          label: "MODEL #1",
+          state: "completed",
+          sequence: 10,
+          text: "completed prefix"
+        },
+        {
+          id: "hidden-hop-tool",
+          kind: "call_tool",
+          label: "Read",
+          state: "completed",
+          sequence: 20,
+          toolActivities: [{ id: "hidden-hop-read", name: "Read", status: "done" }]
+        },
+        {
+          id: "hidden-hop-model-2",
+          kind: "call_model",
+          label: "MODEL #2",
+          state: "active",
+          sequence: 30
+        }
+      ],
+      messages: [
+        createMessage({
+          id: "assistant-hidden-streaming-hop",
+          turnId: "turn-hidden-streaming-hop",
+          role: "assistant",
+          content: "completed prefixunrevealed suffix",
+          status: "pending"
+        }),
+        createMessage({
+          id: "tool-turn-hidden-streaming-hop-hidden-hop-read",
+          turnId: "turn-hidden-streaming-hop",
+          role: "tool",
+          toolName: "Read",
+          detail: "read complete",
+          status: "done"
+        })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const contentPanels = wrapper.findAll(".assistant-response-panel");
+    expect(contentPanels).toHaveLength(1);
+    expect(contentPanels[0]?.text()).toContain("completed prefix");
+    expect(contentPanels[0]?.text()).not.toContain("unrevealed suffix");
+  });
+
   it("uses the active trace timeline while streaming so content does not jump after tool calls complete", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
@@ -3377,7 +3818,8 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     const agentShell = wrapper.get(".conversation-agent-shell");
     const streamingIndex = Array.from(agentShell.element.children).indexOf(streamingPanel.element);
     const toolIndex = Array.from(agentShell.element.children).indexOf(toolPanel.element);
-    expect(streamingPanel.text()).toContain("streaming model result");
+    expect("streaming model result".startsWith(streamingPanel.text())).toBe(true);
+    expect(streamingPanel.text()).not.toBe("streaming model result");
     expect(toolPanel.text()).toContain("tool finished before streaming text");
     expect(streamingIndex).toBeGreaterThan(toolIndex);
     const streamingContentPanelElement = streamingPanel.element;

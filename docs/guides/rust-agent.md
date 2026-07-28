@@ -119,6 +119,20 @@ pub struct ToolResult { status, output, ... }
 
 内置工具约定使用 `tool_` 前缀常量（如 `TOOL_WORKSPACE_READ_FILE`），`ToolKind` 枚举分类（Read/Search/Write/Execute/Plan/Interactive/Composite/External）。
 
+工具元数据的真相源是 `ToolDescriptor` + `ToolRegistrySnapshot`，投影入口是
+`ToolSurface` / `TurnToolView`。新增或修改工具前先读
+[Tool Descriptor 与 Registry 真相源](../architecture/tool-runtime-descriptor-registry.md)，
+其中两条不变量的回归代价很高：
+
+- **registry descriptor 顺序即 provider 工具数组顺序** —— 该顺序属于
+  PA-025/PA-029 收窄的 cache-friendly stable prefix，投影点不得重新排序。
+- **外部/未知工具名必须原样透传** —— 不得回落成 builtin 产品名。用
+  `product_visible_tool_name`，而非 `model_visible_tool_name` 的 `Run` 兜底。
+
+`ToolOutcome` 把 `execution_status` 与 `control_outcome` 正交拆开；
+`tool_runtime.rs` 中的 dispatcher / sandbox / process / MCP 端口目前只是
+合同定义，尚未接入生产路径（PA-076 阶段 3~7）。
+
 ### Hooks 管线
 
 ```rust
@@ -181,11 +195,34 @@ pub struct DefaultGraphPlanner { ... } // 默认策略：ask user / auto-continu
 |------|------|-------------|
 | `npm run cargo:check:shared` | 类型检查（所有 workspace member） | `target-check/` |
 | `npm run cargo:test:shared` | 运行所有测试 | `target-test/` |
-| `npm run cargo:test:exact -- --lib <name>` | 精确运行单测 | `target-test-exact-a/` |
+| `npm run cargo:test:exact -- --lib <name>` | 精确运行单测（**仅 tauri crate**） | `target-test-exact-a/` |
 | `npm run dev:tauri` | Tauri 开发模式 | `target/` |
 | `npm run verify` | test:unit + build + cargo:check:shared | 综合验证 |
 
-> **必须通过 npm script 运行 cargo**，禁止直接 `cargo check/test` 以免污染 `target/` 构建缓存。
+> **不要用裸 `cargo check/test`**，以免污染 `target/` 构建缓存。始终显式指定
+> 上表中的 target 目录（通过 npm script，或直接传 `--target-dir`）。
+
+#### Windows：加载 MSVC 环境
+
+MSVC 环境变量默认不在 shell 中，裸跑会报 `link.exe not found`。这**不是**缺少
+Build Tools —— 用 wrapper 预加载 `vcvars64.bat`：
+
+```bash
+cmd //c "scripts\run-rust-msvc.bat <完整命令>"
+```
+
+#### 运行 core crate 的测试
+
+`scripts/invoke-rust-target.ps1`（`npm run cargo:test:*` 背后的脚本）固定
+`--manifest-path src-tauri/Cargo.toml`，所以 `cargo:test:exact` 的 `--lib`
+指向 **tauri crate**。用它跑 `pony-agent-core` 的测试会静默输出
+`running 0 tests` —— 看起来通过，其实一个都没跑。
+
+core crate 的测试需要显式 `-p pony-agent-core`，并手动复用同一个 target slot：
+
+```bash
+cmd //c "scripts\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a agent::tools::"
+```
 
 ### 清理
 

@@ -8,6 +8,13 @@ async function flushStreamingRender(waitMs = 220) {
   await nextTick();
 }
 
+async function waitForMarkdownBody(wrapper: ReturnType<typeof mount>) {
+  await vi.waitFor(() => {
+    expect(wrapper.find(".markdown-body").exists()).toBe(true);
+  }, { timeout: 5000, interval: 40 });
+  await nextTick();
+}
+
 describe("MarkdownRenderer", () => {
   beforeEach(() => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -100,6 +107,7 @@ describe("MarkdownRenderer", () => {
     });
 
     await flushStreamingRender();
+    await waitForMarkdownBody(wrapper);
 
     expect(wrapper.find(".markdown-body").exists()).toBe(true);
     expect(wrapper.find(".markdown-body").html()).toContain("<p>hello world</p>");
@@ -120,6 +128,7 @@ describe("MarkdownRenderer", () => {
     expect(wrapper.text()).toBe("");
 
     await flushStreamingRender();
+    await waitForMarkdownBody(wrapper);
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
   });
 
@@ -139,6 +148,11 @@ describe("MarkdownRenderer", () => {
 
     await wrapper.setProps({ streaming: false });
     await flushStreamingRender();
+    await vi.waitFor(() => {
+      const events = wrapper.emitted("render-complete") ?? [];
+      expect(events.some((event) => event[0]?.streaming === false)).toBe(true);
+    }, { timeout: 5000, interval: 40 });
+    await nextTick();
 
     // 完成后转为 markdown 渲染（"hello world" 会被 marked 包装为 <p>hello world</p>）
     expect(wrapper.find(".markdown-body").exists()).toBe(true);
@@ -160,6 +174,7 @@ describe("MarkdownRenderer", () => {
     });
 
     await flushStreamingRender();
+    await waitForMarkdownBody(wrapper);
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
 
     await wrapper.setProps({ streaming: false });
@@ -184,6 +199,10 @@ describe("MarkdownRenderer", () => {
     await flushStreamingRender();
     await wrapper.setProps({ streaming: false });
     await flushStreamingRender();
+    await vi.waitFor(() => {
+      const events = wrapper.emitted("render-complete") ?? [];
+      expect(events.some((event) => event[0]?.streaming === false)).toBe(true);
+    }, { timeout: 5000, interval: 40 });
 
     const renderCompleteEvents = wrapper.emitted("render-complete") ?? [];
     expect(renderCompleteEvents.some((event) => event[0]?.streaming === false)).toBe(true);

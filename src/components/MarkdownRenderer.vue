@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useAttrs, watch } from "vue";
-import { renderMarkdown, renderPartialMarkdown, endsWithNaturalBoundary, markdownRenderEpoch } from "@/lib/markdown";
+import {
+  endsWithNaturalBoundary,
+  isSimpleTextContent,
+  markdownRenderEpoch,
+  renderMarkdown,
+  renderPartialMarkdown
+} from "@/lib/markdown";
 
 defineOptions({
   inheritAttrs: false
@@ -40,25 +46,6 @@ const STREAMING_LENGTH_FALLBACK_CHARS = 320;
 const PLAINTEXT_RENDER_COMPLETE_MIN_INTERVAL_MS = 120;
 const PLAINTEXT_RENDER_COMPLETE_MIN_CHARS = 24;
 let lastPlainTextRenderCompleteAt = 0;
-
-/**
- * 快速检测内容是否不含 markdown 语法，适合直接渲染为纯文本。
- * 避免流式输出时走完整 markdown 解析 + v-html 替换造成的布局抖动。
- */
-function isSimpleTextContent(text: string): boolean {
-  if (!text) return true;
-  // 显式的 markdown 语法信号
-  if (text.includes("```") || text.includes("~~~")) return false;
-  if (/\*\*|__/.test(text)) return false;
-  if (/#{1,6}\s/.test(text)) return false;
-  if (/^#{1,6}\S/.test(text)) return false;
-  if (/\[.+?\]\(.+?\)/.test(text)) return false;
-  if (/^>\s/m.test(text)) return false;
-  if (/^[-*+]\s/m.test(text)) return false;
-  if (/^\d+\.\s/m.test(text)) return false;
-  if (/\|.+\|/.test(text)) return false;
-  return true;
-}
 
 /** 流式渲染时是否走纯文本快路径（跳过 markdown 解析） */
 const plainTextMode = computed(() => {

@@ -1,59 +1,34 @@
 import { shallowReactive, type ComputedRef, type Ref } from "vue";
 import type { ChatMessage } from "@/types/runtime";
-import { countUnclosedCodeFences } from "./markdown";
 
-const STREAM_FADE_BATCH_CHARS = 80;
-const STREAM_FADE_TIME_MS = 420;
-const STREAM_FADE_FIRST_BATCH_CHARS = 24;
-const STREAM_FADE_CODE_FENCE_CHARS = 18;
-const STREAM_REASONING_FADE_CHARS = 3;
-const STREAM_BATCH_CHARS_STORAGE_KEY = "pony-agent.stream-render.batch-chars";
-const STREAM_BATCH_TIME_STORAGE_KEY = "pony-agent.stream-render.batch-ms";
-const STREAM_FIRST_BATCH_CHARS_STORAGE_KEY = "pony-agent.stream-render.first-batch-chars";
-const STREAM_CODE_FENCE_CHARS_STORAGE_KEY = "pony-agent.stream-render.code-fence-chars";
+// ─── 逐字连续释放 ───────────────────────────────────────────
+// 每次 tick（60ms）释放的字符数，默认 4 chars/tick = ~67 chars/sec
+const STREAM_RELEASE_CHARS_PER_TICK = 4;
+const STREAM_RELEASE_CHARS_STORAGE_KEY = "pony-agent.stream-render.release-chars";
 
-function readPositiveIntegerOverride(storageKey: string, fallback: number) {
-  if (typeof window === "undefined") {
-    return fallback;
-  }
-
-  const raw = window.localStorage.getItem(storageKey);
-  if (!raw) {
-    return fallback;
-  }
-
+function readReleaseRate(): number {
+  if (typeof window === "undefined") return STREAM_RELEASE_CHARS_PER_TICK;
+  const raw = window.localStorage.getItem(STREAM_RELEASE_CHARS_STORAGE_KEY);
+  if (!raw) return STREAM_RELEASE_CHARS_PER_TICK;
   const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : STREAM_RELEASE_CHARS_PER_TICK;
 }
 
-function readStreamingRevealConfig() {
-  return {
-    batchChars: readPositiveIntegerOverride(STREAM_BATCH_CHARS_STORAGE_KEY, STREAM_FADE_BATCH_CHARS),
-    timeMs: readPositiveIntegerOverride(STREAM_BATCH_TIME_STORAGE_KEY, STREAM_FADE_TIME_MS),
-    firstBatchChars: readPositiveIntegerOverride(STREAM_FIRST_BATCH_CHARS_STORAGE_KEY, STREAM_FADE_FIRST_BATCH_CHARS),
-    codeFenceChars: readPositiveIntegerOverride(STREAM_CODE_FENCE_CHARS_STORAGE_KEY, STREAM_FADE_CODE_FENCE_CHARS)
-  };
-}
-
-function detectCodeFenceActive(content: string): boolean {
-  return countUnclosedCodeFences(content) > 0;
-}
+// ─── Reasoning 淡入（保持原有简单增量模式） ─────────────────
+const STREAM_REASONING_FADE_CHARS = 3;
 
 export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[]> | Ref<ChatMessage[]>) {
-  const streamSnapshotTextByMessageId = shallowReactive<Record<string, string>>({});
+  // 逐字释放：每条正在流式回复的消息已展示到第几个字符
+  const streamVisibleLengthByMessageId = shallowReactive<Record<string, number>>({});
+
+  // Reasoning 跟踪（不变）
   const streamSnapshotReasoningByMessageId = shallowReactive<Record<string, string>>({});
-  const streamFadeTextByMessageId = shallowReactive<Record<string, string>>({});
-  const streamFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
-  const streamFadeLastTimeByMessageId = shallowReactive<Record<string, number>>({});
   const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string>>({});
   const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
 
   const PRESENTATION_MAPS = [
-    streamSnapshotTextByMessageId,
+    streamVisibleLengthByMessageId,
     streamSnapshotReasoningByMessageId,
-    streamFadeTextByMessageId,
-    streamFadeKeyByMessageId,
-    streamFadeLastTimeByMessageId,
     streamReasoningFadeTextByMessageId,
     streamReasoningFadeKeyByMessageId
   ];
@@ -77,20 +52,25 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
       activeMessageIds.add(message.id);
       if (message.status === "pending") {
         pendingAssistants.push(message);
-      }
-    }
-
-    if (pendingAssistants.length === 0) {
-      for (const map of PRESENTATION_MAPS) {
-        for (const id of Object.keys(map)) {
-          if (!activeMessageIds.has(id)) delete map[id];
+      } else {
+        // 非流式状态：释放全部字符，清理中间状态
+        for (const map of PRESENTATION_MAPS) {
+          delete map[message.id];
         }
       }
-      return;
     }
 
+    // 清理已消失消息的残留状态
+    for (const map of PRESENTATION_MAPS) {
+      for (const id of Object.keys(map)) {
+        if (!activeMessageIds.has(id)) delete map[id];
+      }
+    }
+
+    if (pendingAssistants.length === 0) return;
+
     for (const message of pendingAssistants) {
-      // Reasoning content (unchanged, simple delta model)
+      // ── Reasoning ────────────────────────────────────
       const nextReasoning = message.reasoningContent ?? "";
       const previousReasoning = streamSnapshotReasoningByMessageId[message.id] ?? "";
 
@@ -106,95 +86,48 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
       }
       syncPresentationMapValue(streamSnapshotReasoningByMessageId, message.id, nextReasoning);
 
-      // Main text with batch fade: snapshot only advances on flush
+      // ── 主文本：逐字连续释放 ─────────────────────────
       const nextText = message.content;
-      const snapshotText = streamSnapshotTextByMessageId[message.id] ?? "";
-      const isFirstSync = snapshotText.length === 0;
-      const revealConfig = readStreamingRevealConfig();
+      let currentLength = streamVisibleLengthByMessageId[message.id] ?? 0;
 
-      if (isFirstSync) {
-        if (nextText.length >= revealConfig.firstBatchChars) {
-          syncPresentationMapValue(streamFadeTextByMessageId, message.id, nextText);
-          streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
-          streamFadeLastTimeByMessageId[message.id] = Date.now();
-          syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
-        } else {
-          const previousFadeText = streamFadeTextByMessageId[message.id] ?? "";
-          syncPresentationMapValue(streamFadeTextByMessageId, message.id, nextText);
-          if (previousFadeText !== nextText) {
-            streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
-          }
-          streamFadeLastTimeByMessageId[message.id] = Date.now();
-          // snapshot stays empty until the first real batch threshold or time flush is reached.
-        }
-      } else {
-        const pendingChars = nextText.length - snapshotText.length;
-
-        if (pendingChars <= 0) {
-          syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
-          continue;
-        }
-
-        const batchChars = detectCodeFenceActive(nextText)
-          ? revealConfig.codeFenceChars
-          : revealConfig.batchChars;
-        const elapsed = Date.now() - (streamFadeLastTimeByMessageId[message.id] ?? 0);
-
-        if (pendingChars >= batchChars || elapsed >= revealConfig.timeMs) {
-          const fadeText = nextText.slice(snapshotText.length);
-          syncPresentationMapValue(streamFadeTextByMessageId, message.id, fadeText);
-          streamFadeKeyByMessageId[message.id] = (streamFadeKeyByMessageId[message.id] ?? 0) + 1;
-          streamFadeLastTimeByMessageId[message.id] = Date.now();
-          syncPresentationMapValue(streamSnapshotTextByMessageId, message.id, nextText);
-        } else {
-          syncPresentationMapValue(streamFadeTextByMessageId, message.id, "");
-          // snapshot unchanged — content accumulates in stable
-        }
+      // 边界安全：如果内容变短了（极少发生的 reset），回退
+      if (currentLength > nextText.length) {
+        currentLength = nextText.length;
       }
-    }
 
-    for (const map of PRESENTATION_MAPS) {
-      for (const id of Object.keys(map)) {
-        if (!activeMessageIds.has(id)) delete map[id];
+      if (currentLength < nextText.length) {
+        const releaseRate = readReleaseRate();
+        currentLength = Math.min(currentLength + releaseRate, nextText.length);
+        streamVisibleLengthByMessageId[message.id] = currentLength;
       }
     }
   }
 
+  /** 当前已释放的可见文本 */
   function assistantDisplayContent(message: ChatMessage | null) {
-    return message?.content ?? "";
-  }
-
-  function assistantDisplayStableContent(message: ChatMessage | null) {
     if (!message) return "";
-    const displayText = assistantDisplayContent(message);
-    const fadeText = streamFadeTextByMessageId[message.id] ?? "";
-    if (fadeText) {
-      return displayText.slice(0, Math.max(0, displayText.length - fadeText.length));
-    }
-
-    if (message.status === "pending") {
-      return streamSnapshotTextByMessageId[message.id] ?? "";
-    }
-
-    return displayText;
+    const visibleLength = streamVisibleLengthByMessageId[message.id];
+    if (visibleLength == null) return message.content;
+    return message.content.slice(0, visibleLength);
   }
 
-  function assistantDisplayFadeContent(message: ChatMessage | null) {
-    return message ? (streamFadeTextByMessageId[message.id] ?? "") : "";
+  /** 兼容旧接口：返回全部可见内容 */
+  function assistantDisplayStableContent(message: ChatMessage | null) {
+    return assistantDisplayContent(message);
   }
 
-  function assistantDisplayFadeStyle(message: ChatMessage | null) {
-    if (!message) return undefined;
-    return {
-      animationName: "assistant-stream-fade-in"
-    };
+  // ── 以下三个函数在逐字模式中已不需要，保留空实现避免 break ──
+  function assistantDisplayFadeContent(_message: ChatMessage | null) {
+    return "";
+  }
+  function assistantDisplayFadeStyle(_message: ChatMessage | null) {
+    return undefined;
+  }
+  function assistantDisplayFadeKey(_message: ChatMessage | null) {
+    return 0;
   }
 
-  function assistantDisplayFadeKey(message: ChatMessage | null) {
-    if (!message) return 0;
-    return streamFadeKeyByMessageId[message.id] ?? 0;
-  }
-
+  // ── Reasoning 函数（不变） ────────────────────────────────
   function assistantDisplayedReasoning(message: ChatMessage | null) {
     return message?.reasoningContent ?? "";
   }
@@ -213,7 +146,10 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
   function assistantDisplayedReasoningFadeStyle(message: ChatMessage | null) {
     if (!message) return undefined;
     return {
-      animationName: "assistant-stream-fade-in"
+      animationName: "assistant-stream-fade-in",
+      animationDuration: "350ms",
+      animationTimingFunction: "ease-out",
+      animationFillMode: "both"
     };
   }
 

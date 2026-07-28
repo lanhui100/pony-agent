@@ -35,6 +35,7 @@ import type { ChatMessage, ConversationCheckpointEntry, HistoryNode, TraceTimeli
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { extractErrorMessage } from "@/lib/error-utils";
+import { isSimpleTextContent } from "@/lib/markdown";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
 import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 
@@ -151,6 +152,7 @@ const SHOW_REASONING_STORAGE_KEY = "pony-agent.ui.show-reasoning-content";
 const STREAM_RENDER_DISABLE_STORAGE_KEY = "pony-agent.stream-render.disable-optimization";
 const STREAM_RENDER_CONFIG_CHANGED_EVENT = "pony:stream-render-config-changed";
 const STREAMING_MARKDOWN_FOLLOW_DISTANCE_PX = 96;
+const STREAMING_PRESENTATION_TICK_MS = 60;
 const COMPOSER_BUFFER_PX = 220;
 const streamDebugState = shallowReactive<Record<string, unknown>>({});
 const streamingRenderOptimizationDisabled = ref(false);
@@ -596,33 +598,72 @@ function canonicalTraceKind(entry: TraceTimelineEntry) {
 }
 
 function traceToolMatchKey(entry: TraceTimelineEntry) {
-  const activity = entry.toolActivities?.[entry.toolActivities.length - 1] ?? null;
-  return [
-    activity?.canonicalToolName?.trim(),
-    activity?.name?.trim(),
-    entry.label?.trim()
-  ].find(Boolean) ?? "";
+  return entry.toolActivities
+    ?.flatMap((activity) => [activity.canonicalToolName?.trim(), activity.name?.trim()])
+    .filter((value): value is string => Boolean(value)) ?? [entry.label?.trim()].filter((value): value is string => Boolean(value));
 }
 
-function traceSequenceForToolMessage(tool: ChatMessage, traceTimeline: TraceTimelineEntry[]) {
-  const toolKey = toolMergeKey(tool);
-  const toolIdSuffix = tool.id.startsWith(`tool-${tool.turnId}-`)
-    ? tool.id.slice(`tool-${tool.turnId}-`.length)
-    : tool.id;
+function traceSequencesForToolMessages(tools: ChatMessage[], traceTimeline: TraceTimelineEntry[]) {
+  const toolEntries = traceTimeline
+    .filter((entry) => canonicalTraceKind(entry) === "call_tool")
+    .sort((left, right) => left.sequence - right.sequence);
+  const claimedActivityKeys = new Set<string>();
+  const claimedLabelEntryIndexes = new Set<number>();
+  const sequenceByMessageId = new Map<string, number>();
 
-  const matchedEntry = traceTimeline.find((entry) => {
-    if (canonicalTraceKind(entry) !== "call_tool") {
-      return false;
+  for (const tool of tools) {
+    const toolIdSuffix = tool.id.startsWith(`tool-${tool.turnId}-`)
+      ? tool.id.slice(`tool-${tool.turnId}-`.length)
+      : tool.id;
+    for (const entry of toolEntries) {
+      const activity = entry.toolActivities?.find(
+        (candidate) =>
+          !claimedActivityKeys.has(`${entry.id}:${candidate.id}`) &&
+          (candidate.id === toolIdSuffix || `tool-${tool.turnId}-${candidate.id}` === tool.id)
+      );
+      if (activity) {
+        claimedActivityKeys.add(`${entry.id}:${activity.id}`);
+        sequenceByMessageId.set(tool.id, entry.sequence);
+        break;
+      }
     }
+  }
 
-    if (entry.toolActivities?.some((activity) => activity.id === toolIdSuffix || `tool-${tool.turnId}-${activity.id}` === tool.id)) {
-      return true;
+  for (const tool of tools) {
+    if (sequenceByMessageId.has(tool.id)) {
+      continue;
     }
+    const toolKey = toolMergeKey(tool).toLocaleLowerCase();
+    if (!toolKey) {
+      continue;
+    }
+    for (let index = 0; index < toolEntries.length; index++) {
+      const entry = toolEntries[index]!;
+      const activity = entry.toolActivities?.find(
+        (candidate) =>
+          !claimedActivityKeys.has(`${entry.id}:${candidate.id}`) &&
+          [candidate.canonicalToolName, candidate.name]
+            .filter((value): value is string => Boolean(value?.trim()))
+            .some((value) => value.toLocaleLowerCase() === toolKey)
+      );
+      if (activity) {
+        claimedActivityKeys.add(`${entry.id}:${activity.id}`);
+        sequenceByMessageId.set(tool.id, entry.sequence);
+        break;
+      }
+      if (
+        !entry.toolActivities?.length &&
+        !claimedLabelEntryIndexes.has(index) &&
+        traceToolMatchKey(entry).some((entryToolKey) => entryToolKey.toLocaleLowerCase() === toolKey)
+      ) {
+        claimedLabelEntryIndexes.add(index);
+        sequenceByMessageId.set(tool.id, entry.sequence);
+        break;
+      }
+    }
+  }
 
-    return Boolean(toolKey && traceToolMatchKey(entry) === toolKey);
-  });
-
-  return matchedEntry?.sequence ?? null;
+  return sequenceByMessageId;
 }
 
 function latestModelTraceEntry(traceTimeline: TraceTimelineEntry[]) {
@@ -685,6 +726,40 @@ function isStreamingModelEntry(turn: TurnBucket, entry: TraceTimelineEntry, mode
   );
 }
 
+function currentModelHopContent(
+  cumulativeContent: string,
+  entry: TraceTimelineEntry,
+  modelEntries: TraceTimelineEntry[],
+  selectContent: (modelEntry: TraceTimelineEntry) => string,
+  completeCumulativeContent = cumulativeContent
+) {
+  const currentIndex = modelEntries.findIndex((modelEntry) => modelEntry.id === entry.id);
+  if (currentIndex <= 0) {
+    return cumulativeContent;
+  }
+
+  const completedContents = modelEntries.slice(0, currentIndex).map(selectContent);
+  const completedStartIndex = completedContents.findIndex((_, index) => {
+    const candidate = completedContents.slice(index).join("");
+    return Boolean(candidate) && completeCumulativeContent.startsWith(candidate);
+  });
+  const completedPrefix =
+    completedStartIndex >= 0 ? completedContents.slice(completedStartIndex).join("") : "";
+  if (!completedPrefix) {
+    return cumulativeContent;
+  }
+  if (cumulativeContent.startsWith(completedPrefix)) {
+    return cumulativeContent.slice(completedPrefix.length);
+  }
+  if (
+    completeCumulativeContent.startsWith(completedPrefix) &&
+    completedPrefix.startsWith(cumulativeContent)
+  ) {
+    return "";
+  }
+  return cumulativeContent;
+}
+
 function modelEntryReasoningContent(
   turn: TurnBucket,
   entry: TraceTimelineEntry,
@@ -692,7 +767,13 @@ function modelEntryReasoningContent(
 ) {
   if (isStreamingModelEntry(turn, entry, modelEntries)) {
     const reasoning = assistantDisplayedReasoning(turn.assistant);
-    return reasoning.trim() ? reasoning : "";
+    const currentReasoning = currentModelHopContent(
+      reasoning,
+      entry,
+      modelEntries,
+      (modelEntry) => modelEntry.reasoningContent ?? ""
+    );
+    return currentReasoning.trim() ? currentReasoning : "";
   }
 
   const traceReasoning = entry.reasoningContent ?? "";
@@ -714,8 +795,18 @@ function modelEntryContent(
   modelEntries: TraceTimelineEntry[]
 ) {
   if (isStreamingModelEntry(turn, entry, modelEntries)) {
-    const content = assistantDisplayContent(turn.assistant);
-    return content.trim() ? content : "";
+    const completeContent = turn.assistant?.content ?? "";
+    const content = shouldUseOptimizedAssistantStreaming(turn.assistant)
+      ? assistantDisplayContent(turn.assistant)
+      : completeContent;
+    const currentContent = currentModelHopContent(
+      content,
+      entry,
+      modelEntries,
+      (modelEntry) => modelEntry.text ?? "",
+      completeContent
+    );
+    return currentContent.trim() ? currentContent : "";
   }
 
   const traceText = entry.text ?? "";
@@ -734,6 +825,23 @@ function modelEventKey(prefix: "reasoning" | "content", assistant: ChatMessage, 
   return stableAssistantKey ? `${prefix}-${assistant.id}` : `${prefix}-${assistant.id}-${entry.id}`;
 }
 
+function streamingReasoningFade(reasoningContent: string, assistant: ChatMessage) {
+  const fade = assistantDisplayedReasoningFade(assistant);
+  return fade && reasoningContent.endsWith(fade) ? fade : "";
+}
+
+function streamingReasoningStable(reasoningContent: string, assistant: ChatMessage) {
+  const fade = streamingReasoningFade(reasoningContent, assistant);
+  return fade ? reasoningContent.slice(0, -fade.length) : reasoningContent;
+}
+
+/** 将可见文本拆为逐字数组，用于逐字淡入渲染 */
+function streamingVisibleChars(assistant: ChatMessage) {
+  const text = assistantDisplayContent(assistant);
+  if (!text) return [];
+  return text.split("");
+}
+
 function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   const turnTraceTimeline = traceTimelineForTurn(turn.turnId);
   const modelEntry = latestModelTraceEntry(turnTraceTimeline);
@@ -741,6 +849,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   const assistantOrder = messageIndexInTurn(turn.assistant);
   const modelOrder = modelEntry?.sequence ?? assistantOrder;
   const isActiveStreamingTurn = runtimeStore.activeTurnId === turn.turnId && turn.assistant?.status === "pending";
+  const toolTraceSequenceByMessageId = traceSequencesForToolMessages(turn.tools, turnTraceTimeline);
   const events: AgentTurnEvent[] = [];
 
   if (turn.assistant && modelEntries.length > 0) {
@@ -785,7 +894,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   }
 
   for (const tool of turn.tools) {
-    const traceSequence = traceSequenceForToolMessage(tool, turnTraceTimeline);
+    const traceSequence = toolTraceSequenceByMessageId.get(tool.id) ?? null;
     const fallbackOrder = messageIndexInTurn(tool);
     const normalizedFallbackOrder =
       modelEntry && Number.isFinite(assistantOrder) && Number.isFinite(fallbackOrder)
@@ -822,7 +931,9 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       key: `content-${turn.assistant.id}`,
       order: modelOrder,
       assistant: turn.assistant,
-      content: isAssistantStreaming(turn.assistant) ? assistantDisplayContent(turn.assistant) : turn.assistant.content,
+      content: shouldUseOptimizedAssistantStreaming(turn.assistant)
+        ? assistantDisplayContent(turn.assistant)
+        : turn.assistant.content,
       streaming: isAssistantStreaming(turn.assistant)
     });
   }
@@ -842,7 +953,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     return left.key.localeCompare(right.key);
   });
 
-  const mergedEvents: AgentTurnEvent[] = [];
+const mergedEvents: AgentTurnEvent[] = [];
   for (const event of orderedEvents) {
     const last = mergedEvents[mergedEvents.length - 1];
     if (event.kind === "tools" && last?.kind === "tools") {
@@ -857,6 +968,11 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       } else {
         last.tools.push(...event.tools);
       }
+      continue;
+    }
+    if (event.kind === "reasoning" && last?.kind === "reasoning") {
+      last.reasoningContent += "\n\n" + event.reasoningContent;
+      last.streaming = last.streaming || event.streaming;
       continue;
     }
     mergedEvents.push(event);
@@ -894,7 +1010,6 @@ const {
   syncStreamingPresentationState,
   assistantDisplayContent,
   assistantDisplayedReasoning,
-  assistantDisplayedReasoningStable,
   assistantDisplayedReasoningFade,
   assistantDisplayedReasoningFadeStyle,
   assistantDisplayedReasoningFadeKey
@@ -921,7 +1036,9 @@ function assistantHasVisibleContent(message: ChatMessage | null) {
     return false;
   }
 
-  const visibleContent = message.status === "pending" ? assistantDisplayContent(message) : message.content;
+  const visibleContent = shouldUseOptimizedAssistantStreaming(message)
+    ? assistantDisplayContent(message)
+    : message.content;
   return Boolean(visibleContent.trim());
 }
 
@@ -975,7 +1092,7 @@ function scheduleStreamingPresentationTimer() {
     streamingPresentationTimer = null;
     syncStreamingPresentationState();
     scheduleStreamingPresentationTimer();
-  }, 120);
+  }, STREAMING_PRESENTATION_TICK_MS);
 }
 
 function userShellClass() {
@@ -1014,12 +1131,18 @@ function shouldUseOptimizedAssistantStreaming(message: ChatMessage | null) {
   return Boolean(message && isAssistantStreaming(message) && !streamingRenderOptimizationDisabled.value);
 }
 
-function shouldUseMarkdownAssistantRendering(message: ChatMessage | null) {
+function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, content: string) {
   if (!message) {
     return false;
   }
 
-  return !isAssistantStreaming(message) || shouldUseOptimizedAssistantStreaming(message);
+  if (!isAssistantStreaming(message)) {
+    return true;
+  }
+  if (!shouldUseOptimizedAssistantStreaming(message)) {
+    return false;
+  }
+  return !isSimpleTextContent(content);
 }
 
 function latestTraceForTurn(turnId: string) {
@@ -1846,14 +1969,14 @@ watch(
                 </summary>
                 <div class="mt-1 pl-5 whitespace-pre-wrap break-words text-[13px] leading-[1.4] text-stone-400">
                   <template v-if="event.reasoningContent">
-                    <span class="reasoning-italic">{{ event.streaming ? assistantDisplayedReasoningStable(event.assistant) : event.reasoningContent }}</span>
+                    <span class="reasoning-italic">{{ event.streaming ? streamingReasoningStable(event.reasoningContent, event.assistant) : event.reasoningContent }}</span>
                     <span
-                      v-if="event.streaming && assistantDisplayedReasoningFade(event.assistant)"
+                      v-if="event.streaming && streamingReasoningFade(event.reasoningContent, event.assistant)"
                       :key="`rfade-${event.assistant.id}-${assistantDisplayedReasoningFadeKey(event.assistant)}`"
                       class="assistant-streaming-fade reasoning-italic"
                       :style="assistantDisplayedReasoningFadeStyle(event.assistant)"
                     >
-                      {{ assistantDisplayedReasoningFade(event.assistant) }}
+                      {{ streamingReasoningFade(event.reasoningContent, event.assistant) }}
                     </span>
                   </template>
                 </div>
@@ -1889,11 +2012,17 @@ watch(
                   <div class="flex items-center gap-2">
                     <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
                     <span
-                      v-if="tool.description || tool.toolName"
-                      class="min-w-0 truncate"
+                      v-if="tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description"
+                      class="conversation-tool-name min-w-0 truncate"
                       :class="tool.status === 'error' ? 'text-rose-600' : 'text-stone-400'"
                     >
-                      {{ tool.description || tool.displayNameZh || tool.canonicalToolName || tool.toolName }}
+                      {{ tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description }}
+                    </span>
+                    <span
+                      v-if="tool.description && tool.description !== (tool.displayNameZh || tool.canonicalToolName || tool.toolName)"
+                      class="conversation-tool-detail min-w-0 truncate text-stone-400"
+                    >
+                      {{ tool.description }}
                     </span>
                     <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
                     <span class="flex shrink-0 items-center gap-1 leading-none">
@@ -1911,7 +2040,7 @@ watch(
                 v-motion
                 :initial="{ opacity: 0, y: 6 }"
                 :animate="{ opacity: 1, y: 0 }"
-                :transition="{ duration: 0.22, ease: 'easeOut', delay: 0.32 }"
+                :transition="{ duration: 0.22, ease: 'easeOut', delay: event.streaming ? 0 : 0.32 }"
                 class="assistant-response-panel"
               >
                 <!-- 统一 shell：流式/完成共享同一外容器，避免 v-if/v-else 导致的 DOM 子树替换 -->
@@ -1921,7 +2050,7 @@ watch(
                   :data-streaming="event.streaming ? 'true' : undefined"
                 >
                   <div
-                    v-if="shouldUseMarkdownAssistantRendering(event.assistant)"
+                    v-if="shouldUseMarkdownAssistantRendering(event.assistant, event.content)"
                     :class="event.streaming ? 'assistant-streaming-content' : undefined"
                     :data-testid="event.streaming ? 'assistant-streaming-flow' : undefined"
                   >
@@ -1942,7 +2071,10 @@ watch(
                     class="assistant-streaming-content"
                     data-testid="assistant-streaming-flow"
                   >
-                    {{ event.content }}
+                    <template v-if="shouldUseOptimizedAssistantStreaming(event.assistant)">
+                      <span v-for="(char, i) in streamingVisibleChars(event.assistant)" :key="i" class="assistant-streaming-char">{{ char }}</span>
+                    </template>
+                    <template v-else>{{ event.content }}</template>
                   </div>
                   <MarkdownRenderer
                     v-else
@@ -2460,6 +2592,7 @@ watch(
 
 /* v-motion 面板：预声明 transform 层以减少首次动画跳变 */
 .conversation-tool-row,
+.conversation-tool-panel,
 .conversation-reasoning-panel,
 .assistant-response-panel {
   will-change: opacity, transform;
@@ -2491,22 +2624,13 @@ watch(
 .assistant-streaming-fade {
   display: inline;
   white-space: pre-wrap;
-  will-change: opacity;
-  animation-duration: 350ms;
-  animation-timing-function: ease-out;
-  animation-fill-mode: both;
-}
-
-@keyframes assistant-stream-fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
 }
 
 .assistant-streaming-char {
   display: inline;
   white-space: pre-wrap;
   animation-name: assistant-stream-char-fade-in;
-  animation-duration: 200ms;
+  animation-duration: 180ms;
   animation-timing-function: ease-out;
   animation-fill-mode: both;
 }
@@ -2514,10 +2638,17 @@ watch(
 @keyframes assistant-stream-char-fade-in {
   from {
     opacity: 0;
+    transform: translateY(-0.04em);
   }
   to {
     opacity: 1;
+    transform: translateY(0);
   }
+}
+
+@keyframes assistant-stream-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 .assistant-waiting-panel {
@@ -2569,6 +2700,15 @@ watch(
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .conversation-tool-panel,
+  .conversation-reasoning-panel,
+  .assistant-response-panel {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+  }
+
   .assistant-streaming-fade,
   .assistant-streaming-char,
   .assistant-waiting-dot {

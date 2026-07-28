@@ -624,7 +624,9 @@ describe("runtime session resilience", () => {
 
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionId).toBe("session-next");
-    expect(store.phase).toBe("ready");
+    await vi.waitFor(() => {
+      expect(store.phase).toBe("ready");
+    }, { timeout: 5000, interval: 40 });
     expect(store.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
       "user:cached next session",
       "assistant:cached next reply"
@@ -4537,10 +4539,15 @@ describe("runtime session resilience", () => {
       }
     });
 
+    expect(store.streamDebugDeltaCount).toBe(1);
+    expect(store.streamDebugTextCharsReceived).toBe("partial answer".length);
+
     await new Promise((resolve) => window.setTimeout(resolve, 130));
 
     expect(store.firstTokenLatencyMs).toBe(321);
     expect(store.messages.find((message) => message.role === "assistant")?.content).toBe("partial answer");
+    expect(store.streamDebugFlushCount).toBe(1);
+    expect(store.streamDebugTextCharsFlushed).toBe("partial answer".length);
     expect(
       store.traceTimeline.find((entry) => entry.kind === "call_model" && entry.text)?.text
     ).toBeUndefined();
@@ -4579,6 +4586,92 @@ describe("runtime session resilience", () => {
     expect(store.phase).toBe("connecting");
     expect(store.eventCursorByTurnId["6060"]?.eventId).toBe("event-turn-checkpoint-6060");
     expect(store.eventCursorByTurnId["6060"]?.sequence).toBe(6);
+
+    store.$patch({
+      activeTurnId: "multi-hop-trace",
+      messages: [
+        createMessage({
+          id: "assistant-multi-hop-trace",
+          turnId: "multi-hop-trace",
+          role: "assistant",
+          content: "first outputsecond output",
+          reasoningContent: "first reasoningsecond reasoning",
+          status: "pending"
+        })
+      ],
+      traceTimeline: [
+        {
+          id: "model-multi-hop-first",
+          kind: "call_model",
+          label: "MODEL #1",
+          state: "completed",
+          sequence: 10,
+          text: "first output",
+          reasoningContent: "first reasoning"
+        },
+        {
+          id: "tool-multi-hop",
+          kind: "call_tool",
+          label: "Read",
+          state: "completed",
+          sequence: 20
+        },
+        {
+          id: "model-multi-hop-second",
+          kind: "call_model",
+          label: "MODEL #2",
+          state: "active",
+          sequence: 30
+        }
+      ]
+    });
+    store.updateActiveModelTraceFromAssistant("multi-hop-trace");
+    expect(store.traceTimeline[0]?.text).toBe("first output");
+    expect(store.traceTimeline[0]?.reasoningContent).toBe("first reasoning");
+    expect(store.traceTimeline[2]?.text).toBe("second output");
+    expect(store.traceTimeline[2]?.reasoningContent).toBe("second reasoning");
+
+    store.$patch({
+      messages: [
+        createMessage({
+          id: "assistant-multi-hop-partial-trace",
+          turnId: "multi-hop-trace",
+          role: "assistant",
+          content: "second outputthird output",
+          reasoningContent: "second reasoningthird reasoning",
+          status: "pending"
+        })
+      ],
+      traceTimeline: [
+        {
+          id: "model-multi-hop-tool-decision",
+          kind: "call_model",
+          label: "MODEL #1",
+          state: "completed",
+          sequence: 10,
+          text: "tool decision",
+          reasoningContent: "tool reasoning"
+        },
+        { id: "tool-multi-hop-first", kind: "call_tool", label: "Read", state: "completed", sequence: 20 },
+        {
+          id: "model-multi-hop-streamed-followup",
+          kind: "call_model",
+          label: "MODEL #2",
+          state: "completed",
+          sequence: 30,
+          text: "second output",
+          reasoningContent: "second reasoning"
+        },
+        { id: "tool-multi-hop-second", kind: "call_tool", label: "Search", state: "completed", sequence: 40 },
+        { id: "model-multi-hop-active-final", kind: "call_model", label: "MODEL #3", state: "active", sequence: 50 }
+      ]
+    });
+    store.updateActiveModelTraceFromAssistant("multi-hop-trace");
+    expect(store.traceTimeline[0]?.text).toBe("tool decision");
+    expect(store.traceTimeline[2]?.text).toBe("second output");
+    expect(store.traceTimeline[4]?.text).toBe("third output");
+    expect(store.traceTimeline[4]?.reasoningContent).toBe("third reasoning");
+    store.$patch({ activeTurnId: "6060" });
 
     eventHandlers.get("turn:completed")?.({
       payload: {

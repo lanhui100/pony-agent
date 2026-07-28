@@ -17,18 +17,17 @@
   说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排
   说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
-- `PA-075` 清理会话日志中的过期路径引用 (P3)
 
 ## Ready
 
 - 暂无
-    说明：基于本轮 core 审核新增，目标是把 agent core 明确加固为 Tauri-free、多端可复用的基础设施；Tauri 应作为 first host adapter，而不是 core ownership boundary。
 
 
 
 ## In Progress
 
-- 暂无
+- `PA-076` 加固并扩展 Agent Tool Runtime (P0)
+    说明：OpenSpec change `harden-and-expand-agent-tool-runtime` 已通过 strict validate。阶段 1（审核门禁）与阶段 2（descriptor / registry 真相源）已完成并通过真实 Rust 测试（`agent::tools::` 65、`agent::tool_runtime::` 4、`tool_router_regression` 13 全通过），期间修复 3 个 phase-2 缺陷。当前进入阶段 3 governed dispatcher；后续为 Plan/Ask/ToolSearch/MCP、Sandbox/Process、pinned Web/Search/Glob、image 与收口。
 
 ## Review
 

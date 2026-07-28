@@ -3,6 +3,8 @@ mod blocking_helper;
 mod tauri_adapter;
 mod turn_task_registry;
 
+use crate::blocking_helper::BlockingHelper;
+use crate::turn_task_registry::TurnTaskRegistry;
 use agent::app_settings::{AppSettings, AppSettingsStore};
 use agent::capability_bridge::{CapabilitySourceView, CapabilityView, SkillDescriptor};
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
@@ -32,11 +34,9 @@ use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
 use agent::session::SessionOverview;
 use agent::session::TurnTraceRecord;
-use agent::tools::{builtin_tool_contract_views, ToolDefinitionContractView};
+use agent::tools::{builtin_turn_tool_contract_views, ToolDefinitionContractView};
 use serde_json::{json, Value};
 use std::sync::Mutex;
-use crate::blocking_helper::BlockingHelper;
-use crate::turn_task_registry::TurnTaskRegistry;
 use tauri::{AppHandle, Manager, State};
 
 #[derive(Default)]
@@ -427,7 +427,7 @@ fn delete_session(
 
 #[tauri::command]
 fn list_available_tools() -> Vec<ToolDefinitionContractView> {
-    builtin_tool_contract_views()
+    builtin_turn_tool_contract_views()
 }
 
 #[tauri::command]
@@ -679,10 +679,7 @@ async fn query_frontend_stall_snapshots(
 }
 
 #[tauri::command]
-async fn clear_frontend_trace_before(
-    app: AppHandle,
-    ts_wall_ms: i64,
-) -> Result<(), String> {
+async fn clear_frontend_trace_before(app: AppHandle, ts_wall_ms: i64) -> Result<(), String> {
     BlockingHelper::spawn(move || {
         let control_plane = app.state::<HostControlPlane>();
         control_plane.clear_frontend_trace_before(ts_wall_ms)

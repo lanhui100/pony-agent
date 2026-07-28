@@ -479,6 +479,19 @@ function getUnclosedCodeFence(content: string): string | null {
   return openFence;
 }
 
+export function isSimpleTextContent(content: string): boolean {
+  if (!content) return true;
+  if (content.includes("```") || content.includes("~~~")) return false;
+  if (/\*\*|__/.test(content)) return false;
+  if (/^#{1,6}(?:\s|\S)/m.test(content)) return false;
+  if (/\[.+?\]\(.+?\)/.test(content)) return false;
+  if (/^>\s/m.test(content)) return false;
+  if (/^[-*+]\s/m.test(content)) return false;
+  if (/^\d+\.\s/m.test(content)) return false;
+  if (/\|.+\|/.test(content)) return false;
+  return true;
+}
+
 export function countUnclosedCodeFences(content: string): number {
   return getUnclosedCodeFence(content) ? 1 : 0;
 }

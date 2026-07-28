@@ -4,7 +4,10 @@
       "Bash(cargo check *)",
       "Bash(npx vue-tsc *)",
       "Bash(echo \"EXIT_CODE=$?\")",
-      "Bash(cargo test *)"
+      "Bash(cargo test *)",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a agent::tools::contract_view_tests::\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a agent::provider::tests::provider_does_not_infer_builtin_surface_from_tool_count\")"
     ]
   }
 }

@@ -24,6 +24,7 @@
 - [Async Provider IO Migration (PA-066)](architecture/async-provider-io-migration.md)
 - [Blocking Helper Unification (PA-067)](architecture/blocking-helper-unification.md)
 - [Per-Session Async Turn Task Model (PA-068)](architecture/per-session-async-turn-task-model.md)
+- [Tool Descriptor 与 Registry 真相源 (PA-076)](architecture/tool-runtime-descriptor-registry.md)
 - [锁序规范](concurrency/lock-ordering.md)
 
 ## 2.1 Session Control 主线
@@ -120,3 +121,4 @@
 - 想看第二波 builtin 工具面收口范围：先看 `openspec/specs/second-wave-tool-surface/spec.md`，再看 `PA-050 ~ PA-054` 与对应审核/收口日志
 - 想对比三方工具面差距、决策后续该实现哪些工具：看 `docs/analysis/builtin-tool-surface-comparison-2026-06-22.md`
 - 想理解 thinking 参数适配：看 `docs/architecture/thinking-param-adapter.md`
+- 想新增或修改工具、理解工具元数据从哪来：看 `docs/architecture/tool-runtime-descriptor-registry.md`（含 registry 顺序与工具名透传两条不变量，以及 Windows 上跑 Rust 测试的方式）

@@ -35,7 +35,9 @@ impl TaskCleanupGuard {
 
 impl Drop for TaskCleanupGuard {
     fn drop(&mut self) {
-        self.app.state::<TurnTaskRegistry>().unregister(&self.session_id);
+        self.app
+            .state::<TurnTaskRegistry>()
+            .unregister(&self.session_id);
     }
 }
 
@@ -56,10 +58,14 @@ pub fn spawn_turn_stream(app: &AppHandle, command: StartTurnStreamCommand) -> Re
             eprintln!("turn task {session_id} failed: {e}");
         }
     });
-    app.state::<TurnTaskRegistry>().register(session_id_for_register, handle)
+    app.state::<TurnTaskRegistry>()
+        .register(session_id_for_register, handle)
 }
 
-pub fn spawn_graph_run_stream(app: &AppHandle, prepared: PreparedGraphRunStream) -> Result<(), String> {
+pub fn spawn_graph_run_stream(
+    app: &AppHandle,
+    prepared: PreparedGraphRunStream,
+) -> Result<(), String> {
     let session_id = prepared.input.session_id.clone().unwrap_or_default();
     let app_handle = app.clone();
     let session_id_for_register = session_id.clone();
@@ -76,5 +82,6 @@ pub fn spawn_graph_run_stream(app: &AppHandle, prepared: PreparedGraphRunStream)
             eprintln!("graph run task {session_id} failed: {e}");
         }
     });
-    app.state::<TurnTaskRegistry>().register(session_id_for_register, handle)
+    app.state::<TurnTaskRegistry>()
+        .register(session_id_for_register, handle)
 }
