@@ -1012,6 +1012,7 @@ mod tests {
                 recent_attachment_assets: Vec::new(),
                 turn_count: 1,
                 last_referenced_file: None,
+                env_info: None,
             },
             run_state: RunState {
                 run_id: Some("run-1".to_string()),
