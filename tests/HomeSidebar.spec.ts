@@ -173,7 +173,7 @@ function createBuildContextObservation(
     conversationCarryMode: overrides.conversationCarryMode ?? "full_replay",
     requestMessagesText:
       overrides.requestMessagesText ??
-      "system: summarize retrieval state\nuser: continue PA-025\nassistant: acknowledged",
+      "[0] system\nsummarize retrieval state\n\n[1] user\ncontinue PA-025\n\n[2] assistant\nacknowledged",
     toolDefinitionsText:
       overrides.toolDefinitionsText ??
       "workspace.read_file(path: string)\nworkspace.search(query: string)"
@@ -823,7 +823,8 @@ describe("HomeSidebar", () => {
     expect(contextStepText).toContain("response_format=json_schema");
     expect(contextStepText).toContain("这里展示的是本轮真正发给模型的请求，不是 retrieval state 的替身。");
     expect(contextStepText).toContain("稳定前缀");
-    expect(contextStepText).toContain("最终请求消息");
+    expect(contextStepText).toContain("[0] system");
+    expect(contextStepText).toContain("[1] user");
     expect(contextStepText).toContain("工具定义");
 
     await wrapper.get('[data-testid="trace-detail-button-context-2-stable"]').trigger("click");
@@ -838,9 +839,13 @@ describe("HomeSidebar", () => {
     await nextTick();
     expect(wrapper.text()).toContain("latest screenshot");
 
-    await wrapper.get('[data-testid="trace-detail-button-context-2-messages"]').trigger("click");
+    await wrapper.get('[data-testid="trace-detail-button-context-2-msg-0"]').trigger("click");
     await nextTick();
-    expect(wrapper.text()).toContain("system: summarize retrieval state");
+    expect(wrapper.text()).toContain("summarize retrieval state");
+
+    await wrapper.get('[data-testid="trace-detail-button-context-2-msg-1"]').trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("continue PA-025");
 
     await wrapper.get('[data-testid="trace-detail-button-context-2-tools"]').trigger("click");
     await nextTick();
@@ -1038,26 +1043,32 @@ describe("HomeSidebar", () => {
           phase: "completed",
           traceTimeline: [
             {
-              id: "input-1",
-              kind: "input",
-              label: "RECEIVE INPUT",
+              id: "context-1",
+              kind: "build_context",
+              label: "BUILD CONTEXT",
               state: "completed",
               sequence: 1,
-              text: "继续推进 PA-025，不要生成摘要"
+              text: "继续推进 PA-025，不要生成摘要",
+              buildContextObservation: {
+                requestFormat: "openai",
+                messageCount: 5,
+                imageCount: 0,
+                toolCount: 17,
+                temperature: 0.2,
+                maxOutputTokens: 8192,
+                stablePrefixText: "稳定前缀",
+                semiStableContextText: "半稳定上下文",
+                volatileInputText: "继续推进 PA-025，不要生成摘要",
+                requestMessagesText: "[0] user\n继续推进 PA-025，不要生成摘要",
+                toolDefinitionsText: "工具定义"
+              }
             },
             {
-              id: "retrieval-2",
-              kind: "prepare_retrieval",
-              label: "PREPARE RETRIEVAL",
-              state: "completed",
-              sequence: 2
-            },
-            {
-              id: "model-3",
+              id: "model-2",
               kind: "call_model",
               label: "CALL MODEL #1",
               state: "completed",
-              sequence: 3,
+              sequence: 2,
               text: "本轮完成"
             }
           ]
@@ -1071,14 +1082,11 @@ describe("HomeSidebar", () => {
     expect(wrapper.find('[data-testid="trace-step-button-retrieval-2"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("PREPARE RETRIEVAL");
 
-    await wrapper.get('[data-testid="trace-step-button-input-1"]').trigger("click");
+    await wrapper.get('[data-testid="trace-step-button-context-1"]').trigger("click");
     await nextTick();
 
-    const inputSectionText = wrapper.get('[data-testid="trace-step-button-input-1"]').element.closest("section")?.textContent ?? "";
-    expect(countOccurrences(inputSectionText, "继续推进 PA-025，不要生成摘要")).toBe(1);
-    expect(inputSectionText).not.toContain("标题");
-    expect(inputSectionText).not.toContain("输入原文");
-    expect(inputSectionText).not.toContain("记录本轮进入 agent 的用户输入。");
+    const contextSectionText = wrapper.get('[data-testid="trace-step-button-context-1"]').element.closest("section")?.textContent ?? "";
+    expect(contextSectionText).toContain("继续推进 PA-025，不要生成摘要");
   });
 
   it("CALL MODEL 使用 provider/model 合并值，并展开后直接展示思考链与模型输出", async () => {

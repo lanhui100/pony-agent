@@ -454,6 +454,34 @@ function buildContextText(buildContextObservation: BuildContextObservation | nul
   return typeof value === "string" ? value.trim() : "";
 }
 
+/** 解析最终请求消息文本，拆分为单条消息块 */
+function parseRequestMessages(text: string): Array<{ index: number; header: string; content: string }> {
+  const blocks: Array<{ index: number; header: string; content: string }> = [];
+  // 消息格式: "[0] role\ncontent"，消息之间用 \n\n 分隔
+  const pattern = /^\[(\d+)\]\s*(.+)$/m;
+  let remaining = text.trim();
+  while (remaining) {
+    const match = remaining.match(pattern);
+    if (!match) { break; }
+    const headerLine = match[0];
+    const idx = parseInt(match[1], 10);
+    const role = match[2];
+    const afterHeader = remaining.slice(headerLine.length).trimStart();
+    // 找下一条消息的起始位置
+    const nextMatch = afterHeader.match(/^\[\d+\]\s*.+$/m);
+    let content: string;
+    if (nextMatch) {
+      content = afterHeader.slice(0, nextMatch.index!).trim();
+      remaining = afterHeader.slice(nextMatch.index!);
+    } else {
+      content = afterHeader.trim();
+      remaining = "";
+    }
+    blocks.push({ index: idx, header: `[${idx}] ${role}`, content });
+  }
+  return blocks;
+}
+
 function inputKindIcon(kind: InputKind) {
   if (kind === "image") {
     return ImageIcon;
@@ -995,11 +1023,6 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const rows: TimelineDetailRow[] = [];
   const kind = canonicalTraceTimelineKind(entry.kind);
 
-  if (kind === "input") {
-    pushRow(rows, "输入", timelinePreviewText(turn, entry), { multiline: true });
-    return rows;
-  }
-
   if (kind === "build_context") {
     buildContextRows(entry.buildContextObservation ?? turn.buildContextObservation).forEach((row) => rows.push(row));
     pushRow(rows, "请求目标", entry.providerRequestedName ?? turn.providerRequestedName);
@@ -1036,17 +1059,12 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
   const sections: TraceDetailSection[] = [];
   const kind = canonicalTraceTimelineKind(entry.kind);
 
-  if (kind === "input") {
-    return sections;
-  }
-
   if (kind === "build_context") {
     const buildContextObservation = entry.buildContextObservation ?? turn.buildContextObservation;
     const contextSections: Array<[string, string, string]> = [
       ["stable", "稳定前缀", buildContextText(buildContextObservation, "stablePrefixText")],
       ["semi", "半稳定上下文", buildContextText(buildContextObservation, "semiStableContextText")],
       ["volatile", "本轮输入", buildContextText(buildContextObservation, "volatileInputText")],
-      ["messages", "最终请求消息", buildContextText(buildContextObservation, "requestMessagesText")],
       ["tools", "工具定义", buildContextText(buildContextObservation, "toolDefinitionsText")]
     ];
 
@@ -1061,6 +1079,22 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
         content,
         summary: previewInline(content)
       });
+    }
+
+    // 将最终请求消息按单条消息拆分，每条独立折叠
+    const messagesText = buildContextText(buildContextObservation, "requestMessagesText");
+    if (messagesText) {
+      const messageBlocks = parseRequestMessages(messagesText);
+      for (const msg of messageBlocks) {
+        const isLarge = msg.content.length > 500;
+        sections.push({
+          id: `msg-${msg.index}`,
+          label: msg.header,
+          content: msg.content,
+          summary: isLarge ? previewInline(msg.content) : undefined,
+          kind: "tool"
+        });
+      }
     }
 
     return sections;

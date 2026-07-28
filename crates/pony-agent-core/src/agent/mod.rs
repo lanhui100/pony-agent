@@ -1,5 +1,6 @@
 pub mod app_settings;
 pub mod capability_bridge;
+pub mod compression;
 pub mod config;
 pub mod context;
 pub mod control_plane;
@@ -18,5 +19,6 @@ pub mod session;
 pub mod sqlite_session;
 pub mod sse_adapter;
 pub mod telemetry;
+pub mod tool_runtime;
 pub mod tools;
 pub mod turn_flow;

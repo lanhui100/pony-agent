@@ -35,13 +35,13 @@
 职责：
 
 - 表达当前会话稳定可消费的近线信息
-- 暴露裁剪后的 recent history，而不是整段原始历史
+- 暴露完整历史（由下游按 token budget 自行截断）
 - 暴露 recent attachment assets
 - 暴露 `summary / title / last_referenced_file`
 
 当前约束：
 
-- 最近 `12` 条 history
+- 历史不再预设硬上限，由 `build_layered_turn_context` 中的 80% 阈值控制是否截断
 - 最近 `8` 个 attachment assets
 
 ### RunState

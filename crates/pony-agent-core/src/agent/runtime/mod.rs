@@ -7317,40 +7317,12 @@ fn build_context_uses_retrieval(build_context_observation: &BuildContextObservat
 }
 
 fn build_stream_started_trace_timeline(
-    user_message: &str,
+    _user_message: &str,
     provider_meta: &ProviderEventMeta,
     build_context_observation: &BuildContextObservation,
 ) -> Vec<TraceTimelineEntry> {
     let mut sequence = 1_u64;
     let mut timeline = Vec::new();
-
-    timeline.push(TraceTimelineEntry {
-        id: format!("input-{}", sequence),
-        kind: "input".to_string(),
-        label: "RECEIVE INPUT".to_string(),
-        state: "completed".to_string(),
-        sequence,
-        provider_requested_name: None,
-        provider_name: None,
-        provider_protocol: None,
-        provider_model: None,
-        provider_source: None,
-        provider_mode: None,
-        build_context_observation: None,
-        tool_activities: Vec::new(),
-        text: Some(user_message.to_string()),
-        reasoning_content: None,
-        fallback_reason: None,
-        error: None,
-        input_tokens: None,
-        cache_hit_input_tokens: None,
-        reasoning_tokens: None,
-        output_tokens: None,
-        total_tokens: None,
-        first_token_latency_ms: None,
-        turn_duration_ms: None,
-    });
-    sequence += 1;
 
     if build_context_uses_retrieval(build_context_observation) {
         timeline.push(TraceTimelineEntry {
@@ -7442,7 +7414,7 @@ fn build_stream_started_trace_timeline(
 
 #[allow(clippy::too_many_arguments)]
 fn build_stream_progress_trace_timeline(
-    user_message: &str,
+    _user_message: &str,
     provider_meta: &ProviderEventMeta,
     provider_source: Option<&str>,
     provider_mode: Option<&str>,
@@ -7462,34 +7434,6 @@ fn build_stream_progress_trace_timeline(
     };
     let mut sequence = 1_u64;
     let mut timeline = Vec::new();
-
-    timeline.push(TraceTimelineEntry {
-        id: format!("input-{}", sequence),
-        kind: "input".to_string(),
-        label: "RECEIVE INPUT".to_string(),
-        state: "completed".to_string(),
-        sequence,
-        provider_requested_name: None,
-        provider_name: None,
-        provider_protocol: None,
-        provider_model: None,
-        provider_source: None,
-        provider_mode: None,
-        build_context_observation: None,
-        tool_activities: Vec::new(),
-        text: Some(user_message.to_string()),
-        reasoning_content: None,
-        fallback_reason: None,
-        error: None,
-        input_tokens: None,
-        cache_hit_input_tokens: None,
-        reasoning_tokens: None,
-        output_tokens: None,
-        total_tokens: None,
-        first_token_latency_ms: None,
-        turn_duration_ms: None,
-    });
-    sequence += 1;
 
     if build_context_uses_retrieval(build_context_observation) {
         timeline.push(TraceTimelineEntry {
@@ -7647,7 +7591,7 @@ fn build_stream_progress_trace_timeline(
 
 #[allow(clippy::too_many_arguments)]
 fn build_persisted_trace_timeline(
-    user_message: &str,
+    _user_message: &str,
     phase: &str,
     provider_meta: Option<&ProviderEventMeta>,
     provider_source: Option<&str>,
@@ -7671,34 +7615,6 @@ fn build_persisted_trace_timeline(
     let tool_hops = top_level_tool_activities(tool_activities);
     let mut sequence = 1_u64;
     let mut timeline = Vec::new();
-
-    timeline.push(TraceTimelineEntry {
-        id: format!("input-{}", sequence),
-        kind: "input".to_string(),
-        label: "RECEIVE INPUT".to_string(),
-        state: "completed".to_string(),
-        sequence,
-        provider_requested_name: None,
-        provider_name: None,
-        provider_protocol: None,
-        provider_model: None,
-        provider_source: None,
-        provider_mode: None,
-        build_context_observation: None,
-        tool_activities: Vec::new(),
-        text: Some(user_message.to_string()),
-        reasoning_content: None,
-        fallback_reason: None,
-        error: None,
-        input_tokens: None,
-        cache_hit_input_tokens: None,
-        reasoning_tokens: None,
-        output_tokens: None,
-        total_tokens: None,
-        first_token_latency_ms: None,
-        turn_duration_ms: None,
-    });
-    sequence += 1;
 
     if let Some(observation) = build_context_observation {
         if build_context_uses_retrieval(observation) {
@@ -9716,7 +9632,7 @@ mod tests {
     #[test]
     fn run_turn_records_planner_trace_records_in_terminal_trace() {
         let server = MockHttpServer::start(vec![json_completion("planner trace answer")]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
         let result = runtime.run_turn(TurnInput {
             message: "请总结当前状态".to_string(),
@@ -10118,7 +10034,7 @@ mod tests {
                 }
             }),
         ])]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime
             .register_hook_descriptor(observe_hook_descriptor(
                 "observe.prepare-start",
@@ -10230,7 +10146,7 @@ mod tests {
     #[test]
     fn start_turn_stream_fail_turn_policy_emits_failed_terminal_with_hook_evidence() {
         let server = MockHttpServer::start(vec![]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
         let mut descriptor =
             observe_hook_descriptor("observe.fail-turn", 10, TurnHookPoint::ModelCallStart);
@@ -10531,7 +10447,7 @@ mod tests {
                 }
             }),
         ])]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
         let mut descriptor = observe_hook_descriptor(
             "observe.checkpoint-failturn",
@@ -10634,7 +10550,7 @@ mod tests {
                 }
             }),
         ])]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
         runtime
             .register_hook_descriptor(observe_hook_descriptor(
@@ -10718,7 +10634,7 @@ mod tests {
     #[test]
     fn run_turn_fail_turn_policy_on_model_call_start_returns_failed_result_with_hook_evidence() {
         let server = MockHttpServer::start(vec![]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
         let mut descriptor = observe_hook_descriptor(
             "observe.sync-model-failturn",
@@ -10878,7 +10794,7 @@ mod tests {
                 "total_tokens": 21
             }
         }))]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime
             .register_hook_descriptor(observe_hook_descriptor(
                 "observe.sync-checkpoint",
@@ -10967,7 +10883,7 @@ mod tests {
                 }
             ]
         }))]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
         let mut descriptor = observe_hook_descriptor(
             "observe.sync-checkpoint-failturn",
@@ -11051,7 +10967,7 @@ mod tests {
                 }
             ]
         }))]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
         runtime
             .register_hook_descriptor(observe_hook_descriptor(
@@ -11160,7 +11076,7 @@ mod tests {
                 }
             }),
         ])]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         runtime
             .register_hook_descriptor(observe_hook_descriptor(
                 "observe.checkpoint",
@@ -12054,7 +11970,7 @@ mod tests {
     #[test]
     fn start_turn_stream_can_emit_cancelled_when_stop_requested_before_plan() {
         let selection = test_provider_selection("http://127.0.0.1:1/v1".to_string());
-        let mut runtime = build_runtime_for_test(selection);
+        let runtime = build_runtime_for_test(selection);
         let sink = RecordingTurnEventSink::new();
         let control = ExecutionControlRegistry::new();
 
@@ -12108,7 +12024,7 @@ mod tests {
     #[test]
     fn runtime_can_build_graph_turn_handoff_from_stable_turn_artifacts() {
         let selection = test_provider_selection("http://127.0.0.1:1/v1".to_string());
-        let mut runtime = build_runtime_for_test(selection);
+        let runtime = build_runtime_for_test(selection);
         runtime.load_session_snapshot(Some("graph-session"));
         let result = TurnResult {
             event_id: None,
@@ -12218,7 +12134,7 @@ mod tests {
         let sessions = SessionStore::with_backend(Box::new(FileSessionBackend::new(storage_path)));
         let mut selection = test_provider_selection(server.base_url.clone());
         selection.capabilities.supports_image_input = true;
-        let mut runtime = build_runtime_with_session_store(selection, sessions);
+        let runtime = build_runtime_with_session_store(selection, sessions);
         let result = runtime.run_turn(TurnInput {
             message: "请看这张图".to_string(),
             display_message: None,
@@ -12306,6 +12222,7 @@ mod tests {
             history_cursor: Default::default(),
             resolved_node_id: None,
             latest_node_id: None,
+            env_info: None,
         };
 
         let retrieved =
@@ -12361,6 +12278,7 @@ mod tests {
             history_cursor: Default::default(),
             resolved_node_id: None,
             latest_node_id: None,
+            env_info: None,
         };
 
         let retrieved = builder.retrieve_context_state(
@@ -12388,7 +12306,7 @@ mod tests {
                 }
             ]
         }))]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
         let result = runtime.run_turn(TurnInput {
             message: "请直接回答。".to_string(),
@@ -12490,7 +12408,7 @@ mod tests {
                 ]
             })),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
         let result = runtime.run_turn(TurnInput {
             message: "tauri.conf.json 第三行是什么？".to_string(),
@@ -12619,7 +12537,7 @@ mod tests {
                 }
             })),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
         let result = runtime.run_turn(TurnInput {
             message: "继续读取 tauri.conf.json 第三行".to_string(),
@@ -12686,7 +12604,7 @@ mod tests {
                 ]
             })),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
         let result = runtime.run_turn(TurnInput {
             message: "继续查看 tauri.conf.json".to_string(),
@@ -13163,7 +13081,7 @@ mod tests {
                 }),
             ]),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -13448,7 +13366,7 @@ mod tests {
                 }
             }),
         ])]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -13596,7 +13514,7 @@ mod tests {
                 ]
             })),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -13972,7 +13890,7 @@ mod tests {
                 }),
             ]),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -14150,7 +14068,7 @@ mod tests {
                 }),
             ]),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -14280,7 +14198,7 @@ mod tests {
                 ]
             })]),
         ]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
         let sink = RecordingTurnEventSink::new();
 
         runtime.start_turn_stream(
@@ -14329,7 +14247,7 @@ mod tests {
     fn runtime_can_rebuild_session_snapshot_and_retrieved_context_from_history_node() {
         let server =
             MockHttpServer::start(vec![json_completion("第一答"), json_completion("第二答")]);
-        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
         let first = runtime.run_turn(TurnInput {
             message: "第一问".to_string(),

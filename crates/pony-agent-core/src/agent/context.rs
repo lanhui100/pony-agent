@@ -7,7 +7,7 @@ use crate::agent::provider::{
     ProviderMessage, ProviderRequest, ProviderRequestObservation, ProviderRole,
 };
 use crate::agent::session::{
-    AttachmentAsset, LongTermMemoryRecord, SessionSnapshot, TurnHistoryMessage,
+    AttachmentAsset, EnvironmentInfo, LongTermMemoryRecord, SessionSnapshot, TurnHistoryMessage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,8 +22,8 @@ const BASE_SYSTEM_PROMPT: &str = r#"You are Pony Agent, an AI agent that collabo
 - Do not use Markdown formatting in replies; output plain text only unless the user explicitly asks for Markdown.
 - Be extremely concise by default to save tokens; provide detailed explanations only when requested or necessary.
 - When calling a tool, always include a Chinese "description" field briefly explaining the purpose of this invocation (e.g. "读取配置文件 tauri.conf.json", "搜索 TokenManager 类"). This description is displayed to the user in the UI — without it, only a generic message appears.
+- Only rely on the visible request context; do not assume capabilities beyond what is explicitly provided.
 - This base prompt must stay stable; environment facts, workspace instructions, memory, and temporary reminders are injected in later layers."#;
-const SESSION_CONTEXT_HISTORY_LIMIT: usize = 12;
 const SESSION_CONTEXT_ATTACHMENT_LIMIT: usize = 8;
 const TRANSCRIPT_CONTEXT_MESSAGE_LIMIT: usize = 24;
 const CODING_DOMAIN_PROFILE_PROMPT: &str = r#"Active domain profile: coding.
@@ -64,6 +64,8 @@ pub struct SessionContext {
     pub recent_attachment_assets: Vec<AttachmentAsset>,
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_info: Option<EnvironmentInfo>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -188,8 +190,6 @@ pub struct LayeredTurnContext {
     #[serde(default)]
     pub base_system_messages: Vec<ProviderMessage>,
     #[serde(default)]
-    pub runtime_fact_messages: Vec<ProviderMessage>,
-    #[serde(default)]
     pub domain_profile_messages: Vec<ProviderMessage>,
     #[serde(default)]
     pub project_instruction_messages: Vec<ProviderMessage>,
@@ -205,8 +205,6 @@ pub struct LayeredTurnContext {
     pub volatile_input_observation_text: String,
     #[serde(default)]
     pub native_base_system_messages: Vec<Value>,
-    #[serde(default)]
-    pub native_runtime_fact_messages: Vec<Value>,
     #[serde(default)]
     pub native_domain_profile_messages: Vec<Value>,
     #[serde(default)]
@@ -311,9 +309,6 @@ fn build_layered_turn_context(
 ) -> LayeredTurnContext {
     let current_user_message = ProviderMessage::user(retrieved.turn_context.user_message.clone());
     let base_system_messages = vec![ProviderMessage::system(BASE_SYSTEM_PROMPT)];
-    let runtime_fact_messages = vec![ProviderMessage::developer(provider_capability_note(
-        provider,
-    ))];
     let domain_profile_prompt = infer_domain_profile_prompt(graph_name, &retrieved.turn_context);
     let domain_profile_messages = build_domain_profile_messages(provider, domain_profile_prompt);
     let instruction_scope_sources = applicable_instruction_sources(retrieved);
@@ -329,7 +324,6 @@ fn build_layered_turn_context(
     let memory_messages = build_memory_messages(retrieved);
     let mut reserved_messages = vec![
         base_system_messages[0].clone(),
-        runtime_fact_messages[0].clone(),
     ];
     reserved_messages.extend(domain_profile_messages.clone());
     reserved_messages.push(ProviderMessage::developer(
@@ -343,8 +337,27 @@ fn build_layered_turn_context(
         None,
     ));
     reserved_messages.push(current_user_message.clone());
-    let (history_messages, history_truncated_count) =
-        truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens);
+    let (history_messages, history_truncated_count) = {
+        // 80% 阈值检查：低于 80% context window 时不截断，保留全部历史
+        let should_truncate = provider.context_window_tokens().map_or(true, |cw| {
+            let reserved_tokens: usize = reserved_messages
+                .iter()
+                .map(estimate_provider_message_tokens)
+                .sum();
+            let history_tokens: usize = raw_history
+                .iter()
+                .map(estimate_provider_message_tokens)
+                .sum();
+            let total_tokens = reserved_tokens + history_tokens;
+            total_tokens > (cw as f64 * 0.8) as usize
+        });
+
+        if should_truncate {
+            truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens)
+        } else {
+            (raw_history, 0)
+        }
+    };
     let history_truncation_note = truncation_note(history_truncated_count, "history messages");
     let project_instruction_messages = vec![ProviderMessage::developer(
         base_semistable_context.note.clone(),
@@ -369,7 +382,6 @@ fn build_layered_turn_context(
         provider.requires_provider_native_tool_flow(),
     );
     let mut native_base_system_messages = Vec::new();
-    let mut native_runtime_fact_messages = Vec::new();
     let mut native_domain_profile_messages = Vec::new();
     let mut native_project_instruction_messages = Vec::new();
     let mut native_memory_messages = Vec::new();
@@ -385,15 +397,11 @@ fn build_layered_turn_context(
             }),
             json!({
                 "role": "system",
-                "content": provider_capability_note(provider),
-            }),
-            json!({
-                "role": "system",
                 "content": base_semistable_context.note.clone(),
             }),
         ];
         reserved_native_messages.splice(
-            2..2,
+            1..1,
             domain_profile_messages.iter().map(|message| {
                 json!({
                     "role": "system",
@@ -412,11 +420,33 @@ fn build_layered_turn_context(
             "role": "user",
             "content": retrieved.turn_context.user_message.clone()
         }));
-        let (native_transcript, native_truncated_count) = truncate_native_messages(
-            retrieved.transcript.provider_native_messages.clone(),
-            &reserved_native_messages,
-            input_budget_tokens,
-        );
+        let (native_transcript, native_truncated_count) = {
+            // 80% 阈值检查：低于 80% context window 时不截断
+            let should_truncate = provider.context_window_tokens().map_or(true, |cw| {
+                let reserved_tokens: usize = reserved_native_messages
+                    .iter()
+                    .map(estimate_native_message_tokens)
+                    .sum();
+                let transcript_tokens: usize = retrieved
+                    .transcript
+                    .provider_native_messages
+                    .iter()
+                    .map(estimate_native_message_tokens)
+                    .sum();
+                let total_tokens = reserved_tokens + transcript_tokens;
+                total_tokens > (cw as f64 * 0.8) as usize
+            });
+
+            if should_truncate {
+                truncate_native_messages(
+                    retrieved.transcript.provider_native_messages.clone(),
+                    &reserved_native_messages,
+                    input_budget_tokens,
+                )
+            } else {
+                (retrieved.transcript.provider_native_messages.clone(), 0)
+            }
+        };
         let native_transcript_note = truncation_note(
             native_truncated_count,
             "provider-native transcript messages",
@@ -424,10 +454,6 @@ fn build_layered_turn_context(
         native_base_system_messages = vec![json!({
             "role": "system",
             "content": BASE_SYSTEM_PROMPT,
-        })];
-        native_runtime_fact_messages = vec![json!({
-            "role": "system",
-            "content": provider_capability_note(provider),
         })];
         native_domain_profile_messages = domain_profile_messages
             .iter()
@@ -472,7 +498,6 @@ fn build_layered_turn_context(
             .map(|skill| skill.label.clone())
             .collect(),
         base_system_messages,
-        runtime_fact_messages,
         domain_profile_messages,
         project_instruction_messages,
         memory_messages,
@@ -481,7 +506,6 @@ fn build_layered_turn_context(
         volatile_input_messages,
         volatile_input_observation_text,
         native_base_system_messages,
-        native_runtime_fact_messages,
         native_domain_profile_messages,
         native_project_instruction_messages,
         native_memory_messages,
@@ -498,12 +522,11 @@ fn build_layered_turn_context(
 fn flatten_layered_input_messages(context: &LayeredTurnContext) -> Vec<ProviderMessage> {
     let mut messages = Vec::new();
     messages.extend(context.base_system_messages.clone());
-    messages.extend(context.runtime_fact_messages.clone());
     messages.extend(context.domain_profile_messages.clone());
     messages.extend(context.project_instruction_messages.clone());
-    messages.extend(context.conversation_carry_messages.clone());
     messages.extend(context.memory_messages.clone());
     messages.extend(context.volatile_context_messages.clone());
+    messages.extend(context.conversation_carry_messages.clone());
     messages.extend(context.volatile_input_messages.clone());
     messages
 }
@@ -511,12 +534,11 @@ fn flatten_layered_input_messages(context: &LayeredTurnContext) -> Vec<ProviderM
 fn flatten_layered_native_messages(context: &LayeredTurnContext) -> Vec<Value> {
     let mut messages = Vec::new();
     messages.extend(context.native_base_system_messages.clone());
-    messages.extend(context.native_runtime_fact_messages.clone());
     messages.extend(context.native_domain_profile_messages.clone());
     messages.extend(context.native_project_instruction_messages.clone());
-    messages.extend(context.native_conversation_carry_messages.clone());
     messages.extend(context.native_memory_messages.clone());
     messages.extend(context.native_volatile_context_messages.clone());
+    messages.extend(context.native_conversation_carry_messages.clone());
     messages.extend(context.native_volatile_input_messages.clone());
     messages
 }
@@ -525,13 +547,11 @@ fn build_request_observation_from_layered_context(
     context: &LayeredTurnContext,
 ) -> ProviderRequestObservation {
     let stable_prefix_text = if !context.native_base_system_messages.is_empty()
-        || !context.native_runtime_fact_messages.is_empty()
         || !context.native_domain_profile_messages.is_empty()
     {
         render_native_messages_for_observation(
             &[
                 context.native_base_system_messages.clone(),
-                context.native_runtime_fact_messages.clone(),
                 context.native_domain_profile_messages.clone(),
             ]
             .concat(),
@@ -540,7 +560,6 @@ fn build_request_observation_from_layered_context(
         render_provider_messages_for_observation(
             &[
                 context.base_system_messages.clone(),
-                context.runtime_fact_messages.clone(),
                 context.domain_profile_messages.clone(),
             ]
             .concat(),
@@ -551,16 +570,16 @@ fn build_request_observation_from_layered_context(
     {
         join_non_empty_sections(&[
             render_native_messages_for_observation(&context.native_project_instruction_messages),
-            render_native_messages_for_observation(&context.native_conversation_carry_messages),
             render_native_messages_for_observation(&context.native_memory_messages),
             render_native_messages_for_observation(&context.native_volatile_context_messages),
+            render_native_messages_for_observation(&context.native_conversation_carry_messages),
         ])
     } else {
         join_non_empty_sections(&[
             render_provider_messages_for_observation(&context.project_instruction_messages),
-            render_provider_messages_for_observation(&context.conversation_carry_messages),
             render_provider_messages_for_observation(&context.memory_messages),
             render_provider_messages_for_observation(&context.volatile_context_messages),
+            render_provider_messages_for_observation(&context.conversation_carry_messages),
         ])
     };
     let volatile_input_text = if !context.native_volatile_input_messages.is_empty() {
@@ -612,8 +631,7 @@ fn build_domain_profile_messages(
 
 impl ContextStateRetriever for DefaultContextStateRetriever {
     fn retrieve(&self, query: ContextStateQuery<'_>) -> RetrievedContextState {
-        let recent_history =
-            recent_history_slice(&query.session.history, SESSION_CONTEXT_HISTORY_LIMIT);
+        let recent_history = trim_turn_history_to_turn_boundary(query.session.history.clone());
         let recent_attachment_assets = recent_attachment_assets(
             &query.session.attachment_assets,
             SESSION_CONTEXT_ATTACHMENT_LIMIT,
@@ -645,6 +663,7 @@ impl ContextStateRetriever for DefaultContextStateRetriever {
                 recent_attachment_assets,
                 turn_count: query.session.turn_count,
                 last_referenced_file: query.session.last_referenced_file.clone(),
+                env_info: query.session.env_info.clone(),
             },
             run_state: build_run_state(query.run, query.checkpoint),
             long_term_memory: build_long_term_memory(&query.session.long_term_memory_entries),
@@ -671,17 +690,6 @@ fn openai_user_content_blocks(user_message: &str, images: &[TurnInputImage]) -> 
         })
     }));
     blocks
-}
-
-fn provider_capability_note(provider: &ProviderManager) -> String {
-    format!(
-        "Capability profile: contextWindowTokens={} / supportsImageInput={}. Only rely on the visible request context.",
-        provider
-            .context_window_tokens()
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".to_string()),
-        provider.supports_image_input()
-    )
 }
 
 fn provider_semistable_context_note(
@@ -734,6 +742,25 @@ fn volatile_context_note(
     truncation_note: Option<&str>,
 ) -> String {
     let mut notes = Vec::new();
+
+    if let Some(env_info) = &retrieved.session_context.env_info {
+        let git_info = if env_info.is_git_repo {
+            format!(
+                "git branch={}",
+                env_info.git_branch.as_deref().unwrap_or("detached")
+            )
+        } else {
+            "not a git repo".to_string()
+        };
+        notes.push(format!(
+            "Environment: cwd={}, platform={}, date={}, tz={}, {}.",
+            env_info.cwd,
+            env_info.platform,
+            env_info.current_date,
+            env_info.timezone.as_deref().unwrap_or("unknown"),
+            git_info,
+        ));
+    }
 
     if let Some(path) = retrieved.session_context.last_referenced_file.as_deref() {
         notes.push(format!("Focus file: {}.", path));
@@ -1111,11 +1138,6 @@ fn graph_run_phase_label(run: &GraphRun) -> String {
     .to_string()
 }
 
-fn recent_history_slice(history: &[TurnHistoryMessage], limit: usize) -> Vec<TurnHistoryMessage> {
-    let start = history.len().saturating_sub(limit);
-    trim_turn_history_to_turn_boundary(history[start..].to_vec())
-}
-
 fn trim_turn_history_to_turn_boundary(
     mut history: Vec<TurnHistoryMessage>,
 ) -> Vec<TurnHistoryMessage> {
@@ -1482,6 +1504,7 @@ mod tests {
             history_cursor: Default::default(),
             resolved_node_id: None,
             latest_node_id: None,
+            env_info: None,
         }
     }
 
@@ -1703,7 +1726,7 @@ mod tests {
         assert!(request
             .observation
             .stable_prefix_text
-            .contains("Capability profile:"));
+            .contains("Only rely on the visible request context"));
         assert!(request
             .observation
             .semi_stable_context_text
@@ -1787,7 +1810,7 @@ mod tests {
         assert!(request
             .observation
             .stable_prefix_text
-            .contains("supportsImageInput=false"));
+            .contains("Only rely on the visible request context"));
         assert!(!request
             .observation
             .stable_prefix_text
@@ -2096,14 +2119,15 @@ mod tests {
             None,
         );
         let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
-        let developer_text = request
+        let developer_messages: Vec<&str> = request
             .input
             .iter()
-            .find(|message| matches!(message.role, ProviderRole::Developer))
-            .map(|message| message.content.clone())
-            .expect("developer message should exist");
+            .filter(|message| matches!(message.role, ProviderRole::Developer))
+            .map(|message| message.content.as_str())
+            .collect();
 
-        assert!(developer_text.contains("supportsImageInput=false"));
+        // 图片能力说明在 volatile_context 层中，不是第一条 developer 消息
+        assert!(developer_messages.iter().any(|text| text.contains("supportsImageInput=false")));
         assert!(request
             .observation
             .semi_stable_context_text

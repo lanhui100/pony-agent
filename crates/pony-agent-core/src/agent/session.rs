@@ -320,6 +320,77 @@ pub struct SessionState {
     pub history_cursor: HistoryCursor,
 }
 
+/// Runtime environment information captured at session snapshot build time.
+/// Injected into the model context so the agent understands its execution environment.
+///
+/// Fields are collected without spawning subprocesses — reads env vars,
+/// filesystem state (.git/HEAD), and compile-time constants only.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentInfo {
+    /// Absolute working directory path.
+    pub cwd: String,
+    /// Platform identifier (e.g. "windows", "linux", "macos").
+    pub platform: String,
+    /// Shell executable name or path, if detectable.
+    pub shell: Option<String>,
+    /// Operating system version string, if available.
+    pub os_version: Option<String>,
+    /// Current date in ISO 8601 format (YYYY-MM-DD).
+    pub current_date: String,
+    /// Timezone abbreviation (e.g. "CST", "UTC").
+    pub timezone: Option<String>,
+    /// Whether the working directory is inside a git repository.
+    pub is_git_repo: bool,
+    /// Current git branch name, if detectable.
+    pub git_branch: Option<String>,
+}
+
+/// Collects environment information at the current point in time.
+/// Non-blocking: reads env vars, filesystem, and compile-time constants only.
+pub fn collect_env_info() -> EnvironmentInfo {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let now = chrono::Local::now();
+    let is_git_repo = {
+        let git_dir = Path::new(&cwd).join(".git");
+        git_dir.is_dir() || git_dir.is_file()
+    };
+    let git_branch = if is_git_repo {
+        read_git_branch(&cwd)
+    } else {
+        None
+    };
+
+    EnvironmentInfo {
+        cwd,
+        platform: std::env::consts::OS.to_string(),
+        shell: std::env::var("SHELL")
+            .ok()
+            .or_else(|| std::env::var("ComSpec").ok()),
+        os_version: None,
+        current_date: now.format("%Y-%m-%d").to_string(),
+        timezone: Some(now.format("%Z").to_string()),
+        is_git_repo,
+        git_branch,
+    }
+}
+
+/// Reads git branch name from `.git/HEAD` without spawning a git process.
+fn read_git_branch(workspace_root: &str) -> Option<String> {
+    let head_path = Path::new(workspace_root).join(".git").join("HEAD");
+    let content = fs::read_to_string(head_path).ok()?;
+    let trimmed = content.trim();
+    // "ref: refs/heads/main" → "main"
+    if let Some(ref_path) = trimmed.strip_prefix("ref: refs/heads/") {
+        Some(ref_path.trim().to_string())
+    } else {
+        // Detached HEAD — use commit hash prefix
+        Some(trimmed.chars().take(7).collect())
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
@@ -354,6 +425,8 @@ pub struct SessionSnapshot {
     pub history_cursor: HistoryCursor,
     pub resolved_node_id: Option<String>,
     pub latest_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_info: Option<EnvironmentInfo>,
 }
 
 fn bump_cursor_version(cursor: &mut HistoryCursor) {
@@ -930,6 +1003,22 @@ impl SessionStore {
             },
         );
         snapshot
+    }
+
+    /// 替换会话的历史记录（用于上下文压缩后更新历史）
+    pub fn replace_session_history(
+        &mut self,
+        session_id: Option<&str>,
+        new_history: Vec<TurnHistoryMessage>,
+    ) {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        {
+            let session = self.ensure_session(&session_key);
+            session.history = new_history;
+            refresh_session_metadata(session, true);
+            commit_history_node_from_live_state(session, HistoryNodeKind::TurnCommitted, None);
+        }
+        self.save_to_backend();
     }
 
     pub fn record_turn_trace(
@@ -2308,6 +2397,7 @@ fn snapshot_from_state(
             history_cursor,
             resolved_node_id: Some(selected_node.node_id.clone()),
             latest_node_id,
+            env_info: Some(collect_env_info()),
         };
     }
 
@@ -2338,6 +2428,7 @@ fn snapshot_from_state(
         history_cursor: session.history_cursor.clone(),
         resolved_node_id: session.history_cursor.visible_node_id.clone(),
         latest_node_id,
+        env_info: Some(collect_env_info()),
     }
 }
 

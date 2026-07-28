@@ -1340,8 +1340,6 @@ function finalizeCancelledTraceSteps(traceSteps?: TraceStep[] | null): TraceStep
 
 function timelineLabel(kind: TraceTimelineEntry["kind"], index?: number) {
   switch (canonicalizeTraceTimelineKind(kind)) {
-    case "input":
-      return "RECEIVE INPUT";
     case "prepare_retrieval":
       return "PREPARE RETRIEVAL";
     case "build_context":
@@ -1396,9 +1394,8 @@ function createTimelineEntry(
 
 function createDefaultTraceTimeline() {
   return [
-    createTimelineEntry("input", 1, undefined, { state: "completed" }),
-    createTimelineEntry("build_context", 2, undefined, { state: "completed" }),
-    createTimelineEntry("call_model", 3, 1, { state: "active" })
+    createTimelineEntry("build_context", 1, undefined, { state: "completed" }),
+    createTimelineEntry("call_model", 2, 1, { state: "active" })
   ];
 }
 
@@ -1408,7 +1405,7 @@ function applyProviderPatchToTraceTimeline(
 ) {
   return traceTimeline.map((entry) => {
     const kind = canonicalizeTraceTimelineKind(entry.kind);
-    if (kind === "input" || kind === "call_tool") {
+    if (kind === "call_tool") {
       return { ...entry };
     }
 
