@@ -55,8 +55,14 @@ pub struct TurnEventEnvelope {
     pub emitted_at_ms: u64,
 }
 
+pub struct ModelHopTraceContent {
+    pub text: String,
+    pub reasoning_content: Option<String>,
+}
+
 pub struct SyncToolTurnOutcome {
     pub assistant_message: String,
+    pub assistant_reasoning_content: Option<String>,
     pub provider_native_transcript: Option<Vec<Value>>,
     pub provider_source: String,
     pub provider_mode: String,
@@ -64,6 +70,7 @@ pub struct SyncToolTurnOutcome {
     pub token_usage: Option<TokenUsage>,
     pub trace_steps: Vec<TurnTraceStep>,
     pub tool_activities: Vec<TurnToolActivity>,
+    pub model_hop_trace_contents: Vec<ModelHopTraceContent>,
     pub hook_trace_records: Vec<HookTraceRecord>,
     pub first_token_latency_ms: Option<u64>,
 }
