@@ -1272,15 +1272,34 @@ impl SessionStore {
                 // Keep the current truth-source unchanged when guard hooks block checkout.
                 sync_latest_history_node(session, None);
             } else {
-                let Some(node) = history_node(session, node_id).cloned() else {
+                // ── Build node index for O(1) lookups ──
+                let node_index: HashMap<&str, usize> = session
+                    .history_nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.node_id.as_str(), i))
+                    .collect();
+
+                let Some(&node_idx) = node_index.get(node_id) else {
                     return Err(format!("unknown history node: {node_id}"));
                 };
+                let node = session.history_nodes[node_idx].clone();
+
                 // ── Truncate history: mark descendant nodes as cancelled ──
-                // Collect all ancestor node IDs (including the target node itself).
-                // Any node on the same branch that is NOT an ancestor is a descendant
-                // of the target and should be marked as TurnCancelled.
-                let ancestor_ids = collect_ancestor_ids(session, &node.node_id);
+                // Collect all ancestor node IDs (including the target node itself)
+                // using the index for O(1) lookups instead of O(n) linear scans.
+                let mut ancestor_ids = HashSet::new();
+                let mut current = Some(node.node_id.as_str());
+                while let Some(id) = current {
+                    ancestor_ids.insert(id.to_string());
+                    current = node_index
+                        .get(id)
+                        .and_then(|&i| session.history_nodes[i].parent_node_id.as_deref());
+                }
                 let branch_id = node.branch_id.clone();
+                // Drop the index to release the immutable borrow before mutating
+                drop(node_index);
+
                 for n in &mut session.history_nodes {
                     if n.branch_id == branch_id && !ancestor_ids.contains(&n.node_id) {
                         n.kind = HistoryNodeKind::TurnCancelled;
@@ -3188,22 +3207,6 @@ fn classify_turn_node_kind(assistant_message: &str) -> HistoryNodeKind {
     } else {
         HistoryNodeKind::TurnCommitted
     }
-}
-
-/// Collect all ancestor node IDs of the given node (including the node itself)
-/// by walking the `parent_node_id` chain.
-fn collect_ancestor_ids(session: &SessionState, node_id: &str) -> HashSet<String> {
-    let mut ids = HashSet::new();
-    let mut current = Some(node_id.to_string());
-    while let Some(id) = current {
-        ids.insert(id.clone());
-        current = session
-            .history_nodes
-            .iter()
-            .find(|n| n.node_id == id)
-            .and_then(|n| n.parent_node_id.clone());
-    }
-    ids
 }
 
 fn history_node<'a>(session: &'a SessionState, node_id: &str) -> Option<&'a HistoryNode> {
