@@ -127,7 +127,7 @@ const showReasoningContent = ref(false);
 const copiedErrorDetailKey = ref<string | null>(null);
 const copiedAssistantTurnId = ref<string | null>(null);
 const workspaceContentColumnRef = ref<HTMLElement | null>(null);
-const ROLLBACK_PROGRESS_MIN_VISIBLE_MS = 360;
+const ROLLBACK_PROGRESS_MIN_VISIBLE_MS = 0;
 const rollbackInFlight = ref<{ turnId: string; action: CheckpointRollbackAction } | null>(null);
 const rollbackProgressStyle = ref<Record<string, string | undefined>>({});
 const optimisticRollbackTurnId = ref<string | null>(null);
@@ -821,8 +821,8 @@ function modelEntryContent(
   return "";
 }
 
-function modelEventKey(prefix: "reasoning" | "content", assistant: ChatMessage, entry: TraceTimelineEntry, stableAssistantKey: boolean) {
-  return stableAssistantKey ? `${prefix}-${assistant.id}` : `${prefix}-${assistant.id}-${entry.id}`;
+function modelEventKey(prefix: "reasoning" | "content", assistant: ChatMessage, _entry: TraceTimelineEntry) {
+  return `${prefix}-${assistant.id}`;
 }
 
 function streamingReasoningFade(reasoningContent: string, assistant: ChatMessage) {
@@ -835,9 +835,8 @@ function streamingReasoningStable(reasoningContent: string, assistant: ChatMessa
   return fade ? reasoningContent.slice(0, -fade.length) : reasoningContent;
 }
 
-/** 将可见文本拆为逐字数组，用于逐字淡入渲染 */
-function streamingVisibleChars(assistant: ChatMessage) {
-  const text = assistantDisplayContent(assistant);
+/** 将已按 model-hop 裁剪的可见文本拆为逐字数组，用于逐字淡入渲染 */
+function streamingVisibleChars(text: string) {
   if (!text) return [];
   return text.split("");
 }
@@ -855,14 +854,13 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   if (turn.assistant && modelEntries.length > 0) {
     for (const entry of modelEntries) {
       const streaming = isStreamingModelEntry(turn, entry, modelEntries);
-      const stableAssistantKey = isLatestModelEntry(entry, modelEntries);
       const reasoningContent = showReasoningContent.value
         ? modelEntryReasoningContent(turn, entry, modelEntries)
         : "";
       if (reasoningContent) {
         events.push({
           kind: "reasoning",
-          key: modelEventKey("reasoning", turn.assistant, entry, stableAssistantKey),
+          key: modelEventKey("reasoning", turn.assistant, entry),
           order: entry.sequence - 0.2,
           assistant: turn.assistant,
           reasoningContent,
@@ -874,7 +872,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       if (content && !shouldRenderAssistantAsError(turn)) {
         events.push({
           kind: "content",
-          key: modelEventKey("content", turn.assistant, entry, stableAssistantKey),
+          key: modelEventKey("content", turn.assistant, entry),
           order: entry.sequence,
           assistant: turn.assistant,
           content,
@@ -975,6 +973,13 @@ const mergedEvents: AgentTurnEvent[] = [];
       last.streaming = last.streaming || event.streaming;
       continue;
     }
+    // 合并 content 事件：多 hop 内容累积到同一个 content 事件中，
+    // 确保 key 始终为 content-${assistant.id}，避免 DOM 重建闪烁。
+    if (event.kind === "content" && last?.kind === "content") {
+      last.content += "\n\n" + event.content;
+      last.streaming = last.streaming || event.streaming;
+      continue;
+    }
     mergedEvents.push(event);
   }
 
@@ -1072,8 +1077,12 @@ function isAssistantStreaming(message: ChatMessage | null) {
   return message?.status === "pending";
 }
 
-function hasPendingAssistantMessage() {
-  return messages.value.some((message) => message.role === "assistant" && message.status === "pending");
+function hasPendingAssistantPresentationWork() {
+  return messages.value.some((message) =>
+    message.role === "assistant"
+    && message.status === "pending"
+    && assistantDisplayContent(message).length < message.content.length
+  );
 }
 
 function stopStreamingPresentationTimer() {
@@ -1084,8 +1093,9 @@ function stopStreamingPresentationTimer() {
 }
 
 function scheduleStreamingPresentationTimer() {
-  stopStreamingPresentationTimer();
-  if (!hasPendingAssistantMessage()) {
+  // 已有定时器运行时不重复创建，避免快速 content 变动持续推迟 60ms tick
+  if (streamingPresentationTimer) return;
+  if (!hasPendingAssistantPresentationWork()) {
     return;
   }
   streamingPresentationTimer = setTimeout(() => {
@@ -1123,7 +1133,6 @@ function loadStreamingRenderConfig() {
 
 function handleStreamingRenderConfigChanged() {
   loadStreamingRenderConfig();
-  syncStreamingPresentationState();
   scheduleStreamingPresentationTimer();
 }
 
@@ -1131,18 +1140,34 @@ function shouldUseOptimizedAssistantStreaming(message: ChatMessage | null) {
   return Boolean(message && isAssistantStreaming(message) && !streamingRenderOptimizationDisabled.value);
 }
 
-function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, content: string) {
+// 流式渲染路径缓存：一旦在流式中选择了一条路径（markdown/纯文本），
+// 就在该消息的整个流式周期内锁定，避免因 content 逐渐累积触发 isSimpleTextContent
+// 翻转导致 DOM 子树重建闪烁。
+const streamingRenderPathLock = new Map<string, boolean>();
+
+function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, _content: string) {
   if (!message) {
     return false;
   }
 
   if (!isAssistantStreaming(message)) {
+    streamingRenderPathLock.delete(message.id);
     return true;
   }
   if (!shouldUseOptimizedAssistantStreaming(message)) {
+    streamingRenderPathLock.delete(message.id);
     return false;
   }
-  return !isSimpleTextContent(content);
+
+  // 已锁定路径直接返回缓存值
+  if (streamingRenderPathLock.has(message.id)) {
+    return streamingRenderPathLock.get(message.id) ?? false;
+  }
+
+  // 首次判断：基于当前完整内容做决定并锁定
+  const useMarkdown = !isSimpleTextContent(message.content);
+  streamingRenderPathLock.set(message.id, useMarkdown);
+  return useMarkdown;
 }
 
 function latestTraceForTurn(turnId: string) {
@@ -1327,72 +1352,21 @@ async function scrollToRemainingConversationTail() {
 }
 
 function updateRollbackProgressPosition() {
-  if (typeof window === "undefined") {
+  if (typeof window === "undefined" || !rollbackInFlight.value) {
     rollbackProgressStyle.value = {};
     return;
   }
 
   const contentColumn = workspaceContentColumnRef.value;
-  const viewport = resolveTimelineViewport();
-  if (
-    !rollbackInFlight.value ||
-    !contentColumn ||
-    typeof contentColumn.getBoundingClientRect !== "function"
-  ) {
+  if (!contentColumn || typeof contentColumn.getBoundingClientRect !== "function") {
     rollbackProgressStyle.value = {};
     return;
   }
 
-  const columnRect = contentColumn.getBoundingClientRect();
-  const viewportRect = viewport && typeof viewport.getBoundingClientRect === "function"
-    ? viewport.getBoundingClientRect()
-    : null;
-  const left = viewportRect ? Math.max(columnRect.left, viewportRect.left) : columnRect.left;
-  const right = viewportRect ? Math.min(columnRect.right, viewportRect.right) : columnRect.right;
-  const top = viewportRect ? Math.max(columnRect.top, viewportRect.top) : columnRect.top;
-  const bottom = viewportRect ? Math.min(columnRect.bottom, viewportRect.bottom) : columnRect.bottom;
-  const width = Math.max(0, right - left);
-  const height = Math.max(0, bottom - top);
-
-  if (import.meta.env.DEV) {
-    console.log("[debug-rollback] progress overlay:", {
-      columnRect: { left: columnRect.left, top: columnRect.top, right: columnRect.right, width: columnRect.width, height: columnRect.height },
-      viewportRect: viewportRect ? { left: viewportRect.left, top: viewportRect.top, right: viewportRect.right, bottom: viewportRect.bottom } : null,
-      result: { left, top, width, height }
-    });
-  }
-
-  if (width < 20 || height < 20) {
-    rollbackProgressStyle.value = viewportRect
-      ? {
-          left: `${viewportRect.left}px`,
-          top: `${viewportRect.top}px`,
-          width: `${Math.max(0, viewportRect.width)}px`,
-          height: `${Math.max(0, viewportRect.height)}px`,
-          right: "auto",
-          bottom: "auto"
-        }
-      : {
-          left: "0px",
-          top: "0px",
-          width: "100vw",
-          height: "100vh",
-          right: "auto",
-          bottom: "auto"
-        };
-    if (import.meta.env.DEV) {
-      console.log("[debug-rollback] progress overlay: zero-area fallback to full viewport");
-    }
-    return;
-  }
-
+  const rect = contentColumn.getBoundingClientRect();
   rollbackProgressStyle.value = {
-    left: `${left}px`,
-    top: `${top}px`,
-    width: `${width}px`,
-    height: `${height}px`,
-    right: "auto",
-    bottom: "auto"
+    left: `${rect.left + rect.width / 2}px`,
+    top: `${rect.top + rect.height / 2}px`
   };
 }
 
@@ -1785,7 +1759,6 @@ watch(
         lastTrustedTraceTimelineByTurnId.delete(turnId);
       }
     }
-    syncStreamingPresentationState();
     scheduleStreamingPresentationTimer();
   },
   { flush: "pre" }
@@ -1852,6 +1825,7 @@ watch(
       <div
         v-if="rollbackInFlight"
         class="rollback-progress-overlay"
+        :style="rollbackProgressStyle"
         data-testid="workspace-rollback-progress"
       >
         <div class="rollback-progress-card">
@@ -1959,6 +1933,7 @@ watch(
                 :animate="{ opacity: 1, y: 0 }"
                 :transition="{ duration: 0.2, ease: 'easeOut', delay: 0.32 }"
                 class="conversation-disclosure conversation-reasoning-panel group p-0"
+                style="contain: layout;"
               >
                 <summary class="conversation-disclosure-summary">
                   <div class="flex min-w-0 items-center gap-2">
@@ -2025,8 +2000,8 @@ watch(
                       {{ tool.description }}
                     </span>
                     <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
-                    <span class="flex shrink-0 items-center gap-1 leading-none">
-                      <span v-if="tool.durationSeconds != null" class="text-[11px] text-stone-400">{{ (tool.durationSeconds).toFixed(1) }}s</span>
+                    <span class="conversation-tool-status flex shrink-0 items-center gap-1 leading-none">
+                      <span class="text-[11px] text-stone-400" :class="tool.durationSeconds != null ? 'visible' : 'invisible'">{{ tool.durationSeconds != null ? (tool.durationSeconds).toFixed(1) + 's' : '0.0s' }}</span>
                       <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
                       <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
                       <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
@@ -2037,10 +2012,6 @@ watch(
 
               <div
                 v-else-if="event.kind === 'content'"
-                v-motion
-                :initial="{ opacity: 0, y: 6 }"
-                :animate="{ opacity: 1, y: 0 }"
-                :transition="{ duration: 0.22, ease: 'easeOut', delay: event.streaming ? 0 : 0.32 }"
                 class="assistant-response-panel"
               >
                 <!-- 统一 shell：流式/完成共享同一外容器，避免 v-if/v-else 导致的 DOM 子树替换 -->
@@ -2072,7 +2043,7 @@ watch(
                     data-testid="assistant-streaming-flow"
                   >
                     <template v-if="shouldUseOptimizedAssistantStreaming(event.assistant)">
-                      <span v-for="(char, i) in streamingVisibleChars(event.assistant)" :key="i" class="assistant-streaming-char">{{ char }}</span>
+                      <span v-for="(char, i) in streamingVisibleChars(event.content)" :key="i" class="assistant-streaming-char">{{ char }}</span>
                     </template>
                     <template v-else>{{ event.content }}</template>
                   </div>
@@ -2553,9 +2524,22 @@ watch(
   color: #3d342d;
 }
 
+/* 每个 turn 独立渲染隔离，防止工具状态变化/思考流式时整列重排 */
+[data-testid="workspace-content-column"] > div > section[data-turn-id] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 3rem;
+}
+
+/* 工具状态与时长容器：预留足够宽度避免 duration 出现时布局偏移 */
+.conversation-tool-status {
+  min-width: 5.5rem;
+  text-align: right;
+  justify-content: flex-end;
+}
+
 /* 内容列创建布局隔离边界，减少流式输出时的连锁重排 */
 [data-testid="workspace-content-column"] {
-  contain: layout style;
+  contain: layout style paint;
   overflow-anchor: none;
 }
 
@@ -2598,6 +2582,24 @@ watch(
   will-change: opacity, transform;
 }
 
+/* 非流式 content 入场使用极简动画，避免 `animation-fill-mode: both` 在流式→完成过渡时
+   将已渲染的可见元素重置为 opacity:0 导致闪烁。初始渲染靠 streaming char 逐字淡入完成，
+   完成后不再需要额外入场动画。 */
+.assistant-response-panel.motion-entrance {
+  animation: panel-fade-in 0.18s ease-out;
+}
+
+@keyframes panel-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .streaming-unrendered-suffix {
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -2630,7 +2632,7 @@ watch(
   display: inline;
   white-space: pre-wrap;
   animation-name: assistant-stream-char-fade-in;
-  animation-duration: 180ms;
+  animation-duration: 50ms;
   animation-timing-function: ease-out;
   animation-fill-mode: both;
 }
@@ -2921,29 +2923,23 @@ watch(
 
 .rollback-progress-overlay {
   position: fixed;
-  right: max(1rem, env(safe-area-inset-right));
-  bottom: calc(7.25rem + env(safe-area-inset-bottom));
   z-index: 40;
   pointer-events: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  transform: translate(-50%, -50%);
 }
 
 .rollback-progress-card {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  border: 1px solid rgba(231, 229, 228, 0.9);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.86);
-  color: rgba(87, 83, 78, 0.72);
-  box-shadow: 0 8px 22px rgba(68, 64, 60, 0.1);
-  padding: 0.45rem 0.7rem;
-  font-size: 12px;
+  gap: 0.6rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.94);
+  color: rgba(87, 83, 78, 0.85);
+  padding: 0.75rem 1.2rem;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1;
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(14px);
 }
 
 .rollback-progress-icon {

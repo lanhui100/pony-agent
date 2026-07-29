@@ -2,11 +2,17 @@ import { shallowReactive, type ComputedRef, type Ref } from "vue";
 import type { ChatMessage } from "@/types/runtime";
 
 // ─── 逐字连续释放 ───────────────────────────────────────────
-// 每次 tick（60ms）释放的字符数，默认 4 chars/tick = ~67 chars/sec
+// 每次 tick（60ms）释放 4 个字符，避免长回复在展示层严重滞后。
 const STREAM_RELEASE_CHARS_PER_TICK = 4;
 const STREAM_RELEASE_CHARS_STORAGE_KEY = "pony-agent.stream-render.release-chars";
 
+function prefersReducedMotion() {
+  return typeof window !== "undefined"
+    && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+}
+
 function readReleaseRate(): number {
+  if (prefersReducedMotion()) return Number.MAX_SAFE_INTEGER;
   if (typeof window === "undefined") return STREAM_RELEASE_CHARS_PER_TICK;
   const raw = window.localStorage.getItem(STREAM_RELEASE_CHARS_STORAGE_KEY);
   if (!raw) return STREAM_RELEASE_CHARS_PER_TICK;

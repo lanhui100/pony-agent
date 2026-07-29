@@ -184,7 +184,67 @@ describe("HomeWorkspace markdown rendering", () => {
     expect(wrapper.html()).not.toContain("```md");
   }, 15000);
 
-  it("buffers a short streaming response before revealing it as a fading batch", async () => {
+  it("renders partial markdown HTML while the assistant is still pending", async () => {
+    window.localStorage.setItem("pony-agent.stream-render.release-chars", "20");
+    const providerStore = useProviderStore();
+    providerStore.$patch({
+      registry: createProviderRegistry(),
+      selectedReasoningEffort: null
+    });
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      phase: "streaming_response",
+      activeTurnId: "turn-stream-markdown",
+      isSubmitting: true,
+      sessionOperation: null,
+      error: null,
+      messages: [
+        {
+          id: "user-stream-markdown",
+          turnId: "turn-stream-markdown",
+          role: "user",
+          content: "继续",
+          status: "done",
+          tokenCount: null
+        },
+        {
+          id: "assistant-stream-markdown",
+          turnId: "turn-stream-markdown",
+          role: "assistant",
+          content: "**流式加粗**",
+          status: "pending",
+          tokenCount: null,
+          modelName: "ppx/gpt-5.4"
+        }
+      ]
+    });
+
+    const wrapper = mount({
+      render() {
+        return h(TooltipProvider, null, {
+          default: () => h(HomeWorkspace)
+        });
+      }
+    }, {
+      global: {
+        stubs: {
+          ScrollArea: ScrollAreaStub,
+          Button: ButtonStub,
+          Switch: SwitchStub,
+          Transition: false,
+          TransitionGroup: false
+        }
+      }
+    });
+
+    await flushMarkdownRender();
+
+    expect(wrapper.find('[data-testid="assistant-streaming-flow"] .markdown-body').html()).toContain("<strong>流式加粗</strong>");
+    wrapper.unmount();
+  }, 15000);
+
+  it("reveals streaming assistant content character by character with continuous release", async () => {
     const providerStore = useProviderStore();
     providerStore.$patch({
       registry: createProviderRegistry(),
@@ -238,14 +298,15 @@ describe("HomeWorkspace markdown rendering", () => {
     });
 
     await nextTick();
+    // "hello" is simple text (no markdown syntax), goes to char-by-char plain text path
+    const streamingFlow = wrapper.find('[data-testid="assistant-streaming-flow"]');
+    expect(streamingFlow.exists()).toBe(true);
+    // 首次同步后释放四个字符，后续字符由 60ms tick 平滑推进。
+    const chars = streamingFlow.findAll('.assistant-streaming-char');
+    expect(chars).toHaveLength(4);
+    // No v-motion opacity wrapper on streaming content
+    expect(streamingFlow.classes()).not.toContain('assistant-response-panel');
     expect(wrapper.find('[data-testid="assistant-streaming-fade-batch"]').exists()).toBe(false);
-
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 280));
-    await nextTick();
-
-    const fadeBatch = wrapper.find('[data-testid="assistant-streaming-fade-batch"]');
-    expect(fadeBatch.exists()).toBe(true);
-    expect(fadeBatch.text()).toBe("hello");
 
     wrapper.unmount();
   }, 15000);

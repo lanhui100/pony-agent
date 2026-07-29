@@ -78,10 +78,14 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
   let outerCompensationRafId: number | null = null;
   let compensationLerpRestartCount = 0;
   let scrollQueueWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
-  let layoutDirtyWhileQueued = false;
-  let contentDirtyWhileAnimating = false;
-  let isDestroyed = false;
-  let lastStreamingFollowQueuedAt = Number.NEGATIVE_INFINITY;
+let layoutDirtyWhileQueued = false;
+let contentDirtyWhileAnimating = false;
+let isDestroyed = false;
+let lastStreamingFollowQueuedAt = Number.NEGATIVE_INFINITY;
+
+// 微观布局变化节流：避免 tool/reasoning 每帧变化都触发补偿滚动
+const LAYOUT_CHANGE_THROTTLE_MS = 120;
+let lastLayoutCompensationAtMs = 0;
 
   function getViewport() {
     const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
@@ -949,6 +953,16 @@ export function useTimelineAutoScroll(options: UseTimelineAutoScrollOptions) {
     if (!signature || signature === previousSignature) {
       return;
     }
+
+    // 节流：微观变化（tool 状态、reasoning 增量）不应当每帧触发补偿滚动，
+    // 只在足够时间间隔后响应，避免频繁 scrollTop 调整导致用户感知跳变。
+    const now = Date.now();
+    if (now - lastLayoutCompensationAtMs < LAYOUT_CHANGE_THROTTLE_MS) {
+      emit("visible-turn-layout:throttled", { signature, previousSignature, sinceLastMs: now - lastLayoutCompensationAtMs });
+      return;
+    }
+    lastLayoutCompensationAtMs = now;
+
     emit("visible-turn-layout:changed", { signature, previousSignature });
     if (!streamAutoFollowEnabled.value) {
       emit("visible-turn-layout:skip", { reason: "follow-disabled", signature, previousSignature });

@@ -96,6 +96,26 @@ describe("MarkdownRenderer", () => {
     expect(wrapper.find(".markdown-body").text()).toContain("bold text");
   });
 
+  it("keeps rendering new markdown content while forceMarkdownStreaming is active", async () => {
+    const wrapper = mount(MarkdownRenderer, {
+      props: {
+        content: "hello",
+        streaming: true,
+        forceMarkdownStreaming: true,
+        wrapperClass: "assistant-markdown"
+      }
+    });
+
+    await flushStreamingRender();
+    expect(wrapper.find(".markdown-body").text()).toBe("hello");
+
+    await wrapper.setProps({ content: "hello **world**" });
+    expect(wrapper.findAll(".mr-streaming-char").map((node) => node.text()).join("")).toBe("**world**");
+
+    await flushStreamingRender();
+    expect(wrapper.find(".markdown-body").html()).toContain("<strong>world</strong>");
+  });
+
   it("can force the markdown streaming path for simple text", async () => {
     const wrapper = mount(MarkdownRenderer, {
       props: {
@@ -107,13 +127,18 @@ describe("MarkdownRenderer", () => {
     });
 
     await flushStreamingRender();
+
+    expect(wrapper.find(".markdown-body").exists()).toBe(true);
+    expect(wrapper.find(".markdown-body").html()).toContain("<p>hello world</p>");
+
+    await wrapper.setProps({ streaming: false });
     await waitForMarkdownBody(wrapper);
 
     expect(wrapper.find(".markdown-body").exists()).toBe(true);
     expect(wrapper.find(".markdown-body").html()).toContain("<p>hello world</p>");
   });
 
-  it("does not show a raw suffix while force-rendering streaming markdown", async () => {
+  it("renders markdown incrementally while forceMarkdownStreaming is active", async () => {
     const wrapper = mount(MarkdownRenderer, {
       props: {
         content: "**bold text**",
@@ -124,12 +149,49 @@ describe("MarkdownRenderer", () => {
     });
 
     await nextTick();
+    // 首次 partial render 前以原始文本作为可见回退。
     expect(wrapper.find(".streaming-unrendered-suffix").exists()).toBe(false);
-    expect(wrapper.text()).toBe("");
+    expect(wrapper.find(".mr-streaming-raw").exists()).toBe(true);
+    expect(wrapper.text()).toBe("**bold text**");
 
     await flushStreamingRender();
-    await waitForMarkdownBody(wrapper);
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
+    expect(wrapper.find(".mr-streaming-raw").exists()).toBe(false);
+
+    await wrapper.setProps({ streaming: false });
+    await waitForMarkdownBody(wrapper);
+    // 流式结束后保留最终 markdown HTML。
+    expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
+    expect(wrapper.find(".mr-streaming-raw").exists()).toBe(false);
+  });
+
+  it("shows only the unrendered streaming suffix as individual characters", async () => {
+    const wrapper = mount(MarkdownRenderer, {
+      props: {
+        content: "abcd",
+        streaming: true,
+        forceMarkdownStreaming: true,
+        wrapperClass: "assistant-markdown"
+      }
+    });
+
+    await nextTick();
+    expect(wrapper.findAll(".mr-streaming-char")).toHaveLength(4);
+
+    await flushStreamingRender();
+    expect(wrapper.find(".markdown-body").text()).toBe("abcd");
+    expect(wrapper.findAll(".mr-streaming-char")).toHaveLength(0);
+
+    // 解析完成后追加的新内容先以尾部字符层显示，下一轮 partial render 合并回 HTML。
+    await wrapper.setProps({ content: "abcdefgh" });
+    const charsAfter = wrapper.findAll(".mr-streaming-char");
+    expect(charsAfter).toHaveLength(4);
+    expect(charsAfter[0]!.text()).toBe("e");
+    expect(charsAfter[3]!.text()).toBe("h");
+
+    await flushStreamingRender();
+    expect(wrapper.find(".markdown-body").text()).toBe("abcdefgh");
+    expect(wrapper.findAll(".mr-streaming-char")).toHaveLength(0);
   });
 
   it("transitions from plain text streaming to final markdown render when streaming ends", async () => {
@@ -174,14 +236,12 @@ describe("MarkdownRenderer", () => {
     });
 
     await flushStreamingRender();
-    await waitForMarkdownBody(wrapper);
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
 
     await wrapper.setProps({ streaming: false });
-    await nextTick();
+    await waitForMarkdownBody(wrapper);
 
     expect(wrapper.find(".markdown-body").html()).toContain("<strong>bold text</strong>");
-    expect(wrapper.find(".whitespace-pre-wrap").exists()).toBe(false);
   });
 
   it("re-renders the final truthful markdown when streaming ends", async () => {

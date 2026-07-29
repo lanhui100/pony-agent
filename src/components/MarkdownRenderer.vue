@@ -138,6 +138,10 @@ async function executeRender(version: number) {
 }
 
 function scheduleStreamingRender() {
+  if (streamRenderScheduled) {
+    return;
+  }
+
   cancelScheduledRender();
   const version = ++renderVersion;
   streamRenderScheduled = true;
@@ -302,10 +306,16 @@ onBeforeUnmount(() => {
     <!-- 流式 + 正常 markdown 渲染路径 -->
     <template v-else-if="streaming">
       <div v-if="renderedHtml" class="markdown-body" v-html="renderedHtml" />
+      <div v-if="forceMarkdownStreaming && unrenderedSuffix" class="mr-streaming-raw whitespace-pre-wrap">
+        <span v-for="(char, i) in unrenderedSuffix.split('')" :key="i" class="mr-streaming-char">{{ char }}</span>
+      </div>
       <template v-if="!forceMarkdownStreaming">
         <span v-if="unrenderedSuffix" class="streaming-unrendered-suffix whitespace-pre-wrap">{{ unrenderedSuffix }}</span>
         <div v-else-if="content" class="whitespace-pre-wrap">{{ content }}</div>
       </template>
+      <div v-else-if="content && !renderedHtml && !unrenderedSuffix" class="mr-streaming-raw whitespace-pre-wrap">
+        <span v-for="(char, i) in content.split('')" :key="i" class="mr-streaming-char">{{ char }}</span>
+      </div>
     </template>
     <!-- 最终渲染（非流式） -->
     <template v-else>
@@ -314,3 +324,40 @@ onBeforeUnmount(() => {
     </template>
   </div>
 </template>
+
+<style scoped>
+.mr-streaming-raw {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+  color: #3d342d;
+}
+
+.mr-streaming-char {
+  display: inline;
+  white-space: pre-wrap;
+  animation-name: mr-stream-char-fade-in;
+  animation-duration: 50ms;
+  animation-timing-function: ease-out;
+  animation-fill-mode: both;
+}
+
+@keyframes mr-stream-char-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.04em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mr-streaming-char {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+</style>
