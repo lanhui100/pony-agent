@@ -4934,7 +4934,6 @@ export const useRuntimeStore = defineStore("runtime", {
           };
           collectAncestors(nodeId);
           this.historyNodes = this.historyNodes.filter((n) => ancestorIds.has(n.nodeId));
-          this.persistHistory();
         }
 
         result = {
@@ -5422,11 +5421,18 @@ export const useRuntimeStore = defineStore("runtime", {
         (existingTitle && existingTitle !== "未命名轮次" ? existingTitle : undefined) ??
         buildTurnTraceTitleFromMessages(this.messages, turnId);
 
+      // When patch doesn't include traceTimeline (e.g. from commitTurnTraceTimeline
+      // where the caller already set this.traceTimeline and guarantees freshness),
+      // fallback to this.traceTimeline. This avoids redundant double clones.
+      const patchTimeline = Object.prototype.hasOwnProperty.call(patch, "traceTimeline")
+        ? (patch as any).traceTimeline
+        : this.traceTimeline;
+
       if (existing) {
         Object.assign(existing, patch, {
           title: resolvedTitle,
           updatedAt,
-          traceTimeline: patch.traceTimeline ? cloneTraceTimeline(patch.traceTimeline) : existing.traceTimeline,
+          traceTimeline: patchTimeline ? cloneTraceTimeline(patchTimeline) : existing.traceTimeline,
           providerCallRecords:
             patch.providerCallRecords != null
               ? cloneProviderCallRecords(patch.providerCallRecords)
@@ -5450,7 +5456,7 @@ export const useRuntimeStore = defineStore("runtime", {
         title: patch.title ?? "未命名轮次",
         phase: patch.phase ?? this.phase,
         traceSteps: patch.traceSteps ?? [],
-        traceTimeline: patch.traceTimeline ?? [],
+        traceTimeline: patchTimeline ?? [],
         toolActivities: patch.toolActivities ?? [],
         providerCallRecords: patch.providerCallRecords ?? [],
         hookTraceRecords: patch.hookTraceRecords ?? [],
@@ -5515,10 +5521,9 @@ export const useRuntimeStore = defineStore("runtime", {
     ) {
       // resolveEventTraceTimeline/buildFallbackRuntimeTraceTimeline already return a fresh timeline snapshot.
       this.traceTimeline = traceTimeline;
-      this.upsertTurnTrace(turnId, {
-        ...patch,
-        traceTimeline: this.traceTimeline
-      }, persist);
+      // Don't pass traceTimeline in patch — upsertTurnTrace will read this.traceTimeline
+      // to avoid a redundant deep clone (the caller already guarantees freshness).
+      this.upsertTurnTrace(turnId, patch, persist);
       // Lightweight debug log — full buildCacheTelemetryDebugSnapshot is already
       // called in STAGE 1 of each terminal event handler (completed/failed/cancelled),
       // so we avoid the redundant expensive computation here.
@@ -6342,7 +6347,7 @@ export const useRuntimeStore = defineStore("runtime", {
             return;
           }
 
-          // ===== STAGE 2 (setTimeout 0): Trace + metadata + UI unlock =====
+          // ===== STAGE 2 (setTimeout 0): UI unlock + single batch mutation =====
           const nextPhase = completedPhase === "completed" ? "ready" : completedPhase;
           const nextTraceSteps = payload.traceSteps ?? this.traceSteps;
           const nextSessionSummary = payload.sessionSummary ?? this.sessionSummary;
@@ -6356,9 +6361,8 @@ export const useRuntimeStore = defineStore("runtime", {
           const nextOutputTokens = payload.outputTokens ?? this.outputTokens;
           const nextTotalTokens = payload.totalTokens ?? this.totalTokens;
           const nextFirstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
-          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
-          this.syncToolMessages(payload.turnId, payload.toolActivities, false);
 
+          // Pre-compute trace timeline (deep clone, unavoidable but done before $patch)
           const traceTimeline = resolveEventTraceTimeline(payload, () =>
             buildFallbackRuntimeTraceTimeline({
               turnId: payload.turnId,
@@ -6385,7 +6389,24 @@ export const useRuntimeStore = defineStore("runtime", {
               turnDurationMs: payload.turnDurationMs ?? null
             })
           );
-          this.commitTurnTraceTimeline(payload.turnId, traceTimeline, {
+
+          // Pre-compute tool message patches for inline syncToolMessages
+          const completedActiveTools = terminalToolActivities.filter((tool) => tool.status !== "planned");
+          const completedToolPatches = completedActiveTools.map((tool) => ({
+            id: `tool-${payload.turnId}-${tool.id}`,
+            turnId: payload.turnId,
+            role: "tool" as const,
+            content: tool.resultText ?? "",
+            status: toolStatusToMessageStatus(tool.status),
+            toolName: tool.name,
+            canonicalToolName: tool.canonicalToolName ?? null,
+            displayNameZh: tool.displayNameZh ?? null,
+            detail: buildToolMessageDetail(tool),
+            durationSeconds: tool.durationSeconds ?? null
+          }));
+
+          // Pre-compute trace record patch
+          const completedTraceRecordPatch: Partial<TurnTraceRecord> & { updatedAt?: number } = {
             eventId: payload.eventId ?? null,
             eventType: payload.eventType ?? null,
             eventVersion: payload.eventVersion ?? null,
@@ -6413,9 +6434,112 @@ export const useRuntimeStore = defineStore("runtime", {
             ...reasoningTokenPatch,
             ...turnDurationPatch,
             error: null
-          }, false);
+          };
+
+          // Single batch: unlock UI + apply all state changes — only ONE reactive cycle
           this.$patch((state) => {
+            // --- UI unlock (top priority) ---
+            state.isSubmitting = false;
+            state.activeTurnId = null;
             state.phase = nextPhase;
+
+            // --- applyTurnTokenStats inline ---
+            if (payload.inputTokens != null || payload.outputTokens != null) {
+              for (let i = 0; i < state.messages.length; i++) {
+                const msg = state.messages[i];
+                if (msg.turnId !== payload.turnId) continue;
+                if (msg.role === "user" && payload.inputTokens != null) {
+                  state.messages[i] = { ...msg, tokenCount: payload.inputTokens };
+                } else if (msg.role === "assistant" && payload.outputTokens != null) {
+                  state.messages[i] = { ...msg, tokenCount: payload.outputTokens };
+                }
+              }
+            }
+
+            // --- syncToolMessages inline ---
+            if (completedToolPatches.length > 0) {
+              const existingIds = new Set<string>();
+              for (let i = 0; i < state.messages.length; i++) {
+                const msg = state.messages[i];
+                if (msg.role === "tool" && msg.turnId === payload.turnId) {
+                  existingIds.add(msg.id);
+                }
+              }
+              const pendingMessages: ChatMessage[] = [];
+              for (const patch of completedToolPatches) {
+                if (existingIds.has(patch.id)) {
+                  const idx = state.messages.findIndex((m) => m.id === patch.id);
+                  if (idx >= 0) {
+                    state.messages[idx] = {
+                      ...state.messages[idx],
+                      content: patch.content,
+                      status: patch.status,
+                      toolName: patch.toolName,
+                      canonicalToolName: patch.canonicalToolName,
+                      displayNameZh: patch.displayNameZh,
+                      detail: patch.detail,
+                      durationSeconds: patch.durationSeconds
+                    };
+                  }
+                } else {
+                  pendingMessages.push({
+                    id: patch.id,
+                    turnId: patch.turnId,
+                    role: "tool",
+                    content: patch.content,
+                    status: patch.status,
+                    toolName: patch.toolName,
+                    canonicalToolName: patch.canonicalToolName,
+                    displayNameZh: patch.displayNameZh,
+                    detail: patch.detail,
+                    durationSeconds: patch.durationSeconds
+                  });
+                }
+              }
+              if (pendingMessages.length > 0) {
+                state.messages.push(...pendingMessages);
+              }
+            }
+
+            // --- Trace timeline ---
+            state.traceTimeline = traceTimeline;
+
+            // --- Upsert turn trace inline ---
+            const existingIdx = state.turnTraceHistory.findIndex((t) => t.turnId === payload.turnId);
+            const traceUpdatedAt = Date.now();
+            if (existingIdx >= 0) {
+              state.turnTraceHistory[existingIdx] = {
+                ...state.turnTraceHistory[existingIdx],
+                ...completedTraceRecordPatch,
+                traceTimeline: traceTimeline,
+                updatedAt: traceUpdatedAt
+              };
+            } else {
+              state.turnTraceHistory.push({
+                turnId: payload.turnId,
+                title: buildTurnTraceTitleFromMessages(state.messages, payload.turnId),
+                phase: "completed",
+                traceSteps: nextTraceSteps,
+                traceTimeline: traceTimeline,
+                toolActivities: terminalToolActivities,
+                providerCallRecords: [],
+                hookTraceRecords: [],
+                buildContextObservation: null,
+                sessionSummary: nextSessionSummary,
+                fallbackReason: completedTraceRecordPatch.fallbackReason ?? null,
+                error: completedTraceRecordPatch.error ?? null,
+                inputTokens: completedTraceRecordPatch.inputTokens ?? null,
+                cacheHitInputTokens: completedTraceRecordPatch.cacheHitInputTokens ?? null,
+                reasoningTokens: completedTraceRecordPatch.reasoningTokens ?? null,
+                outputTokens: completedTraceRecordPatch.outputTokens ?? null,
+                totalTokens: completedTraceRecordPatch.totalTokens ?? null,
+                firstTokenLatencyMs: completedTraceRecordPatch.firstTokenLatencyMs ?? null,
+                turnDurationMs: completedTraceRecordPatch.turnDurationMs ?? null,
+                updatedAt: traceUpdatedAt
+              });
+            }
+
+            // --- Metadata ---
             state.traceSteps = nextTraceSteps;
             state.toolActivities = terminalToolActivities;
             state.sessionSummary = nextSessionSummary;
@@ -6430,9 +6554,10 @@ export const useRuntimeStore = defineStore("runtime", {
             state.outputTokens = nextOutputTokens;
             state.totalTokens = nextTotalTokens;
             state.firstTokenLatencyMs = nextFirstTokenLatencyMs;
-            state.isSubmitting = false;
-            state.activeTurnId = null;
           });
+
+          // Update eventCursor (not UI-critical) outside $patch
+          this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
 
           // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
           runLowPriorityTurnWork(() => {
@@ -6545,6 +6670,10 @@ export const useRuntimeStore = defineStore("runtime", {
         assistantMessage.status = "error";
         assistantMessage.errorDetail = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
 
+        // Apply token stats and sync tool messages inline (no deferred reactive cycle)
+        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+        this.syncToolMessages(payload.turnId, payload.toolActivities, false);
+
         this.phase = resolveRuntimePhaseFromEvent(payload, "failed");
         this.error = payload.error ?? DEFAULT_FAILED_TURN_ERROR;
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -6590,6 +6719,7 @@ export const useRuntimeStore = defineStore("runtime", {
             turnDurationMs: payload.turnDurationMs ?? null
           })
         );
+        // Pre-computed traceTimeline is already fresh — skip redundant clone inside
         this.commitTurnTraceTimeline(payload.turnId, failedTraceTimeline, {
           eventId: payload.eventId ?? null,
           eventType: payload.eventType ?? null,
@@ -6623,8 +6753,6 @@ export const useRuntimeStore = defineStore("runtime", {
           if (this.sessionId !== failedSessionId || isHistoricalMode(this.historyCursorMode)) {
             return;
           }
-          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
-          this.syncToolMessages(payload.turnId, payload.toolActivities, false);
           runLowPriorityTurnWork(() => {
             this.persistHistory();
             void this.loadRetrievedContextState(failedSessionId, {
@@ -6693,6 +6821,10 @@ export const useRuntimeStore = defineStore("runtime", {
         const cancelledRunId = this.activeRunId;
         const cancelledNodeId = this.visibleNodeId;
 
+        // Apply token stats and sync tool messages inline (no deferred reactive cycle)
+        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+        this.syncToolMessages(payload.turnId, payload.toolActivities, false);
+
         // Keep terminal UI state consistent even before deferred trace work runs.
         this.phase = resolveRuntimePhaseFromEvent(payload, "cancelled");
         this.error = null;
@@ -6735,6 +6867,7 @@ export const useRuntimeStore = defineStore("runtime", {
             turnDurationMs: payload.turnDurationMs ?? null
           })
         );
+        // Pre-computed traceTimeline is already fresh — skip redundant clone inside
         this.commitTurnTraceTimeline(payload.turnId, cancelledTraceTimeline, {
           eventId: payload.eventId ?? null,
           eventType: payload.eventType ?? null,
@@ -6766,11 +6899,7 @@ export const useRuntimeStore = defineStore("runtime", {
             return;
           }
 
-          // ===== STAGE 2 (setTimeout 0): Metadata + trace + UI unlock =====
-          this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
-          this.syncToolMessages(payload.turnId, payload.toolActivities, false);
-
-          // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
+          // ===== STAGE 2 (setTimeout 0): Non-urgent async work =====
           runLowPriorityTurnWork(() => {
             this.persistHistory();
             void this.loadRetrievedContextState(cancelledSessionId, {
