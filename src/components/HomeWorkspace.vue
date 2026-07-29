@@ -35,11 +35,11 @@ import type { ChatMessage, ConversationCheckpointEntry, HistoryNode, TraceTimeli
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { extractErrorMessage } from "@/lib/error-utils";
-import { isSimpleTextContent } from "@/lib/markdown";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
 import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 
 import Button from "@/components/ui/Button.vue";
+import { isSimpleTextContent } from "@/lib/markdown";
 import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import {
@@ -1140,9 +1140,6 @@ function shouldUseOptimizedAssistantStreaming(message: ChatMessage | null) {
   return Boolean(message && isAssistantStreaming(message) && !streamingRenderOptimizationDisabled.value);
 }
 
-// 流式渲染路径缓存：一旦在流式中选择了一条路径（markdown/纯文本），
-// 就在该消息的整个流式周期内锁定，避免因 content 逐渐累积触发 isSimpleTextContent
-// 翻转导致 DOM 子树重建闪烁。
 const streamingRenderPathLock = new Map<string, boolean>();
 
 function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, _content: string) {
@@ -1154,17 +1151,17 @@ function shouldUseMarkdownAssistantRendering(message: ChatMessage | null, _conte
     streamingRenderPathLock.delete(message.id);
     return true;
   }
+
   if (!shouldUseOptimizedAssistantStreaming(message)) {
     streamingRenderPathLock.delete(message.id);
     return false;
   }
 
-  // 已锁定路径直接返回缓存值
+  // 缓存锁定路径，防止内容渐进增长导致 isSimpleTextContent 翻转 → DOM 重建闪烁
   if (streamingRenderPathLock.has(message.id)) {
-    return streamingRenderPathLock.get(message.id) ?? false;
+    return streamingRenderPathLock.get(message.id)!;
   }
 
-  // 首次判断：基于当前完整内容做决定并锁定
   const useMarkdown = !isSimpleTextContent(message.content);
   streamingRenderPathLock.set(message.id, useMarkdown);
   return useMarkdown;

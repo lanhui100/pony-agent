@@ -46,8 +46,12 @@ const SwitchStub = defineComponent({
 });
 
 async function flushMarkdownRender() {
-  await new Promise<void>((resolve) => window.setTimeout(resolve, 160));
-  await nextTick();
+  // MarkdownRenderer 使用异步渲染（debounce 90ms+setTimeout(0)），
+  // 这里用多重 tick + 足够的时间窗口确保渲染完成。
+  for (let i = 0; i < 5; i++) {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
+    await nextTick();
+  }
 }
 
 function createProviderRegistry(): ProviderRegistry {
@@ -184,7 +188,7 @@ describe("HomeWorkspace markdown rendering", () => {
     expect(wrapper.html()).not.toContain("```md");
   }, 15000);
 
-  it("renders partial markdown HTML while the assistant is still pending", async () => {
+  it("shows plain text while assistant is streaming and renders markdown when streaming completes", async () => {
     window.localStorage.setItem("pony-agent.stream-render.release-chars", "20");
     const providerStore = useProviderStore();
     providerStore.$patch({
@@ -240,7 +244,21 @@ describe("HomeWorkspace markdown rendering", () => {
 
     await flushMarkdownRender();
 
-    expect(wrapper.find('[data-testid="assistant-streaming-flow"] .markdown-body').html()).toContain("<strong>流式加粗</strong>");
+    // 流式期间：含 Markdown 语法的内容走增量 Markdown 渲染
+    const streamingFlow = wrapper.get('[data-testid="assistant-streaming-flow"]');
+    expect(streamingFlow.find('.markdown-body').text()).toBe("流式加粗");
+
+    // 流式完成时：保留最终 markdown 渲染
+    const assistantMessage = runtimeStore.messages.find((m) => m.role === "assistant");
+    if (assistantMessage) {
+      assistantMessage.status = "done";
+    }
+    await nextTick();
+    await flushMarkdownRender();
+
+    expect(wrapper.find('.markdown-body').exists()).toBe(true);
+    expect(wrapper.html()).toContain("<strong>流式加粗</strong>");
+
     wrapper.unmount();
   }, 15000);
 

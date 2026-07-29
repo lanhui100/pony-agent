@@ -900,7 +900,9 @@ let lastLayoutCompensationAtMs = 0;
 
       const isStreamingAssistantUpdate = isSubmitting.value && latestMessageRole.value === "assistant";
       const targetMode: ScrollTargetMode = latestMessageRole.value === "user" ? "latest-user" : "anchor";
-      const behavior: ScrollBehavior = isStreamingAssistantUpdate ? "auto" : "smooth";
+      // 流式更新也使用 smooth (lerp) 而非 auto (instant jump)，
+      // 避免每 60ms stream tick 瞬间跳转导致的抖动感。
+      const behavior: ScrollBehavior = "smooth";
       if (isStreamingAssistantUpdate) {
         lastStreamingFollowQueuedAt = Date.now();
       }

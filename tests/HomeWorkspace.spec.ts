@@ -1454,8 +1454,11 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
     await waitForStreamingPresentation();
 
-    expect(findStreamingMarkdown(wrapper).exists()).toBe(true);
-    const streamingMarkdownInstanceId = wrapper.get(".markdown-stub").attributes("data-instance-id");
+    // 流式期间：含 Markdown 语法的内容走增量 Markdown 渲染
+    const streamingFlow = wrapper.get('[data-testid="assistant-streaming-flow"]');
+    expect(streamingFlow.exists()).toBe(true);
+    expect(streamingFlow.text()).toContain("**正在** 输出中");
+    expect(wrapper.find(".markdown-stub").exists()).toBe(true);
     expect(wrapper.find('[data-testid="workspace-agent-actions"]').exists()).toBe(false);
 
     runtimeStore.$patch({
@@ -1479,8 +1482,9 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     });
     await nextTick();
 
+    // 流式完成后切换到 MarkdownRenderer（branch 1）做一次性渲染
     expect(findStreamingMarkdown(wrapper).exists()).toBe(false);
-    expect(wrapper.get(".markdown-stub").attributes("data-instance-id")).toBe(streamingMarkdownInstanceId);
+    expect(wrapper.get(".markdown-stub").exists()).toBe(true);
     expect(wrapper.get(".markdown-stub").attributes("streaming")).toBeUndefined();
     const plainTextBlock = wrapper.get(".assistant-plain-text");
     expect(plainTextBlock.text()).toContain("**完成** 输出");
@@ -2551,7 +2555,8 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     await advanceAnimationFrames(5);
     const scrollDebugEvent = latestScrollDebugEvent("latest-turn-signature:queue-follow-scroll");
     expect(scrollDebugEvent).toBeDefined();
-    expect(scrollDebugEvent?.behavior).toBe("auto");
+    // 流式更新改为 smooth (lerp) 滚动，不再使用 auto (instant jump)
+    expect(scrollDebugEvent?.behavior).toBe("smooth");
     expect(scrollDebugEvent?.streamingAssistantUpdate).toBe(true);
     expect(viewportMetrics.scrollTop).toBeGreaterThan(700);
   });
