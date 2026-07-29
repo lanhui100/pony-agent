@@ -636,11 +636,21 @@ impl ContextStateRetriever for DefaultContextStateRetriever {
             &query.session.attachment_assets,
             SESSION_CONTEXT_ATTACHMENT_LIMIT,
         );
-        let transcript = TranscriptContext {
-            provider_native_messages: recent_transcript_slice(
+        // PA-060: 当 provider_native_transcript 为空但有历史对话时，
+        // 将 history 转为 native 格式作为 fallback。确保更换为 native-tool-flow
+        // 模型时不会丢失此前标准模型轮次的历史对话上下文。
+        let provider_native_messages = if query.session.provider_native_transcript.is_empty()
+            && !recent_history.is_empty()
+        {
+            history_to_native_messages(&recent_history)
+        } else {
+            recent_transcript_slice(
                 &query.session.provider_native_transcript,
                 TRANSCRIPT_CONTEXT_MESSAGE_LIMIT,
-            ),
+            )
+        };
+        let transcript = TranscriptContext {
+            provider_native_messages,
         };
         let references_image = references_image_in_context(
             query.user_message,
@@ -1418,6 +1428,22 @@ fn to_provider_history_message(message: &TurnHistoryMessage) -> Option<ProviderM
         }),
         _ => None,
     }
+}
+
+/// 将 TurnHistoryMessage 列表转为 provider-native 格式的消息列表。
+/// 用于在 provider_native_transcript 为空时，从 history 构建 fallback 上下文，
+/// 确保切换到 native-tool-flow 模型时不会丢失此前标准模型轮次的历史对话。
+fn history_to_native_messages(history: &[TurnHistoryMessage]) -> Vec<Value> {
+    history
+        .iter()
+        .map(|msg| {
+            let content = msg.content.trim().to_string();
+            json!({
+                "role": msg.role,
+                "content": content,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
