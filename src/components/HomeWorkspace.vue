@@ -6,7 +6,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
-  Brain,
+  Activity,
   Check,
   ChevronDown,
   ClipboardList,
@@ -1934,7 +1934,7 @@ watch(
               >
                 <summary class="conversation-disclosure-summary">
                   <div class="flex min-w-0 items-center gap-2">
-                    <Brain class="h-3 w-3 shrink-0 text-stone-400" />
+                    <Activity class="h-3 w-3 shrink-0 text-stone-400" />
                     <span>思考过程</span>
                   </div>
                   <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />

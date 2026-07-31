@@ -1325,11 +1325,23 @@
       ],
       "timestamp": "2026-07-29T15:42:44+08:00",
       "commit": "6ec5fa7"
+    },
+    {
+      "commit": "073191b",
+      "timestamp": "2026-07-31T16:52:21+08:00",
+      "bumps": [
+        {
+          "from": "0.1.66",
+          "to": "0.1.67",
+          "segment": "patch",
+          "component": "tauri"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-07-29T15:42:44+08:00",
+  "lastBump": "2026-07-31T16:52:21+08:00",
   "tauri": {
-    "patch": 66,
+    "patch": 67,
     "minor": 1,
     "major": 0
   },
