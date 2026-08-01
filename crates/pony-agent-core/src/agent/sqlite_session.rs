@@ -1045,12 +1045,35 @@ impl SessionBackend for SqliteSessionBackend {
 
 /// Returns the default SQLite database path.
 pub fn default_sqlite_path() -> PathBuf {
-    dirs::data_local_dir()
-        .or_else(dirs::home_dir)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("PonyAgent")
-        .join("sessions.db")
+    #[cfg(test)]
+    {
+        // 测试必须隔离：绝不读写用户生产数据库（%LOCALAPPDATA%/PonyAgent/sessions.db）。
+        unique_test_sqlite_path()
+    }
+
+    #[cfg(not(test))]
+    {
+        dirs::data_local_dir()
+            .or_else(dirs::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("PonyAgent")
+            .join("sessions.db")
+    }
+}
+
+/// 单元测试专用的会话数据库路径：按进程 + 时间戳唯一化，位于系统临时目录。
+#[cfg(test)]
+fn unique_test_sqlite_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "pony-agent-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ))
+    .join("sessions.db")
 }
 
 #[cfg(test)]

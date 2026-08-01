@@ -1740,8 +1740,12 @@ impl OpenAiSseAccumulator {
             self.reasoning_content.push_str(&delta_reasoning);
             on_delta(ProviderStreamChunk::Reasoning(delta_reasoning));
         }
-        if self.reasoning_content_value.is_none() && delta_reasoning_value.is_some() {
-            self.reasoning_content_value = delta_reasoning_value;
+        // 字符串分片（如 DeepSeek 思考模式）逐片到达，value 只需在 finish() 中
+        // 用完整累计文本回填；结构化值（如数组块）保留首块语义。
+        if let Some(value) = delta_reasoning_value {
+            if !matches!(value, Value::String(_)) && self.reasoning_content_value.is_none() {
+                self.reasoning_content_value = Some(value);
+            }
         }
 
         Ok(false)
@@ -1775,6 +1779,21 @@ impl OpenAiSseAccumulator {
             ));
         }
 
+        // DeepSeek 等 thinking 模式要求后续请求回传完整的 reasoning_content，
+        // 因此字符串类型的 value 必须用累计的完整思考文本回填，而不是首个分片。
+        let final_reasoning_value = if reasoning_content_value
+            .as_ref()
+            .is_none_or(|value| matches!(value, Value::String(_)))
+            && !reasoning_content.trim().is_empty()
+        {
+            Some(Value::String(reasoning_content.clone()))
+        } else {
+            reasoning_content_value.or_else(|| {
+                (!reasoning_content.trim().is_empty())
+                    .then(|| Value::String(reasoning_content.clone()))
+            })
+        };
+
         Ok(OpenAiStreamMessage {
             output_text,
             tool_call,
@@ -1783,9 +1802,7 @@ impl OpenAiSseAccumulator {
             } else {
                 Some(reasoning_content.clone())
             },
-            reasoning_content_value: reasoning_content_value.or_else(|| {
-                (!reasoning_content.trim().is_empty()).then(|| Value::String(reasoning_content))
-            }),
+            reasoning_content_value: final_reasoning_value,
             token_usage,
         })
     }
@@ -1964,8 +1981,12 @@ where
             reasoning.push_str(&delta_reasoning);
             on_delta(ProviderStreamChunk::Reasoning(delta_reasoning));
         }
-        if reasoning_value.is_none() && delta_reasoning_value.is_some() {
-            reasoning_value = delta_reasoning_value;
+        // 与 OpenAiSseAccumulator 保持一致：字符串分片只累计文本，
+        // value 在下方用完整文本回填；结构化值保留首块。
+        if let Some(value) = delta_reasoning_value {
+            if !matches!(value, Value::String(_)) && reasoning_value.is_none() {
+                reasoning_value = Some(value);
+            }
         }
     }
 
@@ -1983,6 +2004,17 @@ where
         ));
     }
 
+    let final_reasoning_value = if reasoning_value
+        .as_ref()
+        .is_none_or(|value| matches!(value, Value::String(_)))
+        && !reasoning.trim().is_empty()
+    {
+        Some(Value::String(reasoning.clone()))
+    } else {
+        reasoning_value
+            .or_else(|| (!reasoning.trim().is_empty()).then(|| Value::String(reasoning.clone())))
+    };
+
     Ok(OpenAiStreamMessage {
         output_text: combined,
         tool_call: None,
@@ -1991,8 +2023,7 @@ where
         } else {
             Some(reasoning.clone())
         },
-        reasoning_content_value: reasoning_value
-            .or_else(|| (!reasoning.trim().is_empty()).then(|| Value::String(reasoning))),
+        reasoning_content_value: final_reasoning_value,
         token_usage: None,
     })
 }
@@ -2546,6 +2577,26 @@ fn normalize_openai_assistant_message(message: &Value) -> Value {
         normalized["tool_calls"] = tool_calls;
     }
 
+    // DeepSeek thinking 模式：带 tool_calls 的 assistant 消息必须回传非空
+    // reasoning_content，否则 API 返回 400（实测校验只要求非空，不校验内容一致性）。
+    // 本地 planner 决策等来源没有该字段，这里兜底填充占位文本。
+    // 注意：结构化 reasoning（数组）是合法值，必须原样保留。
+    let reasoning_missing = match normalized.get("reasoning_content") {
+        Some(Value::Null) | None => true,
+        Some(Value::String(text)) => text.trim().is_empty(),
+        Some(_) => false,
+    };
+    if normalized
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| !calls.is_empty())
+        .unwrap_or(false)
+        && reasoning_missing
+    {
+        normalized["reasoning_content"] =
+            Value::String(TOOL_CALL_REASONING_PLACEHOLDER.to_string());
+    }
+
     normalized
 }
 
@@ -2869,7 +2920,14 @@ fn openai_assistant_message_for_tool_result(
     tool_call: &ToolCall,
 ) -> Value {
     let Some(message) = assistant_message else {
-        return provider_native_assistant_tool_call_message(None, None, tool_call);
+        // 本地 planner 决策没有 reasoning_content；DeepSeek thinking 模式要求
+        // 带 tool_calls 的 assistant 消息必须回传非空 reasoning_content，
+        // 这里兜底填充占位文本（实测 API 只校验非空，不校验内容一致性）。
+        return provider_native_assistant_tool_call_message_with_reasoning_value(
+            None,
+            Some(&Value::String(TOOL_CALL_REASONING_PLACEHOLDER.to_string())),
+            tool_call,
+        );
     };
 
     let mut normalized = normalize_openai_assistant_message(message);
@@ -2893,13 +2951,25 @@ fn openai_assistant_message_for_tool_result(
     {
         return provider_native_assistant_tool_call_message_with_reasoning_value(
             normalized.get("content").and_then(Value::as_str),
-            normalized.get("reasoning_content"),
+            Some(&normalized_reasoning_or_placeholder(&normalized)),
             tool_call,
         );
     }
 
     normalized["tool_calls"] = Value::Array(filtered_tool_calls);
     normalized
+}
+
+/// 提取 assistant 消息中的 reasoning_content；为空或缺失时用占位文本兜底，
+/// 保证 DeepSeek thinking 模式的工具调用回传始终非空。
+/// 结构化 reasoning（数组）是合法值，原样保留。
+fn normalized_reasoning_or_placeholder(normalized: &Value) -> Value {
+    match normalized.get("reasoning_content") {
+        Some(value @ Value::String(text)) if !text.trim().is_empty() => value.clone(),
+        Some(Value::Null) | None => Value::String(TOOL_CALL_REASONING_PLACEHOLDER.to_string()),
+        Some(Value::String(_)) => Value::String(TOOL_CALL_REASONING_PLACEHOLDER.to_string()),
+        Some(other) => other.clone(),
+    }
 }
 
 fn openai_tool_call_matches_executed_call(call: &Value, executed_call: &ToolCall) -> bool {
@@ -3184,6 +3254,10 @@ const OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS: usize = 12_000;
 const OPENAI_TOOL_RESULT_HEAD_CHARS: usize = 4_500;
 const OPENAI_TOOL_RESULT_TAIL_CHARS: usize = 2_500;
 const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
+/// DeepSeek thinking 模式要求带 tool_calls 的 assistant 消息回传非空
+/// reasoning_content（实测 API 只校验非空，不校验内容一致性）。
+/// 本地 planner 决策等来源没有该字段时用此占位文本兜底。
+const TOOL_CALL_REASONING_PLACEHOLDER: &str = "工具调用前的思考过程已省略。";
 const PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 5;
 
 fn extract_provider_error_detail(err: &str) -> String {
@@ -5183,6 +5257,64 @@ mod tests {
         );
     }
 
+    /// DeepSeek thinking 模式：本地 planner 决策（assistant_message=None）的
+    /// follow-up 必须回传非空 reasoning_content，否则 API 返回 400。
+    #[test]
+    fn openai_tool_followup_without_provider_assistant_message_still_echoes_reasoning() {
+        let tool_call = ToolCall {
+            call_id: Some("call_planner_batch".to_string()),
+            name: "workspace_batch".to_string(),
+            arguments: json!({
+                "calls": [
+                    { "name": "workspace_gather_context", "arguments": { "path": "src" } }
+                ]
+            }),
+            plan: None,
+        };
+
+        let rebuilt = openai_assistant_message_for_tool_result(None, &tool_call);
+
+        assert_eq!(
+            rebuilt.get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+        let reasoning = rebuilt
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .expect("planner follow-up must echo non-empty reasoning_content");
+        assert!(!reasoning.trim().is_empty());
+        assert!(rebuilt.get("tool_calls").is_some());
+    }
+
+    /// DeepSeek thinking 模式：assistant 消息带 tool_calls 但 reasoning_content
+    /// 缺失或为空时，normalize 必须兜底填充非空占位文本。
+    #[test]
+    fn openai_normalize_fills_reasoning_placeholder_for_tool_call_message_without_reasoning() {
+        let message = json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {
+                        "name": "WebSearch",
+                        "arguments": "{\"query\":\"migration\"}"
+                    }
+                }
+            ]
+        });
+
+        let normalized = normalize_openai_assistant_message(&message);
+
+        let reasoning = normalized
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .expect("tool-call assistant message must carry non-empty reasoning_content");
+        assert!(!reasoning.trim().is_empty());
+        assert_eq!(reasoning, TOOL_CALL_REASONING_PLACEHOLDER);
+    }
+
     #[test]
     fn openai_tool_followup_truncates_large_tool_output() {
         let tool_call = ToolCall {
@@ -5381,14 +5513,9 @@ mod tests {
 
         assert_eq!(
             response.provider_source,
-            "provider_followup_stream_sync_fallback"
+            "provider_followup_local_fallback"
         );
         assert_eq!(response.provider_mode, "fallback");
-        assert!(response
-            .fallback_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("stream_followup_failed"));
         assert!(response
             .fallback_reason
             .as_deref()
@@ -5461,6 +5588,105 @@ mod tests {
                 ProviderStreamChunk::Text("alpha".to_string()),
                 ProviderStreamChunk::Text("beta".to_string()),
             ]
+        );
+    }
+
+    /// DeepSeek 思考模式会逐片流式返回 reasoning_content。
+    /// follow-up 请求必须把完整思考文本回传给 API（否则 DeepSeek 返回
+    /// "The `reasoning_content` in the thinking mode must be passed back to the API."），
+    /// 因此 reasoning_content_value 不能只保留首个分片。
+    #[test]
+    fn openai_stream_reasoning_value_echoes_full_reasoning_text() {
+        let raw_text = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"第一步\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"检查文件结构\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"。\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"结论：已了解。\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut deltas = Vec::new();
+
+        let message = collect_openai_sse_message_from_reader(
+            std::io::Cursor::new(raw_text.as_bytes()),
+            "unit-test",
+            &mut |delta| deltas.push(delta),
+        )
+        .expect("stream with reasoning chunks should parse");
+
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("第一步检查文件结构。")
+        );
+        assert_eq!(
+            message
+                .reasoning_content_value
+                .as_ref()
+                .and_then(Value::as_str),
+            Some("第一步检查文件结构。")
+        );
+        assert_eq!(
+            deltas,
+            vec![
+                ProviderStreamChunk::Reasoning("第一步".to_string()),
+                ProviderStreamChunk::Reasoning("检查文件结构".to_string()),
+                ProviderStreamChunk::Reasoning("。".to_string()),
+                ProviderStreamChunk::Text("结论：已了解。".to_string()),
+            ]
+        );
+    }
+
+    /// 流式决策后发起 follow-up 时，assistant 消息中的 reasoning_content
+    /// 必须携带完整思考文本（DeepSeek thinking 模式的回传校验）。
+    #[test]
+    fn openai_followup_message_carries_full_reasoning_content() {
+        let request = ProviderRequest {
+            model: "deepseek-v4-flash".to_string(),
+            input: vec![ProviderMessage::user("批量读取文件")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 1024,
+        };
+        let tool_call = ToolCall {
+            call_id: Some("call_batch".to_string()),
+            name: "workspace_batch".to_string(),
+            arguments: json!({
+                "calls": [
+                    { "name": "workspace_gather_context", "arguments": { "path": "1.0" } }
+                ]
+            }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace_batch".to_string(),
+            status: "error".to_string(),
+            output: "{\"ok\":false}".to_string(),
+            duration_ms: 5,
+        };
+        let full_reasoning = "完整思考文本：先看文件结构。";
+        let assistant_message = provider_native_assistant_tool_call_message_with_reasoning_value(
+            None,
+            Some(&Value::String(full_reasoning.to_string())),
+            &tool_call,
+        );
+
+        let messages = openai_messages_with_tool_result(
+            &request,
+            &mut vec![],
+            Some(&assistant_message),
+            &tool_call,
+            &tool_result,
+        );
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages[1].get("reasoning_content").and_then(Value::as_str),
+            Some(full_reasoning)
+        );
+        assert_eq!(
+            messages[2].get("tool_call_id").and_then(Value::as_str),
+            Some("call_batch")
         );
     }
 

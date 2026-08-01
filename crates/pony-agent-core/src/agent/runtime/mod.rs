@@ -1418,20 +1418,17 @@ impl AgentRuntime {
 
         let (mut first_decision, initial_decision_duration_ms) =
             if prepared.provider.requires_provider_native_tool_flow() {
-                match preflight_decision {
-                    Some(decision) if planner_decision_can_override_native_tool_flow(&decision) => {
-                        (decision, None)
-                    }
-                    _ => {
-                        let started_at = Instant::now();
-                        let decision = provider_decision(
-                            &prepared.provider,
-                            &prepared.planning_request,
-                            &prepared.tools,
-                        )?;
-                        (decision, Some(started_at.elapsed().as_millis() as u64))
-                    }
-                }
+                // native tool flow（reasoning 模型，如 DeepSeek thinking 模式）下必须由
+                // provider 生成决策：工具执行后的 follow-up 请求需要把 assistant 消息的
+                // reasoning_content 完整回传给 API，本地 planner 决策没有该字段，
+                // 会被 DeepSeek 等 thinking 模式以 invalid_request_error 拒绝。
+                let started_at = Instant::now();
+                let decision = provider_decision(
+                    &prepared.provider,
+                    &prepared.planning_request,
+                    &prepared.tools,
+                )?;
+                (decision, Some(started_at.elapsed().as_millis() as u64))
             } else {
                 match preflight_decision {
                     Some(decision) => (decision, None),
@@ -4935,27 +4932,24 @@ impl AgentRuntime {
             String,
         > {
             if prepared.provider.requires_provider_native_tool_flow() {
-                return match preflight_decision {
-                    Some(decision) if planner_decision_can_override_native_tool_flow(&decision) => {
+                // 与 plan_turn 一致：native tool flow 下必须由 provider 生成决策，
+                // 保证 follow-up 回传的 assistant 消息带完整 reasoning_content。
+                if supports_true_streaming_decision {
+                    stream_initial_decision().or_else(|_| decide_sync())
+                } else {
+                    decide_sync()
+                }
+            } else {
+                match preflight_decision {
+                    Some(decision) => {
                         Ok((decision, None, None, None, ProviderLatencyKind::Unknown))
                     }
-                    _ => {
+                    None => {
                         if supports_true_streaming_decision {
                             stream_initial_decision().or_else(|_| decide_sync())
                         } else {
                             decide_sync()
                         }
-                    }
-                };
-            }
-
-            match preflight_decision {
-                Some(decision) => Ok((decision, None, None, None, ProviderLatencyKind::Unknown)),
-                None => {
-                    if supports_true_streaming_decision {
-                        stream_initial_decision().or_else(|_| decide_sync())
-                    } else {
-                        decide_sync()
                     }
                 }
             }
@@ -7057,14 +7051,6 @@ fn build_skill_tool_result(
 }
 
 */
-
-fn planner_decision_can_override_native_tool_flow(decision: &ProviderDecision) -> bool {
-    decision
-        .tool_call
-        .as_ref()
-        .and_then(|call| call.plan.as_ref())
-        .is_some()
-}
 
 fn graph_decision_kind_label(kind: &GraphDecisionKind) -> &'static str {
     match kind {
@@ -9344,6 +9330,34 @@ mod tests {
         }
     }
 
+    /// 非 reasoning 模型配置：走 planner 预检决策 + tool-selection 修补流程
+    /// （与 reasoning 模型的 provider-native tool flow 不同）。
+    fn test_chat_provider_selection(base_url: String) -> ResolvedProviderSelection {
+        ResolvedProviderSelection {
+            requested_name: "test-openai-chat".to_string(),
+            provider_name: "test-openai-chat".to_string(),
+            protocol: crate::agent::provider::ProviderProtocol::OpenAi,
+            base_url,
+            auth_type: crate::agent::provider::ProviderAuthType::Auto,
+            api_key_env_var: "TEST_API_KEY".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: "gpt-4.1-mini".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::None,
+        }
+    }
+
     fn deepseek_provider_selection(base_url: String) -> ResolvedProviderSelection {
         ResolvedProviderSelection {
             requested_name: "deepseek".to_string(),
@@ -9676,7 +9690,7 @@ mod tests {
     #[test]
     fn run_turn_records_capability_mediation_trace_for_forced_tool_planner() {
         let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-        let selection = test_provider_selection("http://localhost".to_string());
+        let selection = test_chat_provider_selection("http://localhost".to_string());
         let runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
@@ -9731,7 +9745,7 @@ mod tests {
     fn capability_mediation_hooks_can_rewrite_arguments_before_tool_execution() {
         let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
-        let selection = test_provider_selection("http://localhost".to_string());
+        let selection = test_chat_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
@@ -9793,7 +9807,7 @@ mod tests {
     fn planner_preflight_hooks_can_rewrite_tool_call_before_execution() {
         let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
-        let selection = test_provider_selection("http://localhost".to_string());
+        let selection = test_chat_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
@@ -9857,7 +9871,7 @@ mod tests {
     fn planner_tool_selection_hooks_can_rewrite_selected_tool_before_execution() {
         let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
-        let selection = test_provider_selection("http://localhost".to_string());
+        let selection = test_chat_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
@@ -9921,7 +9935,7 @@ mod tests {
     fn skill_mediation_hooks_can_rewrite_arguments_before_skill_execution() {
         let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let recorded_calls = Arc::new(Mutex::new(Vec::new()));
-        let selection = test_provider_selection("http://localhost".to_string());
+        let selection = test_chat_provider_selection("http://localhost".to_string());
         let mut runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver { selection }),
@@ -14620,6 +14634,105 @@ mod tests {
         assert!(provider_calls
             .iter()
             .all(|record| record.first_token_latency_ms.is_some()));
+    }
+
+    #[test]
+    fn deepseek_followup_replays_full_reasoning_from_fragmented_sse() {
+        // 真实 DeepSeek 以多个 SSE chunk 流式返回 reasoning_content，
+        // follow-up 请求必须回传完整累计文本（DeepSeek thinking 模式校验）。
+        let final_text = "deepseek fragmented follow-up completed";
+        let full_reasoning = "第一步检查版本迁移，第二步执行搜索。";
+        let server = MockHttpServer::start(vec![
+            sse_response(&[
+                json!({
+                    "choices": [{"delta": {"reasoning_content": "第一步检查"}}]
+                }),
+                json!({
+                    "choices": [{"delta": {"reasoning_content": "版本迁移，"}}]
+                }),
+                json!({
+                    "choices": [{"delta": {"reasoning_content": "第二步执行搜索。"}}]
+                }),
+                json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "call a tool first",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_web_search",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "workspace_search_text",
+                                            "arguments": "{\"query\":\"migration\",\"path\":\".\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+            ]),
+            sse_response(&[
+                json!({
+                    "choices": [{"delta": {"content": final_text}}]
+                }),
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 60,
+                        "completion_tokens": 24,
+                        "total_tokens": 84
+                    }
+                }),
+            ]),
+        ]);
+        let mut runtime =
+            build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+
+        runtime.start_turn_stream(
+            &sink,
+            "turn-deepseek-fragmented".to_string(),
+            TurnInput {
+                message: "搜索迁移指南".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                workspace_mode: None,
+                session_id: Some("deepseek-fragmented".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+            },
+        );
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        let followup_request: Value =
+            serde_json::from_str(&requests[1]).expect("followup request should be json");
+        let messages = followup_request
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages");
+        let replayed = messages
+            .iter()
+            .find(|message| {
+                message.get("role").and_then(Value::as_str) == Some("assistant")
+                    && message
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .map(|calls| !calls.is_empty())
+                        .unwrap_or(false)
+            })
+            .expect("follow-up should replay assistant tool call message");
+        assert_eq!(
+            replayed.get("reasoning_content").and_then(Value::as_str),
+            Some(full_reasoning),
+            "follow-up 必须回传完整 reasoning_content，而不是首个分片"
+        );
     }
 
     #[test]

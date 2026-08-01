@@ -464,12 +464,29 @@ impl FrontendDiagnosticsStore {
 }
 
 pub fn default_frontend_diagnostics_sqlite_path() -> PathBuf {
-    dirs::data_local_dir()
-        .or_else(dirs::home_dir)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("PonyAgent")
+    #[cfg(test)]
+    {
+        // 测试必须隔离：绝不读写用户生产数据（%LOCALAPPDATA%/PonyAgent/frontend-diagnostics.db）。
+        std::env::temp_dir().join(format!(
+            "pony-agent-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ))
         .join("frontend-diagnostics.db")
+    }
+
+    #[cfg(not(test))]
+    {
+        dirs::data_local_dir()
+            .or_else(dirs::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("PonyAgent")
+            .join("frontend-diagnostics.db")
+    }
 }
 
 fn build_export_file_name(format: &str, session_id: &Option<String>) -> String {

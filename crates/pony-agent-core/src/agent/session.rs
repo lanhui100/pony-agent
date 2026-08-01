@@ -4251,12 +4251,21 @@ fn extract_explicit_file_name(text: &str) -> Option<String> {
 }
 
 fn default_storage_path() -> PathBuf {
-    dirs::data_local_dir()
-        .or_else(dirs::home_dir)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("PonyAgent")
-        .join("sessions.json")
+    #[cfg(test)]
+    {
+        // 测试必须隔离：绝不读写用户生产数据（%LOCALAPPDATA%/PonyAgent/）。
+        unique_test_session_dir("pony-agent-storage").join("sessions.json")
+    }
+
+    #[cfg(not(test))]
+    {
+        dirs::data_local_dir()
+            .or_else(dirs::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("PonyAgent")
+            .join("sessions.json")
+    }
 }
 
 fn default_attachment_root() -> PathBuf {

@@ -160,7 +160,9 @@ impl LocalTurnPlanner {
             Some(ToolCall {
                 call_id: None,
                 name: skill.label.clone(),
-                arguments: json!({}),
+                arguments: json!({
+                    "description": format!("执行技能 `{}`。", skill.label),
+                }),
                 plan: Some(skill_tool_plan(skill)),
             })
         })
@@ -204,7 +206,9 @@ impl LocalTurnPlanner {
             return Some(ToolCall {
                 call_id: None,
                 name: model_tool_name("time_now"),
-                arguments: json!({}),
+                arguments: json!({
+                    "description": "查询当前时间。",
+                }),
                 plan: None,
             });
         }
@@ -217,6 +221,7 @@ impl LocalTurnPlanner {
                 call_id: None,
                 name: model_tool_name("workspace_list_files"),
                 arguments: json!({
+                    "description": "列出目录下的文件和子目录。",
                     "path": referenced_path.unwrap_or_else(|| ".".to_string()),
                     "limit": 60,
                 }),
@@ -233,6 +238,7 @@ impl LocalTurnPlanner {
                         call_id: None,
                         name: model_tool_name("workspace_gather_context"),
                         arguments: json!({
+                            "description": format!("搜索并收集路径 `{}` 的上下文。", path),
                             "path": path,
                             "query": query,
                             "lineCount": 80,
@@ -246,6 +252,7 @@ impl LocalTurnPlanner {
                     call_id: None,
                     name: model_tool_name("workspace_search_text"),
                     arguments: json!({
+                        "description": format!("在工作区中搜索文本 `{}`。", query),
                         "query": query,
                         "path": ".",
                         "limit": 20,
@@ -278,6 +285,7 @@ impl LocalTurnPlanner {
                         call_id: None,
                         name: model_tool_name("workspace_gather_context"),
                         arguments: json!({
+                            "description": format!("在路径 `{}` 中搜索并收集上下文。", path),
                             "path": path,
                             "query": query,
                             "lineCount": 80,
@@ -291,6 +299,7 @@ impl LocalTurnPlanner {
                     call_id: None,
                     name: model_tool_name("workspace_search_text"),
                     arguments: json!({
+                        "description": format!("在工作区中搜索文本 `{}`。", query),
                         "query": query,
                         "path": ".",
                         "limit": 20,
@@ -327,6 +336,7 @@ impl LocalTurnPlanner {
                     call_id: None,
                     name: model_tool_name("workspace_gather_context"),
                     arguments: json!({
+                        "description": format!("读取路径 `{}` 的上下文。", path),
                         "path": path,
                         "lineCount": 80,
                         "limit": 40,
@@ -339,6 +349,7 @@ impl LocalTurnPlanner {
                 call_id: None,
                 name: model_tool_name("workspace_gather_context"),
                 arguments: json!({
+                    "description": format!("收集路径 `{}` 的上下文。", path),
                     "path": path,
                     "lineCount": 80,
                     "limit": 40,
@@ -418,10 +429,22 @@ impl LocalTurnPlanner {
             })
             .collect::<Vec<_>>();
 
+        let batch_description = format!(
+            "批量调用 {} 个工具收集上下文（{}）",
+            tool_plan_steps.len(),
+            explicit_paths
+                .iter()
+                .take(MAX_LOCAL_BATCH_PATHS)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、")
+        );
+
         Some(ToolCall {
             call_id: None,
             name: model_tool_name("workspace_batch"),
             arguments: json!({
+                "description": batch_description,
                 "parallel": true,
                 "continueOnError": true,
                 "calls": calls,
@@ -728,6 +751,12 @@ fn looks_like_path(segment: &str) -> bool {
         return false;
     }
 
+    // 纯版本号（1.0 / 1.3 / v2.1.0 等）不是路径，避免把
+    // "自1.0版本以来到目前最新的1.3+" 这类文本中的版本号误判为文件路径。
+    if looks_like_version_number(segment) {
+        return false;
+    }
+
     segment.contains('/')
         || segment.contains('\\')
         || segment
@@ -739,6 +768,15 @@ fn looks_like_path(segment: &str) -> bool {
                     && segment.contains('.')
             })
             .unwrap_or(false)
+}
+
+fn looks_like_version_number(segment: &str) -> bool {
+    let lowered = segment.to_ascii_lowercase();
+    let core = lowered.strip_prefix('v').unwrap_or(&lowered);
+    core.contains('.')
+        && core.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())
+        })
 }
 
 fn contains_any(text: &str, keywords: &[&str]) -> bool {
@@ -1024,6 +1062,72 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .expect("batch calls");
         assert_eq!(calls.len(), MAX_LOCAL_BATCH_PATHS);
+    }
+
+    #[test]
+    fn planner_version_numbers_are_not_treated_as_paths() {
+        // "自1.0版本以来到目前最新的1.3+" 中的 1.0 / 1.3 是版本号，不是文件路径。
+        // 此前会被误判为显式路径并触发 BatchExecute（path=1.0/1.3），
+        // 子调用全部 invalid_path 失败。
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "langchain和langgraph自1.0版本以来到目前最新的1.3+，迁移升级有哪些 break change？",
+            &[],
+        );
+
+        assert!(
+            call.is_none(),
+            "版本号不应触发本地工具调用，实际得到：{:?}",
+            call
+        );
+    }
+
+    #[test]
+    fn planner_looks_like_path_rejects_version_numbers() {
+        assert!(!looks_like_path("1.0"));
+        assert!(!looks_like_path("1.3"));
+        assert!(!looks_like_path("v2.1.0"));
+        assert!(!looks_like_path("2.0.0"));
+        // 带真实文件扩展名或目录分隔符的仍应识别为路径
+        assert!(looks_like_path("1.0.md"));
+        assert!(looks_like_path("src/main.rs"));
+        assert!(looks_like_path("Cargo.toml"));
+    }
+
+    #[test]
+    fn planner_batch_call_carries_description() {
+        let call = LocalTurnPlanner::infer_local_tool_call(
+            "请同时查看 src/main.rs 和 src/lib.rs 的实现",
+            &[],
+        )
+        .expect("batch tool call");
+
+        assert_eq!(call.name, "BatchExecute");
+        let description = call
+            .arguments
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .expect("batch description");
+        assert!(description.starts_with("批量调用"));
+        assert!(description.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn planner_quick_tool_calls_carry_description() {
+        let time_call = LocalTurnPlanner::infer_local_tool_call("现在几点？", &[])
+            .expect("time call");
+        assert!(time_call
+            .arguments
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some());
+
+        let list_call = LocalTurnPlanner::infer_local_tool_call("目录里有哪些文件？", &[])
+            .expect("list call");
+        assert!(list_call
+            .arguments
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some());
     }
 
     #[test]
