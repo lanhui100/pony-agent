@@ -21,4 +21,5 @@ pub mod sse_adapter;
 pub mod telemetry;
 pub mod tool_runtime;
 pub mod tools;
+pub mod trace_persistence;
 pub mod turn_flow;

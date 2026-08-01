@@ -81,6 +81,7 @@ pub struct FrontendTraceAppendCommand {
 pub struct FrontendDiagnosticsStore {
     db_path: PathBuf,
     connection: Mutex<Option<Connection>>,
+    last_cleanup_ms: Mutex<Option<i64>>,
 }
 
 impl FrontendDiagnosticsStore {
@@ -88,6 +89,7 @@ impl FrontendDiagnosticsStore {
         Self {
             db_path,
             connection: Mutex::new(None),
+            last_cleanup_ms: Mutex::new(None),
         }
     }
 
@@ -223,8 +225,26 @@ impl FrontendDiagnosticsStore {
         }
         tx.commit().map_err(|e| format!("commit: {e}"))?;
         drop(slot);
-        self.clear_before(now_ms() - retention_window_ms())?;
+        // Retention 清理降频：最多每小时一次，避免每次 flush 都做两表 DELETE。
+        self.clear_before_if_due(now_ms() - retention_window_ms())?;
         Ok(())
+    }
+
+    fn clear_before_if_due(&self, ts_wall_ms: i64) -> Result<(), String> {
+        let now = now_ms();
+        {
+            let mut last = self
+                .last_cleanup_ms
+                .lock()
+                .map_err(|e| format!("cleanup lock: {e}"))?;
+            if let Some(previous) = *last {
+                if now.saturating_sub(previous) < retention_cleanup_interval_ms() {
+                    return Ok(());
+                }
+            }
+            *last = Some(now);
+        }
+        self.clear_before(ts_wall_ms)
     }
 
     pub fn query_window(
@@ -499,6 +519,10 @@ fn build_export_file_name(format: &str, session_id: &Option<String>) -> String {
 
 fn retention_window_ms() -> i64 {
     1000 * 60 * 60 * 24 * 14
+}
+
+fn retention_cleanup_interval_ms() -> i64 {
+    1000 * 60 * 60
 }
 
 fn now_ms() -> i64 {

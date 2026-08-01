@@ -902,6 +902,37 @@ impl SessionStore {
         snapshot
     }
 
+    /// 只读快照：不创建 session、不修正数据、不触发任何落盘。
+    /// 供可观测性/展示类查询使用（读锁即可），避免 trace 面板等
+    /// 查询路径占用写锁或意外触发全量写库而阻塞主对话执行路径。
+    pub fn snapshot_at_readonly(
+        &self,
+        session_id: Option<&str>,
+        node_id: Option<&str>,
+        fallback_history: &[TurnHistoryMessage],
+    ) -> SessionSnapshot {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
+        let Some(session) = self.sessions.get(session_key) else {
+            return default_snapshot_for_session(session_key, node_id);
+        };
+        let attachment_assets = attachment_assets_for_query(
+            &self.sessions,
+            &self.attachment_assets,
+            &self.session_attachment_index,
+            &self.attachment_root,
+            &AttachmentAssetQuery {
+                session_id: Some(session_key.to_string()),
+                ..AttachmentAssetQuery::default()
+            },
+            now_timestamp_ms(),
+        );
+        let mut snapshot = snapshot_from_state(session, attachment_assets, node_id);
+        if snapshot.history.is_empty() && !fallback_history.is_empty() {
+            snapshot.history = fallback_history.to_vec();
+        }
+        snapshot
+    }
+
     pub fn append_turn(
         &mut self,
         session_id: Option<&str>,
@@ -1021,11 +1052,13 @@ impl SessionStore {
         self.save_to_backend();
     }
 
-    pub fn record_turn_trace(
+    /// 仅做内存更新并返回待持久化的 trace 变更（SQLite 落库由调用方决定，
+    /// 主对话热路径应通过后台队列异步落库，避免可观测性写盘阻塞主对话）。
+    pub fn record_turn_trace_in_memory(
         &mut self,
         session_id: Option<&str>,
         mut trace: TurnTraceRecord,
-    ) -> SessionSnapshot {
+    ) -> (String, SessionTraceMutation) {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         {
             let session = self.ensure_session(&session_key);
@@ -1056,14 +1089,89 @@ impl SessionStore {
             .iter()
             .position(|item| item.turn_id == trace.turn_id)
             .unwrap_or(snapshot.turn_trace_history.len().saturating_sub(1));
-        self.persist_session_and_trace_change(
-            &session_key,
+        (
+            session_key,
             SessionTraceMutation::UpsertOne {
                 trace: trace.clone(),
                 trace_order,
             },
-        );
+        )
+    }
+
+    pub fn record_turn_trace(
+        &mut self,
+        session_id: Option<&str>,
+        trace: TurnTraceRecord,
+    ) -> SessionSnapshot {
+        let (session_key, mutation) = self.record_turn_trace_in_memory(session_id, trace);
+        let snapshot = self.snapshot_for_session(&session_key);
+        self.persist_session_and_trace_change(&session_key, mutation);
         snapshot
+    }
+
+    /// 后台 trace 持久化 worker 的落库入口：与 persist_session_and_trace_change
+    /// 行为一致（含失败回退），但只被后台线程调用，不阻塞主对话执行路径。
+    pub fn persist_trace_mutation_from_worker(
+        &mut self,
+        session_id: &str,
+        mutation: SessionTraceMutation,
+    ) {
+        self.persist_session_and_trace_change(session_id, mutation);
+    }
+
+    /// 仅做内存更新并返回待持久化的 trace 变更（供异步落库使用）。
+    pub fn annotate_turn_trace_terminal_event_in_memory(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        event_id: Option<String>,
+        event_type: Option<String>,
+        event_version: Option<String>,
+        sequence: Option<u64>,
+        emitted_at_ms: Option<u64>,
+    ) -> Option<(String, SessionTraceMutation)> {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let persisted_event_id = event_id.clone();
+        let persisted_event_type = event_type.clone();
+        let persisted_event_version = event_version.clone();
+        {
+            let session = self.sessions.get_mut(&session_key)?;
+            let trace = session
+                .turn_trace_history
+                .iter_mut()
+                .find(|item| item.turn_id == turn_id)?;
+            trace.session_id = Some(session_key.clone());
+            trace.event_id = event_id;
+            trace.event_type = event_type;
+            trace.event_version = event_version;
+            trace.sequence = sequence;
+            trace.emitted_at_ms = emitted_at_ms;
+            trace.updated_at = now_timestamp_ms();
+            refresh_session_metadata(session, true);
+        }
+        let updated_at = self
+            .sessions
+            .get(&session_key)
+            .and_then(|session| {
+                session
+                    .turn_trace_history
+                    .iter()
+                    .find(|item| item.turn_id == turn_id)
+                    .map(|trace| trace.updated_at)
+            })
+            .unwrap_or_default();
+        Some((
+            session_key,
+            SessionTraceMutation::UpdateTerminalEvent {
+                turn_id: turn_id.to_string(),
+                event_id: persisted_event_id,
+                event_type: persisted_event_type,
+                event_version: persisted_event_version,
+                sequence,
+                emitted_at_ms,
+                updated_at,
+            },
+        ))
     }
 
     pub fn annotate_turn_trace_terminal_event(
@@ -1120,6 +1228,53 @@ impl SessionStore {
             },
         );
         Some(snapshot)
+    }
+
+    /// 仅做内存更新并返回待持久化的 trace 变更（供异步落库使用）。
+    /// hook 记录为空或无匹配 trace 时返回 None，表示无需持久化。
+    pub fn append_turn_trace_hook_records_in_memory(
+        &mut self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        hook_trace_records: Vec<HookTraceRecord>,
+    ) -> Option<(String, SessionTraceMutation)> {
+        if hook_trace_records.is_empty() {
+            return None;
+        }
+
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let persisted_hook_trace_records = hook_trace_records.clone();
+        {
+            let session = self.sessions.get_mut(&session_key)?;
+            let trace = session
+                .turn_trace_history
+                .iter_mut()
+                .find(|item| item.turn_id == turn_id)?;
+            trace.session_id = Some(session_key.clone());
+            trace.hook_trace_records.extend(hook_trace_records);
+            trace.updated_at = now_timestamp_ms();
+            refresh_session_metadata(session, true);
+            sync_latest_history_node(session, Some(turn_id.to_string()));
+        }
+        let updated_at = self
+            .sessions
+            .get(&session_key)
+            .and_then(|session| {
+                session
+                    .turn_trace_history
+                    .iter()
+                    .find(|item| item.turn_id == turn_id)
+                    .map(|trace| trace.updated_at)
+            })
+            .unwrap_or_default();
+        Some((
+            session_key,
+            SessionTraceMutation::AppendHookRecords {
+                turn_id: turn_id.to_string(),
+                hook_trace_records: persisted_hook_trace_records,
+                updated_at,
+            },
+        ))
     }
 
     pub fn append_turn_trace_hook_records(
@@ -2335,6 +2490,33 @@ fn enrich_history_from_traces(
             }
         }
     }
+}
+
+/// 会话尚不存在时的只读默认快照（与 ensure_session 默认结构一致，但不创建、不落盘）。
+fn default_snapshot_for_session(session_key: &str, node_id: Option<&str>) -> SessionSnapshot {
+    let session = SessionState {
+        conversation_id: session_key.to_string(),
+        title: default_session_title(),
+        summary: DEFAULT_SESSION_SUMMARY.to_string(),
+        history: Vec::new(),
+        provider_native_transcript: Vec::new(),
+        turn_trace_history: Vec::new(),
+        trace_migration_state: TraceMigrationState::LegacyBlob,
+        long_term_memory_entries: Vec::new(),
+        memory_write_evidence: Vec::new(),
+        memory_write_hook_trace_records: Vec::new(),
+        history_state_evidence: Vec::new(),
+        turn_count: 0,
+        last_referenced_file: None,
+        updated_at_ms: 0,
+        history_nodes: Vec::new(),
+        history_branches: Vec::new(),
+        history_cursor: HistoryCursor {
+            session_id: session_key.to_string(),
+            ..HistoryCursor::default()
+        },
+    };
+    snapshot_from_state(&session, Vec::new(), node_id)
 }
 
 fn snapshot_from_state(

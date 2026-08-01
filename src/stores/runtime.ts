@@ -188,6 +188,10 @@ type RuntimeState = {
   streamDebugFlushCount: number;
   streamDebugTextCharsReceived: number;
   streamDebugTextCharsFlushed: number;
+  // traceTimeline 节流状态：delta 高频事件中的 timeline 更新先挂起，
+  // 由 throttle timer 合并应用；低频语义事件与 terminal 事件会强制冲刷。
+  pendingThrottledTraceTimeline: TraceTimelineEntry[] | null;
+  traceTimelineThrottleTimerId: number | null;
 };
 
 type PersistedRuntimeState = {
@@ -409,6 +413,9 @@ async function measureHostRead<T>(
 }
 
 const STREAM_FLUSH_INTERVAL_MS = 120;
+// delta 事件中 traceTimeline 的更新节流窗口：trace 是可观测性数据，允许轻微滞后，
+// 避免每个模型输出 chunk 都全量克隆 timeline 而拖慢主对话流式渲染。
+const TRACE_TIMELINE_THROTTLE_MS = 200;
 
 function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
   switch (status) {
@@ -1239,6 +1246,28 @@ function buildProviderUserMessage(message: string, images: TurnInputImage[]) {
   }
 
   return "请基于附图回答。";
+}
+
+// 查找 content 以"从某 index 开始的连续拼接"为前缀的 index（返回第一个满足项，
+// 与 findIndex + slice(index).join("") 语义一致，但避免每次候选都重新拼接字符串）。
+function completedPrefixIndex(completedContents: string[], content: string): number {
+  if (!content || completedContents.length === 0) {
+    return -1;
+  }
+  const offsets: number[] = [];
+  let total = 0;
+  for (const part of completedContents) {
+    offsets.push(total);
+    total += part.length;
+  }
+  const joined = completedContents.join("");
+  for (let index = 0; index < completedContents.length; index++) {
+    const candidate = joined.slice(offsets[index]);
+    if (candidate.length > 0 && content.startsWith(candidate)) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function normalizeReasoningContent(content?: string | null) {
@@ -3779,7 +3808,9 @@ export const useRuntimeStore = defineStore("runtime", {
       streamDebugDeltaCount: 0,
       streamDebugFlushCount: 0,
       streamDebugTextCharsReceived: 0,
-      streamDebugTextCharsFlushed: 0
+      streamDebugTextCharsFlushed: 0,
+      pendingThrottledTraceTimeline: null,
+      traceTimelineThrottleTimerId: null
     };
   },
   getters: {
@@ -5536,6 +5567,40 @@ export const useRuntimeStore = defineStore("runtime", {
     updateActiveTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
       this.traceTimeline = cloneTraceTimeline(traceTimeline);
     },
+    // delta 高频事件中的 timeline 节流更新：只保留最新一份，定时合并应用。
+    scheduleThrottledTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
+      this.pendingThrottledTraceTimeline = traceTimeline;
+      if (this.traceTimelineThrottleTimerId != null) {
+        return;
+      }
+      this.traceTimelineThrottleTimerId = window.setTimeout(() => {
+        this.traceTimelineThrottleTimerId = null;
+        const pending = this.pendingThrottledTraceTimeline;
+        this.pendingThrottledTraceTimeline = null;
+        if (pending) {
+          this.updateActiveTraceTimeline(pending);
+        }
+      }, TRACE_TIMELINE_THROTTLE_MS);
+    },
+    // 冲刷挂起的 timeline 更新（低频语义事件 / terminal 事件前调用，保证最终态一致）。
+    flushPendingTraceTimeline() {
+      if (this.traceTimelineThrottleTimerId != null) {
+        window.clearTimeout(this.traceTimelineThrottleTimerId);
+        this.traceTimelineThrottleTimerId = null;
+      }
+      const pending = this.pendingThrottledTraceTimeline;
+      this.pendingThrottledTraceTimeline = null;
+      if (pending) {
+        this.updateActiveTraceTimeline(pending);
+      }
+    },
+    clearPendingTraceTimeline() {
+      if (this.traceTimelineThrottleTimerId != null) {
+        window.clearTimeout(this.traceTimelineThrottleTimerId);
+        this.traceTimelineThrottleTimerId = null;
+      }
+      this.pendingThrottledTraceTimeline = null;
+    },
     updateActiveModelTraceFromAssistant(turnId: string) {
       const assistantMessage = this.messages.find((message) => message.turnId === turnId && message.role === "assistant");
       if (!assistantMessage || !this.traceTimeline.length) {
@@ -5563,10 +5628,7 @@ export const useRuntimeStore = defineStore("runtime", {
           .slice(0, modelIndex)
           .filter((entry) => canonicalizeTraceTimelineKind(entry.kind) === "call_model")
           .map((entry) => entry[field] ?? "");
-        const completedStartIndex = completedContents.findIndex((_, index) => {
-          const candidate = completedContents.slice(index).join("");
-          return Boolean(candidate) && content.startsWith(candidate);
-        });
+        const completedStartIndex = completedPrefixIndex(completedContents, content);
         const completedPrefix =
           completedStartIndex >= 0 ? completedContents.slice(completedStartIndex).join("") : "";
         if (!completedPrefix || content.startsWith(completedPrefix)) {
@@ -5947,6 +6009,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.streamBufferText = "";
         this.streamBufferReasoning = "";
         this.resetStreamDebugMetrics();
+        this.clearPendingTraceTimeline();
 
         this.ensureAssistantMessage(
           payload.turnId,
@@ -6037,7 +6100,8 @@ export const useRuntimeStore = defineStore("runtime", {
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         if (payload.traceTimeline?.length) {
-          this.updateActiveTraceTimeline(payload.traceTimeline);
+          // 节流应用：trace 可观测性数据允许滞后，避免每个 chunk 全量克隆
+          this.scheduleThrottledTraceTimeline(payload.traceTimeline);
         }
         if (!deltaText && !deltaReasoning) {
           return;
@@ -6059,6 +6123,8 @@ export const useRuntimeStore = defineStore("runtime", {
         }
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
+        // 低频语义事件：先冲刷节流挂起的 timeline，保证基于最新 timeline 推导
+        this.flushPendingTraceTimeline();
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -6097,6 +6163,7 @@ export const useRuntimeStore = defineStore("runtime", {
         }
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
+        this.flushPendingTraceTimeline();
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -6131,6 +6198,7 @@ export const useRuntimeStore = defineStore("runtime", {
         }
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
+        this.flushPendingTraceTimeline();
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
@@ -6165,6 +6233,7 @@ export const useRuntimeStore = defineStore("runtime", {
         }
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
+        this.flushPendingTraceTimeline();
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         debugLog("event:tool", {
@@ -6299,6 +6368,8 @@ export const useRuntimeStore = defineStore("runtime", {
         // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
+        // terminal 事件：先冲刷节流挂起的 timeline，保证最终态完整
+        this.flushPendingTraceTimeline();
 
         const completedPayloadRecord = payload as Record<string, unknown>;
 
@@ -6634,6 +6705,7 @@ export const useRuntimeStore = defineStore("runtime", {
         // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
+        this.flushPendingTraceTimeline();
 
         const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,
@@ -6792,6 +6864,7 @@ export const useRuntimeStore = defineStore("runtime", {
         // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
+        this.flushPendingTraceTimeline();
 
         const cancelledTraceSteps = finalizeCancelledTraceSteps(payload.traceSteps ?? this.traceSteps);
         logCacheTelemetryContractViolations("cancelled", payload);

@@ -1976,12 +1976,12 @@ impl HostControlPlane {
         for session_overview in selected_overviews {
             let snapshot = self
                 .sessions_rwlock
-                .write()
+                .read()
                 .unwrap_or_else(|e| {
                     eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                     e.into_inner()
                 })
-                .snapshot_at(Some(session_overview.conversation_id.as_str()), None, &[]);
+                .snapshot_at_readonly(Some(session_overview.conversation_id.as_str()), None, &[]);
             let session_metrics = aggregate_session_metrics(&snapshot);
             merge_monitor_overview(
                 &mut overview,
@@ -2303,12 +2303,12 @@ impl HostControlPlane {
         let session_id = query.session_id?;
         let snapshot = self
             .sessions_rwlock
-            .write()
+            .read()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .snapshot_at(Some(session_id.as_str()), None, &[]);
+            .snapshot_at_readonly(Some(session_id.as_str()), None, &[]);
         let trace = if let Some(turn_id) = query.turn_id.as_deref() {
             snapshot.turn_trace_history.iter().find(|trace| {
                 trace.turn_id == turn_id && Self::trace_has_checkpoint_boundary(trace)
@@ -2406,12 +2406,12 @@ impl HostControlPlane {
 
         let snapshot = self
             .sessions_rwlock
-            .write()
+            .read()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .snapshot_at(Some(session_id), None, &[]);
+            .snapshot_at_readonly(Some(session_id), None, &[]);
         let relevant_history_node_id =
             Self::resolve_checkpoint_history_node_id(&snapshot, checkpoint);
         checkpoint.persisted_effect_evidence = snapshot
@@ -2751,12 +2751,12 @@ impl HostControlPlane {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
                 self.sessions_rwlock
-                    .write()
+                    .read()
                     .unwrap_or_else(|e| {
                         eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                         e.into_inner()
                     })
-                    .snapshot_at(None, None, &[])
+                    .snapshot_at_readonly(None, None, &[])
                     .conversation_id
             })
     }
@@ -2861,12 +2861,12 @@ impl HostControlPlane {
     pub fn load_session_snapshot(&self, query: SessionSnapshotQuery) -> SessionSnapshot {
         let mut snapshot = self
             .sessions_rwlock
-            .write()
+            .read()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .snapshot_at(query.session_id.as_deref(), None, &[]);
+            .snapshot_at_readonly(query.session_id.as_deref(), None, &[]);
         let checkpoint = self.load_execution_checkpoint(ExecutionCheckpointQuery {
             turn_id: None,
             session_id: Some(snapshot.conversation_id.clone()),
@@ -3147,12 +3147,12 @@ impl HostControlPlane {
         ));
         let session = self
             .sessions_rwlock
-            .write()
+            .read()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .snapshot_at(
+            .snapshot_at_readonly(
                 Some(resolved_session_id.as_str()),
                 resolved_node_id.as_deref(),
                 &[],

@@ -682,10 +682,12 @@ function modelTraceEntries(traceTimeline: TraceTimelineEntry[]) {
     .sort((left, right) => left.sequence - right.sequence);
 }
 
+// 纯只读函数：渲染路径不写任何共享状态。
+// lastTrustedTraceTimelineByTurnId 缓存的写入由 watch(traceTimeline) 负责，
+// 避免渲染期间修改可变 Map 产生时序竞态。
 function traceTimelineForTurn(turnId: string) {
   const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
   if (activeTurnId === turnId && traceTimeline.value.length) {
-    lastTrustedTraceTimelineByTurnId.set(turnId, traceTimeline.value);
     return traceTimeline.value;
   }
 
@@ -693,7 +695,6 @@ function traceTimelineForTurn(turnId: string) {
   const historicalTimeline = historicalTrace?.traceTimeline ?? [];
   if (historicalTimeline.length) {
     if (terminalTracePhases.has((historicalTrace?.phase ?? "").trim().toLowerCase())) {
-      lastTrustedTraceTimelineByTurnId.set(turnId, historicalTimeline);
       return historicalTimeline;
     }
 
@@ -739,10 +740,7 @@ function currentModelHopContent(
   }
 
   const completedContents = modelEntries.slice(0, currentIndex).map(selectContent);
-  const completedStartIndex = completedContents.findIndex((_, index) => {
-    const candidate = completedContents.slice(index).join("");
-    return Boolean(candidate) && completeCumulativeContent.startsWith(candidate);
-  });
+  const completedStartIndex = completedPrefixIndex(completedContents, completeCumulativeContent);
   const completedPrefix =
     completedStartIndex >= 0 ? completedContents.slice(completedStartIndex).join("") : "";
   if (!completedPrefix) {
@@ -758,6 +756,28 @@ function currentModelHopContent(
     return "";
   }
   return cumulativeContent;
+}
+
+// 查找 content 以"从某 index 开始的连续拼接"为前缀的 index（与 findIndex + slice(index).join("")
+// 语义一致，但避免每个候选都重新拼接字符串，消除 trace 推导链上的 O(n²) 分配）。
+function completedPrefixIndex(completedContents: string[], content: string): number {
+  if (!content || completedContents.length === 0) {
+    return -1;
+  }
+  const offsets: number[] = [];
+  let total = 0;
+  for (const part of completedContents) {
+    offsets.push(total);
+    total += part.length;
+  }
+  const joined = completedContents.join("");
+  for (let index = 0; index < completedContents.length; index++) {
+    const candidate = joined.slice(offsets[index]);
+    if (candidate.length > 0 && content.startsWith(candidate)) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function modelEntryReasoningContent(
@@ -985,6 +1005,17 @@ const mergedEvents: AgentTurnEvent[] = [];
 
   return mergedEvents;
 }
+
+// 主对话渲染与 trace 渲染解耦：agentTurnEvents 的推导结果集中缓存为 computed，
+// template 按 turnId 取缓存，避免每次渲染都内联重算整条 trace timeline 推导链
+// （traceTimelineForTurn + modelTraceEntries + 多 hop 内容拼接）。
+const turnEventsByTurnId = computed(() => {
+  const eventsByTurnId = new Map<string, AgentTurnEvent[]>();
+  for (const turn of turns.value) {
+    eventsByTurnId.set(turn.turnId, agentTurnEvents(turn));
+  }
+  return eventsByTurnId;
+});
 
 const toolIconByCanonicalName: Record<string, any> = {
   Run: Terminal,
@@ -1761,6 +1792,19 @@ watch(
   { flush: "pre" }
 );
 
+// 渲染路径外维护"最后信任的 timeline"缓存（traceTimelineForTurn 为纯只读函数）。
+// immediate：组件挂载时 store 的 traceTimeline 可能已有值，需要立即建立缓存。
+watch(
+  traceTimeline,
+  (timeline) => {
+    const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
+    if (activeTurnId && timeline.length) {
+      lastTrustedTraceTimelineByTurnId.set(activeTurnId, timeline);
+    }
+  },
+  { flush: "pre", immediate: true }
+);
+
 watch(showReasoningContent, (value) => {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(SHOW_REASONING_STORAGE_KEY, value ? "true" : "false");
@@ -1800,7 +1844,8 @@ function flushStreamMetricsToStorage() {
 
 watch(isSubmitting, (submitting, wasSubmitting) => {
   if (wasSubmitting && !submitting) {
-    flushStreamMetricsToStorage();
+    // 统计落盘是纯可观测性开销，延迟到下一事件循环执行，避免阻塞主对话完成帧
+    window.setTimeout(() => flushStreamMetricsToStorage(), 0);
   }
   syncStreamingPresentationState();
   scheduleStreamingPresentationTimer();
@@ -1921,7 +1966,7 @@ watch(
           <article v-if="shouldShowAgentArticle(turn)" :ref="(element) => setLatestAgentMessageRef(element, turn.turnId)" class="conversation-agent-shell flex w-full flex-col gap-2 px-0 py-1">
 
 
-            <template v-for="event in agentTurnEvents(turn)" :key="event.key">
+            <template v-for="event in (turnEventsByTurnId.get(turn.turnId) ?? [])" :key="event.key">
               <details
                 v-if="event.kind === 'reasoning'"
                 :open="shouldOpenReasoningBlock(event.assistant)"

@@ -42,6 +42,10 @@ use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
+use crate::agent::trace_persistence::{
+    spawn_trace_persistence_worker, TracePersistenceCommand, TracePersistenceHandle,
+};
+use crate::agent::session::SessionTraceMutation;
 use crate::agent::tools::{
     builtin_tools, canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
     ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
@@ -318,6 +322,8 @@ pub struct AgentRuntime {
     planner: Box<dyn TurnPlanner>,
     context_builder: Box<dyn TurnContextBuilder>,
     telemetry_builder: Box<dyn TurnTelemetryBuilder>,
+    /// 后台 trace 落库句柄：可观测性写盘与主对话执行路径解耦。
+    trace_persistence: Option<TracePersistenceHandle>,
 }
 
 pub struct AgentRuntimeBuilder {
@@ -441,9 +447,11 @@ impl AgentRuntime {
         for snapshot in persisted_skill_snapshots {
             let _ = capability_registry.replace_skill_source_snapshot(snapshot);
         }
+        let sessions_arc = Arc::new(RwLock::new(sessions));
+        let trace_persistence = Some(spawn_trace_persistence_worker(Arc::clone(&sessions_arc)));
         Self {
             graph: GraphEngine::new("state-machine-v1"),
-            sessions: Arc::new(RwLock::new(sessions)),
+            sessions: sessions_arc,
             provider_resolver,
             capability_registry,
             hook_registry: AgentHookRegistry::new(),
@@ -452,6 +460,7 @@ impl AgentRuntime {
             planner,
             context_builder,
             telemetry_builder,
+            trace_persistence,
         }
     }
 
@@ -469,13 +478,14 @@ impl AgentRuntime {
         sequence: Option<u64>,
         emitted_at_ms: Option<u64>,
     ) -> bool {
-        self.sessions
+        let outcome = self
+            .sessions
             .write()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .annotate_turn_trace_terminal_event(
+            .annotate_turn_trace_terminal_event_in_memory(
                 session_id,
                 turn_id,
                 event_id,
@@ -483,8 +493,14 @@ impl AgentRuntime {
                 event_version,
                 sequence,
                 emitted_at_ms,
-            )
-            .is_some()
+            );
+        match outcome {
+            Some((session_key, mutation)) => {
+                self.enqueue_trace_persistence(session_key, mutation);
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn append_turn_trace_hook_records(
@@ -493,14 +509,46 @@ impl AgentRuntime {
         turn_id: &str,
         hook_trace_records: Vec<HookTraceRecord>,
     ) -> bool {
+        let outcome = self
+            .sessions
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .append_turn_trace_hook_records_in_memory(session_id, turn_id, hook_trace_records);
+        match outcome {
+            Some((session_key, mutation)) => {
+                self.enqueue_trace_persistence(session_key, mutation);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 将 trace 变更交给后台持久化队列；队列不可用时回退同步落库（尽力而为）。
+    fn enqueue_trace_persistence(&self, session_id: String, mutation: SessionTraceMutation) {
+        let Some(handle) = &self.trace_persistence else {
+            self.sync_persist_trace(session_id, mutation);
+            return;
+        };
+        let command = TracePersistenceCommand {
+            session_id,
+            mutation,
+        };
+        if let Err(command) = handle.try_enqueue(command) {
+            self.sync_persist_trace(command.session_id, command.mutation);
+        }
+    }
+
+    fn sync_persist_trace(&self, session_id: String, mutation: SessionTraceMutation) {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .append_turn_trace_hook_records(session_id, turn_id, hook_trace_records)
-            .is_some()
+            .persist_trace_mutation_from_worker(&session_id, mutation);
     }
 
     pub fn name(&self) -> &'static str {
@@ -2048,13 +2096,16 @@ impl AgentRuntime {
             first_token_latency_ms,
             turn_duration_ms,
         );
-        self.sessions
+        // 内存更新同步（快），SQLite 落库通过后台队列异步执行，
+        // 避免 trace（可观测性）写盘阻塞主对话执行路径。
+        let (session_key, mutation) = self
+            .sessions
             .write()
             .unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .record_turn_trace(
+            .record_turn_trace_in_memory(
                 session_id,
                 TurnTraceRecord {
                     turn_id: turn_id.to_string(),
@@ -2091,6 +2142,7 @@ impl AgentRuntime {
                     updated_at: 0,
                 },
             );
+        self.enqueue_trace_persistence(session_key, mutation);
     }
 
     #[allow(clippy::too_many_arguments)]
