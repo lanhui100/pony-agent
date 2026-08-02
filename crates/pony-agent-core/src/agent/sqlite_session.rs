@@ -1065,15 +1065,16 @@ pub fn default_sqlite_path() -> PathBuf {
 /// 单元测试专用的会话数据库路径：按进程 + 时间戳唯一化，位于系统临时目录。
 #[cfg(test)]
 fn unique_test_sqlite_path() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "pony-agent-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default()
-    ))
-    .join("sessions.db")
+    std::env::temp_dir()
+        .join(format!(
+            "pony-agent-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ))
+        .join("sessions.db")
 }
 
 #[cfg(test)]
@@ -1692,9 +1693,15 @@ mod tests {
         store.append_turn(Some("switch-session"), "第二问", "第二答", None, Vec::new());
         store.record_turn_trace(Some("switch-session"), trace("turn-main-2", "main-2", 2));
 
-        let (nodes_before, _, _) = store.load_history_graph(Some("switch-session"));
+        let (nodes_before, branches_before, _) = store.load_history_graph(Some("switch-session"));
         let first_node_id = nodes_before[0].node_id.clone();
-        let second_node_id = nodes_before[1].node_id.clone();
+        // The graph includes a checkpoint root node before the two turns, so
+        // the main branch head is taken from the branch record (the last turn
+        // node), not nodes_before[1].
+        let second_node_id = branches_before[0]
+            .head_node_id
+            .clone()
+            .expect("main branch head node should exist");
 
         store
             .fork_from_history_node(Some("switch-session"), first_node_id.as_str(), None)

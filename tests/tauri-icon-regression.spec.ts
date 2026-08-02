@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = path.resolve(__dirname, "..");
 const tauriConfigPath = path.join(repoRoot, "src-tauri", "tauri.conf.json");
 const tauriLibPath = path.join(repoRoot, "src-tauri", "src", "lib.rs");
+const tauriPlatformPath = path.join(repoRoot, "src-tauri", "src", "platform.rs");
 
 describe("tauri icon regression", () => {
   it("keeps the required bundled icon assets configured", () => {
@@ -31,10 +32,12 @@ describe("tauri icon regression", () => {
 
   it("binds the default window icon to the main window at runtime", () => {
     const rustSource = fs.readFileSync(tauriLibPath, "utf8");
+    const platformSource = fs.readFileSync(tauriPlatformPath, "utf8");
 
+    // 窗口获取仍在 lib.rs 的 setup 中；图标绑定逻辑已外提到 platform.rs。
     expect(rustSource).toContain('app.get_webview_window("main")');
-    expect(rustSource).toContain("app.default_window_icon().cloned()");
-    expect(rustSource).toContain("if let Err(e) = window.set_icon(icon)");
-    expect(rustSource).toContain("tauri::image::Image::from_bytes(ICON_PNG)");
+    expect(platformSource).toContain("app.default_window_icon().cloned()");
+    expect(platformSource).toContain("if let Err(e) = window.set_icon(icon)");
+    expect(platformSource).toContain("tauri::image::Image::from_bytes(ICON_PNG)");
   });
 });

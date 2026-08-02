@@ -3015,7 +3015,7 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     const summaries = wrapper.findAll("summary");
     expect(summaries).toHaveLength(1);
     expect(summaries.some((node) => node.text().includes("思考过程"))).toBe(true);
-    expect(summaries.some((node) => node.html().includes("lucide-brain"))).toBe(true);
+    expect(summaries.some((node) => node.html().includes("lucide-activity"))).toBe(true);
   });
 
   it("uses the localized tool name instead of its execution detail", async () => {

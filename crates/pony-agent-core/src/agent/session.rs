@@ -6295,9 +6295,12 @@ mod tests {
                 None,
             )
             .expect("degraded checkout should succeed");
+        // TranscriptAndWorkspace checkout on a non-rollback-capable node
+        // degrades to transcript-only, so the cursor status reflects the
+        // degrade conclusion rather than NotRequested (d6e1fbf semantics).
         assert_eq!(
             initial.history_cursor.checkout_status,
-            HistoryCheckoutStatus::NotRequested
+            HistoryCheckoutStatus::DegradedToTranscriptOnly
         );
         assert_eq!(initial.history_state_evidence.len(), 2);
         let resolved_node_id = initial
@@ -6330,7 +6333,9 @@ mod tests {
             snapshot.history_cursor.checkout_mode,
             HistoryCheckoutMode::TranscriptAndWorkspace
         );
-        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Historical);
+        // After destructive truncation the checked-out node IS the branch
+        // head, so the persisted mode is Live rather than Historical.
+        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Live);
         assert_eq!(
             snapshot.resolved_node_id.as_deref(),
             Some(resolved_node_id.as_str())
@@ -8703,7 +8708,9 @@ mod tests {
             snapshot.latest_node_id.as_deref(),
             Some(nodes[1].node_id.as_str())
         );
-        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Historical);
+        // checkout_history_node truncates descendants and makes the target
+        // node the branch head, so mode is Live (d6e1fbf semantics).
+        assert_eq!(snapshot.history_cursor.mode, HistoryCursorMode::Live);
         assert_eq!(
             snapshot.history_cursor.checkout_status,
             HistoryCheckoutStatus::DegradedToTranscriptOnly
@@ -8782,9 +8789,15 @@ mod tests {
         store.append_turn(Some("switch-session"), "第一问", "第一答", None, Vec::new());
         store.append_turn(Some("switch-session"), "第二问", "第二答", None, Vec::new());
 
-        let (nodes_before, _, _) = store.load_history_graph(Some("switch-session"));
+        let (nodes_before, branches_before, _) = store.load_history_graph(Some("switch-session"));
         let first_node_id = nodes_before[0].node_id.clone();
-        let second_node_id = nodes_before[1].node_id.clone();
+        // The graph includes a checkpoint root node before the two turns, so
+        // the main branch head is taken from the branch record (the last turn
+        // node), not nodes_before[1].
+        let second_node_id = branches_before[0]
+            .head_node_id
+            .clone()
+            .expect("main branch head node should exist");
 
         store
             .fork_from_history_node(Some("switch-session"), first_node_id.as_str(), None)
