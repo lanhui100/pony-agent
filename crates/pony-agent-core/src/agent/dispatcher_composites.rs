@@ -32,7 +32,7 @@ use crate::agent::tools::{
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // Mirror of the private constants in `tools.rs` (kept in sync by contract; the legacy handlers
 // still own the canonical values until task 8.1 removes the old execution path).
@@ -58,11 +58,17 @@ const SUMMARY_ITEM_LIMIT: usize = 3;
 /// dispatcher that has been given the registry, handlers, and composite handlers it needs.
 pub struct GovernedToolExecutor {
     dispatcher: GovernedDispatcher,
+    /// Session/run/turn/workspace facts for the current invocation. The runtime sets this per turn
+    /// so control requests persist against the real session (phase-4 Ask wiring, P1-1).
+    context: Mutex<DispatchContext>,
 }
 
 impl GovernedToolExecutor {
     pub fn new(dispatcher: GovernedDispatcher) -> Self {
-        Self { dispatcher }
+        Self {
+            dispatcher,
+            context: Mutex::new(DispatchContext::default()),
+        }
     }
 
     /// The underlying governed dispatcher, for callers that need direct access to the
@@ -70,10 +76,29 @@ impl GovernedToolExecutor {
     pub fn dispatcher(&self) -> &GovernedDispatcher {
         &self.dispatcher
     }
+
+    /// Set the session/run/turn/workspace facts for the current invocation. Called by the runtime
+    /// before each turn so a persisted `PendingControlRequest` is bound to the real session.
+    pub fn set_context(&self, context: DispatchContext) {
+        *self.context.lock().expect("governed executor context poisoned") = context;
+    }
+
+    /// Current invocation context.
+    pub fn context(&self) -> DispatchContext {
+        self.context
+            .lock()
+            .expect("governed executor context poisoned")
+            .clone()
+    }
 }
 
 impl ToolExecutor for GovernedToolExecutor {
     fn execute(&self, call: &ToolCall) -> ToolResult {
+        let context = self
+            .context
+            .lock()
+            .expect("governed executor context poisoned")
+            .clone();
         let outcome = self.dispatcher.dispatch_governed(
             ToolDispatchRequest {
                 origin: InvocationOrigin::Model,
@@ -84,7 +109,7 @@ impl ToolExecutor for GovernedToolExecutor {
                     .unwrap_or_else(|| "unknown".to_string()),
                 arguments: call.arguments.clone(),
             },
-            &DispatchContext::default(),
+            &context,
         );
         let mut result = outcome.into_legacy_result(&call.name);
         // A composite that ran children but failed them all reports an `ok` execution status (its

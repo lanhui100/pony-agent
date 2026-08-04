@@ -79,9 +79,11 @@
 
 ## Next Action
 
-阶段 1–7 核心、runtime 切换（task ②）、阶段 8 的 8.1/8.2/8.4/8.5 已落地；core lib 674 + matrix 27 + 回归 + 前端全绿。剩余工作按依赖顺序：
+阶段 1–7 核心、runtime 切换（task ②）、阶段 8 的 8.1/8.2/8.4/8.5 已落地；core lib 675 + matrix 27 + 回归 + 前端全绿。剩余工作按依赖顺序：
 
-1. **Ask 真实接线（P1-1，含 P2-8/P2-9）**：单一共享 `Arc<GovernedDispatcher>` 贯穿 runtime 执行器与 host 控制面；每次 governed dispatch 传入 session-scoped `DispatchContext`（session/run/turn/workspace 事实）；Ask 专用 policy（WaitingHost）使 `PendingControlRequest` 真正持久化；runtime turn loop 绑定/persist/resume（graph wait/resume 面已就绪，缺 turn-loop 接线）；模型 Ask 参数透传进 `prompt/options`。这是 design Decision 5 的端到端兑现点。
+1. **Ask 真实接线（P1-1，含 P2-8/P2-9）**：
+   - ✅ 已落地（执行器级）：`persist_pending_request` 透传 Ask 问题到 `prompt`、`options` 数组到 `options`（P2-9）；`GovernedToolExecutor` 增加可设 session-scoped `DispatchContext`（`set_context`，P2-8）；governed 默认 evaluator 对 Ask 描述符返回 `WaitingHost` → Ask 现在真正持久化 `Interaction` `PendingControlRequest`（session 绑定 + 问题原样，测试 `governed_executor_ask_is_host_mediated_and_persists_the_question`）。
+   - ⬜ 剩余（runtime turn-loop 接线）：运行时每轮设置 context（需把 governed executor 暴露给 runtime/control plane，单一共享 dispatcher）；检测 `control_outcome_pending` → 挂起 run + 调 `graph.bind_ask_wait`（graph 面已就绪）；host answer → `graph.resume_ask_wait` 注入唯一终态。
 2. **pinned connector（P1-5/P2-7）**：移除"预校验后交默认 HTTP client 重解析"弱模式；WebFetch 连接固定到已校验地址 + peer-IP 校验 + 保留 Host/SNI + 显式 ≤5 跳重解析/重校验。`FailClosedResolver` 已兜住任意 hostname URL fail-closed，真实 resolver 接线前必须完成。
 3. **真实 `SandboxBackend`**：`NoSandboxBackend` + `SandboxSupportMatrix` 是 fail-closed 门禁；注册真实 sandbox backend 后无人值守 Run 才从 `sandbox_unavailable` 转为执行。
 4. **阶段 7 工具注册（P2-6）**：`view_image`/MCP resource/ToolSearch 提升的库已就绪，需注册进 builtin registry（`builtin:plan_control` 等）并处理 `ImageReadOptions.include_bytes` 默认 2 MiB 撑爆结果预算的隐患。

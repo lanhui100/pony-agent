@@ -1176,12 +1176,16 @@ impl Inner {
             ),
             PermissionVerdict::WaitingHost => (
                 ToolControlKind::WaitingHost,
-                format!(
-                    "Tool `{}` ({}) requires host mediation. Final arguments digest: {}.",
-                    ready.descriptor.identity.descriptor_id,
-                    ready.descriptor.identity.model_name,
-                    ready.final_args_digest
-                ),
+                // The Ask tool's own question is the user-facing prompt (phase-4 wiring P2-9):
+                // surface `text`/`question`/`prompt` verbatim instead of a synthetic digest.
+                ask_prompt_from_arguments(&ready.final_arguments).unwrap_or_else(|| {
+                    format!(
+                        "Tool `{}` ({}) requires host mediation. Final arguments digest: {}.",
+                        ready.descriptor.identity.descriptor_id,
+                        ready.descriptor.identity.model_name,
+                        ready.final_args_digest
+                    )
+                }),
             ),
             _ => {
                 return Err(DispatchError::new(
@@ -1224,7 +1228,7 @@ impl Inner {
             expires_at_ms: now.saturating_add(config.control_request_expiry_ms),
             state: PendingControlRequestState::Pending,
             prompt: Some(prompt),
-            options: None,
+            options: ask_options_from_arguments(&ready.final_arguments),
         };
         self.pending_requests
             .lock()
@@ -1545,6 +1549,29 @@ pub(crate) fn render_output(value: &Value) -> String {
         return text.to_string();
     }
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+/// Surface the Ask tool's user-facing question verbatim (phase-4 wiring P2-9). Recognizes the
+/// common argument keys `text`/`question`/`prompt`; falls back to `None` so the caller uses a
+/// synthetic digest prompt.
+fn ask_prompt_from_arguments(arguments: &Value) -> Option<String> {
+    for key in ["text", "question", "prompt"] {
+        if let Some(value) = arguments.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract an `options` array from Ask arguments if the model supplied one.
+fn ask_options_from_arguments(arguments: &Value) -> Option<Value> {
+    match arguments.get("options") {
+        Some(Value::Array(items)) if !items.is_empty() => Some(Value::Array(items.clone())),
+        _ => None,
+    }
 }
 
 fn stable_digest(value: &Value) -> String {

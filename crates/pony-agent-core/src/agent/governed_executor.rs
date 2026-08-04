@@ -57,14 +57,27 @@ pub struct LegacyCompatiblePolicyEvaluator;
 impl ToolPolicyEvaluator for LegacyCompatiblePolicyEvaluator {
     fn evaluate(
         &self,
-        _descriptor: &crate::agent::tools::ToolDescriptor,
+        descriptor: &crate::agent::tools::ToolDescriptor,
         _origin: &InvocationOrigin,
         _final_arguments: &Value,
     ) -> PermissionDecision {
-        PermissionDecision {
-            verdict: PermissionVerdict::Allow,
-            decision_source: "legacy_compatible".to_string(),
-            reason: None,
+        // The Ask product tool is host-mediated in the governed path: dispatching it persists an
+        // `Interaction` `PendingControlRequest` (WaitingHost) instead of echoing, which is the
+        // design Decision 5 behavior that replaces the legacy echo placeholder (P1-1 wiring).
+        let is_ask = descriptor.identity.model_name == "Ask"
+            || descriptor.identity.primitive_name == "echo_input";
+        if is_ask {
+            PermissionDecision {
+                verdict: PermissionVerdict::WaitingHost,
+                decision_source: "ask_descriptor".to_string(),
+                reason: None,
+            }
+        } else {
+            PermissionDecision {
+                verdict: PermissionVerdict::Allow,
+                decision_source: "legacy_compatible".to_string(),
+                reason: None,
+            }
         }
     }
 }
@@ -164,6 +177,7 @@ pub fn build_governed_executor(workspace_root: Option<PathBuf>) -> GovernedToolE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tool_runtime::PendingControlRequestKind;
     use crate::agent::tools::ToolExecutor;
     use serde_json::json;
     use std::fs;
@@ -201,7 +215,8 @@ mod tests {
         let governed = build_governed_executor(Some(workspace.clone()));
 
         // The model-visible product surface (what the runtime actually dispatches): List, Search,
-        // Glob, Ask. Read/Write/Edit are covered separately; Run is sandbox-gated (phase 5).
+        // Glob. Read/Write/Edit are covered separately; Run is sandbox-gated; Ask is host-mediated
+        // (covered by its own assertion below — no longer a legacy echo).
         let cases = vec![
             same_call("List", json!({ "path": ".", "description": "test" })),
             same_call(
@@ -209,7 +224,6 @@ mod tests {
                 json!({ "query": "fn", "path": ".", "description": "test" }),
             ),
             same_call("Glob", json!({ "pattern": "**/*.rs", "description": "test" })),
-            same_call("Ask", json!({ "text": "hello", "description": "test" })),
         ];
 
         for call in cases {
@@ -230,6 +244,38 @@ mod tests {
                 call.name
             );
         }
+    }
+
+    #[test]
+    fn governed_executor_ask_is_host_mediated_and_persists_the_question() {
+        let workspace = temp_workspace();
+        let governed = build_governed_executor(Some(workspace));
+        governed.set_context(crate::agent::dispatcher::DispatchContext {
+            session_id: Some("session-ask".to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        });
+        let result = governed.execute(&same_call(
+            "Ask",
+            json!({ "text": "继续吗？", "description": "test" }),
+        ));
+        // Pending control outcome surfaces as the legacy `control_outcome_pending` marker, which
+        // the runtime detects to suspend the run (design Decision 5, P1-1 wiring).
+        assert_eq!(result.status, "error");
+        assert!(
+            result.output.contains("control_outcome_pending"),
+            "expected pending control marker, got: {}",
+            result.output
+        );
+        // The persisted request is an Interaction kind bound to the real session, with the
+        // model's question surfaced verbatim (P2-9).
+        let pending = governed.dispatcher().pending_requests();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request_kind, PendingControlRequestKind::Interaction);
+        assert_eq!(pending[0].session_id.as_deref(), Some("session-ask"));
+        assert_eq!(pending[0].turn_id, "turn-1");
+        assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
     }
 
     /// Parse a tool output and drop the non-deterministic `durationMs` field for fidelity
