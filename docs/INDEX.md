@@ -24,7 +24,7 @@
 - [Async Provider IO Migration (PA-066)](architecture/async-provider-io-migration.md)
 - [Blocking Helper Unification (PA-067)](architecture/blocking-helper-unification.md)
 - [Per-Session Async Turn Task Model (PA-068)](architecture/per-session-async-turn-task-model.md)
-- [Tool Descriptor 与 Registry 真相源 (PA-076)](architecture/tool-runtime-descriptor-registry.md)
+- [Tool Descriptor / Registry / Governed Dispatcher 真相源 (PA-076)](architecture/tool-runtime-descriptor-registry.md)
 - [锁序规范](concurrency/lock-ordering.md)
 
 ## 2.1 Session Control 主线
@@ -79,6 +79,8 @@
 - [PA-056 Code 审核](../management/task-system/02_REVIEWS/2026-06-16-pa056-code-review.md)
 - [PA-056 Code 审核 Follow-up](../management/task-system/02_REVIEWS/2026-06-17-pa056-code-review-followup.md)
 - [PA-056 本轮收口日志](../management/task-system/99_LOGS/2026-06-17-pa056-workspace-mode-closeout.md)
+- [PA-076 阶段 1–7 + runtime 切换收口日志](../management/task-system/99_LOGS/2026-08-02-pa076-phases-1-7-and-runtime-switch.md)
+- [PA-076 阶段 3 审核](../management/task-system/02_REVIEWS/2026-08-02-pa076-phase3-review.md)
 
 ## 8. OpenSpec
 
@@ -87,6 +89,9 @@
 - [第一波工具面 canonical spec](../openspec/specs/first-wave-tool-surface/spec.md)
 - [第二波工具面 canonical spec](../openspec/specs/second-wave-tool-surface/spec.md)
 - [第三波工具面 canonical spec](../openspec/specs/third-wave-default-tool-alignment/spec.md)
+- [Tool Runtime Dispatch canonical spec](../openspec/specs/tool-runtime-dispatch/spec.md)
+- [Process Tool Lifecycle canonical spec](../openspec/specs/process-tool-lifecycle/spec.md)
+- [Web Access Safety canonical spec](../openspec/specs/web-access-safety/spec.md)
 - [上下文构建与缓存策略 canonical spec](../openspec/specs/context-assembly-and-cache-strategy/spec.md)
 - [工具权限模型 canonical spec](../openspec/specs/tool-permission-contract/spec.md)
 - [工具可观测性 canonical spec](../openspec/specs/tool-observability-contract/spec.md)
@@ -121,4 +126,4 @@
 - 想看第二波 builtin 工具面收口范围：先看 `openspec/specs/second-wave-tool-surface/spec.md`，再看 `PA-050 ~ PA-054` 与对应审核/收口日志
 - 想对比三方工具面差距、决策后续该实现哪些工具：看 `docs/analysis/builtin-tool-surface-comparison-2026-06-22.md`
 - 想理解 thinking 参数适配：看 `docs/architecture/thinking-param-adapter.md`
-- 想新增或修改工具、理解工具元数据从哪来：看 `docs/architecture/tool-runtime-descriptor-registry.md`（含 registry 顺序与工具名透传两条不变量，以及 Windows 上跑 Rust 测试的方式）
+- 想新增或修改工具、理解工具元数据从哪来、工具如何被治理执行：看 `docs/architecture/tool-runtime-descriptor-registry.md`（含 registry 顺序与工具名透传两条不变量、governed dispatcher 八步管线、runtime 默认切换、Ask/Plan/process/sandbox/web/search/phase-7 模块落点、两条剩余 integrator notes，以及 Windows 上跑 Rust 测试的方式）

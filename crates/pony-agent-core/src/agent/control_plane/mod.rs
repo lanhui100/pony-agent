@@ -4,6 +4,7 @@ use crate::agent::capability_bridge::{
     SkillSourceView,
 };
 use crate::agent::context::RetrievedContextState;
+use crate::agent::dispatcher::GovernedDispatcher;
 use crate::agent::execution_control::{
     execution_checkpoint_contract_version, refresh_execution_checkpoint_projection,
     ExecutionCheckpoint, ExecutionControlRegistry, StopTurnResponse,
@@ -23,9 +24,12 @@ use crate::agent::hooks::{
     RunControlCheckpointContext, RunControlHookEnvelope,
 };
 use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
+use crate::agent::plan_state::PlanStore;
 use crate::agent::runtime::{
     AgentRuntime, AgentRuntimeBuilder, TurnInput, TurnResult, TurnStreamEvent,
 };
+use crate::agent::tool_runtime::{RuntimeClock, SystemClock};
+use crate::agent::tools::ToolRegistrySnapshot;
 use crate::agent::session::{
     build_missing_run_control_audit_summary, HistoryBranch,
     HistoryCheckoutMode as SessionHistoryCheckoutMode, HistoryCursor, HistoryNode,
@@ -41,6 +45,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+mod ask_plan_commands;
 mod capability_commands;
 mod graph_projection;
 mod history_commands;
@@ -835,6 +840,12 @@ pub struct HostControlPlane {
     graph_planner: Box<dyn GraphPlanner>,
     capability_registry: RwLock<CapabilityRegistry>,
     frontend_diagnostics: FrontendDiagnosticsStore,
+    /// Governed dispatcher whose pending control-request store backs the Ask (`Interaction`)
+    /// control surface (design.md Decision 5). Shared as `Arc` so the runtime executor and the
+    /// host adapter can observe the same store.
+    ask_dispatcher: Arc<GovernedDispatcher>,
+    /// Session-owned revisioned plan store backing the Plan control surface (Decision 6).
+    plan_store: PlanStore,
 }
 
 pub struct HostControlPlaneBuilder {
@@ -843,6 +854,8 @@ pub struct HostControlPlaneBuilder {
     graph_runs: Option<GraphRunStore>,
     graph_runner: Option<GraphRunner>,
     graph_planner: Option<Box<dyn GraphPlanner>>,
+    ask_dispatcher: Option<Arc<GovernedDispatcher>>,
+    plan_store: Option<PlanStore>,
 }
 
 impl HostControlPlaneBuilder {
@@ -853,6 +866,8 @@ impl HostControlPlaneBuilder {
             graph_runs: None,
             graph_runner: None,
             graph_planner: None,
+            ask_dispatcher: None,
+            plan_store: None,
         }
     }
 
@@ -890,6 +905,16 @@ impl HostControlPlaneBuilder {
         self
     }
 
+    pub fn ask_dispatcher(mut self, ask_dispatcher: Arc<GovernedDispatcher>) -> Self {
+        self.ask_dispatcher = Some(ask_dispatcher);
+        self
+    }
+
+    pub fn plan_store(mut self, plan_store: PlanStore) -> Self {
+        self.plan_store = Some(plan_store);
+        self
+    }
+
     pub fn build(self) -> HostControlPlane {
         let runtime = self.runtime.unwrap_or_else(AgentRuntime::new);
         let capability_registry = runtime.capability_registry_snapshot();
@@ -909,6 +934,10 @@ impl HostControlPlaneBuilder {
             frontend_diagnostics: FrontendDiagnosticsStore::new(
                 default_frontend_diagnostics_sqlite_path(),
             ),
+            ask_dispatcher: self
+                .ask_dispatcher
+                .unwrap_or_else(default_ask_dispatcher),
+            plan_store: self.plan_store.unwrap_or_else(PlanStore::new),
         }
     }
 }
@@ -1685,6 +1714,18 @@ fn default_graph_run_store() -> GraphRunStore {
     }
 }
 
+/// Default governed dispatcher backing the Ask control surface. Built from the builtin registry
+/// so descriptor/snapshot/digest facts are real; the runtime may swap in the shared dispatcher it
+/// executes through via [`HostControlPlaneBuilder::ask_dispatcher`] so both observe the same
+/// pending-request store.
+fn default_ask_dispatcher() -> Arc<GovernedDispatcher> {
+    let registry = Arc::new(
+        ToolRegistrySnapshot::builtin().expect("builtin registry must validate"),
+    );
+    let clock: Arc<dyn RuntimeClock> = Arc::new(SystemClock);
+    Arc::new(GovernedDispatcher::new(registry, clock))
+}
+
 fn validate_mcp_source_view(source: &CapabilitySourceView) -> Result<(), String> {
     if source.source_kind != CapabilitySourceKind::Mcp {
         return Err("Only MCP-backed sources may be registered through this command.".to_string());
@@ -2369,8 +2410,10 @@ mod tests {
         ThinkingParamPattern,
     };
     use crate::agent::context::DefaultTurnContextBuilder;
+    use crate::agent::dispatcher::DispatchContext;
     use crate::agent::graph::{
-        GraphDecisionKind, GraphDecisionReason, GraphRunEventKind, GraphRunPhase,
+        GraphAskWaitBinding, GraphDecisionKind, GraphDecisionReason, GraphEngine, GraphRunEventKind,
+        GraphRunPhase, GraphRunStore, GraphRunner,
     };
     use crate::agent::hooks::{
         turn_hook_point_for_planner_hook_point, AgentHookDescriptor, AgentHookExecutor,
@@ -2386,7 +2429,13 @@ mod tests {
     use crate::agent::runtime::TurnStreamEvent;
     use crate::agent::session::SessionStore;
     use crate::agent::telemetry::DefaultTurnTelemetryBuilder;
+    use crate::agent::tool_runtime::{FakeClock, InvocationOrigin, ToolDispatchRequest};
     use crate::agent::tools::ToolRouter;
+    use crate::agent::tools::{
+        ToolDescriptor, ToolDescriptorSource, ToolDisplayMetadata, ToolExecutionPolicy, ToolExposure,
+        ToolHandlerProvenance, ToolIdentity, ToolKind, ToolPermissionDeclaration,
+        ToolRegistrySnapshot,
+    };
     use crate::agent::turn_flow::TurnEventSink;
     use serde_json::json;
     use std::fs;
@@ -7519,5 +7568,244 @@ mod tests {
         assert_eq!(anthropic_key, "anthropic/gpt-5");
         assert_eq!(anthropic_label, "anthropic/gpt-5");
         assert_ne!(openai_key, anthropic_key);
+    }
+
+    // ── Ask / Plan control-plane surface (PA-076 task 4.4) ─────────────────────────────────
+
+    fn host_mediated_ask_descriptor() -> ToolDescriptor {
+        let mut declaration = ToolPermissionDeclaration::default();
+        declaration.host_mediated = true;
+        ToolDescriptor {
+            identity: ToolIdentity {
+                descriptor_id: "builtin:ask".to_string(),
+                model_name: "Ask".to_string(),
+                canonical_name: "ask".to_string(),
+                primitive_name: "echo_input".to_string(),
+                source: ToolDescriptorSource::Builtin,
+            },
+            aliases: vec!["ask".to_string(), "builtin:ask".to_string()],
+            description: String::new(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+                "additionalProperties": false,
+            }),
+            kind: ToolKind::Interactive,
+            exposure: ToolExposure::ModelVisible,
+            permission_declaration: declaration,
+            execution_policy: ToolExecutionPolicy::default(),
+            display_metadata: ToolDisplayMetadata::default(),
+            handler_provenance: ToolHandlerProvenance {
+                handler_kind: "test".to_string(),
+                source_id: "builtin-tools".to_string(),
+            },
+            source_revision: "test-v1".to_string(),
+            composed_descriptor_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ask_control_plane_surface_lists_answers_cancels_and_expires() {
+        let registry = Arc::new(
+            ToolRegistrySnapshot::from_descriptors("test-ask-snapshot", vec![host_mediated_ask_descriptor()])
+                .expect("ask registry must build"),
+        );
+        let dispatcher = Arc::new(GovernedDispatcher::new(
+            registry,
+            Arc::new(FakeClock::new(1_000)),
+        ));
+        let control_plane = HostControlPlaneBuilder::new()
+            .ask_dispatcher(Arc::clone(&dispatcher))
+            .build();
+
+        let context = DispatchContext {
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        };
+        let dispatch = |call_id: &str, text: &str| {
+            let outcome = dispatcher.dispatch_governed(
+                ToolDispatchRequest {
+                    origin: InvocationOrigin::Model,
+                    descriptor_id: "builtin:ask".to_string(),
+                    call_id: call_id.to_string(),
+                    arguments: json!({ "text": text }),
+                },
+                &context,
+            );
+            outcome.control_outcome.expect("ask control outcome").request_id
+        };
+
+        let request_id = dispatch("call-1", "first");
+
+        // list_pending_asks returns the Interaction request, filterable by session.
+        assert_eq!(control_plane.list_pending_asks(None).as_array().map(Vec::len), Some(1));
+        assert_eq!(control_plane.list_pending_asks(Some("session-1")).as_array().map(Vec::len), Some(1));
+        assert_eq!(control_plane.list_pending_asks(Some("session-2")).as_array().map(Vec::len), Some(0));
+        let listed = control_plane.list_pending_asks(None);
+        assert_eq!(listed[0]["requestId"].as_str(), Some(request_id.as_str()));
+        assert_eq!(listed[0]["requestKind"].as_str(), Some("interaction"));
+        assert_eq!(listed[0]["version"].as_u64(), Some(1));
+        assert_eq!(listed[0]["callId"].as_str(), Some("call-1"));
+
+        // Answer with the current version consumes the request.
+        let answered = control_plane
+            .answer_ask(&request_id, 1, json!("continue"))
+            .expect("answer");
+        assert_eq!(answered["request"]["state"].as_str(), Some("consumed"));
+        assert_eq!(answered["answer"].as_str(), Some("continue"));
+
+        // A stale version is rejected after consumption.
+        let stale = control_plane
+            .answer_ask(&request_id, 1, json!("again"))
+            .expect_err("stale answer must fail closed");
+        assert!(stale.contains("stale"), "{stale}");
+
+        // Cancel path.
+        let cancel_id = dispatch("call-2", "second");
+        let cancelled = control_plane.cancel_ask(&cancel_id, 1).expect("cancel");
+        assert_eq!(cancelled["request"]["state"].as_str(), Some("cancelled"));
+
+        // Expire path (explicit now_ms past the pending request expiry).
+        let expire_id = dispatch("call-3", "third");
+        let pending = dispatcher.pending_request(&expire_id).expect("pending ask");
+        let expired = control_plane.expire_asks(Some(pending.expires_at_ms + 1));
+        assert_eq!(expired["expired"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn plan_control_plane_surface_creates_reads_mutates_and_lists() {
+        let control_plane = HostControlPlaneBuilder::new().build();
+
+        let created = control_plane
+            .plan_create(
+                "session-1",
+                json!({
+                    "kind": "implement",
+                    "summary": "Implement the feature",
+                    "steps": [{ "name": "a", "summary": "sa" }, { "name": "b", "summary": "sb" }],
+                }),
+            )
+            .expect("create");
+        assert_eq!(created["planId"].as_str(), Some("plan-1"));
+        assert_eq!(created["revision"].as_u64(), Some(1));
+        assert_eq!(created["lifecycle"].as_str(), Some("draft"));
+        assert_eq!(created["steps"].as_array().map(Vec::len), Some(2));
+
+        let merged = control_plane
+            .plan_merge("session-1", "plan-1", 1, json!({ "name": "c", "summary": "sc" }))
+            .expect("merge");
+        assert_eq!(merged["revision"].as_u64(), Some(2));
+        assert_eq!(merged["steps"].as_array().map(Vec::len), Some(3));
+
+        let step_id = merged["steps"][0]["stepId"]
+            .as_str()
+            .expect("step id")
+            .to_string();
+        let completed = control_plane
+            .plan_complete_step("session-1", "plan-1", 2, &step_id)
+            .expect("complete step");
+        assert_eq!(completed["steps"][0]["status"].as_str(), Some("completed"));
+        assert_eq!(completed["lifecycle"].as_str(), Some("executing"));
+
+        let replaced = control_plane
+            .plan_replace(
+                "session-1",
+                "plan-1",
+                3,
+                json!({ "kind": "refactor", "summary": "Refactor", "steps": [] }),
+            )
+            .expect("replace");
+        assert_eq!(replaced["planId"].as_str(), Some("plan-1"));
+        assert_eq!(replaced["kind"].as_str(), Some("refactor"));
+        assert_eq!(replaced["revision"].as_u64(), Some(4));
+
+        assert_eq!(control_plane.plan_list("session-1").as_array().map(Vec::len), Some(1));
+        let got = control_plane.plan_get("session-1", "plan-1").expect("get");
+        assert_eq!(got["planId"].as_str(), Some("plan-1"));
+
+        // Cross-session and stale mutations fail closed.
+        assert!(control_plane.plan_get("session-2", "plan-1").is_err());
+        let stale = control_plane
+            .plan_merge("session-1", "plan-1", 1, json!({ "name": "x" }))
+            .expect_err("stale merge must fail closed");
+        assert!(stale.starts_with("stale_revision:"), "{stale}");
+    }
+
+    #[test]
+    fn graph_ask_wait_control_plane_surface_binds_lists_and_resumes() {
+        let registry = Arc::new(
+            ToolRegistrySnapshot::from_descriptors("test-ask-snapshot", vec![host_mediated_ask_descriptor()])
+                .expect("ask registry must build"),
+        );
+        let dispatcher = Arc::new(GovernedDispatcher::new(
+            registry,
+            Arc::new(FakeClock::new(1_000)),
+        ));
+        let mut graph_store = GraphRunStore::new();
+        GraphRunner::new().start_run(
+            &mut graph_store,
+            GraphEngine::new("state-machine-v1").start_run("run-ask", "ask flow", Some("session-1")),
+        );
+        let control_plane = HostControlPlaneBuilder::new()
+            .ask_dispatcher(Arc::clone(&dispatcher))
+            .graph_run_store(graph_store)
+            .build();
+
+        let context = DispatchContext {
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-ask".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        };
+        let outcome = dispatcher.dispatch_governed(
+            ToolDispatchRequest {
+                origin: InvocationOrigin::Model,
+                descriptor_id: "builtin:ask".to_string(),
+                call_id: "call-1".to_string(),
+                arguments: json!({ "text": "continue?" }),
+            },
+            &context,
+        );
+        let request_id = outcome.control_outcome.expect("ask control outcome").request_id;
+        let pending = dispatcher.pending_request(&request_id).expect("pending ask");
+
+        let binding = GraphAskWaitBinding {
+            request_id: request_id.clone(),
+            expected_version: pending.version,
+            run_id: "run-ask".to_string(),
+            turn_id: pending.turn_id.clone(),
+            session_id: pending.session_id.clone(),
+            call_id: pending.call_id.clone(),
+            tool_name: "Ask".to_string(),
+            assistant_transcript: json!({ "toolCalls": [{ "id": pending.call_id }] }),
+            created_at_ms: 1_000,
+        };
+        let bound = control_plane
+            .graph_bind_ask_wait("run-ask", binding)
+            .expect("bind ask wait");
+        assert_eq!(bound["phase"].as_str(), Some("waiting_user"));
+
+        let waits = control_plane.graph_list_ask_waits("run-ask");
+        assert_eq!(waits.as_array().map(Vec::len), Some(1));
+        assert_eq!(waits[0]["requestId"].as_str(), Some(request_id.as_str()));
+        assert_eq!(waits[0]["expectedVersion"].as_u64(), Some(pending.version));
+
+        // Stale version rejected by the graph resume.
+        let stale = control_plane
+            .graph_resume_ask("run-ask", &request_id, pending.version + 1, json!("continue"))
+            .expect_err("stale graph resume must fail closed");
+        assert!(stale.contains("stale"), "{stale}");
+
+        let resumed = control_plane
+            .graph_resume_ask("run-ask", &request_id, pending.version, json!("continue"))
+            .expect("resume");
+        assert_eq!(resumed["callId"].as_str(), Some("call-1"));
+        assert_eq!(resumed["terminalResult"]["toolCallId"].as_str(), Some("call-1"));
+        assert_eq!(resumed["terminalResult"]["output"]["answer"].as_str(), Some("continue"));
+
+        assert_eq!(control_plane.graph_list_ask_waits("run-ask").as_array().map(Vec::len), Some(0));
     }
 }

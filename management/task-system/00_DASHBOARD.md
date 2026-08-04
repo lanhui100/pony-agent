@@ -11,7 +11,7 @@
 ## 当前进行中
 
 - `PA-076` 加固并扩展 Agent Tool Runtime（P0 / C 级）
-  阶段 1（审核门禁）与阶段 2（descriptor / registry 真相源）已全部完成，任务清单 11/48。MSVC 环境阻塞已解除，Rust 测试首次真实执行并修复 3 个 phase-2 缺陷（provider 工具顺序回归、外部工具名被改写成 builtin 产品名、path_info 产品名断言错误）。当前进入 task 3.1 的 governed dispatcher。
+  阶段 1–7 与 runtime 切换（task ②）已全部实现并收口。阶段 3 收口：`GovernedDispatcher` 八步管线 + `PendingControlRequest` CAS + bounded child dispatch + 只读门禁 + governed composites + 27 项矩阵测试（审核产物 `02_REVIEWS/2026-08-02-pa076-phase3-review.md`）。阶段 4：`PlanStore`/`PlanControlHandler` + 宿主 Ask 适配 + graph `ask_waits` wait/resume + control-plane 13 个 Tauri command + 前端 ask.ts/plan.ts/AskPanel/PlanPanel。阶段 5：`ProcessManager` + `SandboxSupportMatrix`/`NoSandboxBackend`，`Run` 无 sandbox 时 fail-closed。阶段 6：`WebAccessPolicy`/`PinnedConnector`（`web_fetch_url` fail-closed）+ `SearchEngine`（真实 regex/globset/ignore）。阶段 7：`view_image` + MCP resource list/templates/read + ToolSearch deferred elevation。runtime 默认 tool executor 已切换为 `build_governed_executor`（`tool_router_regression` 仍走 legacy 门禁）。最近验证快照：core lib 672 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328 全绿。剩余工作：task 4.6/5.7/6.6/7.5 阶段审核、task 5.2 平台 spike、8.1–8.4 迁移与收口、两条 integrator notes（Ask session-context 线程接线、真实 `SandboxBackend`）。
 
 ## 当前主线结论
 
@@ -83,8 +83,8 @@
      四卡累计通过 22 次子智能体审核调优，Rust 测试 + 231 项 TS 测试全部通过。OpenSpec changes 已归档：`openspec/changes/archive/2026-06-25-async-refactor-tokio/`。
 26. `PA-070` 已完成 provider request retry 与退避边界治理
     当前已完成 `retry.rs` substrate、provider/tool 退避原语收口、前端 whole-turn 自动重试退场、最终严格代码审核与一轮收尾调优。`call model` 的 request-level retry 现在明确收束在 `pony-agent-core`，而不是前端静默 whole-turn retry。
-27. `PA-076` 阶段 1、2 已收口，工具元数据已有单一真相源
-    `ToolDescriptor / ToolRegistrySnapshot / ToolSurface / TurnToolView` 已成立，provider、capability bridge、planner 与 Tauri `list_available_tools` 统一从 registry 投影，按工具名与工具数量推断元数据的两条路径均已移除。架构说明见 `docs/architecture/tool-runtime-descriptor-registry.md`。
+27. `PA-076` 阶段 1–7 与 runtime 切换已收口，工具元数据已有单一真相源
+    `ToolDescriptor / ToolRegistrySnapshot / ToolSurface / TurnToolView` 已成立，provider、capability bridge、planner 与 Tauri `list_available_tools` 统一从 registry 投影；`GovernedDispatcher` 成为唯一执行入口，`AgentRuntimeBuilder` 默认 tool executor 已切换为 `build_governed_executor`；`Plan/Ask` 从占位映射升级为真实控制面工具，`ProcessManager`/`SandboxSupportMatrix`/`WebAccessPolicy`/`SearchEngine`/`view_image`/MCP resource/ToolSearch elevation 均已落地。架构说明见 `docs/architecture/tool-runtime-descriptor-registry.md`。
 28. Windows 上的 Rust 测试执行方式已澄清
     此前记录的 MSVC `link.exe` 阻塞并非缺少 Build Tools，而是 shell 未加载 `vcvars64.bat`；已新增 `scripts/run-rust-msvc.bat`。同时发现 `npm run cargo:test:exact` 因固定 `--manifest-path src-tauri/Cargo.toml` 而无法触达 core crate 测试（会静默输出 `running 0 tests`），core 测试需显式 `-p pony-agent-core`。已写入 `docs/guides/rust-agent.md`。
 
@@ -108,9 +108,9 @@
   [planner.rs](crates/pony-agent-core/src/agent/planner.rs)
 - 宿主 retrieval-first 读面：
   [control_plane.rs](crates/pony-agent-core/src/agent/control_plane.rs)
-  [lib.rs](/C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/lib.rs)
+  [lib.rs](/D:/Documents/pony-agent/src-tauri/src/lib.rs)
 - 架构边界文档：
-  [context-state-subsystem.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/context-state-subsystem.md)
+  [context-state-subsystem.md](/D:/Documents/pony-agent/docs/architecture/context-state-subsystem.md)
 
 ## 当前验证
 
@@ -136,7 +136,7 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 
 ## 下一步最小动作
 
-1. 推进 `PA-076 / harden-and-expand-agent-tool-runtime` 的 task 3.1 governed dispatcher；阶段 1、2 已收口并通过真实 Rust 测试。Run/WebFetch/Ask 在 sandbox、pinned connector 与 PendingControlRequest 落地前保持 fail closed。接线时保持两条不变量：registry descriptor 顺序即 provider 工具数组顺序；外部工具名原样透传。
+1. 推进 `PA-076` 收口：阶段 1–7 核心、runtime 切换（task ②）、阶段 8 的 8.1（死代码清理）/8.2+8.5（文档/canonical spec/任务系统同步，OpenSpec validate 通过）/8.4（独立双审 CONDITIONAL PASS，`02_REVIEWS/2026-08-02-pa076-phases-4-7-review.md`）已落地。最近验证：core lib 674 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328 全绿。剩余按依赖顺序：① Ask 真实接线（共享 `Arc<GovernedDispatcher>` + session-scoped `DispatchContext` + Ask 专用 policy + turn-loop bind/resume，design Decision 5 端到端）；② pinned connector（移除 validate-后-默认 client 重解析弱模式）；③ 真实 `SandboxBackend`（Run 从 fail-closed 转执行）；④ 阶段 7 工具注册；⑤ task 4.6/5.7/6.6/7.5 阶段审核 + 8.3 全量复跑 + 归档。
 2. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049`。
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。
@@ -159,11 +159,11 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 
 ## 关联入口
 
-- 任务板：[01_TASK_BOARD.md](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
-- OpenSpec 目录：[openspec](/C:/Users/HUAWEI/Documents/pony-agent/openspec)
-- 已完成任务卡：[PA-018](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-018-build-context-state-subsystem-and-retrieval-boundary.md>)
-- 已完成任务卡：[PA-027](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-027-integrate-openspec-into-task-system.md>)
-- 已完成任务卡：[PA-028](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-028-build-history-node-management-and-branching.md>)
-- 正式验收审计：[PA-018 Acceptance Audit](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md>)
-- 文档索引：[docs/INDEX.md](/C:/Users/HUAWEI/Documents/pony-agent/docs/INDEX.md)
-- 会话日志目录：[99_LOGS](/C:/Users/HUAWEI/Documents/pony-agent/management/task-system/99_LOGS)
+- 任务板：[01_TASK_BOARD.md](/D:/Documents/pony-agent/management/task-system/01_TASK_BOARD.md)
+- OpenSpec 目录：[openspec](/D:/Documents/pony-agent/openspec)
+- 已完成任务卡：[PA-018](</D:/Documents/pony-agent/management/task-system/03_TASKS/PA-018-build-context-state-subsystem-and-retrieval-boundary.md>)
+- 已完成任务卡：[PA-027](</D:/Documents/pony-agent/management/task-system/03_TASKS/PA-027-integrate-openspec-into-task-system.md>)
+- 已完成任务卡：[PA-028](</D:/Documents/pony-agent/management/task-system/03_TASKS/PA-028-build-history-node-management-and-branching.md>)
+- 正式验收审计：[PA-018 Acceptance Audit](</D:/Documents/pony-agent/management/task-system/02_REVIEWS/2026-05-28-pa018-acceptance-audit.md>)
+- 文档索引：[docs/INDEX.md](/D:/Documents/pony-agent/docs/INDEX.md)
+- 会话日志目录：[99_LOGS](/D:/Documents/pony-agent/management/task-system/99_LOGS)

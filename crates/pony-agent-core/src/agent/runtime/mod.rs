@@ -42,9 +42,10 @@ use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
+use crate::agent::governed_executor::build_governed_executor;
 use crate::agent::tools::{
     builtin_tools, canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
-    ToolCall, ToolDefinition, ToolExecutor, ToolRouter,
+    ToolCall, ToolDefinition, ToolExecutor,
 };
 use crate::agent::trace_persistence::{
     spawn_trace_persistence_worker, TracePersistenceCommand, TracePersistenceHandle,
@@ -335,6 +336,7 @@ pub struct AgentRuntimeBuilder {
     sessions: Option<SessionStore>,
     provider_resolver: Option<Box<dyn ProviderSelectionResolver>>,
     tool_executor: Option<Box<dyn ToolExecutor>>,
+    workspace_root: Option<std::path::PathBuf>,
     planner: Option<Box<dyn TurnPlanner>>,
     context_builder: Option<Box<dyn TurnContextBuilder>>,
     telemetry_builder: Option<Box<dyn TurnTelemetryBuilder>>,
@@ -346,6 +348,7 @@ impl AgentRuntimeBuilder {
             sessions: None,
             provider_resolver: None,
             tool_executor: None,
+            workspace_root: None,
             planner: None,
             context_builder: None,
             telemetry_builder: None,
@@ -389,10 +392,11 @@ impl AgentRuntimeBuilder {
         self
     }
 
+    /// Seeds the workspace root used by the default (governed) tool executor. This does not
+    /// select a specific executor: an explicit `tool_executor(...)` override still wins, and the
+    /// default engine is `build_governed_executor(Some(root))` (PA-076 runtime switch).
     pub fn workspace_root(mut self, workspace_root: impl Into<std::path::PathBuf>) -> Self {
-        self.tool_executor = Some(Box::new(ToolRouter::with_workspace_root(
-            workspace_root.into(),
-        )));
+        self.workspace_root = Some(workspace_root.into());
         self
     }
 
@@ -402,7 +406,7 @@ impl AgentRuntimeBuilder {
             self.provider_resolver
                 .unwrap_or_else(|| Box::new(ProviderRegistryStore::new())),
             self.tool_executor
-                .unwrap_or_else(|| Box::new(ToolRouter::new())),
+                .unwrap_or_else(|| Box::new(build_governed_executor(self.workspace_root.clone()))),
             self.planner.unwrap_or_else(|| Box::new(LocalTurnPlanner)),
             self.context_builder
                 .unwrap_or_else(|| Box::new(DefaultTurnContextBuilder)),
@@ -9502,6 +9506,43 @@ mod tests {
             TurnHookPoint::TurnFinalizeEnd,
             "turn.failed",
             "failed",
+        );
+    }
+
+    #[test]
+    fn runtime_default_tool_executor_routes_read_tools_through_governed_dispatcher() {
+        // PA-076 runtime switch: the default engine is `build_governed_executor`, so a real
+        // read tool call executed by the runtime must succeed through the governed dispatcher.
+        let runtime = AgentRuntime::new();
+        let (result, _record, _traces) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: Some("call-gov-list".to_string()),
+            name: "List".to_string(),
+            arguments: json!({ "path": ".", "description": "test" }),
+            plan: None,
+        });
+        assert_eq!(
+            result.status, "ok",
+            "default governed executor failed List: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn runtime_default_tool_executor_fails_closed_for_run_without_sandbox() {
+        // Execute scope + no `SandboxBackend` on the governed dispatcher => designed fail-closed
+        // (design.md Decision 7 / task 5.5), surfaced through the runtime's default executor.
+        let runtime = AgentRuntime::new();
+        let (result, _record, _traces) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: Some("call-gov-run".to_string()),
+            name: "Run".to_string(),
+            arguments: json!({ "command": "echo hi", "description": "test" }),
+            plan: None,
+        });
+        assert_eq!(result.status, "error");
+        assert!(
+            result.output.contains("sandbox_unavailable"),
+            "expected sandbox_unavailable, got: {}",
+            result.output
         );
     }
 

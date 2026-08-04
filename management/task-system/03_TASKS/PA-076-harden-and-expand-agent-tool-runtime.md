@@ -8,7 +8,7 @@
 - Complexity: C
 - Owner: @orchestrator
 - Created At: 2026-07-18
-- Updated At: 2026-07-19
+- Updated At: 2026-08-02
 - OpenSpec Change: `harden-and-expand-agent-tool-runtime`
 - Spec Status: 三方审核已修订并通过 strict validate
 
@@ -66,16 +66,34 @@
   1. registry 投影破坏了 provider 工具数组顺序（旧行为按 product name 首次出现的槽位排序，`time_now` 把 `Run` 钉在首位）。该顺序属于 PA-025/PA-029 收窄的 cache-friendly stable prefix，已改为在 builtin 构建时按「模型可见槽位」重排 descriptor，使 registry 位置成为所有投影的唯一顺序真相源。
   2. `model_visible_tool_name` 的 `_ => "Run"` 兜底会把任意未知/外部工具名静默改写成 builtin 产品名 —— 这是 tool-count 推断之外的第二条名称推断路径。已新增 `model_visible_tool_name_opt` 与 `product_visible_tool_name`，三处 contract view 改为未知名原样透传。
   3. 新测试对 `workspace_path_info` 断言产品名为 `Read`，与既有映射 `List` 冲突。phase-2 不得改变产品可见行为，故修正测试断言而非映射。
+- **第 3 阶段已全部完成（task 3.1–3.8，2026-08-02 收口）**：`GovernedDispatcher` 八步管线（origin 鉴权/exposure → schema 校验 → 可改写 hook → 最终校验+权限决策 → 原子预算 → 执行 → control outcome → exactly-once lifecycle record）、`PendingControlRequest` CAS（session/version/nonce/expiry/descriptor/digest 全绑定）、bounded child dispatch（lineage/深度 4/环检测/原子预算账本/`suspended` 停 sibling）、`workspace_batch` 只读门禁（3.4）、governed `workspace_batch`/`gather_context` composite + `GovernedToolExecutor` 适配器（3.5）、`aggregate_composite_permission` 保守聚合（3.6）、27 项矩阵测试（3.7）、独立安全+代码审核（3.8，CONDITIONAL PASS → P0/P1 全部解决）。
+  - 测试：core lib 554 + matrix 27 + tool_router_regression 13 + session_regression 5 全绿；全工作区 check 通过。
+  - 审核产物：`management/task-system/02_REVIEWS/2026-08-02-pa076-phase3-review.md`。
+- **第 4 阶段已完成（task 4.1–4.5，2026-08-02 收口）**：`plan_state.rs` 的 `PlanStore`/`PlanControlHandler`（session-owned、revisioned，create/replace/merge/complete-step，`Draft/Executing/Completed/Aborted` 生命周期，绝不执行任意子调用）；`ask_control.rs` 宿主 Ask 适配器（复用 `PendingControlRequest` + `PendingControlRequestKind::Interaction`，answer 绝不等同 approval）；graph Ask wait/resume（`GraphAskWaitBinding` 持久化 per-run `ask_waits`、`bind_ask_wait`/`resume_ask_wait`、`waiting_user` 挂起、以原 tool call id 注入唯一终态）；control-plane `ask_plan_commands.rs` + 13 个 Tauri command（ask_list_pending/ask_answer/ask_cancel/ask_expire、plan_create/plan_replace/plan_merge/plan_complete_step/plan_list/plan_get、graph_list_ask_waits/graph_bind_ask_wait/graph_resume_ask）；前端 `src/stores/ask.ts`、`src/stores/plan.ts`、`AskPanel.vue`、`PlanPanel.vue`、`src/types/ask-plan.ts`。
+- **第 5 阶段已完成（task 5.1, 5.3–5.6 核心落地）**：`process.rs` 的 `ProcessManager`（session-scoped opaque handle，start/poll/write_stdin/kill/kill_after/shutdown，并发排空 + bounded buffer + 截断/丢弃字节证据）；`sandbox.rs` 的 `SandboxSupportMatrix`/`NoSandboxBackend`/`TestSandboxBackend`（fail-closed 门禁）；`workspace_run_command` 已改由 `ProcessManager` 支撑；无人值守 Run 在无真实 sandbox backend 时按设计 fail-closed（`sandbox_unavailable`）。task 5.2 的 containment spike 决定已记录于 `sandbox.rs`（Windows Job Object 禁 breakaway 为意图 containment、Unix process group 为 best-effort，均未宣称完整 containment、Job Object 尚未实现为完整 enforcement）；task 5.7 审核仍属剩余工作。
+- **第 6 阶段已完成（task 6.1–6.5 核心落地）**：`web_access.rs` 的 `WebAccessPolicy`/`PinnedConnector`/`WebAccessDecision`/`WebAccessDenyReason`（纯 hermetic 决策面、无网络 IO、无 HTTP client）；`web_fetch_url` fail-closed（`web_access_denied`、无 ambient proxy、不自动跟随 redirect）；`search.rs` 的 `SearchEngine`（真实 regex/globset/ignore 语义、确定性排序），`workspace_search_text`/`workspace_glob_files` 改用它并诚实报告截断（`truncated=true` + reason）。task 6.6 审核仍属剩余工作。
+- **第 7 阶段已完成（task 7.1–7.4 核心落地）**：`image_artifact.rs` 的 `view_image`（reference-based `ImageArtifact`、magic-byte MIME/尺寸/字节上限、不解码像素）；`mcp_resources.rs` 的 MCP resource list / list-templates / read（source-bound `McpTransport`、untrusted content 边界、独立 `ResourceTemplate` 类型）；`tool_search_elevation.rs` 的 `ToolSearchElevator`（Deferred 候选 → 当前 turn `TurnToolView` 提升、source_revision 校验、trace evidence）。task 7.5 审核仍属剩余工作。
+- **runtime 切换（task ②）已完成**：`AgentRuntimeBuilder` 默认 tool executor 现在是 `build_governed_executor`（`runtime/mod.rs` `build()` 的 `unwrap_or_else` 兜底；显式 `tool_executor(...)` override 仍优先）。保真测试证明 List/Search/Glob/Ask/Write/Edit 与 legacy 输出逐字节一致；Run 正确 fail-closed（`sandbox_unavailable`）。`tool_router_regression` 仍走 legacy `ToolRouter` 路径（13 项 characterization 门禁）。`DispatchError.code` 已动态化，任意 legacy 错误码可保留。
+- **测试（最近一次验证快照）**：core lib 674 + matrix 27 + tool_router_regression 13 + session_regression 5 全绿；前端 vitest 328 全绿。
+- **阶段 8 部分完成（task 8.1/8.2/8.4/8.5）**：8.1 已删死代码（`ToolCallContractView`/`ToolResultContractView`/`builtin_tool_contract_views` 投影 + 孤儿 helper + 死 `ToolRouter` 面）；8.2/8.5 已完成文档/canonical spec 同步（OpenSpec strict validate 通过）+ 任务系统同步；8.4 独立双审产出 `02_REVIEWS/2026-08-02-pa076-phases-4-7-review.md`（CONDITIONAL PASS，P1-2/3/4 + P2-10 已修复：预算回归、进程最小环境、WebFetch body 边界、time_now 类型；P1-1 Ask 真实接线与 P1-5 pinned connector 记录为下一里程碑）。
 
 ## Next Action
 
-进入 task 3.1：实现 governed dispatcher lifecycle（origin 鉴权、raw validation、mutable hooks、final validation/normalization、final-argument policy 与 sandbox 决策、budgets、执行、control outcome、telemetry、exactly-once lifecycle hooks）。先补 fake dispatcher/policy/budget harness，再只在 runtime 最小接线点消费 `ToolOutcome.control_outcome`。禁止提前启用 Ask、Run 或任意 URL WebFetch。
+阶段 1–7 核心、runtime 切换（task ②）、阶段 8 的 8.1/8.2/8.4/8.5 已落地；core lib 674 + matrix 27 + 回归 + 前端全绿。剩余工作按依赖顺序：
+
+1. **Ask 真实接线（P1-1，含 P2-8/P2-9）**：单一共享 `Arc<GovernedDispatcher>` 贯穿 runtime 执行器与 host 控制面；每次 governed dispatch 传入 session-scoped `DispatchContext`（session/run/turn/workspace 事实）；Ask 专用 policy（WaitingHost）使 `PendingControlRequest` 真正持久化；runtime turn loop 绑定/persist/resume（graph wait/resume 面已就绪，缺 turn-loop 接线）；模型 Ask 参数透传进 `prompt/options`。这是 design Decision 5 的端到端兑现点。
+2. **pinned connector（P1-5/P2-7）**：移除"预校验后交默认 HTTP client 重解析"弱模式；WebFetch 连接固定到已校验地址 + peer-IP 校验 + 保留 Host/SNI + 显式 ≤5 跳重解析/重校验。`FailClosedResolver` 已兜住任意 hostname URL fail-closed，真实 resolver 接线前必须完成。
+3. **真实 `SandboxBackend`**：`NoSandboxBackend` + `SandboxSupportMatrix` 是 fail-closed 门禁；注册真实 sandbox backend 后无人值守 Run 才从 `sandbox_unavailable` 转为执行。
+4. **阶段 7 工具注册（P2-6）**：`view_image`/MCP resource/ToolSearch 提升的库已就绪，需注册进 builtin registry（`builtin:plan_control` 等）并处理 `ImageReadOptions.include_bytes` 默认 2 MiB 撑爆结果预算的隐患。
+5. **阶段审核补完 + 8.3**：task 4.6/5.7/6.6/7.5 独立审核；8.3 格式化/静态检查/全量测试按门禁复跑，随后 OpenSpec 归档。
 
 ## Blockers
 
 - ~~缺少 MSVC `link.exe`~~ 已解除：Build Tools 实际位于 `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`，只是环境变量未加载。统一走 `scripts/run-rust-msvc.bat <命令>`。注意 `invoke-rust-target.ps1` 固定 `--manifest-path src-tauri/Cargo.toml`，跑 core crate 测试需显式 `cargo test -p pony-agent-core --lib --target-dir target-test-exact-a <filter>`。
-- `runtime/mod.rs` 与 `turn_flow.rs` 有用户进行中的 markdown/model-hop trace 修改；PA-076 后续 dispatcher 接线必须在最小交叉点协同，当前未改动这两处。
-- core 全量 `--lib` 另有 7 项失败与 PA-076 无关，不应计入本卡门禁：6 项 history/branch cursor 断言（`session` / `sqlite_session` / `control_plane` / `runtime` 的 node id 与 branch head 解析）与 1 项 `openai_reasoning_tool_followup_stream_attempts_live_stream_before_fallback`（不可达端点降级到 `local_fallback` 而非 `stream_sync_fallback`）。这些断言均不经过工具投影路径，疑与上述未提交的 runtime/turn_flow 改动或网络环境相关，建议单独定位。
+- `runtime/mod.rs` 与 `turn_flow.rs` 有用户进行中的 markdown/model-hop trace 修改。runtime 切换仅在最小交叉点落地（`AgentRuntimeBuilder::build()` 的默认 executor 兜底），未改动 `turn_flow.rs` 与用户进行中的 trace 修改。
+- core 全量 `--lib` 另有 2 项既有失败与 PA-076 无关，不应计入本卡门禁：
+  1. `provider_registry_regression::resolve_selection_falls_back_to_selected_provider_and_model`（config.rs 过期断言 4096 vs 64000）。
+  2. `start_turn_stream_fail_turn_policy_on_tool_call_start_stops_before_tool_execution` 并行 flake（单线程通过）。
 
 ## Validation Evidence
 
@@ -99,12 +117,50 @@
 - `git diff --check`: clean。
 - `npm run openspec -- validate harden-and-expand-agent-tool-runtime --strict`: `Change 'harden-and-expand-agent-tool-runtime' is valid`。
 
+### 2026-08-02（阶段 1–7 + runtime 切换收口快照）
+
+最近一次完整验证快照（全部通过；随后阶段 8.3 需按门禁全量复跑）：
+
+- core lib `--lib`：**674 passed**（含 dispatcher/budget/dispatcher_composites/governed_executor/plan_state/ask_control/process/sandbox/web_access/search/image_artifact/mcp_resources/tool_search_elevation 等模块测试）。
+- 矩阵 `--test dispatcher_matrix`：**27 passed**。
+- `--test tool_router_regression`：**13 passed**（legacy ToolRouter characterization 门禁）。
+- `--test session_regression`：**5 passed**。
+- 前端 vitest：**328 passed**（含 `tests/ask-store.spec.ts`、`tests/plan-store.spec.ts`、`tests/AskPlanPanel.spec.ts`）。
+- `npm run openspec -- validate harden-and-expand-agent-tool-runtime --strict`：`Change 'harden-and-expand-agent-tool-runtime' is valid`（2026-08-02，canonical spec 同步后复跑，见下）。
+
 ## Resume Hint
 
-阶段 1、2 已全部完成。下次直接进入 task 3.1 的 governed dispatcher。
+阶段 1–7 与 runtime 切换（task ②）已全部完成并收口。架构说明见 `docs/architecture/tool-runtime-descriptor-registry.md`（含 governed dispatcher 八步管线、runtime 默认切换、Ask/Plan/process/sandbox/web/search/phase-7 模块落点与两条剩余 integrator notes）。阶段 3 审核产物：`02_REVIEWS/2026-08-02-pa076-phase3-review.md`。剩余工作：task 4.6 / 5.7 / 6.6 / 7.5 阶段审核、8.1–8.4 迁移与收口，以及两条 integrator notes（Ask 的 session-context 线程接线、真实 `SandboxBackend`）。
 
 Rust 测试统一入口：`cmd //c "scripts\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a <filter>"`。
 
-复跑本轮门禁：`agent::tools::`、`agent::tool_runtime::`、`--test tool_router_regression`。
+复跑门禁：`agent::dispatcher::`、`agent::budget::`、`agent::dispatcher_composites::`、`agent::governed_executor::`、`agent::plan_state::`、`agent::ask_control::`、`agent::process::`、`agent::sandbox::`、`agent::web_access::`、`agent::search::`、`agent::image_artifact::`、`agent::mcp_resources::`、`agent::tool_search_elevation::`、`--test dispatcher_matrix`、`--test tool_router_regression`、`--test session_regression`。
 
-接线 dispatcher 时注意两条顺序/命名不变量（本轮修复，回归代价高）：registry descriptor 顺序即 provider 工具数组顺序（stable prefix 依赖）；外部/未知工具名必须原样透传，不得回落到 builtin 产品名。
+接线 dispatcher 时注意两条顺序/命名不变量（阶段 2 修复，回归代价高）：registry descriptor 顺序即 provider 工具数组顺序（stable prefix 依赖）；外部/未知工具名必须原样透传，不得回落到 builtin 产品名。
+
+## OpenSpec 同步与归档就绪（8.5）
+
+### Canonical spec 同步（已完成）
+
+8 个 delta spec 已全量同步到 `openspec/specs/`：
+
+- 新增 canonical：`tool-runtime-dispatch`、`process-tool-lifecycle`、`web-access-safety`。
+- 扩展 canonical（追加本 change 的 ADDED 要求）：`tool-system-contract`（+4）、`tool-permission-contract`（+5）、`third-wave-default-tool-alignment`（Plan/Ask 两条 MODIFIED 已替换 + ToolSearch elevation ADDED）、`second-wave-tool-surface`（+5）、`tool-observability-contract`（+4）。
+
+`openspec/changes/harden-and-expand-agent-tool-runtime/tasks.md` 勾选状态已与实际实现对齐。
+
+### 验证
+
+- `npm run openspec -- validate harden-and-expand-agent-tool-runtime --strict`：`Change 'harden-and-expand-agent-tool-runtime' is valid`。
+
+### 归档就绪状态（未执行归档）
+
+change 仍留在 `openspec/changes/harden-and-expand-agent-tool-runtime/`，**尚未归档**。归档前的剩余前置（完成后再执行 `openspec/changes/archive/2026-08-02-*` 迁移并更新 `docs/INDEX.md` 链接）：
+
+1. task 4.6 / 5.7 / 6.6 / 7.5 独立阶段审核（阶段 3 审核已完成：`02_REVIEWS/2026-08-02-pa076-phase3-review.md`；其余阶段尚无审核产物）。
+2. task 8.1：删除已迁移的旧名称派生表/执行旁路（legacy `builtin_tools()`/`ToolRouter` 仍作执行/兼容输入与 characterization 门禁）。
+3. task 8.3：格式化、静态检查、core 定向/全量 + 前端测试按门禁全量复跑（最近一次快照：core lib 672 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328）。
+4. task 8.4：独立双路代码审核 + 安全/性能审核 + consultant 收口，无未解决 P0/P1。
+5. 两条 integrator notes 若在归档前完成接线（Ask session-context、真实 `SandboxBackend`），则删除本卡相应"剩余"标注。
+
+归档时的预期动作：将 `openspec/changes/harden-and-expand-agent-tool-runtime/` 迁入 `openspec/changes/archive/2026-08-02-harden-and-expand-agent-tool-runtime/`，更新 `docs/INDEX.md` 第 8 节链接（canonical spec 链接保持指向 `openspec/specs/`，不受归档影响），并在 Dashboard/Board 将该卡标记为 Done。

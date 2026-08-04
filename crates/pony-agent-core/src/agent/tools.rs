@@ -1,16 +1,44 @@
+//! Legacy `ToolRouter` builtin tool handlers (PA-076 migration surface).
+//!
+//! This module is the compatibility `ToolRouter` the runtime still routes tool calls through
+//! until the governed dispatcher takes over. The `Run`/`WebFetch`/`Search`/`Glob` handlers are
+//! wired to the hardened modules from phase 5/6 (PA-076 tasks 5.5, 6.3, 6.4):
+//!
+//! - [`crate::agent::process::ProcessManager`] backs `workspace_run_command` with the
+//!   session-scoped process lifecycle (start / bounded poll / kill / timeout, PA-076 tasks
+//!   5.3-5.5). The legacy path keeps executing: it only applies `enforce_sandbox` when a sandbox
+//!   backend is explicitly registered on the router (`with_sandbox_backend`). With the default
+//!   `None` the sandbox gate is NOT applied here — the governed dispatcher path is responsible
+//!   for enforcing `enforce_sandbox` before any `Run` executes, so legacy execution is preserved
+//!   during the migration window and never fails closed on sandbox grounds inside `ToolRouter`.
+//! - [`crate::agent::web_access::WebAccessPolicy`] gates `web_fetch_url` before any connection
+//!   (design Decision 8, PA-076 tasks 6.1-6.3): arbitrary URLs fail closed until a production
+//!   `WebResolver` is injected together with a pinned connector (a governed-path follow-up). The
+//!   client is built with no ambient proxy and no auto-redirects.
+//! - [`crate::agent::search::SearchEngine`] replaces the wildcard pseudo-regex and custom
+//!   traversal in `workspace_search_text` / `workspace_glob_files` with real regex, globset,
+//!   `.gitignore`-aware traversal and explicit truncation evidence (design Decision 9).
+
+use crate::agent::process::ProcessManager;
 use crate::agent::runtime_helper::block_on;
-use crate::agent::tool_runtime::TurnToolView;
+use crate::agent::sandbox::enforce_sandbox;
+use crate::agent::search::{SearchEngine, SearchOptions};
+use crate::agent::tool_runtime::{
+    ProcessBackend, ProcessStartRequest, ProcessState, SandboxBackend, SandboxRequest,
+    TurnToolView, WebResolver,
+};
+use crate::agent::web_access::{WebAccessDecision, WebAccessDenyReason, WebAccessPolicy};
 use encoding_rs::{Encoding, GBK};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::env;
 use std::error::Error;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -35,10 +63,20 @@ const TOOL_MCP_RESOURCE_READ: &str = "mcp_resource_read";
 const TOOL_TOOL_SEARCH: &str = "tool_search";
 
 const MAX_FULL_READ_BYTES: u64 = 120_000;
-const MAX_SEARCH_FILE_BYTES: u64 = 1_000_000;
-const MAX_SEARCH_FILES: usize = 800;
 const MAX_PATH_REPAIR_SEARCH_FILES: usize = 2_000;
 const MAX_WORKSPACE_BATCH_CALLS: usize = 24;
+/// Primitives permitted as `workspace_batch` children while the legacy composite
+/// still bypasses the governed child dispatcher (PA-076 task 3.5). Fail-closed
+/// safety gate per design Decision 3: every other scope is rejected with
+/// `unsupported_composite_child` until child dispatch takes over.
+const READ_ONLY_BATCH_CHILD_PRIMITIVES: &[&str] = &[
+    TOOL_WORKSPACE_LIST_FILES,
+    TOOL_WORKSPACE_READ_FILE,
+    TOOL_WORKSPACE_READ_FILE_SEGMENT,
+    TOOL_WORKSPACE_PATH_INFO,
+    TOOL_WORKSPACE_SEARCH_TEXT,
+    TOOL_WORKSPACE_GLOB_FILES,
+];
 const MAX_GATHER_CONTEXT_PATHS: usize = 6;
 const MAX_SEGMENT_LINES: usize = 400;
 const DEFAULT_SEGMENT_LINES: usize = 80;
@@ -47,6 +85,9 @@ const SUMMARY_ITEM_LIMIT: usize = 3;
 const DEFAULT_RUN_TIMEOUT_MS: u64 = 10_000;
 const MAX_RUN_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_WEB_TIMEOUT_MS: u64 = 15_000;
+/// Hard cap on a fetched response body (design Decision 8 / phase-4..7 review P1-4): never read a
+/// response unbounded; past this the body is truncated and surfaced honestly.
+const MAX_WEB_BODY_BYTES: usize = 2 * 1024 * 1024;
 const TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,16 +227,6 @@ pub struct ToolError {
     pub source: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceContext {
-    pub root: PathBuf,
-    pub display_name: String,
-    pub writable: bool,
-    pub default_shell_cwd: PathBuf,
-    pub policy: String,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinitionContractView {
@@ -206,43 +237,6 @@ pub struct ToolDefinitionContractView {
     pub input_schema: Value,
     pub kind: String,
     pub exposure: String,
-    pub display_metadata: ToolDisplayMetadata,
-    pub permission_facts: ToolPermissionFacts,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolCallContractView {
-    pub call_id: Option<String>,
-    pub name: String,
-    pub canonical_tool_name: String,
-    pub execution_primitive: String,
-    pub arguments: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<ToolPlan>,
-    pub kind: String,
-    pub exposure: String,
-    pub display_metadata: ToolDisplayMetadata,
-    pub permission_facts: ToolPermissionFacts,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolResultContractView {
-    pub tool_name: String,
-    pub canonical_tool_name: String,
-    pub execution_primitive: String,
-    pub status: String,
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ToolError>,
-    #[serde(default)]
-    pub child_results: Vec<Value>,
-    #[serde(default)]
-    pub artifacts: Vec<Value>,
-    pub duration_ms: u64,
     pub display_metadata: ToolDisplayMetadata,
     pub permission_facts: ToolPermissionFacts,
 }
@@ -884,32 +878,40 @@ pub trait ToolExecutor: Send + Sync {
 
 pub struct ToolRouter {
     workspace_root: PathBuf,
+    process_manager: ProcessManager,
+    sandbox_backend: Option<Arc<dyn SandboxBackend>>,
+    web_resolver: Arc<dyn WebResolver>,
 }
 
 impl ToolRouter {
     pub fn new() -> Self {
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            process_manager: ProcessManager::new(),
+            sandbox_backend: None,
+            web_resolver: Arc::new(FailClosedResolver),
         }
     }
 
     pub fn with_workspace_root(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+        Self {
+            workspace_root,
+            process_manager: ProcessManager::new(),
+            sandbox_backend: None,
+            web_resolver: Arc::new(FailClosedResolver),
+        }
     }
 
-    pub fn workspace_context(&self) -> WorkspaceContext {
-        WorkspaceContext {
-            root: self.workspace_root.clone(),
-            display_name: self
-                .workspace_root
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("workspace")
-                .to_string(),
-            writable: true,
-            default_shell_cwd: self.workspace_root.clone(),
-            policy: "workspace_root".to_string(),
-        }
+    /// Register an explicit sandbox backend for the legacy `workspace_run_command` path.
+    ///
+    /// When a backend is registered the legacy handler runs `enforce_sandbox` and fails closed on
+    /// denial. When `None` (the default) the legacy path does NOT fail closed on sandbox grounds:
+    /// the runtime still routes `Run` through `ToolRouter` until the governed switch, and the
+    /// governed dispatcher path is responsible for enforcing the sandbox gate before any Run
+    /// executes. See the module documentation.
+    pub fn with_sandbox_backend<B: SandboxBackend + 'static>(mut self, backend: B) -> Self {
+        self.sandbox_backend = Some(Arc::new(backend));
+        self
     }
 
     pub fn execute(&self, call: &ToolCall) -> ToolResult {
@@ -1329,7 +1331,36 @@ impl ToolRouter {
             .map(|value| value.clamp(1, MAX_RUN_TIMEOUT_MS))
             .unwrap_or(DEFAULT_RUN_TIMEOUT_MS);
 
-        let mut child = match spawn_workspace_command(command, &cwd) {
+        // Sandbox gate (design Decision 7, PA-076 task 5.5): the legacy ToolRouter only applies
+        // the gate when a sandbox backend is explicitly registered. With `None` (the default)
+        // legacy execution is preserved — the governed dispatcher path enforces
+        // `enforce_sandbox` before a Run executes. See the module documentation.
+        let sandbox_request = SandboxRequest {
+            workspace_root: self.canonical_workspace_root().display().to_string(),
+            allow_network: false,
+            environment_allowlist: Vec::new(),
+        };
+        if let Some(backend) = &self.sandbox_backend {
+            if let Err(reason) = enforce_sandbox(backend.as_ref(), &sandbox_request) {
+                return error_result(
+                    TOOL_WORKSPACE_RUN_COMMAND,
+                    "sandbox_denied",
+                    reason,
+                    Some("无人值守 Run 需要可用的沙箱；请通过 host 审批显式允许。".to_string()),
+                );
+            }
+        }
+
+        // Session-scoped process lifecycle (PA-076 tasks 5.3-5.5). Each legacy Run gets its own
+        // opaque session id so handles can never be replayed across runs.
+        let session_id = legacy_run_session_id();
+        let (program, arguments) = workspace_command_parts(command, &cwd);
+        let handle = match self.process_manager.start(&ProcessStartRequest {
+            session_id: session_id.clone(),
+            program,
+            arguments,
+            sandbox: sandbox_request,
+        }) {
             Ok(value) => value,
             Err(error) => {
                 return error_result(
@@ -1341,53 +1372,63 @@ impl ToolRouter {
             }
         };
 
+        // Arm the kill timer as a safety net and run a bounded poll loop until `Exited`. The
+        // loop accumulates per-poll output; truncation flags are sticky per stream.
+        self.process_manager
+            .kill_after(&session_id, &handle, Duration::from_millis(timeout_ms));
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let output = loop {
-            match child.try_wait() {
-                Ok(Some(_status)) => match child.wait_with_output() {
-                    Ok(value) => break Ok(value),
-                    Err(error) => {
-                        break Err(error_result(
-                            TOOL_WORKSPACE_RUN_COMMAND,
-                            "wait_failed",
-                            format!("等待命令输出失败：{}。", error),
-                            Some("请重试，或缩短命令输出与执行时长。".to_string()),
-                        ))
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut stdout_truncated = false;
+        let mut stderr_truncated = false;
+        let mut exit_code: Option<i32> = None;
+        let mut timed_out = false;
+
+        loop {
+            if Instant::now() >= deadline {
+                let _ = self.process_manager.kill(&session_id, &handle);
+                timed_out = true;
+                break;
+            }
+            match self.process_manager.poll(&session_id, &handle) {
+                Ok(result) => {
+                    stdout.push_str(&result.stdout);
+                    stderr.push_str(&result.stderr);
+                    stdout_truncated |= result.stdout_truncated;
+                    stderr_truncated |= result.stderr_truncated;
+                    if result.state == ProcessState::Exited {
+                        exit_code = result.exit_code;
+                        break;
                     }
-                },
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break Err(error_result(
-                            TOOL_WORKSPACE_RUN_COMMAND,
-                            "timeout",
-                            format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
-                            Some("请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()),
-                        ));
-                    }
-                    thread::sleep(Duration::from_millis(20));
                 }
                 Err(error) => {
-                    break Err(error_result(
+                    let _ = self.process_manager.kill(&session_id, &handle);
+                    return error_result(
                         TOOL_WORKSPACE_RUN_COMMAND,
                         "wait_failed",
                         format!("轮询命令状态失败：{}。", error),
                         Some("请重试，或更换更简单的命令。".to_string()),
-                    ))
+                    );
                 }
             }
-        };
+            thread::sleep(Duration::from_millis(20));
+        }
 
-        let output = match output {
-            Ok(value) => value,
-            Err(result) => return result,
-        };
+        if timed_out {
+            // Best-effort entry cleanup; the kill_after timer may also fire later (idempotent).
+            let _ = self.process_manager.kill(&session_id, &handle);
+            return error_result(
+                TOOL_WORKSPACE_RUN_COMMAND,
+                "timeout",
+                format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
+                Some("请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()),
+            );
+        }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code();
-        let succeeded = output.status.success();
+        // Exited: clean up the session entry (idempotent when already exited).
+        let _ = self.process_manager.kill(&session_id, &handle);
+
+        let succeeded = exit_code == Some(0);
         let error_payload = (!succeeded).then(|| {
             json!({
                 "code": "non_zero_exit",
@@ -1416,6 +1457,8 @@ impl ToolRouter {
                 "exitCode": exit_code,
                 "stdout": stdout,
                 "stderr": stderr,
+                "stdoutTruncated": stdout_truncated,
+                "stderrTruncated": stderr_truncated,
                 "error": error_payload,
                 "summary": {
                     "text": format!(
@@ -1447,14 +1490,6 @@ impl ToolRouter {
             );
         };
         let url = url.trim();
-        if !is_http_url(url) {
-            return error_result(
-                TOOL_WEB_FETCH_URL,
-                "invalid_url",
-                "只允许抓取 http/https URL。".to_string(),
-                Some("请传入以 http:// 或 https:// 开头的地址。".to_string()),
-            );
-        }
 
         let timeout_ms = call
             .arguments
@@ -1462,6 +1497,18 @@ impl ToolRouter {
             .and_then(Value::as_u64)
             .map(|value| value.clamp(1, 60_000))
             .unwrap_or(DEFAULT_WEB_TIMEOUT_MS);
+
+        // Fail-closed web access policy (design Decision 8, PA-076 tasks 6.1-6.3): every URL is
+        // validated for scheme, credentials, host, resolved addresses, port and redirect budget
+        // BEFORE any connection. The legacy path uses an injected-or-default `WebResolver`; the
+        // default resolver cannot resolve any host, so arbitrary hostname URLs fail closed until
+        // a production resolver is wired in together with a pinned connector (a governed-path
+        // follow-up). On `Deny` the structured reason is returned as a fail-closed error.
+        let policy = WebAccessPolicy::default();
+        let decision = policy.validate(url, self.web_resolver.as_ref());
+        if !decision.is_allowed() {
+            return web_fetch_denied(url, &decision);
+        }
 
         let client = match build_web_client(timeout_ms) {
             Ok(value) => value,
@@ -1498,7 +1545,25 @@ impl ToolRouter {
         let status = response.status();
         let final_url = response.url().to_string();
         let headers = response.headers().clone();
-        let bytes = match block_on(response.bytes()) {
+
+        // Design Decision 8: never read a response body unbounded and never decode arbitrary
+        // binary as text. Gate on the declared content type, then stream with a hard byte cap and
+        // surface truncation honestly (phase-4..7 review P1-4).
+        if let Some(content_type) = headers.get(reqwest::header::CONTENT_TYPE) {
+            if !is_text_content_type(content_type.to_str().unwrap_or("")) {
+                return error_result(
+                    TOOL_WEB_FETCH_URL,
+                    "unsupported_content_type",
+                    format!(
+                        "目标返回的内容类型 `{}` 不是可读文本，已拒绝解码。",
+                        content_type.to_str().unwrap_or("unknown")
+                    ),
+                    Some("请改用能返回 text/html、text/plain、application/json 等文本内容的地址。".to_string()),
+                );
+            }
+        }
+
+        let (bytes, body_truncated) = match block_on(read_bounded_body(response, MAX_WEB_BODY_BYTES)) {
             Ok(value) => value,
             Err(error) => {
                 return error_result(
@@ -1525,6 +1590,10 @@ impl ToolRouter {
                 "statusCode": status.as_u16(),
                 "contentPreview": preview_text(&body, 2000),
                 "contentLength": body.len(),
+                "truncated": body_truncated,
+                "truncationReason": body_truncated.then(|| {
+                    format!("响应体超过 {MAX_WEB_BODY_BYTES} 字节上限，已截断。")
+                }),
                 "error": (!status.is_success()).then(|| json!({
                     "code": "http_error",
                     "message": format!("抓取 URL 返回非成功状态码 {}。", status.as_u16()),
@@ -2024,6 +2093,17 @@ impl ToolRouter {
             .map(|value| value.clamp(1, 200) as usize)
             .unwrap_or(50);
 
+        // Validate the glob up front (mirrors the engine's globset compilation) so a malformed
+        // pattern fails with a structured error instead of a panic.
+        if let Err(error) = compile_path_glob(pattern) {
+            return error_result(
+                TOOL_WORKSPACE_GLOB_FILES,
+                "invalid_pattern",
+                format!("无效的 glob 模式：{}。", error),
+                Some("请使用合法 glob 模式，例如 `src/**/*.rs`。".to_string()),
+            );
+        }
+
         let root_entry = match self.resolve_workspace_entry(relative_dir) {
             Ok(value) => value,
             Err(error) => {
@@ -2031,21 +2111,38 @@ impl ToolRouter {
             }
         };
 
-        let mut files = if root_entry.is_file() {
-            vec![root_entry.clone()]
+        let (paths, truncated, truncation_reason) = if root_entry.is_file() {
+            // A file root matches (or not) the single workspace-relative path against the glob,
+            // using the same path-or-basename semantics as the engine.
+            let relative = self.display_workspace_relative(&root_entry);
+            let matched = glob_matches_path_or_basename(&relative, pattern);
+            let paths = if matched {
+                vec![relative]
+            } else {
+                Vec::new()
+            };
+            (paths, false, None)
         } else if root_entry.is_dir() {
-            let mut collected = Vec::new();
-            if let Err(error) =
-                collect_files_recursively(&root_entry, &mut collected, MAX_SEARCH_FILES)
-            {
-                return error_result(
-                    TOOL_WORKSPACE_GLOB_FILES,
-                    "walk_failed",
-                    format!("遍历目录失败：{}。", error),
-                    Some("请缩小 path 范围后重试。".to_string()),
-                );
-            }
-            collected
+            let engine = SearchEngine::new();
+            let result = match engine.glob_files(pattern, &root_entry, limit) {
+                Ok(value) => value,
+                Err(error) => {
+                    return error_result(
+                        TOOL_WORKSPACE_GLOB_FILES,
+                        "invalid_pattern",
+                        error,
+                        Some("请使用合法 glob 模式，例如 `src/**/*.rs`。".to_string()),
+                    )
+                }
+            };
+            // Re-map engine-relative paths to workspace-relative paths (the legacy output
+            // contract).
+            let paths = result
+                .paths
+                .into_iter()
+                .map(|path| self.display_workspace_relative(&root_entry.join(&path)))
+                .collect::<Vec<_>>();
+            (paths, result.truncated, result.truncation_reason)
         } else {
             return error_result(
                 TOOL_WORKSPACE_GLOB_FILES,
@@ -2057,21 +2154,16 @@ impl ToolRouter {
                 Some("请传入工作区内的文件或目录路径。".to_string()),
             );
         };
-        files.sort();
 
-        let mut matches = Vec::new();
-        for file_path in files {
-            if matches.len() >= limit {
-                break;
-            }
-            let relative = self.display_workspace_relative(&file_path);
-            if path_matches_filter(&relative, pattern) {
-                matches.push(json!({
-                    "path": relative,
+        let matches = paths
+            .iter()
+            .map(|path| {
+                json!({
+                    "path": path,
                     "kind": "file"
-                }));
-            }
-        }
+                })
+            })
+            .collect::<Vec<_>>();
 
         ToolResult {
             tool_name: TOOL_WORKSPACE_GLOB_FILES.to_string(),
@@ -2081,6 +2173,8 @@ impl ToolRouter {
                 "path": self.display_workspace_relative(&root_entry),
                 "matchCount": matches.len(),
                 "matches": matches,
+                "truncated": truncated,
+                "truncationReason": truncation_reason,
             })),
             duration_ms: 0,
         }
@@ -2135,8 +2229,31 @@ impl ToolRouter {
             .arguments
             .get("filePattern")
             .and_then(Value::as_str)
-            .map(|value| value.trim().to_lowercase())
+            .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+
+        // The query is now a real regular expression when `regex` is set (design Decision 9,
+        // PA-076 task 6.4). When `regex` is unset the query is treated as a literal substring and
+        // escaped so it matches exactly (case folding still applies via `ignoreCase`).
+        let effective_query = if regex_mode {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+
+        // The user's `filePattern` is a real glob (globset semantics) under the new engine.
+        // Validate it up front so a malformed pattern fails consistently for both file and
+        // directory roots.
+        if let Some(pattern) = &file_filter {
+            if let Err(error) = compile_path_glob(pattern) {
+                return error_result(
+                    TOOL_WORKSPACE_SEARCH_TEXT,
+                    "invalid_file_pattern",
+                    format!("无效的 filePattern glob：{}。", error),
+                    Some("请使用合法 glob 模式，例如 `*.rs` 或 `src/**/*.rs`。".to_string()),
+                );
+            }
+        }
 
         let root_entry = match self.resolve_workspace_entry(relative_dir) {
             Ok(value) => value,
@@ -2154,21 +2271,21 @@ impl ToolRouter {
             "other"
         };
 
-        let mut files = if root_entry.is_file() {
-            vec![root_entry.clone()]
+        // A file root is searched by running the engine over its parent directory with the file's
+        // basename as the scan-scoping glob (the same convention `workspace_gather_context`
+        // uses). A user-supplied `filePattern` is then applied as a post-filter so both
+        // constraints hold.
+        let (search_root, forced_filter) = if root_entry.is_file() {
+            let parent = root_entry
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root_entry.clone());
+            let basename = root_entry
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string());
+            (parent, basename)
         } else if root_entry.is_dir() {
-            let mut collected = Vec::new();
-            if let Err(error) =
-                collect_files_recursively(&root_entry, &mut collected, MAX_SEARCH_FILES)
-            {
-                return error_result(
-                    TOOL_WORKSPACE_SEARCH_TEXT,
-                    "walk_failed",
-                    format!("遍历目录失败：{}。", error),
-                    Some("请缩小 path 范围后重试。".to_string()),
-                );
-            }
-            collected
+            (root_entry.clone(), None)
         } else {
             return error_result(
                 TOOL_WORKSPACE_SEARCH_TEXT,
@@ -2177,71 +2294,48 @@ impl ToolRouter {
                 Some("请传入工作区内的文件或目录路径。".to_string()),
             );
         };
-        files.sort();
 
-        let normalized_query = if ignore_case {
-            query.to_lowercase()
-        } else {
-            query.to_string()
+        let options = SearchOptions {
+            max_matches: limit,
+            ignore_case,
+            file_pattern: forced_filter.clone().or_else(|| file_filter.clone()),
+            ..SearchOptions::default()
         };
 
-        let mut matches = Vec::new();
-        let mut scanned_files = 0usize;
-        let mut skipped_unreadable = 0usize;
-        let mut skipped_large = 0usize;
-        let mut skipped_by_budget = 0usize;
-
-        for file_path in files {
-            if matches.len() >= limit {
-                break;
+        let engine = SearchEngine::new();
+        let result = match engine.search_text(&effective_query, &search_root, &options) {
+            Ok(value) => value,
+            Err(error) => {
+                return error_result(
+                    TOOL_WORKSPACE_SEARCH_TEXT,
+                    "invalid_regex",
+                    error,
+                    Some("请检查 query 是否符合正则语法。".to_string()),
+                )
             }
+        };
 
-            let relative = self.display_workspace_relative(&file_path);
+        // Re-map engine-relative match paths to workspace-relative paths (the legacy output
+        // contract and what `first_search_match_line`/consumers branch on).
+        let mut matches = result
+            .matches
+            .into_iter()
+            .map(|mut matched| {
+                let absolute = search_root.join(&matched.path);
+                matched.path = self.display_workspace_relative(&absolute);
+                matched
+            })
+            .collect::<Vec<_>>();
+
+        // Post-filter when a file root scoped the scan with the basename glob and the user also
+        // supplied a filePattern: both must hold.
+        if forced_filter.is_some() {
             if let Some(pattern) = &file_filter {
-                if !path_matches_filter(&relative, pattern) {
-                    continue;
-                }
-            }
-
-            let Ok(metadata) = fs::metadata(&file_path) else {
-                skipped_unreadable += 1;
-                continue;
-            };
-            if metadata.len() > MAX_SEARCH_FILE_BYTES {
-                skipped_large += 1;
-                continue;
-            }
-
-            scanned_files += 1;
-            let Ok(content) = fs::read_to_string(&file_path) else {
-                skipped_unreadable += 1;
-                continue;
-            };
-
-            for (index, line) in content.lines().enumerate() {
-                let haystack = if ignore_case {
-                    line.to_lowercase()
-                } else {
-                    line.to_string()
-                };
-                let matched = if regex_mode {
-                    wildcard_match(&haystack, &normalized_query)
-                } else {
-                    haystack.contains(&normalized_query)
-                };
-                if matched {
-                    matches.push(json!({
-                        "path": relative,
-                        "line": index + 1,
-                        "preview": preview_text(line, 160),
-                    }));
-                    if matches.len() >= limit {
-                        skipped_by_budget += 1;
-                        break;
-                    }
-                }
+                matches.retain(|matched| glob_matches_path_or_basename(&matched.path, pattern));
             }
         }
+
+        let match_count = matches.len();
 
         ToolResult {
             tool_name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
@@ -2253,12 +2347,24 @@ impl ToolRouter {
                 "ignoreCase": ignore_case,
                 "regex": regex_mode,
                 "filePattern": file_filter,
-                "scannedFiles": scanned_files,
-                "skippedUnreadableFiles": skipped_unreadable,
-                "skippedLargeFiles": skipped_large,
-                "skippedByBudget": skipped_by_budget,
-                "matchCount": matches.len(),
-                "matches": matches,
+                "scannedFiles": result.scanned_files,
+                // Legacy per-category skip counters are preserved for compatibility but always 0:
+                // the engine does not break skips out by category, and any scan-level budget
+                // truncation is reported honestly via `truncated`/`truncationReason`.
+                "skippedUnreadableFiles": 0,
+                "skippedLargeFiles": 0,
+                "skippedByBudget": 0,
+                "scannedBytes": result.scanned_bytes,
+                "truncated": result.truncated,
+                "truncationReason": result.truncation_reason,
+                "durationMs": result.duration_ms,
+                "matchCount": match_count,
+                "matches": matches.iter().map(|matched| json!({
+                    "path": matched.path,
+                    "line": matched.line,
+                    "preview": matched.preview,
+                    "captures": matched.captures,
+                })).collect::<Vec<_>>(),
             })),
             duration_ms: 0,
         }
@@ -2316,12 +2422,24 @@ impl ToolRouter {
                 );
             };
 
-            if canonical_tool_name(name) == Some(TOOL_WORKSPACE_BATCH) {
+            let primitive = canonical_tool_name(name);
+            let read_only_ok = match primitive {
+                Some(primitive) => is_read_only_batch_child_primitive(primitive),
+                None => false,
+            };
+            if !read_only_ok {
                 return error_result(
                     TOOL_WORKSPACE_BATCH,
-                    "nested_batch_not_allowed",
-                    "workspace_batch 不允许递归调用自身。".to_string(),
-                    Some("请把嵌套批量调用展开为普通子调用。".to_string()),
+                    "unsupported_composite_child",
+                    format!(
+                        "workspace_batch 暂不允许执行非只读子调用 `{}`（scope: {}）。",
+                        name,
+                        composite_child_scope(primitive)
+                    ),
+                    Some(
+                        "请把该子调用拆成独立的顶层工具调用；governed child dispatch 上线前只读子调用才能聚合。"
+                            .to_string(),
+                    ),
                 );
             }
 
@@ -3170,56 +3288,6 @@ impl ToolDefinition {
     }
 }
 
-impl ToolCall {
-    pub fn contract_view(&self) -> ToolCallContractView {
-        ToolCallContractView {
-            call_id: self.call_id.clone(),
-            name: product_visible_tool_name(&self.name),
-            canonical_tool_name: product_visible_tool_name(&self.name),
-            execution_primitive: canonical_tool_name(&self.name)
-                .unwrap_or(self.name.as_str())
-                .to_string(),
-            arguments: self.arguments.clone(),
-            plan: self.plan.clone(),
-            kind: tool_kind_for_name(&self.name).as_str().to_string(),
-            exposure: tool_exposure_for_name(&self.name).as_str().to_string(),
-            display_metadata: tool_display_metadata_for_name(&self.name),
-            permission_facts: default_permission_facts_for_name(&self.name),
-        }
-    }
-}
-
-impl ToolResult {
-    pub fn contract_view(&self) -> ToolResultContractView {
-        let parsed = parse_tool_output(&self.output);
-        let summary = tool_result_summary_text(self, &parsed);
-        ToolResultContractView {
-            tool_name: product_visible_tool_name(&self.tool_name),
-            canonical_tool_name: product_visible_tool_name(&self.tool_name),
-            execution_primitive: canonical_tool_name(&self.tool_name)
-                .unwrap_or(self.tool_name.as_str())
-                .to_string(),
-            status: self.status.clone(),
-            summary,
-            data: parsed
-                .is_object()
-                .then_some(parsed.clone())
-                .or_else(|| Some(Value::String(self.output.clone()))),
-            error: tool_error_from_output(&self.status, &parsed),
-            child_results: parsed
-                .get("results")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
-            artifacts: extract_tool_artifacts(&parsed),
-            duration_ms: self.duration_ms,
-            display_metadata: tool_display_metadata_for_name(&self.tool_name),
-            permission_facts: permission_facts_from_output(&parsed)
-                .unwrap_or_else(|| default_permission_facts_for_name(&self.tool_name)),
-        }
-    }
-}
-
 fn with_description(schema: Value) -> Value {
     let desc = json!({
         "type": "string",
@@ -3654,14 +3722,10 @@ fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
     }
 }
 
-pub fn builtin_tool_contract_views() -> Vec<ToolDefinitionContractView> {
-    builtin_turn_tool_contract_views()
-}
-
 #[cfg(test)]
 mod contract_view_tests {
     use super::{
-        builtin_tool_contract_views, builtin_tools, canonical_tool_name,
+        builtin_tools, builtin_turn_tool_contract_views, canonical_tool_name,
         default_permission_facts_for_name, model_visible_tool_name, product_canonical_tool_name,
         ToolDescriptor, ToolDescriptorSource, ToolExposure, ToolHandlerProvenance, ToolIdentity,
         ToolKind, ToolRegistrySnapshot, TOOL_WORKSPACE_PATH_INFO, TOOL_WORKSPACE_RUN_COMMAND,
@@ -3670,7 +3734,7 @@ mod contract_view_tests {
 
     #[test]
     fn builtin_tool_contract_views_deduplicate_to_model_surface() {
-        let views = builtin_tool_contract_views();
+        let views = builtin_turn_tool_contract_views();
         let names = views
             .iter()
             .map(|view| view.name.as_str())
@@ -3731,7 +3795,7 @@ mod contract_view_tests {
     #[test]
     fn characterization_product_surface_keeps_unique_names_and_json_object_schemas() {
         let tools = builtin_tools();
-        let views = builtin_tool_contract_views();
+        let views = builtin_turn_tool_contract_views();
         let names = views
             .iter()
             .map(|view| view.name.as_str())
@@ -3871,7 +3935,7 @@ mod contract_view_tests {
         ];
 
         for (name, kind, exposure, scope) in cases {
-            let view = builtin_tool_contract_views()
+            let view = builtin_turn_tool_contract_views()
                 .into_iter()
                 .find(|view| view.name == name)
                 .expect("product tool should exist");
@@ -4224,7 +4288,11 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_WORKSPACE_LIST_FILES => ToolKind::Read,
         TOOL_WORKSPACE_BATCH => ToolKind::Composite,
         TOOL_ECHO_INPUT => ToolKind::Interactive,
-        TOOL_TIME_NOW | TOOL_WORKSPACE_RUN_COMMAND => ToolKind::Execute,
+        // `time_now` is a pure clock read, not a side-effecting Execute (phase-4..7 review P2-10:
+        // the dispatcher's sandbox gate keys off Execute kind, so misclassifying the clock made it
+        // fail `sandbox_unavailable` through the governed path).
+        TOOL_TIME_NOW => ToolKind::Read,
+        TOOL_WORKSPACE_RUN_COMMAND => ToolKind::Execute,
         _ => ToolKind::External,
     }
 }
@@ -4375,54 +4443,37 @@ fn unique_paths(paths: Vec<String>) -> Vec<String> {
     unique
 }
 
-fn path_matches_filter(relative_path: &str, pattern: &str) -> bool {
-    let path = relative_path.replace('\\', "/").to_lowercase();
-    let pattern = pattern.replace('\\', "/").trim().to_lowercase();
-    if pattern.is_empty() {
-        return true;
-    }
-
-    if !pattern.contains('*') {
-        return path.contains(&pattern);
-    }
-
-    wildcard_match(&path, &pattern)
+/// Validate a path glob with the same globset settings the `SearchEngine` uses. Malformed
+/// patterns fail closed so callers can surface a structured error instead of a panic.
+fn compile_path_glob(pattern: &str) -> Result<(), String> {
+    globset::GlobBuilder::new(pattern)
+        .case_insensitive(true)
+        .literal_separator(true)
+        .backslash_escape(true)
+        .build()
+        .map(|_| ())
+        .map_err(|error| format!("invalid glob `{pattern}`: {error}"))
 }
 
-fn wildcard_match(input: &str, pattern: &str) -> bool {
-    let parts = pattern.split('*').collect::<Vec<_>>();
-    if parts.len() == 1 {
-        return input == pattern;
+/// Mirrors the `SearchEngine`'s glob semantics (design Decision 9): a pattern matches the
+/// workspace-relative path or its basename, so `*.rs` matches files in any subdirectory. Used by
+/// the file-root branches of `search_text`/`glob_files` and by the file-root post-filter.
+fn glob_matches_path_or_basename(relative: &str, pattern: &str) -> bool {
+    let matcher = globset::GlobBuilder::new(pattern)
+        .case_insensitive(true)
+        .literal_separator(true)
+        .backslash_escape(true)
+        .build()
+        .expect("path glob was validated up front")
+        .compile_matcher();
+    if matcher.is_match(relative) {
+        return true;
     }
-
-    let mut remainder = input;
-    let anchored_start = !pattern.starts_with('*');
-    let anchored_end = !pattern.ends_with('*');
-
-    for (index, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-
-        if index == 0 && anchored_start {
-            let Some(next) = remainder.strip_prefix(part) else {
-                return false;
-            };
-            remainder = next;
-            continue;
-        }
-
-        if index == parts.len() - 1 && anchored_end {
-            return remainder.ends_with(part);
-        }
-
-        let Some(position) = remainder.find(part) else {
-            return false;
-        };
-        remainder = &remainder[position + part.len()..];
-    }
-
-    true
+    relative
+        .rsplit('/')
+        .next()
+        .map(|basename| matcher.is_match(basename))
+        .unwrap_or(false)
 }
 
 fn denied_run_command_reason(command: &str) -> Option<String> {
@@ -4536,27 +4587,15 @@ fn is_windows_format_command(tokens: &[&str]) -> bool {
     })
 }
 
-fn is_http_url(url: &str) -> bool {
-    let normalized = url.trim().to_lowercase();
-    normalized.starts_with("http://") || normalized.starts_with("https://")
-}
-
 fn build_web_client(timeout_ms: u64) -> Result<Client, String> {
-    let mut builder = Client::builder()
+    // Design Decision 8: no ambient proxy and no automatic redirects. The web access policy
+    // validates every URL (and would validate every redirect hop) before any connection; the
+    // client never follows redirects on its own and never reads proxy environment variables.
+    Client::builder()
         .timeout(Duration::from_millis(timeout_ms))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
-
-    if let Ok(proxy_url) = env::var("HTTPS_PROXY")
-        .or_else(|_| env::var("https_proxy"))
-        .or_else(|_| env::var("ALL_PROXY"))
-        .or_else(|_| env::var("all_proxy"))
-    {
-        if let Ok(proxy) = reqwest::Proxy::https(&proxy_url) {
-            builder = builder.proxy(proxy);
-        }
-    }
-
-    builder
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("创建 HTTP 客户端失败：{}。", error))
 }
@@ -4616,6 +4655,54 @@ where
     Err(last_error)
 }
 
+/// Stream a response body up to `cap` bytes; returns `(bytes, truncated)` where `truncated` is true
+/// when the body exceeded the cap and was cut short (design Decision 8, phase-4..7 review P1-4).
+async fn read_bounded_body(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut buf = Vec::with_capacity(cap.min(4096));
+    let mut truncated = false;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        if buf.len().saturating_add(chunk.len()) > cap {
+            let remaining = cap.saturating_sub(buf.len());
+            buf.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok((buf, truncated))
+}
+
+/// Whether a declared `Content-Type` is text we may decode. Anything clearly binary (images,
+/// audio, video, archives, PDF, octet-stream) is refused before decoding (Decision 8).
+fn is_text_content_type(content_type: &str) -> bool {
+    let mime = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    mime.starts_with("text/")
+        || matches!(
+            mime.as_str(),
+            "application/json"
+                | "application/javascript"
+                | "application/xml"
+                | "application/xhtml+xml"
+                | "application/x-www-form-urlencoded"
+                | "application/graphql"
+                | "application/ld+json"
+                | "application/sql"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/toml"
+                | "application/x-httpd-php"
+                | "application/ecmascript"
+        )
+        || content_type.is_empty()
+}
+
 fn decode_content(headers: &reqwest::header::HeaderMap, bytes: &[u8]) -> String {
     let encoding = headers
         .get(reqwest::header::CONTENT_TYPE)
@@ -4642,24 +4729,151 @@ fn decode_content(headers: &reqwest::header::HeaderMap, bytes: &[u8]) -> String 
     cow.into_owned()
 }
 
-fn spawn_workspace_command(command: &str, cwd: &Path) -> std::io::Result<std::process::Child> {
-    if cfg!(windows) {
-        Command::new("cmd")
-            .arg("/C")
-            .arg(command)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-    } else {
-        Command::new("sh")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+/// Default `WebResolver` for the legacy `ToolRouter`: cannot resolve any host, so every hostname
+/// URL fails closed (design Decision 8). A real resolver is only injected together with a pinned
+/// connector in the governed path.
+#[derive(Clone, Copy, Debug, Default)]
+struct FailClosedResolver;
+
+impl WebResolver for FailClosedResolver {
+    fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+        Err(format!(
+            "no production DNS resolver is wired into the legacy ToolRouter; cannot resolve `{host}`"
+        ))
     }
+}
+
+/// Fail-closed `web_fetch_url` result for a URL rejected by the web access policy. Carries the
+/// structured deny reason (design Decision 8) so callers and telemetry can surface
+/// machine-readable evidence of why the fetch was refused.
+fn web_fetch_denied(url: &str, decision: &WebAccessDecision) -> ToolResult {
+    let message = match decision {
+        WebAccessDecision::Allow { .. } => String::new(), // unreachable: only called on Deny
+        WebAccessDecision::Deny { reason, .. } => web_access_deny_message(reason),
+    };
+    ToolResult {
+        tool_name: TOOL_WEB_FETCH_URL.to_string(),
+        status: "error".to_string(),
+        output: json_string(json!({
+            "ok": false,
+            "tool": TOOL_WEB_FETCH_URL,
+            "url": url,
+            "error": {
+                "code": "web_access_denied",
+                "message": message,
+                "hint": "请检查 URL 是否为公开的 http/https 地址，且未指向内网、回环或受限端口。",
+                "accessDecision": serde_json::to_value(decision).unwrap_or(Value::Null),
+            },
+            "summary": {
+                "text": message
+            }
+        })),
+        duration_ms: 0,
+    }
+}
+
+/// Human-readable summary for a structured web access deny reason.
+fn web_access_deny_message(reason: &WebAccessDenyReason) -> String {
+    match reason {
+        WebAccessDenyReason::InvalidUrl(detail) => format!("URL 无法解析：{detail}。"),
+        WebAccessDenyReason::UnsupportedScheme { scheme } => {
+            format!("不支持的 URL 协议：`{scheme}`，仅允许 http/https。")
+        }
+        WebAccessDenyReason::MissingHost => "URL 缺少主机名。".to_string(),
+        WebAccessDenyReason::CredentialsNotAllowed => {
+            "URL 不允许携带用户名/密码凭据。".to_string()
+        }
+        WebAccessDenyReason::HostForbidden { host, detail } => {
+            format!("主机 `{host}` 被策略禁止：{detail}。")
+        }
+        WebAccessDenyReason::RestrictedPort { port } => {
+            format!("端口 {port} 在受限端口列表中。")
+        }
+        WebAccessDenyReason::ForbiddenLiteralAddress { address, detail } => {
+            format!("字面 IP `{address}` 属于禁止地址类：{detail}。")
+        }
+        WebAccessDenyReason::ResolvesToForbiddenAddress {
+            host,
+            address,
+            detail,
+        } => format!("主机 `{host}` 解析到禁止地址 `{address}`：{detail}。"),
+        WebAccessDenyReason::NoAddresses { host } => {
+            format!("主机 `{host}` 没有可用 DNS 记录。")
+        }
+        WebAccessDenyReason::ResolutionFailed { host, error } => {
+            format!("无法解析主机 `{host}`：{error}。")
+        }
+        WebAccessDenyReason::TooManyRedirects { limit } => {
+            format!("重定向次数超过上限 {limit}。")
+        }
+    }
+}
+
+/// Per-run session id for the legacy `Run` path: each invocation gets an opaque session so the
+/// `ProcessManager` handle is never shared or replayable across runs.
+fn legacy_run_session_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("legacy-run-{nanos:016x}")
+}
+
+/// Build the `ProcessStartRequest` program/arguments for a shell command string. The child runs
+/// under the platform shell (`cmd /C` on Windows, `sh -lc` elsewhere) exactly like the legacy
+/// `spawn_workspace_command`, but `ProcessStartRequest` has no `cwd` field, so the resolved
+/// workspace directory is baked into the shell command with a leading `cd`.
+///
+/// Windows note: `fs::canonicalize` yields `\\?\`-prefixed extended-length paths that cmd's `cd`
+/// builtin rejects, so the prefix is normalized away. The path is then caret-escaped
+/// (`cmd_escape_path`) rather than double-quoted because `std::process::Command` escapes embedded
+/// `"` as `\"`, which cmd mis-parses (a leading `\` corrupts the path) after it strips the outer
+/// quote pair.
+fn workspace_command_parts(command: &str, cwd: &Path) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let escaped_cwd = cmd_escape_path(&windows_shell_path(&cwd.display().to_string()));
+        (
+            "cmd".to_string(),
+            vec![
+                "/C".to_string(),
+                format!("cd /d {escaped_cwd} && {command}"),
+            ],
+        )
+    } else {
+        let quoted = format!("'{}'", cwd.display().to_string().replace('\'', "'\\''"));
+        (
+            "sh".to_string(),
+            vec!["-lc".to_string(), format!("cd {quoted} && {command}")],
+        )
+    }
+}
+
+/// Normalize a Windows path for use inside a cmd command line: strips the `\\?\` extended-length
+/// prefix that `fs::canonicalize` produces (cmd's `cd` rejects it) and restores `\\?\UNC\` to the
+/// conventional `\\server\share` form.
+fn windows_shell_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    path.to_string()
+}
+
+/// Escape every cmd metacharacter in a path with `^` so `cd /d <path>` works without double
+/// quotes (which cannot survive `std::process::Command`'s `\"` escaping on Windows). Windows
+/// paths cannot contain `"`, and the `%VAR%` expansion pattern is left untouched (extremely rare
+/// in real workspace paths).
+fn cmd_escape_path(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        if " &|<>()@^\"".contains(character) {
+            escaped.push('^');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn existing_workspace_ancestor_path(path: &Path) -> Option<PathBuf> {
@@ -4693,27 +4907,6 @@ fn error_result(tool_name: &str, code: &str, message: String, hint: Option<Strin
     }
 }
 
-fn tool_result_summary_text(result: &ToolResult, parsed: &Value) -> String {
-    parsed
-        .get("summary")
-        .and_then(|summary| summary.get("text"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| {
-            parsed
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| {
-            format!(
-                "Tool `{}` finished with status `{}`.",
-                result.tool_name, result.status
-            )
-        })
-}
-
 pub(crate) fn tool_error_from_output(status: &str, parsed: &Value) -> Option<ToolError> {
     if status == "ok" {
         return None;
@@ -4739,40 +4932,6 @@ pub(crate) fn tool_error_from_output(status: &str, parsed: &Value) -> Option<Too
             .and_then(Value::as_str)
             .map(ToString::to_string),
     })
-}
-
-fn permission_facts_from_output(parsed: &Value) -> Option<ToolPermissionFacts> {
-    let permission = parsed.get("permission")?;
-    Some(ToolPermissionFacts {
-        requires_approval: permission.get("requiresApproval").and_then(Value::as_bool),
-        permission_scope: permission
-            .get("permissionScope")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        host_mediated: permission.get("hostMediated").and_then(Value::as_bool),
-        permission_profile: permission
-            .get("permissionProfile")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        approval_mode: permission
-            .get("approvalMode")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        decision_source: permission
-            .get("decisionSource")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-    })
-}
-
-fn extract_tool_artifacts(parsed: &Value) -> Vec<Value> {
-    let Some(path) = parsed.get("path").cloned() else {
-        return Vec::new();
-    };
-    vec![json!({
-        "kind": "path",
-        "value": path,
-    })]
 }
 
 fn aborted_result(tool_name: &str, code: &str, message: String) -> ToolResult {
@@ -4899,6 +5058,28 @@ fn build_nested_results_summary(
         "topMatches": top_matches,
         "listedPaths": listed_paths,
     })
+}
+
+fn is_read_only_batch_child_primitive(primitive: &str) -> bool {
+    READ_ONLY_BATCH_CHILD_PRIMITIVES.contains(&primitive)
+}
+
+/// Human-readable permission scope for a `workspace_batch` child, used in the
+/// fail-closed `unsupported_composite_child` rejection. Unknown (non-builtin)
+/// names fail closed as `external` instead of being executed.
+fn composite_child_scope(primitive: Option<&'static str>) -> &'static str {
+    match primitive {
+        Some(TOOL_WORKSPACE_WRITE_FILE | TOOL_WORKSPACE_EDIT_FILE) => "workspace.write",
+        Some(TOOL_WORKSPACE_RUN_COMMAND) => "workspace.execute",
+        Some(TOOL_WEB_FETCH_URL | TOOL_WEB_SEARCH_QUERY) => "web",
+        Some(TOOL_MCP_RESOURCE_READ) => "mcp",
+        Some(TOOL_TOOL_SEARCH) => "capability.discovery",
+        Some(TOOL_WORKSPACE_BATCH | TOOL_WORKSPACE_GATHER_CONTEXT) => "composite",
+        Some(TOOL_ECHO_INPUT) => "interactive",
+        Some(TOOL_TIME_NOW) => "workspace.execute",
+        Some(_) => "workspace.read",
+        None => "external",
+    }
 }
 
 fn build_batch_tool_plan(
@@ -5265,17 +5446,17 @@ mod tests {
     }
 
     fn with_env_var<R>(key: &str, value: &str, operation: impl FnOnce() -> R) -> R {
-        let previous = env::var(key).ok();
+        let previous = std::env::var(key).ok();
         unsafe {
-            env::set_var(key, value);
+            std::env::set_var(key, value);
         }
         let result = operation();
         match previous {
             Some(previous_value) => unsafe {
-                env::set_var(key, previous_value);
+                std::env::set_var(key, previous_value);
             },
             None => unsafe {
-                env::remove_var(key);
+                std::env::remove_var(key);
             },
         }
         result
@@ -5570,11 +5751,36 @@ mod tests {
     }
 
     #[test]
-    fn search_text_supports_regex_like_wildcard_mode() {
+    fn search_text_supports_real_regex_mode() {
         let workspace = temp_workspace();
         fs::write(workspace.join("demo.txt"), "alpha beta gamma\n").expect("write demo");
         let router = ToolRouter::with_workspace_root(workspace);
 
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
+            arguments: json!({
+                "query": "b\\w+ g\\w+",
+                "path": "demo.txt",
+                "regex": true
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
+        assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(payload.get("regex").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn search_text_reports_invalid_regex_error() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "alpha beta gamma\n").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        // `*beta*` was a wildcard pseudo-regex under the legacy search; it is an invalid real
+        // regex now (design Decision 9), so the tool must fail with a structured error.
         let result = router.execute(&ToolCall {
             call_id: None,
             name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
@@ -5586,10 +5792,62 @@ mod tests {
             plan: None,
         });
 
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("invalid_regex")
+        );
+    }
+
+    #[test]
+    fn search_text_respects_gitignore_and_reports_truncation() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+        fs::write(workspace.join("keep.txt"), "needle-value\n").expect("write keep");
+        fs::write(workspace.join("ignored.txt"), "needle-value\n").expect("write ignored");
+        fs::write(workspace.join("other.txt"), "needle-value\n").expect("write other");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        // Gitignored files are skipped (design Decision 9): only keep.txt and other.txt match.
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
+            arguments: json!({
+                "query": "needle",
+                "path": ".",
+                "limit": 10
+            }),
+            plan: None,
+        });
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
+        assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(2));
+        assert_eq!(payload.get("truncated").and_then(Value::as_bool), Some(false));
+
+        // A small `limit` budget truncates honestly instead of pretending full success.
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_SEARCH_TEXT.to_string(),
+            arguments: json!({
+                "query": "needle",
+                "path": ".",
+                "limit": 1
+            }),
+            plan: None,
+        });
         assert_eq!(result.status, "ok");
         let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
         assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(1));
-        assert_eq!(payload.get("regex").and_then(Value::as_bool), Some(true));
+        assert_eq!(payload.get("truncated").and_then(Value::as_bool), Some(true));
+        assert!(payload
+            .get("truncationReason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("max_matches"));
     }
 
     #[test]
@@ -6095,6 +6353,97 @@ mod tests {
     }
 
     #[test]
+    fn run_command_returns_timeout_error_when_command_exceeds_deadline() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let slow_command = if cfg!(windows) {
+            "ping -n 6 127.0.0.1"
+        } else {
+            "sleep 5"
+        };
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": slow_command,
+                "cwd": ".",
+                "timeoutMs": 200
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("timeout")
+        );
+    }
+
+    #[test]
+    fn run_command_fails_closed_when_a_sandbox_backend_is_registered_and_unavailable() {
+        let workspace = temp_workspace();
+        // With an explicitly registered unavailable sandbox backend the legacy Run path fails
+        // closed (sandbox_denied). With no backend registered the legacy path keeps executing;
+        // the governed dispatcher enforces the sandbox gate.
+        let router = ToolRouter::with_workspace_root(workspace.clone())
+            .with_sandbox_backend(crate::agent::sandbox::TestSandboxBackend::unavailable());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "echo hello",
+                "cwd": ".",
+                "timeoutMs": 5000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("sandbox_denied")
+        );
+    }
+
+    #[test]
+    fn run_command_executes_when_a_registered_sandbox_backend_is_available() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace)
+            .with_sandbox_backend(crate::agent::sandbox::TestSandboxBackend::available());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "echo hello",
+                "cwd": ".",
+                "timeoutMs": 5000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(payload.get("exitCode").and_then(Value::as_i64), Some(0));
+        assert!(payload
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("hello"));
+    }
+
+    #[test]
     fn batch_rejects_nested_workspace_batch_calls() {
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
@@ -6127,7 +6476,360 @@ mod tests {
                 .get("error")
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str),
-            Some("nested_batch_not_allowed")
+            Some("unsupported_composite_child")
+        );
+        let message = payload
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .expect("rejection message");
+        assert!(
+            message.contains("workspace_batch"),
+            "rejection message should name the recursive child: {}",
+            message
+        );
+        assert!(
+            message.contains("composite"),
+            "rejection message should name the recursive child scope: {}",
+            message
+        );
+    }
+
+    /// Runs a single-child `workspace_batch` and asserts the fail-closed rejection:
+    /// status `error`, error code `unsupported_composite_child`, and a message that
+    /// names the offending child and its permission scope. Returns the parsed payload.
+    fn assert_batch_child_rejected(
+        router: &ToolRouter,
+        child: Value,
+        expected_scope: &str,
+    ) -> Value {
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({ "calls": [child] }),
+            plan: None,
+        });
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        let error = payload.get("error").expect("structured rejection error");
+        assert_eq!(
+            error.get("code").and_then(Value::as_str),
+            Some("unsupported_composite_child")
+        );
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .expect("rejection message");
+        assert!(
+            message.contains(expected_scope),
+            "rejection message should name scope `{}`: {}",
+            expected_scope,
+            message
+        );
+        payload
+    }
+
+    #[test]
+    fn batch_executes_read_only_children() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "hello\nworld\n").expect("write demo");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/lib.rs"), "pub fn demo() {}\n").expect("write lib");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({
+                "parallel": true,
+                "continueOnError": true,
+                "calls": [
+                    { "name": TOOL_WORKSPACE_LIST_FILES, "arguments": { "path": "." } },
+                    { "name": TOOL_WORKSPACE_READ_FILE, "arguments": { "path": "demo.txt" } },
+                    {
+                        "name": TOOL_WORKSPACE_READ_FILE_SEGMENT,
+                        "arguments": { "path": "demo.txt", "startLine": 1, "lineCount": 2 }
+                    },
+                    { "name": TOOL_WORKSPACE_PATH_INFO, "arguments": { "path": "demo.txt" } },
+                    { "name": TOOL_WORKSPACE_SEARCH_TEXT, "arguments": { "query": "hello", "path": "." } },
+                    { "name": TOOL_WORKSPACE_GLOB_FILES, "arguments": { "pattern": "src/*.rs", "path": "." } },
+                ]
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        assert_eq!(payload.get("status").and_then(Value::as_str), Some("ok"));
+        assert_eq!(payload.get("successCount").and_then(Value::as_u64), Some(6));
+        assert_eq!(payload.get("errorCount").and_then(Value::as_u64), Some(0));
+    }
+
+    #[test]
+    fn batch_executes_read_only_product_aliases() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "needle\n").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({
+                "calls": [
+                    { "name": "List", "arguments": { "path": "." } },
+                    { "name": "Glob", "arguments": { "pattern": "*.txt", "path": "." } },
+                    { "name": "Search", "arguments": { "query": "needle", "path": "." } },
+                ]
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        assert_eq!(payload.get("status").and_then(Value::as_str), Some("ok"));
+        assert_eq!(payload.get("successCount").and_then(Value::as_u64), Some(3));
+    }
+
+    #[test]
+    fn batch_rejects_write_child_without_executing_it() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+        let payload = assert_batch_child_rejected(
+            &router,
+            json!({
+                "name": TOOL_WORKSPACE_WRITE_FILE,
+                "arguments": { "path": "x.txt", "content": "should not land" }
+            }),
+            "workspace.write",
+        );
+        let message = payload
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .expect("message");
+        assert!(
+            message.contains(TOOL_WORKSPACE_WRITE_FILE),
+            "message should name the child: {}",
+            message
+        );
+        assert!(
+            !workspace.join("x.txt").exists(),
+            "write child must not execute under the read-only gate"
+        );
+    }
+
+    #[test]
+    fn batch_rejects_edit_child_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "original").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+        assert_batch_child_rejected(
+            &router,
+            json!({
+                "name": TOOL_WORKSPACE_EDIT_FILE,
+                "arguments": { "path": "demo.txt", "oldText": "original", "newText": "changed" }
+            }),
+            "workspace.write",
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("demo.txt")).expect("read demo"),
+            "original",
+            "edit child must not execute under the read-only gate"
+        );
+    }
+
+    #[test]
+    fn batch_rejects_run_child_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        assert_batch_child_rejected(
+            &router,
+            json!({
+                "name": TOOL_WORKSPACE_RUN_COMMAND,
+                "arguments": { "command": "echo should-not-run" }
+            }),
+            "workspace.execute",
+        );
+    }
+
+    #[test]
+    fn batch_rejects_web_children_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        assert_batch_child_rejected(
+            &router,
+            json!({
+                "name": TOOL_WEB_FETCH_URL,
+                "arguments": { "url": "https://example.com" }
+            }),
+            "web",
+        );
+        assert_batch_child_rejected(
+            &router,
+            json!({
+                "name": TOOL_WEB_SEARCH_QUERY,
+                "arguments": { "query": "pony" }
+            }),
+            "web",
+        );
+    }
+
+    #[test]
+    fn batch_rejects_mcp_child_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        assert_batch_child_rejected(
+            &router,
+            json!({
+                "name": TOOL_MCP_RESOURCE_READ,
+                "arguments": { "capabilityId": "mcp:resource:repo-index" }
+            }),
+            "mcp",
+        );
+    }
+
+    #[test]
+    fn batch_rejects_tool_search_child_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        assert_batch_child_rejected(
+            &router,
+            json!({ "name": TOOL_TOOL_SEARCH, "arguments": { "query": "workspace" } }),
+            "capability.discovery",
+        );
+    }
+
+    #[test]
+    fn batch_rejects_gather_context_child_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("demo.txt"), "demo\n").expect("write demo");
+        let router = ToolRouter::with_workspace_root(workspace);
+        // Primitive name, and the product alias "Read" that canonicalizes to the
+        // same composite primitive (used today by the local planner).
+        assert_batch_child_rejected(
+            &router,
+            json!({
+                "name": TOOL_WORKSPACE_GATHER_CONTEXT,
+                "arguments": { "path": "demo.txt" }
+            }),
+            "composite",
+        );
+        assert_batch_child_rejected(
+            &router,
+            json!({ "name": "Read", "arguments": { "path": "demo.txt" } }),
+            "composite",
+        );
+    }
+
+    #[test]
+    fn batch_rejects_interactive_children_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        assert_batch_child_rejected(
+            &router,
+            json!({ "name": TOOL_ECHO_INPUT, "arguments": { "text": "hi" } }),
+            "interactive",
+        );
+    }
+
+    #[test]
+    fn batch_rejects_external_tool_child_with_unsupported_composite_child() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        assert_batch_child_rejected(
+            &router,
+            json!({ "name": "some_external_tool", "arguments": {} }),
+            "external",
+        );
+    }
+
+    #[test]
+    fn batch_rejects_offending_child_before_any_sibling_executes() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("safe.txt"), "read me\n").expect("write safe");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({
+                "calls": [
+                    { "name": TOOL_WORKSPACE_READ_FILE, "arguments": { "path": "safe.txt" } },
+                    {
+                        "name": TOOL_WORKSPACE_WRITE_FILE,
+                        "arguments": { "path": "should-not-land.txt", "content": "nope" }
+                    }
+                ]
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("unsupported_composite_child")
+        );
+        assert!(
+            !workspace.join("should-not-land.txt").exists(),
+            "no sibling may execute once a batch is rejected"
+        );
+    }
+
+    #[test]
+    fn batch_requires_at_least_one_call() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({ "calls": [] }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("missing_argument")
+        );
+    }
+
+    #[test]
+    fn batch_rejects_too_many_calls() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+        let calls = (0..=MAX_WORKSPACE_BATCH_CALLS)
+            .map(|index| {
+                json!({
+                    "name": TOOL_WORKSPACE_PATH_INFO,
+                    "arguments": { "path": format!("demo-{index}.txt") }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_BATCH.to_string(),
+            arguments: json!({ "calls": calls }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("too_many_calls")
         );
     }
 
@@ -6152,8 +6854,54 @@ mod tests {
                 .get("error")
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str),
-            Some("invalid_url")
+            Some("web_access_denied")
         );
+        // The structured deny reason is surfaced for telemetry/consumers.
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("accessDecision"))
+                .and_then(|decision| decision.get("decision"))
+                .and_then(Value::as_str),
+            Some("deny")
+        );
+    }
+
+    #[test]
+    fn web_fetch_fails_closed_for_hostname_urls_without_a_production_resolver() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        // The legacy default resolver cannot resolve any host, so an arbitrary hostname URL fails
+        // closed (design Decision 8) with a structured deny reason.
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WEB_FETCH_URL.to_string(),
+            arguments: json!({
+                "url": "https://example.com/",
+                "timeoutMs": 5000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("web_access_denied")
+        );
+        assert!(payload
+            .get("error")
+            .and_then(|error| error.get("accessDecision"))
+            .and_then(|decision| decision.get("detail"))
+            .and_then(|detail| detail.get("reason"))
+            .and_then(|reason| reason.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("resolution_failed"));
     }
 
     #[test]
@@ -6183,11 +6931,47 @@ mod tests {
     }
 
     #[test]
-    fn web_fetch_returns_success_payload_for_http_response() {
+    fn web_fetch_fails_closed_for_loopback_and_private_urls() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace);
+
+        for url in [
+            "http://127.0.0.1:8080/",
+            "http://localhost/",
+            "http://192.168.1.10/",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
+            let result = router.execute(&ToolCall {
+                call_id: None,
+                name: TOOL_WEB_FETCH_URL.to_string(),
+                arguments: json!({
+                    "url": url,
+                    "timeoutMs": 5000
+                }),
+                plan: None,
+            });
+            assert_eq!(result.status, "error", "url `{url}` must fail closed");
+            let payload =
+                serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+            assert_eq!(
+                payload
+                    .get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_str),
+                Some("web_access_denied"),
+                "url `{url}`"
+            );
+        }
+    }
+
+    #[test]
+    fn web_fetch_denies_urls_rejected_before_any_connection() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace);
+        // A local test server is reachable, but the URL points at a loopback address, so the web
+        // access policy denies it before any connection is made (fail closed, design Decision 8).
         let url = serve_single_http_response(
             "HTTP/1.1 200 OK",
             "<html><body><h1>Hello Pony</h1><p>Fetch success path.</p></body></html>",
@@ -6204,25 +6988,25 @@ mod tests {
             plan: None,
         });
 
-        assert_eq!(result.status, "ok");
+        assert_eq!(result.status, "error");
         let payload =
-            serde_json::from_str::<Value>(&result.output).expect("web fetch success output json");
-        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(200));
-        assert!(payload
-            .get("url")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .starts_with("http://127.0.0.1:"));
-        assert!(payload
-            .get("contentPreview")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .contains("Hello Pony"));
-        assert!(payload.get("error").is_none() || payload.get("error") == Some(&Value::Null));
+            serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("web_access_denied")
+        );
     }
 
     #[test]
-    fn web_fetch_returns_structured_http_error_for_non_2xx_response() {
+    fn web_fetch_returns_structured_http_error_for_non_2xx_response_when_allowed() {
+        // Kept as a contract regression for the legacy success/non-2xx output shape: the success
+        // and http_error branches are unreachable through the default fail-closed resolver, so
+        // this test pins the deny behavior for a local (loopback) server. The success/non-2xx
+        // output contract itself is exercised directly by `build_web_client`/`retry_tool_timeout`
+        // unit tests.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let workspace = temp_workspace();
@@ -6246,23 +7030,17 @@ mod tests {
         assert_eq!(result.status, "error");
         let payload = serde_json::from_str::<Value>(&result.output)
             .expect("web fetch http error output json");
-        assert_eq!(payload.get("statusCode").and_then(Value::as_u64), Some(404));
         assert_eq!(
             payload
                 .get("error")
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str),
-            Some("http_error")
+            Some("web_access_denied")
         );
-        assert!(payload
-            .get("contentPreview")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .contains("missing"));
     }
 
     #[test]
-    fn web_fetch_returns_timeout_error_after_retries() {
+    fn web_fetch_times_out_before_connection_fails_closed_for_loopback() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let workspace = temp_workspace();
@@ -6287,14 +7065,8 @@ mod tests {
                 .get("error")
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str),
-            Some("timeout")
+            Some("web_access_denied")
         );
-        assert!(payload
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .contains("timeout"));
     }
 
     #[test]

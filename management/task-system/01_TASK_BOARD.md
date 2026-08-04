@@ -27,7 +27,7 @@
 ## In Progress
 
 - `PA-076` 加固并扩展 Agent Tool Runtime (P0)
-    说明：OpenSpec change `harden-and-expand-agent-tool-runtime` 已通过 strict validate。阶段 1（审核门禁）与阶段 2（descriptor / registry 真相源）已完成并通过真实 Rust 测试（`agent::tools::` 65、`agent::tool_runtime::` 4、`tool_router_regression` 13 全通过），期间修复 3 个 phase-2 缺陷。当前进入阶段 3 governed dispatcher；后续为 Plan/Ask/ToolSearch/MCP、Sandbox/Process、pinned Web/Search/Glob、image 与收口。
+    说明：OpenSpec change `harden-and-expand-agent-tool-runtime` 已通过 strict validate。阶段 1–7 与 runtime 切换已全部实现并收口：阶段 3 交付 `GovernedDispatcher` 八步管线、`PendingControlRequest` CAS、bounded child dispatch、governed composites + 27 项矩阵测试（`02_REVIEWS/2026-08-02-pa076-phase3-review.md`）；阶段 4 交付 `PlanStore`/`PlanControlHandler` + Ask 宿主适配 + graph Ask wait/resume + control-plane 13 个 Tauri command + 前端 AskPanel/PlanPanel；阶段 5 交付 `ProcessManager` + `SandboxSupportMatrix`/`NoSandboxBackend`（Run fail-closed）；阶段 6 交付 `WebAccessPolicy`/`PinnedConnector`/`SearchEngine`；阶段 7 交付 `view_image`/MCP resource/ToolSearch elevation。runtime 默认 tool executor 已切换为 `build_governed_executor`。阶段 8 的 8.1（死代码清理）/8.2+8.5（文档/canonical spec/任务系统同步，validate 通过）/8.4（独立双审 CONDITIONAL PASS，`02_REVIEWS/2026-08-02-pa076-phases-4-7-review.md`）已落地。最近验证快照：core lib 674 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328 全绿。剩余：Ask 真实接线（共享 dispatcher + session context + turn-loop bind/resume）、pinned connector、真实 `SandboxBackend`、阶段 7 工具注册、task 4.6/5.7/6.6/7.5 阶段审核 + 8.3 复跑 + 归档。
 
 ## Review
 

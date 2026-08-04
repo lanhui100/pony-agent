@@ -1,6 +1,6 @@
 [package]
 name = "pony-agent-core"
-version = "0.1.51"
+version = "0.1.52"
 edition = "2021"
 
 [lib]
@@ -16,6 +16,10 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+globset = "0.4"
+ignore = "0.4"
+regex = "1"
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
@@ -26,6 +30,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["linux-native-sync-persistent"] }
+
 
 
 

@@ -31,6 +31,7 @@ use agent::frontend_diagnostics::{
     FrontendStallSnapshot, FrontendTraceAppendCommand, FrontendTraceEvent,
     FrontendTraceExportPayload, FrontendTraceQuery, FrontendTraceQueryResult,
 };
+use agent::graph::GraphAskWaitBinding;
 use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{TurnInput, TurnResult};
 use agent::session::SessionOverview;
@@ -159,6 +160,147 @@ fn stop_graph_run(
     run_id: String,
 ) -> Result<GraphRunControlResponse, String> {
     control_plane.stop_graph_run(StopGraphRunCommand { run_id })
+}
+
+// ── Ask control surface (PA-076 task 4.4) ──────────────────────────────────────────────────
+
+/// Snapshot of every pending Ask (`Interaction`) request, optionally filtered by session.
+#[tauri::command]
+fn ask_list_pending(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: Option<String>,
+) -> Value {
+    control_plane.list_pending_asks(session_id.as_deref())
+}
+
+/// Answer a pending Ask by stable `request_id` and compare-and-swap `version`, carrying the
+/// user's answer payload.
+#[tauri::command]
+fn ask_answer(
+    control_plane: State<'_, HostControlPlane>,
+    request_id: String,
+    version: u64,
+    answer: Value,
+) -> Result<Value, String> {
+    control_plane.answer_ask(&request_id, version, answer)
+}
+
+/// Cancel a pending Ask by stable `request_id` and compare-and-swap `version`.
+#[tauri::command]
+fn ask_cancel(
+    control_plane: State<'_, HostControlPlane>,
+    request_id: String,
+    version: u64,
+) -> Result<Value, String> {
+    control_plane.cancel_ask(&request_id, version)
+}
+
+/// Transition every expired pending request to `Expired`. `now_ms` defaults to the dispatcher
+/// clock when omitted.
+#[tauri::command]
+fn ask_expire(control_plane: State<'_, HostControlPlane>, now_ms: Option<u64>) -> Value {
+    control_plane.expire_asks(now_ms)
+}
+
+// ── Plan control surface (PA-076 task 4.4) ─────────────────────────────────────────────────
+
+/// Create a session-owned `Draft` plan from a `{ kind, summary, steps }` payload.
+#[tauri::command]
+fn plan_create(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    payload: Value,
+) -> Result<Value, String> {
+    control_plane.plan_create(&session_id, payload)
+}
+
+/// Replace a plan's content, preserving its `plan_id`, with a compare-and-swap `revision`.
+#[tauri::command]
+fn plan_replace(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    plan_id: String,
+    revision: u64,
+    payload: Value,
+) -> Result<Value, String> {
+    control_plane.plan_replace(&session_id, &plan_id, revision, payload)
+}
+
+/// Append a single step to a plan, preserving every existing `step_id`.
+#[tauri::command]
+fn plan_merge(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    plan_id: String,
+    revision: u64,
+    step: Value,
+) -> Result<Value, String> {
+    control_plane.plan_merge(&session_id, &plan_id, revision, step)
+}
+
+/// Mark a plan step completed (first completion -> Executing, last -> Completed).
+#[tauri::command]
+fn plan_complete_step(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    plan_id: String,
+    revision: u64,
+    step_id: String,
+) -> Result<Value, String> {
+    control_plane.plan_complete_step(&session_id, &plan_id, revision, &step_id)
+}
+
+/// Every plan owned by a session, in creation order.
+#[tauri::command]
+fn plan_list(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+) -> Value {
+    control_plane.plan_list(&session_id)
+}
+
+/// Read a single plan by stable id.
+#[tauri::command]
+fn plan_get(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    plan_id: String,
+) -> Result<Value, String> {
+    control_plane.plan_get(&session_id, &plan_id)
+}
+
+// ── graph Ask wait surface (PA-076 task 4.4) ───────────────────────────────────────────────
+
+/// Snapshot of every Ask wait bound to a graph run.
+#[tauri::command]
+fn graph_list_ask_waits(
+    control_plane: State<'_, HostControlPlane>,
+    run_id: String,
+) -> Value {
+    control_plane.graph_list_ask_waits(&run_id)
+}
+
+/// Bind an Ask `PendingControlRequest` to a run's `wait_user` suspension.
+#[tauri::command]
+fn graph_bind_ask_wait(
+    control_plane: State<'_, HostControlPlane>,
+    run_id: String,
+    binding: GraphAskWaitBinding,
+) -> Result<Value, String> {
+    control_plane.graph_bind_ask_wait(&run_id, binding)
+}
+
+/// Resolve a bound Ask wait, injecting exactly one terminal tool result for the original call id.
+/// A stale `version` is rejected.
+#[tauri::command]
+fn graph_resume_ask(
+    control_plane: State<'_, HostControlPlane>,
+    run_id: String,
+    request_id: String,
+    version: u64,
+    answer: Value,
+) -> Result<Value, String> {
+    control_plane.graph_resume_ask(&run_id, &request_id, version, answer)
 }
 
 #[tauri::command]
@@ -666,6 +808,19 @@ pub fn run() {
             start_turn_stream,
             stop_turn,
             stop_graph_run,
+            ask_list_pending,
+            ask_answer,
+            ask_cancel,
+            ask_expire,
+            plan_create,
+            plan_replace,
+            plan_merge,
+            plan_complete_step,
+            plan_list,
+            plan_get,
+            graph_list_ask_waits,
+            graph_bind_ask_wait,
+            graph_resume_ask,
             load_execution_checkpoint,
             load_graph_run_checkpoint,
             inspect_host,

@@ -3,7 +3,8 @@ use crate::agent::hooks::RunControlHookEnvelope;
 use crate::agent::planner::{GraphPlanner, GraphPlanningContext};
 use crate::agent::runtime::TurnResult;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,6 +18,8 @@ type GraphRunMap = HashMap<String, GraphRun>;
 struct PersistedGraphRunStore {
     #[serde(default)]
     runs: GraphRunMap,
+    #[serde(default)]
+    ask_waits: BTreeMap<String, Vec<GraphAskWaitBinding>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,6 +160,53 @@ pub struct GraphRunControlBoundaryEvidence {
     pub created_at_ms: u64,
 }
 
+/// An Ask (`PendingControlRequest`) wait bound to a graph run's `wait_user` suspension
+/// (design.md Decision 5, PA-076 task 4.3/4.4). The binding is keyed by `request_id` + the
+/// `expected_version` the host must answer with; the original assistant tool-call transcript is
+/// preserved alongside the pending request so a reload never loses the open roundtrip.
+///
+/// Bindings are stored as a sidecar map in the [`GraphRunStore`] (keyed by `run_id`) rather than
+/// as a field on [`GraphRun`], so the persisted graph contract stays backward compatible and the
+/// `GraphRun` struct shape is untouched for consumers that construct it from a checkpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphAskWaitBinding {
+    pub request_id: String,
+    /// Version the host must present to answer/resume this Ask. Rejecting a different version is
+    /// the graph's stale-version CAS guard.
+    pub expected_version: u64,
+    pub run_id: String,
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Original assistant tool-call id; the resumed run injects exactly one terminal tool result
+    /// for this id.
+    pub call_id: String,
+    /// Product/model-visible tool name of the originating Ask call.
+    pub tool_name: String,
+    /// Original assistant tool-call transcript persisted alongside the pending request.
+    pub assistant_transcript: Value,
+    pub created_at_ms: u64,
+}
+
+/// The result of resuming a bound Ask wait: the run has been moved back to `Ready` and the caller
+/// receives exactly one terminal tool result to inject for the original `call_id` before the run
+/// continues. There is deliberately no additional provider follow-up produced by the graph.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphAskResumeOutcome {
+    pub request_id: String,
+    pub run_id: String,
+    pub turn_id: String,
+    /// Original assistant tool-call id the terminal result must be injected for.
+    pub call_id: String,
+    pub tool_name: String,
+    /// The user's answer payload.
+    pub answer: Value,
+    /// The single terminal tool result for `call_id` after resume.
+    pub terminal_result: Value,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRunLifecycle {
@@ -237,6 +287,9 @@ pub struct GraphEngine {
 
 pub struct GraphRunStore {
     runs: GraphRunMap,
+    /// Pending Ask wait bindings keyed by run id (design.md Decision 5). Persisted alongside the
+    /// runs in the same JSON file; `#[serde(default)]` keeps old stores readable.
+    ask_waits: BTreeMap<String, Vec<GraphAskWaitBinding>>,
     storage_path: Option<PathBuf>,
 }
 
@@ -407,16 +460,19 @@ impl GraphRunStore {
     pub fn new() -> Self {
         Self {
             runs: HashMap::new(),
+            ask_waits: BTreeMap::new(),
             storage_path: None,
         }
     }
 
     pub fn persistent(storage_path: impl Into<PathBuf>) -> Self {
         let storage_path = storage_path.into();
-        let mut runs = load_runs_from_path(&storage_path);
+        let mut persisted = load_persisted_store(&storage_path);
+        let mut runs = std::mem::take(&mut persisted.runs);
         let modified = reconcile_stale_runs(&mut runs);
         let store = Self {
             runs,
+            ask_waits: persisted.ask_waits,
             storage_path: Some(storage_path),
         };
         if modified {
@@ -458,6 +514,7 @@ impl GraphRunStore {
         }
         let Ok(serialized) = serde_json::to_string_pretty(&PersistedGraphRunStore {
             runs: self.runs.clone(),
+            ask_waits: self.ask_waits.clone(),
         }) else {
             return;
         };
@@ -496,6 +553,11 @@ impl GraphRunner {
         ) {
             return None;
         }
+        // A run with unresolved Ask waits is suspended at `wait_user`; it must be resumed through
+        // the Ask path, never by beginning a fresh turn (design.md Decision 5).
+        if has_unresolved_ask_waits(store, run_id) {
+            return None;
+        }
 
         run.phase = GraphRunPhase::Running;
         run.active_turn_id = Some(turn_id.to_string());
@@ -523,6 +585,11 @@ impl GraphRunner {
         decision: GraphDecision,
     ) -> Option<GraphRunAdvance> {
         let mut run = store.load_run(run_id)?;
+        // A run with unresolved Ask waits cannot consume a normal turn result; the Ask path owns
+        // the resume until every binding is resolved (design.md Decision 5).
+        if has_unresolved_ask_waits(store, run_id) {
+            return None;
+        }
         let effective_decision = match (&decision.kind, &run.stop_reason) {
             (GraphDecisionKind::Cancel, Some(GraphRunStopReason::UserStop)) => GraphDecision {
                 kind: GraphDecisionKind::Pause,
@@ -663,6 +730,136 @@ impl GraphRunner {
         run.updated_at_ms = now_timestamp_ms();
         Some(store.save_run(run))
     }
+
+    // ── Ask wait / resume (design.md Decision 5, PA-076 task 4.3/4.4) ─────────────────────────
+
+    /// Bind an Ask `PendingControlRequest` to the run's `wait_user` suspension. The run is moved to
+    /// `WaitingUser` (keyed on `request_id` + `expected_version`) and the original assistant
+    /// tool-call transcript is preserved alongside the pending request. Binding a request_id that
+    /// is already pending for the run fails closed.
+    pub fn bind_ask_wait(
+        &self,
+        store: &mut GraphRunStore,
+        run_id: &str,
+        binding: GraphAskWaitBinding,
+    ) -> Result<GraphRun, String> {
+        let mut run = store
+            .load_run(run_id)
+            .ok_or_else(|| format!("Graph run `{run_id}` not found."))?;
+        if matches!(
+            run.phase,
+            GraphRunPhase::Completed | GraphRunPhase::Failed | GraphRunPhase::Cancelled
+        ) {
+            return Err(format!(
+                "Graph run `{run_id}` is terminal and cannot bind an Ask wait."
+            ));
+        }
+        let waits = store.ask_waits.entry(run_id.to_string()).or_default();
+        if waits
+            .iter()
+            .any(|existing| existing.request_id == binding.request_id)
+        {
+            return Err(format!(
+                "Ask wait `{}` is already bound to run `{run_id}`.",
+                binding.request_id
+            ));
+        }
+        waits.push(binding);
+        run.phase = GraphRunPhase::WaitingUser;
+        run.active_turn_id = None;
+        run.stop_reason = None;
+        run.last_decision = Some(GraphDecision {
+            kind: GraphDecisionKind::WaitUser,
+            reason: GraphDecisionReason::TurnCompletedAwaitingUser,
+            summary: format!(
+                "Ask `{}` awaits a host answer before the run resumes.",
+                waits
+                    .last()
+                    .map(|item| item.request_id.as_str())
+                    .unwrap_or("request")
+            ),
+            target_phase: GraphRunPhase::WaitingUser,
+        });
+        run.updated_at_ms = now_timestamp_ms();
+        Ok(store.save_run(run))
+    }
+
+    /// Snapshot of every Ask wait currently bound to a run.
+    pub fn list_ask_waits(&self, store: &GraphRunStore, run_id: &str) -> Vec<GraphAskWaitBinding> {
+        store.ask_waits.get(run_id).cloned().unwrap_or_default()
+    }
+
+    /// Resolve a bound Ask wait and return exactly one terminal tool result for the original
+    /// `call_id`. The `expected_version` must match the version the binding was created with —
+    /// a stale version (e.g. the version after the request was consumed) is rejected. On success
+    /// the binding is removed and the run moves back to `Ready` to continue; no additional
+    /// provider follow-up is produced.
+    pub fn resume_ask_wait(
+        &self,
+        store: &mut GraphRunStore,
+        run_id: &str,
+        request_id: &str,
+        expected_version: u64,
+        answer: Value,
+    ) -> Result<GraphAskResumeOutcome, String> {
+        let mut run = store
+            .load_run(run_id)
+            .ok_or_else(|| format!("Graph run `{run_id}` not found."))?;
+        let waits = store.ask_waits.get_mut(run_id).ok_or_else(|| {
+            format!("No Ask waits are bound to run `{run_id}`.")
+        })?;
+        let position = waits
+            .iter()
+            .position(|binding| binding.request_id == request_id)
+            .ok_or_else(|| {
+                format!("No pending Ask wait `{request_id}` is bound to run `{run_id}`.")
+            })?;
+        let binding = waits[position].clone();
+        if binding.expected_version != expected_version {
+            return Err(format!(
+                "Ask wait `{request_id}` was bound at version {} but resume presented version {expected_version}; stale resume rejected.",
+                binding.expected_version
+            ));
+        }
+        waits.remove(position);
+
+        run.phase = GraphRunPhase::Ready;
+        run.active_turn_id = None;
+        run.stop_reason = None;
+        run.resume_count = run.resume_count.saturating_add(1);
+        run.updated_at_ms = now_timestamp_ms();
+        let _ = store.save_run(run);
+
+        let terminal_result = json!({
+            "toolCallId": binding.call_id,
+            "toolName": binding.tool_name,
+            "status": "ok",
+            "output": {
+                "ok": true,
+                "requestId": binding.request_id,
+                "version": binding.expected_version,
+                "kind": "waiting_user",
+                "answer": answer.clone(),
+            },
+        });
+        Ok(GraphAskResumeOutcome {
+            request_id: binding.request_id,
+            run_id: binding.run_id,
+            turn_id: binding.turn_id,
+            call_id: binding.call_id,
+            tool_name: binding.tool_name,
+            answer,
+            terminal_result,
+        })
+    }
+}
+
+fn has_unresolved_ask_waits(store: &GraphRunStore, run_id: &str) -> bool {
+    store
+        .ask_waits
+        .get(run_id)
+        .map(|waits| !waits.is_empty())
+        .unwrap_or(false)
 }
 
 #[allow(dead_code)]
@@ -793,12 +990,10 @@ pub fn default_graph_run_store_path() -> PathBuf {
         .join("graph-runs.json")
 }
 
-fn load_runs_from_path(path: &PathBuf) -> GraphRunMap {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    serde_json::from_str::<PersistedGraphRunStore>(&contents)
-        .map(|persisted| persisted.runs)
+fn load_persisted_store(path: &PathBuf) -> PersistedGraphRunStore {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<PersistedGraphRunStore>(&contents).ok())
         .unwrap_or_default()
 }
 
@@ -952,14 +1147,29 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::ask_control::{answer_ask, list_pending_asks};
     use crate::agent::context::{
         LongTermMemory, LongTermMemoryEntry, RunState, SessionContext, TranscriptContext,
         TurnContext,
     };
+    use crate::agent::dispatcher::{
+        ControlRequestAuthorization, DispatchContext, GovernedDispatcher,
+    };
     use crate::agent::planner::DefaultGraphPlanner;
     use crate::agent::runtime::TurnResult;
+    use crate::agent::tool_runtime::{
+        FakeClock, InvocationOrigin, PendingControlRequestKind, PendingControlRequestState,
+        RuntimeClock, ToolDispatchRequest,
+    };
+    use crate::agent::tools::{
+        ToolControlKind, ToolDescriptor, ToolDescriptorSource, ToolDisplayMetadata,
+        ToolExecutionPolicy, ToolExposure, ToolHandlerProvenance, ToolIdentity, ToolKind,
+        ToolPermissionDeclaration, ToolRegistrySnapshot,
+    };
+    use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_result(phase: &str) -> TurnResult {
@@ -1589,5 +1799,340 @@ mod tests {
 
         let modified = reconcile_stale_runs(&mut runs);
         assert!(!modified, "Ready run should not be modified");
+    }
+
+    // ------------------------------------------------------------------
+    // Ask wait / resume binding (design.md Decision 5, task 4.3/4.4)
+    // ------------------------------------------------------------------
+
+    fn ask_descriptor() -> ToolDescriptor {
+        let mut declaration = ToolPermissionDeclaration::default();
+        declaration.host_mediated = true;
+        ToolDescriptor {
+            identity: ToolIdentity {
+                descriptor_id: "builtin:ask".to_string(),
+                model_name: "Ask".to_string(),
+                canonical_name: "ask".to_string(),
+                primitive_name: "echo_input".to_string(),
+                source: ToolDescriptorSource::Builtin,
+            },
+            aliases: vec!["ask".to_string(), "builtin:ask".to_string()],
+            description: String::new(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+                "additionalProperties": false,
+            }),
+            kind: ToolKind::Interactive,
+            exposure: ToolExposure::ModelVisible,
+            permission_declaration: declaration,
+            execution_policy: ToolExecutionPolicy::default(),
+            display_metadata: ToolDisplayMetadata::default(),
+            handler_provenance: ToolHandlerProvenance {
+                handler_kind: "test".to_string(),
+                source_id: "builtin-tools".to_string(),
+            },
+            source_revision: "test-v1".to_string(),
+            composed_descriptor_ids: Vec::new(),
+        }
+    }
+
+    fn ask_registry() -> Arc<ToolRegistrySnapshot> {
+        Arc::new(
+            ToolRegistrySnapshot::from_descriptors("test-ask-snapshot", vec![ask_descriptor()])
+                .expect("ask registry must build"),
+        )
+    }
+
+    /// Persist a real `Interaction` pending request through `dispatch_governed` with a
+    /// host-mediated Ask descriptor.
+    fn persist_ask_via_dispatch(
+        dispatcher: &GovernedDispatcher,
+    ) -> (String, crate::agent::tool_runtime::PendingControlRequest) {
+        let context = DispatchContext {
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-ask".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        };
+        let outcome = dispatcher.dispatch_governed(
+            ToolDispatchRequest {
+                origin: InvocationOrigin::Model,
+                descriptor_id: "builtin:ask".to_string(),
+                call_id: "call-1".to_string(),
+                arguments: json!({ "text": "continue?" }),
+            },
+            &context,
+        );
+        let control = outcome.control_outcome.expect("ask control outcome");
+        assert_eq!(control.kind, ToolControlKind::WaitingHost);
+        let pending = dispatcher
+            .pending_request(&control.request_id)
+            .expect("persisted pending ask");
+        (control.request_id, pending)
+    }
+
+    fn sample_ask_binding(
+        run_id: &str,
+        request_id: &str,
+        expected_version: u64,
+        call_id: &str,
+        session_id: Option<&str>,
+    ) -> GraphAskWaitBinding {
+        GraphAskWaitBinding {
+            request_id: request_id.to_string(),
+            expected_version,
+            run_id: run_id.to_string(),
+            turn_id: "turn-1".to_string(),
+            session_id: session_id.map(str::to_string),
+            call_id: call_id.to_string(),
+            tool_name: "Ask".to_string(),
+            assistant_transcript: json!({
+                "role": "assistant",
+                "toolCalls": [{ "id": call_id, "type": "function", "function": { "name": "Ask" } }],
+            }),
+            created_at_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn graph_bind_ask_wait_suspends_run_and_duplicate_binding_fails_closed() {
+        let engine = GraphEngine::new("state-machine-v1");
+        let runner = GraphRunner::new();
+        let mut store = GraphRunStore::new();
+        runner.start_run(
+            &mut store,
+            engine.start_run("run-ask", "ask flow", Some("session-1")),
+        );
+
+        let binding =
+            sample_ask_binding("run-ask", "control-000000000001", 1, "call-1", Some("session-1"));
+        let bound = runner
+            .bind_ask_wait(&mut store, "run-ask", binding.clone())
+            .expect("bind ask wait");
+        assert_eq!(bound.phase, GraphRunPhase::WaitingUser);
+        assert_eq!(bound.active_turn_id, None);
+        assert_eq!(
+            bound.last_decision.as_ref().map(|item| &item.kind),
+            Some(&GraphDecisionKind::WaitUser)
+        );
+
+        let waits = runner.list_ask_waits(&store, "run-ask");
+        assert_eq!(waits, vec![binding.clone()]);
+
+        assert!(
+            runner.bind_ask_wait(&mut store, "run-ask", binding).is_err(),
+            "a duplicate request_id binding must fail closed"
+        );
+        assert!(runner.list_ask_waits(&store, "run-ask").len() == 1);
+    }
+
+    #[test]
+    fn ask_wait_resume_injects_exactly_one_terminal_result_for_original_call_id() {
+        let dispatcher =
+            GovernedDispatcher::new(ask_registry(), Arc::new(FakeClock::new(1_000)));
+        let (request_id, pending) = persist_ask_via_dispatch(&dispatcher);
+        assert_eq!(pending.request_kind, PendingControlRequestKind::Interaction);
+        assert_eq!(pending.call_id, "call-1");
+
+        let engine = GraphEngine::new("state-machine-v1");
+        let runner = GraphRunner::new();
+        let mut store = GraphRunStore::new();
+        runner.start_run(
+            &mut store,
+            engine.start_run("run-ask", "ask flow", Some("session-1")),
+        );
+        runner
+            .bind_ask_wait(
+                &mut store,
+                "run-ask",
+                sample_ask_binding(
+                    "run-ask",
+                    &request_id,
+                    pending.version,
+                    &pending.call_id,
+                    pending.session_id.as_deref(),
+                ),
+            )
+            .expect("bind ask wait");
+
+        // The host observes the pending Ask and answers it through the Ask control path.
+        let asks = list_pending_asks(&dispatcher);
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].request_id, request_id);
+        let authorization =
+            ControlRequestAuthorization::for_request(&pending, Some(json!("continue")));
+        let consumed = answer_ask(&dispatcher, &request_id, &authorization)
+            .expect("answer consumes the ask");
+        assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
+
+        // Resume: exactly one terminal tool result for the original call id, then the run
+        // continues at Ready. No additional provider follow-up is produced by the graph.
+        let outcome = runner
+            .resume_ask_wait(
+                &mut store,
+                "run-ask",
+                &request_id,
+                pending.version,
+                json!("continue"),
+            )
+            .expect("resume ask wait");
+        assert_eq!(outcome.call_id, pending.call_id);
+        assert_eq!(outcome.request_id, request_id);
+        assert_eq!(outcome.turn_id, "turn-1");
+        assert_eq!(outcome.answer, json!("continue"));
+        assert_eq!(
+            outcome.terminal_result["toolCallId"].as_str(),
+            Some(pending.call_id.as_str())
+        );
+        assert_eq!(outcome.terminal_result["toolName"].as_str(), Some("Ask"));
+        assert_eq!(
+            outcome.terminal_result["output"]["answer"].as_str(),
+            Some("continue")
+        );
+        assert!(
+            outcome.terminal_result.is_object(),
+            "the terminal result is a single result, not a batch"
+        );
+
+        let run = store.load_run("run-ask").expect("run present");
+        assert_eq!(run.phase, GraphRunPhase::Ready);
+        assert_eq!(run.resume_count, 1);
+        assert!(runner.list_ask_waits(&store, "run-ask").is_empty());
+    }
+
+    #[test]
+    fn ask_wait_resume_rejects_stale_version_and_keeps_the_binding() {
+        let dispatcher =
+            GovernedDispatcher::new(ask_registry(), Arc::new(FakeClock::new(1_000)));
+        let (request_id, pending) = persist_ask_via_dispatch(&dispatcher);
+
+        let engine = GraphEngine::new("state-machine-v1");
+        let runner = GraphRunner::new();
+        let mut store = GraphRunStore::new();
+        runner.start_run(
+            &mut store,
+            engine.start_run("run-ask", "ask flow", Some("session-1")),
+        );
+        runner
+            .bind_ask_wait(
+                &mut store,
+                "run-ask",
+                sample_ask_binding(
+                    "run-ask",
+                    &request_id,
+                    pending.version,
+                    &pending.call_id,
+                    pending.session_id.as_deref(),
+                ),
+            )
+            .expect("bind ask wait");
+
+        let error = runner
+            .resume_ask_wait(
+                &mut store,
+                "run-ask",
+                &request_id,
+                pending.version + 1,
+                json!("continue"),
+            )
+            .expect_err("a stale version must be rejected");
+        assert!(error.contains("stale"), "{error}");
+        assert_eq!(
+            runner.list_ask_waits(&store, "run-ask").len(),
+            1,
+            "a rejected resume must leave the binding intact"
+        );
+        assert_eq!(
+            store.load_run("run-ask").expect("run").phase,
+            GraphRunPhase::WaitingUser
+        );
+    }
+
+    #[test]
+    fn ask_wait_bindings_persist_across_store_reload() {
+        let path = temp_graph_store_path();
+        let engine = GraphEngine::new("state-machine-v1");
+        let runner = GraphRunner::new();
+        let mut store = GraphRunStore::persistent(path.clone());
+        runner.start_run(
+            &mut store,
+            engine.start_run(
+                "run-ask-persist",
+                "persist ask wait",
+                Some("session-persist"),
+            ),
+        );
+        runner
+            .bind_ask_wait(
+                &mut store,
+                "run-ask-persist",
+                sample_ask_binding(
+                    "run-ask-persist",
+                    "control-000000000001",
+                    1,
+                    "call-1",
+                    Some("session-persist"),
+                ),
+            )
+            .expect("bind ask wait");
+        drop(store);
+
+        let reloaded = GraphRunStore::persistent(path.clone());
+        let waits = runner.list_ask_waits(&reloaded, "run-ask-persist");
+        assert_eq!(waits.len(), 1);
+        assert_eq!(waits[0].request_id, "control-000000000001");
+        assert_eq!(waits[0].expected_version, 1);
+        let run = reloaded.load_run("run-ask-persist").expect("reloaded run");
+        assert_eq!(run.phase, GraphRunPhase::WaitingUser);
+        assert!(runner.build_checkpoint(&run).resumable);
+
+        let _ = fs::remove_file(&path);
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn begin_turn_and_apply_turn_result_are_rejected_while_an_ask_wait_is_pending() {
+        let engine = GraphEngine::new("state-machine-v1");
+        let runner = GraphRunner::new();
+        let mut store = GraphRunStore::new();
+        runner.start_run(
+            &mut store,
+            engine.start_run("run-ask", "ask flow", Some("session-1")),
+        );
+        runner
+            .bind_ask_wait(
+                &mut store,
+                "run-ask",
+                sample_ask_binding("run-ask", "control-1", 1, "call-1", Some("session-1")),
+            )
+            .expect("bind ask wait");
+
+        assert!(
+            runner
+                .begin_turn(&mut store, "run-ask", "turn-2", Some("session-1"))
+                .is_none(),
+            "begin_turn must be refused while an Ask wait is pending"
+        );
+        let handoff = engine.build_turn_handoff(
+            Some("turn-2"),
+            Some("session-1"),
+            &sample_result("ready"),
+            &sample_retrieved(),
+        );
+        let decision = engine.decide_after_turn(&handoff);
+        assert!(
+            runner
+                .apply_turn_result(&mut store, "run-ask", handoff, decision)
+                .is_none(),
+            "apply_turn_result must be refused while an Ask wait is pending"
+        );
+        assert_eq!(
+            store.load_run("run-ask").expect("run").phase,
+            GraphRunPhase::WaitingUser
+        );
     }
 }

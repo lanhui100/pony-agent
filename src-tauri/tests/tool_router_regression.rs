@@ -15,10 +15,13 @@ fn temp_workspace() -> PathBuf {
 }
 
 #[test]
-fn search_text_respects_file_pattern_and_skips_node_modules() {
+fn search_text_respects_file_pattern_and_skips_gitignored_and_node_modules() {
     let workspace = temp_workspace();
     fs::create_dir_all(workspace.join("src")).expect("create src dir");
     fs::create_dir_all(workspace.join("node_modules")).expect("create node_modules");
+    // The new search engine respects `.gitignore` (design Decision 9), so an ignore rule is what
+    // keeps the dependency directory out of the scan.
+    fs::write(workspace.join(".gitignore"), "node_modules/\n").expect("write gitignore");
     fs::write(
         workspace.join("src").join("hit.rs"),
         "const NEEDLE: &str = \"needle\";\n",
@@ -37,7 +40,7 @@ fn search_text_respects_file_pattern_and_skips_node_modules() {
         arguments: json!({
             "query": "needle",
             "path": ".",
-            "filePattern": ".rs",
+            "filePattern": "*.rs",
             "limit": 10,
             "ignoreCase": true
         }),
@@ -61,6 +64,7 @@ fn search_text_respects_file_pattern_and_skips_node_modules() {
         payload.get("skippedLargeFiles").and_then(Value::as_u64),
         Some(0)
     );
+    assert_eq!(payload.get("truncated").and_then(Value::as_bool), Some(false));
 
     let _ = fs::remove_dir_all(workspace);
 }
@@ -113,9 +117,10 @@ fn batch_stops_following_calls_when_continue_on_error_is_false() {
 }
 
 #[test]
-fn characterization_batch_currently_executes_a_write_child() {
-    // This is a migration-removal baseline. PA-076 must replace it with an
-    // unsupported_composite_child rejection before the governed child dispatcher lands.
+fn batch_rejects_write_child_with_unsupported_composite_child() {
+    // PA-076 design Decision 3: legacy `workspace_batch` is a temporary fail-closed
+    // gate that only permits explicit read-only primitives as children. A write
+    // child must be rejected and must not execute.
     let workspace = temp_workspace();
     let router = ToolRouter::with_workspace_root(workspace.clone());
 
@@ -131,10 +136,18 @@ fn characterization_batch_currently_executes_a_write_child() {
         plan: None,
     });
 
-    assert_eq!(result.status, "ok");
+    assert_eq!(result.status, "error");
+    let payload = serde_json::from_str::<Value>(&result.output).expect("batch output json");
     assert_eq!(
-        fs::read_to_string(workspace.join("baseline.txt")).expect("baseline write child"),
-        "baseline"
+        payload
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str),
+        Some("unsupported_composite_child")
+    );
+    assert!(
+        !workspace.join("baseline.txt").exists(),
+        "write child must not execute under the read-only gate"
     );
 
     let _ = fs::remove_dir_all(workspace);
@@ -368,12 +381,22 @@ fn web_fetch_rejects_non_http_urls() {
 
     assert_eq!(result.status, "error");
     let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+    // The web access policy (design Decision 8) fails closed before any connection; the deny
+    // reason replaces the legacy `invalid_url` error code.
     assert_eq!(
         payload
             .get("error")
             .and_then(|error| error.get("code"))
             .and_then(Value::as_str),
-        Some("invalid_url")
+        Some("web_access_denied")
+    );
+    assert_eq!(
+        payload
+            .get("error")
+            .and_then(|error| error.get("accessDecision"))
+            .and_then(|decision| decision.get("decision"))
+            .and_then(Value::as_str),
+        Some("deny")
     );
 
     let _ = fs::remove_dir_all(workspace);

@@ -7,6 +7,7 @@ import { useProviderStore } from "@/stores/providers";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import HomeToolsPanel from "@/components/HomeToolsPanel.vue";
 import HomeTracePanel from "@/components/HomeTracePanel.vue";
+import PlanPanel from "@/components/PlanPanel.vue";
 import DebugPanel from "@/components/DebugPanel.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 
@@ -39,7 +40,7 @@ const {
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"tools" | "trace" | "debug" | "">("trace");
+const activePanel = ref<"tools" | "trace" | "plan" | "debug" | "">("trace");
 const copiedKey = ref("");
 let copiedTimer: number | null = null;
 
@@ -304,7 +305,7 @@ function copyText(key: string, text: string) {
   }, 1400);
 }
 
-function togglePanel(panel: "tools" | "trace") {
+function togglePanel(panel: "tools" | "trace" | "plan") {
   activePanel.value = activePanel.value === panel ? "" : panel;
 }
 
@@ -352,6 +353,12 @@ watch(sessionId, () => {
           :provider-returned-cache-hit-input-tokens="providerReturnedCacheHitInputTokens"
           @copy="copyText"
           @toggle="togglePanel('trace')"
+        />
+
+        <PlanPanel
+          :session-id="sessionId"
+          :open="activePanel === 'plan'"
+          @toggle="togglePanel('plan')"
         />
 
         <DebugPanel

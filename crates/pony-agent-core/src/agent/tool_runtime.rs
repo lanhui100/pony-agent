@@ -69,6 +69,19 @@ impl RuntimeClock for FakeClock {
     }
 }
 
+/// Wall-clock `RuntimeClock` for production dispatchers. `now_ms` is Unix epoch milliseconds.
+#[derive(Clone, Debug, Default)]
+pub struct SystemClock;
+
+impl RuntimeClock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingControlRequestKind {

@@ -18,6 +18,7 @@ import WorkspaceTurnItem, {
   type TurnBucket
 } from "@/components/chat/WorkspaceTurnItem.vue";
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
+import AskPanel from "@/components/AskPanel.vue";
 
 const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
 
@@ -1531,6 +1532,7 @@ watch(
             :assistant-displayed-reasoning-fade-key="assistantDisplayedReasoningFadeKey"
           />
         </TransitionGroup>
+        <AskPanel />
         <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
         <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
       </div>

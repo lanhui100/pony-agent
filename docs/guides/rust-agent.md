@@ -5,7 +5,7 @@
 ```
 pony-agent/
 ├── crates/pony-agent-core/   # 智能体核心库（不依赖 Tauri）
-│   └── src/agent/            # 22 个模块
+│   └── src/agent/            # 37 个模块
 ├── src-tauri/                # Tauri 桌面适配器（依赖 pony-agent-core）
 │   └── tests/                # 回归测试
 └── src/                      # Vue 3 前端
@@ -16,7 +16,7 @@ pony-agent/
 - `crates/pony-agent-core` — 核心库，包名 `pony_agent_core`，不含 Tauri 依赖
 - `src-tauri` — Tauri 桌面适配器，包名 `pony_agent`，通过 path 依赖引入 core
 
-## 模块架构（22 模块）
+## 模块架构（37 模块）
 
 ### 层依赖方向
 
@@ -46,6 +46,20 @@ pony-agent/
 | `sse_adapter` | SSE 格式序列化：将 TurnStreamEvent 转 BufferingSseTurnEventSink |
 | `telemetry` | 遥测数据结构：TurnTraceStep、ToolActivity、CapabilityInvocationRecord |
 | `tools` | 工具系统：定义、执行器、路由器（内置 18+ 工具） |
+| `ask_control` | Ask 宿主适配：`PendingControlRequest` 的 Interaction 列表/answer/cancel/expire + `ControlRequestAuthorization::for_request` |
+| `budget` | 原子预算账本：calls/concurrency/bytes/deadline + `CancellationToken` + `DispatchBudgetConfig` |
+| `child_dispatch` | bounded child dispatch：lineage/深度/环检测/共享原子账本/`suspended` 停 sibling |
+| `dispatcher` | `GovernedDispatcher`：八步治理管线、来源鉴权/exposure、hook、权限决策、控制请求 CAS、lifecycle record |
+| `dispatcher_composites` | governed `workspace_batch`/`gather_context` composite + `GovernedToolExecutor` 适配器 |
+| `governed_executor` | `build_governed_executor()`：内置工具面桥接到 dispatcher，runtime 默认执行器 |
+| `image_artifact` | `view_workspace_image`：workspace 图片 → reference-based 规范化 artifact（MIME/尺寸/字节上限） |
+| `mcp_resources` | MCP resource list/template/read：source-bound transport、untrusted 内容约束、args 回显拒绝 |
+| `plan_state` | `PlanStore`/`PlanControlHandler`：session-owned 版本化 Plan（create/replace/merge/complete_step + CAS） |
+| `process` | `ProcessManager`：opaque session-bound handle、并发 drain 有界缓冲、truncation 证据、最小环境 |
+| `sandbox` | `SandboxSupportMatrix`/`NoSandboxBackend`/`TestSandboxBackend`：sandbox 支持矩阵与 fail-closed 门禁 |
+| `search` | `SearchEngine`：regex/globset/ignore 标准语义、确定性排序、扫描预算 + 诚实截断 |
+| `tool_search_elevation` | `ToolSearchElevator`：Deferred 候选 → 当前 turn 提升、source-revision 失效、trace evidence |
+| `web_access` | `WebAccessPolicy`/`PinnedConnector`：URL/SSRF/redirect 校验、禁 ambient proxy 与自动重定向 |
 
 ### 模块间依赖关系
 
