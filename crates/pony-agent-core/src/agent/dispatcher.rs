@@ -410,6 +410,7 @@ pub(crate) fn handler_failure(message: String) -> DispatchError {
 
 /// Concrete governed dispatcher. Owns the registry truth source, an injected clock, registered
 /// handlers/hooks/observers, the current turn tool view, and the in-memory control-request store.
+#[derive(Clone)]
 pub struct GovernedDispatcher {
     inner: Arc<Inner>,
 }
@@ -968,6 +969,7 @@ impl Inner {
                             .unwrap_or_else(|| ".".to_string()),
                         allow_network: false,
                         environment_allowlist: Vec::new(),
+                        isolate_environment: true,
                     };
                     if let Err(message) = backend.validate(&sandbox_request) {
                         return Err(DispatchError::new(
@@ -1017,6 +1019,7 @@ impl Inner {
                 .execute(&PrimitiveToolHandlerRequest {
                     descriptor_id: descriptor.identity.descriptor_id.clone(),
                     arguments: ready.final_arguments.clone(),
+                    session_id: context.session_id.clone(),
                 })
                 .map_err(handler_failure);
         }
@@ -1418,6 +1421,7 @@ impl ChildDispatchRunner for Inner {
         match handler.execute(&PrimitiveToolHandlerRequest {
             descriptor_id: ready.descriptor.identity.descriptor_id.clone(),
             arguments: ready.final_arguments.clone(),
+            session_id: ctx.context.session_id.clone(),
         }) {
             Ok(value) => {
                 let output = render_output(&value);

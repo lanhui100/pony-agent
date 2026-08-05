@@ -26,8 +26,7 @@
 
 ## In Progress
 
-- `PA-076` 加固并扩展 Agent Tool Runtime (P0)
-    说明：OpenSpec change `harden-and-expand-agent-tool-runtime` 已通过 strict validate。阶段 1–7 与 runtime 切换已全部实现并收口：阶段 3 交付 `GovernedDispatcher` 八步管线、`PendingControlRequest` CAS、bounded child dispatch、governed composites + 27 项矩阵测试（`02_REVIEWS/2026-08-02-pa076-phase3-review.md`）；阶段 4 交付 `PlanStore`/`PlanControlHandler` + Ask 宿主适配 + graph Ask wait/resume + control-plane 13 个 Tauri command + 前端 AskPanel/PlanPanel；阶段 5 交付 `ProcessManager` + `SandboxSupportMatrix`/`NoSandboxBackend`（Run fail-closed）；阶段 6 交付 `WebAccessPolicy`/`PinnedConnector`/`SearchEngine`；阶段 7 交付 `view_image`/MCP resource/ToolSearch elevation。runtime 默认 tool executor 已切换为 `build_governed_executor`。阶段 8 的 8.1（死代码清理）/8.2+8.5（文档/canonical spec/任务系统同步，validate 通过）/8.4（独立双审 CONDITIONAL PASS，`02_REVIEWS/2026-08-02-pa076-phases-4-7-review.md`）已落地。最近验证快照：core lib 674 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328 全绿。剩余：Ask 真实接线（共享 dispatcher + session context + turn-loop bind/resume）、pinned connector、真实 `SandboxBackend`、阶段 7 工具注册、task 4.6/5.7/6.6/7.5 阶段审核 + 8.3 复跑 + 归档。
+- 暂无
 
 ## Review
 
@@ -38,6 +37,9 @@
 - 暂无
 
 ## Done
+
+- `PA-076` 加固并扩展 Agent Tool Runtime (P0)
+    说明：已完成并收口（2026-08-05）。OpenSpec change `harden-and-expand-agent-tool-runtime` 已归档：`openspec/changes/archive/2026-08-05-harden-and-expand-agent-tool-runtime/`。阶段 1–7 核心 + runtime 默认切换（`build_governed_executor`）+ Ask 真实接线（P1-1 端到端：sync + stream 双路径挂起/恢复 + 共享 dispatcher + resume 注入唯一终态 + 前端 graph_resume_ask）+ pinned connector（P1-5，连接 pin 到已校验地址 + 链级总 deadline）+ 阶段 7 工具注册（P2-6，plan_control/view_image 进 builtin registry）+ Sandbox 裁决（2026-08-04，fail-closed 为合规终态，Job Object 拆 PA-077）。4 份阶段独立审核 + 8.4 收口（consultant PASS，无未解决 P0/P1）。最终验证：core lib 723 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 332 全绿。审核产物：`02_REVIEWS/2026-08-05-pa076-phase{4,5,6,7}-review.md`、`2026-08-05-pa076-84-closeout.md`、`2026-08-04-pa076-sandbox-backend-evaluation.md`。
 
 - `PA-072` 决议 checkpoint message controls change (P1)
     说明：已归档。`add-checkpoint-message-controls-and-bottom-menu` 的 checkpoint UX 核心能力已在代码中基本实现，剩余前端打磨与当前基础设施优先级不匹配。归档位置：`openspec/changes/archive/2026-06-27-add-checkpoint-message-controls-and-bottom-menu/`。

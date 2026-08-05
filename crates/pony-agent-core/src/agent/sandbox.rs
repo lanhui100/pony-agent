@@ -10,6 +10,17 @@
 //! breakaway still does not authorize an unsandboxed command; a Unix process group is best-effort
 //! containment and cannot claim to stop `setsid`/double-fork escapees. Where no real sandbox
 //! backend exists, autonomous `Run` fails closed (`NoSandboxBackend` reports `Unavailable`).
+//!
+//! Adjudication record (2026-08-04, PA-076 remaining item 4): the real backend is split out as
+//! follow-up work, and staying fail-closed is the design-compliant terminal state for this card.
+//! A Windows Job Object containment backend is feasible — `windows-sys` 0.61.2 is already in the
+//! dependency tree (transitive) and exposes `CreateJobObjectW` / `SetInformationJobObject`
+//! (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, breakaway flags off) / `AssignProcessToJobObject` /
+//! `TerminateJobObject` under the `Win32_System_JobObjects` feature. A full sandbox (workspace
+//! file + network containment plus Job Object) is a larger, separate effort. Both are follow-up
+//! cards; see `management/task-system/02_REVIEWS/2026-08-04-pa076-sandbox-backend-evaluation.md`.
+//! Until a real backend is registered, `NoSandboxBackend` + `enforce_sandbox` keep autonomous
+//! `Run` at `sandbox_unavailable`, never silently downgrading to an unsandboxed shell.
 
 pub use crate::agent::tool_runtime::{SandboxAvailability, SandboxBackend, SandboxRequest};
 
@@ -147,6 +158,7 @@ mod tests {
             workspace_root: ".".to_string(),
             allow_network: false,
             environment_allowlist: Vec::new(),
+            isolate_environment: false,
         }
     }
 

@@ -126,4 +126,4 @@
 - 想看第二波 builtin 工具面收口范围：先看 `openspec/specs/second-wave-tool-surface/spec.md`，再看 `PA-050 ~ PA-054` 与对应审核/收口日志
 - 想对比三方工具面差距、决策后续该实现哪些工具：看 `docs/analysis/builtin-tool-surface-comparison-2026-06-22.md`
 - 想理解 thinking 参数适配：看 `docs/architecture/thinking-param-adapter.md`
-- 想新增或修改工具、理解工具元数据从哪来、工具如何被治理执行：看 `docs/architecture/tool-runtime-descriptor-registry.md`（含 registry 顺序与工具名透传两条不变量、governed dispatcher 八步管线、runtime 默认切换、Ask/Plan/process/sandbox/web/search/phase-7 模块落点、两条剩余 integrator notes，以及 Windows 上跑 Rust 测试的方式）
+- 想新增或修改工具、理解工具元数据从哪来、工具如何被治理执行：看 `docs/architecture/tool-runtime-descriptor-registry.md`（含 registry 顺序与工具名透传两条不变量、governed dispatcher 八步管线、runtime 默认切换、Ask/Plan/process/sandbox/web/search/phase-7 模块落点、Sandbox 裁决记录与一条剩余 integrator note（真实 SandboxBackend），以及 Windows 上跑 Rust 测试的方式）

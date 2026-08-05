@@ -20,6 +20,8 @@ struct PersistedGraphRunStore {
     runs: GraphRunMap,
     #[serde(default)]
     ask_waits: BTreeMap<String, Vec<GraphAskWaitBinding>>,
+    #[serde(default)]
+    ask_injections: BTreeMap<String, GraphAskResumeInjection>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -207,6 +209,27 @@ pub struct GraphAskResumeOutcome {
     pub terminal_result: Value,
 }
 
+/// One-shot Ask resume injection persisted by `resume_ask_wait` (design.md Decision 5, PA-076
+/// phase-4 P0). Set when the host answers a bound Ask and the run moves back to `Ready`; the next
+/// turn consumes it exactly once (`GraphRunStore::take_ask_injection`) and seeds the provider
+/// context with the original assistant tool-call + the terminal result so the model sees the
+/// answer and continues, instead of a fresh user turn.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphAskResumeInjection {
+    pub request_id: String,
+    pub run_id: String,
+    pub turn_id: String,
+    /// Original assistant tool-call id the terminal result must be injected for.
+    pub call_id: String,
+    /// Product/model-visible tool name of the originating Ask call.
+    pub tool_name: String,
+    /// Original assistant tool-call transcript preserved alongside the pending request.
+    pub assistant_transcript: Value,
+    /// The single terminal tool result for `call_id` after resume.
+    pub terminal_result: Value,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRunLifecycle {
@@ -290,6 +313,9 @@ pub struct GraphRunStore {
     /// Pending Ask wait bindings keyed by run id (design.md Decision 5). Persisted alongside the
     /// runs in the same JSON file; `#[serde(default)]` keeps old stores readable.
     ask_waits: BTreeMap<String, Vec<GraphAskWaitBinding>>,
+    /// One-shot Ask resume injections keyed by run id (design.md Decision 5, phase-4 P0). Set by
+    /// `resume_ask_wait` when the host answers, consumed by the runtime on the next turn.
+    ask_injections: BTreeMap<String, GraphAskResumeInjection>,
     storage_path: Option<PathBuf>,
 }
 
@@ -461,6 +487,7 @@ impl GraphRunStore {
         Self {
             runs: HashMap::new(),
             ask_waits: BTreeMap::new(),
+            ask_injections: BTreeMap::new(),
             storage_path: None,
         }
     }
@@ -473,6 +500,7 @@ impl GraphRunStore {
         let store = Self {
             runs,
             ask_waits: persisted.ask_waits,
+            ask_injections: persisted.ask_injections,
             storage_path: Some(storage_path),
         };
         if modified {
@@ -496,6 +524,21 @@ impl GraphRunStore {
         runs
     }
 
+    /// Consume the one-shot Ask resume injection for a run, if present (design.md Decision 5,
+    /// phase-4 P0). Called by the runtime at the start of the next turn so the pending terminal
+    /// result is injected exactly once; the sidecar is cleared on read.
+    pub fn take_ask_injection(&mut self, run_id: &str) -> Option<GraphAskResumeInjection> {
+        let injection = self.ask_injections.remove(run_id)?;
+        self.persist_runs();
+        Some(injection)
+    }
+
+    /// Read the pending Ask resume injection for a run without consuming it (observability).
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn peek_ask_injection(&self, run_id: &str) -> Option<GraphAskResumeInjection> {
+        self.ask_injections.get(run_id).cloned()
+    }
+
     fn save_run(&mut self, run: GraphRun) -> GraphRun {
         self.runs.insert(run.id.clone(), run.clone());
         self.persist_runs();
@@ -515,6 +558,7 @@ impl GraphRunStore {
         let Ok(serialized) = serde_json::to_string_pretty(&PersistedGraphRunStore {
             runs: self.runs.clone(),
             ask_waits: self.ask_waits.clone(),
+            ask_injections: self.ask_injections.clone(),
         }) else {
             return;
         };
@@ -842,6 +886,21 @@ impl GraphRunner {
                 "answer": answer.clone(),
             },
         });
+        // Persist the one-shot injection the next turn consumes so the model sees the terminal
+        // result for the original tool-call id and continues (design.md Decision 5, phase-4 P0).
+        store.ask_injections.insert(
+            run_id.to_string(),
+            GraphAskResumeInjection {
+                request_id: binding.request_id.clone(),
+                run_id: binding.run_id.clone(),
+                turn_id: binding.turn_id.clone(),
+                call_id: binding.call_id.clone(),
+                tool_name: binding.tool_name.clone(),
+                assistant_transcript: binding.assistant_transcript.clone(),
+                terminal_result: terminal_result.clone(),
+            },
+        );
+        store.persist_runs();
         Ok(GraphAskResumeOutcome {
             request_id: binding.request_id,
             run_id: binding.run_id,

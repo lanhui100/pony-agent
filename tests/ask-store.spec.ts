@@ -139,6 +139,111 @@ describe("ask store", () => {
     expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("ask_answer", expect.anything());
   });
 
+  it("answers and calls graph_resume_ask to resume the bound graph run", async () => {
+    const ask = createPendingAsk({ requestId: "ask-1", runId: "run-1", version: 2 });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_list_pending") {
+        return Promise.resolve([ask]);
+      }
+      if (command === "ask_answer") {
+        return Promise.resolve({ requestId: "ask-1", answer: "yes" });
+      }
+      if (command === "graph_list_ask_waits") {
+        return Promise.resolve([
+          {
+            requestId: "ask-1",
+            expectedVersion: 2,
+            runId: "run-1",
+            turnId: "turn-1",
+            callId: "call-1",
+            toolName: "Ask",
+            createdAtMs: 1_000
+          }
+        ]);
+      }
+      if (command === "graph_resume_ask") {
+        return Promise.resolve({ runId: "run-1", callId: "call-1", answer: "yes" });
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useAskStore();
+    await store.refresh();
+
+    const result = await store.answer(ask, "yes");
+
+    expect(result).toEqual({ requestId: "ask-1", answer: "yes" });
+    expect(store.pendingAsks).toEqual([]);
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("graph_list_ask_waits", {
+      runId: "run-1"
+    });
+    // The binding's expectedVersion is presented to graph_resume_ask, not the post-consumption
+    // request version (graph resume is keyed to the binding version).
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("graph_resume_ask", {
+      runId: "run-1",
+      requestId: "ask-1",
+      version: 2,
+      answer: "yes"
+    });
+  });
+
+  it("does not call graph_resume_ask when the ask has no run id", async () => {
+    const ask = createPendingAsk({ requestId: "ask-1", runId: "" });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_list_pending") {
+        return Promise.resolve([ask]);
+      }
+      if (command === "ask_answer") {
+        return Promise.resolve({ requestId: "ask-1" });
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useAskStore();
+    await store.refresh();
+    await store.answer(ask, "yes");
+
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("graph_list_ask_waits", expect.anything());
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("graph_resume_ask", expect.anything());
+  });
+
+  it("keeps the resume failure non-fatal when the graph wait is already consumed", async () => {
+    const ask = createPendingAsk({ requestId: "ask-1", runId: "run-1" });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_list_pending") {
+        return Promise.resolve([ask]);
+      }
+      if (command === "ask_answer") {
+        return Promise.resolve({ requestId: "ask-1", answer: "yes" });
+      }
+      if (command === "graph_list_ask_waits") {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useAskStore();
+    await store.refresh();
+
+    const result = await store.answer(ask, "yes");
+
+    // The answer itself succeeded; the missing binding is not an error.
+    expect(result).toEqual({ requestId: "ask-1", answer: "yes" });
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalledWith("graph_resume_ask", expect.anything());
+    expect(store.error).toBeNull();
+  });
+
+  it("watches turn:suspended so a freshly paused run surfaces its ask", async () => {
+    const store = useAskStore();
+    await store.startWatchingEvents();
+
+    const listenedEvents = tauriMocks.mockSafeListen.mock.calls.map(([event]) => event);
+    expect(listenedEvents).toContain("turn:completed");
+    expect(listenedEvents).toContain("turn:failed");
+    expect(listenedEvents).toContain("turn:cancelled");
+    expect(listenedEvents).toContain("turn:suspended");
+  });
+
   it("refuses to answer a non-interaction request", async () => {
     const approval = createPendingAsk({ requestId: "approve-1", requestKind: "approval" });
     tauriMocks.mockSafeInvoke.mockResolvedValueOnce([approval]);

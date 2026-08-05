@@ -109,6 +109,15 @@ pub enum PlanError {
         session_id: String,
     },
     IllegalTransition(String),
+    /// No authoritative session was injected by the dispatch context. Plan ownership must come
+    /// from the dispatcher, never from model-supplied arguments (PA-076 phase-7 review P1-2).
+    MissingSession,
+    /// The model-supplied `session_id` conflicts with the dispatcher-injected session. The
+    /// injected session is authoritative; a self-claimed key is a cross-session forgery attempt.
+    SessionClaimMismatch {
+        claimed: String,
+        authoritative: String,
+    },
 }
 
 impl PlanError {
@@ -118,6 +127,8 @@ impl PlanError {
             Self::StaleRevision { .. } => "stale_revision",
             Self::CrossSession { .. } => "cross_session",
             Self::IllegalTransition(_) => "illegal_transition",
+            Self::MissingSession => "missing_session",
+            Self::SessionClaimMismatch { .. } => "session_claim_mismatch",
         }
     }
 
@@ -135,6 +146,15 @@ impl PlanError {
                 "plan `{plan_id}` is owned by session `{session_id}`"
             ),
             Self::IllegalTransition(detail) => detail.clone(),
+            Self::MissingSession => format!(
+                "no authoritative session was injected by the dispatch context; plan ownership must come from the dispatcher, not model-supplied arguments"
+            ),
+            Self::SessionClaimMismatch {
+                claimed,
+                authoritative,
+            } => format!(
+                "model-supplied session `{claimed}` conflicts with the dispatcher-injected session `{authoritative}`"
+            ),
         }
     }
 
@@ -469,7 +489,20 @@ impl PlanControlHandler {
         &self.store
     }
 
-    pub fn execute_operation(&self, operation: PlanControlOperation) -> Result<Plan, PlanError> {
+    /// Execute a Plan-tool operation under an authoritative session. `session_id` must be the
+    /// dispatch-context-injected session (`PrimitiveToolHandlerRequest.session_id`); a `None` here
+    /// fails closed with [`PlanError::MissingSession`]. The model-supplied `session_id` embedded in
+    /// the operation is validated against the injected session and never trusted as the ownership
+    /// key (PA-076 phase-7 review P1-2).
+    pub fn execute_operation(
+        &self,
+        session_id: Option<&str>,
+        operation: PlanControlOperation,
+    ) -> Result<Plan, PlanError> {
+        let Some(session_id) = session_id else {
+            return Err(PlanError::MissingSession);
+        };
+        let operation = self.authorize_operation(session_id, operation)?;
         match operation {
             PlanControlOperation::Create { session_id, payload } => {
                 self.store.create(&session_id, payload)
@@ -494,6 +527,78 @@ impl PlanControlHandler {
             } => self.store.complete_step(&session_id, &plan_id, revision, &step_id),
         }
     }
+
+    /// Validate the model-supplied `session_id` against the authoritative injected session and
+    /// rewrite the operation so every store call is keyed by the injected session. A self-claimed
+    /// key that differs from the injected session is a cross-session forgery attempt and fails
+    /// closed with [`PlanError::SessionClaimMismatch`].
+    fn authorize_operation(
+        &self,
+        authoritative: &str,
+        operation: PlanControlOperation,
+    ) -> Result<PlanControlOperation, PlanError> {
+        match operation {
+            PlanControlOperation::Create { session_id, payload } => {
+                self.require_claimed_session(authoritative, &session_id)?;
+                Ok(PlanControlOperation::Create {
+                    session_id: authoritative.to_string(),
+                    payload,
+                })
+            }
+            PlanControlOperation::Replace {
+                session_id,
+                plan_id,
+                revision,
+                payload,
+            } => {
+                self.require_claimed_session(authoritative, &session_id)?;
+                Ok(PlanControlOperation::Replace {
+                    session_id: authoritative.to_string(),
+                    plan_id,
+                    revision,
+                    payload,
+                })
+            }
+            PlanControlOperation::Merge {
+                session_id,
+                plan_id,
+                revision,
+                step,
+            } => {
+                self.require_claimed_session(authoritative, &session_id)?;
+                Ok(PlanControlOperation::Merge {
+                    session_id: authoritative.to_string(),
+                    plan_id,
+                    revision,
+                    step,
+                })
+            }
+            PlanControlOperation::CompleteStep {
+                session_id,
+                plan_id,
+                revision,
+                step_id,
+            } => {
+                self.require_claimed_session(authoritative, &session_id)?;
+                Ok(PlanControlOperation::CompleteStep {
+                    session_id: authoritative.to_string(),
+                    plan_id,
+                    revision,
+                    step_id,
+                })
+            }
+        }
+    }
+
+    fn require_claimed_session(&self, authoritative: &str, claimed: &str) -> Result<(), PlanError> {
+        if claimed != authoritative {
+            return Err(PlanError::SessionClaimMismatch {
+                claimed: claimed.to_string(),
+                authoritative: authoritative.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl PrimitiveToolHandler for PlanControlHandler {
@@ -503,7 +608,7 @@ impl PrimitiveToolHandler for PlanControlHandler {
                 format!("invalid_request: malformed plan control arguments: {error}")
             })?;
         let plan = self
-            .execute_operation(operation)
+            .execute_operation(request.session_id.as_deref(), operation)
             .map_err(|error| error.to_message())?;
         serde_json::to_value(&plan)
             .map_err(|error| format!("handler_error: plan projection serialization failed: {error}"))
@@ -530,9 +635,17 @@ mod tests {
     }
 
     fn handler_request(arguments: Value) -> PrimitiveToolHandlerRequest {
+        handler_request_for_session(arguments, Some("session-1"))
+    }
+
+    fn handler_request_for_session(
+        arguments: Value,
+        session_id: Option<&str>,
+    ) -> PrimitiveToolHandlerRequest {
         PrimitiveToolHandlerRequest {
             descriptor_id: "builtin:plan_control".to_string(),
             arguments,
+            session_id: session_id.map(ToString::to_string),
         }
     }
 
@@ -925,5 +1038,103 @@ mod tests {
             })))
             .expect_err("stale replace via handler");
         assert!(stale.starts_with("stale_revision:"), "{stale}");
+    }
+
+    #[test]
+    fn handler_rejects_model_session_that_conflicts_with_injected_session() {
+        let store = PlanStore::new();
+        let handler = PlanControlHandler::new(store);
+
+        // The model claims session-2 but the dispatch context injected session-1; the injected
+        // session is authoritative and the self-claimed key is a forgery attempt.
+        let error = handler
+            .execute(&handler_request_for_session(
+                json!({
+                    "op": "create",
+                    "session_id": "session-2",
+                    "payload": { "kind": "implement", "summary": "s", "steps": [] }
+                }),
+                Some("session-1"),
+            ))
+            .expect_err("conflicting session claim must fail closed");
+        assert!(error.starts_with("session_claim_mismatch:"), "{error}");
+
+        // A later operation with a matching claimed session still works under the same injected
+        // session.
+        handler
+            .execute(&handler_request_for_session(
+                json!({
+                    "op": "create",
+                    "session_id": "session-1",
+                    "payload": { "kind": "implement", "summary": "s", "steps": [] }
+                }),
+                Some("session-1"),
+            ))
+            .expect("matching claimed session succeeds");
+    }
+
+    #[test]
+    fn handler_fails_closed_when_no_session_is_injected_even_if_model_claims_one() {
+        let store = PlanStore::new();
+        let handler = PlanControlHandler::new(store);
+
+        // No dispatch-context session; the model's self-claimed session must not grant ownership.
+        let error = handler
+            .execute(&handler_request_for_session(
+                json!({
+                    "op": "create",
+                    "session_id": "session-1",
+                    "payload": { "kind": "implement", "summary": "s", "steps": [] }
+                }),
+                None,
+            ))
+            .expect_err("missing injected session must fail closed");
+        assert!(error.starts_with("missing_session:"), "{error}");
+    }
+
+    #[test]
+    fn handler_keys_ownership_by_injected_session_and_blocks_cross_session_access() {
+        let store = PlanStore::new();
+        let handler = PlanControlHandler::new(store);
+
+        // The plan is created under the injected session-1.
+        let created: Value = handler
+            .execute(&handler_request_for_session(
+                json!({
+                    "op": "create",
+                    "session_id": "session-1",
+                    "payload": {
+                        "kind": "implement",
+                        "summary": "s",
+                        "steps": [{ "name": "a", "summary": "sa" }]
+                    }
+                }),
+                Some("session-1"),
+            ))
+            .expect("create under injected session-1");
+        assert_eq!(created["sessionId"], "session-1");
+
+        // A sibling session (injected session-2, matching its own claim) cannot reach the plan
+        // owned by session-1.
+        let cross = handler
+            .execute(&handler_request_for_session(
+                json!({
+                    "op": "replace",
+                    "session_id": "session-2",
+                    "plan_id": "plan-1",
+                    "revision": 1,
+                    "payload": { "kind": "x", "summary": "y", "steps": [] }
+                }),
+                Some("session-2"),
+            ))
+            .expect_err("cross-session replace via injected session");
+        assert!(cross.starts_with("cross_session:"), "{cross}");
+
+        // The owner session can still read its own plan.
+        let plan = handler
+            .store()
+            .plan("session-1", "plan-1")
+            .expect("owner read");
+        assert_eq!(plan.session_id, "session-1");
     }
 }

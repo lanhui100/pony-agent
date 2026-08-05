@@ -26,10 +26,14 @@ use crate::agent::dispatcher::{
 use crate::agent::dispatcher_composites::{
     register_governed_composites, GovernedToolExecutor,
 };
+use crate::agent::image_artifact::ViewImageHandler;
+use crate::agent::plan_state::{PlanControlHandler, PlanStore};
 use crate::agent::tool_runtime::{
     InvocationOrigin, PrimitiveToolHandler, PrimitiveToolHandlerRequest, RuntimeClock, SystemClock,
 };
-use crate::agent::tools::{ToolCall, ToolRegistrySnapshot, ToolRouter};
+use crate::agent::tools::{
+    ToolCall, ToolRegistrySnapshot, ToolRouter, TOOL_PLAN_CONTROL, TOOL_VIEW_IMAGE,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -147,12 +151,41 @@ pub fn build_governed_executor(workspace_root: Option<PathBuf>) -> GovernedToolE
     let workspace = workspace_root.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     });
-    let router = Arc::new(ToolRouter::with_workspace_root(workspace));
+    let router = Arc::new(ToolRouter::with_workspace_root(workspace.clone()));
+
+    // ── Plan state control: session-owned, revisioned create/replace/merge/complete-step.
+    // Each runtime owns one PlanStore; session isolation is enforced by the store's
+    // CrossSession guard on every operation (PA-076 Decision 6). ──
+    let plan_store = PlanStore::new();
+    let plan_handler = Arc::new(PlanControlHandler::new(plan_store));
+
+    // ── view_image: reference-based artifact with default include_bytes=false (design Decision 11).
+    // Whether the encoded bytes reach a model is a provider modality choice. ──
+    let view_image_handler = Arc::new(ViewImageHandler::new(workspace.clone()));
 
     // Register every builtin primitive handler (composites are registered separately below).
     for descriptor in &registry.descriptors {
         let primitive = descriptor.identity.primitive_name.clone();
         if COMPOSITE_PRIMITIVES.contains(&primitive.as_str()) {
+            continue;
+        }
+        // ── MCP resource read + ToolSearch boundary decision (PA-076 P2-6): these descriptors
+        // stay in the capability registry execution path; their builtin entries are discovery
+        // metadata only. Deliberately NOT registering governed handlers — doing so would create
+        // a forbidden double execution path (governed dispatcher vs. runtime capability registry).
+        // See tools.rs builtin_tools() comments and runtime/tool_exec.rs. ──
+        if primitive == TOOL_PLAN_CONTROL {
+            dispatcher.register_handler(
+                descriptor.identity.descriptor_id.clone(),
+                Arc::clone(&plan_handler) as Arc<dyn PrimitiveToolHandler>,
+            );
+            continue;
+        }
+        if primitive == TOOL_VIEW_IMAGE {
+            dispatcher.register_handler(
+                descriptor.identity.descriptor_id.clone(),
+                Arc::clone(&view_image_handler) as Arc<dyn PrimitiveToolHandler>,
+            );
             continue;
         }
         dispatcher.register_handler(
@@ -360,6 +393,32 @@ mod tests {
     }
 
     #[test]
+    fn governed_executor_exposes_governed_dispatcher_through_trait_downcast() {
+        let workspace = temp_workspace();
+        let executor: Box<dyn ToolExecutor> =
+            Box::new(build_governed_executor(Some(workspace)));
+        // PA-076 P1-1: the runtime reaches the shared dispatcher via `ToolExecutor::as_any`.
+        let governed = executor
+            .as_any()
+            .and_then(|any| any.downcast_ref::<GovernedToolExecutor>())
+            .expect("default governed executor must downcast to GovernedToolExecutor");
+        assert!(governed.dispatcher().registry().descriptors.len() > 0);
+        // A non-governed executor exposes nothing (backward-compatible default).
+        struct PlainExecutor;
+        impl ToolExecutor for PlainExecutor {
+            fn execute(&self, _call: &ToolCall) -> crate::agent::tools::ToolResult {
+                crate::agent::tools::ToolResult {
+                    tool_name: "plain".to_string(),
+                    status: "ok".to_string(),
+                    output: "{}".to_string(),
+                    duration_ms: 0,
+                }
+            }
+        }
+        assert!(PlainExecutor.as_any().is_none());
+    }
+
+    #[test]
     fn governed_executor_runs_read_only_batch_children_through_child_dispatch() {
         let workspace = temp_workspace();
         fs::write(workspace.join("demo.rs"), "fn main() {}\n").expect("write fixture");
@@ -381,5 +440,258 @@ mod tests {
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["successCount"], 2);
         assert_eq!(payload["results"].as_array().map(Vec::len), Some(2));
+    }
+
+    // ── PA-076 P2-6: plan_control via governed dispatch ──────────────────────────────────────
+
+    #[test]
+    fn governed_executor_dispatches_plan_control_create_replace_merge_and_complete_step() {
+        let workspace = temp_workspace();
+        let governed = build_governed_executor(Some(workspace.clone()));
+        governed.set_context(crate::agent::dispatcher::DispatchContext {
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        });
+
+        // Create a draft plan with two steps.
+        let created = governed.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "create",
+                "session_id": "session-1",
+                "payload": {
+                    "kind": "implement",
+                    "summary": "Implement feature",
+                    "steps": [
+                        { "name": "draft", "summary": "Write spec" },
+                        { "name": "code", "summary": "Implement" }
+                    ]
+                },
+                "description": "test",
+            }),
+        ));
+        assert_eq!(created.status, "ok", "create failed: {}", created.output);
+        let created_value: Value =
+            serde_json::from_str(&created.output).expect("plan output json");
+        assert_eq!(created_value["planId"], "plan-1");
+        assert_eq!(created_value["revision"], 1);
+        assert_eq!(created_value["lifecycle"], "draft");
+        assert_eq!(created_value["steps"].as_array().map(Vec::len), Some(2));
+
+        // Merge a third step, preserving existing step ids.
+        let merged = governed.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "merge",
+                "session_id": "session-1",
+                "plan_id": "plan-1",
+                "revision": 1,
+                "step": { "name": "test", "summary": "Add tests" },
+                "description": "test",
+            }),
+        ));
+        assert_eq!(merged.status, "ok", "merge failed: {}", merged.output);
+        let merged_value: Value = serde_json::from_str(&merged.output).expect("plan output json");
+        assert_eq!(merged_value["revision"], 2);
+        assert_eq!(merged_value["steps"].as_array().map(Vec::len), Some(3));
+
+        // Complete the first step → lifecycle advances to Executing.
+        let step_id = merged_value["steps"][0]["stepId"]
+            .as_str()
+            .expect("step id")
+            .to_string();
+        let completed = governed.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "complete_step",
+                "session_id": "session-1",
+                "plan_id": "plan-1",
+                "revision": 2,
+                "step_id": step_id,
+                "description": "test",
+            }),
+        ));
+        assert_eq!(
+            completed.status, "ok",
+            "complete_step failed: {}",
+            completed.output
+        );
+        let completed_value: Value =
+            serde_json::from_str(&completed.output).expect("plan output json");
+        assert_eq!(completed_value["steps"][0]["status"], "completed");
+        assert_eq!(completed_value["lifecycle"], "executing");
+
+        // Replace the plan content, keeping the same plan_id.
+        let replaced = governed.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "replace",
+                "session_id": "session-1",
+                "plan_id": "plan-1",
+                "revision": 3,
+                "payload": { "kind": "refactor", "summary": "Refactor after review", "steps": [] },
+                "description": "test",
+            }),
+        ));
+        assert_eq!(
+            replaced.status, "ok",
+            "replace failed: {}",
+            replaced.output
+        );
+        let replaced_value: Value =
+            serde_json::from_str(&replaced.output).expect("plan output json");
+        assert_eq!(replaced_value["planId"], "plan-1");
+        assert_eq!(replaced_value["kind"], "refactor");
+        assert_eq!(replaced_value["revision"], 4);
+    }
+
+    #[test]
+    fn governed_executor_plan_control_stale_revision_and_missing_op_fail_closed() {
+        let workspace = temp_workspace();
+        let governed = build_governed_executor(Some(workspace.clone()));
+        governed.set_context(crate::agent::dispatcher::DispatchContext {
+            session_id: Some("session-1".to_string()),
+            ..Default::default()
+        });
+
+        // Set up a plan so a stale revision can be attempted.
+        let created = governed.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "create",
+                "session_id": "session-1",
+                "payload": { "kind": "k", "summary": "s", "steps": [{ "name": "a", "summary": "sa" }] },
+                "description": "test",
+            }),
+        ));
+        assert_eq!(created.status, "ok", "plan setup failed: {}", created.output);
+
+        let stale = governed.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "replace",
+                "session_id": "session-1",
+                "plan_id": "plan-1",
+                "revision": 99,
+                "payload": { "kind": "x", "summary": "y", "steps": [] },
+                "description": "test",
+            }),
+        ));
+        assert_eq!(stale.status, "error");
+        assert!(stale.output.contains("stale_revision"), "{}", stale.output);
+
+        // Missing `op` is rejected by schema validation.
+        let no_op = governed.execute(&same_call(
+            "Plan",
+            json!({
+                "session_id": "session-1",
+                "description": "test",
+            }),
+        ));
+        assert_eq!(no_op.status, "error");
+        assert!(
+            no_op.output.contains("missing required argument `op`"),
+            "{}",
+            no_op.output
+        );
+    }
+
+    // ── PA-076 P2-6: view_image via governed dispatch ────────────────────────────────────────
+
+    fn write_minimal_png(path: &std::path::Path, width: u32, height: u32) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        bytes.extend_from_slice(&[0, 0, 0, 13]);
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]); // CRC placeholder
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(b"IEND");
+        std::fs::write(path, bytes).expect("png fixture should write");
+    }
+
+    #[test]
+    fn governed_executor_view_image_reference_artifact_default_omits_bytes() {
+        let workspace = temp_workspace();
+        write_minimal_png(&workspace.join("photo.png"), 320, 240);
+
+        let governed = build_governed_executor(Some(workspace.clone()));
+        let result = governed.execute(&same_call(
+            "ViewImage",
+            json!({ "path": "photo.png", "description": "test" }),
+        ));
+        assert_eq!(
+            result.status, "ok",
+            "view_image failed: {}",
+            result.output
+        );
+        let value: Value =
+            serde_json::from_str(&result.output).expect("view_image output json");
+        assert_eq!(value["mimeType"], "image/png");
+        assert_eq!(value["width"], 320);
+        assert_eq!(value["height"], 240);
+        assert_eq!(value["bytes"], Value::Null, "default include_bytes=false");
+        assert_eq!(value["truncated"], false);
+    }
+
+    #[test]
+    fn governed_executor_view_image_include_bytes_embeds_capped_payload() {
+        let workspace = temp_workspace();
+        write_minimal_png(&workspace.join("photo.png"), 64, 64);
+        let full_len =
+            std::fs::metadata(&workspace.join("photo.png")).unwrap().len();
+
+        let governed = build_governed_executor(Some(workspace.clone()));
+        // includeBytes=true with a small maxBytes → capped, truncated.
+        let result = governed.execute(&same_call(
+            "ViewImage",
+            json!({
+                "path": "photo.png",
+                "includeBytes": true,
+                "maxBytes": 16,
+                "description": "test",
+            }),
+        ));
+        assert_eq!(result.status, "ok", "capped view_image failed: {}", result.output);
+        let value: Value =
+            serde_json::from_str(&result.output).expect("view_image output json");
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["bytesLen"], full_len);
+        // bytes are base64-encoded in the serialization; verify non-null.
+        assert!(!value["bytes"].is_null());
+    }
+
+    #[test]
+    fn governed_executor_view_image_missing_path_and_unknown_format_fail_closed() {
+        let workspace = temp_workspace();
+        let governed = build_governed_executor(Some(workspace.clone()));
+
+        let missing = governed.execute(&same_call(
+            "ViewImage",
+            json!({ "description": "test" }),
+        ));
+        assert_eq!(missing.status, "error");
+        assert!(
+            missing.output.contains("missing required argument `path`"),
+            "{}",
+            missing.output
+        );
+
+        // A .txt file with valid PNG magic is rejected by extension check.
+        std::fs::write(workspace.join("notes.txt"), b"not an image").expect("write");
+        let unknown = governed.execute(&same_call(
+            "ViewImage",
+            json!({ "path": "notes.txt", "description": "test" }),
+        ));
+        assert_eq!(unknown.status, "error");
+        assert!(
+            unknown.output.contains("unsupported image extension"),
+            "{}",
+            unknown.output
+        );
     }
 }

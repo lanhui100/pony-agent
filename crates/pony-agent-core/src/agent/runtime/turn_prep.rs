@@ -7,6 +7,7 @@ impl AgentRuntime {
         &self,
         input: &TurnInput,
         reject_empty: bool,
+        ask_injection: Option<&GraphAskResumeInjection>,
     ) -> Result<PreparedTurn, String> {
         let user_message = if reject_empty {
             let trimmed = input.message.trim();
@@ -133,6 +134,15 @@ impl AgentRuntime {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| user_message.clone());
+
+        // Phase-4 P0: seed a consumed Ask resume injection into the provider context as a
+        // completed assistant tool-call + terminal tool-result pair (design.md Decision 5). The
+        // pair is inserted immediately before the current user message so the model sees the
+        // answer and continues instead of a fresh user turn.
+        let mut planning_request = planning_request;
+        if let Some(injection) = ask_injection {
+            inject_ask_resume_into_planning_request(&provider, injection, &mut planning_request);
+        }
 
         Ok(PreparedTurn {
             user_message,
@@ -652,4 +662,52 @@ impl AgentRuntime {
         validate_turn_images(&images)?;
         Ok(images)
     }
+}
+
+/// Phase-4 P0 (design.md Decision 5): seed a consumed Ask resume injection into the provider
+/// request as a completed assistant tool-call + terminal tool-result pair, inserted immediately
+/// before the current user message. The model sees the host's answer keyed to the original
+/// tool-call id and continues, instead of a fresh user turn.
+fn inject_ask_resume_into_planning_request(
+    provider: &ProviderManager,
+    injection: &GraphAskResumeInjection,
+    request: &mut ProviderRequest,
+) {
+    let tool_call = ToolCall {
+        call_id: Some(injection.call_id.clone()),
+        name: injection.tool_name.clone(),
+        arguments: injection
+            .assistant_transcript
+            .get("assistantMessage")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        plan: None,
+    };
+    let tool_result = ToolResult {
+        tool_name: injection.tool_name.clone(),
+        status: "ok".to_string(),
+        output: injection.terminal_result.to_string(),
+        duration_ms: 0,
+    };
+    let protocol_label = provider.protocol_label();
+    let assistant_message =
+        provider_native_assistant_tool_call_message_for_protocol(protocol_label, None, None, &tool_call);
+    let tool_result_message =
+        provider_native_tool_result_message_for_protocol(protocol_label, &tool_call, &tool_result);
+
+    let insert_at = request
+        .native_messages
+        .iter()
+        .rposition(is_native_user_message)
+        .unwrap_or(request.native_messages.len());
+    request
+        .native_messages
+        .insert(insert_at, assistant_message);
+    request
+        .native_messages
+        .insert(insert_at + 1, tool_result_message);
+}
+
+fn is_native_user_message(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("user")
 }

@@ -1,3 +1,4 @@
+use pony_agent_core::agent::sandbox::TestSandboxBackend;
 use pony_agent_core::agent::tools::{ToolCall, ToolRouter};
 use serde_json::{json, Value};
 use std::fs;
@@ -242,9 +243,13 @@ fn write_and_edit_tools_work_for_workspace_files() {
 }
 
 #[test]
-fn run_command_returns_structured_result() {
+fn run_command_returns_structured_result_with_available_sandbox() {
     let workspace = temp_workspace();
-    let router = ToolRouter::with_workspace_root(workspace.clone());
+    // Legacy Run fails closed without a sandbox backend (phase-5 review P1-2), so the success
+    // assertion below is an explicit "succeeds with a sandbox" intent, not a frozen silent
+    // downgrade. An available `TestSandboxBackend` accepts the Run.
+    let router = ToolRouter::with_workspace_root(workspace.clone())
+        .with_sandbox_backend(TestSandboxBackend::available());
 
     let result = router.execute(&ToolCall {
         call_id: None,

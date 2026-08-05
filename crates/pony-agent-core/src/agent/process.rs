@@ -269,10 +269,12 @@ impl ProcessManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Design Decision 7: sandboxed children run with a minimal environment and must not
-        // inherit provider keys, session secrets, or ambient proxy env vars. The legacy
-        // (non-sandboxed) path inherits the parent env; a sandbox that supplies an explicit
-        // `environment_allowlist` opts into the minimal env instead (phase-4..7 review P1-3).
-        if !request.sandbox.environment_allowlist.is_empty() {
+        // inherit provider keys, session secrets, or ambient proxy env vars. A child whose
+        // `SandboxRequest` sets `isolate_environment` gets a minimal env (`env_clear` plus the
+        // essential vars plus the explicit `environment_allowlist`); an empty allowlist still
+        // isolates — only the essential vars survive. The legacy (non-sandboxed) path inherits
+        // the parent env (phase-4..7 review P1-3, phase-5 review P1-1).
+        if request.sandbox.isolate_environment {
             command.env_clear();
             for key in ESSENTIAL_ENV_VARS {
                 if let Ok(value) = std::env::var(key) {
@@ -526,6 +528,7 @@ mod tests {
             workspace_root: ".".to_string(),
             allow_network: false,
             environment_allowlist: Vec::new(),
+            isolate_environment: false,
         }
     }
 
@@ -561,6 +564,7 @@ mod tests {
                     workspace_root: ".".to_string(),
                     allow_network: false,
                     environment_allowlist: vec!["PA076_ALLOWED=allowlist-value".to_string()],
+                    isolate_environment: true,
                 },
             })
             .expect("start");
@@ -573,6 +577,39 @@ mod tests {
         assert!(
             !stdout.contains("PA076_SENTINEL_SECRET"),
             "parent secret must not leak into a sandboxed child env"
+        );
+    }
+
+    #[test]
+    fn sandboxed_child_with_isolate_flag_and_empty_allowlist_does_not_inherit_parent_secrets() {
+        // Phase-5 review P1-1: `isolate_environment: true` with an *empty* allowlist must still
+        // produce a minimal child env (`env_clear` + essential vars), not inherit the full parent
+        // environment. `cmd /c set` prints the child's environment.
+        std::env::set_var("PA_SANDBOX_LEAK_SENTINEL", "should-not-leak");
+        let manager = ProcessManager::new();
+        let session = "session-isolate-min";
+        let handle = manager
+            .start(&ProcessStartRequest {
+                session_id: session.to_string(),
+                program: "cmd".to_string(),
+                arguments: vec!["/c".to_string(), "set".to_string()],
+                sandbox: SandboxRequest {
+                    workspace_root: ".".to_string(),
+                    allow_network: false,
+                    environment_allowlist: Vec::new(),
+                    isolate_environment: true,
+                },
+            })
+            .expect("start");
+        let stdout = poll_until_exited(&manager, session, &handle).stdout;
+        std::env::remove_var("PA_SANDBOX_LEAK_SENTINEL");
+        assert!(
+            !stdout.contains("PA_SANDBOX_LEAK_SENTINEL"),
+            "parent sentinel must not leak into an isolate_environment child env"
+        );
+        assert!(
+            stdout.contains("PATH"),
+            "essential PATH must be present in the isolate_environment minimal child env"
         );
     }
 

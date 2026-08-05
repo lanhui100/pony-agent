@@ -1,10 +1,17 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke, safeListen } from "@/lib/tauri";
-import type { PendingAsk } from "@/types/ask-plan";
+import type { GraphAskWait, PendingAsk } from "@/types/ask-plan";
 
 export const ASK_POLL_INTERVAL_MS = 2500;
 
-const ASK_REFRESH_EVENTS = ["turn:completed", "turn:failed", "turn:cancelled"] as const;
+// `turn:suspended` must be included so a freshly-paused run (Ask pending) surfaces its card even
+// when polling self-terminated with no pending asks (PA-076 phase-4 P1-1).
+const ASK_REFRESH_EVENTS = [
+  "turn:completed",
+  "turn:failed",
+  "turn:cancelled",
+  "turn:suspended"
+] as const;
 
 type AskState = {
   pendingAsks: PendingAsk[];
@@ -128,6 +135,10 @@ export const useAskStore = defineStore("ask", {
           answer: answerValue ?? null
         });
         this.removePendingAsk(request.requestId);
+        // PA-076 phase-4 P0: `ask_answer` CAS-consumed the dispatcher request; the graph run is
+        // still bound at `WaitingUser`. Resume the graph so the terminal result (the answer) is
+        // injected into the next turn and the run can continue.
+        await this.resumeGraphAsk(request, answerValue ?? null);
         return result;
       } catch (error) {
         const message = `应答失败：${String(error)}`;
@@ -140,6 +151,37 @@ export const useAskStore = defineStore("ask", {
         return null;
       } finally {
         this.answeringRequestId = null;
+      }
+    },
+
+    /**
+     * Consume the graph Ask wait binding after the dispatcher request was CAS-consumed, so the
+     * bound run moves back to `Ready` and the terminal tool result is injected for the original
+     * call id. Non-fatal: the answer itself already succeeded, so a resume failure is surfaced
+     * for observability rather than rolled back.
+     */
+    async resumeGraphAsk(request: PendingAsk, answerValue: unknown): Promise<void> {
+      const runId = request.runId;
+      if (!runId || !request.requestKind || request.requestKind !== "interaction") {
+        return;
+      }
+      try {
+        const waits = await safeInvoke<GraphAskWait[] | null>("graph_list_ask_waits", { runId });
+        const wait = (Array.isArray(waits) ? waits : []).find(
+          (item) => item.requestId === request.requestId
+        );
+        if (!wait) {
+          // The binding was already consumed elsewhere; nothing to resume.
+          return;
+        }
+        await safeInvoke("graph_resume_ask", {
+          runId,
+          requestId: request.requestId,
+          version: wait.expectedVersion,
+          answer: answerValue ?? null
+        });
+      } catch (error) {
+        this.error = `恢复运行失败：${String(error)}`;
       }
     },
 

@@ -189,7 +189,10 @@ impl HostControlPlane {
     }
 
     /// Resolve a bound Ask wait and inject exactly one terminal tool result for the original
-    /// call id, moving the run back to `Ready`. A stale version is rejected.
+    /// call id, moving the run back to `Ready`. A stale version is rejected. The dispatcher's
+    /// pending request must already have been CAS-consumed (through `answer_ask` / `cancel_ask`):
+    /// resuming a request that is still `Pending` would let an arbitrary answer bypass the single
+    /// consumption entry point (phase-4 P1-2).
     pub fn graph_resume_ask(
         &self,
         run_id: &str,
@@ -197,6 +200,17 @@ impl HostControlPlane {
         expected_version: u64,
         answer: Value,
     ) -> Result<Value, String> {
+        let pending = self
+            .ask_dispatcher
+            .pending_request(request_id)
+            .ok_or_else(|| format!("unknown control request `{request_id}`"))?;
+        if pending.state != crate::agent::tool_runtime::PendingControlRequestState::Consumed {
+            return Err(format!(
+                "Ask `{request_id}` cannot resume: the pending control request has not been \
+                 CAS-consumed (state {:?}); answer or cancel it first.",
+                pending.state
+            ));
+        }
         let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
             eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
             e.into_inner()

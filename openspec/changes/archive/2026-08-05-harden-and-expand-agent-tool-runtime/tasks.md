@@ -33,7 +33,7 @@
 - [x] 4.3 Replace `Ask -> echo_input` with `PendingControlRequest` and atomic `waiting_user` graph/session/checkpoint state; preserve the originating assistant tool-call transcript.
 - [x] 4.4 Add host control-plane and Tauri/frontend adapters to display, answer, cancel, expire, reload, and resume Ask requests by stable request id and CAS version.
 - [x] 4.5 Add Plan revision/transition and Ask wait/reload/answer/resume/replay/cancel/expiry/no-interactive-host tests.
-- [ ] 4.6 Run phase-4 architecture, UX, and code reviews; resolve all P0/P1 findings. (待完成)
+- [x] 4.6 Run phase-4 architecture, UX, and code reviews; resolve all P0/P1 findings. (完成：`02_REVIEWS/2026-08-05-pa076-phase4-review.md`；P0-1 Ask 端到端 resume + 4.6-P1-1/P1-2 已在 P0 修复中处理并端到端验证；4.6-P1-3 接受为迁移窗口决策并追踪)
 
 ## 5. Process Lifecycle
 
@@ -43,7 +43,7 @@
 - [x] 5.4 Drain stdout/stderr concurrently into bounded buffers and return truncation/observed-byte evidence.
 - [x] 5.5 Migrate `Run` to the sandboxed process lifecycle while preserving short-command compatibility fields.
 - [x] 5.6 Add process tests for sandbox denial, environment isolation, cross-session handle rejection, large output, interactive stdin, non-zero exit, timeout, cancellation, containment canary, output budgets, and permissions.
-- [ ] 5.7 Run phase-5 security, performance, and code reviews; resolve all P0/P1 findings. (待完成)
+- [x] 5.7 Run phase-5 security, performance, and code reviews; resolve all P0/P1 findings. (完成：`02_REVIEWS/2026-08-05-pa076-phase5-review.md`；5.7-P1-1 `isolate_environment` 标志 + 5.7-P1-2 legacy Run fail-closed 已修复)
 
 ## 6. Web, Search, and Glob Hardening
 
@@ -52,7 +52,7 @@
 - [x] 6.3 Stream WebFetch responses under redirect/time/body/compression/header budgets and reject unsupported content types without arbitrary text decoding.
 - [x] 6.4 Replace wildcard pseudo-regex and custom traversal with standard regex, glob, ignore, deterministic ordering, and explicit truncation evidence.
 - [x] 6.5 Add hermetic SSRF/rebinding/peer-IP/redirect/oversize/compression/binary/proxy tests and Search/Glob regex/ignore/order/budget tests.
-- [ ] 6.6 Run phase-6 security, performance, and code reviews; resolve all P0/P1 findings. (待完成)
+- [x] 6.6 Run phase-6 security, performance, and code reviews; resolve all P0/P1 findings. (完成：`02_REVIEWS/2026-08-05-pa076-phase6-review.md`；6.6-P1-1 链级总 deadline 已修复，最坏阻塞 12min→60s，P2-3 测试缺口补齐)
 
 ## 7. First New Foundation Tools
 
@@ -60,12 +60,12 @@
 - [x] 7.2 Implement separate MCP list-resources, list-resource-templates, and read-resource tools through a source-bound `McpTransport`; add independent ResourceTemplate types and capability provenance.
 - [x] 7.3 Complete ToolSearch candidate selection, `TurnToolView` next-hop schema elevation, source-revision invalidation, cache mutation, and trace evidence.
 - [x] 7.4 Add core, host, provider, frontend, and reload tests for image artifacts, MCP transport pagination/timeout/disconnect/malformed response/source replacement, and deferred elevation expiry.
-- [ ] 7.5 Run phase-7 architecture, security, and code reviews; resolve all P0/P1 findings. (待完成)
+- [x] 7.5 Run phase-7 architecture, security, and code reviews; resolve all P0/P1 findings. (完成：`02_REVIEWS/2026-08-05-pa076-phase7-review.md`；7.5-P1-1 MCP 参数回显 fail-closed + 7.5-P1-2 Plan session 注入已修复)
 
 ## 8. Migration and Closeout
 
-- [ ] 8.1 Remove superseded name-derived metadata tables, unsafe execution bypasses, and compatibility code whose migration tests have passed. (尚未执行；legacy `builtin_tools()`/`ToolRouter` 仍作执行/兼容输入与 characterization 门禁)
+- [x] 8.1 Remove superseded name-derived metadata tables, unsafe execution bypasses, and compatibility code whose migration tests have passed. (完成于 `328b1d7`：`ToolCallContractView`/`ToolResultContractView`/`builtin_tool_contract_views` 投影 + 孤儿 helper + 死 `ToolRouter` 面已删；legacy `builtin_tools()`/`ToolRouter` 保留作执行/兼容输入与 characterization 门禁)
 - [x] 8.2 Update runtime/tool architecture docs, roadmap, docs index, frontend type contracts, and migration notes.
-- [ ] 8.3 Run formatting, lint/type checks, core targeted and full Rust tests, frontend unit/build/E2E as applicable, non-Tauri harness, and strict OpenSpec validation. (尚未执行；最近一次快照见 PA-076 任务卡 Validation Evidence)
-- [ ] 8.4 Complete independent dual code review, security review, performance review, and consultant closeout with no unresolved P0/P1.
+- [x] 8.3 Run formatting, lint/type checks, core targeted and full Rust tests, frontend unit/build/E2E as applicable, non-Tauri harness, and strict OpenSpec validation. (完成 2026-08-05：core lib 723 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 332 + rustfmt 0 diff + git diff --check clean + openspec strict validate valid；唯一间歇 flake 为 session attachment 时间窗口测试，隔离恒通过，与 PA-076 无关)
+- [x] 8.4 Complete independent dual code review, security review, performance review, and consultant closeout with no unresolved P0/P1. (完成 2026-08-05：4 份阶段独立审核 + `02_REVIEWS/2026-08-05-pa076-84-closeout.md` consultant 裁决 PASS，无未解决 P0/P1；4.6-P1-3 接受为迁移窗口决策并追踪)
 - [x] 8.5 Sync PA-076 dashboard/board/task card, review evidence, session log, canonical specs, and archive readiness. (同步已执行；**归档本身未执行**，见任务卡 "Archive Readiness (8.5)" 一节：等待 4.6/5.7/6.6/7.5 审核与 8.1/8.3/8.4 完成后再归档)

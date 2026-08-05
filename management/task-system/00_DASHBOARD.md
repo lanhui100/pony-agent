@@ -10,8 +10,8 @@
 
 ## 当前进行中
 
-- `PA-076` 加固并扩展 Agent Tool Runtime（P0 / C 级）
-  阶段 1–7 与 runtime 切换（task ②）已全部实现并收口。阶段 3 收口：`GovernedDispatcher` 八步管线 + `PendingControlRequest` CAS + bounded child dispatch + 只读门禁 + governed composites + 27 项矩阵测试（审核产物 `02_REVIEWS/2026-08-02-pa076-phase3-review.md`）。阶段 4：`PlanStore`/`PlanControlHandler` + 宿主 Ask 适配 + graph `ask_waits` wait/resume + control-plane 13 个 Tauri command + 前端 ask.ts/plan.ts/AskPanel/PlanPanel。阶段 5：`ProcessManager` + `SandboxSupportMatrix`/`NoSandboxBackend`，`Run` 无 sandbox 时 fail-closed。阶段 6：`WebAccessPolicy`/`PinnedConnector`（`web_fetch_url` fail-closed）+ `SearchEngine`（真实 regex/globset/ignore）。阶段 7：`view_image` + MCP resource list/templates/read + ToolSearch deferred elevation。runtime 默认 tool executor 已切换为 `build_governed_executor`（`tool_router_regression` 仍走 legacy 门禁）。最近验证快照：core lib 672 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328 全绿。剩余工作：task 4.6/5.7/6.6/7.5 阶段审核、task 5.2 平台 spike、8.1–8.4 迁移与收口、两条 integrator notes（Ask session-context 线程接线、真实 `SandboxBackend`）。
+- `PA-076` 加固并扩展 Agent Tool Runtime（P0 / C 级）**已完成并收口（2026-08-05）**
+  阶段 1–7、runtime 切换（task ②）、Ask 真实接线（P1-1 端到端）、pinned connector（P1-5）、阶段 7 工具注册（P2-6）、Sandbox 裁决、4 份阶段独立审核与 8.4 收口全部完成；OpenSpec change 已归档（`openspec/changes/archive/2026-08-05-harden-and-expand-agent-tool-runtime/`）。最终验证：core lib 723 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 332 全绿，consultant 裁决 PASS（无未解决 P0/P1）。详见任务卡与 `02_REVIEWS/2026-08-05-pa076-84-closeout.md`。后续工作拆卡：PA-077（Job Object containment）、完整 SandboxBackend、McpResourceSurface 接线、生产 resolver 接线、evaluator 保守审批迁移。
 
 ## 当前主线结论
 
@@ -136,8 +136,8 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 
 ## 下一步最小动作
 
-1. 推进 `PA-076` 收口：阶段 1–7 核心、runtime 切换（task ②）、阶段 8 的 8.1（死代码清理）/8.2+8.5（文档/canonical spec/任务系统同步，OpenSpec validate 通过）/8.4（独立双审 CONDITIONAL PASS，`02_REVIEWS/2026-08-02-pa076-phases-4-7-review.md`）已落地。最近验证：core lib 674 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328 全绿。剩余按依赖顺序：① Ask 真实接线（共享 `Arc<GovernedDispatcher>` + session-scoped `DispatchContext` + Ask 专用 policy + turn-loop bind/resume，design Decision 5 端到端）；② pinned connector（移除 validate-后-默认 client 重解析弱模式）；③ 真实 `SandboxBackend`（Run 从 fail-closed 转执行）；④ 阶段 7 工具注册；⑤ task 4.6/5.7/6.6/7.5 阶段审核 + 8.3 全量复跑 + 归档。
-2. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049`。
+1. `PA-076` 已收口（2026-08-05），不再是下一步目标。后续工具系统扩展以新卡承接：`PA-077`（Windows Job Object containment）、完整 `SandboxBackend`、`McpResourceSurface` 真实 McpTransport 接线、生产 resolver 接线（hostname WebFetch 从 fail-closed 转启用）、生产默认从 `LegacyCompatiblePolicyEvaluator` 迁移到保守审批。
+2. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049` 或 `PA-076`。
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。
 5. 前端卡顿定位现已具备 flight recorder 证据链（`PA-057` 已完成），后续性能优化可以基于 `frontend-diagnostics.db` 中的 stall 快照和 trace 事件进行数据分析，而不是再靠手动复现。

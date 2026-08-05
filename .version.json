@@ -1409,16 +1409,34 @@
       ],
       "commit": "328b1d7",
       "timestamp": "2026-08-04T12:49:37+08:00"
+    },
+    {
+      "timestamp": "2026-08-05T12:20:49+08:00",
+      "commit": "7d5985e",
+      "bumps": [
+        {
+          "to": "0.1.54",
+          "component": "core",
+          "segment": "patch",
+          "from": "0.1.53"
+        },
+        {
+          "to": "0.1.70",
+          "component": "tauri",
+          "segment": "patch",
+          "from": "0.1.69"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-08-04T12:49:37+08:00",
+  "lastBump": "2026-08-05T12:20:49+08:00",
   "tauri": {
-    "patch": 69,
+    "patch": 70,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 53,
+    "patch": 54,
     "minor": 1,
     "major": 0
   }

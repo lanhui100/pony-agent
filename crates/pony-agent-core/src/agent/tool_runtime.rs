@@ -36,6 +36,12 @@ pub trait ToolDispatcher: Send + Sync {
 pub struct PrimitiveToolHandlerRequest {
     pub descriptor_id: String,
     pub arguments: Value,
+    /// Session injected from the dispatch context (authoritative for ownership decisions such as
+    /// the Plan store's CrossSession guard). `None` when the dispatch context carries no session;
+    /// handlers that need session ownership must fail closed rather than trust model-supplied
+    /// keys (PA-076 phase-7 review P1-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 pub trait PrimitiveToolHandler: Send + Sync {
@@ -230,6 +236,11 @@ pub struct SandboxRequest {
     pub workspace_root: String,
     pub allow_network: bool,
     pub environment_allowlist: Vec<String>,
+    /// When true the sandboxed child runs with a minimal environment: `env_clear` plus the
+    /// essential vars plus `environment_allowlist`, never inheriting provider keys, session
+    /// secrets, or ambient proxy env vars (design Decision 7, phase-5 review P1-1). An empty
+    /// `environment_allowlist` still isolates — it keeps only the essential vars.
+    pub isolate_environment: bool,
 }
 
 pub trait SandboxBackend: Send + Sync {

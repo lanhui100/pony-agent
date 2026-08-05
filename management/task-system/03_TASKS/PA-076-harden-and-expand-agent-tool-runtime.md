@@ -3,14 +3,14 @@
 ## Basic Info
 
 - ID: PA-076
-- Status: In Progress
+- Status: Done
 - Priority: P0
 - Complexity: C
 - Owner: @orchestrator
 - Created At: 2026-07-18
-- Updated At: 2026-08-02
-- OpenSpec Change: `harden-and-expand-agent-tool-runtime`
-- Spec Status: 三方审核已修订并通过 strict validate
+- Updated At: 2026-08-05
+- OpenSpec Change: `harden-and-expand-agent-tool-runtime`（已归档：`openspec/changes/archive/2026-08-05-harden-and-expand-agent-tool-runtime/`）
+- Spec Status: 三方审核已修订并通过 strict validate；canonical specs 已同步
 
 ## Background
 
@@ -77,17 +77,17 @@
 - **测试（最近一次验证快照）**：core lib 674 + matrix 27 + tool_router_regression 13 + session_regression 5 全绿；前端 vitest 328 全绿。
 - **阶段 8 部分完成（task 8.1/8.2/8.4/8.5）**：8.1 已删死代码（`ToolCallContractView`/`ToolResultContractView`/`builtin_tool_contract_views` 投影 + 孤儿 helper + 死 `ToolRouter` 面）；8.2/8.5 已完成文档/canonical spec 同步（OpenSpec strict validate 通过）+ 任务系统同步；8.4 独立双审产出 `02_REVIEWS/2026-08-02-pa076-phases-4-7-review.md`（CONDITIONAL PASS，P1-2/3/4 + P2-10 已修复：预算回归、进程最小环境、WebFetch body 边界、time_now 类型；P1-1 Ask 真实接线与 P1-5 pinned connector 记录为下一里程碑）。
 
-## Next Action
+## Closeout（2026-08-05）
 
-阶段 1–7 核心、runtime 切换（task ②）、阶段 8 的 8.1/8.2/8.4/8.5 已落地；core lib 675 + matrix 27 + 回归 + 前端全绿。剩余工作按依赖顺序：
+**本卡已收口，Status = Done。** 阶段 1–7 核心 + runtime 切换（task ②）+ 阶段 8 全部完成：
 
-1. **Ask 真实接线（P1-1，含 P2-8/P2-9）**：
-   - ✅ 已落地（执行器级）：`persist_pending_request` 透传 Ask 问题到 `prompt`、`options` 数组到 `options`（P2-9）；`GovernedToolExecutor` 增加可设 session-scoped `DispatchContext`（`set_context`，P2-8）；governed 默认 evaluator 对 Ask 描述符返回 `WaitingHost` → Ask 现在真正持久化 `Interaction` `PendingControlRequest`（session 绑定 + 问题原样，测试 `governed_executor_ask_is_host_mediated_and_persists_the_question`）。
-   - ⬜ 剩余（runtime turn-loop 接线）：运行时每轮设置 context（需把 governed executor 暴露给 runtime/control plane，单一共享 dispatcher）；检测 `control_outcome_pending` → 挂起 run + 调 `graph.bind_ask_wait`（graph 面已就绪）；host answer → `graph.resume_ask_wait` 注入唯一终态。
-2. **pinned connector（P1-5/P2-7）**：移除"预校验后交默认 HTTP client 重解析"弱模式；WebFetch 连接固定到已校验地址 + peer-IP 校验 + 保留 Host/SNI + 显式 ≤5 跳重解析/重校验。`FailClosedResolver` 已兜住任意 hostname URL fail-closed，真实 resolver 接线前必须完成。
-3. **真实 `SandboxBackend`**：`NoSandboxBackend` + `SandboxSupportMatrix` 是 fail-closed 门禁；注册真实 sandbox backend 后无人值守 Run 才从 `sandbox_unavailable` 转为执行。
-4. **阶段 7 工具注册（P2-6）**：`view_image`/MCP resource/ToolSearch 提升的库已就绪，需注册进 builtin registry（`builtin:plan_control` 等）并处理 `ImageReadOptions.include_bytes` 默认 2 MiB 撑爆结果预算的隐患。
-5. **阶段审核补完 + 8.3**：task 4.6/5.7/6.6/7.5 独立审核；8.3 格式化/静态检查/全量测试按门禁复跑，随后 OpenSpec 归档。
+1. **Ask 真实接线（P1-1）端到端完成**：执行器级（P2-8/P2-9）+ runtime turn-loop（sync `handle_sync_tool_turn` + stream `handle_stream_tool_turn` 前端主路径 `start_graph_run_stream` 双路径挂起/恢复）+ 共享 `Arc<GovernedDispatcher>`（runtime 与 host 控制面同一实例）+ **P0 修复**（resume 端到端：`resume_ask_wait` 持久化注入到 `GraphRunStore.ask_injections` → 下一 turn `prepare_turn` 把原 call_id 的 assistant tool_call + terminal_result(answer) 插入 provider 请求，OpenAI/Anthropic 协议感知；`graph_resume_ask` CAS 消费校验；前端 `resumeGraphAsk` 接线 + `turn:suspended` 刷新）。
+2. **pinned connector（P1-5/P2-7）完成**：每跳连接 pin 到已校验地址（`resolve_to_addrs`）+ peer-IP 校验（`remote_addr`）+ 保留 Host/SNI + ≤5 跳 redirect 逐跳重解析/重校验 + **链级总 deadline**（6.6-P1，最坏阻塞 12min→60s）；hostname URL 默认仍 fail-closed，生产 resolver 接线为后续工作。
+3. **真实 `SandboxBackend` 裁决（2026-08-04）**：保持 fail-closed 为设计合规终态；Job Object containment 拆为 PA-077，完整沙箱另立卡。详见 `02_REVIEWS/2026-08-04-pa076-sandbox-backend-evaluation.md`。
+4. **阶段 7 工具注册（P2-6）完成**：`plan_control`/`view_image` 注册进 builtin registry + governed handler，`include_bytes` 默认 false + 2MiB result budget；MCP/ToolSearch 裁决留 capability registry 路径（McpResourceSurface 接线为后续工作）。
+5. **阶段审核补完 + 8.3/8.4 完成**：4.6（FAIL→P0/P1 已修复）/5.7/6.6/7.5 独立审核 + 8.4 收口（`02_REVIEWS/2026-08-05-pa076-84-closeout.md`，consultant 裁决 PASS，无未解决 P0/P1；4.6-P1-3 evaluator 迁移接受为迁移窗口决策并追踪）。
+
+**阶段 4–7 审核发现的 P0/P1 全部处置**：P0（Ask 前端 resume 断链）+ 8 项 P1 全部修复；唯一接受决策 = 4.6-P1-3（`LegacyCompatiblePolicyEvaluator` 复刻 legacy 行为，迁移窗口内有意为之，追踪后续迁移到保守审批）。后续工作拆卡：PA-077 Job Object containment、完整 SandboxBackend、McpResourceSurface 接线、生产 resolver 接线、evaluator 保守审批迁移。
 
 ## Blockers
 
@@ -130,6 +130,19 @@
 - 前端 vitest：**328 passed**（含 `tests/ask-store.spec.ts`、`tests/plan-store.spec.ts`、`tests/AskPlanPanel.spec.ts`）。
 - `npm run openspec -- validate harden-and-expand-agent-tool-runtime --strict`：`Change 'harden-and-expand-agent-tool-runtime' is valid`（2026-08-02，canonical spec 同步后复跑，见下）。
 
+### 2026-08-05（最终收口快照，task 8.3/8.4 后）
+
+全部通过（含 T1 Ask 接线 + T1b stream 接线 + T2 pinned connector + T3 阶段 7 注册 + P0 修复 + P1 修复 1/2/3）：
+
+- core lib `--lib`：**723 passed / 0 failed**（权威干净跑；全量并行偶发 1-off 为 session attachment 时间窗口测试，隔离恒通过，与 PA-076 无关）。
+- `--test dispatcher_matrix`：**27 passed**。
+- `--test tool_router_regression`（src-tauri）：**13 passed**。
+- `--test session_regression`（src-tauri）：**5 passed**。
+- 前端 vitest：**332 passed / 10 skipped**。
+- `rustfmt --check`（9 个改动文件）：**0 diff**；`git diff --check`：clean。
+- `npm run openspec -- validate harden-and-expand-agent-tool-runtime --strict`：valid。
+- 审核产物：`02_REVIEWS/2026-08-05-pa076-phase4-review.md`（FAIL→修复）、`phase5/6/7-review.md`（CONDITIONAL PASS→修复）、`2026-08-05-pa076-84-closeout.md`（PASS 裁决）、`2026-08-04-pa076-sandbox-backend-evaluation.md`。
+
 ## Resume Hint
 
 阶段 1–7 与 runtime 切换（task ②）已全部完成并收口。架构说明见 `docs/architecture/tool-runtime-descriptor-registry.md`（含 governed dispatcher 八步管线、runtime 默认切换、Ask/Plan/process/sandbox/web/search/phase-7 模块落点与两条剩余 integrator notes）。阶段 3 审核产物：`02_REVIEWS/2026-08-02-pa076-phase3-review.md`。剩余工作：task 4.6 / 5.7 / 6.6 / 7.5 阶段审核、8.1–8.4 迁移与收口，以及两条 integrator notes（Ask 的 session-context 线程接线、真实 `SandboxBackend`）。
@@ -155,14 +168,12 @@ Rust 测试统一入口：`cmd //c "scripts\run-rust-msvc.bat cargo test -p pony
 
 - `npm run openspec -- validate harden-and-expand-agent-tool-runtime --strict`：`Change 'harden-and-expand-agent-tool-runtime' is valid`。
 
-### 归档就绪状态（未执行归档）
+### 归档（2026-08-05 已执行）
 
-change 仍留在 `openspec/changes/harden-and-expand-agent-tool-runtime/`，**尚未归档**。归档前的剩余前置（完成后再执行 `openspec/changes/archive/2026-08-02-*` 迁移并更新 `docs/INDEX.md` 链接）：
+change 已迁入 `openspec/changes/archive/2026-08-05-harden-and-expand-agent-tool-runtime/`，`docs/INDEX.md` 链接已更新，Dashboard/Board 已标记 Done。归档前置全部完成：
 
-1. task 4.6 / 5.7 / 6.6 / 7.5 独立阶段审核（阶段 3 审核已完成：`02_REVIEWS/2026-08-02-pa076-phase3-review.md`；其余阶段尚无审核产物）。
-2. task 8.1：删除已迁移的旧名称派生表/执行旁路（legacy `builtin_tools()`/`ToolRouter` 仍作执行/兼容输入与 characterization 门禁）。
-3. task 8.3：格式化、静态检查、core 定向/全量 + 前端测试按门禁全量复跑（最近一次快照：core lib 672 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 328）。
-4. task 8.4：独立双路代码审核 + 安全/性能审核 + consultant 收口，无未解决 P0/P1。
-5. 两条 integrator notes 若在归档前完成接线（Ask session-context、真实 `SandboxBackend`），则删除本卡相应"剩余"标注。
-
-归档时的预期动作：将 `openspec/changes/harden-and-expand-agent-tool-runtime/` 迁入 `openspec/changes/archive/2026-08-02-harden-and-expand-agent-tool-runtime/`，更新 `docs/INDEX.md` 第 8 节链接（canonical spec 链接保持指向 `openspec/specs/`，不受归档影响），并在 Dashboard/Board 将该卡标记为 Done。
+1. task 4.6 / 5.7 / 6.6 / 7.5 独立阶段审核产物已落盘（`02_REVIEWS/2026-08-05-pa076-phase{4,5,6,7}-review.md`）。
+2. task 8.1 死代码清理完成（`328b1d7`）。
+3. task 8.3 门禁全量复跑通过（见 2026-08-05 最终快照）。
+4. task 8.4 双审 + 收口完成，无未解决 P0/P1（`02_REVIEWS/2026-08-05-pa076-84-closeout.md`）。
+5. integrator note 状态：Ask session-context 接线已完成（P1-1 端到端）；真实 `SandboxBackend` 已裁决（2026-08-04，fail-closed 为合规终态，拆 PA-077）。

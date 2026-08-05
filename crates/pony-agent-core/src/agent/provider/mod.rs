@@ -3822,7 +3822,9 @@ mod tests {
                 "ToolSearch".to_string(),
                 "Write".to_string(),
                 "Edit".to_string(),
-                "BatchExecute".to_string()
+                "BatchExecute".to_string(),
+                "Plan".to_string(),
+                "ViewImage".to_string()
             ]
         );
     }
@@ -3855,7 +3857,9 @@ mod tests {
                 "ToolSearch".to_string(),
                 "Write".to_string(),
                 "Edit".to_string(),
-                "BatchExecute".to_string()
+                "BatchExecute".to_string(),
+                "Plan".to_string(),
+                "ViewImage".to_string()
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -3863,6 +3867,10 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|description| !description.trim().is_empty())
         }));
+        // PA-076 P2-6: Plan and ViewImage are appended; the existing 13-tool prefix is
+        // preserved (cache-friendly stable prefix invariant from design Decision 10).
+        let last_two = &names[names.len() - 2..];
+        assert_eq!(last_two, &["Plan".to_string(), "ViewImage".to_string()]);
     }
 
     #[test]

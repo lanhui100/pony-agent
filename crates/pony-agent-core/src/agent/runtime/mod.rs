@@ -7,10 +7,14 @@ use crate::agent::config::{
     ProviderReasoningEffort, ProviderRegistryStore, ProviderSelectionResolver,
 };
 use crate::agent::context::{DefaultTurnContextBuilder, RetrievedContextState, TurnContextBuilder};
+use crate::agent::dispatcher::{DispatchContext, GovernedDispatcher};
+use crate::agent::dispatcher_composites::GovernedToolExecutor;
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::execution_control::ExecutionControlRegistry;
+use crate::agent::governed_executor::build_governed_executor;
 use crate::agent::graph::{
-    GraphDecision, GraphDecisionKind, GraphEngine, GraphRun, GraphTurnHandoff,
+    GraphAskResumeInjection, GraphAskWaitBinding, GraphDecision, GraphDecisionKind, GraphEngine,
+    GraphRun, GraphRunStore, GraphRunner, GraphTurnHandoff,
 };
 use crate::agent::hooks::{
     build_observe_hook_trace_record, turn_hook_point_for_capability_mediation_hook_point,
@@ -42,10 +46,12 @@ use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
-use crate::agent::governed_executor::build_governed_executor;
 use crate::agent::tools::{
     builtin_tools, canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
-    ToolCall, ToolDefinition, ToolExecutor,
+    ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+};
+use crate::agent::tool_runtime::{
+    PendingControlRequest, PendingControlRequestKind, PendingControlRequestState,
 };
 use crate::agent::trace_persistence::{
     spawn_trace_persistence_worker, TracePersistenceCommand, TracePersistenceHandle,
@@ -67,9 +73,7 @@ use std::path::Path;
 use std::rc::Rc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 pub mod turn_runner;
@@ -317,6 +321,29 @@ struct NormalizedToolDirective {
     assistant_message: Option<Value>,
 }
 
+/// Turn-level invocation facts for Ask control-request persistence (design.md Decision 5,
+/// PA-076 P1-1). The control plane sets these before each graph-run turn so a persisted
+/// `PendingControlRequest` is bound to the real session/run/turn; plain `run_turn` calls apply
+/// the input's session with `None` run/turn facts.
+#[derive(Clone, Debug, Default)]
+pub struct RunTurnFacts {
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub workspace_root: Option<String>,
+}
+
+/// `TurnResult.phase` value for a turn paused on a control outcome (Ask pending). The host must
+/// answer the persisted `PendingControlRequest` before the run resumes; the runtime never feeds a
+/// `control_outcome_pending` result to the provider as a follow-up.
+pub const SUSPENDED_TURN_PHASE: &str = "suspended";
+
+/// Runtime-internal snapshot of a suspended Ask turn: the persisted pending request the host must
+/// answer and whether the graph run was bound to `WaitingUser`.
+struct ToolTurnSuspension {
+    pending_request: Option<PendingControlRequest>,
+    bound_run_id: Option<String>,
+}
+
 pub struct AgentRuntime {
     graph: GraphEngine,
     sessions: Arc<RwLock<SessionStore>>,
@@ -330,6 +357,17 @@ pub struct AgentRuntime {
     telemetry_builder: Box<dyn TurnTelemetryBuilder>,
     /// 后台 trace 落库句柄：可观测性写盘与主对话执行路径解耦。
     trace_persistence: Option<TracePersistenceHandle>,
+    /// Shared graph run store backing Ask-wait suspension binding (design.md Decision 5). The
+    /// host control plane shares the same store so `graph_bind_ask_wait` / `graph_resume_ask`
+    /// observe the binding the runtime creates. `None` when the runtime runs outside a graph.
+    graph_runs: Option<Arc<Mutex<GraphRunStore>>>,
+    /// Workspace root facts seeded into the governed `DispatchContext` per turn.
+    workspace_root: Option<String>,
+    /// The governed dispatcher the default tool executor executes through, cached once so the
+    /// runtime and the host control plane share the exact same `Arc` (design.md Decision 5,
+    /// P1-1). Computed from the tool executor at first use; `None` when the executor is not the
+    /// governed adapter.
+    governed_dispatcher: OnceLock<Option<Arc<GovernedDispatcher>>>,
 }
 
 pub struct AgentRuntimeBuilder {
@@ -401,7 +439,7 @@ impl AgentRuntimeBuilder {
     }
 
     pub fn build(self) -> AgentRuntime {
-        AgentRuntime::with_dependencies(
+        let mut runtime = AgentRuntime::with_dependencies(
             self.sessions.unwrap_or_else(SessionStore::new),
             self.provider_resolver
                 .unwrap_or_else(|| Box::new(ProviderRegistryStore::new())),
@@ -412,7 +450,11 @@ impl AgentRuntimeBuilder {
                 .unwrap_or_else(|| Box::new(DefaultTurnContextBuilder)),
             self.telemetry_builder
                 .unwrap_or_else(|| Box::new(DefaultTurnTelemetryBuilder)),
-        )
+        );
+        runtime.workspace_root = self
+            .workspace_root
+            .map(|path| path.display().to_string());
+        runtime
     }
 }
 
@@ -470,11 +512,79 @@ impl AgentRuntime {
             context_builder,
             telemetry_builder,
             trace_persistence,
+            graph_runs: None,
+            workspace_root: None,
+            governed_dispatcher: OnceLock::new(),
         }
     }
 
     pub fn sessions_handle(&self) -> Arc<RwLock<SessionStore>> {
         Arc::clone(&self.sessions)
+    }
+
+    /// Share the graph run store used for Ask-wait suspension binding (design.md Decision 5).
+    /// The host control plane injects the same `Arc<Mutex<GraphRunStore>>` it reads/writes for
+    /// `graph_bind_ask_wait` / `graph_resume_ask`, so a binding the runtime creates during a turn
+    /// is immediately visible to the host surface.
+    pub fn set_graph_run_store(&mut self, store: Arc<Mutex<GraphRunStore>>) {
+        self.graph_runs = Some(store);
+    }
+
+    pub fn graph_run_store(&self) -> Option<Arc<Mutex<GraphRunStore>>> {
+        self.graph_runs.clone()
+    }
+
+    /// Consume the one-shot Ask resume injection for a run from the shared graph run store, if
+    /// one is pending (design.md Decision 5, phase-4 P0). The host answers through
+    /// `graph_resume_ask` (which persists the injection), and the next graph-run turn consumes it
+    /// exactly once here — before the provider request is built — so the terminal tool result is
+    /// seeded into the turn's provider context.
+    fn take_pending_ask_injection(&self, run_id: Option<&str>) -> Option<GraphAskResumeInjection> {
+        let run_id = run_id?;
+        let store_arc = self.graph_run_store()?;
+        let mut store = store_arc.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        store.take_ask_injection(run_id)
+    }
+
+    /// The governed dispatcher the default tool executor executes through, if the runtime's
+    /// `ToolExecutor` is the governed adapter. The host control plane shares this exact `Arc` so
+    /// `ask_answer` / `ask_cancel` hit the same pending-request store the runtime persists Ask
+    /// control requests into (design.md Decision 5, P1-1). Cached on first use; the same `Arc`
+    /// is returned for the lifetime of the runtime.
+    pub fn governed_dispatcher(&self) -> Option<Arc<GovernedDispatcher>> {
+        self.governed_dispatcher
+            .get_or_init(|| {
+                self.tool_executor
+                    .as_any()?
+                    .downcast_ref::<GovernedToolExecutor>()
+                    .map(|governed| Arc::new(governed.dispatcher().clone()))
+            })
+            .clone()
+    }
+
+    /// Apply the real session/run/turn/workspace facts to the governed executor before a turn
+    /// executes, so a persisted `PendingControlRequest` (Ask) is bound to the real invocation
+    /// (design.md Decision 5, P1-1 wiring / P2-8). `None` run/turn facts (plain `run_turn`)
+    /// still bind the session; `host_control_available` stays `true` so an interactive host can
+    /// answer. When the executor is not governed this is a no-op.
+    pub(crate) fn apply_governed_turn_context(&self, input: &TurnInput, facts: &RunTurnFacts) {
+        let Some(governed) = self
+            .tool_executor
+            .as_any()
+            .and_then(|any| any.downcast_ref::<GovernedToolExecutor>())
+        else {
+            return;
+        };
+        governed.set_context(DispatchContext {
+            session_id: input.session_id.clone(),
+            run_id: facts.run_id.clone(),
+            turn_id: facts.turn_id.clone(),
+            workspace_root: facts.workspace_root.clone().or_else(|| self.workspace_root.clone()),
+            host_control_available: true,
+        });
     }
 
     pub fn annotate_turn_trace_terminal_event(
@@ -1031,6 +1141,89 @@ impl AgentRuntime {
                 None,
                 None,
             );
+
+            // Design Decision 5 (PA-076 P1-1): a pending control outcome (`control_outcome_pending`,
+            // surfaced as a structured `error.code`) means the dispatcher persisted an
+            // `Interaction`/`Approval` `PendingControlRequest` instead of producing a
+            // provider-consumable result. The run must pause — bind the Ask wait to the graph run
+            // when a store + run are available, emit the terminal `turn:suspended` event — and
+            // never feed the pending marker back to the provider as an ordinary tool error.
+            if tool_result_control_outcome_pending(&tool_result) {
+                let suspension = self.suspend_turn_for_control_outcome(
+                    &current_tool_call,
+                    &tool_result,
+                );
+                if let Some(request) = &suspension.pending_request {
+                    runtime_log(format!(
+                        "turn:ask-suspend-stream hop={} request={} kind={:?} call_id={} bound_run={:?}",
+                        completed_hops,
+                        request.request_id,
+                        request.request_kind,
+                        request.call_id,
+                        suspension.bound_run_id
+                    ));
+                }
+                let assistant_message = suspension
+                    .pending_request
+                    .as_ref()
+                    .map(|request| {
+                        format!(
+                            "Ask `{}` awaits a host answer before the run resumes.",
+                            request.request_id
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "工具调用进入控制请求状态，等待宿主应答后继续。".to_string()
+                    });
+                let session_summary = suspension
+                    .pending_request
+                    .as_ref()
+                    .map(|request| request.request_id.clone())
+                    .unwrap_or_else(|| SUSPENDED_TURN_PHASE.to_string());
+                let suspended_trace_steps =
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
+                emit_stream_event(
+                    sink,
+                    "turn:suspended",
+                    turn_id.to_string(),
+                    "suspended",
+                    Some(SUSPENDED_TURN_PHASE),
+                    Some(assistant_message),
+                    None,
+                    Some(provider_meta),
+                    None,
+                    None,
+                    Some("control_outcome_pending".to_string()),
+                    Some(context_observation.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    Some(suspended_trace_steps),
+                    Some(build_stream_progress_trace_timeline(
+                        display_message,
+                        provider_meta,
+                        None,
+                        None,
+                        &context_observation,
+                        &tool_activities,
+                        &model_hop_trace_contents(&hop_records),
+                        None,
+                        None,
+                        first_token_latency.get(),
+                        SUSPENDED_TURN_PHASE,
+                    )),
+                    Some(tool_activities.clone()),
+                    Some(provider_call_records.clone()),
+                    Some(hook_trace_records.clone()),
+                    Some(session_summary),
+                    input.session_id.clone(),
+                );
+                return;
+            }
 
             // Only abort the turn if the tool was intentionally stopped (e.g. user cancellation).
             // Tool execution errors (status "error") are fed back to the model so it can
@@ -1872,6 +2065,37 @@ impl AgentRuntime {
                 tool_result: tool_result.clone(),
             });
 
+            // Design Decision 5 (PA-076 P1-1): a pending control outcome (`control_outcome_pending`,
+            // surfaced as a structured `error.code`) means the dispatcher persisted an
+            // `Interaction`/`Approval` `PendingControlRequest` instead of producing a
+            // provider-consumable result. The run must pause — bind the Ask wait to the graph run
+            // when a store + run are available, and return a suspended outcome — never feed the
+            // pending marker back to the provider as an ordinary tool error.
+            if tool_result_control_outcome_pending(&tool_result) {
+                let suspension = self.suspend_turn_for_control_outcome(
+                    &current_tool_call,
+                    &tool_result,
+                );
+                if let Some(request) = &suspension.pending_request {
+                    runtime_log(format!(
+                        "turn:ask-suspend hop={} request={} kind={:?} call_id={} bound_run={:?}",
+                        completed_hops,
+                        request.request_id,
+                        request.request_kind,
+                        request.call_id,
+                        suspension.bound_run_id
+                    ));
+                }
+                return Err(self.build_suspended_turn_result(
+                    Some(provider_meta),
+                    display_message,
+                    self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                    tool_activities,
+                    hook_trace_records,
+                    &suspension,
+                ));
+            }
+
             // Only abort the turn if the tool was intentionally stopped (e.g. user cancellation).
             // Tool execution errors (status "error") are fed back to the model so it can
             // decide how to respond — e.g. try a different path, use another tool, or
@@ -2072,9 +2296,178 @@ impl AgentRuntime {
         }
     }
 
+    /// Suspend a turn on a persisted control outcome (design.md Decision 5, P1-1 wiring).
+    /// Matches the dispatcher's pending request to the originating tool call, binds an Ask wait
+    /// to the shared graph run store when a run + store are available (run → `WaitingUser`), and
+    /// returns the suspension snapshot. The turn never proceeds to `provider_followup`.
+    fn suspend_turn_for_control_outcome(
+        &self,
+        tool_call: &ToolCall,
+        _tool_result: &ToolResult,
+    ) -> ToolTurnSuspension {
+        let Some(dispatcher) = self.governed_dispatcher() else {
+            return ToolTurnSuspension {
+                pending_request: None,
+                bound_run_id: None,
+            };
+        };
+        let requests = dispatcher.pending_requests();
+        let Some(pending_request) = match_pending_control_request(&requests, tool_call) else {
+            return ToolTurnSuspension {
+                pending_request: None,
+                bound_run_id: None,
+            };
+        };
+        let pending_request = pending_request.clone();
+
+        let bound_run_id = self.bind_ask_wait_for_request(&pending_request, tool_call);
+        ToolTurnSuspension {
+            pending_request: Some(pending_request),
+            bound_run_id,
+        }
+    }
+
+    /// Bind one persisted Ask `PendingControlRequest` to the shared graph run store
+    /// (`GraphRunner::bind_ask_wait`), aligning the pending request's `call_id` with the original
+    /// assistant tool-call id. Returns the bound `run_id` or `None` when no store/run is
+    /// available or the run is already bound.
+    fn bind_ask_wait_for_request(
+        &self,
+        pending_request: &PendingControlRequest,
+        tool_call: &ToolCall,
+    ) -> Option<String> {
+        // Only `Interaction` (Ask) requests bind to the graph ask-wait suspension; an Approval
+        // suspends the turn too, but its resume path re-executes the tool rather than injecting an
+        // answer as the Ask terminal result (design.md Decision 5 — Ask is never approval).
+        if pending_request.request_kind != PendingControlRequestKind::Interaction {
+            return None;
+        }
+        let store_arc = self.graph_run_store()?;
+        let run_id = pending_request.run_id.clone()?;
+        let expected_version = pending_request.version;
+        let request_id = pending_request.request_id.clone();
+        let call_id = pending_request.call_id.clone();
+        let turn_id = pending_request.turn_id.clone();
+        let session_id = pending_request.session_id.clone();
+        let tool_name = tool_call.name.clone();
+        let assistant_transcript = json!({
+            "toolCalls": [{ "id": call_id, "name": tool_name }],
+            "assistantMessage": tool_call.arguments.clone(),
+        });
+        let binding = GraphAskWaitBinding {
+            request_id: request_id.clone(),
+            expected_version,
+            run_id: run_id.clone(),
+            turn_id,
+            session_id,
+            call_id,
+            tool_name,
+            assistant_transcript,
+            created_at_ms: runtime_now_ms(),
+        };
+        let mut store = store_arc.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        match GraphRunner::new()
+            .bind_ask_wait(&mut store, &run_id, binding)
+        {
+            Ok(_) => Some(run_id),
+            Err(error) => {
+                runtime_log(format!(
+                    "turn:ask-bind-failed run={run_id} request={request_id} error={error}"
+                ));
+                // A failed bind must not silently drop the pending request: the dispatcher still
+                // holds it for the host surface; the suspended turn outcome still carries it.
+                None
+            }
+        }
+    }
+
+    /// Build the `TurnResult` returned when a turn pauses on a control outcome. `phase` is
+    /// `SUSPENDED_TURN_PHASE` ("suspended") so the host control plane can react to the Ask wait
+    /// without mistaking the turn for a failure or a completion.
+    fn build_suspended_turn_result(
+        &self,
+        provider_meta: Option<&ProviderEventMeta>,
+        user_message: String,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        suspension: &ToolTurnSuspension,
+    ) -> TurnResult {
+        let assistant_message = suspension
+            .pending_request
+            .as_ref()
+            .map(|request| {
+                format!(
+                    "Ask `{}` awaits a host answer before the run resumes.",
+                    request.request_id
+                )
+            })
+            .unwrap_or_else(|| {
+                "工具调用进入控制请求状态，等待宿主应答后继续。".to_string()
+            });
+        let session_summary = suspension
+            .pending_request
+            .as_ref()
+            .map(|request| request.request_id.clone())
+            .unwrap_or_else(|| SUSPENDED_TURN_PHASE.to_string());
+        TurnResult {
+            event_id: None,
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: SUSPENDED_TURN_PHASE.to_string(),
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()).unwrap_or_default(),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()).unwrap_or_default(),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()).unwrap_or_default(),
+            provider_model: provider_meta.map(|meta| meta.model.clone()).unwrap_or_default(),
+            provider_source: SUSPENDED_TURN_PHASE.to_string(),
+            provider_mode: SUSPENDED_TURN_PHASE.to_string(),
+            fallback_reason: Some("control_outcome_pending".to_string()),
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            user_message,
+            assistant_message,
+            trace_steps,
+            trace_timeline: Vec::new(),
+            tool_activities,
+            provider_call_records: Vec::new(),
+            hook_trace_records,
+            session_summary,
+        }
+    }
+
     pub fn run_turn(&self, input: TurnInput) -> TurnResult {
+        self.run_turn_with_facts(input, RunTurnFacts::default())
+    }
+
+    /// `run_turn` with explicit session/run/turn/workspace facts for governed Ask
+    /// control-request persistence (design.md Decision 5). The host control plane supplies the
+    /// graph run's facts before each graph-run turn; the plain `run_turn` entry uses `None` facts
+    /// and still binds the input's session. A pending Ask resume injection (phase-4 P0) is
+    /// consumed here and seeded into the turn's provider context.
+    pub(crate) fn run_turn_with_facts(&self, input: TurnInput, facts: RunTurnFacts) -> TurnResult {
+        self.apply_governed_turn_context(&input, &facts);
+        let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());
+        self.run_turn_inner(input, ask_injection)
+    }
+
+    fn run_turn_inner(
+        &self,
+        input: TurnInput,
+        ask_injection: Option<GraphAskResumeInjection>,
+    ) -> TurnResult {
         let turn_started_at = Instant::now();
-        let prepared = match self.prepare_turn(&input, false) {
+        let prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
                 return build_failed_turn_result(
@@ -2516,8 +2909,36 @@ impl AgentRuntime {
         turn_id: String,
         input: TurnInput,
     ) {
+        self.start_turn_stream_with_control_and_facts(
+            sink,
+            control,
+            turn_id,
+            input,
+            RunTurnFacts::default(),
+        );
+    }
+
+    /// `start_turn_stream_with_control` with explicit run/turn/workspace facts for governed Ask
+    /// control-request persistence (design.md Decision 5, P1-1). The host control plane supplies
+    /// the graph run's facts before each graph-run streamed turn so a persisted
+    /// `PendingControlRequest` (Ask) is bound to the real run/turn; the plain entry uses `None`
+    /// facts and still binds the input's session.
+    pub fn start_turn_stream_with_control_and_facts<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        control: &ExecutionControlRegistry,
+        turn_id: String,
+        input: TurnInput,
+        facts: RunTurnFacts,
+    ) {
+        // Bind the streamed turn's session/run/turn to the governed executor so an Ask control
+        // request persists against the real invocation (design.md Decision 5, P1-1 wiring).
+        self.apply_governed_turn_context(&input, &facts);
+        // Consume a pending Ask resume injection (phase-4 P0) so the terminal tool result is
+        // seeded into this turn's provider context.
+        let ask_injection = self.take_pending_ask_injection(facts.run_id.as_deref());
         let turn_started_at = Instant::now();
-        let prepared = match self.prepare_turn(&input, true) {
+        let prepared = match self.prepare_turn(&input, true, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
                 emit_turn_failed(
@@ -6068,6 +6489,57 @@ fn tool_call_signature(tool_call: &ToolCall) -> String {
     )
 }
 
+/// Detect a `control_outcome_pending` legacy tool result: the governed executor surfaces a
+/// pending control outcome as `status == "error"` with a structured `error.code ==
+/// "control_outcome_pending"` (design.md Decision 5). Such a result is never provider-consumable
+/// and must pause the run instead of being fed back as an ordinary tool error.
+fn tool_result_control_outcome_pending(tool_result: &ToolResult) -> bool {
+    if tool_result.status != "error" {
+        return false;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(&tool_result.output) else {
+        return false;
+    };
+    parsed
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        == Some("control_outcome_pending")
+}
+
+/// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The
+/// request's `call_id` is the dispatch call id the executor persisted, which equals the original
+/// assistant tool-call id when one was supplied; a missing call id falls back to the most recent
+/// `Interaction` request (the Ask path).
+fn match_pending_control_request<'a>(
+    requests: &'a [PendingControlRequest],
+    tool_call: &ToolCall,
+) -> Option<&'a PendingControlRequest> {
+    if let Some(call_id) = tool_call.call_id.as_deref() {
+        if let Some(found) = requests
+            .iter()
+            .find(|request| request.state == PendingControlRequestState::Pending && request.call_id == call_id)
+        {
+            return Some(found);
+        }
+    }
+    requests
+        .iter()
+        .filter(|request| {
+            request.state == PendingControlRequestState::Pending
+                && request.request_kind == PendingControlRequestKind::Interaction
+        })
+        .last()
+}
+
+/// Unix-epoch milliseconds used for graph binding timestamps.
+fn runtime_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn build_tool_hop_limit_error(limit: usize) -> String {
     format!(
         "同一 turn 内连续工具调用超过 {} 次，已停止继续 follow-up 以避免进入无限循环；如属复杂任务，可提高 PONY_AGENT_MAX_TOOL_HOPS_PER_TURN。",
@@ -6172,6 +6644,11 @@ mod tests {
         FileSessionBackend, SessionSnapshot, SessionStore, TurnHistoryMessage,
     };
     use crate::agent::telemetry::DefaultTurnTelemetryBuilder;
+    use crate::agent::dispatcher::{ControlRequestAuthorization, ControlRequestConsumed};
+    use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
+    use crate::agent::control_plane::HostControlPlaneBuilder;
+    use crate::agent::tool_runtime::PendingControlRequestState;
+    use crate::agent::graph::GraphRunPhase;
     use serde_json::json;
     use std::cell::RefCell;
     use std::fs;
@@ -6447,6 +6924,60 @@ mod tests {
                 fallback_reason: None,
                 token_usage: None,
             })
+        }
+
+        fn select_tool_call(
+            &self,
+            _user_message: &str,
+            _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+            provider_tool_call: Option<ToolCall>,
+        ) -> Option<ToolCall> {
+            provider_tool_call
+        }
+    }
+
+    /// Forced-Ask planner that defers to the provider on the second turn — used by the
+    /// phase-4 P0 end-to-end test so the resumed turn reaches the provider (and receives the
+    /// injected terminal result) instead of re-persisting a fresh Ask.
+    struct AskOnceThenDeferPlanner {
+        tool_name: String,
+        arguments: Value,
+        ask_forced: std::sync::atomic::AtomicBool,
+    }
+
+    impl TurnPlanner for AskOnceThenDeferPlanner {
+        fn preflight_decision(
+            &self,
+            _user_message: &str,
+            _history: &[TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+        ) -> Option<ProviderDecision> {
+            if !self.ask_forced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Some(ProviderDecision {
+                    output_text: String::new(),
+                    tool_call: Some(ToolCall {
+                        call_id: Some("forced-ask-call".to_string()),
+                        name: self.tool_name.clone(),
+                        arguments: self.arguments.clone(),
+                        plan: Some(crate::agent::tools::ToolPlan {
+                            kind: "forced".to_string(),
+                            summary: format!("强制执行工具 `{}`。", self.tool_name),
+                            parallel: false,
+                            continue_on_error: false,
+                            steps: Vec::new(),
+                        }),
+                    }),
+                    reasoning_content: None,
+                    reasoning_content_value: None,
+                    assistant_message: None,
+                    provider_source: "planner_preflight".to_string(),
+                    provider_mode: "preflight".to_string(),
+                    fallback_reason: None,
+                    token_usage: None,
+                });
+            }
+            None
         }
 
         fn select_tool_call(
@@ -12529,13 +13060,25 @@ mod tests {
             plan: None,
         });
 
-        assert_eq!(tool_result.status, "ok");
+        // design Decision 11: the registry resource entrypoint fails closed with
+        // `source_unavailable` until the real McpTransport-backed `McpResourceSurface` is wired;
+        // the request arguments are never echoed back as resource content (PA-076 phase-7
+        // review P1-1).
+        assert_eq!(tool_result.status, "error");
         let payload =
             serde_json::from_str::<Value>(&tool_result.output).expect("resource tool output json");
         assert_eq!(
             payload.get("requestedCapabilityId").and_then(Value::as_str),
             Some("mcp:resource:repo-index")
         );
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("source_unavailable")
+        );
+        assert_eq!(payload.get("content"), Some(&Value::Null));
         assert_eq!(
             invocation_record.capability_id.as_deref(),
             Some("mcp:resource:repo-index")
@@ -12547,6 +13090,10 @@ mod tests {
         assert_eq!(
             invocation_record.invocation_mode.as_deref(),
             Some("read_only_fetch")
+        );
+        assert_eq!(
+            invocation_record.failure_kind.as_deref(),
+            Some("source_unavailable")
         );
     }
 
@@ -12600,10 +13147,14 @@ mod tests {
                     plan: None,
                 });
 
-            assert_eq!(tool_result.status, "ok");
+            assert_eq!(tool_result.status, "error");
             assert_eq!(
                 invocation_record.capability_id.as_deref(),
                 Some("mcp:resource:repo-index")
+            );
+            assert_eq!(
+                invocation_record.failure_kind.as_deref(),
+                Some("source_unavailable")
             );
         }
     }
@@ -12954,4 +13505,715 @@ mod tests {
             );
         }
     }
-}
+
+    // ── Ask suspension in the governed sync turn loop (PA-076 P1-1) ─────────────────────
+
+    #[test]
+    fn governed_ask_suspends_turn_and_binds_waiting_user_without_provider_followup() {
+            let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+            let workspace = temp_workspace_dir("ask-suspend-loop");
+            let executor = build_governed_executor(Some(workspace.clone()));
+            let mut store = GraphRunStore::new();
+            GraphRunner::new().start_run(
+                &mut store,
+                GraphEngine::new("state-machine-v1")
+                    .start_run("run-ask-loop", "ask flow", Some("session-ask-loop")),
+            );
+            let store_arc = Arc::new(Mutex::new(store));
+            // A fake provider that would panic if `provider_followup` is called after Ask — the
+            // MockHttpServer with empty responses causes any follow-up connection to fail, which
+            // would produce a failed (not suspended) TurnResult.
+            let server = MockHttpServer::start(Vec::new());
+            let mut runtime = AgentRuntime::with_dependencies(
+                SessionStore::memory_only(),
+                Box::new(StaticResolver {
+                    selection: test_chat_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(executor),
+                Box::new(ForcedToolPlanner {
+                    tool_name: "Ask".to_string(),
+                    // `text` becomes the prompt surfaced in the persisted request (P2-9).
+                    arguments: json!({ "text": "继续吗？", "description": "test" }),
+                }),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+            let result = runtime.run_turn_with_facts(
+                TurnInput {
+                    message: "hi".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-ask-loop".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+                RunTurnFacts {
+                    run_id: Some("run-ask-loop".to_string()),
+                    turn_id: Some("turn-ask-1".to_string()),
+                    workspace_root: Some(workspace.display().to_string()),
+                },
+            );
+
+            // 1. The turn is suspended, not failed or completed.
+            assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
+            assert!(result
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("control_outcome_pending")));
+
+            // 2. The pending request is persisted against the real session/run/turn.
+            let dispatcher = runtime
+                .governed_dispatcher()
+                .expect("governed dispatcher must be present");
+            let pending = dispatcher.pending_requests();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].request_kind, PendingControlRequestKind::Interaction);
+            assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-loop"));
+            assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-loop"));
+            assert_eq!(pending[0].turn_id, "turn-ask-1");
+            assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
+
+            // 3. The graph run is WaitingUser with a bound ask wait.
+            let store = store_arc.lock().unwrap();
+            let run = store.load_run("run-ask-loop").expect("run must exist");
+            assert_eq!(run.phase, GraphRunPhase::WaitingUser);
+            let waits = GraphRunner::new().list_ask_waits(&store, "run-ask-loop");
+            assert_eq!(waits.len(), 1);
+            assert_eq!(waits[0].request_id, pending[0].request_id);
+            assert_eq!(waits[0].expected_version, pending[0].version);
+            drop(store);
+
+            // 4. The provider was never contacted — no follow-up request after Ask suspension.
+            let requests = server.finish();
+            assert!(requests.is_empty(), "provider should not have been called: {requests:?}");
+        }
+
+        #[test]
+        fn governed_ask_host_answer_resumes_injects_unique_terminal_result_with_original_call_id()
+        {
+            let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+            let workspace = temp_workspace_dir("ask-resume-loop");
+            let executor = build_governed_executor(Some(workspace.clone()));
+            let mut store = GraphRunStore::new();
+            GraphRunner::new().start_run(
+                &mut store,
+                GraphEngine::new("state-machine-v1")
+                    .start_run("run-ask-resume", "ask resume flow", Some("session-ask-resume")),
+            );
+            let store_arc = Arc::new(Mutex::new(store));
+            let server = MockHttpServer::start(Vec::new());
+            let mut runtime = AgentRuntime::with_dependencies(
+                SessionStore::memory_only(),
+                Box::new(StaticResolver {
+                    selection: test_chat_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(executor),
+                Box::new(ForcedToolPlanner {
+                    tool_name: "Ask".to_string(),
+                    arguments: json!({ "text": "确认？", "description": "test" }),
+                }),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+            let result = runtime.run_turn_with_facts(
+                TurnInput {
+                    message: "ask resume test".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-ask-resume".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+                RunTurnFacts {
+                    run_id: Some("run-ask-resume".to_string()),
+                    turn_id: Some("turn-ask-resume-1".to_string()),
+                    workspace_root: Some(workspace.display().to_string()),
+                },
+            );
+            assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
+
+            let dispatcher = runtime
+                .governed_dispatcher()
+                .expect("governed dispatcher must be present");
+            let pending = dispatcher.pending_requests();
+            assert_eq!(pending.len(), 1);
+            let request_id = pending[0].request_id.clone();
+            let expected_version = pending[0].version;
+
+            // Host answers the Ask via the shared dispatcher.
+            let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+                &pending[0],
+                Some(json!("确认继续")),
+            );
+            let consumed = dispatcher
+                .answer_control_request(&request_id, &authorization)
+                .expect("answer must succeed on shared dispatcher");
+            assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
+            assert_eq!(
+                consumed.answer.as_ref().and_then(Value::as_str),
+                Some("确认继续")
+            );
+
+            // Graph resume injects exactly one terminal result for the original call_id.
+            let mut store = store_arc.lock().unwrap();
+            let outcome = GraphRunner::new()
+                .resume_ask_wait(
+                    &mut store,
+                    "run-ask-resume",
+                    &request_id,
+                    expected_version,
+                    json!("确认继续"),
+                )
+                .expect("graph resume must succeed");
+            assert_eq!(outcome.call_id, pending[0].call_id);
+            assert_eq!(
+                outcome.terminal_result["output"]["answer"].as_str(),
+                Some("确认继续")
+            );
+            assert_eq!(
+                outcome.terminal_result["toolCallId"].as_str(),
+                Some(pending[0].call_id.as_str())
+            );
+            assert!(GraphRunner::new()
+                .list_ask_waits(&store, "run-ask-resume")
+                .is_empty());
+            drop(store);
+
+            // The provider was never called (no follow-up after suspension).
+            let requests = server.finish();
+            assert!(
+                requests.is_empty(),
+                "provider should not have been called: {requests:?}"
+            );
+        }
+
+        #[test]
+        fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context() {
+            // PA-076 phase-4 P0: after the host answers a bound Ask and the graph resumes
+            // (run -> Ready), the NEXT turn's provider request must carry the original assistant
+            // tool-call + the terminal tool result (the answer) — injected as a completed tool
+            // round, not a fresh user turn. The injection is one-shot.
+            let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+            let workspace = temp_workspace_dir("ask-resume-inject-provider");
+            let executor = build_governed_executor(Some(workspace.clone()));
+            let mut store = GraphRunStore::new();
+            GraphRunner::new().start_run(
+                &mut store,
+                GraphEngine::new("state-machine-v1").start_run(
+                    "run-ask-inject",
+                    "ask inject flow",
+                    Some("session-ask-inject"),
+                ),
+            );
+            let store_arc = Arc::new(Mutex::new(store));
+            // The resumed turn reaches the provider exactly once and receives a text completion.
+            let server =
+                MockHttpServer::start(vec![json_completion("好的，我已经看到你的回答，继续。")]);
+            let mut runtime = AgentRuntime::with_dependencies(
+                SessionStore::memory_only(),
+                Box::new(StaticResolver {
+                    selection: test_chat_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(executor),
+                Box::new(AskOnceThenDeferPlanner {
+                    tool_name: "Ask".to_string(),
+                    arguments: json!({ "text": "继续吗？", "description": "test" }),
+                    ask_forced: std::sync::atomic::AtomicBool::new(false),
+                }),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+            // Turn 1: the planner forces the Ask tool -> dispatcher persists -> turn suspends and
+            // the run is bound to WaitingUser. The provider is never called.
+            let suspended = runtime.run_turn_with_facts(
+                TurnInput {
+                    message: "start the ask flow".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-ask-inject".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+                RunTurnFacts {
+                    run_id: Some("run-ask-inject".to_string()),
+                    turn_id: Some("turn-ask-inject-1".to_string()),
+                    workspace_root: Some(workspace.display().to_string()),
+                },
+            );
+            assert_eq!(suspended.phase, SUSPENDED_TURN_PHASE);
+
+            // Host answers through the shared dispatcher (CAS consumes the pending request).
+            let dispatcher = runtime
+                .governed_dispatcher()
+                .expect("governed dispatcher must be present");
+            let pending = dispatcher.pending_requests();
+            assert_eq!(pending.len(), 1);
+            let request_id = pending[0].request_id.clone();
+            let expected_version = pending[0].version;
+            let original_call_id = pending[0].call_id.clone();
+            let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+                &pending[0],
+                Some(json!("继续执行")),
+            );
+            dispatcher
+                .answer_control_request(&request_id, &authorization)
+                .expect("answer must succeed on shared dispatcher");
+
+            // Graph resume: run -> Ready and exactly one injection is persisted for the original
+            // call id (the next turn consumes it).
+            {
+                let mut store = store_arc.lock().unwrap();
+                let outcome = GraphRunner::new()
+                    .resume_ask_wait(
+                        &mut store,
+                        "run-ask-inject",
+                        &request_id,
+                        expected_version,
+                        json!("继续执行"),
+                    )
+                    .expect("graph resume must succeed");
+                assert_eq!(outcome.call_id, original_call_id);
+                assert_eq!(
+                    outcome.terminal_result["output"]["answer"].as_str(),
+                    Some("继续执行")
+                );
+                let run = store.load_run("run-ask-inject").expect("run present");
+                assert_eq!(run.phase, GraphRunPhase::Ready);
+                assert!(
+                    store.peek_ask_injection("run-ask-inject").is_some(),
+                    "the resume must persist the one-shot injection"
+                );
+            }
+
+            // Turn 2: the resumed run consumes the one-shot injection. The provider request must
+            // contain the original assistant tool-call + the terminal tool result (the answer).
+            let resumed = runtime.run_turn_with_facts(
+                TurnInput {
+                    message: "continue after the answer".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-ask-inject".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+                RunTurnFacts {
+                    run_id: Some("run-ask-inject".to_string()),
+                    turn_id: Some("turn-ask-inject-2".to_string()),
+                    workspace_root: Some(workspace.display().to_string()),
+                },
+            );
+            assert_ne!(
+                resumed.phase, SUSPENDED_TURN_PHASE,
+                "the resumed turn must not suspend again"
+            );
+
+            // The injection is one-shot: consumed (gone) after the resumed turn.
+            assert!(
+                store_arc
+                    .lock()
+                    .unwrap()
+                    .peek_ask_injection("run-ask-inject")
+                    .is_none(),
+                "the injection must be consumed exactly once"
+            );
+
+            // The single provider request carries the injected pair.
+            let requests = server.finish();
+            assert_eq!(
+                requests.len(),
+                1,
+                "provider should be called exactly once for the resumed turn: {requests:?}"
+            );
+            let body: Value = serde_json::from_str(&requests[0]).expect("request body json");
+            let messages = body["messages"].as_array().expect("messages array");
+            let assistant_index = messages
+                .iter()
+                .position(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                        && message
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .is_some_and(|calls| {
+                                calls.iter().any(|call| {
+                                    call.get("id").and_then(Value::as_str)
+                                        == Some(original_call_id.as_str())
+                                })
+                            })
+                })
+                .expect("the original assistant tool-call must be injected into the request");
+            let tool_result_index = messages
+                .iter()
+                .position(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("tool")
+                        && message
+                            .get("tool_call_id")
+                            .and_then(Value::as_str)
+                            == Some(original_call_id.as_str())
+                        && message
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|content| content.contains("继续执行"))
+                })
+                .expect("the terminal tool result with the answer must be injected into the request");
+            assert!(
+                tool_result_index > assistant_index,
+                "the tool result must follow the assistant tool-call"
+            );
+        }
+
+        #[test]
+        fn governed_ask_host_and_runtime_share_same_dispatcher() {
+            // PA-076 P1-1: HostControlPlane built via `with_runtime` must share the runtime's
+            // governed dispatcher so host `ask_answer` hits the pending request the runtime
+            // persisted. This also exercises the `build()` auto-wiring: no explicit
+            // `ask_dispatcher` is passed.
+            let workspace = temp_workspace_dir("ask-shared-dispatch");
+            let executor = build_governed_executor(Some(workspace.clone()));
+            let runtime = AgentRuntime::with_dependencies(
+                SessionStore::memory_only(),
+                Box::new(ProviderRegistryStore::new()),
+                Box::new(executor),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+
+            let runtime_dispatcher = runtime
+                .governed_dispatcher()
+                .expect("runtime must have a governed dispatcher");
+
+            // Control plane built with this runtime shares its dispatcher (no explicit
+            // ask_dispatcher → auto-wired via build()).
+            let control_plane =
+                HostControlPlaneBuilder::new().runtime(runtime).build();
+
+            // Same Arc pointer → host answer hits the runtime's store.
+            assert!(Arc::ptr_eq(
+                &control_plane.ask_dispatcher,
+                &runtime_dispatcher
+            ));
+
+            // Dispatch an Ask through the shared dispatcher.
+            let outcome = control_plane.ask_dispatcher.dispatch_governed(
+                ToolDispatchRequest {
+                    origin: InvocationOrigin::Model,
+                    descriptor_id: "Ask".to_string(),
+                    call_id: "call-shared".to_string(),
+                    arguments: json!({ "text": "共享测试", "description": "test" }),
+                },
+                &DispatchContext {
+                    session_id: Some("session-shared".to_string()),
+                    run_id: Some("run-shared".to_string()),
+                    turn_id: Some("turn-shared".to_string()),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                outcome.control_outcome.is_some(),
+                "expected pending control outcome, got: {:?} / result={:?}",
+                outcome.control_outcome,
+                outcome.result
+            );
+            let request_id = outcome.control_outcome.unwrap().request_id;
+
+            // Host answers through the control-plane surface — same dispatcher → CAS succeeds.
+            let consumed = control_plane
+                .answer_ask(&request_id, 1, json!("是的"))
+                .expect("answer must hit the same pending request");
+            let consumed_request =
+                serde_json::from_value::<ControlRequestConsumed>(
+                    consumed,
+                )
+                .expect("consumed request projection");
+            assert_eq!(
+                consumed_request.request.state,
+                PendingControlRequestState::Consumed
+            );
+        }
+
+        #[test]
+        fn governed_ask_stream_suspends_turn_and_binds_waiting_user_without_provider_followup() {
+            // PA-076 P1-1: the stream path (`start_turn_stream_with_control_and_facts` →
+            // `handle_stream_tool_turn`) must pause on a `control_outcome_pending` result exactly
+            // like the sync path: bind the Ask wait to the graph run (→ `WaitingUser`), persist
+            // the pending request against the real run/turn facts, emit the terminal
+            // `turn:suspended` event, and never feed the marker back to the provider.
+            let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+            let workspace = temp_workspace_dir("ask-stream-suspend-loop");
+            let executor = build_governed_executor(Some(workspace.clone()));
+            let mut store = GraphRunStore::new();
+            GraphRunner::new().start_run(
+                &mut store,
+                GraphEngine::new("state-machine-v1").start_run(
+                    "run-ask-stream",
+                    "ask stream flow",
+                    Some("session-ask-stream"),
+                ),
+            );
+            let store_arc = Arc::new(Mutex::new(store));
+            // A fake provider that would panic if `provider_followup_stream` is called after Ask —
+            // with zero queued responses the mock server's listener exits immediately, so any
+            // follow-up connection is refused and the turn would fail instead of suspending.
+            let server = MockHttpServer::start(Vec::new());
+            let mut runtime = AgentRuntime::with_dependencies(
+                SessionStore::memory_only(),
+                Box::new(StaticResolver {
+                    selection: test_chat_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(executor),
+                Box::new(ForcedToolPlanner {
+                    tool_name: "Ask".to_string(),
+                    arguments: json!({ "text": "继续吗？", "description": "test" }),
+                }),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+            let sink = RecordingTurnEventSink::new();
+            let control = ExecutionControlRegistry::new();
+            control.register_turn(
+                "turn-ask-stream-1",
+                Some("session-ask-stream"),
+                Some("run-ask-stream"),
+            );
+            runtime.start_turn_stream_with_control_and_facts(
+                &sink,
+                &control,
+                "turn-ask-stream-1".to_string(),
+                TurnInput {
+                    message: "hi".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-ask-stream".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+                RunTurnFacts {
+                    run_id: Some("run-ask-stream".to_string()),
+                    turn_id: Some("turn-ask-stream-1".to_string()),
+                    workspace_root: Some(workspace.display().to_string()),
+                },
+            );
+
+            // 1. The stream emitted a terminal `turn:suspended` event (never a completed/failed
+            //    terminal) carrying the suspended phase.
+            let events = sink.events.borrow();
+            let event_names = || {
+                events
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                events.iter().any(|(name, payload)| {
+                    name == "turn:suspended"
+                        && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
+                }),
+                "stream should emit turn:suspended, got: {:?}",
+                event_names()
+            );
+            assert!(
+                !events.iter().any(|(name, _)| name == "turn:completed"),
+                "stream must not emit turn:completed after Ask suspension: {:?}",
+                event_names()
+            );
+            assert!(
+                !events.iter().any(|(name, _)| name == "turn:failed"),
+                "stream must not emit turn:failed after Ask suspension: {:?}",
+                event_names()
+            );
+            drop(events);
+
+            // 2. The pending request is persisted against the real session/run/turn.
+            let dispatcher = runtime
+                .governed_dispatcher()
+                .expect("governed dispatcher must be present");
+            let pending = dispatcher.pending_requests();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].request_kind, PendingControlRequestKind::Interaction);
+            assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-stream"));
+            assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-stream"));
+            assert_eq!(pending[0].turn_id, "turn-ask-stream-1");
+            assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
+
+            // 3. The graph run is WaitingUser with a bound ask wait.
+            let store = store_arc.lock().unwrap();
+            let run = store.load_run("run-ask-stream").expect("run must exist");
+            assert_eq!(run.phase, GraphRunPhase::WaitingUser);
+            let waits = GraphRunner::new().list_ask_waits(&store, "run-ask-stream");
+            assert_eq!(waits.len(), 1);
+            assert_eq!(waits[0].request_id, pending[0].request_id);
+            assert_eq!(waits[0].expected_version, pending[0].version);
+            drop(store);
+
+            // 4. The provider was never contacted — no follow-up request after Ask suspension.
+            let requests = server.finish();
+            assert!(
+                requests.is_empty(),
+                "provider should not have been called: {requests:?}"
+            );
+        }
+
+        #[test]
+        fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_original_call_id()
+        {
+            // PA-076 P1-1 end-to-end stream resume: the host answers the persisted Ask through the
+            // shared dispatcher, then `resume_ask_wait` injects exactly one terminal result keyed
+            // to the original assistant tool-call id.
+            let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+            let workspace = temp_workspace_dir("ask-stream-resume-loop");
+            let executor = build_governed_executor(Some(workspace.clone()));
+            let mut store = GraphRunStore::new();
+            GraphRunner::new().start_run(
+                &mut store,
+                GraphEngine::new("state-machine-v1").start_run(
+                    "run-ask-stream-resume",
+                    "ask stream resume flow",
+                    Some("session-ask-stream-resume"),
+                ),
+            );
+            let store_arc = Arc::new(Mutex::new(store));
+            let server = MockHttpServer::start(Vec::new());
+            let mut runtime = AgentRuntime::with_dependencies(
+                SessionStore::memory_only(),
+                Box::new(StaticResolver {
+                    selection: test_chat_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(executor),
+                Box::new(ForcedToolPlanner {
+                    tool_name: "Ask".to_string(),
+                    arguments: json!({ "text": "确认？", "description": "test" }),
+                }),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+            let sink = RecordingTurnEventSink::new();
+            let control = ExecutionControlRegistry::new();
+            control.register_turn(
+                "turn-ask-stream-resume-1",
+                Some("session-ask-stream-resume"),
+                Some("run-ask-stream-resume"),
+            );
+            runtime.start_turn_stream_with_control_and_facts(
+                &sink,
+                &control,
+                "turn-ask-stream-resume-1".to_string(),
+                TurnInput {
+                    message: "ask stream resume test".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-ask-stream-resume".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+                RunTurnFacts {
+                    run_id: Some("run-ask-stream-resume".to_string()),
+                    turn_id: Some("turn-ask-stream-resume-1".to_string()),
+                    workspace_root: Some(workspace.display().to_string()),
+                },
+            );
+            assert!(
+                sink.events.borrow().iter().any(|(name, payload)| {
+                    name == "turn:suspended"
+                        && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
+                }),
+                "stream should emit turn:suspended"
+            );
+
+            let dispatcher = runtime
+                .governed_dispatcher()
+                .expect("governed dispatcher must be present");
+            let pending = dispatcher.pending_requests();
+            assert_eq!(pending.len(), 1);
+            let request_id = pending[0].request_id.clone();
+            let expected_version = pending[0].version;
+            let original_call_id = pending[0].call_id.clone();
+
+            // Host answers the Ask via the shared dispatcher.
+            let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+                &pending[0],
+                Some(json!("确认继续")),
+            );
+            let consumed = dispatcher
+                .answer_control_request(&request_id, &authorization)
+                .expect("answer must succeed on shared dispatcher");
+            assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
+            assert_eq!(
+                consumed.answer.as_ref().and_then(Value::as_str),
+                Some("确认继续")
+            );
+
+            // Graph resume injects exactly one terminal result for the original call_id.
+            let mut store = store_arc.lock().unwrap();
+            let outcome = GraphRunner::new()
+                .resume_ask_wait(
+                    &mut store,
+                    "run-ask-stream-resume",
+                    &request_id,
+                    expected_version,
+                    json!("确认继续"),
+                )
+                .expect("graph resume must succeed");
+            assert_eq!(outcome.call_id, original_call_id);
+            assert_eq!(
+                outcome.terminal_result["toolCallId"].as_str(),
+                Some(original_call_id.as_str())
+            );
+            assert_eq!(
+                outcome.terminal_result["output"]["answer"].as_str(),
+                Some("确认继续")
+            );
+            assert!(GraphRunner::new()
+                .list_ask_waits(&store, "run-ask-stream-resume")
+                .is_empty());
+            drop(store);
+
+            // The provider was never called (no follow-up after suspension).
+            let requests = server.finish();
+            assert!(
+                requests.is_empty(),
+                "provider should not have been called: {requests:?}"
+            );
+        }
+
+        fn temp_workspace_dir(name: &str) -> PathBuf {
+            let root = std::env::temp_dir()
+                .join(format!("pony-ask-runtime-test-{}-{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("create temp workspace for ask test");
+            root
+        }
+    }

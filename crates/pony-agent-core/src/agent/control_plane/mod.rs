@@ -15,8 +15,9 @@ use crate::agent::frontend_diagnostics::{
     FrontendTraceQueryResult,
 };
 use crate::agent::graph::{
-    GraphDecision, GraphRun, GraphRunCheckpoint, GraphRunControlBoundaryEvidence, GraphRunEvent,
-    GraphRunPhase, GraphRunStopReason, GraphRunStore, GraphRunner, GraphTurnHandoff,
+    GraphDecision, GraphDecisionKind, GraphDecisionReason, GraphRun, GraphRunCheckpoint,
+    GraphRunControlBoundaryEvidence, GraphRunEvent, GraphRunEventKind, GraphRunPhase,
+    GraphRunStopReason, GraphRunStore, GraphRunner, GraphTurnHandoff,
 };
 use crate::agent::hooks::HistoryStateHookEvidence;
 use crate::agent::hooks::{
@@ -26,7 +27,8 @@ use crate::agent::hooks::{
 use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
 use crate::agent::plan_state::PlanStore;
 use crate::agent::runtime::{
-    AgentRuntime, AgentRuntimeBuilder, TurnInput, TurnResult, TurnStreamEvent,
+    AgentRuntime, AgentRuntimeBuilder, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult,
+    TurnStreamEvent,
 };
 use crate::agent::tool_runtime::{RuntimeClock, SystemClock};
 use crate::agent::tools::ToolRegistrySnapshot;
@@ -825,7 +827,10 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
 impl<'a, S: TurnEventSink> TurnEventSink for RecordingTurnEventSink<'a, S> {
     fn emit(&self, name: &str, payload: TurnStreamEvent) {
         self.inner.emit(name, payload.clone());
-        if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+        if matches!(
+            name,
+            "turn:completed" | "turn:failed" | "turn:cancelled" | "turn:suspended"
+        ) {
             self.record_terminal_payload(&payload);
         }
     }
@@ -835,7 +840,7 @@ pub struct HostControlPlane {
     runtime: RwLock<AgentRuntime>,
     sessions_rwlock: Arc<RwLock<SessionStore>>,
     execution_control: ExecutionControlRegistry,
-    graph_runs: Mutex<GraphRunStore>,
+    graph_runs: Arc<Mutex<GraphRunStore>>,
     graph_runner: GraphRunner,
     graph_planner: Box<dyn GraphPlanner>,
     capability_registry: RwLock<CapabilityRegistry>,
@@ -843,7 +848,7 @@ pub struct HostControlPlane {
     /// Governed dispatcher whose pending control-request store backs the Ask (`Interaction`)
     /// control surface (design.md Decision 5). Shared as `Arc` so the runtime executor and the
     /// host adapter can observe the same store.
-    ask_dispatcher: Arc<GovernedDispatcher>,
+    pub ask_dispatcher: Arc<GovernedDispatcher>,
     /// Session-owned revisioned plan store backing the Plan control surface (Decision 6).
     plan_store: PlanStore,
 }
@@ -916,16 +921,25 @@ impl HostControlPlaneBuilder {
     }
 
     pub fn build(self) -> HostControlPlane {
-        let runtime = self.runtime.unwrap_or_else(AgentRuntime::new);
+        let mut runtime = self.runtime.unwrap_or_else(AgentRuntime::new);
         let capability_registry = runtime.capability_registry_snapshot();
         let sessions_rwlock = runtime.sessions_handle();
+        // The graph run store and the governed ask dispatcher are shared with the runtime so the
+        // Ask control surface (`ask_answer` / `graph_resume_ask`) hits the exact pending-request
+        // store and run bindings the runtime's turn loop persists (design.md Decision 5, P1-1).
+        let graph_runs = Arc::new(Mutex::new(self.graph_runs.unwrap_or_else(GraphRunStore::new)));
+        runtime.set_graph_run_store(Arc::clone(&graph_runs));
+        let ask_dispatcher = self
+            .ask_dispatcher
+            .or_else(|| runtime.governed_dispatcher())
+            .unwrap_or_else(default_ask_dispatcher);
         HostControlPlane {
             runtime: RwLock::new(runtime),
             sessions_rwlock,
             execution_control: self
                 .execution_control
                 .unwrap_or_else(ExecutionControlRegistry::new),
-            graph_runs: Mutex::new(self.graph_runs.unwrap_or_else(GraphRunStore::new)),
+            graph_runs,
             graph_runner: self.graph_runner.unwrap_or_else(GraphRunner::new),
             graph_planner: self
                 .graph_planner
@@ -934,9 +948,7 @@ impl HostControlPlaneBuilder {
             frontend_diagnostics: FrontendDiagnosticsStore::new(
                 default_frontend_diagnostics_sqlite_path(),
             ),
-            ask_dispatcher: self
-                .ask_dispatcher
-                .unwrap_or_else(default_ask_dispatcher),
+            ask_dispatcher,
             plan_store: self.plan_store.unwrap_or_else(PlanStore::new),
         }
     }
@@ -1278,11 +1290,16 @@ impl HostControlPlane {
         let (turn_result, handoff, decision) = {
             let runtime = self.runtime.read().expect("runtime lock poisoned");
             let recording_sink = RecordingTurnEventSink::new(sink);
-            runtime.start_turn_stream_with_control(
+            runtime.start_turn_stream_with_control_and_facts(
                 &recording_sink,
                 &self.execution_control,
                 prepared.turn_id.clone(),
                 prepared.input.clone(),
+                RunTurnFacts {
+                    run_id: Some(prepared.run_id.clone()),
+                    turn_id: Some(prepared.turn_id.clone()),
+                    workspace_root: None,
+                },
             );
             if let Some((
                 session_id,
@@ -1344,43 +1361,101 @@ impl HostControlPlane {
                 checkpoint.as_ref(),
                 prepared.input.workspace_mode.as_deref(),
             );
-            let decision_outcome = runtime.decide_graph_after_turn_with_planner(
-                &run,
-                Some(&prepared.turn_id),
-                prepared.input.session_id.as_deref(),
-                &turn_result,
-                checkpoint.as_ref(),
-                prepared.input.workspace_mode.as_deref(),
-                self.graph_planner.as_ref(),
-            )?;
-            let decision = decision_outcome.decision;
-            if let Some(trace_turn_id) = runtime
-                .load_session_snapshot(run.session_id.as_deref())
-                .turn_trace_history
-                .last()
-                .map(|trace| trace.turn_id.clone())
-            {
-                if !decision_outcome.trace_records.is_empty() {
-                    turn_result
-                        .hook_trace_records
-                        .extend(decision_outcome.trace_records.clone());
-                    let _ = runtime.append_turn_trace_hook_records(
+            if turn_result.phase == SUSPENDED_TURN_PHASE {
+                // The runtime already bound the Ask wait (run -> `WaitingUser`) and set the
+                // WaitUser decision; no planner decision may run while an Ask wait is unresolved
+                // (design.md Decision 5). The graph's `has_unresolved_ask_waits` guard keeps the
+                // run in `WaitingUser` until the host answers and `resume_ask_wait` injects the
+                // unique terminal result.
+                let decision = run.last_decision.clone().unwrap_or_else(|| GraphDecision {
+                    kind: GraphDecisionKind::WaitUser,
+                    reason: GraphDecisionReason::TurnCompletedAwaitingUser,
+                    summary: format!(
+                        "Ask awaits a host answer before run `{}` resumes.",
+                        prepared.run_id
+                    ),
+                    target_phase: GraphRunPhase::WaitingUser,
+                });
+                (turn_result, handoff, decision)
+            } else {
+                let decision_outcome = runtime.decide_graph_after_turn_with_planner(
+                    &run,
+                    Some(&prepared.turn_id),
+                    prepared.input.session_id.as_deref(),
+                    &turn_result,
+                    checkpoint.as_ref(),
+                    prepared.input.workspace_mode.as_deref(),
+                    self.graph_planner.as_ref(),
+                )?;
+                let decision = decision_outcome.decision;
+                if let Some(trace_turn_id) = runtime
+                    .load_session_snapshot(run.session_id.as_deref())
+                    .turn_trace_history
+                    .last()
+                    .map(|trace| trace.turn_id.clone())
+                {
+                    if !decision_outcome.trace_records.is_empty() {
+                        turn_result
+                            .hook_trace_records
+                            .extend(decision_outcome.trace_records.clone());
+                        let _ = runtime.append_turn_trace_hook_records(
+                            run.session_id.as_deref(),
+                            &trace_turn_id,
+                            decision_outcome.trace_records,
+                        );
+                    }
+                    if let Some(record) = runtime.record_planner_graph_decision_trace(
                         run.session_id.as_deref(),
                         &trace_turn_id,
-                        decision_outcome.trace_records,
-                    );
+                        &run,
+                        &decision,
+                    ) {
+                        turn_result.hook_trace_records.push(record);
+                    }
                 }
-                if let Some(record) = runtime.record_planner_graph_decision_trace(
-                    run.session_id.as_deref(),
-                    &trace_turn_id,
-                    &run,
-                    &decision,
-                ) {
-                    turn_result.hook_trace_records.push(record);
-                }
+                (turn_result, handoff, decision)
             }
-            (turn_result, handoff, decision)
         };
+
+        if turn_result.phase == SUSPENDED_TURN_PHASE {
+            // The run is already `WaitingUser` with a bound Ask wait (design.md Decision 5): the
+            // runtime set it via `bind_ask_wait` before the turn returned. No turn-result
+            // application may run while the wait is unresolved (`apply_turn_result` rejects it
+            // via `has_unresolved_ask_waits`), so return the suspension snapshot directly.
+            let run = {
+                let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
+                graph_runs.load_run(&prepared.run_id).ok_or_else(|| {
+                    format!(
+                        "Graph run `{}` failed to load after Ask suspension.",
+                        prepared.run_id
+                    )
+                })?
+            };
+            let event = GraphRunEvent {
+                run_id: run.id.clone(),
+                kind: GraphRunEventKind::Updated,
+                phase: GraphRunPhase::WaitingUser,
+                summary: format!(
+                    "Ask awaits a host answer before run `{}` resumes.",
+                    prepared.run_id
+                ),
+                step_count: run.steps.len(),
+                updated_at_ms: run.updated_at_ms,
+                hook_point: None,
+                canonical_event_type: None,
+                canonical_phase: None,
+            };
+            return Ok(GraphRunTurnResponse {
+                run,
+                handoff,
+                decision,
+                event,
+                turn_result,
+            });
+        }
 
         let advance = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
@@ -1616,7 +1691,14 @@ impl HostControlPlane {
 
         let (turn_result, handoff, decision) = {
             let runtime = self.runtime.read().expect("runtime lock poisoned");
-            let mut turn_result = runtime.run_turn(input.clone());
+            let mut turn_result = runtime.run_turn_with_facts(
+                input.clone(),
+                RunTurnFacts {
+                    run_id: Some(run_id.clone()),
+                    turn_id: Some(turn_id.clone()),
+                    workspace_root: None,
+                },
+            );
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
                     eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
@@ -1634,43 +1716,86 @@ impl HostControlPlane {
                 None,
                 input.workspace_mode.as_deref(),
             );
-            let decision_outcome = runtime.decide_graph_after_turn_with_planner(
-                &run,
-                Some(&turn_id),
-                input.session_id.as_deref(),
-                &turn_result,
-                None,
-                input.workspace_mode.as_deref(),
-                self.graph_planner.as_ref(),
-            )?;
-            let decision = decision_outcome.decision;
-            if let Some(trace_turn_id) = runtime
-                .load_session_snapshot(run.session_id.as_deref())
-                .turn_trace_history
-                .last()
-                .map(|trace| trace.turn_id.clone())
-            {
-                if !decision_outcome.trace_records.is_empty() {
-                    turn_result
-                        .hook_trace_records
-                        .extend(decision_outcome.trace_records.clone());
-                    let _ = runtime.append_turn_trace_hook_records(
+            if turn_result.phase == SUSPENDED_TURN_PHASE {
+                // The runtime already bound the Ask wait (run -> `WaitingUser`) and set the
+                // WaitUser decision; no planner decision or turn-result application may run while
+                // an Ask wait is unresolved (design.md Decision 5).
+                let decision = run.last_decision.clone().unwrap_or_else(|| GraphDecision {
+                    kind: GraphDecisionKind::WaitUser,
+                    reason: GraphDecisionReason::TurnCompletedAwaitingUser,
+                    summary: format!("Ask awaits a host answer before run `{run_id}` resumes."),
+                    target_phase: GraphRunPhase::WaitingUser,
+                });
+                (turn_result, handoff, decision)
+            } else {
+                let decision_outcome = runtime.decide_graph_after_turn_with_planner(
+                    &run,
+                    Some(&turn_id),
+                    input.session_id.as_deref(),
+                    &turn_result,
+                    None,
+                    input.workspace_mode.as_deref(),
+                    self.graph_planner.as_ref(),
+                )?;
+                let decision = decision_outcome.decision;
+                if let Some(trace_turn_id) = runtime
+                    .load_session_snapshot(run.session_id.as_deref())
+                    .turn_trace_history
+                    .last()
+                    .map(|trace| trace.turn_id.clone())
+                {
+                    if !decision_outcome.trace_records.is_empty() {
+                        turn_result
+                            .hook_trace_records
+                            .extend(decision_outcome.trace_records.clone());
+                        let _ = runtime.append_turn_trace_hook_records(
+                            run.session_id.as_deref(),
+                            &trace_turn_id,
+                            decision_outcome.trace_records,
+                        );
+                    }
+                    if let Some(record) = runtime.record_planner_graph_decision_trace(
                         run.session_id.as_deref(),
                         &trace_turn_id,
-                        decision_outcome.trace_records,
-                    );
+                        &run,
+                        &decision,
+                    ) {
+                        turn_result.hook_trace_records.push(record);
+                    }
                 }
-                if let Some(record) = runtime.record_planner_graph_decision_trace(
-                    run.session_id.as_deref(),
-                    &trace_turn_id,
-                    &run,
-                    &decision,
-                ) {
-                    turn_result.hook_trace_records.push(record);
-                }
+                (turn_result, handoff, decision)
             }
-            (turn_result, handoff, decision)
         };
+
+        if turn_result.phase == SUSPENDED_TURN_PHASE {
+            let run = {
+                let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
+                graph_runs.load_run(&run_id).ok_or_else(|| {
+                    format!("Graph run `{run_id}` failed to load after Ask suspension.")
+                })?
+            };
+            let event = GraphRunEvent {
+                run_id: run.id.clone(),
+                kind: GraphRunEventKind::Updated,
+                phase: GraphRunPhase::WaitingUser,
+                summary: format!("Ask awaits a host answer before run `{run_id}` resumes."),
+                step_count: run.steps.len(),
+                updated_at_ms: run.updated_at_ms,
+                hook_point: None,
+                canonical_event_type: None,
+                canonical_phase: None,
+            };
+            return Ok(GraphRunTurnResponse {
+                run,
+                handoff,
+                decision,
+                event,
+                turn_result,
+            });
+        }
 
         let advance = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
@@ -2423,21 +2548,24 @@ mod tests {
         HookSideEffectPersistenceRequirements, HookStructuredResult, HookTraceRequirements,
         NoopHookExecutor, PlannerFactsEnvelope, PlannerHookPoint, TurnHookPoint,
     };
-    use crate::agent::planner::LocalTurnPlanner;
+    use crate::agent::planner::{LocalTurnPlanner, TurnPlanner};
     use crate::agent::provider::ProviderAuthType;
     use crate::agent::provider::ProviderProtocol;
     use crate::agent::runtime::TurnStreamEvent;
     use crate::agent::session::SessionStore;
     use crate::agent::telemetry::DefaultTurnTelemetryBuilder;
-    use crate::agent::tool_runtime::{FakeClock, InvocationOrigin, ToolDispatchRequest};
+    use crate::agent::tool_runtime::{
+        FakeClock, InvocationOrigin, PendingControlRequestKind, PendingControlRequestState,
+        ToolDispatchRequest,
+    };
     use crate::agent::tools::ToolRouter;
     use crate::agent::tools::{
-        ToolDescriptor, ToolDescriptorSource, ToolDisplayMetadata, ToolExecutionPolicy, ToolExposure,
-        ToolHandlerProvenance, ToolIdentity, ToolKind, ToolPermissionDeclaration,
-        ToolRegistrySnapshot,
+        ToolCall, ToolDescriptor, ToolDescriptorSource, ToolDisplayMetadata, ToolExecutionPolicy,
+        ToolExposure, ToolHandlerProvenance, ToolIdentity, ToolKind, ToolPermissionDeclaration,
+        ToolPlan, ToolRegistrySnapshot,
     };
     use crate::agent::turn_flow::TurnEventSink;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -2787,6 +2915,34 @@ mod tests {
                 supports_streaming: true,
                 supports_image_input: false,
                 supports_reasoning: true,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::EffortStandard,
+        }
+    }
+
+    /// 非 reasoning 模型配置：走 planner 预检决策 + tool-selection 修补流程（Ask stream 测试用，
+    /// 与 runtime 测试的 `test_chat_provider_selection` 一致）。
+    fn test_chat_provider_selection(base_url: String) -> ResolvedProviderSelection {
+        ResolvedProviderSelection {
+            requested_name: "test-openai-chat".to_string(),
+            provider_name: "test-openai-chat".to_string(),
+            protocol: ProviderProtocol::OpenAi,
+            base_url,
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "TEST_API_KEY".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: "gpt-4.1-mini".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: false,
+                supports_reasoning: false,
                 ..Default::default()
             },
             thinking_param_pattern: ThinkingParamPattern::EffortStandard,
@@ -7793,7 +7949,34 @@ mod tests {
         assert_eq!(waits[0]["requestId"].as_str(), Some(request_id.as_str()));
         assert_eq!(waits[0]["expectedVersion"].as_u64(), Some(pending.version));
 
-        // Stale version rejected by the graph resume.
+        // Phase-4 P1-2: graph_resume_ask refuses to resume a request that has not been
+        // CAS-consumed through the Ask control surface — it must not bypass the single
+        // consumption entry point with an arbitrary answer.
+        let unconsumed = control_plane
+            .graph_resume_ask("run-ask", &request_id, pending.version, json!("continue"))
+            .expect_err("resume of an unconsumed request must fail closed");
+        assert!(
+            unconsumed.contains("CAS-consumed") || unconsumed.contains("cannot resume"),
+            "{unconsumed}"
+        );
+
+        // The host answers through the shared dispatcher (CAS consumes the pending request).
+        let authorization =
+            crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+                &pending,
+                Some(json!("continue")),
+            );
+        let consumed = control_plane
+            .ask_dispatcher
+            .answer_control_request(&request_id, &authorization)
+            .expect("answer must succeed on shared dispatcher");
+        assert_eq!(
+            consumed.request.state,
+            PendingControlRequestState::Consumed
+        );
+
+        // Stale version rejected by the graph resume (binding version must be presented, not the
+        // post-consumption request version).
         let stale = control_plane
             .graph_resume_ask("run-ask", &request_id, pending.version + 1, json!("continue"))
             .expect_err("stale graph resume must fail closed");
@@ -7807,5 +7990,179 @@ mod tests {
         assert_eq!(resumed["terminalResult"]["output"]["answer"].as_str(), Some("continue"));
 
         assert_eq!(control_plane.graph_list_ask_waits("run-ask").as_array().map(Vec::len), Some(0));
+    }
+
+    struct ForcedToolPlanner {
+        tool_name: String,
+        arguments: serde_json::Value,
+    }
+
+    impl TurnPlanner for ForcedToolPlanner {
+        fn preflight_decision(
+            &self,
+            _user_message: &str,
+            _history: &[crate::agent::session::TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+        ) -> Option<crate::agent::provider::ProviderDecision> {
+            Some(crate::agent::provider::ProviderDecision {
+                output_text: String::new(),
+                tool_call: Some(ToolCall {
+                    call_id: Some("forced-stream-tool-call".to_string()),
+                    name: self.tool_name.clone(),
+                    arguments: self.arguments.clone(),
+                    plan: Some(ToolPlan {
+                        kind: "forced".to_string(),
+                        summary: format!("强制执行工具 `{}`。", self.tool_name),
+                        parallel: false,
+                        continue_on_error: false,
+                        steps: Vec::new(),
+                    }),
+                }),
+                reasoning_content: None,
+                reasoning_content_value: None,
+                assistant_message: None,
+                provider_source: "planner_preflight".to_string(),
+                provider_mode: "preflight".to_string(),
+                fallback_reason: None,
+                token_usage: None,
+            })
+        }
+
+        fn select_tool_call(
+            &self,
+            _user_message: &str,
+            _history: &[crate::agent::session::TurnHistoryMessage],
+            _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
+            provider_tool_call: Option<ToolCall>,
+        ) -> Option<ToolCall> {
+            provider_tool_call
+        }
+    }
+
+    #[test]
+    fn graph_run_stream_ask_suspends_returns_waiting_user_and_resumes_unique_terminal() {
+        // PA-076 P1-1: the frontend's main path is the graph-run stream. A real streamed turn
+        // must persist the Ask pending request against run/turn facts, `execute_graph_run_stream`
+        // must return a `WaitingUser` suspension (provider never called again), and the host
+        // answering through the shared dispatcher must let `graph_resume_ask` inject exactly one
+        // terminal result keyed to the original tool-call id.
+        let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let workspace = std::env::temp_dir().join(format!(
+            "pony-ask-cp-stream-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("create temp workspace for ask cp stream test");
+        let server = MockHttpServer::start(Vec::new());
+        let runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver {
+                selection: test_chat_provider_selection(server.base_url.clone()),
+            }),
+            Box::new(crate::agent::governed_executor::build_governed_executor(
+                Some(workspace),
+            )),
+            Box::new(ForcedToolPlanner {
+                tool_name: "Ask".to_string(),
+                arguments: json!({ "text": "继续吗？", "description": "test" }),
+            }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        let control_plane = HostControlPlaneBuilder::new().runtime(runtime).build();
+
+        let (started, prepared) = control_plane
+            .prepare_start_graph_run_stream(StartGraphRunStreamCommand {
+                turn_id: "run-ask-stream-turn-1".to_string(),
+                run_id: Some("run-ask-stream".to_string()),
+                goal: "ask stream flow".to_string(),
+                input: TurnInput {
+                    message: "start the ask stream run".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-ask-stream".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+            })
+            .expect("graph stream run should prepare");
+        assert_eq!(started.run.phase, GraphRunPhase::Running);
+
+        let suspended = control_plane
+            .execute_graph_run_stream(&NoopSink, prepared)
+            .expect("graph stream run should execute");
+        assert_eq!(suspended.turn_result.phase, SUSPENDED_TURN_PHASE);
+        assert!(suspended
+            .turn_result
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("control_outcome_pending")));
+        assert_eq!(suspended.run.phase, GraphRunPhase::WaitingUser);
+        assert_eq!(suspended.decision.kind, GraphDecisionKind::WaitUser);
+        assert_eq!(
+            suspended.decision.reason,
+            GraphDecisionReason::TurnCompletedAwaitingUser
+        );
+        assert_eq!(suspended.event.kind, GraphRunEventKind::Updated);
+
+        // The Ask request was persisted against the real run/turn, and the run is bound.
+        let pending = control_plane.ask_dispatcher.pending_requests();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request_kind, PendingControlRequestKind::Interaction);
+        assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-stream"));
+        assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-stream"));
+        assert_eq!(pending[0].turn_id, "run-ask-stream-turn-1");
+        assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
+        let request_id = pending[0].request_id.clone();
+        let expected_version = pending[0].version;
+        let original_call_id = pending[0].call_id.clone();
+        assert_eq!(
+            control_plane
+                .graph_list_ask_waits("run-ask-stream")
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        // Host answers through the shared dispatcher (same store the runtime persisted into).
+        let authorization =
+            crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+                &pending[0],
+                Some(json!("继续")),
+            );
+        let consumed = control_plane
+            .ask_dispatcher
+            .answer_control_request(&request_id, &authorization)
+            .expect("answer must succeed on shared dispatcher");
+        assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
+        assert_eq!(consumed.answer.as_ref().and_then(Value::as_str), Some("继续"));
+
+        // Graph resume injects exactly one terminal result for the original tool-call id.
+        let resumed = control_plane
+            .graph_resume_ask("run-ask-stream", &request_id, expected_version, json!("继续"))
+            .expect("graph resume must succeed");
+        assert_eq!(resumed["callId"].as_str(), Some(original_call_id.as_str()));
+        assert_eq!(
+            resumed["terminalResult"]["toolCallId"].as_str(),
+            Some(original_call_id.as_str())
+        );
+        assert_eq!(
+            resumed["terminalResult"]["output"]["answer"].as_str(),
+            Some("继续")
+        );
+        assert_eq!(
+            control_plane
+                .graph_list_ask_waits("run-ask-stream")
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
+
+        server.finish();
+        drop(rt_guard);
     }
 }

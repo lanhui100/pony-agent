@@ -125,6 +125,10 @@ impl ToolExecutor for GovernedToolExecutor {
         }
         result
     }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

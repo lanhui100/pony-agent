@@ -11,6 +11,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::agent::tool_runtime::{PrimitiveToolHandler, PrimitiveToolHandlerRequest};
+
 /// Bounded metadata read used for header sniffing and dimension parsing. Kept independent of
 /// `max_bytes` so a tiny byte budget cannot make an otherwise valid image unreadable.
 const HEADER_SNIFF_BYTES: usize = 8 * 1024;
@@ -37,7 +39,7 @@ impl Default for ImageReadOptions {
             max_width: 8_192,
             max_height: 8_192,
             max_bytes: 2 * 1024 * 1024,
-            include_bytes: true,
+            include_bytes: false,
         }
     }
 }
@@ -328,6 +330,65 @@ fn bmp_dimensions(header: &[u8]) -> Result<(u64, u64), String> {
     Ok((width as u64, height.unsigned_abs()))
 }
 
+/// Primitive tool handler adapting [`view_workspace_image`] to the governed dispatcher (PA-076 P2-6).
+/// The handler parses `path` (required) and optional `includeBytes`/`maxWidth`/`maxHeight`/`maxBytes`
+/// overrides from the call arguments and delegates to `view_workspace_image`, returning the serialized
+/// [`ImageArtifact`] on success or a structured `code: message` error on failure.
+#[derive(Clone, Debug)]
+pub struct ViewImageHandler {
+    root: std::path::PathBuf,
+    default_options: ImageReadOptions,
+}
+
+impl ViewImageHandler {
+    pub fn new(root: std::path::PathBuf) -> Self {
+        Self {
+            root,
+            default_options: ImageReadOptions::default(),
+        }
+    }
+}
+
+impl PrimitiveToolHandler for ViewImageHandler {
+    fn execute(
+        &self,
+        request: &PrimitiveToolHandlerRequest,
+    ) -> Result<serde_json::Value, String> {
+        let path = request
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| "missing_argument: view_image 缺少必填参数 `path`".to_string())?;
+        let options = ImageReadOptions {
+            include_bytes: request
+                .arguments
+                .get("includeBytes")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(self.default_options.include_bytes),
+            max_width: request
+                .arguments
+                .get("maxWidth")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(self.default_options.max_width),
+            max_height: request
+                .arguments
+                .get("maxHeight")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(self.default_options.max_height),
+            max_bytes: request
+                .arguments
+                .get("maxBytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(self.default_options.max_bytes),
+        };
+        let artifact = view_workspace_image(path, &self.root, &options)?;
+        serde_json::to_value(&artifact)
+            .map_err(|e| format!("handler_error: view_image artifact serialization failed: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +502,7 @@ mod tests {
         let path = workspace.write("photo.png", &[]);
         write_png(&path, 320, 240);
 
+        // Default is reference-based: include_bytes=false (design Decision 11).
         let artifact =
             view_workspace_image("photo.png", workspace.path(), &ImageReadOptions::default())
                 .expect("workspace png should be viewable");
@@ -449,7 +511,23 @@ mod tests {
         assert_eq!(artifact.mime_type, "image/png");
         assert_eq!(artifact.bytes_len, std::fs::metadata(&path).unwrap().len());
         assert!(!artifact.truncated);
-        let bytes = artifact.bytes.expect("default options embed capped bytes");
+        assert!(
+            artifact.bytes.is_none(),
+            "default options produce a reference-based artifact (include_bytes=false)"
+        );
+
+        // With include_bytes=true, the bytes are present and truncated only when limits exceeded.
+        let artifact = view_workspace_image(
+            "photo.png",
+            workspace.path(),
+            &ImageReadOptions {
+                include_bytes: true,
+                ..ImageReadOptions::default()
+            },
+        )
+        .expect("workspace png with bytes should be viewable");
+        assert!(artifact.bytes.is_some());
+        let bytes = artifact.bytes.expect("include_bytes=true embeds bytes");
         assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
     }
 
@@ -526,13 +604,14 @@ mod tests {
 
         let options = ImageReadOptions {
             max_bytes: 16,
+            include_bytes: true,
             ..ImageReadOptions::default()
         };
         let artifact =
             view_workspace_image("big.png", workspace.path(), &options).expect("read should succeed");
         assert!(artifact.truncated, "byte overflow must surface truncated evidence");
         assert_eq!(artifact.bytes_len, full_len);
-        let bytes = artifact.bytes.expect("capped payload should be present");
+        let bytes = artifact.bytes.expect("capped payload should be present when include_bytes is true");
         assert_eq!(bytes.len(), 16);
     }
 
@@ -615,5 +694,109 @@ mod tests {
             view_workspace_image("empty.png", workspace.path(), &ImageReadOptions::default())
                 .expect_err("empty file must be rejected");
         assert!(empty_error.contains("not a supported image"), "{empty_error}");
+    }
+
+    #[test]
+    fn include_bytes_default_is_false_and_reference_only() {
+        // design Decision 11: default artifact carries only the controlled reference + metadata;
+        // the host/provider adapter decides when to encode bytes.
+        let workspace = TempWorkspace::new("include_bytes_default");
+        write_png(&workspace.path().join("photo.png"), 8, 8);
+
+        let artifact =
+            view_workspace_image("photo.png", workspace.path(), &ImageReadOptions::default())
+                .expect("reference-based default must succeed");
+        assert!(!artifact.truncated);
+        assert!(artifact.bytes.is_none());
+        assert_eq!(artifact.width, 8);
+        assert_eq!(artifact.mime_type, "image/png");
+    }
+
+    // ── ViewImageHandler ────────────────────────────────────────────────────────────────────
+
+    fn handler_request(arguments: serde_json::Value) -> crate::agent::tool_runtime::PrimitiveToolHandlerRequest {
+        crate::agent::tool_runtime::PrimitiveToolHandlerRequest {
+            descriptor_id: "builtin:view_image".to_string(),
+            arguments,
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn handler_returns_reference_artifact_with_default_options() {
+        let workspace = TempWorkspace::new("handler_ref");
+        write_png(&workspace.path().join("photo.png"), 100, 50);
+
+        let handler = ViewImageHandler::new(workspace.path().to_path_buf());
+        let output = handler
+            .execute(&handler_request(serde_json::json!({ "path": "photo.png" })))
+            .expect("handler should succeed");
+        assert_eq!(output["width"], 100);
+        assert_eq!(output["height"], 50);
+        assert_eq!(output["mimeType"], "image/png");
+        assert_eq!(output["bytes"], serde_json::Value::Null);
+        assert_eq!(output["truncated"], false);
+    }
+
+    #[test]
+    fn handler_with_include_bytes_true_embeds_payload() {
+        let workspace = TempWorkspace::new("handler_bytes");
+        write_png(&workspace.path().join("photo.png"), 16, 16);
+
+        let handler = ViewImageHandler::new(workspace.path().to_path_buf());
+        let output = handler
+            .execute(&handler_request(serde_json::json!({
+                "path": "photo.png",
+                "includeBytes": true
+            })))
+            .expect("handler should succeed");
+        assert!(output["bytes"].is_array() || output["bytes"].is_string());
+        assert!(!output["bytes"].is_null());
+    }
+
+    #[test]
+    fn handler_max_bytes_override_caps_and_marks_truncated() {
+        let workspace = TempWorkspace::new("handler_cap");
+        write_png(&workspace.path().join("photo.png"), 64, 64);
+        let full_len = std::fs::metadata(&workspace.path().join("photo.png"))
+            .unwrap()
+            .len();
+        assert!(full_len > 16);
+
+        let handler = ViewImageHandler::new(workspace.path().to_path_buf());
+        let output = handler
+            .execute(&handler_request(serde_json::json!({
+                "path": "photo.png",
+                "includeBytes": true,
+                "maxBytes": 16
+            })))
+            .expect("handler should succeed with capped bytes");
+        assert_eq!(output["truncated"], true);
+        assert_eq!(output["bytesLen"], full_len);
+        let bytes = output["bytes"].as_array().map(Vec::len).unwrap_or(0);
+        assert_eq!(bytes, 16);
+    }
+
+    #[test]
+    fn handler_missing_path_is_missing_argument_error() {
+        let workspace = TempWorkspace::new("handler_missing");
+        let handler = ViewImageHandler::new(workspace.path().to_path_buf());
+        let error = handler
+            .execute(&handler_request(serde_json::json!({})))
+            .expect_err("missing path must fail closed");
+        assert!(error.starts_with("missing_argument:"), "{error}");
+    }
+
+    #[test]
+    fn handler_unknown_format_rejects_with_mime_error() {
+        let workspace = TempWorkspace::new("handler_format");
+        std::fs::write(workspace.path().join("notes.txt"), b"not an image\n")
+            .expect("write fixture");
+
+        let handler = ViewImageHandler::new(workspace.path().to_path_buf());
+        let error = handler
+            .execute(&handler_request(serde_json::json!({ "path": "notes.txt" })))
+            .expect_err("non-image extension must fail closed");
+        assert!(error.contains("unsupported image extension"), "{error}");
     }
 }

@@ -293,9 +293,18 @@ impl AgentRuntime {
         };
 
         let result = match self.capability_registry.resolve_invocation(&request) {
-            Ok(crate::agent::capability_bridge::CapabilityBridgeAction::Resource(action)) => self
+            // design Decision 11 forbids echoing the request arguments back as resource content.
+            // The real McpTransport-backed `McpResourceSurface` (mcp_resources.rs, which rejects
+            // argument echoes) is not yet wired into this production registry path, so resource
+            // reads fail closed with `SourceUnavailable` ("source transport not wired") until that
+            // surface lands. Wiring McpResourceSurface is follow-up work; fail-closed is the
+            // design-compliant terminal state before wiring. The `arguments` are never used as
+            // content.
+            Ok(crate::agent::capability_bridge::CapabilityBridgeAction::Resource(_)) => self
                 .capability_registry
-                .resource_fetch_success_result(action, arguments),
+                .resource_fetch_failure_result(&request, CapabilityFailureKind::SourceUnavailable),
+            // Any other resolved action (Tool / PromptTemplate) reaching the resource entrypoint
+            // is a registry shape violation and fails closed without echoing arguments.
             Ok(_) => self
                 .capability_registry
                 .resource_fetch_failure_result(&request, CapabilityFailureKind::MalformedResponse),

@@ -306,13 +306,31 @@ no provider-consumable result, so `into_legacy_result` fails closed with
    suspension, and exactly-one-terminal-result resume happen with real facts
    rather than a migration evaluator. The graph wait/resume and control-plane
    surface already exist; what remains is the runtime turn-loop wiring.
-2. **Real `SandboxBackend` for `Run`.** `NoSandboxBackend` + `SandboxSupportMatrix`
-   provide the fail-closed gate: autonomous `Run` returns `sandbox_unavailable`
-   until a real sandbox backend (workspace files / network / environment /
-   handle-inheritance constraints) is registered on the dispatcher. The process
-   lifecycle (`ProcessManager`) and containment strategy decision (Windows
-   non-breakaway Job Object vs process group as best-effort) are the remaining
-   pieces before unattended Run can be enabled.
+2. **Real `SandboxBackend` for `Run` — adjudicated 2026-08-04 (PA-076 remaining
+   item 4).** This note is **resolved as: fail-closed is the design-compliant
+   terminal state for this card.** With `NoSandboxBackend` + `SandboxSupportMatrix`
+   registered, autonomous `Run` returns `sandbox_unavailable`, which is exactly
+   what design.md Decision 7 and the process-tool-lifecycle spec prescribe:
+   「无人值守 `Run` 只在真实 sandbox 可用时启用；无 sandbox backend 的平台 fail
+   closed」and「runtime SHALL fail closed 并返回 `sandbox_unavailable`；SHALL NOT
+   退化为普通 shell 或只使用 denylist/process group」. An unsandboxed run is only
+   ever a per-invocation host approval, flagged high-risk in result and trace —
+   never a silent downgrade (design.md Non-Goals also forbids using a Job Object
+   or process group as a sandbox/approval substitute; they are defense-in-depth
+   containment only).
+   The feasibility evaluation
+   (`management/task-system/02_REVIEWS/2026-08-04-pa076-sandbox-backend-evaluation.md`)
+   confirms `windows-sys` 0.61.2 is already in the dependency tree (transitive)
+   and exposes the complete Job Object API under the `Win32_System_JobObjects`
+   feature (`CreateJobObjectW`, `SetInformationJobObject` with
+   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and breakaway flags off,
+   `AssignProcessToJobObject`, `TerminateJobObject`), so a real **Windows Job
+   Object containment** backend is feasible and is split out as follow-up card
+   **PA-077**; a **full sandbox** (workspace file/network containment + Job
+   Object) is a larger, separate follow-up. Until those land, fail-closed remains
+   the correct and compliant terminal state; the containment strategy decision
+   (Windows non-breakaway Job Object vs best-effort process group) stays recorded
+   in `sandbox.rs`.
 
 ## Code Layout
 
