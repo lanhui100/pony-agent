@@ -26,13 +26,15 @@ use crate::agent::dispatcher::{
 use crate::agent::dispatcher_composites::{
     register_governed_composites, GovernedToolExecutor,
 };
+use crate::agent::document_conversion::ReadDocumentHandler;
 use crate::agent::image_artifact::ViewImageHandler;
 use crate::agent::plan_state::{PlanControlHandler, PlanStore};
 use crate::agent::tool_runtime::{
     InvocationOrigin, PrimitiveToolHandler, PrimitiveToolHandlerRequest, RuntimeClock, SystemClock,
 };
 use crate::agent::tools::{
-    ToolCall, ToolRegistrySnapshot, ToolRouter, TOOL_PLAN_CONTROL, TOOL_VIEW_IMAGE,
+    ToolCall, ToolRegistrySnapshot, ToolRouter, TOOL_PLAN_CONTROL, TOOL_WORKSPACE_READ_DOCUMENT,
+    TOOL_VIEW_IMAGE,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -44,6 +46,7 @@ const READ_ONLY_PRIMITIVES: &[&str] = &[
     "workspace_list_files",
     "workspace_read_file",
     "workspace_read_file_segment",
+    "workspace_read_document",
     "workspace_path_info",
     "workspace_search_text",
     "workspace_glob_files",
@@ -163,6 +166,10 @@ pub fn build_governed_executor(workspace_root: Option<PathBuf>) -> GovernedToolE
     // Whether the encoded bytes reach a model is a provider modality choice. ──
     let view_image_handler = Arc::new(ViewImageHandler::new(workspace.clone()));
 
+    // ── workspace_read_document: local office document → Markdown via anydoc, workspace-scoped,
+    // with explicit output/input byte budgets and truncated evidence. ──
+    let read_document_handler = Arc::new(ReadDocumentHandler::new(workspace.clone()));
+
     // Register every builtin primitive handler (composites are registered separately below).
     for descriptor in &registry.descriptors {
         let primitive = descriptor.identity.primitive_name.clone();
@@ -185,6 +192,13 @@ pub fn build_governed_executor(workspace_root: Option<PathBuf>) -> GovernedToolE
             dispatcher.register_handler(
                 descriptor.identity.descriptor_id.clone(),
                 Arc::clone(&view_image_handler) as Arc<dyn PrimitiveToolHandler>,
+            );
+            continue;
+        }
+        if primitive == TOOL_WORKSPACE_READ_DOCUMENT {
+            dispatcher.register_handler(
+                descriptor.identity.descriptor_id.clone(),
+                Arc::clone(&read_document_handler) as Arc<dyn PrimitiveToolHandler>,
             );
             continue;
         }

@@ -82,6 +82,12 @@
 - [PA-076 阶段 1–7 + runtime 切换收口日志](../management/task-system/99_LOGS/2026-08-02-pa076-phases-1-7-and-runtime-switch.md)
 - [PA-076 阶段 3 审核](../management/task-system/02_REVIEWS/2026-08-02-pa076-phase3-review.md)
 
+## 8.1 工具面新增变更
+
+- [workspace_read_document（anydoc 文档转换）OpenSpec 变更（已归档）](../openspec/changes/archive/2026-08-06-workspace-read-document-anydoc/proposal.md)
+- [workspace_read_document canonical spec](../openspec/specs/workspace-read-document/spec.md)
+- [workspace_read_document 收口日志](../management/task-system/99_LOGS/2026-08-06-workspace-read-document-anydoc-closeout.md)
+
 ## 8. OpenSpec
 
 - [OpenSpec 根目录](../openspec)

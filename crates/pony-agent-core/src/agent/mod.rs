@@ -9,6 +9,7 @@ pub mod context;
 pub mod control_plane;
 pub mod dispatcher;
 pub mod dispatcher_composites;
+pub mod document_conversion;
 pub mod execution_control;
 pub mod frontend_diagnostics;
 pub mod graph;

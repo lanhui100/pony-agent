@@ -80,6 +80,10 @@ pub(crate) const TOOL_PLAN_CONTROL: &str = "plan_control";
 /// (design.md Decision 11). The handler lives in
 /// [`crate::agent::image_artifact::ViewImageHandler`].
 pub(crate) const TOOL_VIEW_IMAGE: &str = "view_image";
+/// Workspace-scoped office document conversion (Firecrawl anydoc): converts Word/PowerPoint/
+/// Excel/ODF/RTF/EPUB/CSV/PDF to GitHub-Flavored Markdown, local and offline. The handler
+/// lives in [`crate::agent::document_conversion::ReadDocumentHandler`].
+pub(crate) const TOOL_WORKSPACE_READ_DOCUMENT: &str = "workspace_read_document";
 
 const MAX_FULL_READ_BYTES: u64 = 120_000;
 const MAX_PATH_REPAIR_SEARCH_FILES: usize = 2_000;
@@ -92,6 +96,7 @@ const READ_ONLY_BATCH_CHILD_PRIMITIVES: &[&str] = &[
     TOOL_WORKSPACE_LIST_FILES,
     TOOL_WORKSPACE_READ_FILE,
     TOOL_WORKSPACE_READ_FILE_SEGMENT,
+    TOOL_WORKSPACE_READ_DOCUMENT,
     TOOL_WORKSPACE_PATH_INFO,
     TOOL_WORKSPACE_SEARCH_TEXT,
     TOOL_WORKSPACE_GLOB_FILES,
@@ -3401,6 +3406,25 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
             })),
         },
         ToolDefinition {
+            name: TOOL_WORKSPACE_READ_DOCUMENT,
+            description: "把当前工作区内的办公文档（Word/PPT/Excel/ODF/RTF/EPUB/CSV/PDF）本地转换为 GitHub 风格 Markdown 文本返回，需要提供相对路径；扫描版 PDF（无内嵌文本）不支持，转换结果超出 maxOutputBytes 时截断并在 truncated 字段给出证据。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "当前工作区内的相对文档路径（.doc/.docx/.ppt/.pptx/.xls/.xlsx/.odt/.ods/.odp/.rtf/.epub/.csv/.pdf 等）"
+                    },
+                    "maxOutputBytes": {
+                        "type": "integer",
+                        "description": "转换结果 Markdown 输出上限（字节），默认 524288"
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
             name: TOOL_WORKSPACE_READ_FILE_SEGMENT,
             description: "按行读取当前工作区文件的一段内容，适合大文件局部查看。",
             input_schema: with_description(json!({
@@ -3893,6 +3917,7 @@ mod contract_view_tests {
                 "Run",
                 "Ask",
                 "Read",
+                "ReadDocument",
                 "List",
                 "Search",
                 "Glob",
@@ -3901,7 +3926,7 @@ mod contract_view_tests {
                 "MCPResource",
                 "ToolSearch",
                 "Write",
-"Edit",
+                "Edit",
                 "BatchExecute",
                 "Plan",
                 "ViewImage"
@@ -3913,6 +3938,7 @@ mod contract_view_tests {
                 "workspace_run_command",
                 "echo_input",
                 "workspace_gather_context",
+                "workspace_read_document",
                 "workspace_list_files",
                 "workspace_search_text",
                 "workspace_glob_files",
@@ -3948,14 +3974,15 @@ mod contract_view_tests {
             .map(|view| view.name.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 19, "baseline internal primitive count");
-        assert_eq!(names.len(), 15, "baseline product tool count");
+        assert_eq!(tools.len(), 20, "baseline internal primitive count");
+        assert_eq!(names.len(), 16, "baseline product tool count");
         assert_eq!(
             names,
             vec![
                 "Run",
                 "Ask",
                 "Read",
+                "ReadDocument",
                 "List",
                 "Search",
                 "Glob",
@@ -4114,7 +4141,7 @@ mod contract_view_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 16);
         assert!(registry.resolve("Run").is_some());
         assert!(registry.resolve("workspace.run_command").is_some());
         assert!(registry.resolve("workspace_path_info").is_some());
@@ -4308,6 +4335,9 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
         }
         TOOL_PLAN_CONTROL | "plan.control" => Some(TOOL_PLAN_CONTROL),
         TOOL_VIEW_IMAGE | "view.image" => Some(TOOL_VIEW_IMAGE),
+        TOOL_WORKSPACE_READ_DOCUMENT | "workspace.read_document" => {
+            Some(TOOL_WORKSPACE_READ_DOCUMENT)
+        }
         _ => None,
     }
 }
@@ -4340,6 +4370,7 @@ fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
         }
         TOOL_PLAN_CONTROL => vec![TOOL_PLAN_CONTROL, "plan.control"],
         TOOL_VIEW_IMAGE => vec![TOOL_VIEW_IMAGE, "view.image"],
+        TOOL_WORKSPACE_READ_DOCUMENT => vec![TOOL_WORKSPACE_READ_DOCUMENT, "workspace.read_document"],
         _ => Vec::new(),
     }
 }
@@ -4364,6 +4395,12 @@ fn execution_policy_for_primitive(primitive: &str) -> ToolExecutionPolicy {
             // the result budget should not truncate a valid bounded payload (design Decision 11:
             // reference-based by default, but caller-adjustable).
             policy.result_budget_bytes = 2 * 1024 * 1024;
+        }
+        TOOL_WORKSPACE_READ_DOCUMENT => {
+            policy.concurrent_safe = true;
+            // Converted Markdown can reach the default 512 KiB output cap, so the result budget
+            // must not truncate a valid bounded payload.
+            policy.result_budget_bytes = crate::agent::document_conversion::DEFAULT_MAX_OUTPUT_BYTES as usize;
         }
         TOOL_WORKSPACE_RUN_COMMAND => {
             policy.default_timeout_ms = DEFAULT_RUN_TIMEOUT_MS;
@@ -4419,6 +4456,7 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_WORKSPACE_GATHER_CONTEXT => "Read",
         TOOL_PLAN_CONTROL => "Plan",
         TOOL_VIEW_IMAGE => "ViewImage",
+        TOOL_WORKSPACE_READ_DOCUMENT => "ReadDocument",
         _ => return None,
     };
     Some(mapped)
@@ -4463,6 +4501,7 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_WORKSPACE_RUN_COMMAND => ToolKind::Execute,
         TOOL_PLAN_CONTROL => ToolKind::Write,
         TOOL_VIEW_IMAGE => ToolKind::Read,
+        TOOL_WORKSPACE_READ_DOCUMENT => ToolKind::Read,
         _ => ToolKind::External,
     }
 }
@@ -4488,6 +4527,7 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         TOOL_WORKSPACE_PATH_INFO => ToolExposure::Deferred,
         TOOL_PLAN_CONTROL => ToolExposure::ModelVisible,
         TOOL_VIEW_IMAGE => ToolExposure::ModelVisible,
+        TOOL_WORKSPACE_READ_DOCUMENT => ToolExposure::ModelVisible,
         _ => ToolExposure::Internal,
     }
 }
@@ -4509,6 +4549,7 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         "Edit" => Some("编辑".to_string()),
         "Plan" => Some("计划".to_string()),
         "ViewImage" => Some("看图".to_string()),
+        "ReadDocument" => Some("读文档".to_string()),
         _ => None,
     };
     ToolDisplayMetadata { display_name_zh }
@@ -4532,6 +4573,7 @@ pub fn default_permission_facts_for_name(name: &str) -> ToolPermissionFacts {
         TOOL_WORKSPACE_RUN_COMMAND => Some("workspace.execute".to_string()),
         TOOL_TIME_NOW | TOOL_ECHO_INPUT | TOOL_PLAN_CONTROL => None,
         TOOL_VIEW_IMAGE => Some("workspace.read".to_string()),
+        TOOL_WORKSPACE_READ_DOCUMENT => Some("workspace.read".to_string()),
         _ => None,
     };
     ToolPermissionFacts {

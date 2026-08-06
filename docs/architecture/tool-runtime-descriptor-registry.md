@@ -257,6 +257,22 @@ wins.
   source revision, expires at turn end / source replacement / reload, and is
   recorded in trace.
 
+## Workspace Document Conversion (`workspace_read_document`, anydoc)
+
+- `document_conversion.rs`: workspace-scoped `workspace_read_document` converts
+  office documents (Word / PowerPoint / Excel / ODF / RTF / EPUB / CSV / PDF) to
+  GitHub-Flavored Markdown **locally** through the Firecrawl `anydoc` crate
+  (crates.io `=0.1.6`, MIT, pure Rust, no external service). Mirrors
+  `image_artifact`'s safety posture: path must canonicalize inside the workspace
+  (fail closed), input capped at 20 MiB, converted output capped at 512 KiB with
+  explicit `truncated` evidence plus full `markdown_len`, and content-based
+  format detection (`Format::from_bytes`, with path-extension fallback for
+  signature-less CSV) so mislabeled files still convert. Scanned/image-only PDFs
+  (no embedded text, would need OCR) fail closed with a clear diagnostic. The
+  dedicated `ReadDocumentHandler` is registered in `build_governed_executor`
+  (same pattern as `ViewImageHandler`), exposed `ModelVisible` as
+  `workspace.read`.
+
 ## Validation Rules
 
 `ToolRegistrySnapshot::from_descriptors` rejects:
@@ -350,6 +366,7 @@ no provider-consumable result, so `into_legacy_result` fails closed with
 | `crates/pony-agent-core/src/agent/web_access.rs` | `WebAccessPolicy`, `PinnedConnector`, structured deny reasons (phase 6) |
 | `crates/pony-agent-core/src/agent/search.rs` | `SearchEngine` — regex / globset / ignore semantics (phase 6) |
 | `crates/pony-agent-core/src/agent/image_artifact.rs` | Workspace-scoped `view_image` (phase 7) |
+| `crates/pony-agent-core/src/agent/document_conversion.rs` | Workspace-scoped `workspace_read_document` via Firecrawl `anydoc` (local office → Markdown) |
 | `crates/pony-agent-core/src/agent/mcp_resources.rs` | MCP resource list/templates/read via `McpTransport` (phase 7) |
 | `crates/pony-agent-core/src/agent/tool_search_elevation.rs` | Deferred ToolSearch elevation (phase 7) |
 | `crates/pony-agent-core/src/agent/graph.rs` | `ask_waits` binding, `bind_ask_wait` / `resume_ask_wait`, `waiting_user` suspension |
