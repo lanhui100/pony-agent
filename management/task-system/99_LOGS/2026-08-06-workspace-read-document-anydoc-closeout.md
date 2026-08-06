@@ -37,7 +37,7 @@
 
 ## 下一步动作
 
-1. **提交**：仅提交本任务文件（core Cargo.toml / Cargo.lock / document_conversion.rs / tools.rs / governed_executor.rs / mod.rs / provider/mod.rs / 文档 / 归档变更目录），不含其他会话遗留改动（control_plane/mod.rs、runtime/mod.rs、src-tauri 下的临时 py 文件等）。
+1. ~~**提交**：仅提交本任务文件（core Cargo.toml / Cargo.lock / document_conversion.rs / tools.rs / governed_executor.rs / mod.rs / provider/mod.rs / 文档 / 归档变更目录），不含其他会话遗留改动（control_plane/mod.rs、runtime/mod.rs、src-tauri 下的临时 py 文件等）。~~ **已完成**：`fcecbd0`。注意：pre-commit 版本治理 hook 检测到 core 变更后自动 bump core `0.1.55 → 0.1.56` 并纳入提交（明确输出，非静默）；Cargo.lock 的版本同步按项目惯例由独立 `chore: sync Cargo.lock` 流程处理，不属于本任务。
 2. **provider 回归测试修复变更**：已委派子智能体（backend-dev）建立 OpenSpec 变更并修复 `resolve_selection_falls_back_to_selected_provider_and_model` 期望（确认 `a2636da` 变更意图后决定是修逻辑还是修测试基线）。
 
 ## 断点续跑提示
