@@ -8165,4 +8165,82 @@ mod tests {
         server.finish();
         drop(rt_guard);
     }
+
+    #[test]
+    fn graph_run_stream_normal_tool_turn_completes() {
+        // Regression: the app.s exact entry (prepare_start_graph_run_stream →
+        // execute_graph_run_stream) with a real workspace tool + followup must complete, not hang.
+        let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let workspace = std::env::temp_dir().join(format!(
+            "pony-repro-glob-cp-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("create temp workspace for repro");
+        std::fs::write(workspace.join("a.txt"), "hello").expect("write file");
+        // Streaming (SSE) followup response: the assistant's final answer after the glob tool
+        // executes — mirrors the real app's DeepSeek streaming provider.
+        let sse_chunks = [
+            json!({"choices": [{"delta": {"content": "done listing files"}}]}),
+            json!({"choices": [{"delta": {"content": "\n"}}]}),
+            json!({"choices": [{"delta": {}}]}),
+        ];
+        let mut sse_body = String::new();
+        for chunk in &sse_chunks {
+            sse_body.push_str(&format!("data: {chunk}\n\n"));
+        }
+        sse_body.push_str("data: [DONE]\n\n");
+        let server = MockHttpServer::start(vec![MockHttpResponse {
+            content_type: "text/event-stream",
+            body: sse_body,
+        }]);
+        let runtime = AgentRuntime::with_dependencies(
+            SessionStore::memory_only(),
+            Box::new(StaticResolver {
+                selection: test_provider_selection(server.base_url.clone()),
+            }),
+            Box::new(crate::agent::governed_executor::build_governed_executor(
+                Some(workspace.clone()),
+            )),
+            Box::new(ForcedToolPlanner {
+                tool_name: "workspace_glob_files".to_string(),
+                arguments: json!({ "pattern": "**/*" }),
+            }),
+            Box::new(DefaultTurnContextBuilder),
+            Box::new(DefaultTurnTelemetryBuilder),
+        );
+        let control_plane = HostControlPlaneBuilder::new().runtime(runtime).build();
+
+        let (started, prepared) = control_plane
+            .prepare_start_graph_run_stream(StartGraphRunStreamCommand {
+                turn_id: "run-repro-glob-turn-1".to_string(),
+                run_id: Some("run-repro-glob".to_string()),
+                goal: "repro glob flow".to_string(),
+                input: TurnInput {
+                    message: "list files".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-repro-glob".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+            })
+            .expect("repro graph stream should prepare");
+        assert_eq!(started.run.phase, GraphRunPhase::Running);
+
+        let result = control_plane
+            .execute_graph_run_stream(&NoopSink, prepared)
+            .expect("repro graph stream should execute and return");
+        // A normal tool turn must NOT suspend on an Ask wait.
+        assert_ne!(
+            result.turn_result.phase, SUSPENDED_TURN_PHASE,
+            "normal glob tool turn must not suspend"
+        );
+        server.finish();
+        drop(rt_guard);
+    }
 }

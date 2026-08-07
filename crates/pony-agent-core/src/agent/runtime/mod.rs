@@ -14082,6 +14082,73 @@ mod tests {
         }
 
         #[test]
+        fn governed_stream_normal_glob_tool_turn_completes() {
+            // Regression: a normal (non-Ask) workspace tool
+            // turn through the app's stream path must complete, not hang.
+            let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+            let workspace = temp_workspace_dir("repro-glob-stream");
+            std::fs::write(workspace.join("a.txt"), "hello").expect("write file");
+            std::fs::write(workspace.join("b.md"), "world").expect("write file");
+            let executor = build_governed_executor(Some(workspace.clone()));
+            // One followup response (the assistant's final answer after the tool executes).
+            let server = MockHttpServer::start(vec![json_completion("done listing files")]);
+            let mut runtime = AgentRuntime::with_dependencies(
+                SessionStore::memory_only(),
+                Box::new(StaticResolver {
+                    selection: test_chat_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(executor),
+                Box::new(ForcedToolPlanner {
+                    tool_name: "workspace_glob_files".to_string(),
+                    arguments: json!({ "pattern": "**/*" }),
+                }),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let sink = RecordingTurnEventSink::new();
+            let control = ExecutionControlRegistry::new();
+            control.register_turn(
+                "turn-repro-glob-1",
+                Some("session-repro-glob"),
+                Some("run-repro-glob"),
+            );
+            runtime.start_turn_stream_with_control_and_facts(
+                &sink,
+                &control,
+                "turn-repro-glob-1".to_string(),
+                TurnInput {
+                    message: "list files".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("session-repro-glob".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                },
+                RunTurnFacts {
+                    run_id: Some("run-repro-glob".to_string()),
+                    turn_id: Some("turn-repro-glob-1".to_string()),
+                    workspace_root: Some(workspace.display().to_string()),
+                },
+            );
+            let events = sink.events.borrow();
+            let names = || {
+                events
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                events.iter().any(|(name, _)| name == "turn:completed"),
+                "stream should complete a normal tool turn; got: {:?}",
+                names()
+            );
+        }
+
+        #[test]
         fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_original_call_id()
         {
             // PA-076 P1-1 end-to-end stream resume: the host answers the persisted Ask through the
