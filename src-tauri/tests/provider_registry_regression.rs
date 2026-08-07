@@ -381,7 +381,11 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
     assert_eq!(resolved.provider_name, "beta");
     assert_eq!(resolved.base_url, "https://beta.example/v1");
     assert_eq!(resolved.model, "claude-3-7-sonnet-latest");
-    assert_eq!(resolved.max_output_tokens, 64000);
+    // a2636da 引入 dedupe_provider_models：beta-chat 与 beta-fallback 共享模型值
+    // "claude-3-7-sonnet-latest"，后者被去重删除，selected_model_id 重定向到保留项
+    // beta-chat（max_output_tokens=4096）。因此 fallback 解析结果为 beta-chat 的 4096，
+    // 而非 a2636da 之前可达的 DEFAULT_MODERN_MAX_OUTPUT_TOKENS (64000)。
+    assert_eq!(resolved.max_output_tokens, 4096);
     assert_eq!(resolved.api_key.as_deref(), Some("beta-secret"));
     assert!(resolved.capabilities.supports_reasoning);
     assert!(resolved.capabilities.supports_image_input);

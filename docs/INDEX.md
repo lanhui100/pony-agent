@@ -84,6 +84,7 @@
 
 ## 8.1 工具面新增变更
 
+- [fix-provider-registry-fallback-test-baseline OpenSpec 变更](../openspec/changes/fix-provider-registry-fallback-test-baseline/proposal.md)
 - [workspace_read_document（anydoc 文档转换）OpenSpec 变更（已归档）](../openspec/changes/archive/2026-08-06-workspace-read-document-anydoc/proposal.md)
 - [workspace_read_document canonical spec](../openspec/specs/workspace-read-document/spec.md)
 - [workspace_read_document 收口日志](../management/task-system/99_LOGS/2026-08-06-workspace-read-document-anydoc-closeout.md)

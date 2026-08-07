@@ -1451,11 +1451,23 @@
           "component": "core"
         }
       ]
+    },
+    {
+      "bumps": [
+        {
+          "from": "0.1.70",
+          "component": "tauri",
+          "to": "0.1.71",
+          "segment": "patch"
+        }
+      ],
+      "timestamp": "2026-08-07T15:48:08+08:00",
+      "commit": "ec5d045"
     }
   ],
-  "lastBump": "2026-08-06T19:33:58+08:00",
+  "lastBump": "2026-08-07T15:48:08+08:00",
   "tauri": {
-    "patch": 70,
+    "patch": 71,
     "minor": 1,
     "major": 0
   },
