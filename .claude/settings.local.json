@@ -7,7 +7,24 @@
       "Bash(cargo test *)",
       "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a agent::tools::contract_view_tests::\")",
       "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a\")",
-      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a agent::provider::tests::provider_does_not_infer_builtin_surface_from_tool_count\")"
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a agent::provider::tests::provider_does_not_infer_builtin_surface_from_tool_count\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo check -p pony-agent-core --lib --target-dir target-test-exact-a\")",
+      "Read(//c/Users/HUAWEI/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.12.28/src/**)",
+      "Read(//c/Users/HUAWEI/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.12.28/src/async_impl/**)",
+      "Bash(sort -t- -k2 -n)",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo check -p pony-agent-core --lib --target-dir target-test-pin\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-pin agent::web_access::\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo check -p pony-agent-core --lib --target-dir target-test-ask\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-test-ask\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-pin agent::tools::\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::image_artifact:: --no-fail-fast\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-pin --no-run\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::tools::contract_view_tests --no-fail-fast\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo check -p pony-agent-core --tests --target-dir target-test-ask\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::plan_state:: --no-fail-fast\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::governed_executor:: --no-fail-fast\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ask agent::governed_executor::\")",
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::mcp_resources:: agent::tool_search_elevation::\")"
     ]
   }
 }
