@@ -59,20 +59,23 @@
 - `PA-075` 清理会话日志中的过期路径引用 (P3)
     说明：63 个文件、200+ 处 `src-tauri/src/agent/` → `crates/pony-agent-core/src/agent/` 路径替换完成。98_IMPORTS/ 中 20 处绝对路径已改为相对路径。
 
+- `PA-069` Tokio 异步后优化治理（Spec + 5 张子卡）
+    说明：已完成并收口（2026-08-08）。五张子卡 A~E 全部实现完毕并通过收尾验证：`cargo check`（shared）通过、core lib 733 全绿、回归集 13 项全绿、src-tauri lib 6 项全绿、前端 vitest 332 全绿。收尾时修复 1 个历史 flaky 附件测试（同一毫秒 asset_id 碰撞）。
+
 - `PA-069-A` 工具文件 IO 从 runtime 锁内移出 (P1)
-    说明：代码验证通过。`grep runtime\.lock()` 在生产路径无匹配，工具通过 `tool_executor: Arc<dyn ToolExecutor>` 执行，不持 runtime 锁。已确认实现完毕。
+    说明：已完成并收口（2026-08-08）。`TurnContext`（`runtime/turn_runner.rs:19-27`）携带 `tool_executor: Arc<dyn ToolExecutor + Send>`，工具执行落在独立模块 `runtime/tool_exec.rs`，不持 runtime 锁。`grep runtime\.lock()` 在生产路径无匹配。验证通过。
 
 - `PA-069-B` capability_registry Mutex → RwLock (P2)
-    说明：代码验证通过。`control_plane.rs:774` 和 `turn_runner.rs:24` 均已使用 `RwLock<CapabilityRegistry>`。已确认实现完毕。
+    说明：已完成并收口（2026-08-08）。`control_plane/mod.rs:846` 与 `turn_runner.rs:24` 均已使用 `RwLock<CapabilityRegistry>`，`apply_skill_source_snapshot` TOCTOU 已按「读→释放→应用→写回重验证」修复。验证通过。
 
 - `PA-069-C` Mutex 中毒容错修复 (P2)
-    说明：代码验证通过。`control_plane.rs` 全量使用 `unwrap_or_else(|e| { eprintln!(...); e.into_inner() })`（仅 `runtime` 保留 `expect()`——有意之举），`execution_control.rs` 同理。已确认实现完毕。
+    说明：已完成并收口（2026-08-08）。`control_plane.rs` 全量使用 `unwrap_or_else(|e| { eprintln!(...); e.into_inner() })`（仅 `runtime` 保留 `expect()`——有意之举），`execution_control.rs` 同理。验证通过。
 
 - `PA-069-D` SQLite 写路径优化 (P2)
-    说明：代码验证通过。`write_full_store` 仅用于 JSON→SQLite 迁移（`sqlite_session.rs:149`），写路径走 `upsert_session()` 逐行 upsert，有专用测试 `upsert_session_updates_one_row_without_rewriting_other_sessions`。已确认实现完毕。
+    说明：已完成并收口（2026-08-08）。`write_full_store` 仅用于 JSON→SQLite 迁移（`sqlite_session.rs:149`），写路径走 `upsert_session()` 逐行 upsert，含 `PRAGMA wal_checkpoint(PASSIVE)`（`sqlite_session.rs:603`），有专用测试 `upsert_session_updates_one_row_without_rewriting_other_sessions`。验证通过。
 
 - `PA-069-E` 锁序规范文档化 (P2)
-    说明：`docs/concurrency/lock-ordering.md` 73 行，包含规范锁序（5 级）、获取规则、已知异常和锁清单。已确认实现完毕。
+    说明：已完成并收口（2026-08-08）。`docs/concurrency/lock-ordering.md` 73 行，包含规范锁序（5 级）、获取规则、已知异常和锁清单。验证通过。
 
 - `PA-068` 接入 per-session async turn task 模型
     说明：已完成 `TurnTaskRegistry` per-session 任务追踪、`spawn_turn_stream`/`spawn_graph_run_stream` 从 `spawn_blocking` 切换到 `tauri::async_runtime::spawn` + 内层 `spawn_blocking` 的 async task 模型、`TaskCleanupGuard` 自动反注册、`abort_all` 挂钩窗口关闭事件。多 session 通过 `TurnTaskRegistry` 实现独立任务身份。Rust 测试 30 项 + TS 测试 231 项全部通过，3 轮并行智能体审核验收。

@@ -3,10 +3,10 @@
 ## 基本信息
 - 编号: PA-069
 - 名称: Tokio 异步后优化治理
-- 状态: Spec Review
+- 状态: Done
 - 优先级: P1-P2
 - 创建日期: 2026-06-25
-- 更新日期: 2026-06-25（采纳 3 路审核意见）
+- 更新日期: 2026-08-08（五张子卡全部完成并验证收口）
 
 ## 背景
 PA-065~068 已完成 Tokio 异步重构四卡。在审核验收过程中发现仍有 5 个 P1-P2 级别的优化点未被覆盖。3 路并行智能体审核已完成，以下为采纳的汇总意见。
@@ -106,3 +106,14 @@ npm run cargo:check:shared
 npm run cargo:test:shared
 npm run cargo:test:regression
 ```
+
+## 收口记录（2026-08-08）
+- PA-069-A~E 五张子卡全部实现完毕并通过代码验证（详见各子卡与任务板 Done 区）。
+- 本轮收尾验证：`cargo check`（shared）通过；core lib 733 测试全绿；回归集（session_regression / provider_registry_regression / tool_router_regression）13 项全绿；src-tauri lib 6 项全绿；前端 vitest 332 全绿。
+- 收尾时修复 1 个历史 flaky 测试：`attachment_assets_expose_lifecycle_statuses_and_queries` / `cleanup_attachment_assets_only_reclaims_unreferenced_payloads` 在同一毫秒内多次 `save_input_attachments` 导致 asset_id 碰撞（asset_id 基于 `created_at_ms`），在保存之间加 2ms 时钟推进。
+- 验收标准对照：
+  1. PA-069-B: `RwLock<CapabilityRegistry>` 落地于 `control_plane/mod.rs:846` 与 `runtime/turn_runner.rs:24` ✓
+  2. PA-069-C: 关键锁（graph_runs / terminal / capability_registry / sessions_rwlock / execution_control state）全部 `unwrap_or_else` 容错，仅 `runtime` 保留 `.expect("runtime lock poisoned")`（有意之举）✓
+  3. PA-069-D: `write_full_store` 仅用于 JSON→SQLite 迁移（`sqlite_session.rs:149`），热路径走 `upsert_session()` 逐行 upsert，含 `PRAGMA wal_checkpoint(PASSIVE)`（`sqlite_session.rs:603`）与专用测试 ✓
+  4. PA-069-A: 工具经 `tool_executor: Arc<dyn ToolExecutor + Send>`（`turn_runner.rs:21`）执行，`runtime.lock()` 在生产路径无匹配 ✓
+  5. PA-069-E: `docs/concurrency/lock-ordering.md` 73 行，含 5 级规范锁序、获取规则、已知异常（`load_session_runtime_view`）与锁清单 ✓

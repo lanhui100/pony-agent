@@ -6877,6 +6877,8 @@ mod tests {
             active_attachments,
         );
 
+        // 每次保存之间推进时钟，避免同一毫秒内 asset_id 碰撞（asset_id 基于 created_at_ms）
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let missing_attachments = store
             .save_input_attachments(&session_id, &missing_images)
             .expect("save missing attachments");
@@ -6890,11 +6892,13 @@ mod tests {
         );
         let _ = fs::remove_file(store.attachment_root.join(&missing_relative_path));
 
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let reclaimable_attachments = store
             .save_input_attachments(&session_id, &reclaimable_images)
             .expect("save reclaimable attachments");
         let reclaimable_asset_id = reclaimable_attachments[0].asset_id.clone();
 
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let expired_attachments = store
             .save_input_attachments(&session_id, &expired_images)
             .expect("save expired attachments");
@@ -7003,6 +7007,8 @@ mod tests {
             active_attachments,
         );
 
+        // 每次保存之间推进时钟，避免同一毫秒内 asset_id 碰撞（asset_id 基于 created_at_ms）
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let reclaimable_attachments = store
             .save_input_attachments(&session_id, &reclaimable_images)
             .expect("save reclaimable attachments");
@@ -7011,6 +7017,7 @@ mod tests {
             .attachment_root
             .join(&reclaimable_attachments[0].relative_path);
 
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let expired_attachments = store
             .save_input_attachments(&session_id, &expired_images)
             .expect("save expired attachments");
@@ -7026,6 +7033,7 @@ mod tests {
             .saturating_sub(DEFAULT_ATTACHMENT_RECLAIM_TTL_MS)
             .saturating_sub(1_000);
 
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let missing_attachments = store
             .save_input_attachments(&session_id, &missing_images)
             .expect("save missing attachments");

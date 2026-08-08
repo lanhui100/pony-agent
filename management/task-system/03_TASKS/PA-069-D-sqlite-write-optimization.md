@@ -2,10 +2,11 @@
 
 ## Basic Info
 - ID: PA-069-D
-- Status: Ready
+- Status: Done
 - Priority: P2
 - Owner: @agent
 - Created At: 2026-06-25
+- Updated At: 2026-08-08（实现验证通过并收口）
 - Estimated Effort: 2h
 
 ## Goal
@@ -20,7 +21,10 @@
 3. 编译通过，现有测试全部通过
 
 ## Current Progress
-- 待开始
+- 已完成并收口（2026-08-08）。
+- 代码验证：`write_full_store` 仅用于 JSON→SQLite 迁移（`sqlite_session.rs:149`），热路径走 `upsert_session()` 逐行 upsert（`sqlite_session.rs:612`）。
+- WAL checkpoint 管理：`sqlite_session.rs:603` 在写路径执行 `PRAGMA wal_checkpoint(PASSIVE)`。
+- 专用测试：`upsert_session_updates_one_row_without_rewriting_other_sessions`（`sqlite_session.rs:1208`）。
 
 ## Next Action
-- 分析 `save_store` 调用链，识别可降级为增量写的路径
+- 无。已完成收口。

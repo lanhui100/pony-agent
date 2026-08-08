@@ -82,7 +82,9 @@
      - `PA-068` per-session async turn task：`TurnTaskRegistry` 任务追踪，`spawn_turn_stream`/`spawn_graph_run_stream` 切换 async task 模型
      四卡累计通过 22 次子智能体审核调优，Rust 测试 + 231 项 TS 测试全部通过。OpenSpec changes 已归档：`openspec/changes/archive/2026-06-25-async-refactor-tokio/`。
 26. `PA-070` 已完成 provider request retry 与退避边界治理
-    当前已完成 `retry.rs` substrate、provider/tool 退避原语收口、前端 whole-turn 自动重试退场、最终严格代码审核与一轮收尾调优。`call model` 的 request-level retry 现在明确收束在 `pony-agent-core`，而不是前端静默 whole-turn retry。
+    当前已完成 `retry.rs` substrate、provider/tool 退避原语收口、前端 whole-turn 自动重试退场、最终严格代码审核与一轮收尾调优。`call model` 的 request-level retry 现在明确收束在 `pony-agent-core`，而不是前端静默 whole-turn retry。收尾验证（2026-08-08）：`retry.rs` 的 `ProviderRetryPolicy` 已集成于 `provider/mod.rs:2847`，`tools.rs:5165` 使用退避原语，canonical spec 存在（`openspec/specs/provider-retry-and-backoff-boundary/spec.md`），前端无 autoRetry 残留；core lib 733 + 回归 13 + 前端 332 全绿。
+27. `PA-069` Tokio 异步后优化治理五卡已完成并收口（2026-08-08）
+    PA-069-A~E 全部实现完毕并通过收尾验证：A（`tool_executor: Arc<dyn ToolExecutor>` + 独立 `runtime/tool_exec.rs`，生产路径无 `runtime.lock()`）、B（`RwLock<CapabilityRegistry>` + TOCTOU 重验证）、C（关键锁 `unwrap_or_else` 容错，仅 `runtime` 保留 `expect()`）、D（`upsert_session` 增量写 + WAL PASSIVE checkpoint）、E（`docs/concurrency/lock-ordering.md` 5 级锁序）。收尾时修复 1 个历史 flaky 附件测试（同一毫秒 asset_id 碰撞）。验证：`cargo check`（shared）+ core lib 733 + 回归 13 + src-tauri lib 6 + 前端 vitest 332 全绿。
 27. `PA-076` 阶段 1–7 与 runtime 切换已收口，工具元数据已有单一真相源
     `ToolDescriptor / ToolRegistrySnapshot / ToolSurface / TurnToolView` 已成立，provider、capability bridge、planner 与 Tauri `list_available_tools` 统一从 registry 投影；`GovernedDispatcher` 成为唯一执行入口，`AgentRuntimeBuilder` 默认 tool executor 已切换为 `build_governed_executor`；`Plan/Ask` 从占位映射升级为真实控制面工具，`ProcessManager`/`SandboxSupportMatrix`/`WebAccessPolicy`/`SearchEngine`/`view_image`/MCP resource/ToolSearch elevation 均已落地。架构说明见 `docs/architecture/tool-runtime-descriptor-registry.md`。
 28. Windows 上的 Rust 测试执行方式已澄清

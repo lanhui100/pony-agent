@@ -2,10 +2,11 @@
 
 ## Basic Info
 - ID: PA-069-B
-- Status: Ready
+- Status: Done
 - Priority: P2
 - Owner: @agent
 - Created At: 2026-06-25
+- Updated At: 2026-08-08（实现验证通过并收口）
 - Estimated Effort: 1h
 
 ## Goal
@@ -20,7 +21,9 @@
 3. 编译通过，现有测试全部通过
 
 ## Current Progress
-- 待开始
+- 已完成并收口（2026-08-08）。
+- 代码验证：`RwLock<CapabilityRegistry>` 落地于 `control_plane/mod.rs:846`（HostControlPlane 字段）与 `runtime/turn_runner.rs:24`（TurnContext 字段，`Arc<RwLock<CapabilityRegistry>>`）。
+- TOCTOU 修复：`apply_skill_source_snapshot` 采用「读 → 释放 → 应用 → 写回重验证」模式（见 `docs/concurrency/lock-ordering.md` 规则 3）。
 
 ## Next Action
-- 修改 `control_plane.rs` 中 `capability_registry` 类型
+- 无。已完成收口。

@@ -2,11 +2,11 @@
 
 ## Basic Info
 - ID: PA-069-A
-- Status: Ready
+- Status: Done
 - Priority: P1
 - Owner: @agent
 - Created At: 2026-06-25
-- Updated At: 2026-06-25（采纳 3 路审核意见：spawn_blocking 不能解决锁内问题，需重构 turn 循环）
+- Updated At: 2026-08-08（实现验证通过并收口）
 - Estimated Effort: 4-6h
 
 ## Goal
@@ -63,12 +63,12 @@ Then in `handle_stream_tool_turn`:
 4. Re-acquire runtime lock for state update
 
 ## Current Progress
-- 待开始（需等待 PA-069-B~E 完成后执行）
-- 3 路审核确认：估算从 2h 修正为 4-6h，且触及 turn 循环核心
+- 已完成并收口（2026-08-08）。
+- 实现形态：`AgentRuntime` 拆分出 `TurnContext`（`runtime/turn_runner.rs:19-27`），工具执行经 `tool_executor: Arc<dyn ToolExecutor + Send>` 独立执行；`execute_registered_tool_call` / `execute_capability_tool_call` 落在独立模块 `runtime/tool_exec.rs`，通过 `self.tool_executor.execute(&action.tool_call)` 执行，不持 runtime 锁。
+- 代码验证：`grep runtime\.lock()` 在 `crates/pony-agent-core/src` 生产路径无匹配。
 
 ## Next Action
-- 将 `AgentRuntime.tool_executor` 从 `Box<dyn ToolExecutor>` 改为 `Arc<dyn ToolExecutor + Send + Sync>`
-- 从 `handle_stream_tool_turn` 中提取工具执行步骤到独立函数，不依赖 runtime 锁
+- 无。已完成收口。
 
 ## Resume Hint
 - 核心文件：`runtime/mod.rs:2444-3478` (`handle_stream_tool_turn`)、`runtime/mod.rs:5572-5620` (`execute_registered_tool_call`)
