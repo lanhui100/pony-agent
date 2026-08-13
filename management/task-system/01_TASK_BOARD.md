@@ -20,7 +20,10 @@
 
 ## Ready
 
-- 暂无
+- `PA-080` Workspace 路径权限边界（P0）
+  说明：统一路径权限模块（组件级前缀校验 + Windows 大小写折叠 + 授权清单持久化）；写权限默认仅 workspace 根（递归）+ 受控 tmp；workspace 外读取需显式授权（结构化错误 `requires_authorization`）；可注入 canonicalizer 支持 hermetic 安全测试。OpenSpec change：`workspace-path-permission-boundary`（spec 通过，2026-08-09）。
+- `PA-081` 侧边栏 Workspace 树导航（P1）
+  说明：`HomeSessionSidebar` 平铺会话列表改造为"项目（二级）→ 对话（三级）"树，折叠/展开、按 workspaceId 归组（孤儿归"未分组"）、Workspace 管理入口；激活 workspace 为前端 localStorage 单一真相源。OpenSpec change：`workspace-sidebar-tree-navigation`（spec 通过，2026-08-09）。
 
 
 
@@ -38,6 +41,10 @@
 
 ## Done
 
+- `PA-079` Workspace 数据模型与注册表（P1）
+  说明：**已完成并收口（2026-08-09）**——workspace 注册表（`workspace.rs`，默认保留字 `"default"`）、`PersistedStore.workspaces` 持久化（SQLite store_metadata + File/Memory 自动）、`SessionState.workspace_id` + 投影、`TurnInput.workspaceId` 传输 + 首次盖章（修复首轮丢失）、宿主 `workspace_list`/`workspace_create`、`import_attachment` 注册表解析。spec 3 路审核 + 实现后审核（@tester 通过 + 自审）通过；验证 core lib 754 + 回归 8/5/13 + 前端 377 全绿。审核产物：`02_REVIEWS/2026-08-09-pa079-implementation-review.md`。OpenSpec change：`workspace-data-model-and-registry`。
+- `PA-078` 对话文件附件入口与文件类型注册表（P0）
+  说明：**已完成并收口（2026-08-09）**——composer 别针入口 + 待发送附件条、类型注册表（扩展名优先/MIME 兜底 + 图片魔数嗅探）、文本内容注入（≤64KiB 截断）/二进制文档引用附着（path+mime）、宿主 `import_attachment`/`get_workspace_root`（name 净化 + `.tmp/imports/` 受控导入）、附件-only 自动摘要与生命周期清空。spec 3 路对抗审核 + 实现后 3 路对抗审核均通过，无未解决 P0/P1。验证：前端 vitest 377 + build + cargo:check:shared + core lib 740 全绿。审核产物：`02_REVIEWS/2026-08-09-pa078-081-spec-review.md`、`2026-08-09-pa078-implementation-review.md`。OpenSpec change：`add-chat-file-attachment-entry`。
 - `PA-076` 加固并扩展 Agent Tool Runtime (P0)
     说明：已完成并收口（2026-08-05）。OpenSpec change `harden-and-expand-agent-tool-runtime` 已归档：`openspec/changes/archive/2026-08-05-harden-and-expand-agent-tool-runtime/`。阶段 1–7 核心 + runtime 默认切换（`build_governed_executor`）+ Ask 真实接线（P1-1 端到端：sync + stream 双路径挂起/恢复 + 共享 dispatcher + resume 注入唯一终态 + 前端 graph_resume_ask）+ pinned connector（P1-5，连接 pin 到已校验地址 + 链级总 deadline）+ 阶段 7 工具注册（P2-6，plan_control/view_image 进 builtin registry）+ Sandbox 裁决（2026-08-04，fail-closed 为合规终态，Job Object 拆 PA-077）。4 份阶段独立审核 + 8.4 收口（consultant PASS，无未解决 P0/P1）。最终验证：core lib 723 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 332 全绿。审核产物：`02_REVIEWS/2026-08-05-pa076-phase{4,5,6,7}-review.md`、`2026-08-05-pa076-84-closeout.md`、`2026-08-04-pa076-sandbox-backend-evaluation.md`。
 

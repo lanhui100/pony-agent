@@ -10,6 +10,9 @@
 
 ## 当前进行中
 
+- **新主线（2026-08-08 启动）：Workspace 多项目 + 对话文件附件**
+  拆分为 4 张卡：`PA-078`（对话文件附件入口与类型白名单，P0，先行）→ `PA-079`（Workspace 数据模型与注册表）→ `PA-080`（Workspace 路径权限边界，P0，安全敏感）→ `PA-081`（侧边栏 Workspace 树导航）。每张卡走"任务卡 + OpenSpec change → 3 路对抗审核 → 采纳修订 → 实现 → 实现后 3 路审核 → 验证收口"闭环。对应 OpenSpec changes：`add-chat-file-attachment-entry` / `workspace-data-model-and-registry` / `workspace-path-permission-boundary` / `workspace-sidebar-tree-navigation`。**PA-078 已完成并收口；PA-079 已完成并收口（2026-08-09）**；spec 审核记录 `02_REVIEWS/2026-08-09-pa078-081-spec-review.md`，实现后审核 `2026-08-09-pa078-implementation-review.md` / `2026-08-09-pa079-implementation-review.md`。当前推进 **PA-080（路径权限边界）**。
+
 - `PA-076` 加固并扩展 Agent Tool Runtime（P0 / C 级）**已完成并收口（2026-08-05）**
   阶段 1–7、runtime 切换（task ②）、Ask 真实接线（P1-1 端到端）、pinned connector（P1-5）、阶段 7 工具注册（P2-6）、Sandbox 裁决、4 份阶段独立审核与 8.4 收口全部完成；OpenSpec change 已归档（`openspec/changes/archive/2026-08-05-harden-and-expand-agent-tool-runtime/`）。最终验证：core lib 723 + matrix 27 + tool_router_regression 13 + session_regression 5 + 前端 vitest 332 全绿，consultant 裁决 PASS（无未解决 P0/P1）。详见任务卡与 `02_REVIEWS/2026-08-05-pa076-84-closeout.md`。后续工作拆卡：PA-077（Job Object containment）、完整 SandboxBackend、McpResourceSurface 接线、生产 resolver 接线、evaluator 保守审批迁移。
 
@@ -138,8 +141,9 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 
 ## 下一步最小动作
 
-1. `PA-076` 已收口（2026-08-05），不再是下一步目标。后续工具系统扩展以新卡承接：`PA-077`（Windows Job Object containment）、完整 `SandboxBackend`、`McpResourceSurface` 真实 McpTransport 接线、生产 resolver 接线（hostname WebFetch 从 fail-closed 转启用）、生产默认从 `LegacyCompatiblePolicyEvaluator` 迁移到保守审批。
-2. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049` 或 `PA-076`。
+1. `PA-078 ~ PA-081` 新主线：PA-078（附件入口）与 PA-079（workspace 数据模型）**均已完成并收口（2026-08-09）**。下一步按依赖顺序推进：**PA-080（路径权限边界，P0，依赖 PA-079 数据模型）→ PA-081（侧边栏树，依赖 079/080）**。spec 审核记录：`02_REVIEWS/2026-08-09-pa078-081-spec-review.md`；实现后审核：`02_REVIEWS/2026-08-09-pa078-implementation-review.md`、`2026-08-09-pa079-implementation-review.md`。
+2. `PA-076` 已收口（2026-08-05），不再是下一步目标。后续工具系统扩展以新卡承接：`PA-077`（Windows Job Object containment）、完整 `SandboxBackend`、`McpResourceSurface` 真实 McpTransport 接线、生产 resolver 接线（hostname WebFetch 从 fail-closed 转启用）、生产默认从 `LegacyCompatiblePolicyEvaluator` 迁移到保守审批。
+3. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049` 或 `PA-076`。
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。
 5. 前端卡顿定位现已具备 flight recorder 证据链（`PA-057` 已完成），后续性能优化可以基于 `frontend-diagnostics.db` 中的 stall 快照和 trace 事件进行数据分析，而不是再靠手动复现。
