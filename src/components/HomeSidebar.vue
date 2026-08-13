@@ -226,7 +226,30 @@ function canonicalTraceTimelineKind(kind: TraceTimelineEntry["kind"]) {
   }
 }
 
+// 按 turn 缓存折叠结果：key = traceTimeline 引用 + updatedAt。
+// 历史 turn 的引用/时间戳稳定，命中率高；活跃 turn 就地更新时
+// （updateActiveModelTraceFromAssistant 触发 updatedAt 变化）自动失效。
+const turnTimelineMemo = new Map<
+  string,
+  { ref: TraceTimelineEntry[] | null | undefined; updatedAt?: number; result: TraceTimelineEntry[] }
+>();
+
 function turnTimeline(turn: TurnTraceRecord) {
+  const cached = turnTimelineMemo.get(turn.turnId);
+  if (cached && cached.ref === turn.traceTimeline && cached.updatedAt === turn.updatedAt) {
+    return cached.result;
+  }
+
+  const result = computeTurnTimeline(turn);
+  turnTimelineMemo.set(turn.turnId, {
+    ref: turn.traceTimeline,
+    updatedAt: turn.updatedAt,
+    result
+  });
+  return result;
+}
+
+function computeTurnTimeline(turn: TurnTraceRecord) {
   if (turn.traceTimeline?.length) {
     const normalized: TraceTimelineEntry[] = [];
     let lastModelIndex = -1;
@@ -311,6 +334,7 @@ function togglePanel(panel: "tools" | "trace" | "plan") {
 
 watch(sessionId, () => {
   copiedKey.value = "";
+  turnTimelineMemo.clear();
 });
 </script>
 

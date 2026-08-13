@@ -63,13 +63,17 @@ const hasVisibleCurrentSession = computed(() =>
   sessionList.value.some((session) => session.conversationId === sessionId.value)
 );
 const canCreateSession = computed(
-  () => !isSubmitting.value && !sessionOperation.value && hasPersistableCurrentSession.value
+  () => !sessionOperation.value && hasPersistableCurrentSession.value
 );
-const createSessionTitle = computed(() =>
-  hasPersistableCurrentSession.value
+const createSessionTitle = computed(() => {
+  if (isSubmitting.value) {
+    return "当前对话正在运行；新建空白对话后，运行会转入后台继续。";
+  }
+
+  return hasPersistableCurrentSession.value
     ? "新建一个空白对话，并保留当前已存在的历史会话。"
-    : "当前已经是空白新对话，发送首条消息后才会保存到历史。"
-);
+    : "当前已经是空白新对话，发送首条消息后才会保存到历史。";
+});
 
 const visibleSessions = computed<SessionOverview[]>(() => {
   if (hasVisibleCurrentSession.value) {

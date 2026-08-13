@@ -791,12 +791,65 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   return mergedEvents;
 }
 
-// 主对话渲染与 trace 渲染解耦：agentTurnEvents 的推导结果集中缓存为 computed，
-// template 按 turnId 取缓存，避免每次渲染都内联重算整条 trace timeline 推导链
+// 主对话渲染与 trace 渲染解耦：agentTurnEvents 的推导结果按 turn 缓存，
+// 避免 traceTimeline/turnTraceHistory 每次变化都对所有 turn 全量重推导
 // （traceTimelineForTurn + modelTraceEntries + 多 hop 内容拼接）。
+// 只缓存非活跃 turn：流式中的 turn 内容持续变化且展示状态由 streaming
+// presentation 驱动，缓存无收益，直接重算。
+const turnEventCache = new Map<
+  string,
+  { timelineRef: TraceTimelineEntry[] | null; signature: string; events: AgentTurnEvent[] }
+>();
+
+function buildTurnEventSignature(
+  turn: TurnBucket,
+  showReasoning: boolean,
+  activeTurnId: string | null,
+  streamingRenderOptimized: boolean
+) {
+  const assistant = turn.assistant;
+  const assistantPart = assistant
+    ? `${assistant.id}:${assistant.status ?? ""}:${assistant.content.length}:${assistant.reasoningContent?.length ?? ""}:${assistant.modelName ?? ""}`
+    : "-";
+  const toolsPart = turn.tools
+    .map((tool) =>
+      `${tool.id}:${tool.status ?? ""}:${tool.durationSeconds ?? ""}:${tool.content?.length ?? 0}:${tool.detail?.length ?? 0}:${tool.toolName ?? ""}`
+    )
+    .join(",");
+  return [
+    turn.turnId,
+    turn.user?.id ?? "-",
+    assistantPart,
+    toolsPart,
+    `sr:${showReasoning}`,
+    `at:${activeTurnId ?? ""}`,
+    `last:${isLastTurn.value(turn.turnId)}`,
+    `opt:${streamingRenderOptimized}`
+  ].join("|");
+}
+
 const turnEventsByTurnId = computed(() => {
   const eventsByTurnId = new Map<string, AgentTurnEvent[]>();
+  const activeTurnId = runtimeStore.activeTurnId?.trim() || null;
+  const showReasoning = showReasoningContent.value;
+  const streamingRenderOptimized = !streamingRenderOptimizationDisabled.value;
+
   for (const turn of turns.value) {
+    const isActiveStreaming =
+      activeTurnId === turn.turnId || turn.assistant?.status === "pending";
+    if (!isActiveStreaming) {
+      const signature = buildTurnEventSignature(turn, showReasoning, activeTurnId, streamingRenderOptimized);
+      const timeline = traceTimelineForTurn(turn.turnId);
+      const cached = turnEventCache.get(turn.turnId);
+      if (cached && cached.signature === signature && cached.timelineRef === timeline) {
+        eventsByTurnId.set(turn.turnId, cached.events);
+        continue;
+      }
+      const events = agentTurnEvents(turn);
+      turnEventCache.set(turn.turnId, { timelineRef: timeline, signature, events });
+      eventsByTurnId.set(turn.turnId, events);
+      continue;
+    }
     eventsByTurnId.set(turn.turnId, agentTurnEvents(turn));
   }
   return eventsByTurnId;
@@ -1405,6 +1458,11 @@ watch(
     for (const turnId of lastTrustedTraceTimelineByTurnId.keys()) {
       if (!visibleTurnIds.has(turnId)) {
         lastTrustedTraceTimelineByTurnId.delete(turnId);
+      }
+    }
+    for (const turnId of turnEventCache.keys()) {
+      if (!visibleTurnIds.has(turnId)) {
+        turnEventCache.delete(turnId);
       }
     }
     scheduleStreamingPresentationTimer();

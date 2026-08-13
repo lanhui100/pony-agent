@@ -1541,11 +1541,23 @@
         }
       ],
       "commit": "0f7bf94"
+    },
+    {
+      "bumps": [
+        {
+          "component": "tauri",
+          "segment": "patch",
+          "to": "0.1.75",
+          "from": "0.1.74"
+        }
+      ],
+      "timestamp": "2026-08-13T11:23:19+08:00",
+      "commit": "526b18b"
     }
   ],
-  "lastBump": "2026-08-13T11:23:06+08:00",
+  "lastBump": "2026-08-13T11:23:19+08:00",
   "tauri": {
-    "patch": 74,
+    "patch": 75,
     "minor": 1,
     "major": 0
   },

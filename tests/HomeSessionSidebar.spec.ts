@@ -173,6 +173,29 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.get('[data-testid="session-delete-session-transient"]').attributes("disabled")).toBeDefined();
   });
 
+  it("keeps the new-chat control available while a turn is submitting", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionList: [
+        createSession({
+          conversationId: "session-current",
+          title: "Current session",
+          summary: "Current summary"
+        })
+      ],
+      sessionOperation: null,
+      isSubmitting: true,
+      messages: [createMessage({ content: "running turn" })]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    // 运行中的 turn 应转入后台而不是阻塞新建对话
+    expect(wrapper.get('[data-testid="session-sidebar-new-chat"]').attributes("disabled")).toBeUndefined();
+  });
+
   it("keeps a saved failed session visible instead of treating it as transient", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({

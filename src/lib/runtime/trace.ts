@@ -201,6 +201,23 @@ export function resolveEventTraceTimeline(
   return payloadTraceTimeline.length ? payloadTraceTimeline : fallback();
 }
 
+// 低频语义事件（turn:trace / phase_changed / checkpoint_persisted / tool）的 timeline 解析：
+// Rust 端已不再携带全量 timeline（IPC 瘦身），payload 无 timeline 时优先保留当前
+// timeline（真实数据 + 避免重建/冗余克隆），仅在当前 timeline 为空时走 fallback 兜底。
+export function resolveSemanticEventTraceTimeline(
+  payload: { traceTimeline?: TraceTimelineEntry[] | null },
+  fallback: () => TraceTimelineEntry[],
+  currentTimeline: TraceTimelineEntry[]
+): TraceTimelineEntry[] {
+  if (payload.traceTimeline?.length) {
+    return cloneTraceTimeline(payload.traceTimeline);
+  }
+  if (currentTimeline.length) {
+    return currentTimeline;
+  }
+  return fallback();
+}
+
 export function buildFallbackRuntimeTraceTimeline(options: {
   turnId: string;
   eventType?: TurnStreamEvent["eventType"];

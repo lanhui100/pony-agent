@@ -18,8 +18,20 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
   });
 }
 
+const DEBUG_RUNTIME_LOGS_KEY = "pony-agent.debug.runtime-logs";
+let debugLoggingEnabled: boolean | null = null;
+
+export function isDebugLoggingEnabled() {
+  if (debugLoggingEnabled !== null) {
+    return debugLoggingEnabled;
+  }
+  debugLoggingEnabled =
+    typeof window !== "undefined" && window.localStorage.getItem(DEBUG_RUNTIME_LOGS_KEY) === "true";
+  return debugLoggingEnabled;
+}
+
 export function debugLog(event: string, payload?: Record<string, unknown>) {
-  if (typeof window !== "undefined" && window.localStorage.getItem("pony-agent.debug.runtime-logs") !== "true") {
+  if (!isDebugLoggingEnabled()) {
     return;
   }
   const message = {
@@ -31,7 +43,7 @@ export function debugLog(event: string, payload?: Record<string, unknown>) {
 }
 
 export function errorLog(event: string, payload?: Record<string, unknown>) {
-  if (typeof window !== "undefined" && window.localStorage.getItem("pony-agent.debug.runtime-logs") !== "true") {
+  if (!isDebugLoggingEnabled()) {
     return;
   }
   const message = {
