@@ -43,6 +43,7 @@ export type RuntimeState = {
   health: HealthPayload | null;
   error: string | null;
   draftMessage: string;
+  pendingAttachments: import("./file-attachments").PendingAttachment[];
   sessionSummary: string;
   retrievedContext: RetrievedContextState | null;
   providerRequestedName: string;

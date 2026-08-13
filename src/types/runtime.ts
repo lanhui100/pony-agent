@@ -783,6 +783,8 @@ export type TurnInput = {
   nodeId?: string | null;
   history?: TurnHistoryMessage[];
   images?: TurnInputImage[];
+  /** Workspace 归属（PA-079）：携带时在会话首次持久化盖章 */
+  workspaceId?: string | null;
 };
 
 export type TurnHistoryMessage = {
@@ -803,6 +805,8 @@ export type SessionOverview = {
   turnCount: number;
   lastReferencedFile?: string | null;
   updatedAtMs: number;
+  /** Workspace 归属（PA-079）：None → 默认 workspace */
+  workspaceId?: string | null;
 };
 
 export type SessionSnapshot = {
@@ -820,6 +824,8 @@ export type SessionSnapshot = {
   turnCount: number;
   lastReferencedFile?: string | null;
   updatedAtMs: number;
+  /** Workspace 归属投影（PA-079）：None → 默认 workspace */
+  workspaceId?: string | null;
 };
 
 export type TurnContext = {

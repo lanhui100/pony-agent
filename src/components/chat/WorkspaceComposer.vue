@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
-import { ArrowUp, Check, ChevronDown, Square, Undo2 } from "lucide-vue-next";
+import { ArrowUp, Check, ChevronDown, Paperclip, Square, Undo2, X } from "lucide-vue-next";
 import type { ProviderConfig, ProviderReasoningEffort } from "@/types/provider";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
+import { pickFiles } from "@/lib/runtime/file-attachments";
 import Button from "@/components/ui/Button.vue";
 import {
   TooltipContent,
@@ -37,6 +38,7 @@ const {
   latestExecutionCheckpoint,
   latestGraphRunSubmissionPlan,
   latestRunControlAuditSummary,
+  pendingAttachments,
   sessionOperation
 } = storeToRefs(runtimeStore);
 const { currentProvider, currentModel } = storeToRefs(providerStore);
@@ -173,13 +175,53 @@ const composerAction = computed<{
   };
 });
 
-const primaryActionDisabled = computed(
-  () => Boolean(sessionOperation.value) || (!isSubmitting.value && draftMessage.value.trim().length === 0)
-);
+const primaryActionDisabled = computed(() => {
+  if (sessionOperation.value) {
+    return true;
+  }
+  if (isSubmitting.value) {
+    return false;
+  }
+  const hasReadyAttachment = pendingAttachments.value.some((attachment) => attachment.status === "ok");
+  return draftMessage.value.trim().length === 0 && !hasReadyAttachment;
+});
 
 const primaryActionTitle = computed(() =>
   isSubmitting.value ? "请求在安全边界停止当前运行。" : composerAction.value.hint
 );
+
+const attachNotice = ref<string | null>(null);
+
+async function handleAttach() {
+  attachNotice.value = null;
+  try {
+    const files = await pickFiles();
+    if (!files.length) {
+      return;
+    }
+    const { errors } = await runtimeStore.addPendingAttachments(files);
+    if (errors.length) {
+      attachNotice.value = errors.join("；");
+    }
+  } catch (error) {
+    attachNotice.value = String(error);
+  }
+}
+
+function removePendingAttachment(id: string) {
+  runtimeStore.removePendingAttachment(id);
+  attachNotice.value = null;
+}
+
+function formatAttachmentSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
 function toggleProviderMenu() {
   providerMenuOpen.value = !providerMenuOpen.value;
@@ -307,8 +349,52 @@ onBeforeUnmount(() => {
         @keydown="handleComposerKeydown"
       />
 
+      <div v-if="pendingAttachments.length" class="mt-2 flex flex-wrap items-center gap-1.5">
+        <div
+          v-for="(attachment, index) in pendingAttachments"
+          :key="attachment.id"
+          class="flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px]"
+          :class="attachment.status === 'error'
+            ? 'border-red-200 bg-red-50 text-red-600'
+            : 'border-stone-200/80 bg-stone-100/80 text-stone-700'"
+          :data-testid="`workspace-attachment-chip-${index}`"
+          :title="attachment.errorDetail ?? attachment.path ?? ''"
+        >
+          <span class="truncate">{{ attachment.name }}</span>
+          <span class="shrink-0 text-stone-400">{{ formatAttachmentSize(attachment.sizeBytes) }}</span>
+          <button
+            class="shrink-0 text-stone-400 transition-colors hover:text-stone-600"
+            type="button"
+            :data-testid="`workspace-attachment-remove-${index}`"
+            aria-label="移除附件"
+            @click="removePendingAttachment(attachment.id)"
+          >
+            <X class="h-3 w-3" />
+          </button>
+        </div>
+      </div>
+      <p
+        v-if="attachNotice"
+        class="mt-1.5 text-[11px] leading-4 text-amber-600"
+        data-testid="workspace-attach-notice"
+      >
+        {{ attachNotice }}
+      </p>
+
       <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200/70 pt-2.5">
         <div class="flex min-w-0 flex-wrap items-center gap-2">
+
+          <button
+            class="composer-select-trigger"
+            type="button"
+            :disabled="isSubmitting"
+            :title="isSubmitting ? '等待当前轮次结束后再添加附件' : '添加附件'"
+            data-testid="workspace-attach-button"
+            @click="handleAttach"
+          >
+            <Paperclip class="h-3 w-3" />
+            <span class="sr-only">添加附件</span>
+          </button>
 
           <div ref="providerMenuRef" class="relative">
             <button

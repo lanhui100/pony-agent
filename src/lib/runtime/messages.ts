@@ -10,6 +10,7 @@ import type {
   TurnInputImage,
   TurnTraceRecord
 } from "../../types/runtime";
+import type { PendingAttachment } from "./file-attachments";
 import {
   toolStatusToMessageStatus,
   traceErrorDetail,
@@ -239,6 +240,93 @@ export function buildProviderUserMessage(message: string, images: TurnInputImage
   }
 
   return "请基于附图回答。";
+}
+
+/** 附件消息块：文本注入块 + 二进制文档引用行。 */
+export type AttachmentMessageBlocks = {
+  text: string[];
+  documents: string[];
+};
+
+export function buildAttachmentMessageBlocks(
+  attachments: PendingAttachment[]
+): AttachmentMessageBlocks {
+  const text: string[] = [];
+  const documents: string[] = [];
+  for (const attachment of attachments) {
+    if (attachment.route === "text" && attachment.content != null) {
+      const label = attachment.truncated
+        ? `${attachment.name}（内容过长，已截断）`
+        : attachment.name;
+      text.push(`[附件: ${label}]\n\n${attachment.content}`);
+    } else if (attachment.route === "document" && attachment.path) {
+      documents.push(`[附件: ${attachment.name}，路径: ${attachment.path}]`);
+    }
+  }
+  return { text, documents };
+}
+
+/** 附件感知的 provider 用户消息：用户文本在前，随后文本内容注入块 → 文档引用行。
+ * 附件块置于用户消息尾部，不影响 ADR-0007 稳定前缀（稳定前缀 = 请求前部 system/tools/history）。 */
+export function buildProviderUserMessageWithAttachments(
+  message: string,
+  images: TurnInputImage[],
+  blocks: AttachmentMessageBlocks
+): string {
+  const parts: string[] = [];
+  if (message.trim()) {
+    parts.push(message.trim());
+  }
+  if (blocks.text.length) {
+    parts.push(blocks.text.join("\n\n"));
+  }
+  if (blocks.documents.length) {
+    parts.push(blocks.documents.join("\n"));
+  }
+  const joined = parts.join("\n\n");
+  if (joined.trim()) {
+    return joined;
+  }
+  return images.length ? "请基于附图回答。" : message;
+}
+
+/** 附件感知的展示消息：用户文本 + 图片/文件摘要。 */
+export function buildDisplayedUserMessageWithAttachments(
+  message: string,
+  images: TurnInputImage[],
+  blocks: AttachmentMessageBlocks
+): string {
+  const summaryParts: string[] = [];
+  if (images.length) {
+    const imageSummary = `[已附图片 ${images.length} 张${summarizeImageNames(images) ? `：${summarizeImageNames(images)}` : ""}]`;
+    summaryParts.push(imageSummary);
+  }
+  const fileCount = blocks.text.length + blocks.documents.length;
+  if (fileCount) {
+    summaryParts.push(`[已附文件 ${fileCount} 个]`);
+  }
+  const summary = summaryParts.join(" ");
+  if (!message.trim()) {
+    return summary || message;
+  }
+  return `${message}\n\n${summary}`.trim();
+}
+
+/** 把附件条目投影为消息 `attachments` 元数据（AttachmentMeta 合同）。 */
+export function buildAttachmentMetas(
+  attachments: PendingAttachment[],
+  requestId: string
+): Array<import("../../types/runtime").AttachmentMeta> {
+  return attachments
+    .filter((attachment) => attachment.route !== "image")
+    .map((attachment, index) => ({
+      id: `pending-${requestId}-file-${index + 1}`,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      relativePath: attachment.relativePath,
+      sizeBytes: attachment.sizeBytes,
+      createdAtMs: Date.now()
+    }));
 }
 
 export function buildTurnHistory(messages: ChatMessage[]): TurnHistoryMessage[] {

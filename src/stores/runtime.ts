@@ -42,6 +42,7 @@ import type { PersistedRuntimeState, RuntimeState } from "@/lib/runtime/types";
 import type { HistoryCheckoutWireResult } from "@/lib/runtime/history";
 import {
   debugLog,
+  isDebugLoggingEnabled,
   measureHostRead,
   reportSwitchPerf,
   runLowPriorityTurnWork,
@@ -94,14 +95,17 @@ import {
   readNestedNumericTokenValue,
   resolvedStreamStartRunId,
   resolveEventTraceTimeline,
+  resolveSemanticEventTraceTimeline,
   resolveProviderReturnedCacheHitInputTokens,
   resolveReasoningTokens,
   resolveTerminalToolActivities,
   toolStatusToMessageStatus
 } from "@/lib/runtime/trace";
 import {
-  buildDisplayedUserMessage,
-  buildProviderUserMessage,
+  buildAttachmentMessageBlocks,
+  buildAttachmentMetas,
+  buildDisplayedUserMessageWithAttachments,
+  buildProviderUserMessageWithAttachments,
   buildToolMessageDetail,
   buildTurnHistory,
   buildTurnTitle,
@@ -112,6 +116,21 @@ import {
   previewMessageStateDeltaMessages,
   reuseStableChatMessages
 } from "@/lib/runtime/messages";
+import {
+  attachmentDedupKey,
+  bytesToDataUrl,
+  importAttachment,
+  MAX_TURN_IMAGES,
+  mimeForSniffed,
+  mimeFromExtension,
+  readFileAsArrayBuffer,
+  resolveAttachmentRoute,
+  sniffImageKind,
+  truncateTextByBytes,
+  type PendingAttachment,
+  type PendingAttachmentStatus,
+  type ImportAttachmentOptions
+} from "@/lib/runtime/file-attachments";
 import {
   buildConversationCheckpointEntries,
   cloneHistoryBranches,
@@ -167,8 +186,8 @@ import {
   loadPersistedRuntimeState,
   loadRunningSessionMap,
   mergeRuntimeViews,
-  persistRunningSessionMap,
   persistSessionState,
+  persistSessionStateAndRuntimeMaps,
   removePersistedSessionState,
   restoreSessionRuntimeSnapshot,
   shouldAcceptTurnEvent
@@ -200,6 +219,7 @@ export const useRuntimeStore = defineStore("runtime", {
       health: null,
       error: null,
       draftMessage: "",
+      pendingAttachments: [] as PendingAttachment[],
       sessionSummary: persisted?.sessionSummary ?? "",
       retrievedContext: null,
       providerRequestedName: persisted?.providerRequestedName ?? "",
@@ -345,6 +365,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "idle";
       this.error = null;
       this.draftMessage = "";
+      this.clearPendingAttachments();
       this.sessionHydrating = false;
       this.sessionSummary = blankFields.sessionSummary;
       this.retrievedContext = null;
@@ -599,8 +620,13 @@ export const useRuntimeStore = defineStore("runtime", {
       };
 
       try {
-        persistSessionState(this.sessionId, payload);
-        persistRunningSessionMap(this.runningSessionMap, this.completedSessionSet, this.failedSessionSet);
+        persistSessionStateAndRuntimeMaps(
+          this.sessionId,
+          payload,
+          this.runningSessionMap,
+          this.completedSessionSet,
+          this.failedSessionSet
+        );
         debugLog("persist", {
           sessionId: this.sessionId,
           messages: this.messages.length,
@@ -1524,6 +1550,9 @@ export const useRuntimeStore = defineStore("runtime", {
         return;
       }
 
+      // 切换会话时清空待发送附件，防跨会话携带
+      this.clearPendingAttachments();
+
       // Register current running turn as a background turn before switching away
       const switchingFromRunningTurn = this.isSubmitting && this.activeTurnId != null;
       if (switchingFromRunningTurn && this.activeTurnId) {
@@ -1658,6 +1687,8 @@ export const useRuntimeStore = defineStore("runtime", {
       });
     },
     async createSession() {
+      // 新建会话意图即清空待发送附件（即使空消息 no-op 也清，避免残留携带）
+      this.clearPendingAttachments();
       if (this.sessionOperation || !hasPersistableMessages(this.messages)) {
         return;
       }
@@ -2012,8 +2043,10 @@ export const useRuntimeStore = defineStore("runtime", {
         traceTimelineLength: this.traceTimeline.length
       });
     },
-    updateActiveTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
-      this.traceTimeline = cloneTraceTimeline(traceTimeline);
+    updateActiveTraceTimeline(traceTimeline: TraceTimelineEntry[], skipClone = false) {
+      // 低频语义事件路径（turn:trace / phase_changed / checkpoint_persisted / tool）中，
+      // resolveEventTraceTimeline 已返回新鲜克隆，skipClone 避免第二次全量深拷贝。
+      this.traceTimeline = skipClone ? traceTimeline : cloneTraceTimeline(traceTimeline);
     },
     // delta 高频事件中的 timeline 节流更新：只保留最新一份，定时合并应用。
     scheduleThrottledTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
@@ -2055,7 +2088,9 @@ export const useRuntimeStore = defineStore("runtime", {
         return;
       }
 
-      const traceTimeline = cloneTraceTimeline(this.traceTimeline);
+      // 调用点（低频语义事件）保证 this.traceTimeline 已是新鲜克隆，
+      // 此处就地替换 model entry，避免第三次全量深拷贝。
+      const traceTimeline = this.traceTimeline;
       let modelIndex = -1;
       for (let i = traceTimeline.length - 1; i >= 0; i--) {
         if (canonicalizeTraceTimelineKind(traceTimeline[i]!.kind) === "call_model") {
@@ -2269,6 +2304,139 @@ export const useRuntimeStore = defineStore("runtime", {
     },
     setDraftMessage(message: string) {
       this.draftMessage = message;
+    },
+    setPendingAttachments(attachments: PendingAttachment[]) {
+      this.pendingAttachments = attachments;
+    },
+    clearPendingAttachments() {
+      this.pendingAttachments = [];
+    },
+    removePendingAttachment(id: string) {
+      this.pendingAttachments = this.pendingAttachments.filter((attachment) => attachment.id !== id);
+    },
+    /**
+     * 处理选中的文件并加入待发送附件列表。逐文件：类型解析（扩展名优先/MIME 兜底）→
+     * 大小上限 → 图片数量上限（3）→ 浏览器模式二进制文档拒绝 → 去重 → 图片魔数嗅探 →
+     * 文本内容截断 → 宿主导入（Tauri）或内存引用（浏览器）。
+     */
+    async addPendingAttachments(
+      files: File[],
+      options?: ImportAttachmentOptions
+    ): Promise<{ added: number; errors: string[] }> {
+      const errors: string[] = [];
+      let added = 0;
+
+      for (const file of files) {
+        const resolution = resolveAttachmentRoute(file.name, file.type);
+        if (!resolution) {
+          errors.push(`暂不支持该文件类型：${file.name}`);
+          continue;
+        }
+        const { route, spec } = resolution;
+
+        if (file.size > spec.maxBytes) {
+          errors.push(`${file.name} 超过大小上限`);
+          continue;
+        }
+        if (
+          route === "image" &&
+          this.pendingAttachments.filter(
+            (attachment) => attachment.route === "image" && attachment.status === "ok"
+          ).length >= MAX_TURN_IMAGES
+        ) {
+          errors.push(`最多添加 ${MAX_TURN_IMAGES} 张图片（${file.name} 未添加）`);
+          continue;
+        }
+        if (route === "document" && !isTauriAvailable()) {
+          errors.push(`预览模式暂不支持二进制文档：${file.name}`);
+          continue;
+        }
+        // 去重只看成功条目（失败条目允许重试）；键含 lastModified 降低同名同尺寸误伤
+        const dedupKey = attachmentDedupKey({
+          name: file.name,
+          sizeBytes: file.size,
+          lastModified: file.lastModified
+        });
+        if (
+          this.pendingAttachments.some(
+            (attachment) => attachment.status === "ok" && attachmentDedupKey(attachment) === dedupKey
+          )
+        ) {
+          errors.push(`已添加过该文件：${file.name}`);
+          continue;
+        }
+
+        let status: PendingAttachmentStatus = "ok";
+        let errorDetail: string | null = null;
+        let dataUrl: string | null = null;
+        let path: string | null = null;
+        let relativePath: string | null = null;
+        let content: string | null = null;
+        let truncated = false;
+        let attachmentMime = file.type || mimeFromExtension(file.name);
+
+        try {
+          const bytes = new Uint8Array(await readFileAsArrayBuffer(file));
+
+          if (route === "image") {
+            const sniffed = sniffImageKind(bytes);
+            if (!sniffed) {
+              errors.push(`无效图片文件：${file.name}`);
+              continue;
+            }
+            // I-2：dataUrl mime 必须与真实内容一致（由嗅探结果派生），防"PNG 内容改名 .jpg"
+            attachmentMime = mimeForSniffed(sniffed);
+            dataUrl = bytesToDataUrl(bytes, attachmentMime);
+          } else {
+            if (route === "text") {
+              const decoded = new TextDecoder().decode(bytes);
+              const result = truncateTextByBytes(decoded, spec.injectMaxBytes);
+              content = result.text;
+              truncated = result.truncated;
+            }
+            if (bytes.length > 0) {
+              const importResult = await importAttachment(file.name, bytes, attachmentMime, options);
+              path = importResult.path;
+              relativePath = importResult.relativePath ?? null;
+            }
+            // 空文本（0 字节）：跳过导入（宿主拒绝空字节），path/relativePath 为 null，
+            // 内容为空——与浏览器模式行为一致（T-8）。
+          }
+        } catch (error) {
+          status = "error";
+          errorDetail = String(error);
+        }
+
+        // I-6：在途导入期间用户已提交 → 丢弃本次结果，避免 chip 遗留给下一轮
+        if (this.isSubmitting) {
+          break;
+        }
+
+        this.pendingAttachments = [
+          ...this.pendingAttachments,
+          {
+            id: `pending-${Date.now()}-${this.pendingAttachments.length}-${added}`,
+            name: file.name,
+            sizeBytes: file.size,
+            mimeType: attachmentMime,
+            route,
+            spec,
+            path,
+            relativePath,
+            dataUrl,
+            content,
+            truncated,
+            lastModified: file.lastModified,
+            status,
+            errorDetail
+          }
+        ];
+        if (status === "ok") {
+          added += 1;
+        }
+      }
+
+      return { added, errors };
     },
     async fetchHealth() {
       if (this.health) {
@@ -2497,7 +2665,7 @@ export const useRuntimeStore = defineStore("runtime", {
         );
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities, false);
-        this.updateActiveTraceTimeline(this.traceTimeline);
+        this.updateActiveTraceTimeline(this.traceTimeline, true);
       });
 
       const deltaUnlisten = await safeListen<TurnStreamEvent>("turn:delta", ({ payload }) => {
@@ -2576,7 +2744,7 @@ export const useRuntimeStore = defineStore("runtime", {
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
-        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+        const traceTimeline = resolveSemanticEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
             turnId: payload.turnId,
             eventType: payload.eventType,
@@ -2592,9 +2760,10 @@ export const useRuntimeStore = defineStore("runtime", {
               providerMode: this.providerMode
             },
             firstTokenLatencyMs: this.firstTokenLatencyMs
-          })
+          }),
+          this.traceTimeline
         );
-        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveTraceTimeline(traceTimeline, true);
         this.updateActiveModelTraceFromAssistant(payload.turnId);
         debugLog("event:trace", {
           turnId: payload.turnId,
@@ -2615,7 +2784,7 @@ export const useRuntimeStore = defineStore("runtime", {
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
-        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+        const traceTimeline = resolveSemanticEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
             turnId: payload.turnId,
             eventType: payload.eventType,
@@ -2631,9 +2800,10 @@ export const useRuntimeStore = defineStore("runtime", {
               providerMode: this.providerMode
             },
             firstTokenLatencyMs: this.firstTokenLatencyMs
-          })
+          }),
+          this.traceTimeline
         );
-        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveTraceTimeline(traceTimeline, true);
         this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
@@ -2650,7 +2820,7 @@ export const useRuntimeStore = defineStore("runtime", {
 
         this.phase = resolveRuntimePhaseFromEvent(payload, this.phase);
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
-        const traceTimeline = resolveEventTraceTimeline(payload, () =>
+        const traceTimeline = resolveSemanticEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
             turnId: payload.turnId,
             eventType: payload.eventType,
@@ -2666,9 +2836,10 @@ export const useRuntimeStore = defineStore("runtime", {
               providerMode: this.providerMode
             },
             firstTokenLatencyMs: this.firstTokenLatencyMs
-          })
+          }),
+          this.traceTimeline
         );
-        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveTraceTimeline(traceTimeline, true);
         this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
@@ -2690,6 +2861,11 @@ export const useRuntimeStore = defineStore("runtime", {
         });
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities, false);
+        // tool 事件需要 timeline 结构演进（新增/更新 call_tool entry）：
+        // payload 无 timeline 时基于当前 toolActivities 重建，并保留已有 build_context observation。
+        const existingContextObservation = this.traceTimeline.find(
+          (entry) => canonicalizeTraceTimelineKind(entry.kind) === "build_context"
+        )?.buildContextObservation ?? null;
         const traceTimeline = resolveEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
             turnId: payload.turnId,
@@ -2698,6 +2874,7 @@ export const useRuntimeStore = defineStore("runtime", {
             phase: payload.phase ?? this.phase,
             assistantMessage: this.messages.find((message) => message.turnId === payload.turnId && message.role === "assistant") ?? null,
             toolActivities: payload.toolActivities ?? this.toolActivities,
+            buildContextObservation: existingContextObservation,
             providerPatch: {
               providerName: this.providerName,
               providerProtocol: this.providerProtocol,
@@ -2708,7 +2885,7 @@ export const useRuntimeStore = defineStore("runtime", {
             firstTokenLatencyMs: this.firstTokenLatencyMs
           })
         );
-        this.updateActiveTraceTimeline(traceTimeline);
+        this.updateActiveTraceTimeline(traceTimeline, true);
         this.updateActiveModelTraceFromAssistant(payload.turnId);
       });
 
@@ -2848,26 +3025,43 @@ export const useRuntimeStore = defineStore("runtime", {
         const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
-        debugLog("cache-telemetry:terminal-payload", {
-          terminalEvent: "completed",
-          ...buildCacheTelemetryDebugSnapshot(payload)
-        });
+        if (isDebugLoggingEnabled()) {
+          debugLog("cache-telemetry:terminal-payload", {
+            terminalEvent: "completed",
+            ...buildCacheTelemetryDebugSnapshot(payload)
+          });
+        }
         const completedSessionId = this.sessionId;
         const completedRunId = this.activeRunId;
         const completedNodeId = this.visibleNodeId;
+
+        // ===== STAGE 1b (sync): lightweight UI unlock =====
+        // 立即解锁 isSubmitting/activeTurnId/phase，让用户马上可以发起新一轮对话；
+        // trace 终态投影（深拷贝 + upsert）推迟到 STAGE 2 的宏任务中执行，不再阻塞解锁。
+        const unlockedPhase = completedPhase === "completed" ? "ready" : completedPhase;
+        this.$patch((state) => {
+          state.isSubmitting = false;
+          state.activeTurnId = null;
+          state.phase = unlockedPhase;
+        });
 
         // Yield to browser — let Vue flush reactivity + DOM for chat area
         window.setTimeout(() => {
           if (
             this.sessionId !== completedSessionId ||
-            this.activeTurnId !== payload.turnId ||
-            isHistoricalMode(this.historyCursorMode)
+            isHistoricalMode(this.historyCursorMode) ||
+            // 该 turn 已被清出消息流（新建会话/撤回/切换历史）时，跳过终态投影。
+            // 不能依赖 activeTurnId：STAGE 1b 已解锁，新 turn 可能已经开始。
+            !this.messages.some((message) => message.turnId === payload.turnId)
           ) {
             return;
           }
 
-          // ===== STAGE 2 (setTimeout 0): UI unlock + single batch mutation =====
-          const nextPhase = completedPhase === "completed" ? "ready" : completedPhase;
+          // ===== STAGE 2 (setTimeout 0): terminal trace projection =====
+          // 全局展示字段（provider/tokens/sessionSummary）仅在"没有新 turn 抢占前台"时写入：
+          // activeTurnId 为 null（刚解锁空闲）或仍是本 turn 时安全；另一个新 turn 已开始则跳过，
+          // 避免旧 turn 的终态值覆盖新 turn 的提交状态。
+          const stillOwnsGlobalState = this.activeTurnId == null || this.activeTurnId === payload.turnId;
           const nextTraceSteps = payload.traceSteps ?? this.traceSteps;
           const nextSessionSummary = payload.sessionSummary ?? this.sessionSummary;
           const nextProviderRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
@@ -2955,13 +3149,10 @@ export const useRuntimeStore = defineStore("runtime", {
             error: null
           };
 
-          // Single batch: unlock UI + apply all state changes — only ONE reactive cycle
+          // Single batch: terminal trace projection — only ONE reactive cycle.
+          // UI 解锁（isSubmitting/activeTurnId/phase）已在 STAGE 1b 完成，
+          // 此处不再触碰这些字段，避免覆盖可能已开始的新 turn 状态。
           this.$patch((state) => {
-            // --- UI unlock (top priority) ---
-            state.isSubmitting = false;
-            state.activeTurnId = null;
-            state.phase = nextPhase;
-
             // --- applyTurnTokenStats inline ---
             if (payload.inputTokens != null || payload.outputTokens != null) {
               for (let i = 0; i < state.messages.length; i++) {
@@ -3041,10 +3232,23 @@ export const useRuntimeStore = defineStore("runtime", {
                 traceSteps: nextTraceSteps,
                 traceTimeline: traceTimeline,
                 toolActivities: terminalToolActivities,
-                providerCallRecords: [],
-                hookTraceRecords: [],
-                buildContextObservation: null,
+                // 完整展开终态 patch（event envelope / provider / tokens / 深拷贝记录），
+                // 覆盖"提交后未建 trace 记录即收到 completed"的异常路径。
+                providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
+                hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
+                buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
                 sessionSummary: nextSessionSummary,
+                eventId: completedTraceRecordPatch.eventId ?? null,
+                eventType: completedTraceRecordPatch.eventType ?? null,
+                eventVersion: completedTraceRecordPatch.eventVersion ?? null,
+                sequence: completedTraceRecordPatch.sequence ?? null,
+                emittedAtMs: completedTraceRecordPatch.emittedAtMs ?? null,
+                providerRequestedName: completedTraceRecordPatch.providerRequestedName ?? null,
+                providerName: completedTraceRecordPatch.providerName ?? null,
+                providerProtocol: completedTraceRecordPatch.providerProtocol ?? null,
+                providerModel: completedTraceRecordPatch.providerModel ?? null,
+                providerSource: completedTraceRecordPatch.providerSource ?? null,
+                providerMode: completedTraceRecordPatch.providerMode ?? null,
                 fallbackReason: completedTraceRecordPatch.fallbackReason ?? null,
                 error: completedTraceRecordPatch.error ?? null,
                 inputTokens: completedTraceRecordPatch.inputTokens ?? null,
@@ -3058,25 +3262,26 @@ export const useRuntimeStore = defineStore("runtime", {
               });
             }
 
-            // --- Metadata ---
-            state.traceSteps = nextTraceSteps;
-            state.toolActivities = terminalToolActivities;
-            state.sessionSummary = nextSessionSummary;
-            state.providerRequestedName = nextProviderRequestedName;
-            state.providerName = nextProviderName;
-            state.providerProtocol = nextProviderProtocol;
-            state.providerModel = nextProviderModel;
-            state.providerSource = nextProviderSource;
-            state.providerMode = nextProviderMode;
-            state.fallbackReason = payload.fallbackReason ?? null;
-            state.inputTokens = nextInputTokens;
-            state.outputTokens = nextOutputTokens;
-            state.totalTokens = nextTotalTokens;
-            state.firstTokenLatencyMs = nextFirstTokenLatencyMs;
+            // --- Metadata: traceSteps/toolActivities 与全局展示字段仅在
+            // 该 turn 仍是当前前台 turn 时写入，避免覆盖新 turn 已设置的状态。
+            // turnTraceHistory 记录（含 provider/tokens）始终完整写入。
+            if (stillOwnsGlobalState) {
+              state.traceSteps = nextTraceSteps;
+              state.toolActivities = terminalToolActivities;
+              state.sessionSummary = nextSessionSummary;
+              state.providerRequestedName = nextProviderRequestedName;
+              state.providerName = nextProviderName;
+              state.providerProtocol = nextProviderProtocol;
+              state.providerModel = nextProviderModel;
+              state.providerSource = nextProviderSource;
+              state.providerMode = nextProviderMode;
+              state.fallbackReason = payload.fallbackReason ?? null;
+              state.inputTokens = nextInputTokens;
+              state.outputTokens = nextOutputTokens;
+              state.totalTokens = nextTotalTokens;
+              state.firstTokenLatencyMs = nextFirstTokenLatencyMs;
+            }
           });
-
-          // Update eventCursor (not UI-critical) outside $patch
-          this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
 
           // ===== STAGE 3 (runLowPriorityTurnWork): Non-urgent async =====
           runLowPriorityTurnWork(() => {
@@ -3171,10 +3376,12 @@ export const useRuntimeStore = defineStore("runtime", {
         const cacheHitInputTokenPatch = cacheHitInputTokens != null ? { cacheHitInputTokens } : {};
         const reasoningTokenPatch = reasoningTokens != null ? { reasoningTokens } : {};
         const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
-        debugLog("cache-telemetry:terminal-payload", {
-          terminalEvent: "failed",
-          ...buildCacheTelemetryDebugSnapshot(payload)
-        });
+        if (isDebugLoggingEnabled()) {
+          debugLog("cache-telemetry:terminal-payload", {
+            terminalEvent: "failed",
+            ...buildCacheTelemetryDebugSnapshot(payload)
+          });
+        }
         const failedSessionId = this.sessionId;
         const failedRunId = this.activeRunId;
         const failedNodeId = this.visibleNodeId;
@@ -3318,10 +3525,12 @@ export const useRuntimeStore = defineStore("runtime", {
         logCacheTelemetryContractViolations("cancelled", payload);
         const cancelledCacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
         const cancelledReasoningTokens = resolveReasoningTokens(payload);
-        debugLog("cache-telemetry:terminal-payload", {
-          terminalEvent: "cancelled",
-          ...buildCacheTelemetryDebugSnapshot(payload)
-        });
+        if (isDebugLoggingEnabled()) {
+          debugLog("cache-telemetry:terminal-payload", {
+            terminalEvent: "cancelled",
+            ...buildCacheTelemetryDebugSnapshot(payload)
+          });
+        }
 
         const assistantMessage = this.ensureAssistantMessage(
           payload.turnId,
@@ -3577,10 +3786,25 @@ export const useRuntimeStore = defineStore("runtime", {
         return false;
       }
 
-      const images = (options?.images ?? []).map((image) => ({ ...image }));
+      const optionsImages = (options?.images ?? []).map((image) => ({ ...image }));
+      const readyAttachments = this.pendingAttachments.filter((attachment) => attachment.status === "ok");
+      const pendingImages: TurnInputImage[] = readyAttachments
+        .filter((attachment) => attachment.route === "image" && attachment.dataUrl != null)
+        .map((attachment) => ({
+          dataUrl: attachment.dataUrl as string,
+          mimeType: attachment.mimeType,
+          name: attachment.name
+        }));
+      const images = [...pendingImages, ...optionsImages];
       const message = this.draftMessage.trim();
+      const attachmentBlocks = buildAttachmentMessageBlocks(readyAttachments);
 
-      if (!message.trim() && !images.length) {
+      if (
+        !message.trim() &&
+        !images.length &&
+        !attachmentBlocks.text.length &&
+        !attachmentBlocks.documents.length
+      ) {
         return false;
       }
 
@@ -3609,8 +3833,8 @@ export const useRuntimeStore = defineStore("runtime", {
         .reverse()
         .find((entry) => entry.role === "assistant") ?? null;
       const retryingAfterTimeout = isRetryableError(lastAssistantMessage?.errorDetail);
-      const providerMessage = buildProviderUserMessage(message, images);
-      const displayMessage = buildDisplayedUserMessage(message, images);
+      const providerMessage = buildProviderUserMessageWithAttachments(message, images, attachmentBlocks);
+      const displayMessage = buildDisplayedUserMessageWithAttachments(message, images, attachmentBlocks);
       const payload: TurnInput = {
         message: providerMessage,
         displayMessage,
@@ -3621,7 +3845,9 @@ export const useRuntimeStore = defineStore("runtime", {
         sessionId: this.sessionId,
         nodeId: this.visibleNodeId,
         history: buildTurnHistory(this.messages),
-        images
+        images,
+        // PA-079 传输通道：本轮恒 null（→ 默认 workspace）；PA-081 起改传 activeWorkspaceId
+        workspaceId: null
       };
 
       const requestId = String(Date.now());
@@ -3632,14 +3858,17 @@ export const useRuntimeStore = defineStore("runtime", {
         turnId: requestId,
         role: "user",
         content: displayMessage,
-        attachments: images.map((image, index) => ({
-          id: `pending-${requestId}-${index + 1}`,
-          name: image.name ?? null,
-          mimeType: image.mimeType,
-          relativePath: null,
-          sizeBytes: image.dataUrl.length,
-          createdAtMs: Date.now()
-        })),
+        attachments: [
+          ...images.map((image, index) => ({
+            id: `pending-${requestId}-${index + 1}`,
+            name: image.name ?? null,
+            mimeType: image.mimeType,
+            relativePath: null,
+            sizeBytes: image.dataUrl.length,
+            createdAtMs: Date.now()
+          })),
+          ...buildAttachmentMetas(readyAttachments, requestId)
+        ],
         status: "done",
         tokenCount: null
       });
@@ -3657,6 +3886,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "calling_model";
       this.activeTurnId = requestId;
       this.draftMessage = "";
+      this.clearPendingAttachments();
       this.providerRequestedName = selectedProviderName ?? "";
       this.providerName = selectedProviderName ?? "";
       this.providerProtocol = selectedProviderProtocol ?? "";
@@ -3686,7 +3916,10 @@ export const useRuntimeStore = defineStore("runtime", {
         providerMode: null,
         fallbackReason: null,
         error: null
-      });
+      }, false);
+      // trace 初始记录不立即全量写 localStorage（用户消息已在上方 persistHistory 落盘），
+      // 延迟合并写避免发送路径连续两次全量序列化阻塞主线程。
+      this.scheduleDeferredPersist();
 
       if (retryingAfterTimeout) {
         const assistantMessage = this.ensureAssistantMessage(

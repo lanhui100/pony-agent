@@ -2951,7 +2951,8 @@ describe("runtime session resilience", () => {
         summary: "发送第一条消息后保存到历史",
         turnCount: 0,
         lastReferencedFile: null,
-        updatedAtMs: 0
+        updatedAtMs: 0,
+        workspaceId: null
       },
       {
         conversationId: "browser-current",
@@ -2959,7 +2960,8 @@ describe("runtime session resilience", () => {
         summary: "Browser summary",
         turnCount: 1,
         lastReferencedFile: null,
-        updatedAtMs: 4000
+        updatedAtMs: 4000,
+        workspaceId: null
       }
     ]);
     expect(Object.keys(readPersistedSessions().sessions)).toEqual(["browser-current"]);
@@ -3082,7 +3084,8 @@ describe("runtime session resilience", () => {
         summary: "Browser summary",
         turnCount: 1,
         lastReferencedFile: null,
-        updatedAtMs: 4000
+        updatedAtMs: 4000,
+        workspaceId: null
       }
     ]);
   });
@@ -4864,6 +4867,153 @@ describe("runtime session resilience", () => {
     expect(store.turnTraceHistory).toHaveLength(1);
     expect(store.turnTraceHistory[0]?.eventType).toBe("turn.completed");
     nowSpy.mockRestore();
+  });
+
+  it("unlocks the UI synchronously on completed while terminal trace projection is deferred", async () => {
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const store = useRuntimeStore();
+    store.$patch({
+      sessionId: "session-unlock-first",
+      draftMessage: "stream request",
+      phase: "calling_model",
+      activeTurnId: "turn-unlock",
+      isSubmitting: true,
+      messages: [
+        createMessage({ id: "user-unlock", turnId: "turn-unlock", role: "user", content: "request" })
+      ],
+      turnTraceHistory: []
+    });
+
+    await store.initializeTurnEvents();
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "turn-unlock",
+        eventId: "event-turn-completed-unlock",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 1500,
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        sessionSummary: "Completed summary",
+        traceSteps: store.traceSteps,
+        toolActivities: []
+      } as any
+    });
+
+    // STAGE 1b 同步解锁：不等待任何定时器即可开始新一轮对话
+    expect(store.isSubmitting).toBe(false);
+    expect(store.activeTurnId).toBeNull();
+    expect(store.phase).toBe("ready");
+
+    await flushDeferredTurnWork();
+    await flushMicrotasks();
+
+    // 终态 trace 投影在宏任务中补齐
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.eventType).toBe("turn.completed");
+    expect(store.turnTraceHistory[0]?.sessionSummary).toBe("Completed summary");
+    expect(store.sessionSummary).toBe("Completed summary");
+    expect(store.providerName).toBe("OpenAI");
+  });
+
+  it("does not overwrite a newly started turn's global state with a stale terminal projection", async () => {
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const store = useRuntimeStore();
+    store.$patch({
+      sessionId: "session-stale-guard",
+      draftMessage: "stream request",
+      phase: "calling_model",
+      activeTurnId: "turn-old",
+      isSubmitting: true,
+      providerName: "OpenAI",
+      providerModel: "gpt-5",
+      sessionSummary: "Old summary",
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old request" })
+      ],
+      turnTraceHistory: []
+    });
+
+    await store.initializeTurnEvents();
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "turn-old",
+        eventId: "event-turn-completed-old",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 1500,
+        text: "old answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        providerProtocol: "openai",
+        providerSource: "primary",
+        providerMode: "standard",
+        sessionSummary: "Old summary",
+        traceSteps: store.traceSteps,
+        toolActivities: []
+      } as any
+    });
+
+    // STAGE 1b 同步解锁
+    expect(store.isSubmitting).toBe(false);
+    expect(store.activeTurnId).toBeNull();
+
+    // 用户在 STAGE 2 执行前发起了新 turn（模拟 submitTurn 设置的前台状态）
+    store.$patch({
+      activeTurnId: "turn-new",
+      isSubmitting: true,
+      phase: "calling_model",
+      providerName: "Anthropic",
+      providerModel: "claude-4",
+      sessionSummary: "New summary"
+    });
+
+    await flushDeferredTurnWork();
+    await flushMicrotasks();
+
+    // 全局展示字段保持新 turn 的值，不被旧 turn 终态覆盖
+    expect(store.providerName).toBe("Anthropic");
+    expect(store.providerModel).toBe("claude-4");
+    expect(store.sessionSummary).toBe("New summary");
+    expect(store.isSubmitting).toBe(true);
+    expect(store.activeTurnId).toBe("turn-new");
+
+    // 旧 turn 的终态 trace 仍完整写入 turnTraceHistory
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.eventType).toBe("turn.completed");
+    expect(store.turnTraceHistory[0]?.sessionSummary).toBe("Old summary");
   });
 
   it("keeps terminal assistant payload stable when output_end and completed carry the same content", async () => {

@@ -480,6 +480,40 @@ export function persistSessionState(sessionId: string, payload: PersistedRuntime
   window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
 }
 
+export function persistSessionStateAndRuntimeMaps(
+  sessionId: string,
+  payload: PersistedRuntimeState,
+  map: Record<string, RunningTurn>,
+  completedSessionSet: Record<string, boolean>,
+  failedSessionSet: Record<string, boolean>
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const cache = loadPersistedRuntimeCache();
+    cache.sessions[sessionId] = payload;
+    const stripped: Record<string, { turnId: string; phase: RuntimePhase; textBuffer: string; reasoningBuffer: string }> = {};
+    for (const [sid, turn] of Object.entries(map)) {
+      stripped[sid] = {
+        turnId: turn.turnId,
+        phase: turn.phase,
+        textBuffer: turn.textBuffer.slice(-5000),
+        reasoningBuffer: turn.reasoningBuffer.slice(-2000)
+      };
+    }
+    cache.runningSessionMap = stripped;
+    cache.completedSet = { ...completedSessionSet };
+    cache.failedSet = { ...failedSessionSet };
+    // 合并 sessions + running map 为单次 load-modify-save，
+    // 避免 persistHistory 路径上背靠背两次全量 JSON 序列化。
+    window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
+  } catch {
+    debugLog("persist:session-and-maps:error");
+  }
+}
+
 export function persistRunningSessionMap(
   map: Record<string, RunningTurn>,
   completedSessionSet: Record<string, boolean>,
@@ -609,7 +643,8 @@ export function createTransientSessionOverview(sessionId: string): SessionOvervi
     summary: "发送第一条消息后保存到历史",
     turnCount: 0,
     lastReferencedFile: null,
-    updatedAtMs: 0
+    updatedAtMs: 0,
+    workspaceId: null
   };
 }
 
@@ -627,7 +662,8 @@ export function buildSessionOverviewFromPersistedState(
     updatedAtMs:
       legacyTraceHistory.length > 0
         ? legacyTraceHistory[legacyTraceHistory.length - 1]!.updatedAt
-        : Date.now()
+        : Date.now(),
+    workspaceId: null
   };
 }
 
@@ -643,7 +679,8 @@ export function buildSessionOverviewFromRuntimeState(state: Pick<RuntimeState, "
     summary: state.sessionSummary || DEFAULT_BROWSER_SESSION_SUMMARY,
     turnCount: state.messages.filter((message) => message.role === "user").length,
     lastReferencedFile: null,
-    updatedAtMs: latestTrace?.updatedAt ?? Date.now()
+    updatedAtMs: latestTrace?.updatedAt ?? Date.now(),
+    workspaceId: null
   };
 }
 
