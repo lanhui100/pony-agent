@@ -234,7 +234,7 @@ impl SqliteSessionBackend {
 
         // Upsert metadata — scoped to drop the statement before commit
         {
-            let metadata_entries: [(&str, Option<String>); 5] = [
+            let metadata_entries: [(&str, Option<String>); 6] = [
                 (
                     "attachment_assets",
                     serde_json::to_string(&store.attachment_assets).ok(),
@@ -254,6 +254,10 @@ impl SqliteSessionBackend {
                 (
                     "workspaces",
                     serde_json::to_string(&store.workspaces).ok(),
+                ),
+                (
+                    "path_authorizations.v1",
+                    serde_json::to_string(&store.path_authorizations).ok(),
                 ),
             ];
 
@@ -579,6 +583,7 @@ impl SessionBackend for SqliteSessionBackend {
         let mcp_source_snapshots = self.read_metadata(conn, "mcp_source_snapshots");
         let skill_source_snapshots = self.read_metadata(conn, "skill_source_snapshots");
         let workspaces = self.read_metadata(conn, "workspaces");
+        let path_authorizations = self.read_metadata(conn, "path_authorizations.v1");
 
         Some(PersistedStore {
             sessions,
@@ -587,6 +592,7 @@ impl SessionBackend for SqliteSessionBackend {
             mcp_source_snapshots,
             skill_source_snapshots,
             workspaces,
+            path_authorizations,
         })
     }
 

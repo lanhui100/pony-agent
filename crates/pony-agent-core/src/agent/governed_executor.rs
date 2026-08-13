@@ -135,8 +135,12 @@ fn legacy_error_message(output: &str) -> String {
 
 /// Build a governed executor over the full builtin tool surface, ready to be adopted as the
 /// runtime's tool-execution engine. `workspace_root` seeds the `ToolRouter` implementations and the
-/// dispatcher's workspace facts.
-pub fn build_governed_executor(workspace_root: Option<PathBuf>) -> GovernedToolExecutor {
+/// dispatcher's workspace facts. `authorize_store`（PA-080）与 host control plane 共享同一
+/// `Arc`：`authorize_path` 的授权变更即时对工具读判定生效。
+pub fn build_governed_executor(
+    workspace_root: Option<PathBuf>,
+    authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
+) -> GovernedToolExecutor {
     let registry = Arc::new(
         ToolRegistrySnapshot::builtin().expect("builtin registry must validate"),
     );
@@ -154,7 +158,13 @@ pub fn build_governed_executor(workspace_root: Option<PathBuf>) -> GovernedToolE
     let workspace = workspace_root.unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     });
-    let router = Arc::new(ToolRouter::with_workspace_root(workspace.clone()));
+    // PA-080：授权清单（如有）与 host control plane 共享同一 `Arc`；
+    // 缺省（测试/legacy 构造）时工具判定使用空授权清单（workspace 外读一律 requires_authorization）。
+    let shared_authorizations = authorize_store
+        .unwrap_or_else(|| Arc::new(crate::agent::path_permission::AuthorizeStore::new()));
+    let router = Arc::new(
+        ToolRouter::with_workspace_root(workspace.clone()).with_authorize_store(Arc::clone(&shared_authorizations)),
+    );
 
     // ── Plan state control: session-owned, revisioned create/replace/merge/complete-step.
     // Each runtime owns one PlanStore; session isolation is enforced by the store's
@@ -164,11 +174,15 @@ pub fn build_governed_executor(workspace_root: Option<PathBuf>) -> GovernedToolE
 
     // ── view_image: reference-based artifact with default include_bytes=false (design Decision 11).
     // Whether the encoded bytes reach a model is a provider modality choice. ──
-    let view_image_handler = Arc::new(ViewImageHandler::new(workspace.clone()));
+    let view_image_handler = Arc::new(
+        ViewImageHandler::new(workspace.clone()).with_authorizations(Arc::clone(&shared_authorizations)),
+    );
 
     // ── workspace_read_document: local office document → Markdown via anydoc, workspace-scoped,
     // with explicit output/input byte budgets and truncated evidence. ──
-    let read_document_handler = Arc::new(ReadDocumentHandler::new(workspace.clone()));
+    let read_document_handler = Arc::new(
+        ReadDocumentHandler::new(workspace.clone()).with_authorizations(Arc::clone(&shared_authorizations)),
+    );
 
     // Register every builtin primitive handler (composites are registered separately below).
     for descriptor in &registry.descriptors {
@@ -259,7 +273,7 @@ mod tests {
         fs::write(workspace.join("sub/mod.rs"), "pub fn helper() {}\n").expect("write fixture");
 
         let legacy = ToolRouter::with_workspace_root(workspace.clone());
-        let governed = build_governed_executor(Some(workspace.clone()));
+        let governed = build_governed_executor(Some(workspace.clone()), None);
 
         // The model-visible product surface (what the runtime actually dispatches): List, Search,
         // Glob. Read/Write/Edit are covered separately; Run is sandbox-gated; Ask is host-mediated
@@ -296,7 +310,7 @@ mod tests {
     #[test]
     fn governed_executor_ask_is_host_mediated_and_persists_the_question() {
         let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace));
+        let governed = build_governed_executor(Some(workspace), None);
         governed.set_context(crate::agent::dispatcher::DispatchContext {
             session_id: Some("session-ask".to_string()),
             run_id: Some("run-1".to_string()),
@@ -342,7 +356,7 @@ mod tests {
     fn governed_executor_matches_legacy_router_for_write_and_edit() {
         let workspace = temp_workspace();
         let legacy = ToolRouter::with_workspace_root(workspace.clone());
-        let governed = build_governed_executor(Some(workspace.clone()));
+        let governed = build_governed_executor(Some(workspace.clone()), None);
 
         let write = same_call(
             "Write",
@@ -391,7 +405,7 @@ mod tests {
     #[test]
     fn governed_executor_fails_closed_for_run_without_sandbox_backend() {
         let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace));
+        let governed = build_governed_executor(Some(workspace), None);
         let result = governed.execute(&same_call(
             "Run",
             json!({ "command": "echo hi", "description": "test" }),
@@ -410,7 +424,7 @@ mod tests {
     fn governed_executor_exposes_governed_dispatcher_through_trait_downcast() {
         let workspace = temp_workspace();
         let executor: Box<dyn ToolExecutor> =
-            Box::new(build_governed_executor(Some(workspace)));
+            Box::new(build_governed_executor(Some(workspace), None));
         // PA-076 P1-1: the runtime reaches the shared dispatcher via `ToolExecutor::as_any`.
         let governed = executor
             .as_any()
@@ -436,7 +450,7 @@ mod tests {
     fn governed_executor_runs_read_only_batch_children_through_child_dispatch() {
         let workspace = temp_workspace();
         fs::write(workspace.join("demo.rs"), "fn main() {}\n").expect("write fixture");
-        let governed = build_governed_executor(Some(workspace));
+        let governed = build_governed_executor(Some(workspace), None);
 
         let result = governed.execute(&same_call(
             "BatchExecute",
@@ -461,7 +475,7 @@ mod tests {
     #[test]
     fn governed_executor_dispatches_plan_control_create_replace_merge_and_complete_step() {
         let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace.clone()));
+        let governed = build_governed_executor(Some(workspace.clone()), None);
         governed.set_context(crate::agent::dispatcher::DispatchContext {
             session_id: Some("session-1".to_string()),
             run_id: Some("run-1".to_string()),
@@ -564,7 +578,7 @@ mod tests {
     #[test]
     fn governed_executor_plan_control_stale_revision_and_missing_op_fail_closed() {
         let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace.clone()));
+        let governed = build_governed_executor(Some(workspace.clone()), None);
         governed.set_context(crate::agent::dispatcher::DispatchContext {
             session_id: Some("session-1".to_string()),
             ..Default::default()
@@ -633,7 +647,7 @@ mod tests {
         let workspace = temp_workspace();
         write_minimal_png(&workspace.join("photo.png"), 320, 240);
 
-        let governed = build_governed_executor(Some(workspace.clone()));
+        let governed = build_governed_executor(Some(workspace.clone()), None);
         let result = governed.execute(&same_call(
             "ViewImage",
             json!({ "path": "photo.png", "description": "test" }),
@@ -659,7 +673,7 @@ mod tests {
         let full_len =
             std::fs::metadata(&workspace.join("photo.png")).unwrap().len();
 
-        let governed = build_governed_executor(Some(workspace.clone()));
+        let governed = build_governed_executor(Some(workspace.clone()), None);
         // includeBytes=true with a small maxBytes → capped, truncated.
         let result = governed.execute(&same_call(
             "ViewImage",
@@ -682,7 +696,7 @@ mod tests {
     #[test]
     fn governed_executor_view_image_missing_path_and_unknown_format_fail_closed() {
         let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace.clone()));
+        let governed = build_governed_executor(Some(workspace.clone()), None);
 
         let missing = governed.execute(&same_call(
             "ViewImage",

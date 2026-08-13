@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::agent::tool_runtime::{PrimitiveToolHandler, PrimitiveToolHandlerRequest};
 
@@ -73,6 +74,7 @@ pub fn read_workspace_document(
     path: &str,
     root: &Path,
     options: &DocumentReadOptions,
+    authorizations: &crate::agent::path_permission::AuthorizeStore,
 ) -> Result<DocumentConversion, String> {
     let raw_path = path.trim();
     if raw_path.is_empty() {
@@ -82,7 +84,7 @@ pub fn read_workspace_document(
         return Err("document read byte budgets cannot be zero".to_string());
     }
 
-    let canonical = resolve_inside_workspace(raw_path, root)?;
+    let canonical = resolve_inside_workspace(raw_path, root, authorizations)?;
     let metadata = std::fs::metadata(&canonical)
         .map_err(|error| format!("cannot read document metadata for `{raw_path}`: {error}"))?;
     if !metadata.is_file() {
@@ -168,8 +170,14 @@ fn format_name(format: &anydoc::Format) -> String {
 }
 
 /// Canonicalize `raw_path` (absolute or relative to `root`) and fail closed when the result
-/// escapes the workspace.
-fn resolve_inside_workspace(raw_path: &str, root: &Path) -> Result<PathBuf, String> {
+/// escapes the workspace. PA-080: the check goes through `classify_path(Read)` so an explicit
+/// authorization entry can allow an external document read; otherwise it fails closed.
+fn resolve_inside_workspace(
+    raw_path: &str,
+    root: &Path,
+    authorizations: &crate::agent::path_permission::AuthorizeStore,
+) -> Result<PathBuf, String> {
+    use crate::agent::path_permission::{PathPermissionChecker, PathPurpose};
     let input = PathBuf::from(raw_path);
     let candidate = if input.is_absolute() {
         input
@@ -183,9 +191,19 @@ fn resolve_inside_workspace(raw_path: &str, root: &Path) -> Result<PathBuf, Stri
         .canonicalize()
         .map_err(|error| format!("cannot resolve workspace root `{}`: {error}", root.display()))?;
     if !canonical.starts_with(&canonical_root) {
-        return Err(format!(
-            "document path `{raw_path}` resolves outside the workspace and is denied"
-        ));
+        // workspace 外：授权清单命中放行，否则 `requires_authorization`（审批语义入口）。
+        let checker = PathPermissionChecker::with_default();
+        let tmp = root.join(".tmp");
+        return match checker.classify(
+            &canonical.display().to_string(),
+            &canonical_root,
+            &tmp,
+            authorizations,
+            PathPurpose::Read,
+        ) {
+            Ok(permission) => Ok(permission.canonical),
+            Err(error) => Err(format!("{}: {}", error.code.as_str(), error.message)),
+        };
     }
     Ok(canonical)
 }
@@ -198,6 +216,8 @@ fn resolve_inside_workspace(raw_path: &str, root: &Path) -> Result<PathBuf, Stri
 pub struct ReadDocumentHandler {
     root: PathBuf,
     default_options: DocumentReadOptions,
+    /// 共享授权清单（PA-080）：workspace 外文档读取需显式授权才放行。
+    authorizations: Arc<crate::agent::path_permission::AuthorizeStore>,
 }
 
 impl ReadDocumentHandler {
@@ -205,7 +225,17 @@ impl ReadDocumentHandler {
         Self {
             root,
             default_options: DocumentReadOptions::default(),
+            authorizations: Arc::new(crate::agent::path_permission::AuthorizeStore::new()),
         }
+    }
+
+    /// 注入共享授权清单（PA-080）：与工具执行器共享同一 `Arc`。
+    pub fn with_authorizations(
+        mut self,
+        authorizations: Arc<crate::agent::path_permission::AuthorizeStore>,
+    ) -> Self {
+        self.authorizations = authorizations;
+        self
     }
 }
 
@@ -229,7 +259,7 @@ impl PrimitiveToolHandler for ReadDocumentHandler {
                 .unwrap_or(self.default_options.max_output_bytes),
             max_input_bytes: self.default_options.max_input_bytes,
         };
-        let conversion = read_workspace_document(path, &self.root, &options)?;
+        let conversion = read_workspace_document(path, &self.root, &options, &self.authorizations)?;
         serde_json::to_value(&conversion).map_err(|e| {
             format!("handler_error: workspace_read_document serialization failed: {e}")
         })
@@ -239,6 +269,7 @@ impl PrimitiveToolHandler for ReadDocumentHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::path_permission::AuthorizeStore;
     use std::fs;
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -304,7 +335,7 @@ mod tests {
         let file = root.join("data.csv");
         fs::write(&file, csv_bytes()).expect("write csv");
 
-        let result = read_workspace_document("data.csv", &root, &DocumentReadOptions::default())
+        let result = read_workspace_document("data.csv", &root, &DocumentReadOptions::default(), &AuthorizeStore::new())
             .expect("csv should convert");
         assert_eq!(result.format.as_deref(), Some("csv"));
         assert!(!result.truncated);
@@ -319,7 +350,7 @@ mod tests {
         let file = root.join("report.dat"); // misleading extension
         fs::write(&file, minimal_docx_bytes()).expect("write docx-as-dat");
 
-        let result = read_workspace_document("report.dat", &root, &DocumentReadOptions::default())
+        let result = read_workspace_document("report.dat", &root, &DocumentReadOptions::default(), &AuthorizeStore::new())
             .expect("content-based detection should convert mislabeled docx");
         assert_eq!(result.format.as_deref(), Some("docx"));
         assert!(result.markdown.contains("Pony Agent doc test"), "{}", result.markdown);
@@ -335,25 +366,37 @@ mod tests {
             &format!("..\\{}", outside.file_name().unwrap().to_string_lossy()),
             &root,
             &DocumentReadOptions::default(),
+            &AuthorizeStore::new(),
         )
         .expect_err("escape must fail closed");
-        assert!(error.contains("outside the workspace"), "{error}");
+        assert!(
+            error.contains("outside the workspace")
+                || error.contains("denied")
+                || error.contains("requires_authorization"),
+            "{error}"
+        );
         let absolute = read_workspace_document(
             &outside.to_string_lossy(),
             &root,
             &DocumentReadOptions::default(),
+            &AuthorizeStore::new(),
         )
         .expect_err("absolute path outside must fail closed");
-        assert!(absolute.contains("outside the workspace"), "{absolute}");
+        assert!(
+            absolute.contains("outside the workspace")
+                || absolute.contains("denied")
+                || absolute.contains("requires_authorization"),
+            "{absolute}"
+        );
     }
 
     #[test]
     fn rejects_missing_and_directory_targets() {
         let root = temp_workspace();
-        let missing = read_workspace_document("nope.docx", &root, &DocumentReadOptions::default())
+        let missing = read_workspace_document("nope.docx", &root, &DocumentReadOptions::default(), &AuthorizeStore::new())
             .expect_err("missing file must fail");
         assert!(missing.contains("cannot resolve"), "{missing}");
-        let directory = read_workspace_document("sub", &root, &DocumentReadOptions::default())
+        let directory = read_workspace_document("sub", &root, &DocumentReadOptions::default(), &AuthorizeStore::new())
             .expect_err("directory must fail");
         assert!(directory.contains("not a regular file"), "{directory}");
     }
@@ -367,7 +410,7 @@ mod tests {
             max_input_bytes: 4,
             ..Default::default()
         };
-        let error = read_workspace_document("big.csv", &root, &options)
+        let error = read_workspace_document("big.csv", &root, &options, &AuthorizeStore::new())
             .expect_err("oversized input must be rejected");
         assert!(error.contains("input limit"), "{error}");
     }
@@ -381,7 +424,7 @@ mod tests {
             max_output_bytes: 10,
             ..Default::default()
         };
-        let result = read_workspace_document("data.csv", &root, &options)
+        let result = read_workspace_document("data.csv", &root, &options, &AuthorizeStore::new())
             .expect("conversion with tiny budget still succeeds");
         assert!(result.truncated);
         assert!(result.markdown_len > 10);
@@ -394,7 +437,7 @@ mod tests {
         let root = temp_workspace();
         let file = root.join("junk.bin");
         fs::write(&file, b"not a document at all").expect("write junk");
-        let error = read_workspace_document("junk.bin", &root, &DocumentReadOptions::default())
+        let error = read_workspace_document("junk.bin", &root, &DocumentReadOptions::default(), &AuthorizeStore::new())
             .expect_err("unknown content must fail");
         assert!(error.contains("unsupported"), "{error}");
     }

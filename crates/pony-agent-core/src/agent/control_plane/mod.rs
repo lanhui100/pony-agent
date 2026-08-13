@@ -52,6 +52,7 @@ mod capability_commands;
 mod graph_projection;
 mod history_commands;
 mod message_projection;
+mod path_authorization_commands;
 mod query_commands;
 mod trace_commands;
 mod workspace_commands;
@@ -8189,6 +8190,7 @@ mod tests {
             }),
             Box::new(crate::agent::governed_executor::build_governed_executor(
                 Some(workspace),
+                None,
             )),
             Box::new(ForcedToolPlanner {
                 tool_name: "Ask".to_string(),
@@ -8328,9 +8330,7 @@ mod tests {
             Box::new(StaticResolver {
                 selection: test_provider_selection(server.base_url.clone()),
             }),
-            Box::new(crate::agent::governed_executor::build_governed_executor(
-                Some(workspace.clone()),
-            )),
+            Box::new(crate::agent::governed_executor::build_governed_executor(None, None)),
             Box::new(ForcedToolPlanner {
                 tool_name: "workspace_glob_files".to_string(),
                 arguments: json!({ "pattern": "**/*" }),

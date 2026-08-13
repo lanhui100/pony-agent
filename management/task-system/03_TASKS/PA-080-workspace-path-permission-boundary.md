@@ -55,10 +55,12 @@
 
 - 3 路对抗审核（2026-08-09）已完成，findings 全部采纳；spec/proposal/design/tasks 已修订（Windows 组件级大小写折叠 + 双断言、写新文件复用 `prepare_workspace_file_path`、可注入 canonicalizer + hermetic symlink 测试、scope 仅 read、Run 只判 cwd、错误码断言等）。详见 `02_REVIEWS/2026-08-09-pa078-081-spec-review.md`。
 - 无未解决 P0/P1，spec 通过审核，可进入实现。
+- **实现完成（2026-08-13）**：`path_permission.rs`（885 行）统一路径判定 + 18 项对抗测试；工具接入（读/写/Run cwd 统一经 `classify_path`）；`AuthorizeStore` 持久化（SQLite `store_metadata` key=`path_authorizations.v1` + JSON fallback）；宿主 `authorize_path`/`revoke_authorization`/`list_authorizations`；`docs/concurrency/lock-ordering.md` 登记 `path_authorizations` 锁（与 sessions_rwlock 同级、先 registry 后 authorize）；runtime 构建时从 SessionStore 共享授权存储给 governed executor。
+- **验证（2026-08-13）**：`npm run cargo:check:shared` 通过；core lib 772 全绿（含 path_permission 18 项对抗测试）；tool_router_regression 13 + session_regression 5 + provider_registry_regression 8 + src-tauri lib 6 全绿；前端 vitest 377 全绿。
 
 ## Next Action
 
-- 按 `openspec/changes/workspace-path-permission-boundary/tasks.md` 顺序实现（依赖 PA-079 数据模型最小可用版）。
+- 提交实现（feat(pa-080)）；实现后 3 路对抗审核（@consultant 权限模型 / @code-reviewer 路径安全 / @tester 对抗矩阵复核）；PA-081（侧边栏树）在其后启动。
 
 ## Blockers
 

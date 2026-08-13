@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::agent::tool_runtime::{PrimitiveToolHandler, PrimitiveToolHandlerRequest};
 
@@ -74,6 +75,7 @@ pub fn view_workspace_image(
     path: &str,
     root: &Path,
     options: &ImageReadOptions,
+    authorizations: &crate::agent::path_permission::AuthorizeStore,
 ) -> Result<ImageArtifact, String> {
     let raw_path = path.trim();
     if raw_path.is_empty() {
@@ -83,7 +85,7 @@ pub fn view_workspace_image(
         return Err("image read byte budget cannot be zero".to_string());
     }
 
-    let canonical = resolve_inside_workspace(raw_path, root)?;
+    let canonical = resolve_inside_workspace(raw_path, root, authorizations)?;
     let metadata = std::fs::metadata(&canonical)
         .map_err(|error| format!("cannot read image metadata for `{raw_path}`: {error}"))?;
     if !metadata.is_file() {
@@ -126,8 +128,14 @@ pub fn view_workspace_image(
 }
 
 /// Canonicalize `raw_path` (absolute or relative to `root`) and fail closed when the result
-/// escapes the workspace.
-fn resolve_inside_workspace(raw_path: &str, root: &Path) -> Result<PathBuf, String> {
+/// escapes the workspace. PA-080: the check goes through `classify_path(Read)` so an explicit
+/// authorization entry can allow an external image read; otherwise it fails closed.
+fn resolve_inside_workspace(
+    raw_path: &str,
+    root: &Path,
+    authorizations: &crate::agent::path_permission::AuthorizeStore,
+) -> Result<PathBuf, String> {
+    use crate::agent::path_permission::{PathPermissionChecker, PathPurpose};
     let input = PathBuf::from(raw_path);
     let candidate = if input.is_absolute() {
         input
@@ -141,9 +149,19 @@ fn resolve_inside_workspace(raw_path: &str, root: &Path) -> Result<PathBuf, Stri
         .canonicalize()
         .map_err(|error| format!("cannot resolve workspace root `{}`: {error}", root.display()))?;
     if !canonical.starts_with(&canonical_root) {
-        return Err(format!(
-            "image path `{raw_path}` resolves outside the workspace and is denied"
-        ));
+        // workspace 外：授权清单命中放行，否则 `requires_authorization`（审批语义入口）。
+        let checker = PathPermissionChecker::with_default();
+        let tmp = root.join(".tmp");
+        return match checker.classify(
+            &canonical.display().to_string(),
+            &canonical_root,
+            &tmp,
+            authorizations,
+            PathPurpose::Read,
+        ) {
+            Ok(permission) => Ok(permission.canonical),
+            Err(error) => Err(format!("{}: {}", error.code.as_str(), error.message)),
+        };
     }
     Ok(canonical)
 }
@@ -338,6 +356,8 @@ fn bmp_dimensions(header: &[u8]) -> Result<(u64, u64), String> {
 pub struct ViewImageHandler {
     root: std::path::PathBuf,
     default_options: ImageReadOptions,
+    /// 共享授权清单（PA-080）：workspace 外图片读取需显式授权才放行。
+    authorizations: Arc<crate::agent::path_permission::AuthorizeStore>,
 }
 
 impl ViewImageHandler {
@@ -345,7 +365,17 @@ impl ViewImageHandler {
         Self {
             root,
             default_options: ImageReadOptions::default(),
+            authorizations: Arc::new(crate::agent::path_permission::AuthorizeStore::new()),
         }
+    }
+
+    /// 注入共享授权清单（PA-080）：与工具执行器共享同一 `Arc`。
+    pub fn with_authorizations(
+        mut self,
+        authorizations: Arc<crate::agent::path_permission::AuthorizeStore>,
+    ) -> Self {
+        self.authorizations = authorizations;
+        self
     }
 }
 
@@ -383,7 +413,7 @@ impl PrimitiveToolHandler for ViewImageHandler {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(self.default_options.max_bytes),
         };
-        let artifact = view_workspace_image(path, &self.root, &options)?;
+        let artifact = view_workspace_image(path, &self.root, &options, &self.authorizations)?;
         serde_json::to_value(&artifact)
             .map_err(|e| format!("handler_error: view_image artifact serialization failed: {e}"))
     }
@@ -392,6 +422,7 @@ impl PrimitiveToolHandler for ViewImageHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::path_permission::AuthorizeStore;
 
     struct TempWorkspace {
         root: PathBuf,
@@ -504,7 +535,7 @@ mod tests {
 
         // Default is reference-based: include_bytes=false (design Decision 11).
         let artifact =
-            view_workspace_image("photo.png", workspace.path(), &ImageReadOptions::default())
+            view_workspace_image("photo.png", workspace.path(), &ImageReadOptions::default(), &AuthorizeStore::new())
                 .expect("workspace png should be viewable");
         assert_eq!(artifact.width, 320);
         assert_eq!(artifact.height, 240);
@@ -524,6 +555,7 @@ mod tests {
                 include_bytes: true,
                 ..ImageReadOptions::default()
             },
+            &AuthorizeStore::new(),
         )
         .expect("workspace png with bytes should be viewable");
         assert!(artifact.bytes.is_some());
@@ -545,22 +577,22 @@ mod tests {
 
         let options = ImageReadOptions::default();
         let jpeg_artifact =
-            view_workspace_image("photo.jpg", workspace.path(), &options).expect("jpeg viewable");
+            view_workspace_image("photo.jpg", workspace.path(), &options, &AuthorizeStore::new()).expect("jpeg viewable");
         assert_eq!((jpeg_artifact.width, jpeg_artifact.height), (640, 480));
         assert_eq!(jpeg_artifact.mime_type, "image/jpeg");
 
         let gif_artifact =
-            view_workspace_image("anim.gif", workspace.path(), &options).expect("gif viewable");
+            view_workspace_image("anim.gif", workspace.path(), &options, &AuthorizeStore::new()).expect("gif viewable");
         assert_eq!((gif_artifact.width, gif_artifact.height), (12, 34));
         assert_eq!(gif_artifact.mime_type, "image/gif");
 
         let bmp_artifact =
-            view_workspace_image("raw.bmp", workspace.path(), &options).expect("bmp viewable");
+            view_workspace_image("raw.bmp", workspace.path(), &options, &AuthorizeStore::new()).expect("bmp viewable");
         assert_eq!((bmp_artifact.width, bmp_artifact.height), (56, 78));
         assert_eq!(bmp_artifact.mime_type, "image/bmp");
 
         let webp_artifact =
-            view_workspace_image("modern.webp", workspace.path(), &options).expect("webp viewable");
+            view_workspace_image("modern.webp", workspace.path(), &options, &AuthorizeStore::new()).expect("webp viewable");
         assert_eq!((webp_artifact.width, webp_artifact.height), (90, 120));
         assert_eq!(webp_artifact.mime_type, "image/webp");
     }
@@ -582,14 +614,29 @@ mod tests {
             &escape.to_string_lossy(),
             &workspace_dir,
             &options,
+            &AuthorizeStore::new(),
         )
         .expect_err("absolute path outside the workspace must be denied");
-        assert!(absolute_error.contains("outside the workspace"), "{absolute_error}");
+        assert!(
+            absolute_error.contains("outside the workspace")
+                || absolute_error.contains("denied")
+                || absolute_error.contains("requires_authorization"),
+            "{absolute_error}"
+        );
 
-        let relative_error =
-            view_workspace_image("../escape.png", &workspace_dir, &options)
-                .expect_err("relative escape outside the workspace must be denied");
-        assert!(relative_error.contains("outside the workspace"), "{relative_error}");
+        let relative_error = view_workspace_image(
+            "../escape.png",
+            &workspace_dir,
+            &options,
+            &AuthorizeStore::new(),
+        )
+        .expect_err("relative escape outside the workspace must be denied");
+        assert!(
+            relative_error.contains("outside the workspace")
+                || relative_error.contains("denied")
+                || relative_error.contains("requires_authorization"),
+            "{relative_error}"
+        );
 
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -608,7 +655,7 @@ mod tests {
             ..ImageReadOptions::default()
         };
         let artifact =
-            view_workspace_image("big.png", workspace.path(), &options).expect("read should succeed");
+            view_workspace_image("big.png", workspace.path(), &options, &AuthorizeStore::new()).expect("read should succeed");
         assert!(artifact.truncated, "byte overflow must surface truncated evidence");
         assert_eq!(artifact.bytes_len, full_len);
         let bytes = artifact.bytes.expect("capped payload should be present when include_bytes is true");
@@ -623,7 +670,7 @@ mod tests {
 
         let options = ImageReadOptions::default();
         let artifact =
-            view_workspace_image("huge.png", workspace.path(), &options).expect("read should succeed");
+            view_workspace_image("huge.png", workspace.path(), &options, &AuthorizeStore::new()).expect("read should succeed");
         assert!(artifact.truncated, "dimension overflow must surface truncated evidence");
         assert_eq!(artifact.width, 100_000);
         assert_eq!(artifact.bytes, None, "oversized images must not embed bytes");
@@ -640,7 +687,7 @@ mod tests {
             ..ImageReadOptions::default()
         };
         let artifact =
-            view_workspace_image("thumb.png", workspace.path(), &options).expect("read should succeed");
+            view_workspace_image("thumb.png", workspace.path(), &options, &AuthorizeStore::new()).expect("read should succeed");
         assert!(!artifact.truncated);
         assert_eq!(artifact.bytes, None);
         assert_eq!(artifact.width, 8);
@@ -653,7 +700,7 @@ mod tests {
         write_png(&path, 4, 4);
 
         let error =
-            view_workspace_image("notes.txt", workspace.path(), &ImageReadOptions::default())
+            view_workspace_image("notes.txt", workspace.path(), &ImageReadOptions::default(), &AuthorizeStore::new())
                 .expect_err("non-image extension must be rejected");
         assert!(error.contains("unsupported image extension"), "{error}");
     }
@@ -665,7 +712,7 @@ mod tests {
         write_jpeg(&path, 16, 16);
 
         let error =
-            view_workspace_image("actually_jpeg.png", workspace.path(), &ImageReadOptions::default())
+            view_workspace_image("actually_jpeg.png", workspace.path(), &ImageReadOptions::default(), &AuthorizeStore::new())
                 .expect_err("declared extension must match content MIME");
         assert!(error.contains("declares `image/png`"), "{error}");
     }
@@ -674,7 +721,7 @@ mod tests {
     fn missing_file_errors() {
         let workspace = TempWorkspace::new("missing");
         let error =
-            view_workspace_image("nope.png", workspace.path(), &ImageReadOptions::default())
+            view_workspace_image("nope.png", workspace.path(), &ImageReadOptions::default(), &AuthorizeStore::new())
                 .expect_err("missing file must error");
         assert!(error.contains("cannot resolve image path"), "{error}");
     }
@@ -685,13 +732,13 @@ mod tests {
         std::fs::create_dir(workspace.path().join("folder")).expect("subdir should create");
 
         let dir_error =
-            view_workspace_image("folder", workspace.path(), &ImageReadOptions::default())
+            view_workspace_image("folder", workspace.path(), &ImageReadOptions::default(), &AuthorizeStore::new())
                 .expect_err("directory must be rejected");
         assert!(dir_error.contains("not a regular file"), "{dir_error}");
 
         workspace.write("empty.png", &[]);
         let empty_error =
-            view_workspace_image("empty.png", workspace.path(), &ImageReadOptions::default())
+            view_workspace_image("empty.png", workspace.path(), &ImageReadOptions::default(), &AuthorizeStore::new())
                 .expect_err("empty file must be rejected");
         assert!(empty_error.contains("not a supported image"), "{empty_error}");
     }
@@ -704,7 +751,7 @@ mod tests {
         write_png(&workspace.path().join("photo.png"), 8, 8);
 
         let artifact =
-            view_workspace_image("photo.png", workspace.path(), &ImageReadOptions::default())
+            view_workspace_image("photo.png", workspace.path(), &ImageReadOptions::default(), &AuthorizeStore::new())
                 .expect("reference-based default must succeed");
         assert!(!artifact.truncated);
         assert!(artifact.bytes.is_none());

@@ -764,6 +764,8 @@ pub struct SessionStore {
     skill_source_snapshots: HashMap<String, SkillSourceSnapshot>,
     /// Workspace 注册表（PA-079）。
     workspaces: Vec<crate::agent::workspace::WorkspaceRecord>,
+    /// 路径读授权清单（PA-080）：内存 `AuthorizeStore`，持久化经 PersistedStore。
+    path_authorizations: Arc<crate::agent::path_permission::AuthorizeStore>,
     backend: Box<dyn SessionBackend>,
     attachment_root: PathBuf,
     memory_write_hook_executor: Arc<dyn MemoryWriteHookExecutor>,
@@ -785,6 +787,10 @@ pub struct PersistedStore {
     /// Workspace 注册表（PA-079），随 full-store 持久化（SQLite store_metadata key=workspaces）。
     #[serde(default)]
     pub(crate) workspaces: Vec<crate::agent::workspace::WorkspaceRecord>,
+    /// 路径读授权清单（PA-080），随 full-store 持久化（SQLite store_metadata
+    /// key=`path_authorizations.v1`）；重启后生效。
+    #[serde(default)]
+    pub(crate) path_authorizations: Vec<crate::agent::path_permission::AuthorizedPathEntry>,
 }
 
 pub struct FileSessionBackend {
@@ -878,6 +884,12 @@ impl SessionStore {
             mcp_source_snapshots,
             skill_source_snapshots,
             workspaces,
+            path_authorizations: Arc::new(
+                crate::agent::path_permission::AuthorizeStore::from_entries(
+                    persisted.path_authorizations,
+                    None,
+                ),
+            ),
             backend,
             attachment_root,
             memory_write_hook_executor: Arc::new(NoopMemoryWriteHookExecutor),
@@ -2222,6 +2234,33 @@ impl SessionStore {
         }
     }
 
+    /// 共享路径授权清单（PA-080）：host control plane 与工具执行器共享同一 `Arc`。
+    pub fn path_authorizations(&self) -> Arc<crate::agent::path_permission::AuthorizeStore> {
+        Arc::clone(&self.path_authorizations)
+    }
+
+    /// 显式授权一个路径（仅读；目标必须存在）。变更即持久化（store_metadata
+    /// key=`path_authorizations.v1`），重启后生效。
+    pub fn authorize_path(&mut self, canonical: PathBuf) -> Result<crate::agent::path_permission::AuthorizedPathEntry, String> {
+        let entry = self.path_authorizations.grant(canonical)?;
+        self.save_to_backend();
+        Ok(entry)
+    }
+
+    /// 撤销授权（精确路径；子授权保留）。返回是否实际移除。
+    pub fn revoke_authorization(&mut self, canonical: &Path) -> bool {
+        let removed = self.path_authorizations.revoke(canonical);
+        if removed {
+            self.save_to_backend();
+        }
+        removed
+    }
+
+    /// 列出全部授权条目。
+    pub fn list_authorizations(&self) -> Vec<crate::agent::path_permission::AuthorizedPathEntry> {
+        self.path_authorizations.entries()
+    }
+
     fn save_to_backend(&self) {
         if matches!(
             self.backend.trace_storage_mode(),
@@ -2256,6 +2295,7 @@ impl SessionStore {
             mcp_source_snapshots: self.mcp_source_snapshots.clone(),
             skill_source_snapshots: self.skill_source_snapshots.clone(),
             workspaces: self.workspaces.clone(),
+            path_authorizations: self.path_authorizations.entries(),
         };
         self.backend.save_store(&store);
     }

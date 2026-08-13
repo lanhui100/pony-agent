@@ -21,6 +21,7 @@ pub mod input;
 pub mod mcp_resources;
 pub mod planner;
 pub mod plan_state;
+pub mod path_permission;
 pub mod process;
 pub mod provider;
 pub mod retry;

@@ -469,6 +469,49 @@ fn workspace_create(
         })
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorizedPathEntryView {
+    path: String,
+    granted_at_ms: u64,
+}
+
+#[tauri::command]
+fn authorize_path(
+    control_plane: State<'_, HostControlPlane>,
+    path: String,
+    scope: String,
+) -> Result<AuthorizedPathEntryView, String> {
+    control_plane
+        .authorize_path(&path, &scope)
+        .map(|entry| AuthorizedPathEntryView {
+            path: entry.path.display().to_string(),
+            granted_at_ms: entry.granted_at_ms,
+        })
+}
+
+#[tauri::command]
+fn revoke_authorization(
+    control_plane: State<'_, HostControlPlane>,
+    path: String,
+) -> Result<bool, String> {
+    control_plane.revoke_authorization(&path)
+}
+
+#[tauri::command]
+fn list_authorizations(
+    control_plane: State<'_, HostControlPlane>,
+) -> Vec<AuthorizedPathEntryView> {
+    control_plane
+        .list_authorizations()
+        .into_iter()
+        .map(|entry| AuthorizedPathEntryView {
+            path: entry.path.display().to_string(),
+            granted_at_ms: entry.granted_at_ms,
+        })
+        .collect()
+}
+
 #[tauri::command]
 fn load_session_traces(
     control_plane: State<'_, HostControlPlane>,
@@ -851,6 +894,9 @@ pub fn run() {
             import_attachment,
             workspace_list,
             workspace_create,
+            authorize_path,
+            revoke_authorization,
+            list_authorizations,
             load_session_traces,
             load_model_monitor_summary,
             load_model_monitor_session_drilldown,

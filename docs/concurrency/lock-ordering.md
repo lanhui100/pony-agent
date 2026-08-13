@@ -12,6 +12,17 @@ All locks in `HostControlPlane` and `AgentRuntime` must be acquired in this orde
 5. sessions_rwlock: RwLock<SessionStore>   ← lowest (backed by SQLite)
 ```
 
+### Workspace 域锁（PA-080，与 `sessions_rwlock` 同级、先 registry 后 authorize）
+
+```
+5a. workspace_registry（SessionStore.workspaces 内联字段，随 sessions_rwlock 保护）
+5b. path_authorizations: RwLock<AuthorizeStore>   ← 授权清单（先 registry 后 authorize）
+```
+
+- `path_authorizations` 是 `SessionStore` 内的 `Arc<RwLock<AuthorizeStore>>`（`session.rs`），与 `sessions_rwlock` 同级：先取 registry（workspaces 字段）再取 authorize。
+- **判定闭包内不得再获取 `sessions_rwlock` 写锁**：`classify_path` 的授权查询只读 `path_authorizations`，工具执行路径不得在持有授权锁时反向获取 sessions 写锁（避免与 `sessions_rwlock` 形成反向依赖）。
+- 授权清单每次变更即写 `store_metadata` key=`path_authorizations.v1`（SQLite）/ JSON fallback。
+
 ## Rationale
 
 - `runtime` is the most complex state machine. If poisoned, the system cannot safely continue so it panics (`.expect()`). All other locks can tolerate poison.
@@ -49,6 +60,7 @@ All locks in `HostControlPlane` and `AgentRuntime` must be acquired in this orde
 | `capability_registry` | `RwLock` | `CapabilityRegistry` (capability/skill index, cloned from `AgentRuntime`) | Recover — `unwrap_or_else` |
 | `graph_runs` | `Mutex` | `GraphRunStore` (run metadata, lifecycle state) | Recover — `unwrap_or_else` |
 | `frontend_diagnostics` | `FrontendDiagnosticsStore` (contains `Mutex<Option<Connection>>`) | SQLite diagnostics connection | Recover — `unwrap_or_else` (frontend_diagnostics.rs) |
+| `path_authorizations` | `RwLock` | `AuthorizeStore`（`HashMap<canonical_path, AuthorizedPathEntry>`，path_permission.rs；随 sessions_rwlock 同级，先 registry 后 authorize） | Recover — `unwrap_or_else` |
 
 ### ExecutionControlRegistry internal locks (`execution_control.rs`)
 

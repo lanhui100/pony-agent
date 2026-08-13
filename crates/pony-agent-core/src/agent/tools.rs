@@ -928,6 +928,13 @@ pub struct ToolRouter {
     process_manager: ProcessManager,
     sandbox_backend: Option<Arc<dyn SandboxBackend>>,
     web_resolver: Arc<dyn WebResolver>,
+    /// 路径权限判定器（PA-080）：所有文件工具的路径解析统一走 `classify_path`。
+    path_checker: crate::agent::path_permission::PathPermissionChecker,
+    /// 显式读授权清单（PA-080）：workspace 外读取需命中授权才放行。
+    authorize_store: Arc<crate::agent::path_permission::AuthorizeStore>,
+    /// 会话级 root 解析器（PA-080）：由 host 注入（按 workspaceId 解析 root）；
+    /// 无上下文时回退构造时的默认 root。
+    root_resolver: Option<Arc<dyn Fn(&str) -> Option<std::path::PathBuf> + Send + Sync>>,
 }
 
 impl ToolRouter {
@@ -937,6 +944,9 @@ impl ToolRouter {
             process_manager: ProcessManager::new(),
             sandbox_backend: None,
             web_resolver: Arc::new(FailClosedResolver),
+            path_checker: crate::agent::path_permission::PathPermissionChecker::with_default(),
+            authorize_store: Arc::new(crate::agent::path_permission::AuthorizeStore::new()),
+            root_resolver: None,
         }
     }
 
@@ -946,7 +956,36 @@ impl ToolRouter {
             process_manager: ProcessManager::new(),
             sandbox_backend: None,
             web_resolver: Arc::new(FailClosedResolver),
+            path_checker: crate::agent::path_permission::PathPermissionChecker::with_default(),
+            authorize_store: Arc::new(crate::agent::path_permission::AuthorizeStore::new()),
+            root_resolver: None,
         }
+    }
+
+    /// 注入共享授权清单（PA-080）：host control plane 与工具执行器共享同一 `Arc`，
+    /// `authorize_path` / `revoke_authorization` 的变更即时对工具判定生效。
+    pub fn with_authorize_store(
+        mut self,
+        authorize_store: Arc<crate::agent::path_permission::AuthorizeStore>,
+    ) -> Self {
+        self.authorize_store = authorize_store;
+        self
+    }
+
+    /// 注入会话级 root 解析器（PA-080）：`Fn(workspaceId) -> Option<root>`，
+    /// 由 host 在构造时注入（按注册表解析）；无上下文（legacy 会话、直接调用、回归套件）
+    /// 回退构造时的默认 root。
+    pub fn with_root_resolver<F>(mut self, resolver: F) -> Self
+    where
+        F: Fn(&str) -> Option<std::path::PathBuf> + Send + Sync + 'static,
+    {
+        self.root_resolver = Some(Arc::new(resolver));
+        self
+    }
+
+    /// 当前生效的授权清单（PA-080）。
+    pub fn authorize_store(&self) -> &Arc<crate::agent::path_permission::AuthorizeStore> {
+        &self.authorize_store
     }
 
     /// Register an explicit sandbox backend for the legacy `workspace_run_command` path.
@@ -3103,40 +3142,65 @@ impl ToolRouter {
         Ok(canonical)
     }
 
+    /// 会话级 root 解析（PA-080）：优先按 `workspace_id` 经注入的 resolver 解析；
+    /// 无 resolver / 解析失败 / 无上下文 → 回退构造时的默认 root。
+    fn resolved_workspace_root(&self, workspace_id: Option<&str>) -> PathBuf {
+        if let Some(workspace_id) = workspace_id.filter(|value| !value.trim().is_empty()) {
+            if let Some(resolver) = &self.root_resolver {
+                if let Some(root) = resolver(workspace_id) {
+                    return root;
+                }
+                // 孤儿 workspace_id（注册表无记录）：读回退默认 root（带告警），写由调用方 fail-closed。
+                eprintln!(
+                    "[pony-agent] workspace `{workspace_id}` 未注册，回退默认 workspace root"
+                );
+            }
+        }
+        self.workspace_root.clone()
+    }
+
+    /// 受控 tmp 目录（PA-080）：`<root>/.tmp/`，与 PA-078 导入目录布局一致。
+    fn controlled_tmp_dir(&self, root: &Path) -> PathBuf {
+        root.join(".tmp")
+    }
+
+    /// 统一路径权限判定（PA-080）：读/写工具一律经 `classify_path`，
+    /// 返回权限错误时按结构化错误码映射到工具错误消息。
+    fn classify_workspace_path(
+        &self,
+        raw_path: &str,
+        purpose: crate::agent::path_permission::PathPurpose,
+        workspace_id: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        use crate::agent::path_permission::{PathPurpose as Purpose, PermissionErrorCode};
+        let root = self.resolved_workspace_root(workspace_id);
+        let tmp = self.controlled_tmp_dir(&root);
+        match self.path_checker.classify(raw_path, &root, &tmp, &self.authorize_store, purpose) {
+            Ok(permission) => Ok(permission.canonical),
+            Err(error) => match error.code {
+                PermissionErrorCode::RequiresAuthorization => Err(format!(
+                    "requires_authorization: {}",
+                    error.message
+                )),
+                PermissionErrorCode::OutsideWorkspaceWriteDenied => Err(format!(
+                    "outside_workspace_write_denied: {}",
+                    error.message
+                )),
+                PermissionErrorCode::PermissionDenied => Err(error.message),
+            },
+        }
+    }
+
     fn prepare_workspace_file_path(&self, raw_path: &str) -> Result<PathBuf, String> {
+        use crate::agent::path_permission::PathPurpose;
         let trimmed = raw_path.trim();
         if trimmed.is_empty() {
             return Err("文件路径不能为空。".to_string());
         }
 
-        let input = PathBuf::from(trimmed);
-        let candidate = if input.is_absolute() {
-            input
-        } else {
-            self.workspace_root.join(trimmed)
-        };
-
-        let root = self.canonical_workspace_root();
-        let parent = candidate.parent().unwrap_or(&self.workspace_root);
-        let existing_ancestor = existing_workspace_ancestor_path(parent)
-            .ok_or_else(|| format!("无法解析目标父目录 {}。", parent.display()))?;
-        let canonical_ancestor = existing_ancestor.canonicalize().map_err(|error| {
-            format!(
-                "无法解析目标父目录 {}：{}",
-                existing_ancestor.display(),
-                error
-            )
-        })?;
-
-        if !is_within_root(&root, &canonical_ancestor) {
-            return Err("只允许写入当前工作区内的相对路径。".to_string());
-        }
-
-        let relative_suffix = candidate
-            .strip_prefix(&existing_ancestor)
-            .map_err(|_| "无法计算工作区内的目标路径后缀。".to_string())?;
-
-        Ok(canonical_ancestor.join(relative_suffix))
+        // PA-080：写路径统一经 classify_path(Write)，workspace 外写返回
+        // `outside_workspace_write_denied`；写新文件复用"最近存在祖先 + 后缀组件校验"语义。
+        self.classify_workspace_path(trimmed, PathPurpose::Write, None)
     }
 
     fn resolve_workspace_entry(&self, raw_path: &str) -> Result<PathBuf, String> {
@@ -3173,6 +3237,7 @@ impl ToolRouter {
     }
 
     fn canonicalize_workspace_target(&self, raw_path: &str) -> Result<PathBuf, String> {
+        use crate::agent::path_permission::PathPurpose;
         let input = PathBuf::from(raw_path);
         let candidate = if input.is_absolute() {
             input
@@ -3185,16 +3250,31 @@ impl ToolRouter {
         let root = self.canonical_workspace_root();
 
         if !is_within_root(&root, &canonical) {
-            return Err("只允许访问当前工作区内的相对路径。".to_string());
+            // PA-080：workspace 外读 → 授权清单命中放行（classify_path(Read) 判定），
+            // 未命中返回 `requires_authorization` 结构化错误。
+            let display = canonical.display().to_string();
+            return self
+                .classify_workspace_path(&display, PathPurpose::Read, None)
+                .map_err(|error| {
+                    if error.starts_with("requires_authorization: ") {
+                        error
+                    } else {
+                        format!("只允许访问当前工作区内的相对路径。{error}")
+                    }
+                });
         }
 
         Ok(canonical)
     }
 
     fn canonical_workspace_root(&self) -> PathBuf {
-        self.workspace_root
+        let canonical = self
+            .workspace_root
             .canonicalize()
-            .unwrap_or_else(|_| self.workspace_root.clone())
+            .unwrap_or_else(|_| self.workspace_root.clone());
+        // PA-080：与 path_permission 的 canonical 输出保持同一归一化（Windows 去 `\\?\` 前缀），
+        // 否则 display_workspace_relative / strip_prefix 对"带前缀 vs 去前缀"路径失配。
+        crate::agent::path_permission::normalize_canonical(&canonical)
     }
 
     fn display_workspace_relative(&self, path: &Path) -> String {

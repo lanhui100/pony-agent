@@ -442,12 +442,18 @@ impl AgentRuntimeBuilder {
     }
 
     pub fn build(self) -> AgentRuntime {
+        let sessions = self.sessions.unwrap_or_else(SessionStore::new);
+        let shared_authorizations = sessions.path_authorizations();
         let mut runtime = AgentRuntime::with_dependencies(
-            self.sessions.unwrap_or_else(SessionStore::new),
+            sessions,
             self.provider_resolver
                 .unwrap_or_else(|| Box::new(ProviderRegistryStore::new())),
-            self.tool_executor
-                .unwrap_or_else(|| Box::new(build_governed_executor(self.workspace_root.clone()))),
+            self.tool_executor.unwrap_or_else(|| {
+                Box::new(build_governed_executor(
+                    self.workspace_root.clone(),
+                    Some(shared_authorizations),
+                ))
+            }),
             self.planner.unwrap_or_else(|| Box::new(LocalTurnPlanner)),
             self.context_builder
                 .unwrap_or_else(|| Box::new(DefaultTurnContextBuilder)),
@@ -13551,7 +13557,7 @@ mod tests {
     fn governed_ask_suspends_turn_and_binds_waiting_user_without_provider_followup() {
             let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
             let workspace = temp_workspace_dir("ask-suspend-loop");
-            let executor = build_governed_executor(Some(workspace.clone()));
+            let executor = build_governed_executor(Some(workspace.clone()), None);
             let mut store = GraphRunStore::new();
             GraphRunner::new().start_run(
                 &mut store,
@@ -13639,7 +13645,7 @@ mod tests {
         {
             let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
             let workspace = temp_workspace_dir("ask-resume-loop");
-            let executor = build_governed_executor(Some(workspace.clone()));
+            let executor = build_governed_executor(Some(workspace.clone()), None);
             let mut store = GraphRunStore::new();
             GraphRunner::new().start_run(
                 &mut store,
@@ -13748,7 +13754,7 @@ mod tests {
             // round, not a fresh user turn. The injection is one-shot.
             let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
             let workspace = temp_workspace_dir("ask-resume-inject-provider");
-            let executor = build_governed_executor(Some(workspace.clone()));
+            let executor = build_governed_executor(Some(workspace.clone()), None);
             let mut store = GraphRunStore::new();
             GraphRunner::new().start_run(
                 &mut store,
@@ -13933,7 +13939,7 @@ mod tests {
             // persisted. This also exercises the `build()` auto-wiring: no explicit
             // `ask_dispatcher` is passed.
             let workspace = temp_workspace_dir("ask-shared-dispatch");
-            let executor = build_governed_executor(Some(workspace.clone()));
+            let executor = build_governed_executor(Some(workspace.clone()), None);
             let runtime = AgentRuntime::with_dependencies(
                 SessionStore::memory_only(),
                 Box::new(ProviderRegistryStore::new()),
@@ -14005,7 +14011,7 @@ mod tests {
             // `turn:suspended` event, and never feed the marker back to the provider.
             let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
             let workspace = temp_workspace_dir("ask-stream-suspend-loop");
-            let executor = build_governed_executor(Some(workspace.clone()));
+            let executor = build_governed_executor(Some(workspace.clone()), None);
             let mut store = GraphRunStore::new();
             GraphRunner::new().start_run(
                 &mut store,
@@ -14133,7 +14139,7 @@ mod tests {
             let workspace = temp_workspace_dir("repro-glob-stream");
             std::fs::write(workspace.join("a.txt"), "hello").expect("write file");
             std::fs::write(workspace.join("b.md"), "world").expect("write file");
-            let executor = build_governed_executor(Some(workspace.clone()));
+            let executor = build_governed_executor(Some(workspace.clone()), None);
             // One followup response (the assistant's final answer after the tool executes).
             let server = MockHttpServer::start(vec![json_completion("done listing files")]);
             let mut runtime = AgentRuntime::with_dependencies(
@@ -14201,7 +14207,7 @@ mod tests {
             // to the original assistant tool-call id.
             let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
             let workspace = temp_workspace_dir("ask-stream-resume-loop");
-            let executor = build_governed_executor(Some(workspace.clone()));
+            let executor = build_governed_executor(Some(workspace.clone()), None);
             let mut store = GraphRunStore::new();
             GraphRunner::new().start_run(
                 &mut store,
