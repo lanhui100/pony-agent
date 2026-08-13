@@ -262,6 +262,7 @@ fn run_probe(target: &ProbeTarget, prompt: &str, run_index: usize) {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         },
     );
 

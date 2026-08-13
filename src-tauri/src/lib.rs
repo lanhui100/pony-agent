@@ -398,6 +398,77 @@ fn list_sessions(control_plane: State<'_, HostControlPlane>) -> Vec<SessionOverv
     control_plane.list_sessions()
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportAttachmentResultView {
+    path: String,
+    relative_path: Option<String>,
+}
+
+#[tauri::command]
+fn get_workspace_root(control_plane: State<'_, HostControlPlane>) -> String {
+    control_plane.get_workspace_root()
+}
+
+#[tauri::command]
+fn import_attachment(
+    control_plane: State<'_, HostControlPlane>,
+    name: String,
+    bytes_b64: String,
+    mime_type: String,
+    workspace_id: Option<String>,
+) -> Result<ImportAttachmentResultView, String> {
+    control_plane
+        .import_attachment(
+            &name,
+            &bytes_b64,
+            &mime_type,
+            workspace_id.as_deref(),
+            None,
+            None,
+        )
+        .map(|result| ImportAttachmentResultView {
+            path: result.path.display().to_string(),
+            relative_path: result.relative_path,
+        })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceRecordView {
+    id: String,
+    name: String,
+    root_path: String,
+}
+
+#[tauri::command]
+fn workspace_list(control_plane: State<'_, HostControlPlane>) -> Vec<WorkspaceRecordView> {
+    control_plane
+        .list_workspaces()
+        .into_iter()
+        .map(|workspace| WorkspaceRecordView {
+            id: workspace.id,
+            name: workspace.name,
+            root_path: workspace.root_path,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn workspace_create(
+    control_plane: State<'_, HostControlPlane>,
+    name: String,
+    root_path: String,
+) -> Result<WorkspaceRecordView, String> {
+    control_plane
+        .create_workspace(&name, &root_path)
+        .map(|workspace| WorkspaceRecordView {
+            id: workspace.id,
+            name: workspace.name,
+            root_path: workspace.root_path,
+        })
+}
+
 #[tauri::command]
 fn load_session_traces(
     control_plane: State<'_, HostControlPlane>,
@@ -776,6 +847,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health_check,
             list_sessions,
+            get_workspace_root,
+            import_attachment,
+            workspace_list,
+            workspace_create,
             load_session_traces,
             load_model_monitor_summary,
             load_model_monitor_session_drilldown,

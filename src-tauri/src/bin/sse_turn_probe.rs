@@ -202,6 +202,7 @@ fn stream_turn(
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         },
     );
 

@@ -183,6 +183,7 @@ fn turn_input(message: &str, session_id: &str) -> TurnInput {
         node_id: None,
         history: Vec::new(),
         images: Vec::new(),
+        workspace_id: None,
     }
 }
 

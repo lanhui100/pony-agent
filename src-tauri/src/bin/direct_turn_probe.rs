@@ -185,6 +185,7 @@ fn run_direct_scenario(runtime: &mut AgentRuntime, scenario: &DirectScenario) {
             node_id: None,
             history: vec![],
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let summary = analyze_turn_result(&result);
