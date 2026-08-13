@@ -20,8 +20,6 @@
 
 ## Ready
 
-- `PA-080` Workspace 路径权限边界（P0）
-  说明：统一路径权限模块（组件级前缀校验 + Windows 大小写折叠 + 授权清单持久化）；写权限默认仅 workspace 根（递归）+ 受控 tmp；workspace 外读取需显式授权（结构化错误 `requires_authorization`）；可注入 canonicalizer 支持 hermetic 安全测试。OpenSpec change：`workspace-path-permission-boundary`（spec 通过，2026-08-09）。
 - `PA-081` 侧边栏 Workspace 树导航（P1）
   说明：`HomeSessionSidebar` 平铺会话列表改造为"项目（二级）→ 对话（三级）"树，折叠/展开、按 workspaceId 归组（孤儿归"未分组"）、Workspace 管理入口；激活 workspace 为前端 localStorage 单一真相源。OpenSpec change：`workspace-sidebar-tree-navigation`（spec 通过，2026-08-09）。
 
@@ -29,7 +27,8 @@
 
 ## In Progress
 
-- 暂无
+- `PA-080` Workspace 路径权限边界（P0）
+  说明：**实现完成（2026-08-13，commit `2db0b0e`）**——`path_permission.rs`（976 行）统一路径判定（组件级前缀比较 + Windows 大小写折叠 + 可注入 canonicalizer）、`AuthorizeStore` 授权清单（SQLite store_metadata key=`path_authorizations.v1` + JSON fallback，每次变更即写）、写边界（workspace 根递归 + 受控 tmp，`outside_workspace_write_denied`）、读边界（workspace 外需授权，`requires_authorization`）、宿主 `authorize_path`（仅 read）/`revoke_authorization`/`list_authorizations`、工具接入（读/写统一经 `classify_path`，Run 只判 cwd）、锁序登记（`docs/concurrency/lock-ordering.md`）。验证：core lib 772 全绿（含 path_permission 18 项对抗测试）+ tool_router_regression 13 + session_regression 5 + provider_registry 8 + src-tauri lib 6 + 前端 vitest 377 全绿。下一步：实现后 3 路对抗审核。OpenSpec change：`workspace-path-permission-boundary`（活跃）。
 
 ## Review
 

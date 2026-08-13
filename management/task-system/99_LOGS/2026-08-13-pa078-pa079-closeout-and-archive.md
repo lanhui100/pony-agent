@@ -49,3 +49,27 @@
 ## 下一步
 
 - 实现 PA-080（Workspace 路径权限边界，P0）：按 `openspec/changes/workspace-path-permission-boundary/tasks.md` 顺序，先读 `crates/pony-agent-core/src/agent/sandbox.rs`、`tools.rs` 的 `ToolPermissionScope`/`ApprovalRequired`、`docs/concurrency/lock-ordering.md`
+
+---
+
+# 追加：PA-080 实现（2026-08-13 续）
+
+## 执行过程
+
+- 委派 @backend-dev 实现（子代理返回空结果，但实际产出完整：path_permission.rs 976 行 + 11 个文件接入）
+- 修复 2 处编译错误：`control_plane/mod.rs` 多余 `)`（build_governed_executor 签名变化）、`src-tauri/src/lib.rs` `list_authorizations` 缺 `.collect()`
+- 补 `docs/concurrency/lock-ordering.md` 锁序登记（tasks.md 第 9 项，子代理遗漏）：`path_authorizations` RwLock 与 sessions_rwlock 同级、先 registry 后 authorize、判定闭包内不得获取 sessions 写锁
+- 自行完成实现后审查（子代理环境异常）：核心判定逻辑（组件级比较/ParentDir 拒绝/祖先链止于卷根/精确 revoke/可注入 canonicalizer）、工具接入完整性、错误码传播（`outside_workspace_write_denied`/`requires_authorization` 进入工具错误消息）、锁序一致性全部核对通过
+
+## 验证结果
+
+- `npm run cargo:check:shared`：通过
+- core lib：**772 passed**（含 path_permission 18 项对抗测试：穿越/前缀混淆/Windows 双断言/卷边界/symlink 逃逸+hermetic/全新嵌套目录/`..` 后缀/授权 grant-revoke 循环/目录授权覆盖子孙/卷根授权/持久化回调/真 symlink canary）
+- tool_router_regression 13 + session_regression 5 + provider_registry_regression 8 + src-tauri lib 6：全绿
+- 前端 vitest：377 passed
+- 提交：`2db0b0e` feat(core,pa-080)
+
+## 下一步
+
+- PA-080 实现后 3 路对抗审核（@consultant 权限模型 / @code-reviewer 路径安全 / @tester 对抗矩阵复核）
+- 审核通过后收口归档 PA-080，启动 PA-081（侧边栏 Workspace 树导航）
