@@ -24,7 +24,13 @@
       "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::plan_state:: --no-fail-fast\")",
       "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::governed_executor:: --no-fail-fast\")",
       "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ask agent::governed_executor::\")",
-      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::mcp_resources:: agent::tool_search_elevation::\")"
+      "Bash(cmd //c \"scripts\\\\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-ph7 agent::mcp_resources:: agent::tool_search_elevation::\")",
+      "Skill(update-config)",
+      "Bash(python -c \"import json,sys; d=json.load\\(open\\(r'D:\\\\Documents\\\\pony-agent\\\\.claude\\\\settings.local.json'\\)\\); print\\(json.dumps\\(d['permissions']['defaultMode']\\)\\)\")",
+      "Bash(node -e \"const d=require\\('D:/Documents/pony-agent/.claude/settings.local.json'\\); console.log\\(d.permissions.defaultMode\\)\")",
+      "Bash(rustc --version)",
+      "Read(//c/Users/HUAWEI/.rustup/**)",
+      "Bash(grep -iv \"test\\\\|//\")"
     ]
   }
 }
