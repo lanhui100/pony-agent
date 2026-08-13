@@ -54,6 +54,14 @@ mod history_commands;
 mod message_projection;
 mod query_commands;
 mod trace_commands;
+mod workspace_commands;
+
+/// 默认 workspace root：进程当前目录（与 `ToolRouter::new()` 默认一致）。
+fn default_workspace_root() -> String {
+    std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".to_string())
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -979,6 +987,45 @@ impl HostControlPlane {
 
     pub fn with_runtime(runtime: AgentRuntime) -> Self {
         HostControlPlaneBuilder::new().runtime(runtime).build()
+    }
+
+    /// 当前 workspace root（PA-078 附件导入/前端获取根路径；PA-079 注册表落地后改由
+    /// 会话 `workspace_id` 解析，此处保留为默认回退）。
+    pub fn get_workspace_root(&self) -> String {
+        let runtime = self.runtime.read().expect("runtime lock poisoned");
+        runtime
+            .workspace_root()
+            .map(|value| value.to_string())
+            .unwrap_or_else(default_workspace_root)
+    }
+
+    /// 附件导入（PA-078/PA-079）：base64 解码后由 `attachment_import` 写入受控导入目录。
+    /// 目标 root 由 `workspace_id` 经注册表解析（缺省 → 默认 workspace root）；未注册 id → 错误。
+    pub fn import_attachment(
+        &self,
+        name: &str,
+        bytes_b64: &str,
+        _mime_type: &str,
+        workspace_id: Option<&str>,
+        root_override: Option<&str>,
+        _import_dir_override: Option<&str>,
+    ) -> Result<crate::agent::attachment_import::ImportAttachmentResult, String> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(bytes_b64.trim())
+            .map_err(|error| format!("[import_attachment_failed] base64 解码失败：{error}"))?;
+
+        let workspace_root = match root_override {
+            Some(value) if !value.trim().is_empty() => std::path::PathBuf::from(value),
+            _ => {
+                let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
+                std::path::PathBuf::from(sessions.resolve_workspace_root(workspace_id)?)
+            }
+        };
+        crate::agent::attachment_import::import_attachment_bytes(name, &bytes, &workspace_root)
     }
 
     pub fn health_snapshot(&self) -> HostHealthSnapshot {
@@ -2986,6 +3033,47 @@ mod tests {
     }
 
     #[test]
+    fn import_attachment_resolves_workspace_via_registry() {
+        // PA-078×PA-079：workspace_id 经注册表解析目标 root；未注册 id → 明确错误。
+        let control_plane = HostControlPlane::with_runtime(AgentRuntime::new());
+
+        // 未注册 workspace → 明确错误
+        let err = control_plane
+            .import_attachment("a.txt", "aGVsbG8=", "text/plain", Some("ws-nope"), None, None)
+            .expect_err("未注册 workspace 应被拒绝");
+        assert!(err.contains("workspace 不存在"), "err={err}");
+
+        // root_override 注入（测试接缝）仍生效
+        let root = std::env::temp_dir().join(format!("pa079-cp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ok = control_plane.import_attachment(
+            "a.txt",
+            "aGVsbG8=",
+            "text/plain",
+            Some("default"),
+            Some(root.to_str().unwrap()),
+            None,
+        );
+        assert!(ok.is_ok(), "默认 workspace + root_override 应被允许: {ok:?}");
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 注册一个 workspace 后，import 落其 root
+        let ws_root = std::env::temp_dir().join(format!("pa079-ws-import-{}", std::process::id()));
+        std::fs::create_dir_all(&ws_root).unwrap();
+        let created = control_plane.create_workspace("Import Target", ws_root.to_str().unwrap()).unwrap();
+        let imported = control_plane
+            .import_attachment("doc.pdf", "aGVsbG8=", "application/pdf", Some(&created.id), None, None)
+            .unwrap();
+        assert!(imported.path.starts_with(ws_root.join(".tmp/imports")));
+        assert_eq!(
+            imported.relative_path.as_deref(),
+            Some(".tmp/imports/doc.pdf")
+        );
+        let _ = std::fs::remove_dir_all(&ws_root);
+    }
+
+    #[test]
     fn recording_turn_event_sink_uses_fallback_summary_when_terminal_event_has_none() {
         let sink = NoopSink;
         let recording_sink = RecordingTurnEventSink::new(&sink);
@@ -3042,6 +3130,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 "retrieval summary fallback".to_string(),
             )
@@ -3082,6 +3171,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -3162,6 +3252,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -3537,6 +3628,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -3597,6 +3689,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -3637,6 +3730,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph run should start");
@@ -3675,6 +3769,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             },
         );
@@ -3718,6 +3813,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph run should start");
@@ -3785,6 +3881,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph run should start");
@@ -3835,6 +3932,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph run should start");
@@ -3852,6 +3950,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph run should continue");
@@ -3886,6 +3985,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph run should start");
@@ -3989,6 +4089,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph run should resume");
@@ -4079,6 +4180,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph stream run should prepare");
@@ -4128,6 +4230,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph stream run should continue");
@@ -4163,6 +4266,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph stream run should resume");
@@ -4239,6 +4343,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph stream boundary run should prepare");
@@ -4294,6 +4399,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("ordinary graph stream should prepare");
@@ -4730,6 +4836,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -4783,6 +4890,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -4858,6 +4966,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "继续检查 control_plane 的恢复判定。".to_string(),
@@ -4870,6 +4979,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -5290,6 +5400,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         });
 
@@ -5337,6 +5448,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         });
 
@@ -5389,6 +5501,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -5401,6 +5514,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -5517,6 +5631,7 @@ mod tests {
                 node_id: fork.cursor.visible_node_id.clone(),
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -5627,6 +5742,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -5639,6 +5755,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -5782,6 +5899,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -5794,6 +5912,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -5952,6 +6071,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "第二问".to_string(),
@@ -5964,6 +6084,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -6037,6 +6158,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
             let _ = runtime.run_turn(TurnInput {
                 message: "再继续第二轮".to_string(),
@@ -6049,6 +6171,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -6581,6 +6704,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
             assert_eq!(result.phase, "ready");
             assert_eq!(result.tool_activities.len(), 1);
@@ -6816,6 +6940,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         });
         assert!(result
@@ -6880,6 +7005,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         });
         assert!(result
@@ -7011,6 +7137,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         });
         assert!(result
@@ -7654,6 +7781,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             });
         }
 
@@ -8087,6 +8215,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("graph stream run should prepare");
@@ -8227,6 +8356,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             })
             .expect("repro graph stream should prepare");

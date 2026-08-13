@@ -160,6 +160,9 @@ pub struct TurnInput {
     pub history: Vec<TurnHistoryMessage>,
     #[serde(default)]
     pub images: Vec<TurnInputImage>,
+    /// Workspace 归属（PA-079）：携带时在会话首次持久化时盖章。
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -481,6 +484,11 @@ impl AgentRuntime {
         DesktopRuntimePreset::build()
     }
 
+    /// 当前 workspace root（PA-078 宿主 `get_workspace_root` 读取）。
+    pub fn workspace_root(&self) -> Option<&str> {
+        self.workspace_root.as_deref()
+    }
+
     pub fn with_dependencies(
         sessions: SessionStore,
         provider_resolver: Box<dyn ProviderSelectionResolver>,
@@ -571,6 +579,16 @@ impl AgentRuntime {
     /// still bind the session; `host_control_available` stays `true` so an interactive host can
     /// answer. When the executor is not governed this is a no-op.
     pub(crate) fn apply_governed_turn_context(&self, input: &TurnInput, facts: &RunTurnFacts) {
+        // PA-079：turn 携带 workspace_id 时，在会话上首次持久化盖章（幂等）。
+        if let Some(workspace_id) = input.workspace_id.as_deref().filter(|value| !value.trim().is_empty()) {
+            if let Some(session_id) = input.session_id.as_deref() {
+                let mut sessions = self.sessions.write().unwrap_or_else(|e| {
+                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
+                sessions.stamp_workspace_id(session_id, workspace_id);
+            }
+        }
         let Some(governed) = self
             .tool_executor
             .as_any()
@@ -881,23 +899,7 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(trace_steps),
-                Some(build_stream_progress_trace_timeline(
-                    display_message,
-                    provider_meta,
-                    None,
-                    None,
-                    &context_observation,
-                    &tool_activities,
-                    &model_hop_trace_contents_with_current(
-                        &hop_records,
-                        current_assistant_output_text.as_str(),
-                        current_assistant_reasoning.as_deref(),
-                    ),
-                    Some(current_assistant_output_text.as_str()),
-                    current_assistant_reasoning.as_deref(),
-                    first_token_latency.get(),
-                    "calling_tool",
-                )),
+                None,
                 None,
                 None,
                 None,
@@ -1122,19 +1124,7 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(return_trace_steps),
-                Some(build_stream_progress_trace_timeline(
-                    display_message,
-                    provider_meta,
-                    None,
-                    None,
-                    &context_observation,
-                    &tool_activities,
-                    &model_hop_trace_contents(&hop_records),
-                    None,
-                    None,
-                    first_token_latency.get(),
-                    "calling_model",
-                )),
+                None,
                 None,
                 None,
                 None,
@@ -1203,19 +1193,7 @@ impl AgentRuntime {
                     first_token_latency.get(),
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(suspended_trace_steps),
-                    Some(build_stream_progress_trace_timeline(
-                        display_message,
-                        provider_meta,
-                        None,
-                        None,
-                        &context_observation,
-                        &tool_activities,
-                        &model_hop_trace_contents(&hop_records),
-                        None,
-                        None,
-                        first_token_latency.get(),
-                        SUSPENDED_TURN_PHASE,
-                    )),
+                    None,
                     Some(tool_activities.clone()),
                     Some(provider_call_records.clone()),
                     Some(hook_trace_records.clone()),
@@ -1278,19 +1256,7 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(self.telemetry_builder.trace_return_active(all_tools_ok)),
-                Some(build_stream_progress_trace_timeline(
-                    display_message,
-                    provider_meta,
-                    None,
-                    None,
-                    &context_observation,
-                    &tool_activities,
-                    &model_hop_trace_contents(&hop_records),
-                    None,
-                    None,
-                    first_token_latency.get(),
-                    "calling_model",
-                )),
+                None,
                 Some(tool_activities.clone()),
                 None,
                 Some(followup_model_hook_trace_records),
@@ -3209,19 +3175,7 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(start_trace_steps.clone()),
-                Some(build_stream_progress_trace_timeline(
-                    prepared.display_message.as_str(),
-                    &prepared_provider_meta,
-                    None,
-                    None,
-                    &prepared.build_context_observation,
-                    &[],
-                    &[],
-                    None,
-                    None,
-                    None,
-                    "calling_model",
-                )),
+                None,
                 None,
                 None,
                 Some(model_call_hook_trace_records),
@@ -3417,19 +3371,7 @@ impl AgentRuntime {
                 None,
                 None,
                 Some(start_trace_steps.clone()),
-                Some(build_stream_progress_trace_timeline(
-                    prepared.display_message.as_str(),
-                    &prepared_provider_meta,
-                    None,
-                    None,
-                    &prepared.build_context_observation,
-                    &[],
-                    &[],
-                    None,
-                    None,
-                    None,
-                    "calling_model",
-                )),
+                None,
                 None,
                 None,
                 Some(model_call_hook_trace_records),
@@ -3940,23 +3882,7 @@ impl AgentRuntime {
             None,
             None,
             Some(self.telemetry_builder.trace_return_active_without_tool()),
-            Some(build_stream_progress_trace_timeline(
-                display_message.as_str(),
-                &provider_meta,
-                Some(first_decision.provider_source.as_str()),
-                Some(first_decision.provider_mode.as_str()),
-                &build_context_observation,
-                &[],
-                &[],
-                None,
-                None,
-                if initial_latency_kind == ProviderLatencyKind::ProviderStream {
-                    initial_call_first_token_latency_ms
-                } else {
-                    None
-                },
-                "response_ready",
-            )),
+            None,
             None,
             None,
             None,
@@ -4799,6 +4725,7 @@ fn build_skill_tool_result(
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -4940,6 +4867,7 @@ fn build_skill_tool_result(
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -5347,6 +5275,8 @@ fn build_stream_started_trace_timeline(
     timeline
 }
 
+// 生产代码不再携带进度 timeline（低频事件 IPC 瘦身），此构建函数仅保留给测试模块使用。
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 fn build_stream_progress_trace_timeline(
     _user_message: &str,
@@ -7718,6 +7648,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let _ = server.finish();
@@ -7773,6 +7704,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert!(result
@@ -7838,6 +7770,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert!(result
@@ -7900,6 +7833,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert!(result
@@ -7964,6 +7898,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert!(result
@@ -8062,6 +7997,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert!(result
@@ -8159,6 +8095,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -8245,6 +8182,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -8354,6 +8292,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -8448,6 +8387,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -8549,6 +8489,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -8659,6 +8600,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -8732,6 +8674,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let request_bodies = server.finish();
@@ -8781,6 +8724,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let request_bodies = server.finish();
@@ -8835,6 +8779,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let request_bodies = server.finish();
@@ -8894,6 +8839,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let request_bodies = server.finish();
@@ -8981,6 +8927,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let request_bodies = server.finish();
@@ -9072,6 +9019,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         let request_bodies = server.finish();
@@ -9180,6 +9128,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -10023,6 +9972,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -10103,6 +10053,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -10226,6 +10177,70 @@ mod tests {
     }
 
     #[test]
+    fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
+        // PA-079 P1-1 闭环：全新会话首轮 turn 携带 workspace_id → 盖章 → snapshot/overview 携带；
+        // 第二轮不同 id 不覆盖（幂等）。
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let server = MockHttpServer::start(vec![
+            json_response(json!({ "choices": [ { "message": { "role": "assistant", "content": "ok" } } ] })),
+            json_response(json!({ "choices": [ { "message": { "role": "assistant", "content": "ok2" } } ] })),
+        ]);
+        let sessions = SessionStore::memory_only();
+        let selection = test_provider_selection(server.base_url.clone());
+        let mut runtime = build_runtime_with_session_store(selection, sessions);
+
+        let _ = runtime.run_turn(TurnInput {
+            message: "hello".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("ws-session".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: Some("ws-proj-1".to_string()),
+        });
+
+        let snapshot = runtime.load_session_snapshot(Some("ws-session"));
+        assert_eq!(
+            snapshot.workspace_id.as_deref(),
+            Some("ws-proj-1"),
+            "首轮 workspace_id 应盖章到会话"
+        );
+        let overviews = runtime.sessions_handle().read().unwrap().list_sessions();
+        let overview = overviews
+            .iter()
+            .find(|session| session.conversation_id == "ws-session")
+            .expect("session overview exists");
+        assert_eq!(overview.workspace_id.as_deref(), Some("ws-proj-1"));
+
+        // 第二轮不同 id → 幂等，不覆盖
+        let _ = runtime.run_turn(TurnInput {
+            message: "hello 2".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("ws-session".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: Some("ws-proj-2".to_string()),
+        });
+        let snapshot2 = runtime.load_session_snapshot(Some("ws-session"));
+        assert_eq!(
+            snapshot2.workspace_id.as_deref(),
+            Some("ws-proj-1"),
+            "已盖章会话的后续轮不得覆盖"
+        );
+
+        let _ = server.finish();
+    }
+
+    #[test]
     fn run_turn_fails_when_attachment_persistence_fails() {
         let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let server = MockHttpServer::start(vec![json_response(json!({
@@ -10260,6 +10275,7 @@ mod tests {
                 mime_type: "image/png".to_string(),
                 name: Some("diagram.png".to_string()),
             }],
+            workspace_id: None,
         });
 
         assert_eq!(result.phase, "failed");
@@ -10335,6 +10351,7 @@ mod tests {
             resolved_node_id: None,
             latest_node_id: None,
             env_info: None,
+            workspace_id: None,
         };
 
         let retrieved =
@@ -10391,6 +10408,7 @@ mod tests {
             resolved_node_id: None,
             latest_node_id: None,
             env_info: None,
+            workspace_id: None,
         };
 
         let retrieved = builder.retrieve_context_state(
@@ -10431,6 +10449,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert_eq!(result.phase, "ready");
@@ -10484,6 +10503,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert_eq!(result.assistant_message, final_text);
@@ -10533,6 +10553,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
         let request_bodies = server.finish();
 
@@ -10662,6 +10683,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert_eq!(result.phase, "ready");
@@ -10729,6 +10751,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
 
         assert_eq!(result.phase, "ready");
@@ -10991,6 +11014,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
         let request_bodies = server.finish();
@@ -11210,6 +11234,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -11300,6 +11325,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -11386,6 +11412,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -11495,6 +11522,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -11643,6 +11671,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -11744,6 +11773,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -11867,6 +11897,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -12019,6 +12050,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -12197,6 +12229,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -12327,6 +12360,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -12372,6 +12406,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
         let second = runtime.run_turn(TurnInput {
             message: "第二问".to_string(),
@@ -12384,6 +12419,7 @@ mod tests {
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
+            workspace_id: None,
         });
         assert_eq!(first.assistant_message, "第一答");
         assert_eq!(second.assistant_message, "第二答");
@@ -12672,6 +12708,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -12808,6 +12845,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -12959,6 +12997,7 @@ mod tests {
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
+                workspace_id: None,
             },
         );
 
@@ -13552,6 +13591,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 RunTurnFacts {
                     run_id: Some("run-ask-loop".to_string()),
@@ -13635,6 +13675,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 RunTurnFacts {
                     run_id: Some("run-ask-resume".to_string()),
@@ -13751,6 +13792,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 RunTurnFacts {
                     run_id: Some("run-ask-inject".to_string()),
@@ -13817,6 +13859,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 RunTurnFacts {
                     run_id: Some("run-ask-inject".to_string()),
@@ -14014,6 +14057,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 RunTurnFacts {
                     run_id: Some("run-ask-stream".to_string()),
@@ -14127,6 +14171,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 RunTurnFacts {
                     run_id: Some("run-repro-glob".to_string()),
@@ -14205,6 +14250,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
                 RunTurnFacts {
                     run_id: Some("run-ask-stream-resume".to_string()),

@@ -318,6 +318,9 @@ pub struct SessionState {
     pub history_branches: Vec<HistoryBranch>,
     #[serde(default)]
     pub history_cursor: HistoryCursor,
+    /// Workspace 归属（PA-079）：None → 投影为默认 workspace。serde default 兼容旧数据。
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// Runtime environment information captured at session snapshot build time.
@@ -427,6 +430,9 @@ pub struct SessionSnapshot {
     pub latest_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_info: Option<EnvironmentInfo>,
+    /// Workspace 归属投影（PA-079）：None → 默认 workspace。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 fn bump_cursor_version(cursor: &mut HistoryCursor) {
@@ -597,6 +603,8 @@ pub struct SessionOverview {
     pub turn_count: usize,
     pub last_referenced_file: Option<String>,
     pub updated_at_ms: u64,
+    /// Workspace 归属投影（PA-079）：None → 默认 workspace。
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -754,6 +762,8 @@ pub struct SessionStore {
     session_attachment_index: SessionAttachmentIndex,
     mcp_source_snapshots: HashMap<String, McpSourceSnapshot>,
     skill_source_snapshots: HashMap<String, SkillSourceSnapshot>,
+    /// Workspace 注册表（PA-079）。
+    workspaces: Vec<crate::agent::workspace::WorkspaceRecord>,
     backend: Box<dyn SessionBackend>,
     attachment_root: PathBuf,
     memory_write_hook_executor: Arc<dyn MemoryWriteHookExecutor>,
@@ -772,6 +782,9 @@ pub struct PersistedStore {
     pub(crate) mcp_source_snapshots: HashMap<String, McpSourceSnapshot>,
     #[serde(default)]
     pub(crate) skill_source_snapshots: HashMap<String, SkillSourceSnapshot>,
+    /// Workspace 注册表（PA-079），随 full-store 持久化（SQLite store_metadata key=workspaces）。
+    #[serde(default)]
+    pub(crate) workspaces: Vec<crate::agent::workspace::WorkspaceRecord>,
 }
 
 pub struct FileSessionBackend {
@@ -818,6 +831,24 @@ impl SessionStore {
         let mcp_source_snapshots = persisted.mcp_source_snapshots;
         let skill_source_snapshots = persisted.skill_source_snapshots;
         let mut should_save = false;
+        // Workspace 注册表：加载 + 确保默认 workspace 始终存在（PA-079）。
+        let mut workspaces = persisted.workspaces;
+        if !crate::agent::workspace::default_workspace_exists(&workspaces) {
+            let raw_default_root = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .display()
+                .to_string();
+            // P2-6：默认 root 也过规范化（canonicalize + 去 \\?\ 前缀），与 create 路径一致，
+            // 避免与 create_workspace_entry 存储形式不一致导致 PA-080 前缀比较失配。
+            let default_root = crate::agent::workspace::normalize_workspace_root(&raw_default_root)
+                .unwrap_or(raw_default_root);
+            workspaces.push(crate::agent::workspace::WorkspaceRecord {
+                id: crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string(),
+                name: "默认工作区".to_string(),
+                root_path: default_root,
+            });
+            should_save = true;
+        }
         for session in sessions.values_mut() {
             refresh_session_metadata(session, false);
             if session.updated_at_ms == 0 {
@@ -846,6 +877,7 @@ impl SessionStore {
             session_attachment_index,
             mcp_source_snapshots,
             skill_source_snapshots,
+            workspaces,
             backend,
             attachment_root,
             memory_write_hook_executor: Arc::new(NoopMemoryWriteHookExecutor),
@@ -1885,6 +1917,7 @@ impl SessionStore {
                 turn_count: session.turn_count,
                 last_referenced_file: session.last_referenced_file.clone(),
                 updated_at_ms: session.updated_at_ms,
+                workspace_id: session.workspace_id.clone(),
             })
             .collect::<Vec<_>>();
 
@@ -2147,7 +2180,46 @@ impl SessionStore {
                     session_id: session_id.to_string(),
                     ..HistoryCursor::default()
                 },
+                workspace_id: None,
             })
+    }
+
+    /// Workspace 注册表（PA-079）。
+    pub fn list_workspaces(&self) -> Vec<crate::agent::workspace::WorkspaceRecord> {
+        self.workspaces.clone()
+    }
+
+    pub fn create_workspace(
+        &mut self,
+        name: &str,
+        root_path: &str,
+    ) -> Result<crate::agent::workspace::WorkspaceRecord, String> {
+        let record = crate::agent::workspace::create_workspace_entry(&mut self.workspaces, name, root_path)?;
+        self.save_to_backend();
+        Ok(record)
+    }
+
+    pub fn resolve_workspace_root(&self, workspace_id: Option<&str>) -> Result<String, String> {
+        crate::agent::workspace::resolve_workspace_root(&self.workspaces, workspace_id)
+    }
+
+    /// 首次持久化盖章 workspace_id（PA-079）：会话 workspace_id 为 None 时写入并落盘；
+    /// 已盖章则 no-op（幂等，不影响既有会话的后续轮）。
+    /// **先 `ensure_session` 再盖章**：turn 提交时全新会话尚未被 `prepare_turn` 创建，
+    /// 若只对已存在会话盖章，首轮 workspace_id 会丢失。
+    pub fn stamp_workspace_id(&mut self, session_id: &str, workspace_id: &str) {
+        let changed = {
+            let session = self.ensure_session(session_id);
+            if session.workspace_id.is_none() {
+                session.workspace_id = Some(workspace_id.to_string());
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.save_to_backend();
+        }
     }
 
     fn save_to_backend(&self) {
@@ -2183,6 +2255,7 @@ impl SessionStore {
             session_attachment_index: self.session_attachment_index.clone(),
             mcp_source_snapshots: self.mcp_source_snapshots.clone(),
             skill_source_snapshots: self.skill_source_snapshots.clone(),
+            workspaces: self.workspaces.clone(),
         };
         self.backend.save_store(&store);
     }
@@ -2515,6 +2588,7 @@ fn default_snapshot_for_session(session_key: &str, node_id: Option<&str>) -> Ses
             session_id: session_key.to_string(),
             ..HistoryCursor::default()
         },
+        workspace_id: None,
     };
     snapshot_from_state(&session, Vec::new(), node_id)
 }
@@ -2599,6 +2673,7 @@ fn snapshot_from_state(
             resolved_node_id: Some(selected_node.node_id.clone()),
             latest_node_id,
             env_info: Some(collect_env_info()),
+            workspace_id: session.workspace_id.clone(),
         };
     }
 
@@ -2630,6 +2705,7 @@ fn snapshot_from_state(
         resolved_node_id: session.history_cursor.visible_node_id.clone(),
         latest_node_id,
         env_info: Some(collect_env_info()),
+        workspace_id: session.workspace_id.clone(),
     }
 }
 
@@ -2803,6 +2879,7 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                workspace_id: session.workspace_id.clone(),
             };
             refresh_session_metadata(&mut materialized, false);
             session.history_nodes.push(HistoryNode {
@@ -4490,6 +4567,7 @@ fn default_sessions() -> SessionMap {
             history_nodes: Vec::new(),
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
+            workspace_id: None,
         },
     );
     sessions
@@ -4553,12 +4631,27 @@ fn rebuild_attachment_assets_from_sessions(
     assets
 }
 
+/// 判定消息附件是否应物化为 `AttachmentAsset`。
+///
+/// 图片资产的 `relative_path` 为 `<session_id>/att-...` 且 `asset_id` 已注册；doc/text
+/// 引用（PA-078）仅携带 `relative_path`（`.tmp/imports/...`）、无 `asset_id`，不应进入
+/// 附件目录——AC#4 收窄：只对图片保持 AttachmentAsset 生命周期合同。显式 `asset_id`
+/// （引用已注册资产）始终保留。
+fn is_asset_eligible_attachment(session_id: &str, attachment: &SessionAttachment) -> bool {
+    if !attachment.asset_id.trim().is_empty() {
+        return true;
+    }
+    let relative = attachment.relative_path.replace('\\', "/");
+    relative.starts_with(&format!("{session_id}/"))
+}
+
 fn merge_session_attachment_assets(sessions: &SessionMap, assets: &mut AttachmentAssetMap) {
     for session in sessions.values() {
         for attachment in session
             .history
             .iter()
             .flat_map(|message| message.attachments.iter())
+            .filter(|attachment| is_asset_eligible_attachment(&session.conversation_id, attachment))
         {
             let asset_id = if attachment.asset_id.trim().is_empty() {
                 attachment_asset_id(&attachment.relative_path)
@@ -5037,6 +5130,7 @@ mod tests {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                workspace_id: None,
             },
         );
         let snapshot = store.snapshot(Some(session_id), &[]);
@@ -5187,6 +5281,7 @@ mod tests {
                     mode: HistoryCursorMode::Live,
                     ..Default::default()
                 },
+                workspace_id: None,
             },
         );
         let snapshot = store
@@ -5299,6 +5394,7 @@ mod tests {
                     mode: HistoryCursorMode::Live,
                     ..Default::default()
                 },
+                workspace_id: None,
             },
         );
 
@@ -6842,6 +6938,152 @@ mod tests {
     }
 
     #[test]
+    fn doc_text_reference_attachments_do_not_materialize_phantom_assets() {
+        // PA-078 AC#4：doc/text 以引用附着（.tmp/imports/...），不应进入 AttachmentAsset 目录
+        // （relative_path 相对 attachment_root 不存在 → 否则物化为 MissingPayload 幽灵资产）。
+        let mut store = SessionStore::memory_only();
+        let session_id = format!("docref-{}", now_timestamp_ms());
+        let doc_attachment = AttachmentReference {
+            id: "ref-doc-1".to_string(),
+            asset_id: String::new(),
+            name: Some("foo.md".to_string()),
+            mime_type: "text/markdown".to_string(),
+            relative_path: ".tmp/imports/foo.md".to_string(),
+            size_bytes: 12,
+            created_at_ms: now_timestamp_ms(),
+        };
+        store.append_turn(
+            Some(&session_id),
+            "[附件: foo.md]",
+            "已收到。",
+            None,
+            vec![doc_attachment.clone()],
+        );
+        store.refresh_attachment_catalog();
+
+        let phantom_id = attachment_asset_id(".tmp/imports/foo.md");
+        assert!(
+            !store.attachment_assets.contains_key(&phantom_id),
+            "doc/text 引用不应物化为 AttachmentAsset（phantom: {phantom_id}）"
+        );
+
+        // 对照：图片资产仍正常物化
+        let images = vec![TurnInputImage {
+            data_url: "data:image/png;base64,AAAA".to_string(),
+            mime_type: "image/png".to_string(),
+            name: Some("active.png".to_string()),
+        }];
+        let image_attachments = store
+            .save_input_attachments(&session_id, &images)
+            .expect("save image attachments");
+        store.append_turn(
+            Some(&session_id),
+            "[image: active.png]",
+            "看到了。",
+            None,
+            image_attachments,
+        );
+        store.refresh_attachment_catalog();
+        assert_eq!(store.list_attachment_assets(None).len(), 1, "图片资产应保留");
+    }
+
+    #[test]
+    fn session_store_workspace_registry_default_and_crud() {
+        // PA-079：默认 workspace 始终存在；create/list/resolve 正确。
+        let mut store = SessionStore::memory_only();
+        let workspaces = store.list_workspaces();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+
+        let root = std::env::temp_dir().join(format!("pa079-store-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let created = store.create_workspace("Docs", root.to_str().unwrap()).unwrap();
+        assert!(created.id.starts_with("ws-docs-"));
+
+        assert_eq!(store.list_workspaces().len(), 2);
+        assert_eq!(
+            store.resolve_workspace_root(Some(&created.id)).unwrap(),
+            crate::agent::workspace::normalize_workspace_root(root.to_str().unwrap()).unwrap()
+        );
+        // 缺省 → 默认 workspace
+        assert!(store.resolve_workspace_root(None).is_ok());
+
+        // 重复 root 拒绝
+        assert!(store.create_workspace("Docs2", root.to_str().unwrap()).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_store_stamps_workspace_id_only_once() {
+        // PA-079：TurnInput.workspace_id 首次盖章；后续轮 no-op。
+        let mut store = SessionStore::memory_only();
+        store.ensure_session("ws-session");
+        assert!(store.sessions["ws-session"].workspace_id.is_none());
+
+        store.stamp_workspace_id("ws-session", "ws-proj-1");
+        assert_eq!(store.sessions["ws-session"].workspace_id.as_deref(), Some("ws-proj-1"));
+
+        store.stamp_workspace_id("ws-session", "ws-proj-2");
+        assert_eq!(store.sessions["ws-session"].workspace_id.as_deref(), Some("ws-proj-1"));
+    }
+
+    #[test]
+    fn legacy_session_without_workspace_id_projects_to_default() {
+        // PA-079：旧会话（无 workspace_id 字段）serde 兼容 + 快照投影 None。
+        let mut store = SessionStore::memory_only();
+        store.ensure_session("legacy");
+        let snapshot = store.snapshot(Some("legacy"), &[]);
+        assert_eq!(snapshot.workspace_id, None);
+
+        // P2-7b：模拟旧 schema blob（无 workspace_id 字段）→ 全字段原样往返 + workspace_id=None。
+        let mut legacy_session = store.sessions["legacy"].clone();
+        legacy_session.title = "旧标题".to_string();
+        legacy_session.summary = "旧摘要".to_string();
+        legacy_session.turn_count = 3;
+        legacy_session.updated_at_ms = 12345;
+        legacy_session.history = vec![TurnHistoryMessage {
+            role: "user".to_string(),
+            content: "旧内容".to_string(),
+            attachments: Vec::new(),
+            ..Default::default()
+        }];
+        let serialized = serde_json::to_string(&legacy_session).unwrap();
+        // 去掉 workspace_id 键模拟旧版本写入的 blob
+        let mut value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        if let serde_json::Value::Object(map) = &mut value {
+            map.remove("workspaceId");
+        }
+        let restored: SessionState = serde_json::from_str(&value.to_string()).unwrap();
+        assert_eq!(restored.workspace_id, None, "旧 blob 无 workspace_id → None");
+        assert_eq!(restored.title, "旧标题");
+        assert_eq!(restored.summary, "旧摘要");
+        assert_eq!(restored.turn_count, 3);
+        assert_eq!(restored.updated_at_ms, 12345);
+        assert_eq!(restored.history.len(), 1);
+        assert_eq!(restored.history[0].content, "旧内容");
+    }
+
+    #[test]
+    fn corrupt_file_backend_falls_back_to_default_workspace() {
+        // PA-079 P1-2：File backend 整文件损坏 → load_store None → 默认 workspace 重建。
+        let dir = std::env::temp_dir().join(format!("pa079-file-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage_path = dir.join("store.json");
+        std::fs::write(&storage_path, "{bad json").unwrap();
+
+        let backend = FileSessionBackend {
+            storage_path: storage_path.clone(),
+        };
+        let store = SessionStore::with_backend(Box::new(backend));
+        let workspaces = store.list_workspaces();
+        assert_eq!(workspaces.len(), 1, "损坏回退后应只剩默认 workspace");
+        assert_eq!(workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn attachment_assets_expose_lifecycle_statuses_and_queries() {
         let mut store = SessionStore::memory_only();
         let session_id = format!("lifecycle-{}", now_timestamp_ms());
@@ -7204,6 +7446,7 @@ mod tests {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                workspace_id: None,
             },
         );
 
@@ -7268,6 +7511,7 @@ mod tests {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                workspace_id: None,
             },
         );
 
@@ -7352,6 +7596,7 @@ mod tests {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                workspace_id: None,
             },
         );
 
@@ -7421,6 +7666,7 @@ mod tests {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                workspace_id: None,
             },
         );
 

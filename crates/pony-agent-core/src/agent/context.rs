@@ -1531,6 +1531,7 @@ mod tests {
             resolved_node_id: None,
             latest_node_id: None,
             env_info: None,
+            workspace_id: None,
         }
     }
 

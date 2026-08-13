@@ -1,5 +1,6 @@
 pub mod app_settings;
 pub mod ask_control;
+pub mod attachment_import;
 pub mod budget;
 pub mod capability_bridge;
 pub mod child_dispatch;
@@ -38,3 +39,4 @@ pub mod tools;
 pub mod trace_persistence;
 pub mod turn_flow;
 pub mod web_access;
+pub mod workspace;

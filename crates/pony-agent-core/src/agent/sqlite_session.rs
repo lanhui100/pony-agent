@@ -234,7 +234,7 @@ impl SqliteSessionBackend {
 
         // Upsert metadata — scoped to drop the statement before commit
         {
-            let metadata_entries: [(&str, Option<String>); 4] = [
+            let metadata_entries: [(&str, Option<String>); 5] = [
                 (
                     "attachment_assets",
                     serde_json::to_string(&store.attachment_assets).ok(),
@@ -250,6 +250,10 @@ impl SqliteSessionBackend {
                 (
                     "skill_source_snapshots",
                     serde_json::to_string(&store.skill_source_snapshots).ok(),
+                ),
+                (
+                    "workspaces",
+                    serde_json::to_string(&store.workspaces).ok(),
                 ),
             ];
 
@@ -574,6 +578,7 @@ impl SessionBackend for SqliteSessionBackend {
         let session_attachment_index = self.read_metadata(conn, "session_attachment_index");
         let mcp_source_snapshots = self.read_metadata(conn, "mcp_source_snapshots");
         let skill_source_snapshots = self.read_metadata(conn, "skill_source_snapshots");
+        let workspaces = self.read_metadata(conn, "workspaces");
 
         Some(PersistedStore {
             sessions,
@@ -581,6 +586,7 @@ impl SessionBackend for SqliteSessionBackend {
             session_attachment_index,
             mcp_source_snapshots,
             skill_source_snapshots,
+            workspaces,
         })
     }
 
@@ -1153,6 +1159,63 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn corrupt_workspaces_metadata_falls_back_to_default_on_store_load() {
+        // PA-079 P1-2：store_metadata 的 workspaces JSON 损坏 → read_metadata 回退空 → SessionStore 重建默认。
+        let dir = unique_dir("corrupt-ws");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::DualWrite,
+        );
+
+        {
+            let mut slot = backend.connection().expect("connection");
+            let conn = slot.as_mut().expect("initialized");
+            conn.execute(
+                "INSERT OR REPLACE INTO store_metadata (key, value) VALUES ('workspaces', '{bad json')",
+                [],
+            )
+            .expect("insert corrupt workspaces metadata");
+        }
+
+        let store = SessionStore::with_backend(Box::new(backend));
+        let workspaces = store.list_workspaces();
+        assert_eq!(workspaces.len(), 1, "损坏回退后应只剩默认 workspace");
+        assert_eq!(workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn workspaces_roundtrip_through_sqlite_store_metadata() {
+        // PA-079：注册表随 PersistedStore.workspaces 经 store_metadata key=workspaces 持久化。
+        let dir = unique_dir("workspaces");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::DualWrite,
+        );
+        let root = dir.join("ws-root");
+        fs::create_dir_all(&root).unwrap();
+        let mut store = PersistedStore::default();
+        store.workspaces.push(crate::agent::workspace::WorkspaceRecord {
+            id: crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string(),
+            name: "默认工作区".to_string(),
+            root_path: root.display().to_string(),
+        });
+        backend.save_store(&store);
+
+        let loaded = backend.load_store().unwrap();
+        assert_eq!(loaded.workspaces.len(), 1);
+        assert_eq!(loaded.workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     fn minimal_session(id: &str, title: &str, updated_at_ms: u64) -> SessionState {
         SessionState {
             conversation_id: id.to_string(),
@@ -1172,6 +1235,7 @@ mod tests {
             history_nodes: Vec::new(),
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
+            workspace_id: None,
         }
     }
 

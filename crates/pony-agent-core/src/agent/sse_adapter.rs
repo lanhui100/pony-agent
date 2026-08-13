@@ -215,6 +215,7 @@ mod tests {
                     node_id: None,
                     history: Vec::new(),
                     images: Vec::new(),
+                    workspace_id: None,
                 },
             },
         );
