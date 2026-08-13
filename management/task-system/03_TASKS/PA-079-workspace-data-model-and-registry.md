@@ -9,8 +9,8 @@
 - Owner: @orchestrator
 - Created At: 2026-08-08
 - Updated At: 2026-08-08
-- OpenSpec Change: `workspace-data-model-and-registry`（3 路对抗审核已通过，2026-08-09）
-- Spec 状态: 通过（proposal/design/spec/tasks 已按采纳意见修订）
+- OpenSpec Change: `workspace-data-model-and-registry`（3 路对抗审核已通过，2026-08-09；**已归档** `openspec/changes/archive/2026-08-09-workspace-data-model-and-registry/`，canonical spec `openspec/specs/workspace-data-model/spec.md`）
+- Spec 状态: 通过（proposal/design/spec/tasks 已按采纳意见修订；已完成收口）
 
 ## Background
 
@@ -58,7 +58,7 @@
 
 ## Next Action
 
-- 收口：任务状态流转 Done（已完成）；PA-080（路径权限边界，P0，安全敏感）在 PA-079 数据模型基础上推进。
+- 已收口（2026-08-13）：任务状态 Done；OpenSpec change 已归档（`openspec/changes/archive/2026-08-09-workspace-data-model-and-registry/`）；canonical spec 已同步 `openspec/specs/workspace-data-model/spec.md`；实现已提交（`a118786`/`0f7bf94`/`57519c4` 等）。下一步推进 **PA-080（路径权限边界，P0，安全敏感）**。
 
 ## Blockers
 

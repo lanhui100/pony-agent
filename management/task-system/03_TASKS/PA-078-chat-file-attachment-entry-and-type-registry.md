@@ -9,8 +9,8 @@
 - Owner: @orchestrator
 - Created At: 2026-08-08
 - Updated At: 2026-08-08
-- OpenSpec Change: `add-chat-file-attachment-entry`（3 路对抗审核已通过，2026-08-09）
-- Spec 状态: 通过（proposal/design/spec/tasks 已按采纳意见修订）
+- OpenSpec Change: `add-chat-file-attachment-entry`（3 路对抗审核已通过，2026-08-09；**已归档** `openspec/changes/archive/2026-08-09-add-chat-file-attachment-entry/`，canonical spec `openspec/specs/chat-file-attachment-entry/spec.md`）
+- Spec 状态: 通过（proposal/design/spec/tasks 已按采纳意见修订；已完成收口）
 
 ## Background
 
@@ -59,7 +59,7 @@
 
 ## Next Action
 
-- 收口：任务状态流转 Done（已完成）；OpenSpec change 归档（如需）；PA-079（workspace 数据模型）启动实现。
+- 已收口（2026-08-13）：任务状态 Done；OpenSpec change 已归档（`openspec/changes/archive/2026-08-09-add-chat-file-attachment-entry/`）；canonical spec 已同步 `openspec/specs/chat-file-attachment-entry/spec.md`；实现已提交（`a118786`/`0f7bf94`/`57519c4` 等）。PA-079 已完成，当前主线推进 PA-080。
 
 ## Blockers
 
@@ -67,4 +67,4 @@
 
 ## Resume Hint
 
-- 实现参考 `openspec/changes/add-chat-file-attachment-entry/tasks.md`（已勾选完成）；实现后审核记录 `02_REVIEWS/2026-08-09-pa078-implementation-review.md`；代码入口 `src/lib/runtime/file-attachments.ts`、`src/components/chat/WorkspaceComposer.vue`、`src/stores/runtime.ts` 的 `submitTurn`、`crates/pony-agent-core/src/agent/attachment_import.rs`。
+- 实现参考 `openspec/changes/archive/2026-08-09-add-chat-file-attachment-entry/tasks.md`（已勾选完成）；实现后审核记录 `02_REVIEWS/2026-08-09-pa078-implementation-review.md`；代码入口 `src/lib/runtime/file-attachments.ts`、`src/components/chat/WorkspaceComposer.vue`、`src/stores/runtime.ts` 的 `submitTurn`、`crates/pony-agent-core/src/agent/attachment_import.rs`。
