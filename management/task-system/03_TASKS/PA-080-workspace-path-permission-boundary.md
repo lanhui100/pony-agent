@@ -57,10 +57,15 @@
 - 无未解决 P0/P1，spec 通过审核，可进入实现。
 - **实现完成（2026-08-13）**：`path_permission.rs`（885 行）统一路径判定 + 18 项对抗测试；工具接入（读/写/Run cwd 统一经 `classify_path`）；`AuthorizeStore` 持久化（SQLite `store_metadata` key=`path_authorizations.v1` + JSON fallback）；宿主 `authorize_path`/`revoke_authorization`/`list_authorizations`；`docs/concurrency/lock-ordering.md` 登记 `path_authorizations` 锁（与 sessions_rwlock 同级、先 registry 后 authorize）；runtime 构建时从 SessionStore 共享授权存储给 governed executor。
 - **验证（2026-08-13）**：`npm run cargo:check:shared` 通过；core lib 772 全绿（含 path_permission 18 项对抗测试）；tool_router_regression 13 + session_regression 5 + provider_registry_regression 8 + src-tauri lib 6 全绿；前端 vitest 377 全绿。
+- **实现后 3 路对抗审核（2026-08-13）**：
+  - @code-reviewer 发现并已修复：**P0** `workspace_edit_file` 走读判定后写盘（只读授权可升级外部写）→ 改走 `classify_path(Write)`；**P1-1** `workspace_run_command` cwd 可落授权外部目录 → 新增 `resolve_workspace_dir_for_execution`（Write 语义）；**P1-2** 会话级 root 未接线。
+  - @consultant 发现并已修复（方案 A）：**P0** `session_workspace_root: RwLock` ambient state 并发串扰 → 改为**显式不可变 `ToolExecutionContext`** 贯穿工具方法链（无共享可变状态、batch 克隆上下文、panic 无残留）；生产链路 `apply_governed_turn_context` 按 `workspace_id` 从注册表解析会话 root；错误码改为**顶层结构化信封**（`requires_authorization` / `outside_workspace_write_denied` 直接作为 error.code，不再编码进 message）；Run sandbox 基准用会话 root；受控 tmp 覆盖 PA-078 fallback 布局；相对读路径按 root 基座解析。
+  - 新增回归测试：`edit_file_rejects_authorized_external_path_with_write_denied`、`run_command_rejects_authorized_external_cwd`、`concurrent_calls_keep_session_workspace_roots_isolated`（并发串扰 P0 回归）。
+  - **修复后验证（2026-08-13）**：core lib **775** 全绿 + tool_router_regression 13 + session_regression 5 + provider_registry 8 + src-tauri lib 6 + 前端 vitest 377 全绿，cargo check 无 warning。
 
 ## Next Action
 
-- 提交实现（feat(pa-080)）；实现后 3 路对抗审核（@consultant 权限模型 / @code-reviewer 路径安全 / @tester 对抗矩阵复核）；PA-081（侧边栏树）在其后启动。
+- 提交修复（feat(pa-080) 修复提交）；收口归档 PA-080（OpenSpec change 归档 + canonical spec 同步）；PA-081（侧边栏树）随后启动。
 
 ## Blockers
 

@@ -923,6 +923,14 @@ pub trait ToolExecutor: Send + Sync {
     }
 }
 
+/// 单次工具调用的不可变执行上下文（PA-080 consultant 方案 A）。
+/// 显式贯穿工具方法链，取代共享可变状态：并发调用互不串扰、panic 无残留。
+#[derive(Clone, Debug, Default)]
+pub struct ToolExecutionContext {
+    /// 会话级 workspace root（`None` = 无会话上下文，回退构造时默认 root）。
+    pub workspace_root: Option<PathBuf>,
+}
+
 pub struct ToolRouter {
     workspace_root: PathBuf,
     process_manager: ProcessManager,
@@ -1013,25 +1021,48 @@ impl ToolRouter {
     }
 
     pub fn execute(&self, call: &ToolCall) -> ToolResult {
+        self.execute_with_workspace_root(call, None)
+    }
+
+    /// 会话级 root 接线（PA-080 修复，code-review P1-2 / consultant 方案 A）：工具执行时携带
+    /// 会话 workspace root，权限判定锚定在会话 workspace 而非进程 cwd。`None` 时回退构造时的
+    /// 默认 root（legacy 直接调用 / 无上下文路径）。
+    ///
+    /// 实现采用**显式不可变调用上下文**（`ToolExecutionContext`）贯穿整条工具方法链，
+    /// 不使用共享可变状态：并发多会话工具执行（同一 `Arc<ToolRouter>`）不会串扰，
+    /// `workspace_batch` 并行子调用克隆同一上下文，panic 也不会残留状态。
+    pub fn execute_with_workspace_root(
+        &self,
+        call: &ToolCall,
+        workspace_root: Option<&Path>,
+    ) -> ToolResult {
         let started_at = Instant::now();
-        let mut result = self.execute_internal(call, true);
+        let context = ToolExecutionContext {
+            workspace_root: workspace_root.map(|path| path.to_path_buf()),
+        };
+        let mut result = self.execute_internal(call, true, &context);
         result.duration_ms = started_at.elapsed().as_millis() as u64;
         result
     }
 
-    fn execute_internal(&self, call: &ToolCall, allow_batch: bool) -> ToolResult {
+    fn execute_internal(
+        &self,
+        call: &ToolCall,
+        allow_batch: bool,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
         match canonical_tool_name(&call.name) {
             Some(TOOL_TIME_NOW) => self.time_now(),
             Some(TOOL_ECHO_INPUT) => self.echo_input(call),
-            Some(TOOL_WORKSPACE_LIST_FILES) => self.list_files(call),
-            Some(TOOL_WORKSPACE_READ_FILE) => self.read_file(call),
-            Some(TOOL_WORKSPACE_READ_FILE_SEGMENT) => self.read_file_segment(call),
-            Some(TOOL_WORKSPACE_PATH_INFO) => self.path_info(call),
-            Some(TOOL_WORKSPACE_SEARCH_TEXT) => self.search_text(call),
-            Some(TOOL_WORKSPACE_GLOB_FILES) => self.glob_files(call),
-            Some(TOOL_WORKSPACE_WRITE_FILE) => self.write_file(call),
-            Some(TOOL_WORKSPACE_EDIT_FILE) => self.edit_file(call),
-            Some(TOOL_WORKSPACE_RUN_COMMAND) => self.run_command(call),
+            Some(TOOL_WORKSPACE_LIST_FILES) => self.list_files(call, context),
+            Some(TOOL_WORKSPACE_READ_FILE) => self.read_file(call, context),
+            Some(TOOL_WORKSPACE_READ_FILE_SEGMENT) => self.read_file_segment(call, context),
+            Some(TOOL_WORKSPACE_PATH_INFO) => self.path_info(call, context),
+            Some(TOOL_WORKSPACE_SEARCH_TEXT) => self.search_text(call, context),
+            Some(TOOL_WORKSPACE_GLOB_FILES) => self.glob_files(call, context),
+            Some(TOOL_WORKSPACE_WRITE_FILE) => self.write_file(call, context),
+            Some(TOOL_WORKSPACE_EDIT_FILE) => self.edit_file(call, context),
+            Some(TOOL_WORKSPACE_RUN_COMMAND) => self.run_command(call, context),
             Some(TOOL_WEB_FETCH_URL) => self.web_fetch(call),
             Some(TOOL_WEB_SEARCH_QUERY) => self.web_search(call),
             Some(TOOL_MCP_RESOURCE_READ) => error_result(
@@ -1046,8 +1077,8 @@ impl ToolRouter {
                 "ToolSearch 由 capability registry 代理执行。".to_string(),
                 Some("请通过 runtime 注册工具执行入口调用该工具。".to_string()),
             ),
-            Some(TOOL_WORKSPACE_GATHER_CONTEXT) => self.gather_context(call),
-            Some(TOOL_WORKSPACE_BATCH) if allow_batch => self.batch(call),
+            Some(TOOL_WORKSPACE_GATHER_CONTEXT) => self.gather_context(call, context),
+            Some(TOOL_WORKSPACE_BATCH) if allow_batch => self.batch(call, context),
             Some(TOOL_WORKSPACE_BATCH) => error_result(
                 TOOL_WORKSPACE_BATCH,
                 "nested_batch_not_allowed",
@@ -1145,7 +1176,7 @@ impl ToolRouter {
         }
     }
 
-    fn write_file(&self, call: &ToolCall) -> ToolResult {
+    fn write_file(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_WRITE_FILE,
@@ -1179,10 +1210,10 @@ impl ToolRouter {
             );
         }
 
-        let target = match self.prepare_workspace_file_path(relative_path) {
+        let target = match self.prepare_workspace_file_path(relative_path, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_WRITE_FILE, "invalid_path", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_WRITE_FILE, &code, message, None)
             }
         };
 
@@ -1244,7 +1275,7 @@ impl ToolRouter {
         }
     }
 
-    fn edit_file(&self, call: &ToolCall) -> ToolResult {
+    fn edit_file(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_EDIT_FILE,
@@ -1294,10 +1325,13 @@ impl ToolRouter {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let target = match self.resolve_workspace_path(path) {
+        // PA-080 修复（code-review P0）：edit_file 是写操作，目标解析必须走 Write 判定
+        // （classify_path(Write)），否则"只读授权"的外部路径会被改写，击穿写边界。
+        // 与 tasks.md「workspace_edit_file 改调 classify_path(Write)」一致。
+        let target = match self.prepare_workspace_file_path(path, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_EDIT_FILE, "invalid_path", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_EDIT_FILE, &code, message, None)
             }
         };
 
@@ -1379,7 +1413,7 @@ impl ToolRouter {
         }
     }
 
-    fn run_command(&self, call: &ToolCall) -> ToolResult {
+    fn run_command(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let Some(command) = call.arguments.get("command").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_RUN_COMMAND,
@@ -1416,10 +1450,12 @@ impl ToolRouter {
             .get("cwd")
             .and_then(Value::as_str)
             .unwrap_or(".");
-        let cwd = match self.resolve_workspace_dir(cwd_input) {
+        // PA-080 修复（code-review P1-1）：cwd 用 Write 语义判定，授权的外部目录不得作为
+        // 命令工作目录（spec：cwd SHALL be inside workspace root or controlled tmp）。
+        let cwd = match self.resolve_workspace_dir_for_execution(cwd_input, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_RUN_COMMAND, "invalid_cwd", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_RUN_COMMAND, &code, message, None)
             }
         };
         let timeout_ms = call
@@ -1433,8 +1469,10 @@ impl ToolRouter {
         // Run always runs `enforce_sandbox`. With no backend registered it fails closed via
         // `NoSandboxBackend` (Unavailable), so a Run never silently downgrades to a
         // full-parent-environment shell. An explicitly registered backend decides the verdict.
+        // PA-080（consultant 修复）：sandbox 基准用会话级 workspace root，与 cwd 判定一致。
+        let execution_root = self.resolved_workspace_root(context, None);
         let sandbox_request = SandboxRequest {
-            workspace_root: self.canonical_workspace_root().display().to_string(),
+            workspace_root: execution_root.display().to_string(),
             allow_network: false,
             environment_allowlist: Vec::new(),
             isolate_environment: true,
@@ -1865,7 +1903,7 @@ impl ToolRouter {
             duration_ms: 0,
         }
     }
-    fn read_file(&self, call: &ToolCall) -> ToolResult {
+    fn read_file(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_READ_FILE,
@@ -1875,10 +1913,10 @@ impl ToolRouter {
             );
         };
 
-        let resolved = match self.resolve_workspace_path(path) {
+        let resolved = match self.resolve_workspace_path(path, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_READ_FILE, "invalid_path", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_READ_FILE, &code, message, None)
             }
         };
 
@@ -1934,7 +1972,7 @@ impl ToolRouter {
         }
     }
 
-    fn read_file_segment(&self, call: &ToolCall) -> ToolResult {
+    fn read_file_segment(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_READ_FILE_SEGMENT,
@@ -1960,15 +1998,10 @@ impl ToolRouter {
             .map(|value| value.clamp(1, MAX_SEGMENT_LINES as u64) as usize)
             .unwrap_or(40);
 
-        let resolved = match self.resolve_workspace_path(path) {
+        let resolved = match self.resolve_workspace_path(path, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(
-                    TOOL_WORKSPACE_READ_FILE_SEGMENT,
-                    "invalid_path",
-                    error,
-                    None,
-                )
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_READ_FILE_SEGMENT, &code, message, None)
             }
         };
 
@@ -2023,7 +2056,7 @@ impl ToolRouter {
         }
     }
 
-    fn list_files(&self, call: &ToolCall) -> ToolResult {
+    fn list_files(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let relative_dir = call
             .arguments
             .get("path")
@@ -2037,10 +2070,10 @@ impl ToolRouter {
             .map(|value| value.clamp(1, 200) as usize)
             .unwrap_or(DEFAULT_LIST_LIMIT);
 
-        let dir = match self.resolve_workspace_dir(relative_dir) {
+        let dir = match self.resolve_workspace_dir(relative_dir, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_LIST_FILES, "invalid_path", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_LIST_FILES, &code, message, None)
             }
         };
 
@@ -2084,7 +2117,7 @@ impl ToolRouter {
         }
     }
 
-    fn path_info(&self, call: &ToolCall) -> ToolResult {
+    fn path_info(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let relative_path = call
             .arguments
             .get("path")
@@ -2092,10 +2125,10 @@ impl ToolRouter {
             .unwrap_or(".")
             .trim();
 
-        let path = match self.resolve_workspace_entry(relative_path) {
+        let path = match self.resolve_workspace_entry(relative_path, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_PATH_INFO, "invalid_path", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_PATH_INFO, &code, message, None)
             }
         };
 
@@ -2143,7 +2176,7 @@ impl ToolRouter {
         }
     }
 
-    fn glob_files(&self, call: &ToolCall) -> ToolResult {
+    fn glob_files(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let pattern = call
             .arguments
             .get("pattern")
@@ -2186,10 +2219,10 @@ impl ToolRouter {
             );
         }
 
-        let root_entry = match self.resolve_workspace_entry(relative_dir) {
+        let root_entry = match self.resolve_workspace_entry(relative_dir, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_GLOB_FILES, "invalid_path", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_GLOB_FILES, &code, message, None)
             }
         };
 
@@ -2262,7 +2295,7 @@ impl ToolRouter {
         }
     }
 
-    fn search_text(&self, call: &ToolCall) -> ToolResult {
+    fn search_text(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let Some(query) = call.arguments.get("query").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_SEARCH_TEXT,
@@ -2337,10 +2370,10 @@ impl ToolRouter {
             }
         }
 
-        let root_entry = match self.resolve_workspace_entry(relative_dir) {
+        let root_entry = match self.resolve_workspace_entry(relative_dir, context) {
             Ok(value) => value,
-            Err(error) => {
-                return error_result(TOOL_WORKSPACE_SEARCH_TEXT, "invalid_path", error, None)
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_SEARCH_TEXT, &code, message, None)
             }
         };
 
@@ -2452,7 +2485,7 @@ impl ToolRouter {
         }
     }
 
-    fn batch(&self, call: &ToolCall) -> ToolResult {
+    fn batch(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let calls = match call.arguments.get("calls").and_then(Value::as_array) {
             Some(value) if !value.is_empty() => value,
             _ => {
@@ -2544,7 +2577,7 @@ impl ToolRouter {
                     handles.push((
                         index,
                         nested_call,
-                        scope.spawn(move || self.execute_internal(&worker_call, false)),
+                        scope.spawn(move || self.execute_internal(&worker_call, false, context)),
                     ));
                 }
 
@@ -2569,7 +2602,7 @@ impl ToolRouter {
             let mut collected = Vec::with_capacity(nested_calls.len());
             let mut stop_after_index = None;
             for (index, nested_call) in nested_calls.iter().cloned().enumerate() {
-                let result = self.execute_internal(&nested_call, false);
+                let result = self.execute_internal(&nested_call, false, context);
                 let should_stop = result.status != "ok" && !continue_on_error;
                 collected.push((index, nested_call, result));
                 if should_stop {
@@ -2610,7 +2643,7 @@ impl ToolRouter {
         )
     }
 
-    fn gather_context(&self, call: &ToolCall) -> ToolResult {
+    fn gather_context(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         let raw_path = call
             .arguments
             .get("path")
@@ -2680,7 +2713,7 @@ impl ToolRouter {
                         }),
                         plan: None,
                     };
-                    let result = self.gather_context(&nested_call);
+                    let result = self.gather_context(&nested_call, context);
                     (index, nested_call, result)
                 })
                 .collect::<Vec<_>>();
@@ -2735,18 +2768,13 @@ impl ToolRouter {
         }
 
         let path = if raw_path.is_empty() { "." } else { raw_path };
-        let resolved = match self.resolve_workspace_entry(path) {
+        let resolved = match self.resolve_workspace_entry(path, context) {
             Ok(value) => value,
-            Err(error) => {
-                let code = if error.contains("只允许访问当前工作区内的相对路径") {
-                    "out_of_scope"
-                } else {
-                    "invalid_path"
-                };
+            Err((code, message)) => {
                 return error_result(
                     TOOL_WORKSPACE_GATHER_CONTEXT,
-                    code,
-                    error,
+                    &code,
+                    message,
                     Some("请提供工作区内存在的相对路径。".to_string()),
                 );
             }
@@ -2792,11 +2820,11 @@ impl ToolRouter {
                     plan: None,
                 };
                 let info_handle = scope.spawn(|| {
-                    let result = self.path_info(&path_info_call);
+                    let result = self.path_info(&path_info_call, context);
                     (0usize, path_info_call, result)
                 });
                 let segment_handle = scope.spawn(|| {
-                    let result = self.read_file_segment(&segment_call);
+                    let result = self.read_file_segment(&segment_call, context);
                     (1usize, segment_call, result)
                 });
                 vec![
@@ -2857,11 +2885,11 @@ impl ToolRouter {
                     plan: None,
                 };
                 let info_handle = scope.spawn(|| {
-                    let result = self.path_info(&path_info_call);
+                    let result = self.path_info(&path_info_call, context);
                     (0usize, path_info_call, result)
                 });
                 let list_handle = scope.spawn(|| {
-                    let result = self.list_files(&list_call);
+                    let result = self.list_files(&list_call, context);
                     (1usize, list_call, result)
                 });
                 vec![
@@ -2944,9 +2972,9 @@ impl ToolRouter {
                     collected.push((
                         0usize,
                         path_info_call.clone(),
-                        self.path_info(&path_info_call),
+                        self.path_info(&path_info_call, context),
                     ));
-                    let search_result = self.search_text(&search_call);
+                    let search_result = self.search_text(&search_call, context);
                     let segment_line =
                         first_search_match_line(&search_result.output, &display_path);
                     collected.push((1usize, search_call, search_result));
@@ -2967,7 +2995,7 @@ impl ToolRouter {
                     collected.push((
                         2usize,
                         segment_call.clone(),
-                        self.read_file_segment(&segment_call),
+                        self.read_file_segment(&segment_call, context),
                     ));
 
                     collected
@@ -2994,9 +3022,9 @@ impl ToolRouter {
                     collected.push((
                         0usize,
                         path_info_call.clone(),
-                        self.path_info(&path_info_call),
+                        self.path_info(&path_info_call, context),
                     ));
-                    let search_result = self.search_text(&search_call);
+                    let search_result = self.search_text(&search_call, context);
                     let should_add_listing = search_result.status != "ok"
                         || search_match_count(&search_result.output) == 0;
                     collected.push((1usize, search_call, search_result));
@@ -3011,7 +3039,7 @@ impl ToolRouter {
                             }),
                             plan: None,
                         };
-                        collected.push((2usize, list_call.clone(), self.list_files(&list_call)));
+                        collected.push((2usize, list_call.clone(), self.list_files(&list_call, context)));
                     }
 
                     collected
@@ -3118,13 +3146,17 @@ impl ToolRouter {
         }
     }
 
-    fn resolve_workspace_path(&self, raw_path: &str) -> Result<PathBuf, String> {
+    fn resolve_workspace_path(
+        &self,
+        raw_path: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<PathBuf, (String, String)> {
         let trimmed = raw_path.trim();
         if trimmed.is_empty() {
-            return Err("文件路径不能为空。".to_string());
+            return Err(("invalid_path".to_string(), "文件路径不能为空。".to_string()));
         }
 
-        let canonical = match self.canonicalize_workspace_target(trimmed) {
+        let canonical = match self.canonicalize_workspace_target(trimmed, context) {
             Ok(canonical) => canonical,
             Err(primary_error) => match self.try_repair_file_path(trimmed) {
                 Ok(Some(repaired)) => repaired,
@@ -3133,18 +3165,29 @@ impl ToolRouter {
             },
         };
         if !canonical.is_file() {
-            return Err(format!(
-                "目标不是文件：{}。",
-                self.display_workspace_relative(&canonical)
+            return Err((
+                "invalid_path".to_string(),
+                format!(
+                    "目标不是文件：{}。",
+                    self.display_workspace_relative(&canonical)
+                ),
             ));
         }
 
         Ok(canonical)
     }
 
-    /// 会话级 root 解析（PA-080）：优先按 `workspace_id` 经注入的 resolver 解析；
-    /// 无 resolver / 解析失败 / 无上下文 → 回退构造时的默认 root。
-    fn resolved_workspace_root(&self, workspace_id: Option<&str>) -> PathBuf {
+    /// 会话级 root 解析（PA-080 consultant 方案 A）：优先取调用上下文的会话 workspace root
+    /// （`execute_with_workspace_root` 注入，显式不可变）；其次按 `workspace_id` 经注入的
+    /// resolver 解析；无 resolver / 解析失败 / 无上下文 → 回退构造时的默认 root。
+    fn resolved_workspace_root(
+        &self,
+        context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
+    ) -> PathBuf {
+        if let Some(session_root) = &context.workspace_root {
+            return session_root.clone();
+        }
         if let Some(workspace_id) = workspace_id.filter(|value| !value.trim().is_empty()) {
             if let Some(resolver) = &self.root_resolver {
                 if let Some(root) = resolver(workspace_id) {
@@ -3164,52 +3207,105 @@ impl ToolRouter {
         root.join(".tmp")
     }
 
-    /// 统一路径权限判定（PA-080）：读/写工具一律经 `classify_path`，
-    /// 返回权限错误时按结构化错误码映射到工具错误消息。
+    /// 受控 tmp 判定目录列表（PA-080 consultant 修复）：除 `<root>/.tmp/` 外，
+    /// 覆盖 PA-078 附件导入的 fallback 布局 `<temp_dir>/pony-agent/.tmp/imports/`，
+    /// 避免 fallback 导入物被当成普通外部路径。
+    fn controlled_tmp_dirs(&self, root: &Path) -> Vec<PathBuf> {
+        vec![
+            self.controlled_tmp_dir(root),
+            std::env::temp_dir()
+                .join(crate::agent::attachment_import::FALLBACK_TEMP_SUBDIR)
+                .join(crate::agent::attachment_import::IMPORT_RELATIVE_DIR),
+        ]
+    }
+
+    /// 统一路径权限判定（PA-080）：读/写工具一律经 `classify_path`。
+    /// 返回 `(错误码, 消息)` 结构化信封：权限错误码（`requires_authorization` /
+    /// `outside_workspace_write_denied` / `permission_denied`）作为顶层错误码透出，
+    /// 前端授权 UI 可直接消费（consultant P1 修复）。
     fn classify_workspace_path(
         &self,
         raw_path: &str,
         purpose: crate::agent::path_permission::PathPurpose,
+        context: &ToolExecutionContext,
         workspace_id: Option<&str>,
-    ) -> Result<PathBuf, String> {
-        use crate::agent::path_permission::{PathPurpose as Purpose, PermissionErrorCode};
-        let root = self.resolved_workspace_root(workspace_id);
-        let tmp = self.controlled_tmp_dir(&root);
-        match self.path_checker.classify(raw_path, &root, &tmp, &self.authorize_store, purpose) {
-            Ok(permission) => Ok(permission.canonical),
-            Err(error) => match error.code {
-                PermissionErrorCode::RequiresAuthorization => Err(format!(
-                    "requires_authorization: {}",
-                    error.message
-                )),
-                PermissionErrorCode::OutsideWorkspaceWriteDenied => Err(format!(
-                    "outside_workspace_write_denied: {}",
-                    error.message
-                )),
-                PermissionErrorCode::PermissionDenied => Err(error.message),
-            },
+    ) -> Result<PathBuf, (String, String)> {
+        use crate::agent::path_permission::{PermissionErrorCode, PermissionZone};
+        let root = self.resolved_workspace_root(context, workspace_id);
+        let tmp_dirs = self.controlled_tmp_dirs(&root);
+        // 依次对 root + 各受控 tmp 区域判定：命中任一即放行（组件级比较，无 IO 副作用）。
+        // 全部未命中时，最后一次判定的错误码（requires_authorization / outside_workspace_write_denied）透出。
+        let mut last_error: Option<(String, String)> = None;
+        let mut zones = vec![root.clone()];
+        zones.extend(tmp_dirs.iter().cloned());
+        for zone_root in &zones {
+            let tmp = zone_root.join(".tmp");
+            match self
+                .path_checker
+                .classify(raw_path, &root, &tmp, &self.authorize_store, purpose)
+            {
+                Ok(permission) => {
+                    if matches!(
+                        permission.zone,
+                        PermissionZone::WorkspaceRoot | PermissionZone::ControlledTmp
+                    ) {
+                        return Ok(permission.canonical);
+                    }
+                    // AuthorizedExternal（仅 Read 且命中授权）→ 直接放行。
+                    if permission.zone == PermissionZone::AuthorizedExternal {
+                        return Ok(permission.canonical);
+                    }
+                }
+                Err(error) => {
+                    let code = match error.code {
+                        PermissionErrorCode::RequiresAuthorization => "requires_authorization",
+                        PermissionErrorCode::OutsideWorkspaceWriteDenied => {
+                            "outside_workspace_write_denied"
+                        }
+                        PermissionErrorCode::PermissionDenied => "permission_denied",
+                    };
+                    last_error = Some((code.to_string(), error.message));
+                }
+            }
         }
+        Err(last_error.unwrap_or_else(|| {
+            (
+                "permission_denied".to_string(),
+                "路径权限判定失败。".to_string(),
+            )
+        }))
     }
 
-    fn prepare_workspace_file_path(&self, raw_path: &str) -> Result<PathBuf, String> {
+    fn prepare_workspace_file_path(
+        &self,
+        raw_path: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<PathBuf, (String, String)> {
         use crate::agent::path_permission::PathPurpose;
         let trimmed = raw_path.trim();
         if trimmed.is_empty() {
-            return Err("文件路径不能为空。".to_string());
+            return Err((
+                "invalid_path".to_string(),
+                "文件路径不能为空。".to_string(),
+            ));
         }
 
         // PA-080：写路径统一经 classify_path(Write)，workspace 外写返回
         // `outside_workspace_write_denied`；写新文件复用"最近存在祖先 + 后缀组件校验"语义。
-        self.classify_workspace_path(trimmed, PathPurpose::Write, None)
+        self.classify_workspace_path(trimmed, PathPurpose::Write, context, None)
     }
 
-    fn resolve_workspace_entry(&self, raw_path: &str) -> Result<PathBuf, String> {
+    fn resolve_workspace_entry(
+        &self,
+        raw_path: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<PathBuf, (String, String)> {
         let trimmed = if raw_path.trim().is_empty() {
             "."
         } else {
             raw_path.trim()
         };
-        match self.canonicalize_workspace_target(trimmed) {
+        match self.canonicalize_workspace_target(trimmed, context) {
             Ok(canonical) => Ok(canonical),
             Err(primary_error) => match self.try_repair_file_path(trimmed) {
                 Ok(Some(repaired)) => Ok(repaired),
@@ -3219,24 +3315,63 @@ impl ToolRouter {
         }
     }
 
-    fn resolve_workspace_dir(&self, raw_path: &str) -> Result<PathBuf, String> {
+    fn resolve_workspace_dir(
+        &self,
+        raw_path: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<PathBuf, (String, String)> {
         let trimmed = if raw_path.trim().is_empty() {
             "."
         } else {
             raw_path.trim()
         };
-        let canonical = self.canonicalize_workspace_target(trimmed)?;
+        let canonical = self.canonicalize_workspace_target(trimmed, context)?;
         if !canonical.is_dir() {
-            return Err(format!(
-                "目标不是目录：{}。",
-                self.display_workspace_relative(&canonical)
+            return Err((
+                "invalid_path".to_string(),
+                format!(
+                    "目标不是目录：{}。",
+                    self.display_workspace_relative(&canonical)
+                ),
             ));
         }
 
         Ok(canonical)
     }
 
-    fn canonicalize_workspace_target(&self, raw_path: &str) -> Result<PathBuf, String> {
+    /// Run 命令 cwd 专用解析（PA-080 修复，code-review P1-1）：cwd 必须是 workspace 根内或受控
+    /// tmp 内，授权的外部目录不得作为命令工作目录（spec：`cwd` SHALL be inside the workspace
+    /// root or the controlled tmp）。与 `resolve_workspace_dir` 的差异：不做 Read 授权回退，
+    /// 外部目录一律拒绝（`outside_workspace_write_denied` 语义）。
+    fn resolve_workspace_dir_for_execution(
+        &self,
+        raw_path: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<PathBuf, (String, String)> {
+        use crate::agent::path_permission::PathPurpose;
+        let trimmed = if raw_path.trim().is_empty() {
+            "."
+        } else {
+            raw_path.trim()
+        };
+        let canonical = self.classify_workspace_path(trimmed, PathPurpose::Write, context, None)?;
+        if !canonical.is_dir() {
+            return Err((
+                "invalid_cwd".to_string(),
+                format!(
+                    "目标不是目录：{}。",
+                    self.display_workspace_relative(&canonical)
+                ),
+            ));
+        }
+        Ok(canonical)
+    }
+
+    fn canonicalize_workspace_target(
+        &self,
+        raw_path: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<PathBuf, (String, String)> {
         use crate::agent::path_permission::PathPurpose;
         let input = PathBuf::from(raw_path);
         let candidate = if input.is_absolute() {
@@ -3246,7 +3381,12 @@ impl ToolRouter {
         };
         let canonical = candidate
             .canonicalize()
-            .map_err(|error| format!("无法解析路径 {}：{}", raw_path, error))?;
+            .map_err(|error| {
+                (
+                    "invalid_path".to_string(),
+                    format!("无法解析路径 {}：{}", raw_path, error),
+                )
+            })?;
         let root = self.canonical_workspace_root();
 
         if !is_within_root(&root, &canonical) {
@@ -3254,12 +3394,15 @@ impl ToolRouter {
             // 未命中返回 `requires_authorization` 结构化错误。
             let display = canonical.display().to_string();
             return self
-                .classify_workspace_path(&display, PathPurpose::Read, None)
-                .map_err(|error| {
-                    if error.starts_with("requires_authorization: ") {
-                        error
+                .classify_workspace_path(&display, PathPurpose::Read, context, None)
+                .map_err(|(code, message)| {
+                    if code == "requires_authorization" {
+                        (code, message)
                     } else {
-                        format!("只允许访问当前工作区内的相对路径。{error}")
+                        (
+                            code,
+                            format!("只允许访问当前工作区内的相对路径。{message}"),
+                        )
                     }
                 });
         }
@@ -3292,7 +3435,7 @@ impl ToolRouter {
             .unwrap_or_else(|| path.display().to_string().replace('\\', "/"))
     }
 
-    fn try_repair_file_path(&self, raw_path: &str) -> Result<Option<PathBuf>, String> {
+    fn try_repair_file_path(&self, raw_path: &str) -> Result<Option<PathBuf>, (String, String)> {
         let normalized_raw_path = raw_path
             .trim()
             .trim_end_matches(['/', '\\'])
@@ -3335,9 +3478,12 @@ impl ToolRouter {
                     .map(|path| self.display_workspace_relative(path))
                     .collect::<Vec<_>>()
                     .join(", ");
-                return Err(format!(
-                    "无法解析路径 {}：工作区内发现多个同名文件 {}，请提供更精确的相对路径。",
-                    raw_path, candidates
+                return Err((
+                    "invalid_path".to_string(),
+                    format!(
+                        "无法解析路径 {}：工作区内发现多个同名文件 {}，请提供更精确的相对路径。",
+                        raw_path, candidates
+                    ),
                 ));
             }
         }
@@ -3378,9 +3524,12 @@ impl ToolRouter {
                     .map(|path| self.display_workspace_relative(path))
                     .collect::<Vec<_>>()
                     .join(", ");
-                Err(format!(
-                    "无法解析路径 {}：工作区内发现多个缺扩展名候选文件 {}，请提供更精确的相对路径。",
-                    raw_path, candidates
+                Err((
+                    "invalid_path".to_string(),
+                    format!(
+                        "无法解析路径 {}：工作区内发现多个缺扩展名候选文件 {}，请提供更精确的相对路径。",
+                        raw_path, candidates
+                    ),
                 ))
             }
         }
@@ -5541,17 +5690,6 @@ fn cmd_escape_path(path: &str) -> String {
     escaped
 }
 
-fn existing_workspace_ancestor_path(path: &Path) -> Option<PathBuf> {
-    let mut current = Some(path);
-    while let Some(candidate) = current {
-        if candidate.exists() {
-            return Some(candidate.to_path_buf());
-        }
-        current = candidate.parent();
-    }
-    None
-}
-
 fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
     ToolResult {
         tool_name: tool_name.to_string(),
@@ -6838,6 +6976,174 @@ mod tests {
                 .and_then(Value::as_str),
             Some("no_match")
         );
+    }
+
+    #[test]
+    fn edit_file_rejects_authorized_external_path_with_write_denied() {
+        // PA-080 code-review P0 回归：edit_file 是写操作，即使外部路径有"只读授权"
+        // 也必须拒绝（outside_workspace_write_denied），不得把只读授权升级为外部写。
+        let workspace = temp_workspace();
+        let external_dir = std::env::temp_dir().join(format!(
+            "pa080-edit-external-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&external_dir);
+        std::fs::create_dir_all(&external_dir).expect("create external dir");
+        let external_file = external_dir.join("secret.txt");
+        fs::write(&external_file, "top secret\n").expect("write external file");
+
+        let authorize_store = crate::agent::path_permission::AuthorizeStore::new();
+        authorize_store
+            .grant(external_file.clone())
+            .expect("grant read authorization");
+        let router = ToolRouter::with_workspace_root(workspace.clone())
+            .with_authorize_store(std::sync::Arc::new(authorize_store));
+
+        // 读授权放行（读工具可读外部文件）
+        let read_result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_READ_FILE.to_string(),
+            arguments: json!({ "path": external_file.display().to_string() }),
+            plan: None,
+        });
+        assert_eq!(read_result.status, "ok", "read with authorization must succeed");
+
+        // 但 edit 必须拒绝：写判定不认授权清单
+        let edit_result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+            arguments: json!({
+                "path": external_file.display().to_string(),
+                "oldText": "top secret",
+                "newText": "tampered"
+            }),
+            plan: None,
+        });
+        assert_eq!(edit_result.status, "error");
+        let payload = serde_json::from_str::<Value>(&edit_result.output).expect("edit output json");
+        let code = payload
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert_eq!(
+            code, "outside_workspace_write_denied",
+            "edit must fail with outside_workspace_write_denied code, got: {code}"
+        );
+        // 文件内容未被篡改
+        let content = fs::read_to_string(&external_file).expect("read external file");
+        assert_eq!(content, "top secret\n", "external file must not be modified");
+
+        let _ = std::fs::remove_dir_all(&external_dir);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn run_command_rejects_authorized_external_cwd() {
+        // PA-080 code-review P1-1 回归：Run 的 cwd 必须是 workspace 内或受控 tmp，
+        // 授权的外部目录不得作为命令工作目录。
+        let workspace = temp_workspace();
+        let external_dir = std::env::temp_dir().join(format!(
+            "pa080-run-cwd-external-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&external_dir);
+        std::fs::create_dir_all(&external_dir).expect("create external dir");
+
+        let authorize_store = crate::agent::path_permission::AuthorizeStore::new();
+        authorize_store
+            .grant(external_dir.clone())
+            .expect("grant read authorization");
+        let router = ToolRouter::with_workspace_root(workspace.clone())
+            .with_authorize_store(std::sync::Arc::new(authorize_store))
+            .with_sandbox_backend(crate::agent::sandbox::TestSandboxBackend::available());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "echo hi",
+                "cwd": external_dir.display().to_string(),
+                "timeoutMs": 5000
+            }),
+            plan: None,
+        });
+        assert_eq!(result.status, "error");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        let code = payload
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert_eq!(
+            code, "outside_workspace_write_denied",
+            "run cwd must be rejected with outside_workspace_write_denied, got: {code}"
+        );
+
+        let _ = std::fs::remove_dir_all(&external_dir);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn concurrent_calls_keep_session_workspace_roots_isolated() {
+        // PA-080 consultant P0 回归：显式不可变调用上下文（方案 A）下，同一 Arc<ToolRouter>
+        // 并发执行不同会话 root 的工具调用不得串扰——每个调用只能写入自己的 workspace。
+        let ws_a = temp_workspace();
+        let ws_b = temp_workspace();
+        let router = Arc::new(ToolRouter::with_workspace_root(ws_a.clone()));
+
+        let router_for_threads = Arc::clone(&router);
+        std::thread::scope(|scope| {
+            for (index, (ws, marker)) in [(&ws_a, "a"), (&ws_b, "b")].into_iter().enumerate() {
+                let router = Arc::clone(&router_for_threads);
+                let ws = ws.clone();
+                let marker = marker.to_string();
+                scope.spawn(move || {
+                    for i in 0..5 {
+                        let file = format!("concurrent-{marker}-{index}-{i}.txt");
+                        // 每个线程只写自己的会话 root。
+                        let result = router.execute_with_workspace_root(
+                            &ToolCall {
+                                call_id: None,
+                                name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+                                arguments: json!({
+                                    "path": file,
+                                    "content": format!("content-{marker}-{i}"),
+                                }),
+                                plan: None,
+                            },
+                            Some(ws.as_path()),
+                        );
+                        assert_eq!(result.status, "ok", "write {marker} {i}: {}", result.output);
+                    }
+                });
+            }
+        });
+
+        // 每个 workspace 只应包含自己的文件（无跨会话串扰）。
+        let files_a = std::fs::read_dir(&ws_a)
+            .expect("read ws_a")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        let files_b = std::fs::read_dir(&ws_b)
+            .expect("read ws_b")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(files_a.len(), 5, "ws_a files: {files_a:?}");
+        assert_eq!(files_b.len(), 5, "ws_b files: {files_b:?}");
+        assert!(
+            files_a.iter().all(|name| name.starts_with("concurrent-a-")),
+            "ws_a must only contain its own files: {files_a:?}"
+        );
+        assert!(
+            files_b.iter().all(|name| name.starts_with("concurrent-b-")),
+            "ws_b must only contain its own files: {files_b:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws_a);
+        let _ = std::fs::remove_dir_all(&ws_b);
     }
 
     #[test]

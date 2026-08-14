@@ -602,11 +602,29 @@ impl AgentRuntime {
         else {
             return;
         };
+        // PA-080（consultant 修复）：会话级 workspace root 解析——优先取 facts 显式传入的
+        // root；否则按 input.workspace_id 从 workspace 注册表解析（生产链路 control_plane
+        // 传 None，这里补齐）；解析失败（孤儿 workspace_id）→ 读回退默认 root（带告警）、
+        // 写 fail-closed 由工具层判定兜底；无 workspace_id → 默认 root。
+        let resolved_workspace_root = facts.workspace_root.clone().or_else(|| {
+            let workspace_id = input.workspace_id.as_deref();
+            let sessions = self.sessions.read().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            });
+            match sessions.resolve_workspace_root(workspace_id) {
+                Ok(root) => Some(root),
+                Err(error) => {
+                    eprintln!("[pony-agent] workspace root 解析失败（回退默认 root）：{error}");
+                    None
+                }
+            }
+        });
         governed.set_context(DispatchContext {
             session_id: input.session_id.clone(),
             run_id: facts.run_id.clone(),
             turn_id: facts.turn_id.clone(),
-            workspace_root: facts.workspace_root.clone().or_else(|| self.workspace_root.clone()),
+            workspace_root: resolved_workspace_root.or_else(|| self.workspace_root.clone()),
             host_control_available: true,
         });
     }

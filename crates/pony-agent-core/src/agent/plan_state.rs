@@ -646,6 +646,7 @@ mod tests {
             descriptor_id: "builtin:plan_control".to_string(),
             arguments,
             session_id: session_id.map(ToString::to_string),
+            workspace_root: None,
         }
     }
 

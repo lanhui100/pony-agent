@@ -99,12 +99,22 @@ struct RouterPrimitiveHandler {
 
 impl PrimitiveToolHandler for RouterPrimitiveHandler {
     fn execute(&self, request: &PrimitiveToolHandlerRequest) -> Result<Value, String> {
-        let result = self.router.execute(&ToolCall {
-            call_id: None,
-            name: self.primitive.clone(),
-            arguments: request.arguments.clone(),
-            plan: None,
-        });
+        // PA-080 P1-2：会话级 workspace root 透传给 ToolRouter 的权限判定。
+        let workspace_root = request
+            .workspace_root
+            .as_deref()
+            .map(std::path::Path::new);
+        let result = self
+            .router
+            .execute_with_workspace_root(
+                &ToolCall {
+                    call_id: None,
+                    name: self.primitive.clone(),
+                    arguments: request.arguments.clone(),
+                    plan: None,
+                },
+                workspace_root,
+            );
         if result.status == "ok" {
             Ok(Value::String(result.output))
         } else {

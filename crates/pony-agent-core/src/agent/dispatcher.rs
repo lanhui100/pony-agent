@@ -1020,6 +1020,8 @@ impl Inner {
                     descriptor_id: descriptor.identity.descriptor_id.clone(),
                     arguments: ready.final_arguments.clone(),
                     session_id: context.session_id.clone(),
+                    // PA-080 P1-2：会话级 workspace root 透传，工具权限判定锚定会话 workspace。
+                    workspace_root: context.workspace_root.clone(),
                 })
                 .map_err(handler_failure);
         }
@@ -1422,6 +1424,7 @@ impl ChildDispatchRunner for Inner {
             descriptor_id: ready.descriptor.identity.descriptor_id.clone(),
             arguments: ready.final_arguments.clone(),
             session_id: ctx.context.session_id.clone(),
+            workspace_root: ctx.context.workspace_root.clone(),
         }) {
             Ok(value) => {
                 let output = render_output(&value);

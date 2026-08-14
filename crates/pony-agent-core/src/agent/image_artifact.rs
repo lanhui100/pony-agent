@@ -766,6 +766,7 @@ mod tests {
             descriptor_id: "builtin:view_image".to_string(),
             arguments,
             session_id: None,
+            workspace_root: None,
         }
     }
 

@@ -42,6 +42,10 @@ pub struct PrimitiveToolHandlerRequest {
     /// keys (PA-076 phase-7 review P1-2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// 会话级 workspace root（PA-080 P1-2 修复）：由 dispatch context 注入，工具权限判定
+    /// 锚定在会话 workspace 而非进程 cwd。`None` 时 handler 回退构造时的默认 root。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
 }
 
 pub trait PrimitiveToolHandler: Send + Sync {

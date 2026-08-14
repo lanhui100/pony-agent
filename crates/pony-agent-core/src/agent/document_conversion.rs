@@ -452,6 +452,7 @@ mod tests {
             descriptor_id: "builtin:workspace_read_document".to_string(),
             arguments: serde_json::json!({ "path": "data.csv" }),
             session_id: None,
+            workspace_root: None,
         };
         let value = handler.execute(&request).expect("handler should convert");
         assert_eq!(value["format"], serde_json::json!("csv"));
@@ -462,6 +463,7 @@ mod tests {
             descriptor_id: "builtin:workspace_read_document".to_string(),
             arguments: serde_json::json!({}),
             session_id: None,
+            workspace_root: None,
         };
         let error = handler.execute(&missing).expect_err("missing path must fail");
         assert!(error.contains("missing_argument"), "{error}");

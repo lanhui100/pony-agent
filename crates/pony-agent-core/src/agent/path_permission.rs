@@ -406,7 +406,17 @@ impl PathPermissionChecker {
             PathPurpose::Write => {
                 self.canonicalize_for_write(Path::new(trimmed), root, tmp_dir)?
             }
-            PathPurpose::Read => self.canonicalize_for_read(Path::new(trimmed))?,
+            PathPurpose::Read => {
+                // 相对读路径按 root 基座解析（consultant P3 修复）：避免按进程 cwd 解析
+                // 导致判定锚点漂移；绝对路径原样处理。
+                let input = Path::new(trimmed);
+                let absolute = if input.is_absolute() {
+                    input.to_path_buf()
+                } else {
+                    root.join(input)
+                };
+                self.canonicalize_for_read(&absolute)?
+            }
         };
 
         // 组件级前缀判定（绝不整体字符串前缀比较）。
