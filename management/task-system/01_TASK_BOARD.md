@@ -27,8 +27,7 @@
 
 ## In Progress
 
-- `PA-080` Workspace 路径权限边界（P0）
-  说明：**实现完成（2026-08-13，commit `2db0b0e`）**——`path_permission.rs`（976 行）统一路径判定（组件级前缀比较 + Windows 大小写折叠 + 可注入 canonicalizer）、`AuthorizeStore` 授权清单（SQLite store_metadata key=`path_authorizations.v1` + JSON fallback，每次变更即写）、写边界（workspace 根递归 + 受控 tmp，`outside_workspace_write_denied`）、读边界（workspace 外需授权，`requires_authorization`）、宿主 `authorize_path`（仅 read）/`revoke_authorization`/`list_authorizations`、工具接入（读/写统一经 `classify_path`，Run 只判 cwd）、锁序登记（`docs/concurrency/lock-ordering.md`）。验证：core lib 772 全绿（含 path_permission 18 项对抗测试）+ tool_router_regression 13 + session_regression 5 + provider_registry 8 + src-tauri lib 6 + 前端 vitest 377 全绿。下一步：实现后 3 路对抗审核。OpenSpec change：`workspace-path-permission-boundary`（活跃）。
+- 暂无
 
 ## Review
 
@@ -39,6 +38,9 @@
 - 暂无
 
 ## Done
+
+- `PA-080` Workspace 路径权限边界（P0）
+  说明：**已完成并收口（2026-08-13）**——`path_permission.rs` 统一路径判定（组件级前缀比较 + Windows 大小写折叠 + 可注入 canonicalizer）+ 18 项对抗测试、`AuthorizeStore` 授权清单（SQLite store_metadata key=`path_authorizations.v1` + JSON fallback）、写边界（workspace 根递归 + 受控 tmp，`outside_workspace_write_denied`）、读边界（外部需授权，`requires_authorization`）、宿主 `authorize_path`（仅 read）/`revoke_authorization`/`list_authorizations`、锁序登记。**实现后 3 路对抗审核**：@code-reviewer（P0 edit 写判定 / P1-1 Run cwd / P1-2 会话 root）+ @consultant（P0 会话 root 并发串扰 → 方案 A 显式 `ToolExecutionContext`、生产链路按 workspaceId 解析 root、错误码结构化信封、Run sandbox 基准、fallback tmp 覆盖）全部修复。最终验证：core lib 775 + tool_router_regression 13 + session_regression 5 + provider_registry 8 + src-tauri lib 6 + 前端 vitest 377 全绿。提交：`2db0b0e`（实现）+ `a1b75d8`（审核修复）。OpenSpec change 已归档：`openspec/changes/archive/2026-08-13-workspace-path-permission-boundary/`，canonical spec：`openspec/specs/workspace-path-permission/spec.md`。
 
 - `PA-082` 前端流式渲染优化收口（optimize-agent-stream-ui / stabilize-markdown-stream-rendering）
   说明：**已完成并收口（2026-08-13）**——流式部分 markdown 稳定化（未闭合代码围栏专用渲染路径）、缓冲揭示节奏（首屏低阈值/代码块紧节奏）、安全呈现回退、reduced-motion、流式状态指示、终态专属操作、运行时回滚开关；配套 turn 级 timeline memo 与 semantic-event timeline 复用性能优化。OpenSpec changes 已归档：`openspec/changes/archive/2026-08-09-optimize-agent-stream-ui/`、`2026-08-09-stabilize-markdown-stream-rendering/`，canonical spec：`openspec/specs/chat-ui/spec.md`。

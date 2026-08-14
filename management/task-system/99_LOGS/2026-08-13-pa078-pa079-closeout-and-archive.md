@@ -73,3 +73,49 @@
 
 - PA-080 实现后 3 路对抗审核（@consultant 权限模型 / @code-reviewer 路径安全 / @tester 对抗矩阵复核）
 - 审核通过后收口归档 PA-080，启动 PA-081（侧边栏 Workspace 树导航）
+
+---
+
+# 追加：PA-080 实现后审核 + 修复 + 收口（2026-08-13 续 2）
+
+## 实现后 3 路对抗审核
+
+- **@code-reviewer**（路径安全）：发现 1 P0 + 2 P1 + 若干 P2/P3
+  - P0：`workspace_edit_file` 用读判定解析目标后写盘 → 只读授权可升级为外部写
+  - P1-1：`workspace_run_command` cwd 可落在授权外部目录
+  - P1-2：会话级 root 未接线（判定锚定进程 cwd）
+- **@consultant**（权限模型架构）：判定 **FAIL**，核心问题
+  - P0：`session_workspace_root: RwLock` ambient state 在并发多会话下串扰 → 采纳**方案 A（显式不可变 `ToolExecutionContext`）**
+  - P0：生产调用链未按 workspaceId 解析 root；相对读路径固定默认 root
+  - P1：错误码编码进 message 字符串而非顶层错误码；fallback tmp 未接入权限 checker；授权持久化失败不可上报
+
+## 修复内容（commit `a1b75d8`）
+
+1. **P0 edit 写判定**：edit_file 改用 `classify_path(Write)`，外部授权文件编辑返回 `outside_workspace_write_denied`（只读授权不可升级为写）
+2. **P1-1 Run cwd**：新增 `resolve_workspace_dir_for_execution`（Write 语义），授权外部目录不可作 cwd；sandbox 基准改用会话 root
+3. **P1-2/P0 会话 root（方案 A）**：删除 ambient RwLock，引入 `ToolExecutionContext`（`workspace_root: Option<PathBuf>`）显式贯穿 `execute_internal` → 工具方法 → 路径 helper → classify；`RouterPrimitiveHandler` 经 `PrimitiveToolHandlerRequest.workspace_root` 透传 dispatcher 的 `DispatchContext.workspace_root`；`apply_governed_turn_context` 按 `input.workspace_id` 从 workspace 注册表解析会话 root（生产链路补齐）
+4. **错误码结构化信封**：`classify_workspace_path` 返回 `(code, message)`，权限码（`requires_authorization` / `outside_workspace_write_denied` / `permission_denied`）直接作为工具 error.code 顶层字段
+5. **fallback tmp 覆盖**：`controlled_tmp_dirs` 纳入 PA-078 的 `<temp_dir>/pony-agent/.tmp/imports/` fallback 布局
+6. **相对读路径**：`path_permission::classify` 的 Read 相对路径按 root 基座拼接（防进程 cwd 漂移）
+
+## 回归测试（新增 3 项）
+
+- `edit_file_rejects_authorized_external_path_with_write_denied`（P0 回归：读授权 + edit → 拒绝、文件未篡改）
+- `run_command_rejects_authorized_external_cwd`（P1-1 回归）
+- `concurrent_calls_keep_session_workspace_roots_isolated`（P0 并发串扰回归：两线程并发写各自会话 root 无串扰）
+
+## 最终验证（2026-08-13）
+
+- core lib **775** 全绿（含 path_permission 18 项 + 新增 3 项回归）
+- tool_router_regression 13 + session_regression 5 + provider_registry 8 + src-tauri lib 6 全绿
+- 前端 vitest 377 全绿；cargo check 无 warning
+
+## 收口归档（2026-08-13）
+
+- PA-080 change 迁入 `openspec/changes/archive/2026-08-13-workspace-path-permission-boundary/`
+- canonical spec 同步：`openspec/specs/workspace-path-permission/spec.md`（delta→canonical，validate 通过）
+- 任务卡 PA-080 状态 Done，任务板 In Progress 清空，dashboard 主线更新
+
+## 下一步
+
+- 启动 **PA-081**（侧边栏 Workspace 树导航，P1，spec 已通过）：`HomeSessionSidebar` 平铺列表 → "项目（二级）→ 对话（三级）"树，按 workspaceId 归组、折叠/展开、Workspace 管理入口

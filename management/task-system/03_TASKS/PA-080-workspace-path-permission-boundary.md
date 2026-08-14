@@ -3,14 +3,14 @@
 ## Basic Info
 
 - ID: PA-080
-- Status: Ready
+- Status: Done
 - Priority: P0
 - Complexity: C
 - Owner: @orchestrator
 - Created At: 2026-08-08
-- Updated At: 2026-08-08
-- OpenSpec Change: `workspace-path-permission-boundary`（3 路对抗审核已通过，2026-08-09）
-- Spec 状态: 通过（proposal/design/spec/tasks 已按采纳意见修订）
+- Updated At: 2026-08-13
+- OpenSpec Change: `workspace-path-permission-boundary`（3 路对抗审核已通过，2026-08-09；**已归档** `openspec/changes/archive/2026-08-13-workspace-path-permission-boundary/`，canonical spec `openspec/specs/workspace-path-permission/spec.md`）
+- Spec 状态: 通过（proposal/design/spec/tasks 已按采纳意见修订；已完成收口）
 
 ## Background
 
@@ -65,7 +65,7 @@
 
 ## Next Action
 
-- 提交修复（feat(pa-080) 修复提交）；收口归档 PA-080（OpenSpec change 归档 + canonical spec 同步）；PA-081（侧边栏树）随后启动。
+- **已收口（2026-08-13）**：任务状态 Done；OpenSpec change 已归档（`openspec/changes/archive/2026-08-13-workspace-path-permission-boundary/`）；canonical spec 已同步（`openspec/specs/workspace-path-permission/spec.md`）；实现与审核修复已提交（`2db0b0e` + `a1b75d8`）。下一步：启动 PA-081（侧边栏 Workspace 树导航）。
 
 ## Blockers
 
