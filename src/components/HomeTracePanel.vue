@@ -28,6 +28,12 @@ import type {
   TurnTraceRecord
 } from "@/types/runtime";
 import Tooltip from "@/components/ui/Tooltip.vue";
+import ScrollArea from "@/components/ui/ScrollArea.vue";
+import {
+  computeVirtualTurnWindow,
+  buildTurnPrefixHeights,
+  estimateTurnHeight
+} from "@/lib/runtime/trace-virtual-scroll";
 
 type DetailRowTone = "default" | "muted" | "warning" | "danger";
 type InputKind = "text" | "image" | "video" | "audio";
@@ -101,6 +107,154 @@ const turnTimelineCache = computed(() => {
 // falls back to direct computation (for non-cached turns).
 function getCachedTimeline(turn: TurnTraceRecord): TraceTimelineEntry[] {
   return turnTimelineCache.value.get(turn.turnId) ?? props.turnTimeline(turn);
+}
+
+// ===== turn 级虚拟滚动（PA-085）=====
+// 独立滚动容器 ref（body 内嵌 ScrollArea），scrollTop/viewportHeight 驱动窗口。
+const traceBodyScrollRef = ref<{ viewportEl: HTMLElement | null } | null>(null);
+const traceScrollTop = ref(0);
+const traceViewportHeight = ref(0);
+let followBottom = true;
+let scrollRafId: number | null = null;
+let resizeObserver: ResizeObserver | null = null;
+
+function turnHeightAt(turn: TurnTraceRecord): number {
+  const timeline = getCachedTimeline(turn);
+  const isTurnExpanded = activeTurnId.value === turn.turnId;
+  const expandedEntryCount =
+    activeTraceStepKey.value && activeTraceStepKey.value.startsWith(`${turn.turnId}:`)
+      ? timeline.length
+      : 0;
+  return estimateTurnHeight(timeline, isTurnExpanded, expandedEntryCount);
+}
+
+const turnPrefixHeights = computed(() =>
+  buildTurnPrefixHeights(props.turns, turnHeightAt)
+);
+const virtualTurnWindow = computed(() =>
+  computeVirtualTurnWindow(turnPrefixHeights.value, traceScrollTop.value, traceViewportHeight.value)
+);
+const visibleTurns = computed(() =>
+  props.turns.slice(virtualTurnWindow.value.startIndex, virtualTurnWindow.value.endIndex)
+);
+const virtualPaddingTop = computed(() => virtualTurnWindow.value.paddingTop);
+const virtualPaddingBottom = computed(() => virtualTurnWindow.value.paddingBottom);
+
+function handleTraceBodyScroll() {
+  const viewportEl = traceBodyScrollRef.value?.viewportEl;
+  if (!viewportEl) {
+    return;
+  }
+  if (scrollRafId != null) {
+    cancelAnimationFrame(scrollRafId);
+  }
+  scrollRafId = requestAnimationFrame(() => {
+    scrollRafId = null;
+    const scrollTop = viewportEl.scrollTop;
+    traceScrollTop.value = scrollTop;
+    // 跟随底部：视口接近内容底部时保持跟随；用户上滑后停止
+    const distanceToBottom = viewportEl.scrollHeight - scrollTop - viewportEl.clientHeight;
+    followBottom = distanceToBottom < 80;
+  });
+}
+
+function scrollTraceToBottom(behavior: ScrollBehavior = "auto") {
+  const viewportEl = traceBodyScrollRef.value?.viewportEl;
+  if (!viewportEl) {
+    return;
+  }
+  viewportEl.scrollTo({ top: viewportEl.scrollHeight, behavior });
+  traceScrollTop.value = viewportEl.scrollTop;
+}
+
+// 挂载时测量视口高度并建立 ResizeObserver；
+// scroll 监听直接绑定到 viewport 元素（自定义 ScrollArea 的 attrs 会落到 root，
+// 原生 scroll 事件不冒泡，无法从组件上捕获）。
+let boundScrollHandler: ((event: Event) => void) | null = null;
+
+function onTraceBodyMounted() {
+  const viewportEl = traceBodyScrollRef.value?.viewportEl;
+  if (!viewportEl) {
+    return;
+  }
+  traceViewportHeight.value = viewportEl.clientHeight;
+  boundScrollHandler = handleTraceBodyScroll;
+  viewportEl.addEventListener("scroll", boundScrollHandler, { passive: true });
+  if (typeof ResizeObserver !== "undefined" && resizeObserver == null) {
+    resizeObserver = new ResizeObserver(() => {
+      traceViewportHeight.value = viewportEl.clientHeight;
+    });
+    resizeObserver.observe(viewportEl);
+  }
+}
+
+// 首次展开时定位到最新 turn（底部）；流式更新时若处于跟随态则保持底部
+watch(
+  () => props.open,
+  (isOpen) => {
+    if (isOpen) {
+      // 等 body 挂载完成后再定位
+      requestAnimationFrame(() => {
+        scrollTraceToBottom();
+        onTraceBodyMounted();
+      });
+    }
+  }
+);
+
+watch(
+  orderedTurnTraceSignature,
+  () => {
+    if (!props.open) {
+      return;
+    }
+    if (followBottom) {
+      requestAnimationFrame(() => {
+        scrollTraceToBottom();
+      });
+    }
+  }
+);
+
+// 流式更新只改变当前 turn 的 timeline 内容（turn ID 不变），
+// 因此底部跟随需依赖总高度变化而非 turn ID 签名。
+const totalTraceHeight = computed(() =>
+  turnPrefixHeights.value.length > 0
+    ? turnPrefixHeights.value[turnPrefixHeights.value.length - 1]!
+    : 0
+);
+
+watch(totalTraceHeight, () => {
+  if (!props.open) {
+    return;
+  }
+  if (followBottom) {
+    requestAnimationFrame(() => {
+      scrollTraceToBottom();
+    });
+  }
+});
+
+watch(
+  () => props.sessionId,
+  () => {
+    followBottom = true;
+    traceScrollTop.value = 0;
+  }
+);
+
+function onTraceBodyUnmounted() {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  if (boundScrollHandler != null) {
+    const viewportEl = traceBodyScrollRef.value?.viewportEl;
+    viewportEl?.removeEventListener("scroll", boundScrollHandler);
+    boundScrollHandler = null;
+  }
+  if (scrollRafId != null) {
+    cancelAnimationFrame(scrollRafId);
+    scrollRafId = null;
+  }
 }
 
 function isCheckpointPersistEntry(entry: TraceTimelineEntry) {
@@ -1165,14 +1319,23 @@ watch(orderedTurnTraceSignature, () => {
       <ChevronRight class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': open }" />
     </button>
 
-    <div class="collapsible-body">
-      <section class="collapsible-content mt-2 space-y-1">
-        <section
-          v-for="turn in turns"
-          :key="turn.turnId"
-          class="collapsible-shell overflow-hidden py-1.5"
-          :data-open="activeTurnId === turn.turnId"
-        >
+    <div v-if="open" class="collapsible-body">
+      <ScrollArea
+        ref="traceBodyScrollRef"
+        class="trace-body-scroll max-h-[24rem] min-h-[3rem]"
+        viewport-class="trace-body-viewport"
+        @vue:mounted="onTraceBodyMounted"
+        @vue:unmounted="onTraceBodyUnmounted"
+      >
+        <section class="collapsible-content mt-2">
+          <div :style="{ height: `${virtualPaddingTop}px` }" aria-hidden="true"></div>
+          <div class="space-y-1">
+            <section
+              v-for="turn in visibleTurns"
+              :key="turn.turnId"
+              class="collapsible-shell overflow-hidden py-1.5"
+              :data-open="activeTurnId === turn.turnId"
+            >
           <button class="group flex w-full items-start justify-between gap-2 text-left" type="button" @click="toggleTurn(turn.turnId)">
             <div class="min-w-0 space-y-0.5">
               <div class="flex items-center gap-1.5 text-[12px] font-medium text-stone-800">
@@ -1443,7 +1606,10 @@ watch(orderedTurnTraceSignature, () => {
             </div>
           </div>
         </section>
-      </section>
+          </div>
+          <div :style="{ height: `${virtualPaddingBottom}px` }" aria-hidden="true"></div>
+        </section>
+      </ScrollArea>
     </div>
   </section>
 </template>

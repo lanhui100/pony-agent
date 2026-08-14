@@ -5,6 +5,7 @@ hermes/
 claude-code-sourcemap/
 codex-openai/
 reasonix-esengine/
+deepseek-harness/
 
 src-tauri/target/
 src-tauri/target-codex-*/

@@ -274,14 +274,14 @@ async function flushAll() {
   await nextTick();
 }
 
-function mountSidebar() {
+async function mountSidebar(options: { expandTrace?: boolean } = {}) {
   const providerStore = useProviderStore();
   providerStore.$patch({
     registry: createProviderRegistry(),
     selectedReasoningEffort: null
   });
 
-  return mount(HomeSidebar, {
+  const wrapper = mount(HomeSidebar, {
     global: {
       stubs: {
         ScrollArea: ScrollAreaStub,
@@ -289,6 +289,17 @@ function mountSidebar() {
       }
     }
   });
+  await flushAll();
+
+  // 默认展开 trace 面板（保持既有测试语义）；expandTrace: false 验证默认折叠
+  if (options.expandTrace !== false) {
+    const toggle = wrapper.get('[data-testid="trace-panel-toggle"]');
+    if (toggle.element.closest("section")?.getAttribute("data-open") !== "true") {
+      await toggle.trigger("click");
+      await flushAll();
+    }
+  }
+  return wrapper;
 }
 
 function countOccurrences(text: string, needle: string) {
@@ -353,7 +364,7 @@ describe("HomeSidebar", () => {
   });
 
   it("保留状态、工具和 trace 三段折叠结构", async () => {
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     expect(wrapper.text()).toContain("状态");
@@ -363,8 +374,38 @@ describe("HomeSidebar", () => {
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
   }, 10000);
 
+  it("trace 面板默认折叠，body 不挂载", async () => {
+    const wrapper = await mountSidebar({ expandTrace: false });
+    await flushAll();
+
+    expect(wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("false");
+    // body 懒挂载：折叠时无 trace timeline 内容
+    expect(wrapper.find('[data-testid="trace-step-button-model-3"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="trace-panel-toggle"]').element.closest("section")?.querySelector(".collapsible-body")).toBeNull();
+  }, 10000);
+
+  it("trace 面板折叠后点击 header 可展开并渲染内容", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({ turnId: "turn-collapse-1", title: "first turn", updatedAt: 1000 })
+      ]
+    });
+
+    const wrapper = await mountSidebar({ expandTrace: false });
+    await flushAll();
+
+    expect(wrapper.find('[data-testid="trace-step-button-model-3"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="trace-panel-toggle"]').trigger("click");
+    await flushAll();
+
+    expect(wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
+    expect(wrapper.find('[data-testid="trace-step-button-model-3"]').exists()).toBe(true);
+  }, 10000);
+
   it("工具目录优先展示中文短名并附带权限摘要", async () => {
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     await wrapper.get('[data-testid="tools-panel-toggle"]').trigger("click");
@@ -418,7 +459,7 @@ describe("HomeSidebar", () => {
       return null;
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     // KNOWN TEST DEBT: Recorder UI section rendering changed
@@ -443,7 +484,7 @@ describe("HomeSidebar", () => {
     const runtimeStore = useRuntimeStore();
     const refreshSpy = vi.spyOn(runtimeStore, "refreshFrontendRecorderStats");
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     await wrapper.get('[data-testid="frontend-stall-smoke"]').trigger("click");
@@ -460,7 +501,7 @@ describe("HomeSidebar", () => {
       sessionOperation: "switching"
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     expect(wrapper.get('[data-testid="status-session-summary"]').text()).toContain("正在切换对话");
@@ -523,7 +564,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const latestTurnButton = wrapper.findAll("button").find((button) => button.text().includes("新成功轮次"));
@@ -594,7 +635,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const text = wrapper.text();
@@ -637,7 +678,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
     await wrapper.get('[data-testid="tools-panel-toggle"]').trigger("click");
     await flushAll();
@@ -695,7 +736,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const toolButton = wrapper.get('[data-testid="trace-step-button-tool-failure"]');
@@ -738,7 +779,7 @@ describe("HomeSidebar", () => {
       }
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
@@ -805,7 +846,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const statusPanelText = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.textContent ?? "";
@@ -871,7 +912,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const statusPanel = wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")!;
@@ -953,7 +994,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const turnButton = wrapper.findAll("button").find((button) => button.text().includes("turn summary metrics"));
@@ -988,7 +1029,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const tracePanel = wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")!;
@@ -1076,7 +1117,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     expect(wrapper.find('[data-testid="trace-step-button-retrieval-2"]').exists()).toBe(false);
@@ -1171,7 +1212,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
@@ -1267,7 +1308,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
@@ -1334,7 +1375,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
@@ -1387,7 +1428,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
@@ -1469,7 +1510,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
@@ -1542,7 +1583,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
@@ -1594,7 +1635,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const toolButton = wrapper.get('[data-testid="trace-step-button-tool-4"]');
@@ -1709,7 +1750,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const firstModelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
@@ -1790,7 +1831,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
@@ -1863,7 +1904,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     expect(wrapper.find('[data-testid="trace-step-button-return-4"]').exists()).toBe(false);
@@ -1904,7 +1945,7 @@ describe("HomeSidebar", () => {
       ]
     });
 
-    const wrapper = mountSidebar();
+    const wrapper = await mountSidebar();
     await flushAll();
 
     const modelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');

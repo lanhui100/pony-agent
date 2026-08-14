@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import type { TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
@@ -10,6 +10,7 @@ import HomeTracePanel from "@/components/HomeTracePanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import DebugPanel from "@/components/DebugPanel.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
+import { clearTraceProjectionMemo, turnTimeline as projectedTurnTimeline } from "@/lib/runtime/trace-projection";
 
 const runtimeStore = useRuntimeStore();
 const providerStore = useProviderStore();
@@ -40,7 +41,7 @@ const {
   turnTraceHistory
 } = storeToRefs(runtimeStore);
 
-const activePanel = ref<"tools" | "trace" | "plan" | "debug" | "">("trace");
+const activePanel = ref<"tools" | "trace" | "plan" | "debug" | "">("");
 const copiedKey = ref("");
 let copiedTimer: number | null = null;
 
@@ -86,8 +87,14 @@ function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
   return left.turnId.localeCompare(right.turnId);
 }
 
+// 折叠态：liveTraceTurn 返回 null，避免与 store 活跃 timeline 共享可变引用
+// （就地修改会污染"冻结"引用，且 memo 缓存会因引用不变而返回陈旧结果）。
+// 展开态：正常构造活跃 turn（引用随 store 更新，memo 以 ref+updatedAt 自然失效）。
 const liveTraceTurn = computed<TurnTraceRecord | null>(() => {
   const turnId = runtimeActiveTurnId.value?.trim() || "";
+  if (activePanel.value !== "trace") {
+    return null;
+  }
   if (!isSubmitting.value || !turnId || traceTimeline.value.length === 0) {
     return null;
   }
@@ -165,7 +172,7 @@ const sessionTurnCount = computed(() => orderedTurnTraces.value.length);
 const turnTimelineCache = computed(() => {
   const cache = new Map<string, TraceTimelineEntry[]>();
   for (const turn of orderedTurnTraces.value) {
-    cache.set(turn.turnId, turnTimeline(turn));
+    cache.set(turn.turnId, projectedTurnTimeline(turn));
   }
   return cache;
 });
@@ -226,82 +233,6 @@ function canonicalTraceTimelineKind(kind: TraceTimelineEntry["kind"]) {
   }
 }
 
-// 按 turn 缓存折叠结果：key = traceTimeline 引用 + updatedAt。
-// 历史 turn 的引用/时间戳稳定，命中率高；活跃 turn 就地更新时
-// （updateActiveModelTraceFromAssistant 触发 updatedAt 变化）自动失效。
-const turnTimelineMemo = new Map<
-  string,
-  { ref: TraceTimelineEntry[] | null | undefined; updatedAt?: number; result: TraceTimelineEntry[] }
->();
-
-function turnTimeline(turn: TurnTraceRecord) {
-  const cached = turnTimelineMemo.get(turn.turnId);
-  if (cached && cached.ref === turn.traceTimeline && cached.updatedAt === turn.updatedAt) {
-    return cached.result;
-  }
-
-  const result = computeTurnTimeline(turn);
-  turnTimelineMemo.set(turn.turnId, {
-    ref: turn.traceTimeline,
-    updatedAt: turn.updatedAt,
-    result
-  });
-  return result;
-}
-
-function computeTurnTimeline(turn: TurnTraceRecord) {
-  if (turn.traceTimeline?.length) {
-    const normalized: TraceTimelineEntry[] = [];
-    let lastModelIndex = -1;
-    for (const entry of turn.traceTimeline) {
-      const kind = canonicalTraceTimelineKind(entry.kind);
-      if (kind === "prepare_retrieval") {
-        continue;
-      }
-      if (kind !== "return_result") {
-        normalized.push({ ...entry, kind });
-        if (kind === "call_model") {
-          lastModelIndex = normalized.length - 1;
-        }
-        continue;
-      }
-
-      if (lastModelIndex === -1) {
-        normalized.push({
-          ...entry,
-          id: `model-${entry.sequence}`,
-          kind: "call_model",
-          label: "CALL MODEL #1",
-          text: entry.state === "completed" ? entry.text ?? null : null
-        });
-        lastModelIndex = normalized.length - 1;
-        continue;
-      }
-
-      const modelEntry = normalized[lastModelIndex];
-      normalized[lastModelIndex] = {
-        ...modelEntry,
-        kind: "call_model",
-        state: entry.state ?? modelEntry.state,
-        text: entry.state === "completed" ? entry.text ?? modelEntry.text ?? null : modelEntry.text ?? null,
-        reasoningContent: entry.reasoningContent ?? modelEntry.reasoningContent ?? null,
-        fallbackReason: entry.fallbackReason ?? modelEntry.fallbackReason ?? null,
-        error: entry.error ?? modelEntry.error ?? null,
-        inputTokens: entry.inputTokens ?? modelEntry.inputTokens ?? null,
-        cacheHitInputTokens: entry.cacheHitInputTokens ?? modelEntry.cacheHitInputTokens ?? null,
-        reasoningTokens: entry.reasoningTokens ?? modelEntry.reasoningTokens ?? null,
-        outputTokens: entry.outputTokens ?? modelEntry.outputTokens ?? null,
-        totalTokens: entry.totalTokens ?? modelEntry.totalTokens ?? null,
-        firstTokenLatencyMs: entry.firstTokenLatencyMs ?? modelEntry.firstTokenLatencyMs ?? null,
-        turnDurationMs: entry.turnDurationMs ?? modelEntry.turnDurationMs ?? null
-      };
-    }
-    return normalized;
-  }
-
-  return [];
-}
-
 function providerReturnedCacheHitInputTokens(turn: TurnTraceRecord) {
   const values = (turn.providerCallRecords ?? [])
     .map((record) => record.cacheHitInputTokens)
@@ -334,7 +265,11 @@ function togglePanel(panel: "tools" | "trace" | "plan") {
 
 watch(sessionId, () => {
   copiedKey.value = "";
-  turnTimelineMemo.clear();
+  clearTraceProjectionMemo();
+});
+
+onBeforeUnmount(() => {
+  clearTraceProjectionMemo();
 });
 </script>
 
@@ -373,7 +308,7 @@ watch(sessionId, () => {
           :copied-key="copiedKey"
           :open="activePanel === 'trace'"
           :canonical-kind="canonicalTraceTimelineKind"
-          :turn-timeline="turnTimeline"
+          :turn-timeline="projectedTurnTimeline"
           :provider-returned-cache-hit-input-tokens="providerReturnedCacheHitInputTokens"
           @copy="copyText"
           @toggle="togglePanel('trace')"

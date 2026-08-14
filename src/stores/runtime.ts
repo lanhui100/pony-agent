@@ -398,7 +398,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.attachmentAssets = [];
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
-      this.traceTimeline = createDefaultTraceTimeline();
+      this.publishTraceTimeline(createDefaultTraceTimeline());
       this.turnTraceHistory = [];
       this.eventCursorByTurnId = {};
       this.cancelStreamFlush();
@@ -527,7 +527,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "cancelled";
       this.error = null;
       this.traceSteps = cancelledTraceSteps;
-      this.traceTimeline = traceTimeline;
+      this.publishTraceTimeline(traceTimeline);
       this.toolActivities = [];
       const terminalSequence = traceTimeline[traceTimeline.length - 1]?.sequence ?? cancelledTraceSteps.length;
       const terminalEnvelope = createBrowserPreviewTerminalEnvelope(
@@ -788,9 +788,11 @@ export const useRuntimeStore = defineStore("runtime", {
       this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
       this.traceSteps = createDefaultTraceSteps();
       const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
-      this.traceTimeline = lastTrace?.traceTimeline?.length
-        ? cloneTraceTimeline(lastTrace.traceTimeline)
-        : createDefaultTraceTimeline();
+      this.publishTraceTimeline(
+        lastTrace?.traceTimeline?.length
+          ? cloneTraceTimeline(lastTrace.traceTimeline)
+          : createDefaultTraceTimeline()
+      );
       this.toolActivities = [];
       this.error = null;
       this.isSubmitting = false;
@@ -898,7 +900,7 @@ export const useRuntimeStore = defineStore("runtime", {
       const checkpointTimeline = cloneTraceTimeline(
         this.turnTraceHistory.find((trace) => trace.turnId === checkpoint.turnId)?.traceTimeline
       );
-      this.traceTimeline = checkpointTimeline.length ? checkpointTimeline : createDefaultTraceTimeline();
+      this.publishTraceTimeline(checkpointTimeline.length ? checkpointTimeline : createDefaultTraceTimeline());
       this.upsertTurnTrace(checkpoint.turnId, {
         phase: this.phase,
         traceSteps: this.traceSteps,
@@ -1140,7 +1142,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
       const restoredTraceTimeline = cloneTraceTimeline(this.turnTraceHistory[this.turnTraceHistory.length - 1]?.traceTimeline);
-      this.traceTimeline = restoredTraceTimeline.length ? restoredTraceTimeline : createDefaultTraceTimeline();
+      this.publishTraceTimeline(restoredTraceTimeline.length ? restoredTraceTimeline : createDefaultTraceTimeline());
       this.phase = resolveRestoredPersistedPhase(
         restoredState?.phase ?? null,
         restoredState?.canonicalTerminalPhase ?? null,
@@ -1234,7 +1236,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.attachmentAssets = [];
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
-      this.traceTimeline = createDefaultTraceTimeline();
+      this.publishTraceTimeline(createDefaultTraceTimeline());
       this.turnTraceHistory = [];
       this.eventCursorByTurnId = {};
       this.streamBufferTurnId = null;
@@ -1269,9 +1271,11 @@ export const useRuntimeStore = defineStore("runtime", {
       this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
       this.traceSteps = createDefaultTraceSteps();
       const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
-      this.traceTimeline = lastTrace?.traceTimeline?.length
-        ? cloneTraceTimeline(lastTrace.traceTimeline)
-        : createDefaultTraceTimeline();
+      this.publishTraceTimeline(
+        lastTrace?.traceTimeline?.length
+          ? cloneTraceTimeline(lastTrace.traceTimeline)
+          : createDefaultTraceTimeline()
+      );
       this.toolActivities = [];
       this.error = null;
       this.isSubmitting = false;
@@ -1420,9 +1424,11 @@ export const useRuntimeStore = defineStore("runtime", {
           this.eventCursorByTurnId = buildEventCursorByTurnTraceHistory(this.turnTraceHistory);
           this.traceSteps = createDefaultTraceSteps();
           const lastTrace = this.turnTraceHistory[this.turnTraceHistory.length - 1];
-          this.traceTimeline = lastTrace?.traceTimeline?.length
-            ? cloneTraceTimeline(lastTrace.traceTimeline)
-            : createDefaultTraceTimeline();
+          this.publishTraceTimeline(
+            lastTrace?.traceTimeline?.length
+              ? cloneTraceTimeline(lastTrace.traceTimeline)
+              : createDefaultTraceTimeline()
+          );
           // 1-branch 模式：撤回后 checkout 的 checkpoint 成为新的当前状态
           this.branchHeadNodeId = nodeId;
           this.historyCursorMode = "live";
@@ -2030,7 +2036,7 @@ export const useRuntimeStore = defineStore("runtime", {
       persist = true
     ) {
       // resolveEventTraceTimeline/buildFallbackRuntimeTraceTimeline already return a fresh timeline snapshot.
-      this.traceTimeline = traceTimeline;
+      this.publishTraceTimeline(traceTimeline);
       // Don't pass traceTimeline in patch — upsertTurnTrace will read this.traceTimeline
       // to avoid a redundant deep clone (the caller already guarantees freshness).
       this.upsertTurnTrace(turnId, patch, persist);
@@ -2046,7 +2052,12 @@ export const useRuntimeStore = defineStore("runtime", {
     updateActiveTraceTimeline(traceTimeline: TraceTimelineEntry[], skipClone = false) {
       // 低频语义事件路径（turn:trace / phase_changed / checkpoint_persisted / tool）中，
       // resolveEventTraceTimeline 已返回新鲜克隆，skipClone 避免第二次全量深拷贝。
-      this.traceTimeline = skipClone ? traceTimeline : cloneTraceTimeline(traceTimeline);
+      this.publishTraceTimeline(skipClone ? traceTimeline : cloneTraceTimeline(traceTimeline));
+    },
+    // 单一 trace timeline 发布入口（PA-086）：所有写路径收敛于此，
+    // 保证投影层（签名化 memo）与源数据强一致。
+    publishTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
+      this.traceTimeline = traceTimeline;
     },
     // delta 高频事件中的 timeline 节流更新：只保留最新一份，定时合并应用。
     scheduleThrottledTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
@@ -2133,7 +2144,7 @@ export const useRuntimeStore = defineStore("runtime", {
         reasoningContent: currentReasoning ?? modelEntry.reasoningContent ?? null,
         firstTokenLatencyMs: this.firstTokenLatencyMs ?? modelEntry.firstTokenLatencyMs ?? null
       };
-      this.traceTimeline = traceTimeline;
+      this.publishTraceTimeline(traceTimeline);
     },
     applyTurnTokenStats(turnId: string, inputTokens?: number | null, outputTokens?: number | null, persist = true) {
       const userMessage = this.messages.find((item) => item.turnId === turnId && item.role === "user");
@@ -2647,7 +2658,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
         this.traceSteps = payload.traceSteps ?? this.traceSteps;
-        this.traceTimeline = resolveEventTraceTimeline(payload, () =>
+        this.publishTraceTimeline(resolveEventTraceTimeline(payload, () =>
           buildFallbackRuntimeTraceTimeline({
             turnId: payload.turnId,
             eventType: payload.eventType,
@@ -2662,7 +2673,7 @@ export const useRuntimeStore = defineStore("runtime", {
               providerMode: payload.providerMode ?? this.providerMode
             }
           })
-        );
+        ));
         this.toolActivities = payload.toolActivities ?? this.toolActivities;
         this.syncToolMessages(payload.turnId, payload.toolActivities, false);
         this.updateActiveTraceTimeline(this.traceTimeline, true);
@@ -3709,7 +3720,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "completed";
       this.sessionSummary = BROWSER_PREVIEW_SESSION_SUMMARY;
       this.traceSteps = createBrowserPreviewTraceSteps();
-      this.traceTimeline = createBrowserPreviewTraceTimeline();
+      this.publishTraceTimeline(createBrowserPreviewTraceTimeline());
       this.toolActivities = [];
       const terminalSequence = this.traceTimeline[this.traceTimeline.length - 1]?.sequence ?? this.traceSteps.length;
       const terminalEnvelope = createBrowserPreviewTerminalEnvelope(
@@ -3899,10 +3910,10 @@ export const useRuntimeStore = defineStore("runtime", {
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
       this.traceSteps = createSubmitTraceSteps();
-      this.traceTimeline = applyProviderPatchToTraceTimeline(
+      this.publishTraceTimeline(applyProviderPatchToTraceTimeline(
         createDefaultTraceTimeline(),
         selectedProviderTracePatch
-      );
+      ));
       this.toolActivities = [];
       this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
         phase: "calling_model",
@@ -4051,10 +4062,10 @@ export const useRuntimeStore = defineStore("runtime", {
         this.activeTurnId = null;
         this.activeRunId = null;
         this.traceSteps = createSubmitFailureTraceSteps();
-        this.traceTimeline = applyProviderPatchToTraceTimeline(
+        this.publishTraceTimeline(applyProviderPatchToTraceTimeline(
           createSubmitFailureTraceTimeline(),
           selectedProviderTracePatch
-        );
+        ));
         this.commitTurnTraceTimeline(requestId, this.traceTimeline, {
           phase: "failed",
           traceSteps: this.traceSteps,

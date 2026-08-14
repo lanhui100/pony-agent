@@ -20,6 +20,18 @@
 
 ## Ready
 
+- `PA-084` trace 面板初始化折叠与懒渲染（P0）
+  说明：**已完成并收口（2026-08-14）**——`activePanel` 默认 `""`、`HomeTracePanel` body `v-if="open"` 懒挂载（header 常驻）、折叠时 `liveTraceTurn` 返回 null（消除冻结引用污染）。实现后审核 P1 已修复。OpenSpec change 待归档：`trace-panel-collapse-by-default`。
+
+- `PA-085` trace 面板虚拟滚动（P0）
+  说明：**已完成并收口（2026-08-14）**——`trace-virtual-scroll.ts` 纯函数（前缀和 + binarySearch + OVERSCAN）、内嵌独立 ScrollArea、turn 级虚拟化（实现偏离：替代单层扁平，理由重构风险）、底部跟随依赖总高度、scroll 原生监听 viewport。实现后审核 P1 已修复。OpenSpec change 待归档：`trace-panel-virtual-scroll`。
+
+- `PA-086` trace 渲染快照投影与节流增强（P0）
+  说明：**已完成并收口（2026-08-14）**——`trace-projection.ts` 轻量 memo helper（ref+updatedAt 签名）、15 处写路径收敛 `publishTraceTimeline()`、HomeSidebar/HomeTracePanel 消费投影层、onBeforeUnmount 清理。实现后审核裁决：投影层定位轻量 memo helper（非完整 projection），低频恢复路径不强制收敛（引用已变，memo 自然失效）。OpenSpec change 待归档：`trace-render-snapshot-projection`。
+
+- `PA-087` 输入框优先级隔离（P0）
+  说明：**已完成并收口（2026-08-14）**——`handleComposerKeydown` 补 `isComposing`/keyCode 229 守卫（修复中文候选确认误发送）、draft 同步写入确认。实现偏离：调度降级由 084/085/086 覆盖，本卡收敛为 IME 守卫 + 输入路径确认。OpenSpec change 待归档：`composer-input-priority-isolation`。
+
 - `PA-081` 侧边栏 Workspace 树导航（P1）
   说明：`HomeSessionSidebar` 平铺会话列表改造为"项目（二级）→ 对话（三级）"树，折叠/展开、按 workspaceId 归组（孤儿归"未分组"）、Workspace 管理入口；激活 workspace 为前端 localStorage 单一真相源。OpenSpec change：`workspace-sidebar-tree-navigation`（spec 通过，2026-08-09）。
 

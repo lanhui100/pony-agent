@@ -1277,6 +1277,11 @@ async function handleUndoLastTurn() {
 }
 
 function handleComposerKeydown(event: KeyboardEvent) {
+  // IME 组合中（中文候选确认等）不触发快捷键与提交，避免误发送
+  if (event.isComposing || event.keyCode === 229) {
+    return;
+  }
+
   const isUndoShortcut =
     event.key.toLowerCase() === "z" &&
     (event.ctrlKey || event.metaKey) &&

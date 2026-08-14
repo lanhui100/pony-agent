@@ -2799,6 +2799,43 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(submitTurnSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("does not submit on Enter during IME composition (isComposing / keyCode 229)", async () => {
+    const runtimeStore = useRuntimeStore();
+    const submitTurnSpy = vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const textarea = wrapper.get("textarea");
+
+    // IME 组合中：isComposing = true，Enter 不应提交
+    await textarea.trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      isComposing: true,
+      preventDefault: vi.fn()
+    });
+    expect(submitTurnSpy).not.toHaveBeenCalled();
+
+    // IME 组合中：keyCode 229（旧式浏览器），Enter 不应提交
+    await textarea.trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      keyCode: 229,
+      preventDefault: vi.fn()
+    });
+    expect(submitTurnSpy).not.toHaveBeenCalled();
+
+    // 组合结束：正常 Enter 提交
+    await textarea.trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      isComposing: false,
+      preventDefault: vi.fn()
+    });
+    expect(submitTurnSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("renders assistant tone, reasoning blocks, and tool status badges", async () => {
     window.localStorage.setItem("pony-agent.ui.show-reasoning-content", "true");
 
