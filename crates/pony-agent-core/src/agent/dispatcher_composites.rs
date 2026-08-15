@@ -43,6 +43,10 @@ const TOOL_WORKSPACE_READ_FILE_SEGMENT: &str = "workspace_read_file_segment";
 const TOOL_WORKSPACE_LIST_FILES: &str = "workspace_list_files";
 const TOOL_WORKSPACE_SEARCH_TEXT: &str = "workspace_search_text";
 const MAX_WORKSPACE_BATCH_CALLS: usize = 24;
+/// 复合工具内部子调用统一使用的 `description` 值：`with_description` 要求所有内置
+/// 工具参数必带 `description`，内部子调用由代码构造，必须显式补齐，否则子调用会被
+/// schema 预检以 `missing required argument description` 拦截。
+const GATHER_CHILD_DESCRIPTION: &str = "gather 内部子调用";
 const MAX_GATHER_CONTEXT_PATHS: usize = 6;
 const MAX_SEGMENT_LINES: usize = 400;
 const DEFAULT_SEGMENT_LINES: usize = 80;
@@ -185,10 +189,24 @@ impl CompositeToolHandler for BatchExecuteComposite {
                     index + 1
                 ));
             };
+            let mut child_arguments = item
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            // 子调用同样要求 `description`（with_description 必填）；模型遗漏时注入默认值，
+            // 避免内部子调用被 schema 预检拦截（与 gather 内部子调用同一约束）。
+            if let Some(object) = child_arguments.as_object_mut() {
+                if object.get("description").map_or(true, Value::is_null) {
+                    object.insert(
+                        "description".to_string(),
+                        Value::String(format!("批量执行子调用：{name}")),
+                    );
+                }
+            }
             child_requests.push(ChildDispatchRequest {
                 descriptor_id: name.to_string(),
                 call_id: format!("child-{index}"),
-                arguments: item.get("arguments").cloned().unwrap_or_else(|| json!({})),
+                arguments: child_arguments,
             });
         }
 
@@ -366,7 +384,10 @@ impl GatherContextComposite {
         let path_info_call = ChildDispatchRequest {
             descriptor_id: TOOL_WORKSPACE_PATH_INFO.to_string(),
             call_id: "gather-path-info".to_string(),
-            arguments: json!({ "path": path }),
+            arguments: json!({
+                "path": path,
+                "description": GATHER_CHILD_DESCRIPTION,
+            }),
         };
         let path_info_outcome = children.dispatch(path_info_call.clone())?;
         if child_outcome_legacy_status(&path_info_outcome) != "ok" {
@@ -400,6 +421,7 @@ impl GatherContextComposite {
                         "path": display_path,
                         "startLine": 1,
                         "lineCount": line_count,
+                        "description": GATHER_CHILD_DESCRIPTION,
                     }),
                 };
                 let segment_outcome = children.dispatch(segment_call.clone())?;
@@ -428,6 +450,7 @@ impl GatherContextComposite {
                     arguments: json!({
                         "path": display_path,
                         "limit": limit,
+                        "description": GATHER_CHILD_DESCRIPTION,
                     }),
                 };
                 let list_outcome = children.dispatch(list_call.clone())?;
@@ -465,6 +488,7 @@ impl GatherContextComposite {
                     "query": query,
                     "path": search_path,
                     "limit": limit,
+                    "description": GATHER_CHILD_DESCRIPTION,
                 });
                 if let Some(pattern) = &file_pattern {
                     search_arguments["filePattern"] = Value::String(pattern.clone());
@@ -491,6 +515,7 @@ impl GatherContextComposite {
                             "path": display_path,
                             "startLine": start_line,
                             "lineCount": line_count,
+                            "description": GATHER_CHILD_DESCRIPTION,
                         }),
                     };
                     let segment_outcome = children.dispatch(segment_call.clone())?;
@@ -506,6 +531,7 @@ impl GatherContextComposite {
                             arguments: json!({
                                 "path": display_path,
                                 "limit": limit,
+                                "description": GATHER_CHILD_DESCRIPTION,
                             }),
                         };
                         let list_outcome = children.dispatch(list_call.clone())?;
@@ -1253,6 +1279,20 @@ mod tests {
         })
     }
 
+    /// Mirrors the production builtin schemas after `with_description`: `description` is a
+    /// required property, so the batch composite's injection is exercised instead of masked.
+    fn batch_text_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" },
+                "description": { "type": "string" },
+            },
+            "required": ["text", "description"],
+            "additionalProperties": false,
+        })
+    }
+
     fn batch_schema() -> Value {
         json!({
             "type": "object",
@@ -1277,8 +1317,15 @@ mod tests {
         })
     }
 
-    fn permissive_object_schema() -> Value {
-        json!({ "type": "object" })
+    /// Mirrors the production builtin child schemas (with_description): `description` is required,
+    /// so composites must inject it on every internal child call. Using the permissive schema here
+    /// would mask the PA-076 regression where gather children failed with
+    /// `missing required argument description`.
+    fn description_required_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["description"],
+        })
     }
 
     fn registry(descriptors: Vec<ToolDescriptor>) -> Arc<ToolRegistrySnapshot> {
@@ -1414,7 +1461,7 @@ mod tests {
                 "dynamic:leaf",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                text_schema(),
+                batch_text_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);
@@ -1514,7 +1561,7 @@ mod tests {
                 "dynamic:leaf",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                text_schema(),
+                batch_text_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);
@@ -1560,7 +1607,7 @@ mod tests {
             "dynamic:approve_me",
             ToolKind::Write,
             ToolExposure::Internal,
-            text_schema(),
+            batch_text_schema(),
         );
         approve_me.permission_declaration = approval;
         let approval_registry = registry(vec![
@@ -1575,7 +1622,7 @@ mod tests {
                 "dynamic:leaf",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                text_schema(),
+                batch_text_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(approval_registry);
@@ -1664,13 +1711,13 @@ mod tests {
                 "dynamic:leaf",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                text_schema(),
+                batch_text_schema(),
             ),
             dynamic_descriptor(
                 "dynamic:denied",
                 ToolKind::Write,
                 ToolExposure::Internal,
-                text_schema(),
+                batch_text_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);
@@ -1730,7 +1777,7 @@ mod tests {
                 "dynamic:leaf",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                text_schema(),
+                batch_text_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);
@@ -1837,25 +1884,25 @@ mod tests {
                 "workspace_path_info",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_read_file_segment",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_list_files",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_search_text",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);
@@ -1896,25 +1943,25 @@ mod tests {
                 "workspace_path_info",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_read_file_segment",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_list_files",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_search_text",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);
@@ -1971,25 +2018,25 @@ mod tests {
                 "workspace_path_info",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_read_file_segment",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_list_files",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_search_text",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);
@@ -2051,25 +2098,25 @@ mod tests {
                 "workspace_path_info",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_read_file_segment",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_list_files",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
             workspace_primitive_descriptor(
                 "workspace_search_text",
                 ToolKind::Read,
                 ToolExposure::Internal,
-                permissive_object_schema(),
+                description_required_schema(),
             ),
         ]);
         let dispatcher = dispatcher_for(registry);

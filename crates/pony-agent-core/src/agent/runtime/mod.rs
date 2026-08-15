@@ -243,6 +243,12 @@ const MAX_TOOL_HOPS_ENV: &str = "PONY_AGENT_MAX_TOOL_HOPS_PER_TURN";
 const DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN: usize = 12;
 const MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN: usize = 32;
 const MAX_TOOL_FOLLOWUPS_ENV: &str = "PONY_AGENT_MAX_TOOL_FOLLOWUPS_PER_TURN";
+/// 同一 turn 内「同一工具 + 同一错误码」连续失败达到该次数时，终止 follow-up 并把
+/// 真实错误直接呈现给用户，避免模型把整个 follow-up 预算浪费在注定失败的重复重试上。
+const DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN: usize = 3;
+const MAX_ALLOWED_CONSECUTIVE_TOOL_FAILURES_PER_TURN: usize = 16;
+const MAX_CONSECUTIVE_TOOL_FAILURES_ENV: &str =
+    "PONY_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN";
 const STREAM_REASONING_BATCH_CHARS: usize = 96;
 const MAX_TURN_IMAGES: usize = 3;
 const MAX_TURN_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
@@ -865,6 +871,7 @@ impl AgentRuntime {
         let first_token_latency = Rc::new(Cell::new(initial_turn_first_token_latency_ms));
         let mut hook_trace_records = initial_hook_trace_records;
         let mut seen_tool_signatures = BTreeSet::from([tool_call_signature(&current_tool_call)]);
+        let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
 
         loop {
@@ -1252,6 +1259,41 @@ impl AgentRuntime {
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     completed_hops,
                     error,
+                );
+                return;
+            }
+
+            // Consecutive-failure stop-loss: the same tool failing with the same error code
+            // `limit` times in a row means the model is retrying a doomed invocation. Stop the
+            // follow-up loop and surface the real error instead of burning the remaining
+            // follow-up budget on identical retries.
+            let failure_signal = tool_failure_signal(&current_tool_call, &tool_result);
+            let failure_count = consecutive_failures.record(failure_signal.clone());
+            if failure_count >= max_consecutive_tool_failures_per_turn() {
+                self.fail_stream_turn_with_hook_dispatch(
+                    sink,
+                    control,
+                    input.session_id.as_deref(),
+                    turn_id,
+                    display_message,
+                    Some(provider_meta),
+                    Some(context_observation.clone()),
+                    self.telemetry_builder.failed_trace_after_tool(false),
+                    tool_activities.clone(),
+                    provider_call_records.clone(),
+                    hook_trace_records.clone(),
+                    first_token_latency.get(),
+                    Some(turn_started_at.elapsed().as_millis() as u64),
+                    completed_hops,
+                    build_consecutive_tool_failure_error(
+                        max_consecutive_tool_failures_per_turn(),
+                        &current_tool_call.name,
+                        failure_signal
+                            .as_ref()
+                            .map(|(_, code)| code.as_str())
+                            .unwrap_or("unknown"),
+                        tool_result.output.as_str(),
+                    ),
                 );
                 return;
             }
@@ -2007,6 +2049,7 @@ impl AgentRuntime {
         let mut accumulated_token_usage = first_decision.token_usage.clone();
         let mut hook_trace_records = initial_model_hook_trace_records;
         let mut seen_tool_signatures = BTreeSet::from([tool_call_signature(&current_tool_call)]);
+        let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
 
         loop {
@@ -2099,6 +2142,31 @@ impl AgentRuntime {
                     hook_trace_records,
                     build_tool_execution_error(
                         &current_tool_call.name,
+                        tool_result.output.as_str(),
+                    ),
+                ));
+            }
+
+            // Consecutive-failure stop-loss: the same tool failing with the same error code
+            // `limit` times in a row means the model is retrying a doomed invocation. Stop the
+            // follow-up loop and surface the real error instead of burning the remaining
+            // follow-up budget on identical retries.
+            let failure_signal = tool_failure_signal(&current_tool_call, &tool_result);
+            let failure_count = consecutive_failures.record(failure_signal.clone());
+            if failure_count >= max_consecutive_tool_failures_per_turn() {
+                return Err(self.fail_sync_turn_result(
+                    Some(provider_meta),
+                    display_message,
+                    self.telemetry_builder.failed_trace_after_tool(false),
+                    tool_activities,
+                    hook_trace_records,
+                    build_consecutive_tool_failure_error(
+                        max_consecutive_tool_failures_per_turn(),
+                        &current_tool_call.name,
+                        failure_signal
+                            .as_ref()
+                            .map(|(_, code)| code.as_str())
+                            .unwrap_or("unknown"),
                         tool_result.output.as_str(),
                     ),
                 ));
@@ -6461,6 +6529,65 @@ fn tool_result_control_outcome_pending(tool_result: &ToolResult) -> bool {
         == Some("control_outcome_pending")
 }
 
+/// Extract the consecutive-failure signal for a tool result: `(tool name, error code)`.
+/// `ok`/`partial` results, aborted executions, and pending control outcomes (`Ask` waits) never
+/// count as failures, so they reset the consecutive counter.
+fn tool_failure_signal(tool_call: &ToolCall, tool_result: &ToolResult) -> Option<(String, String)> {
+    if tool_result.status != "error" || tool_result_control_outcome_pending(tool_result) {
+        return None;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(&tool_result.output) else {
+        return None;
+    };
+    let error = parsed.get("error")?;
+    let code = error
+        .get("kind")
+        .or_else(|| error.get("code"))
+        .and_then(Value::as_str)?;
+    Some((tool_call.name.clone(), code.to_string()))
+}
+
+/// Tracks how many consecutive failures share the same `(tool name, error code)` signal.
+/// A success, an unclassifiable result, or a different signal resets the run.
+#[derive(Clone, Debug, Default)]
+struct ConsecutiveFailureTracker {
+    signal: Option<(String, String)>,
+    count: usize,
+}
+
+impl ConsecutiveFailureTracker {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one tool outcome signal; returns the updated consecutive-failure count.
+    fn record(&mut self, signal: Option<(String, String)>) -> usize {
+        match signal {
+            Some(next) if self.signal.as_ref() == Some(&next) => {
+                self.count += 1;
+                self.count
+            }
+            Some(next) => {
+                self.signal = Some(next);
+                self.count = 1;
+                1
+            }
+            None => {
+                self.signal = None;
+                self.count = 0;
+                0
+            }
+        }
+    }
+}
+
+fn build_consecutive_tool_failure_error(limit: usize, tool_name: &str, code: &str, output: &str) -> String {
+    format!(
+        "工具 `{tool_name}` 连续 {limit} 次以同一错误 `{code}` 失败，已停止继续 follow-up 以避免无效重试；最后一次错误详情：{}。如属误判，可提高 PONY_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN。",
+        preview_text(output, 200)
+    )
+}
+
 /// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The
 /// request's `call_id` is the dispatch call id the executor persisted, which equals the original
 /// assistant tool-call id when one was supplied; a missing call id falls back to the most recent
@@ -6575,6 +6702,35 @@ fn parse_max_tool_followups_per_turn(raw: Option<&str>) -> usize {
     raw.and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| (1..=MAX_ALLOWED_TOOL_FOLLOWUPS_PER_TURN).contains(value))
         .unwrap_or(DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN)
+}
+
+#[cfg(test)]
+fn consecutive_failure_limit_override_registry() -> &'static AtomicUsize {
+    static OVERRIDE: OnceLock<AtomicUsize> = OnceLock::new();
+    OVERRIDE.get_or_init(|| AtomicUsize::new(0))
+}
+
+fn max_consecutive_tool_failures_per_turn() -> usize {
+    #[cfg(test)]
+    {
+        let override_limit = consecutive_failure_limit_override_registry().load(AtomicOrdering::SeqCst);
+        if override_limit > 0 {
+            return override_limit;
+        }
+    }
+
+    static MAX_CONSECUTIVE_FAILURES: OnceLock<usize> = OnceLock::new();
+    *MAX_CONSECUTIVE_FAILURES.get_or_init(|| {
+        parse_max_consecutive_tool_failures_per_turn(
+            std::env::var(MAX_CONSECUTIVE_TOOL_FAILURES_ENV).ok().as_deref(),
+        )
+    })
+}
+
+fn parse_max_consecutive_tool_failures_per_turn(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| (1..=MAX_ALLOWED_CONSECUTIVE_TOOL_FAILURES_PER_TURN).contains(value))
+        .unwrap_or(DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN)
 }
 
 #[cfg(test)]
@@ -10859,6 +11015,259 @@ mod tests {
             parse_max_tool_followups_per_turn(Some("not-a-number")),
             DEFAULT_MAX_TOOL_FOLLOWUPS_PER_TURN
         );
+    }
+
+    // ── consecutive tool failure stop-loss ───────────────────────────────────────────────────
+
+    #[test]
+    fn consecutive_failure_limit_uses_default_when_env_is_missing() {
+        assert_eq!(
+            parse_max_consecutive_tool_failures_per_turn(None),
+            DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN
+        );
+    }
+
+    #[test]
+    fn consecutive_failure_limit_accepts_reasonable_env_override() {
+        assert_eq!(parse_max_consecutive_tool_failures_per_turn(Some("3")), 3);
+        assert_eq!(parse_max_consecutive_tool_failures_per_turn(Some("16")), 16);
+    }
+
+    #[test]
+    fn consecutive_failure_limit_rejects_invalid_env_values() {
+        assert_eq!(
+            parse_max_consecutive_tool_failures_per_turn(Some("0")),
+            DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN
+        );
+        assert_eq!(
+            parse_max_consecutive_tool_failures_per_turn(Some("32")),
+            DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN
+        );
+        assert_eq!(
+            parse_max_consecutive_tool_failures_per_turn(Some("not-a-number")),
+            DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN
+        );
+    }
+
+    #[test]
+    fn consecutive_failure_tracker_counts_same_signal_and_resets_otherwise() {
+        let mut tracker = ConsecutiveFailureTracker::new();
+        let signal = Some(("workspace_read_file".to_string(), "invalid_path".to_string()));
+        assert_eq!(tracker.record(signal.clone()), 1);
+        assert_eq!(tracker.record(signal.clone()), 2);
+        assert_eq!(tracker.record(signal.clone()), 3);
+        // 同一工具、不同错误码：重新计数
+        assert_eq!(
+            tracker.record(Some((
+                "workspace_read_file".to_string(),
+                "not_found".to_string()
+            ))),
+            1
+        );
+        // 不同工具、同一错误码：重新计数
+        assert_eq!(tracker.record(signal.clone()), 1);
+        // 成功/无法分类的结果：清零
+        assert_eq!(tracker.record(None), 0);
+        assert_eq!(tracker.record(signal), 1);
+    }
+
+    #[test]
+    fn tool_failure_signal_skips_success_and_pending_control() {
+        let call = ToolCall {
+            call_id: None,
+            name: "workspace_read_file".to_string(),
+            arguments: json!({}),
+            plan: None,
+        };
+        // ok → None
+        assert_eq!(
+            tool_failure_signal(
+                &call,
+                &ToolResult {
+                    tool_name: "workspace_read_file".to_string(),
+                    status: "ok".to_string(),
+                    output: "{}".to_string(),
+                    duration_ms: 0,
+                }
+            ),
+            None
+        );
+        // error + code → Some((tool, code))
+        let failing = ToolResult {
+            tool_name: "workspace_read_file".to_string(),
+            status: "error".to_string(),
+            output: json!({
+                "error": { "code": "invalid_path", "message": "路径不存在" }
+            })
+            .to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(
+            tool_failure_signal(&call, &failing),
+            Some(("workspace_read_file".to_string(), "invalid_path".to_string()))
+        );
+        // control_outcome_pending（Ask 挂起）不计失败
+        let pending = ToolResult {
+            tool_name: "Ask".to_string(),
+            status: "error".to_string(),
+            output: json!({
+                "error": { "code": "control_outcome_pending", "message": "pending" }
+            })
+            .to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(tool_failure_signal(&call, &pending), None);
+        // 非结构化错误 output → None
+        assert_eq!(
+            tool_failure_signal(
+                &call,
+                &ToolResult {
+                    tool_name: "workspace_read_file".to_string(),
+                    status: "error".to_string(),
+                    output: "boom".to_string(),
+                    duration_ms: 0,
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn consecutive_failure_error_message_includes_tool_code_and_details() {
+        let message = build_consecutive_tool_failure_error(
+            3,
+            "workspace_read_file",
+            "invalid_path",
+            "{\"error\":{\"code\":\"invalid_path\",\"message\":\"路径不存在\"}}",
+        );
+        assert!(message.contains("workspace_read_file"));
+        assert!(message.contains("invalid_path"));
+        assert!(message.contains("路径不存在"));
+        assert!(message.contains("PONY_AGENT_MAX_CONSECUTIVE_TOOL_FAILURES_PER_TURN"));
+    }
+
+    #[test]
+    fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
+        // 固定失败的 executor：同一工具永远返回同一错误码。
+        struct AlwaysFailingExecutor;
+        impl crate::agent::tools::ToolExecutor for AlwaysFailingExecutor {
+            fn execute(&self, call: &ToolCall) -> crate::agent::tools::ToolResult {
+                crate::agent::tools::ToolResult {
+                    tool_name: call.name.clone(),
+                    status: "error".to_string(),
+                    output: json!({
+                        "ok": false,
+                        "tool": call.name,
+                        "error": {
+                            "code": "invalid_path",
+                            "message": "目标路径不存在，请检查后重试。"
+                        }
+                    })
+                    .to_string(),
+                    duration_ms: 1,
+                }
+            }
+        }
+
+        let server = MockHttpServer::start(vec![
+            json_response(decision_tool_call(
+                "workspace_read_file",
+                json!({ "path": "missing-a.txt", "description": "读取文件" }),
+            )),
+            json_response(decision_tool_call(
+                "workspace_read_file",
+                json!({ "path": "missing-b.txt", "description": "换个路径重试" }),
+            )),
+            json_response(decision_tool_call(
+                "workspace_read_file",
+                json!({ "path": "missing-c.txt", "description": "再试一次" }),
+            )),
+        ]);
+        let mut runtime = build_runtime_for_test_with_tool_executor(
+            test_provider_selection(server.base_url.clone()),
+            Box::new(AlwaysFailingExecutor),
+        );
+
+        let result = runtime.run_turn(TurnInput {
+            message: "读取 missing 文件".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("consecutive-failure-stop-loss".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        });
+
+        assert_eq!(result.phase, "failed");
+        assert!(
+            result.assistant_message.contains("连续"),
+            "应包含止损文案，实际：{}",
+            result.assistant_message
+        );
+        assert!(result.assistant_message.contains("invalid_path"));
+        assert!(result.assistant_message.contains("目标路径不存在，请检查后重试。"));
+        // 第 3 次失败后止损：不再向 provider 发起第 4 次 follow-up。
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn run_turn_resets_consecutive_failure_counter_on_success() {
+        let server = MockHttpServer::start(vec![
+            json_response(decision_tool_call(
+                "workspace_read_file",
+                json!({ "path": "Windows/System32/a", "description": "越界路径" }),
+            )),
+            json_response(decision_tool_call(
+                "workspace_read_file",
+                json!({ "path": "tauri.conf.json", "description": "正常读取" }),
+            )),
+            json_response(decision_tool_call(
+                "workspace_read_file",
+                json!({ "path": "Windows/System32/b", "description": "越界重试一" }),
+            )),
+            json_response(decision_tool_call(
+                "workspace_read_file",
+                json!({ "path": "Windows/System32/c", "description": "越界重试二" }),
+            )),
+            json_response(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "已按当前可用信息完成处理。",
+                            "reasoning_content": "两次失败不连续，未触发止损，正常收尾。"
+                        }
+                    }
+                ]
+            })),
+        ]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+
+        let result = runtime.run_turn(TurnInput {
+            message: "读取文件并继续".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("consecutive-failure-reset".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        });
+
+        // 失败-成功-失败-失败：没有连续 3 次同信号失败，turn 正常完成。
+        assert_eq!(result.phase, "ready");
+        assert_eq!(result.assistant_message, "已按当前可用信息完成处理。");
+        assert_eq!(result.tool_activities.len(), 4);
+        let requests = server.finish();
+        assert_eq!(requests.len(), 5);
     }
 
     #[test]
