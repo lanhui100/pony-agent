@@ -333,14 +333,14 @@ const toolIconByCanonicalName: Record<string, any> = {
               <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
               <span
                 v-if="tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description"
-                class="conversation-tool-name min-w-0 truncate"
-                :class="tool.status === 'error' ? 'text-rose-600' : 'text-stone-400'"
+                class="conversation-tool-name shrink-0 text-stone-400"
               >
                 {{ tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description }}
               </span>
               <span
                 v-if="tool.description && tool.description !== (tool.displayNameZh || tool.canonicalToolName || tool.toolName)"
                 class="conversation-tool-detail min-w-0 truncate text-stone-400"
+                :title="tool.description"
               >
                 {{ tool.description }}
               </span>
