@@ -391,9 +391,17 @@ export type HistoryNode = {
   title?: string | null;
   history?: TurnHistoryMessage[];
   turnTraceHistory?: TurnTraceRecord[];
+  /** PA-088：持久化层轻量 trace 引用（节点不再内嵌完整 trace 时用于物化）。 */
+  turnTraceRefs?: TurnTraceRef[];
   turnCount?: number | null;
   lastReferencedFile?: string | null;
   createdAtMs: number;
+};
+
+export type TurnTraceRef = {
+  turnId: string;
+  updatedAtMs: number;
+  version?: number | null;
 };
 
 export type HistoryBranch = {

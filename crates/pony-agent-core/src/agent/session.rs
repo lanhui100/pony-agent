@@ -95,6 +95,19 @@ pub struct WorkspaceRef {
     pub rollback_capable: bool,
 }
 
+/// 轻量 trace 引用（PA-088）：持久化层用引用替代节点内嵌的完整 trace。
+/// `None`（字段缺失）= legacy/旧数据（可用内嵌 trace 兜底）；
+/// `Some([])` = authoritative 且确实无 trace（禁止兜底）；
+/// `Some(v)` = 有序引用（materialize 时按此顺序组装）。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnTraceRef {
+    pub turn_id: String,
+    pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryNode {
@@ -117,6 +130,12 @@ pub struct HistoryNode {
     pub provider_native_transcript: Vec<Value>,
     #[serde(default)]
     pub turn_trace_history: Vec<TurnTraceRecord>,
+    /// PA-088：节点归属的 turn（前端 checkpoint/回滚依赖，替代从 trace 末条推导）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// PA-088：持久化时生成的轻量 trace 引用（节点不再内嵌完整 trace）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_trace_refs: Option<Vec<TurnTraceRef>>,
     #[serde(default)]
     pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
     #[serde(default)]
@@ -300,6 +319,9 @@ pub struct SessionState {
     pub turn_trace_history: Vec<TurnTraceRecord>,
     #[serde(default)]
     pub trace_migration_state: TraceMigrationState,
+    /// PA-088：当前可见分支的顶层 trace 引用（WriteSeparate+Authoritative 持久化用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_trace_refs: Option<Vec<TurnTraceRef>>,
     #[serde(default)]
     pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
     #[serde(default)]
@@ -811,7 +833,10 @@ impl SessionStore {
         if let Some(parent) = sqlite_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let backend: Box<dyn SessionBackend> = Box::new(SqliteSessionBackend::new(sqlite_path));
+        let backend: Box<dyn SessionBackend> = Box::new(SqliteSessionBackend::new_with_trace_mode(
+            sqlite_path,
+            SeparateTraceTableMode::WriteSeparate,
+        ));
         Self::with_backend(backend)
     }
 
@@ -2167,7 +2192,9 @@ impl SessionStore {
         let initial_trace_migration_state = match self.backend.trace_storage_mode() {
             SeparateTraceTableMode::Off => TraceMigrationState::LegacyBlob,
             SeparateTraceTableMode::DualWrite => TraceMigrationState::DualWrite,
-            SeparateTraceTableMode::WriteSeparate => TraceMigrationState::DualWrite,
+            // PA-088：新会话无旧数据，直接表权威（blob 只存 refs，不膨胀）。
+            // 存量会话（load_store 反序列化）保持其 blob 中的状态，不在此晋升。
+            SeparateTraceTableMode::WriteSeparate => TraceMigrationState::TraceTableAuthoritative,
         };
         self.sessions
             .entry(session_id.to_string())
@@ -2179,6 +2206,7 @@ impl SessionStore {
                 provider_native_transcript: Vec::new(),
                 turn_trace_history: Vec::new(),
                 trace_migration_state: initial_trace_migration_state,
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -2271,9 +2299,11 @@ impl SessionStore {
                     session.trace_migration_state,
                     TraceMigrationState::TraceTableAuthoritative
                 ) {
-                    let _ = self
-                        .backend
-                        .replace_session_traces(session_id, &session.turn_trace_history);
+                    // PA-088：写表用全量 Union（顶层 ∪ 全部节点 trace，按 turn_id 去重取最新）。
+                    // 仅写顶层会导致 >24 轮会话的旧节点 refs 在重启 materialize 时解析不到
+                    // （表被 prune 到 24 行），节点 trace 丢失。
+                    let union = collect_trace_union(session);
+                    let _ = self.backend.replace_session_traces(session_id, &union);
                 }
             }
         }
@@ -2351,7 +2381,16 @@ impl SessionStore {
                 SeparateTraceTableMode::WriteSeparate
             ) {
                 if let Some(session) = self.sessions.get_mut(session_id) {
-                    session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+                    // PA-088：按原状态分派晋升——存量 LegacyBlob 首次写 → DualWrite
+                    // （保留 blob 双写兜底窗口，不直接表权威）；DualWrite 保持；
+                    // 新会话（ensure_session 已置 Authoritative）保持。
+                    session.trace_migration_state = match session.trace_migration_state {
+                        TraceMigrationState::LegacyBlob => TraceMigrationState::DualWrite,
+                        TraceMigrationState::DualWrite => TraceMigrationState::DualWrite,
+                        TraceMigrationState::TraceTableAuthoritative => {
+                            TraceMigrationState::TraceTableAuthoritative
+                        }
+                    };
                 }
             }
             return;
@@ -2395,8 +2434,10 @@ impl SessionStore {
                 .sessions
                 .get(session_id)
                 .map(|session| {
-                    self.backend
-                        .replace_session_traces(session_id, &session.turn_trace_history)
+                    // PA-088：ReplaceAll 用全量 Union（顶层 ∪ 节点 trace），
+                    // 避免用内存顶层（24 行截断）替换表导致节点 refs 解析不到。
+                    let union = collect_trace_union(session);
+                    self.backend.replace_session_traces(session_id, &union)
                 })
                 .unwrap_or(SessionBackendMutationResult::Unsupported),
             TracePersistenceAction::UpsertOne { trace, trace_order } => self
@@ -2615,6 +2656,7 @@ fn default_snapshot_for_session(session_key: &str, node_id: Option<&str>) -> Ses
         provider_native_transcript: Vec::new(),
         turn_trace_history: Vec::new(),
         trace_migration_state: TraceMigrationState::LegacyBlob,
+        turn_trace_refs: None,
         long_term_memory_entries: Vec::new(),
         memory_write_evidence: Vec::new(),
         memory_write_hook_trace_records: Vec::new(),
@@ -2707,7 +2749,9 @@ fn snapshot_from_state(
             turn_count: selected_node.turn_count,
             last_referenced_file: selected_node.last_referenced_file.clone(),
             updated_at_ms: session.updated_at_ms,
-            history_nodes: session.history_nodes.clone(),
+            // PA-088：轻量投影——节点不携带完整 trace（避免 IPC payload 膨胀导致前端
+            // JSON.parse 卡死）；选中节点的 trace 已放快照顶层 turn_trace_history。
+            history_nodes: project_lightweight_nodes(&session.history_nodes),
             history_branches: session.history_branches.clone(),
             history_cursor,
             resolved_node_id: Some(selected_node.node_id.clone()),
@@ -2739,7 +2783,8 @@ fn snapshot_from_state(
         turn_count: session.turn_count,
         last_referenced_file: session.last_referenced_file.clone(),
         updated_at_ms: session.updated_at_ms,
-        history_nodes: session.history_nodes.clone(),
+        // PA-088：轻量投影（同选中节点路径）。
+        history_nodes: project_lightweight_nodes(&session.history_nodes),
         history_branches: session.history_branches.clone(),
         history_cursor: session.history_cursor.clone(),
         resolved_node_id: session.history_cursor.visible_node_id.clone(),
@@ -2873,6 +2918,8 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
             history: Vec::new(),
             provider_native_transcript: Vec::new(),
             turn_trace_history: Vec::new(),
+            turn_id: None,
+            turn_trace_refs: Some(Vec::new()),
             long_term_memory_entries: Vec::new(),
             memory_write_evidence: Vec::new(),
             memory_write_hook_trace_records: Vec::new(),
@@ -2908,7 +2955,8 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                     .take((turn_index + 1).min(session.turn_trace_history.len()))
                     .cloned()
                     .collect(),
-                trace_migration_state: TraceMigrationState::default(),
+                trace_migration_state: session.trace_migration_state,
+                turn_trace_refs: None,
                 long_term_memory_entries: replay_long_term_memory(&session.history[..end]),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -2942,6 +2990,21 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 history: materialized.history.clone(),
                 provider_native_transcript: materialized.provider_native_transcript.clone(),
                 turn_trace_history: materialized.turn_trace_history.clone(),
+                turn_id: materialized
+                    .turn_trace_history
+                    .last()
+                    .map(|trace| trace.turn_id.clone()),
+                turn_trace_refs: Some(
+                    materialized
+                        .turn_trace_history
+                        .iter()
+                        .map(|trace| TurnTraceRef {
+                            turn_id: trace.turn_id.clone(),
+                            updated_at_ms: trace.updated_at,
+                            version: None,
+                        })
+                        .collect(),
+                ),
                 long_term_memory_entries: materialized.long_term_memory_entries.clone(),
                 memory_write_evidence: materialized.memory_write_evidence.clone(),
                 memory_write_hook_trace_records: materialized
@@ -2997,6 +3060,8 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                         history: Vec::new(),
                         provider_native_transcript: Vec::new(),
                         turn_trace_history: Vec::new(),
+                        turn_id: None,
+                        turn_trace_refs: Some(Vec::new()),
                         long_term_memory_entries: Vec::new(),
                         memory_write_evidence: Vec::new(),
                         memory_write_hook_trace_records: Vec::new(),
@@ -3160,6 +3225,18 @@ fn commit_history_node_from_live_state(
         history: session.history.clone(),
         provider_native_transcript: session.provider_native_transcript.clone(),
         turn_trace_history: session.turn_trace_history.clone(),
+        turn_id: session.turn_trace_history.last().map(|trace| trace.turn_id.clone()),
+        turn_trace_refs: Some(
+            session
+                .turn_trace_history
+                .iter()
+                .map(|trace| TurnTraceRef {
+                    turn_id: trace.turn_id.clone(),
+                    updated_at_ms: trace.updated_at,
+                    version: None,
+                })
+                .collect(),
+        ),
         long_term_memory_entries: session.long_term_memory_entries.clone(),
         memory_write_evidence: session.memory_write_evidence.clone(),
         memory_write_hook_trace_records: session.memory_write_hook_trace_records.clone(),
@@ -3205,6 +3282,19 @@ fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) 
     node.history = history;
     node.provider_native_transcript = provider_native_transcript;
     node.turn_trace_history = turn_trace_history;
+    // PA-088：同步更新 turn_id 与 refs，保持内存态与持久化重算一致
+    // （前端 checkpoint 列表直接读 node.turnId）。
+    node.turn_id = node.turn_trace_history.last().map(|trace| trace.turn_id.clone());
+    node.turn_trace_refs = Some(
+        node.turn_trace_history
+            .iter()
+            .map(|trace| TurnTraceRef {
+                turn_id: trace.turn_id.clone(),
+                updated_at_ms: trace.updated_at,
+                version: None,
+            })
+            .collect(),
+    );
     node.long_term_memory_entries = long_term_memory_entries;
     node.memory_write_evidence = memory_write_evidence;
     node.memory_write_hook_trace_records = memory_write_hook_trace_records;
@@ -3250,6 +3340,49 @@ fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
     session.last_referenced_file = node.last_referenced_file.clone();
 }
 
+/// PA-088：收集会话的 trace 全量 Union（顶层 ∪ 全部节点 trace，按 turn_id 去重取最新）。
+/// 用于 Authoritative 会话写表——保证节点 refs 在重启 materialize 时可解析。
+fn collect_trace_union(session: &SessionState) -> Vec<TurnTraceRecord> {
+    let mut by_id: HashMap<String, TurnTraceRecord> = HashMap::new();
+    for trace in &session.turn_trace_history {
+        by_id.insert(trace.turn_id.clone(), trace.clone());
+    }
+    for node in &session.history_nodes {
+        for trace in &node.turn_trace_history {
+            by_id
+                .entry(trace.turn_id.clone())
+                .and_modify(|existing| {
+                    if trace.updated_at > existing.updated_at {
+                        *existing = trace.clone();
+                    }
+                })
+                .or_insert_with(|| trace.clone());
+        }
+    }
+    by_id.into_values().collect()
+}
+
+/// PA-088：轻量节点投影——清空节点内嵌 trace（保留 turnId/refs/摘要/元数据）。
+/// 前端 trace 面板读快照顶层 turn_trace_history；节点只用于 checkpoint/回滚映射。
+/// 存量节点（legacy 反序列化）turn_id 可能为 None：先回填（trace 末条），
+/// 否则前端 checkpoint 列表（依赖 node.turnId）会丢失全部存量节点。
+fn project_lightweight_nodes(nodes: &[HistoryNode]) -> Vec<HistoryNode> {
+    nodes
+        .iter()
+        .map(|node| {
+            let mut projected = node.clone();
+            if projected.turn_id.is_none() {
+                projected.turn_id = projected
+                    .turn_trace_history
+                    .last()
+                    .map(|trace| trace.turn_id.clone());
+            }
+            projected.turn_trace_history.clear();
+            projected
+        })
+        .collect()
+}
+
 fn session_state_for_backend(
     session: &SessionState,
     trace_mode: SeparateTraceTableMode,
@@ -3262,10 +3395,14 @@ fn session_state_for_backend(
         }
         (SeparateTraceTableMode::DualWrite, TraceMigrationState::DualWrite)
         | (SeparateTraceTableMode::DualWrite, TraceMigrationState::TraceTableAuthoritative) => {}
-        (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::DualWrite)
-        | (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::TraceTableAuthoritative) => {
+        (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::TraceTableAuthoritative) => {
             prepared.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
         }
+        // PA-088：WriteSeparate + DualWrite 保持双写（blob 完整 + 表），不晋升剥离。
+        // 若在此晋升，内存态仍是 DualWrite（save_to_backend 按内存态分派跳过写表），
+        // 持久化副本却被剥离 → 表里没有节点 trace → 重启 materialize 失败（数据丢失）。
+        // 存量会话的迁移归 PA-090。
+        (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::DualWrite) => {}
         (SeparateTraceTableMode::WriteSeparate, TraceMigrationState::LegacyBlob) => {
             // Do not auto-promote a legacy-only session straight to authoritative.
         }
@@ -3276,7 +3413,35 @@ fn session_state_for_backend(
             TraceMigrationState::TraceTableAuthoritative
         )
     {
+        // PA-088：authoritative 会话持久化时剥离 trace，只保留轻量引用。
+        // 内存中的 SessionState 不受影响（本函数只作用于持久化副本），
+        // 运行中 checkout/fork 仍使用内存完整快照；重启后由 load_store 按 refs 物化。
+        prepared.turn_trace_refs = Some(
+            prepared
+                .turn_trace_history
+                .iter()
+                .map(|trace| TurnTraceRef {
+                    turn_id: trace.turn_id.clone(),
+                    updated_at_ms: trace.updated_at,
+                    version: None,
+                })
+                .collect(),
+        );
         prepared.turn_trace_history.clear();
+        for node in &mut prepared.history_nodes {
+            node.turn_trace_refs = Some(
+                node.turn_trace_history
+                    .iter()
+                    .map(|trace| TurnTraceRef {
+                        turn_id: trace.turn_id.clone(),
+                        updated_at_ms: trace.updated_at,
+                        version: None,
+                    })
+                    .collect(),
+            );
+            node.turn_id = node.turn_trace_history.last().map(|trace| trace.turn_id.clone());
+            node.turn_trace_history.clear();
+        }
     }
     prepared
 }
@@ -4597,6 +4762,7 @@ fn default_sessions() -> SessionMap {
             provider_native_transcript: Vec::new(),
             turn_trace_history: Vec::new(),
             trace_migration_state: TraceMigrationState::default(),
+            turn_trace_refs: None,
             long_term_memory_entries: Vec::new(),
             memory_write_evidence: Vec::new(),
             memory_write_hook_trace_records: Vec::new(),
@@ -5160,6 +5326,7 @@ mod tests {
                     ..Default::default()
                 }],
                 trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -5270,6 +5437,7 @@ mod tests {
                     ..Default::default()
                 }],
                 trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -5382,6 +5550,7 @@ mod tests {
                     ..Default::default()
                 }],
                 trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -7476,6 +7645,7 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -7541,6 +7711,7 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -7626,6 +7797,7 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -7696,6 +7868,7 @@ mod tests {
                 ],
                 turn_trace_history: Vec::new(),
                 trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
                 long_term_memory_entries: Vec::new(),
                 memory_write_evidence: Vec::new(),
                 memory_write_hook_trace_records: Vec::new(),
@@ -9132,5 +9305,221 @@ mod tests {
             restored.resolved_node_id.as_deref(),
             Some(second_node_id.as_str())
         );
+    }
+
+    #[test]
+    fn session_state_for_backend_strips_node_traces_and_writes_refs() {
+        // PA-088：WriteSeparate + Authoritative 时，持久化副本剥离节点 trace 并生成 refs；
+        // 内存副本（原 session）不受影响。
+        let mut session = SessionState {
+            conversation_id: "s1".to_string(),
+            title: "t".to_string(),
+            summary: "s".to_string(),
+            history: Vec::new(),
+            provider_native_transcript: Vec::new(),
+            turn_trace_history: vec![
+                TurnTraceRecord {
+                    turn_id: "turn-1".to_string(),
+                    updated_at: 100,
+                    ..TurnTraceRecord::default()
+                },
+                TurnTraceRecord {
+                    turn_id: "turn-2".to_string(),
+                    updated_at: 200,
+                    ..TurnTraceRecord::default()
+                },
+            ],
+            trace_migration_state: TraceMigrationState::TraceTableAuthoritative,
+            turn_trace_refs: None,
+            long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            turn_count: 2,
+            last_referenced_file: None,
+            updated_at_ms: 300,
+            history_nodes: vec![HistoryNode {
+                node_id: "node-1".to_string(),
+                session_id: "s1".to_string(),
+                parent_node_id: None,
+                branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                forked_from_node_id: None,
+                kind: HistoryNodeKind::TurnCommitted,
+                run_id: None,
+                workspace_ref: WorkspaceRef::default(),
+                summary: "s".to_string(),
+                title: "t".to_string(),
+                history: Vec::new(),
+                provider_native_transcript: Vec::new(),
+                turn_trace_history: vec![TurnTraceRecord {
+                    turn_id: "turn-2".to_string(),
+                    updated_at: 200,
+                    ..TurnTraceRecord::default()
+                }],
+                turn_id: None,
+                turn_trace_refs: None,
+                long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                turn_count: 2,
+                last_referenced_file: None,
+                created_at_ms: 250,
+            }],
+            history_branches: Vec::new(),
+            history_cursor: HistoryCursor::default(),
+            workspace_id: None,
+        };
+
+        let prepared = session_state_for_backend(&session, SeparateTraceTableMode::WriteSeparate);
+
+        // 持久化副本：顶层 + 节点 trace 被剥离，refs 生成
+        assert!(prepared.turn_trace_history.is_empty());
+        let top_refs = prepared.turn_trace_refs.expect("top-level refs present");
+        assert_eq!(top_refs.len(), 2);
+        assert_eq!(top_refs[0].turn_id, "turn-1");
+        assert_eq!(top_refs[1].turn_id, "turn-2");
+        let node = &prepared.history_nodes[0];
+        assert!(node.turn_trace_history.is_empty());
+        assert_eq!(node.turn_id.as_deref(), Some("turn-2"));
+        let node_refs = node.turn_trace_refs.as_ref().expect("node refs present");
+        assert_eq!(node_refs.len(), 1);
+        assert_eq!(node_refs[0].turn_id, "turn-2");
+
+        // 内存副本：完整 trace 保留（运行中 checkout 语义不变）
+        assert_eq!(session.turn_trace_history.len(), 2);
+        assert_eq!(session.history_nodes[0].turn_trace_history.len(), 1);
+        assert!(session.turn_trace_refs.is_none());
+    }
+
+    #[test]
+    fn session_state_for_backend_keeps_legacy_blob_intact_under_write_separate() {
+        // PA-088：WriteSeparate + LegacyBlob 存量会话不晋升、不剥离（保持可读写）。
+        let session = SessionState {
+            conversation_id: "s1".to_string(),
+            title: "t".to_string(),
+            summary: "s".to_string(),
+            history: Vec::new(),
+            provider_native_transcript: Vec::new(),
+            turn_trace_history: vec![TurnTraceRecord {
+                turn_id: "turn-1".to_string(),
+                updated_at: 100,
+                ..TurnTraceRecord::default()
+            }],
+            trace_migration_state: TraceMigrationState::LegacyBlob,
+            turn_trace_refs: None,
+            long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            turn_count: 1,
+            last_referenced_file: None,
+            updated_at_ms: 100,
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: HistoryCursor::default(),
+            workspace_id: None,
+        };
+
+        let prepared = session_state_for_backend(&session, SeparateTraceTableMode::WriteSeparate);
+
+        assert_eq!(
+            prepared.trace_migration_state,
+            TraceMigrationState::LegacyBlob,
+            "legacy 会话不自动晋升"
+        );
+        assert_eq!(prepared.turn_trace_history.len(), 1, "blob trace 保留");
+        assert!(prepared.turn_trace_refs.is_none());
+    }
+
+    #[test]
+    fn collect_trace_union_merges_top_level_and_node_traces() {
+        // PA-088 P0-1 回归：写表用全量 Union（顶层 ∪ 节点 trace），
+        // 保证 >24 轮会话的旧节点 refs 在重启 materialize 时可解析。
+        let session = SessionState {
+            conversation_id: "s1".to_string(),
+            title: "t".to_string(),
+            summary: "s".to_string(),
+            history: Vec::new(),
+            provider_native_transcript: Vec::new(),
+            turn_trace_history: vec![TurnTraceRecord {
+                turn_id: "turn-1".to_string(),
+                updated_at: 100,
+                ..TurnTraceRecord::default()
+            }],
+            trace_migration_state: TraceMigrationState::TraceTableAuthoritative,
+            turn_trace_refs: None,
+            long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            turn_count: 3,
+            last_referenced_file: None,
+            updated_at_ms: 300,
+            history_nodes: vec![
+                HistoryNode {
+                    node_id: "node-1".to_string(),
+                    session_id: "s1".to_string(),
+                    parent_node_id: None,
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    forked_from_node_id: None,
+                    kind: HistoryNodeKind::TurnCommitted,
+                    run_id: None,
+                    workspace_ref: WorkspaceRef::default(),
+                    summary: "s".to_string(),
+                    title: "t".to_string(),
+                    history: Vec::new(),
+                    provider_native_transcript: Vec::new(),
+                    turn_trace_history: vec![TurnTraceRecord {
+                        turn_id: "turn-1".to_string(),
+                        updated_at: 100,
+                        ..TurnTraceRecord::default()
+                    }],
+                    turn_id: Some("turn-1".to_string()),
+                    turn_trace_refs: None,
+                    long_term_memory_entries: Vec::new(),
+                    memory_write_evidence: Vec::new(),
+                    memory_write_hook_trace_records: Vec::new(),
+                    turn_count: 1,
+                    last_referenced_file: None,
+                    created_at_ms: 100,
+                },
+                HistoryNode {
+                    node_id: "node-2".to_string(),
+                    session_id: "s1".to_string(),
+                    parent_node_id: Some("node-1".to_string()),
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    forked_from_node_id: None,
+                    kind: HistoryNodeKind::TurnCommitted,
+                    run_id: None,
+                    workspace_ref: WorkspaceRef::default(),
+                    summary: "s".to_string(),
+                    title: "t".to_string(),
+                    history: Vec::new(),
+                    provider_native_transcript: Vec::new(),
+                    // 节点 2 引用了顶层已淘汰的 turn-2（>24 轮场景）
+                    turn_trace_history: vec![TurnTraceRecord {
+                        turn_id: "turn-2".to_string(),
+                        updated_at: 200,
+                        ..TurnTraceRecord::default()
+                    }],
+                    turn_id: Some("turn-2".to_string()),
+                    turn_trace_refs: None,
+                    long_term_memory_entries: Vec::new(),
+                    memory_write_evidence: Vec::new(),
+                    memory_write_hook_trace_records: Vec::new(),
+                    turn_count: 2,
+                    last_referenced_file: None,
+                    created_at_ms: 200,
+                },
+            ],
+            history_branches: Vec::new(),
+            history_cursor: HistoryCursor::default(),
+            workspace_id: None,
+        };
+
+        let union = collect_trace_union(&session);
+        let mut turn_ids: Vec<String> = union.iter().map(|trace| trace.turn_id.clone()).collect();
+        turn_ids.sort();
+        assert_eq!(turn_ids, vec!["turn-1".to_string(), "turn-2".to_string()]);
     }
 }

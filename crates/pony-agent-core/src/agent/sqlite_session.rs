@@ -204,7 +204,14 @@ impl SqliteSessionBackend {
                 // regardless of trace_migration_state. This prevents stale traces
                 // from lingering in the trace table after checkout/rollback
                 // when the fallback persist path is taken.
-                self.replace_session_traces_tx(&tx, id, &normalized_session.turn_trace_history)?;
+                // PA-088：authoritative 会话跳过——其 blob 已被 session_state_for_backend
+                // 剥离 trace（只剩 refs），此处若用剥离后的空 trace 替换表会清空数据；
+                // 表已由 save_to_backend 的 replace_session_traces 在剥离前写入。
+                if normalized_session.trace_migration_state
+                    != TraceMigrationState::TraceTableAuthoritative
+                {
+                    self.replace_session_traces_tx(&tx, id, &normalized_session.turn_trace_history)?;
+                }
             }
         }
 
@@ -574,6 +581,42 @@ impl SessionBackend for SqliteSessionBackend {
                 }
                 let table_traces = self.read_session_traces(conn, &id).ok()?;
                 session.turn_trace_history = self.merge_trace_history(&session, table_traces);
+                // PA-088：节点 materialize——按 refs 从表恢复节点 trace。
+                // Some([]) = authoritative 且确实无 trace（清空不兜底）；
+                // Some(v) = 按 refs 查表组装（缺失的 turn 降级为空并告警）；
+                // None = legacy 旧数据（反序列化已带内嵌 trace，保持）。
+                for node in &mut session.history_nodes {
+                    if let Some(refs) = &node.turn_trace_refs {
+                        if refs.is_empty() {
+                            node.turn_trace_history.clear();
+                        } else {
+                            let by_id: HashMap<&str, &TurnTraceRecord> = session
+                                .turn_trace_history
+                                .iter()
+                                .map(|trace| (trace.turn_id.as_str(), trace))
+                                .collect();
+                            let mut missing = 0usize;
+                            node.turn_trace_history = refs
+                                .iter()
+                                .filter_map(|reference| {
+                                    match by_id.get(reference.turn_id.as_str()) {
+                                        Some(trace) => Some((*trace).clone()),
+                                        None => {
+                                            missing += 1;
+                                            None
+                                        }
+                                    }
+                                })
+                                .collect();
+                            if missing > 0 {
+                                eprintln!(
+                                    "[pony-agent][session] materialize node {}: {} ref(s) missing from trace table",
+                                    node.node_id, missing
+                                );
+                            }
+                        }
+                    }
+                }
                 Some((id, session))
             })
             .collect();
@@ -665,10 +708,14 @@ impl SessionBackend for SqliteSessionBackend {
             return false;
         }
         // Always write traces to keep session blob and trace table in sync.
-        if let Err(e) = self.replace_session_traces_tx(&tx, session_id, &session.turn_trace_history)
-        {
-            eprintln!("[pony-agent][session] SQLite replace traces error: {e}");
-            return false;
+        // PA-088：authoritative 会话跳过——blob 已被剥离 trace，若用空 trace 替换
+        // 表会清空数据（表由 save_to_backend 在剥离前写入）。
+        if session.trace_migration_state != TraceMigrationState::TraceTableAuthoritative {
+            if let Err(e) = self.replace_session_traces_tx(&tx, session_id, &session.turn_trace_history)
+            {
+                eprintln!("[pony-agent][session] SQLite replace traces error: {e}");
+                return false;
+            }
         }
         if let Err(e) = tx.commit() {
             eprintln!("[pony-agent][session] SQLite upsert commit error: {e}");
@@ -838,7 +885,10 @@ impl SessionBackend for SqliteSessionBackend {
             session_id,
             trace,
             trace_order,
-            matches!(self.trace_mode, SeparateTraceTableMode::WriteSeparate),
+            // PA-088：WriteSeparate 下不 prune——表可能含节点 refs 引用的历史 trace
+            // （>24 轮），prune 会删掉它们导致重启 materialize 失败。
+            // refs 保护 prune 归 PA-090 迁移阶段实现。
+            false,
         ) {
             eprintln!("[pony-agent][session] SQLite trace upsert error: {error}");
             return SessionBackendMutationResult::Failed;
@@ -983,11 +1033,10 @@ impl SessionBackend for SqliteSessionBackend {
                     session_id,
                     &trace,
                     trace_order,
-                    matches!(self.trace_mode, SeparateTraceTableMode::WriteSeparate)
-                        && matches!(
-                            session.trace_migration_state,
-                            TraceMigrationState::TraceTableAuthoritative
-                        ),
+                    // PA-088：Authoritative 会话不 prune——表可能含节点 refs 引用的
+                    // 历史 trace（>24 轮），prune 会删掉它们导致重启 materialize 失败。
+                    // refs 保护 prune 归 PA-090 迁移阶段实现。
+                    false,
                 )
                 .map(|_| SessionBackendMutationResult::Succeeded),
             SessionTraceMutation::UpdateTerminalEvent {
@@ -1231,6 +1280,7 @@ mod tests {
             provider_native_transcript: Vec::new(),
             turn_trace_history: Vec::new(),
             trace_migration_state: TraceMigrationState::default(),
+            turn_trace_refs: None,
             long_term_memory_entries: Vec::new(),
             memory_write_evidence: Vec::new(),
             memory_write_hook_trace_records: Vec::new(),
@@ -1705,7 +1755,10 @@ mod tests {
     }
 
     #[test]
-    fn write_separate_prunes_trace_table_to_history_limit() {
+    fn write_separate_keeps_all_trace_rows_for_authoritative_session() {
+        // PA-088：Authoritative 会话 upsert 不 prune——表可能含节点 refs 引用的
+        // 历史 trace（>24 轮），prune 会删掉它们导致重启 materialize 失败。
+        // （原 prune 行为测试已按新设计更新。）
         let dir = unique_dir("trace-prune");
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("trace-prune.db");
@@ -1733,14 +1786,15 @@ mod tests {
         let loaded = backend.load_store().unwrap();
         assert_eq!(
             loaded.sessions["s1"].turn_trace_history.len(),
-            SQLITE_TRACE_HISTORY_LIMIT
+            40,
+            "Authoritative 会话 upsert 不应 prune 到 24 行"
         );
         assert_eq!(
             loaded.sessions["s1"].turn_trace_history[0].turn_id,
-            "turn-16"
+            "turn-0"
         );
         assert_eq!(
-            loaded.sessions["s1"].turn_trace_history[23].turn_id,
+            loaded.sessions["s1"].turn_trace_history[39].turn_id,
             "turn-39"
         );
 
@@ -1916,6 +1970,72 @@ mod tests {
         assert_eq!(
             snapshot.turn_trace_history[0].event_id.as_deref(),
             Some("turn-1:4")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upsert_turn_trace_does_not_prune_authoritative_session_rows() {
+        // PA-088 P0-1′ 回归：Authoritative 会话 upsert 不 prune——
+        // 表可能含节点 refs 引用的历史 trace（>24 轮），prune 会删掉它们。
+        let dir = unique_dir("no-prune-authoritative");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("no-prune-authoritative.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let session = super::SessionState {
+            conversation_id: "s1".to_string(),
+            title: "t".to_string(),
+            summary: "s".to_string(),
+            history: Vec::new(),
+            provider_native_transcript: Vec::new(),
+            turn_trace_history: Vec::new(),
+            trace_migration_state: super::TraceMigrationState::TraceTableAuthoritative,
+            turn_trace_refs: None,
+            long_term_memory_entries: Vec::new(),
+            memory_write_evidence: Vec::new(),
+            memory_write_hook_trace_records: Vec::new(),
+            history_state_evidence: Vec::new(),
+            turn_count: 0,
+            last_referenced_file: None,
+            updated_at_ms: 1,
+            history_nodes: Vec::new(),
+            history_branches: Vec::new(),
+            history_cursor: Default::default(),
+            workspace_id: None,
+        };
+        assert!(
+            backend.upsert_session("s1", &session),
+            "upsert should succeed"
+        );
+
+        // 写入 30 条 trace（>24 上限），全部应保留（不 prune）
+        for index in 0..30u64 {
+            let result = backend.upsert_turn_trace(
+                "s1",
+                &trace(&format!("turn-{index}"), "t", 100 + index),
+                index as usize,
+            );
+            assert!(matches!(result, SessionBackendMutationResult::Succeeded));
+        }
+
+        let reloaded = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let loaded = reloaded.load_store().expect("load should succeed");
+        let loaded_session = loaded
+            .sessions
+            .get("s1")
+            .expect("session should exist after reload");
+        assert_eq!(
+            loaded_session.turn_trace_history.len(),
+            30,
+            "Authoritative 会话 upsert 不应 prune 到 24 行"
         );
 
         fs::remove_dir_all(&dir).ok();

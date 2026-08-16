@@ -606,9 +606,9 @@ impl HostControlPlane {
                 .and_then(|value| value.as_str().map(str::to_string))
                 .unwrap_or_else(|| "turn_committed".to_string()),
             turn_id: node
-                .turn_trace_history
-                .last()
-                .map(|trace| trace.turn_id.clone()),
+                .turn_id
+                .clone()
+                .or_else(|| node.turn_trace_history.last().map(|trace| trace.turn_id.clone())),
             workspace_ref: node.workspace_ref.clone(),
             summary: Some(node.summary.clone()),
             title: Some(node.title.clone()),

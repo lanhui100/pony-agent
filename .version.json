@@ -1631,16 +1631,28 @@
           "segment": "patch"
         }
       ]
+    },
+    {
+      "bumps": [
+        {
+          "component": "core",
+          "to": "0.1.65",
+          "segment": "patch",
+          "from": "0.1.64"
+        }
+      ],
+      "timestamp": "2026-08-16T19:45:15+08:00",
+      "commit": "f5d0e0c"
     }
   ],
-  "lastBump": "2026-08-16T19:44:55+08:00",
+  "lastBump": "2026-08-16T19:45:15+08:00",
   "tauri": {
     "patch": 78,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 64,
+    "patch": 65,
     "minor": 1,
     "major": 0
   }

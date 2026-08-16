@@ -82,7 +82,8 @@ export function cloneHistoryNodes(nodes?: HistoryNode[] | null) {
       ...message,
       attachments: (message.attachments ?? []).map((attachment) => ({ ...attachment }))
     })),
-    turnTraceHistory: (node.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace))
+    turnTraceHistory: (node.turnTraceHistory ?? []).map((trace) => normalizeTurnTraceRecord(trace)),
+    turnTraceRefs: (node.turnTraceRefs ?? []).map((reference) => ({ ...reference }))
   }));
 }
 
