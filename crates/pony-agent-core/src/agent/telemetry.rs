@@ -6,6 +6,22 @@ use crate::agent::tools::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// 工具结果文本的落库上限（32KB）。
+/// 防止 WebSearch 等工具把完整搜索结果全文写入 trace，导致 session blob 膨胀
+/// （实测单个 timeline 条目 222KB、会话 46MB 的根因之一）。
+/// 前端预览足够；完整结果如需保留，由后续规范化存储阶段外置到文件。
+const TOOL_RESULT_TEXT_MAX_CHARS: usize = 32 * 1024;
+
+fn truncate_tool_result_text(text: String) -> String {
+    if text.len() <= TOOL_RESULT_TEXT_MAX_CHARS {
+        return text;
+    }
+    let mut truncated = text;
+    truncated.truncate(TOOL_RESULT_TEXT_MAX_CHARS);
+    truncated.push_str("\n...[truncated by pony-agent]");
+    truncated
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnTraceStep {
@@ -397,11 +413,12 @@ fn completed_summary(_active_call: &ToolCall, runtime_status: &str, parsed: &Val
 }
 
 fn parent_result_text(parsed: &Value, fallback: &str) -> String {
-    if parsed.is_object() {
+    let text = if parsed.is_object() {
         pretty_json(parsed)
     } else {
         fallback.to_string()
-    }
+    };
+    truncate_tool_result_text(text)
 }
 
 fn composite_result_status(parsed: &Value) -> Option<&str> {
@@ -544,19 +561,18 @@ fn nested_summary(
 }
 
 fn nested_result_text(output: &Value, error_message: Option<&str>) -> String {
-    if let Some(summary_text) = output
+    let text = if let Some(summary_text) = output
         .get("summary")
         .and_then(|summary| summary.get("text"))
         .and_then(Value::as_str)
     {
-        return summary_text.to_string();
-    }
-
-    if let Some(message) = error_message {
-        return message.to_string();
-    }
-
-    pretty_json(output)
+        summary_text.to_string()
+    } else if let Some(message) = error_message {
+        message.to_string()
+    } else {
+        pretty_json(output)
+    };
+    truncate_tool_result_text(text)
 }
 
 fn extract_activity_artifacts(parsed: &Value) -> Vec<Value> {
@@ -821,5 +837,63 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("resultCount"));
+    }
+
+    #[test]
+    fn oversized_tool_result_text_is_truncated() {
+        // 构造超过 32KB 的工具结果，验证 result_text 被截断并追加标记。
+        let huge_output = json!({
+            "ok": true,
+            "query": "oversized",
+            "results": [
+                { "snippet": "x".repeat(TOOL_RESULT_TEXT_MAX_CHARS + 10_000) }
+            ]
+        });
+        let call = ToolCall {
+            call_id: None,
+            name: "web_search_query".to_string(),
+            arguments: json!({ "query": "oversized" }),
+            plan: None,
+        };
+        let result = ToolResult {
+            tool_name: "web_search_query".to_string(),
+            status: "ok".to_string(),
+            output: serde_json::to_string(&huge_output).expect("result payload"),
+            duration_ms: 18,
+        };
+
+        let activities = tool_activities_after_result(&call, &result);
+        let text = activities[0].result_text.as_deref().unwrap_or_default();
+
+        assert!(text.len() <= TOOL_RESULT_TEXT_MAX_CHARS + 64, "截断后长度受控");
+        assert!(text.ends_with("...[truncated by pony-agent]"), "追加截断标记");
+    }
+
+    #[test]
+    fn small_tool_result_text_is_not_truncated() {
+        let call = ToolCall {
+            call_id: None,
+            name: "web_search_query".to_string(),
+            arguments: json!({ "query": "small" }),
+            plan: None,
+        };
+        let result = ToolResult {
+            tool_name: "web_search_query".to_string(),
+            status: "ok".to_string(),
+            output: serde_json::to_string(&json!({
+                "ok": true,
+                "query": "small",
+                "resultCount": 1,
+                "results": [{ "title": "t", "url": "u", "snippet": "s" }]
+            }))
+            .expect("result payload"),
+            duration_ms: 18,
+        };
+
+        let activities = tool_activities_after_result(&call, &result);
+        let text = activities[0].result_text.as_deref().unwrap_or_default();
+
+        assert!(text.contains("resultCount"), "小结果保留完整内容");
+        assert!(!text.contains("truncated by pony-agent"), "小结果不截断");
     }
 }
