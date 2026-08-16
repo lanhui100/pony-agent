@@ -23,6 +23,12 @@ function readReleaseRate(): number {
 // ─── Reasoning 淡入（保持原有简单增量模式） ─────────────────
 const STREAM_REASONING_FADE_CHARS = 3;
 
+// ─── 停滞收敛 ───────────────────────────────────────────────
+// 若 pending 消息的 content 在约 2s（60ms tick × 34）内未再增长，
+// 视为流已停滞（output_end 可能丢失/未到达），直接释放全部字符，
+// 避免逐字渲染无限续跑拖垮主线程。
+const STREAM_STALL_RELEASE_TICKS = 34;
+
 export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[]> | Ref<ChatMessage[]>) {
   // 逐字释放：每条正在流式回复的消息已展示到第几个字符
   const streamVisibleLengthByMessageId = shallowReactive<Record<string, number>>({});
@@ -32,11 +38,17 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
   const streamReasoningFadeTextByMessageId = shallowReactive<Record<string, string>>({});
   const streamReasoningFadeKeyByMessageId = shallowReactive<Record<string, number>>({});
 
+  // 停滞检测：记录每条 pending 消息的 content 长度与连续未增长 tick 数
+  const streamLastContentLengthByMessageId = shallowReactive<Record<string, number>>({});
+  const streamStallTickCountByMessageId = shallowReactive<Record<string, number>>({});
+
   const PRESENTATION_MAPS = [
     streamVisibleLengthByMessageId,
     streamSnapshotReasoningByMessageId,
     streamReasoningFadeTextByMessageId,
-    streamReasoningFadeKeyByMessageId
+    streamReasoningFadeKeyByMessageId,
+    streamLastContentLengthByMessageId,
+    streamStallTickCountByMessageId
   ];
 
   function syncPresentationMapValue<T extends string | number>(
@@ -102,8 +114,21 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
       }
 
       if (currentLength < nextText.length) {
-        const releaseRate = readReleaseRate();
-        currentLength = Math.min(currentLength + releaseRate, nextText.length);
+        // 停滞检测：content 未增长达到阈值 tick 数 → 直接释放全部字符
+        const previousContentLength = streamLastContentLengthByMessageId[message.id] ?? -1;
+        if (previousContentLength === nextText.length) {
+          streamStallTickCountByMessageId[message.id] = (streamStallTickCountByMessageId[message.id] ?? 0) + 1;
+        } else {
+          streamStallTickCountByMessageId[message.id] = 0;
+        }
+        streamLastContentLengthByMessageId[message.id] = nextText.length;
+
+        if ((streamStallTickCountByMessageId[message.id] ?? 0) >= STREAM_STALL_RELEASE_TICKS) {
+          currentLength = nextText.length;
+        } else {
+          const releaseRate = readReleaseRate();
+          currentLength = Math.min(currentLength + releaseRate, nextText.length);
+        }
         streamVisibleLengthByMessageId[message.id] = currentLength;
       }
     }
@@ -112,6 +137,8 @@ export function useStreamingPresentationState(messages: ComputedRef<ChatMessage[
   /** 当前已释放的可见文本 */
   function assistantDisplayContent(message: ChatMessage | null) {
     if (!message) return "";
+    // 非流式状态（done/error）：直接返回完整内容，避免残留的逐字游标截断文本
+    if (message.status !== "pending") return message.content;
     const visibleLength = streamVisibleLengthByMessageId[message.id];
     if (visibleLength == null) return message.content;
     return message.content.slice(0, visibleLength);

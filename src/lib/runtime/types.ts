@@ -103,6 +103,8 @@ export type RuntimeState = {
   // 由 throttle timer 合并应用；低频语义事件与 terminal 事件会强制冲刷。
   pendingThrottledTraceTimeline: TraceTimelineEntry[] | null;
   traceTimelineThrottleTimerId: number | null;
+  // 运行态看门狗：isSubmitting 置位后若超时未收到终态事件，强制解锁。
+  submissionWatchdogTimerId: number | null;
 };
 
 export type PersistedRuntimeState = {

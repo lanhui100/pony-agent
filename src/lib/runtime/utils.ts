@@ -19,15 +19,18 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 }
 
 const DEBUG_RUNTIME_LOGS_KEY = "pony-agent.debug.runtime-logs";
-let debugLoggingEnabled: boolean | null = null;
 
 export function isDebugLoggingEnabled() {
-  if (debugLoggingEnabled !== null) {
-    return debugLoggingEnabled;
+  if (typeof window === "undefined") {
+    return false;
   }
-  debugLoggingEnabled =
-    typeof window !== "undefined" && window.localStorage.getItem(DEBUG_RUNTIME_LOGS_KEY) === "true";
-  return debugLoggingEnabled;
+  // 支持 URL 参数 ?debug=1 / ?debug=runtime 开启（无需 DevTools 操作 localStorage）。
+  // 不缓存：运行时设置 localStorage 后立即生效，便于现场开启诊断。
+  const urlDebug = new URLSearchParams(window.location.search).get("debug");
+  if (urlDebug === "1" || urlDebug === "runtime") {
+    return true;
+  }
+  return window.localStorage.getItem(DEBUG_RUNTIME_LOGS_KEY) === "true";
 }
 
 export function debugLog(event: string, payload?: Record<string, unknown>) {

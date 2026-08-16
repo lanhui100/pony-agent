@@ -1607,11 +1607,23 @@
         }
       ],
       "commit": "80c8238"
+    },
+    {
+      "commit": "fc952b2",
+      "bumps": [
+        {
+          "to": "0.1.78",
+          "segment": "patch",
+          "from": "0.1.77",
+          "component": "tauri"
+        }
+      ],
+      "timestamp": "2026-08-16T19:44:28+08:00"
     }
   ],
-  "lastBump": "2026-08-15T16:27:58+08:00",
+  "lastBump": "2026-08-16T19:44:28+08:00",
   "tauri": {
-    "patch": 77,
+    "patch": 78,
     "minor": 1,
     "major": 0
   },

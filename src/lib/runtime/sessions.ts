@@ -244,7 +244,8 @@ export function buildEventCursorByTurnTraceHistory(turnTraceHistory: TurnTraceRe
 
 export function shouldAcceptTurnEvent(
   currentCursor: { eventId: string | null; sequence: number | null; emittedAtMs: number | null } | null | undefined,
-  payload: Pick<TurnStreamEvent, "eventId" | "sequence" | "emittedAtMs">
+  payload: Pick<TurnStreamEvent, "eventId" | "sequence" | "emittedAtMs">,
+  options: { allowSameSequenceDifferentEventId?: boolean } = {}
 ) {
   const nextEventId = payload.eventId?.trim() || null;
   const nextSequence = typeof payload.sequence === "number" && Number.isFinite(payload.sequence) ? payload.sequence : null;
@@ -264,8 +265,13 @@ export function shouldAcceptTurnEvent(
     }
 
     if (nextSequence === currentCursor.sequence) {
-      if (!nextEventId || !currentCursor.eventId || nextEventId !== currentCursor.eventId) {
-        return false;
+      // 默认：同 sequence 不同 eventId 视为重复丢弃。
+      // 终态事件（completed/failed/cancelled）允许放行——output_end 与终态事件
+      // 常在同一 sequence 批次内连发（不同 eventId），误杀会导致状态永久卡死。
+      if (!options.allowSameSequenceDifferentEventId) {
+        if (!nextEventId || !currentCursor.eventId || nextEventId !== currentCursor.eventId) {
+          return false;
+        }
       }
     }
   }

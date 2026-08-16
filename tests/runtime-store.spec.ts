@@ -5461,6 +5461,166 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("accepts terminal events sharing a sequence with output_end (same sequence, different eventId)", async () => {
+    const store = useRuntimeStore();
+    const eventHandlers = new Map<string, (event: { payload: TurnStreamEvent }) => void>();
+
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: (event: { payload: TurnStreamEvent }) => void) => {
+      eventHandlers.set(eventName, handler);
+      return () => {
+        eventHandlers.delete(eventName);
+      };
+    });
+
+    store.$patch({
+      sessionId: "terminal-seq-session",
+      historyCursorMode: "live",
+      activeTurnId: "turn-seq",
+      isSubmitting: true,
+      phase: "calling_model",
+      messages: [createMessage({ id: "user-seq", turnId: "turn-seq", role: "user", content: "q" })]
+    });
+
+    await store.initializeTurnEvents();
+
+    // output_end：sequence 5, eventId A
+    eventHandlers.get("turn:output_end")?.({
+      payload: {
+        turnId: "turn-seq",
+        eventId: "output-end-A",
+        eventType: "turn.output_end",
+        eventVersion: "1.0",
+        sequence: 5,
+        emittedAtMs: 1000,
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5"
+      } as TurnStreamEvent
+    });
+
+    expect(store.isSubmitting).toBe(true);
+
+    // completed：sequence 5, eventId B —— 同 sequence 不同 eventId，不应被去重丢弃
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "turn-seq",
+        kind: "completed",
+        eventId: "completed-B",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 5,
+        emittedAtMs: 1100,
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        traceSteps: [],
+        toolActivities: [],
+        providerCallRecords: [],
+        hookTraceRecords: []
+      } as TurnStreamEvent
+    });
+
+    expect(store.isSubmitting).toBe(false);
+    expect(store.activeTurnId).toBeNull();
+    expect(
+      store.messages.find((message) => message.turnId === "turn-seq" && message.role === "assistant")?.status
+    ).toBe("done");
+  });
+
+  it("unlocks the running state on terminal events while viewing historical checkout without mutating history", async () => {
+    const store = useRuntimeStore();
+    const eventHandlers = new Map<string, (event: { payload: TurnStreamEvent }) => void>();
+
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: (event: { payload: TurnStreamEvent }) => void) => {
+      eventHandlers.set(eventName, handler);
+      return () => {
+        eventHandlers.delete(eventName);
+      };
+    });
+
+    store.$patch({
+      sessionId: "history-unlock-session",
+      historyCursorMode: "historical",
+      visibleNodeId: "node-old",
+      branchHeadNodeId: "node-head",
+      activeBranchId: "branch-main",
+      activeTurnId: "turn-head",
+      isSubmitting: true,
+      phase: "calling_model",
+      messages: [
+        createMessage({ id: "user-old", turnId: "turn-old", role: "user", content: "old question" }),
+        createMessage({ id: "assistant-old", turnId: "turn-old", role: "assistant", content: "old answer" })
+      ],
+      turnTraceHistory: [createTrace({ turnId: "turn-old", title: "old turn", updatedAt: 2000 })]
+    });
+
+    await store.initializeTurnEvents();
+
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "turn-head",
+        kind: "completed",
+        eventId: "turn-head:2",
+        eventType: "turn.completed",
+        eventVersion: "1.0",
+        sequence: 2,
+        emittedAtMs: 3200,
+        phase: "completed",
+        text: "latest answer",
+        traceSteps: [],
+        toolActivities: [],
+        providerCallRecords: [],
+        hookTraceRecords: []
+      } as TurnStreamEvent
+    });
+
+    // 历史模式下终态事件：仅解锁运行态，不污染历史视图
+    expect(store.isSubmitting).toBe(false);
+    expect(store.activeTurnId).toBeNull();
+    expect(store.messages.map((message) => message.turnId)).toEqual(["turn-old", "turn-old"]);
+    expect(store.turnTraceHistory).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.turnId).toBe("turn-old");
+  });
+
+  it("force-unlocks the running state when the submission watchdog times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = useRuntimeStore();
+      store.$patch({
+        sessionId: "watchdog-session",
+        historyCursorMode: "live",
+        activeTurnId: "turn-watch",
+        isSubmitting: true,
+        phase: "calling_model",
+        messages: [
+          createMessage({ id: "user-watch", turnId: "turn-watch", role: "user", content: "q" }),
+          createMessage({
+            id: "assistant-watch",
+            turnId: "turn-watch",
+            role: "assistant",
+            content: "partial",
+            status: "pending"
+          })
+        ]
+      });
+
+      store.startSubmissionWatchdog("turn-watch");
+      expect(store.isSubmitting).toBe(true);
+
+      vi.advanceTimersByTime(120_000 + 1);
+
+      expect(store.isSubmitting).toBe(false);
+      expect(store.activeTurnId).toBeNull();
+      expect(store.phase).toBe("failed");
+      expect(store.messages.find((message) => message.id === "assistant-watch")?.status).toBe("error");
+      expect(store.messages.find((message) => message.id === "assistant-watch")?.errorDetail).toBe(
+        "submission_watchdog_timeout"
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("records model and tool hops in timeline order without merging", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(7070);

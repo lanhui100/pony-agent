@@ -1,6 +1,11 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke, safeListen } from "@/lib/tauri";
-import { initFrontendFlightRecorder } from "@/lib/frontend-flight-recorder";
+import {
+  bindFrontendRecorderSession,
+  bindFrontendRecorderTurn,
+  initFrontendFlightRecorder,
+  recordFrontendInstant
+} from "@/lib/frontend-flight-recorder";
 import { useProviderStore } from "@/stores/providers";
 import { useSettingsStore } from "@/stores/settings";
 import { deriveGraphRunFromRunState, extractActiveTaskFocus } from "../types/runtime";
@@ -198,6 +203,10 @@ import {
   createCapabilitySources,
   defaultAvailableTools
 } from "@/lib/runtime/browser-preview";
+// 运行态看门狗：isSubmitting 置位后若在超时窗口内未收到任何终态事件
+// （completed/failed/cancelled），强制解锁，杜绝"终态事件被丢弃 → 永久卡死"。
+const SUBMISSION_WATCHDOG_TIMEOUT_MS = 120_000;
+
 export const useRuntimeStore = defineStore("runtime", {
   state: (): RuntimeState => {
     const persisted = loadPersistedRuntimeState(DEFAULT_SESSION_ID);
@@ -278,7 +287,8 @@ export const useRuntimeStore = defineStore("runtime", {
       streamDebugTextCharsReceived: 0,
       streamDebugTextCharsFlushed: 0,
       pendingThrottledTraceTimeline: null,
-      traceTimelineThrottleTimerId: null
+      traceTimelineThrottleTimerId: null,
+      submissionWatchdogTimerId: null
     };
   },
   getters: {
@@ -361,6 +371,7 @@ export const useRuntimeStore = defineStore("runtime", {
   actions: {
     resetSessionRuntimeState() {
       this.cancelDeferredPersist();
+      this.clearSubmissionWatchdog();
       const blankFields = createBlankSessionRuntimeFields();
       this.phase = "idle";
       this.error = null;
@@ -561,6 +572,7 @@ export const useRuntimeStore = defineStore("runtime", {
       });
       this.persistHistory();
       void this.loadSessionCatalog();
+      this.clearSubmissionWatchdog();
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeRunId = null;
@@ -575,6 +587,40 @@ export const useRuntimeStore = defineStore("runtime", {
         this.deferredPersistTimerId = null;
         this.persistHistory();
       }, delay);
+    },
+    startSubmissionWatchdog(turnId: string) {
+      this.clearSubmissionWatchdog();
+      this.submissionWatchdogTimerId = window.setTimeout(() => {
+        this.submissionWatchdogTimerId = null;
+        if (!this.isSubmitting || this.activeTurnId !== turnId) {
+          return;
+        }
+        debugLog("watchdog:submission-timeout", {
+          turnId,
+          timeoutMs: SUBMISSION_WATCHDOG_TIMEOUT_MS
+        });
+        // 兜底：把仍卡 pending 的 assistant 消息收敛为 error，停止逐字渲染续跑。
+        const assistantMessage = this.messages.find(
+          (message) => message.turnId === turnId && message.role === "assistant"
+        );
+        if (assistantMessage && assistantMessage.status === "pending") {
+          assistantMessage.status = "error";
+          assistantMessage.errorDetail = "submission_watchdog_timeout";
+          this.messageRevision = null;
+        }
+        this.isSubmitting = false;
+        this.activeTurnId = null;
+        this.activeRunId = null;
+        this.phase = "failed";
+        this.error = "运行超时：长时间未收到终态事件，已强制解锁。";
+        this.persistHistory();
+      }, SUBMISSION_WATCHDOG_TIMEOUT_MS);
+    },
+    clearSubmissionWatchdog() {
+      if (this.submissionWatchdogTimerId != null) {
+        window.clearTimeout(this.submissionWatchdogTimerId);
+        this.submissionWatchdogTimerId = null;
+      }
     },
     persistHistory() {
       this.cancelDeferredPersist();
@@ -795,6 +841,7 @@ export const useRuntimeStore = defineStore("runtime", {
       );
       this.toolActivities = [];
       this.error = null;
+      this.clearSubmissionWatchdog();
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeRunId = null;
@@ -1096,6 +1143,7 @@ export const useRuntimeStore = defineStore("runtime", {
 
       this.sessionId = sessionId;
       this.error = null;
+      this.clearSubmissionWatchdog();
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeRunId = retrieved?.runState?.runId?.trim() || null;
@@ -1216,6 +1264,7 @@ export const useRuntimeStore = defineStore("runtime", {
       this.outputTokens = null;
       this.totalTokens = null;
       this.firstTokenLatencyMs = null;
+      this.clearSubmissionWatchdog();
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeRunId = null;
@@ -1278,6 +1327,7 @@ export const useRuntimeStore = defineStore("runtime", {
       );
       this.toolActivities = [];
       this.error = null;
+      this.clearSubmissionWatchdog();
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeRunId = null;
@@ -1504,6 +1554,7 @@ export const useRuntimeStore = defineStore("runtime", {
       });
       if (result) {
         this.historyCursorMode = "live";
+        this.clearSubmissionWatchdog();
         this.activeTurnId = null;
         this.activeRunId = null;
         this.isSubmitting = false;
@@ -1558,6 +1609,8 @@ export const useRuntimeStore = defineStore("runtime", {
 
       // 切换会话时清空待发送附件，防跨会话携带
       this.clearPendingAttachments();
+      bindFrontendRecorderSession(nextSessionId);
+      bindFrontendRecorderTurn(null);
 
       // Register current running turn as a background turn before switching away
       const switchingFromRunningTurn = this.isSubmitting && this.activeTurnId != null;
@@ -1659,6 +1712,7 @@ export const useRuntimeStore = defineStore("runtime", {
       if (bgTurn) {
         this.activeTurnId = bgTurn.turnId;
         this.isSubmitting = true;
+        this.startSubmissionWatchdog(bgTurn.turnId);
         this.phase = bgTurn.phase;
         if (bgTurn.textBuffer) {
           this.streamBufferText = bgTurn.textBuffer;
@@ -2001,11 +2055,75 @@ export const useRuntimeStore = defineStore("runtime", {
         this.persistHistory();
       }
     },
-    shouldProcessTurnEvent(payload: Pick<TurnStreamEvent, "turnId" | "eventId" | "sequence" | "emittedAtMs">) {
+    shouldProcessTurnEvent(
+      payload: Pick<TurnStreamEvent, "turnId" | "eventId" | "sequence" | "emittedAtMs" | "kind">
+    ) {
+      const isTerminalEvent =
+        payload.kind === "completed" || payload.kind === "failed" || payload.kind === "cancelled";
+      if (isTerminalEvent) {
+        // 终态事件：历史模式下仍处理（更新消息状态并解锁），且不被
+        // "同 sequence 不同 eventId"的去重规则误杀（output_end 与 completed
+        // 常在同一 sequence 批次内连发，后者会被误判为重复而丢弃 → 永久卡死）。
+        const accepted = shouldAcceptTurnEvent(this.eventCursorByTurnId[payload.turnId], payload, {
+          allowSameSequenceDifferentEventId: true
+        });
+        debugLog("event:gate:terminal", {
+          turnId: payload.turnId,
+          kind: payload.kind,
+          eventId: payload.eventId ?? null,
+          sequence: payload.sequence ?? null,
+          emittedAtMs: payload.emittedAtMs ?? null,
+          accepted
+        });
+        // 无条件落库（低频）：终态事件链路是"状态卡死"诊断的核心依据。
+        recordFrontendInstant("runtime.event-gate", "terminal", {
+          turnId: payload.turnId,
+          kind: payload.kind,
+          eventId: payload.eventId ?? null,
+          sequence: payload.sequence ?? null,
+          emittedAtMs: payload.emittedAtMs ?? null,
+          accepted,
+          historical: isHistoricalMode(this.historyCursorMode)
+        });
+        return accepted;
+      }
       if (isHistoricalMode(this.historyCursorMode)) {
+        debugLog("event:gate:dropped-historical", {
+          turnId: payload.turnId,
+          kind: payload.kind,
+          eventId: payload.eventId ?? null,
+          sequence: payload.sequence ?? null
+        });
+        // 无条件落库（低频）：历史模式吞事件是"状态卡死"的另一根因。
+        recordFrontendInstant("runtime.event-gate", "dropped-historical", {
+          turnId: payload.turnId,
+          kind: payload.kind,
+          eventId: payload.eventId ?? null,
+          sequence: payload.sequence ?? null,
+          emittedAtMs: payload.emittedAtMs ?? null
+        });
         return false;
       }
-      return shouldAcceptTurnEvent(this.eventCursorByTurnId[payload.turnId], payload);
+      const accepted = shouldAcceptTurnEvent(this.eventCursorByTurnId[payload.turnId], payload);
+      debugLog("event:gate", {
+        turnId: payload.turnId,
+        kind: payload.kind,
+        eventId: payload.eventId ?? null,
+        sequence: payload.sequence ?? null,
+        emittedAtMs: payload.emittedAtMs ?? null,
+        accepted
+      });
+      // 无条件落库（低频）：仅记录被丢弃的事件，避免高频 delta 刷爆缓冲。
+      if (!accepted) {
+        recordFrontendInstant("runtime.event-gate", "dropped-dedup", {
+          turnId: payload.turnId,
+          kind: payload.kind,
+          eventId: payload.eventId ?? null,
+          sequence: payload.sequence ?? null,
+          emittedAtMs: payload.emittedAtMs ?? null
+        });
+      }
+      return accepted;
     },
     commitTurnEventCursor(payload: Pick<TurnStreamEvent, "turnId" | "eventId" | "sequence" | "emittedAtMs">) {
       this.eventCursorByTurnId[payload.turnId] = {
@@ -2226,7 +2344,9 @@ export const useRuntimeStore = defineStore("runtime", {
 
       this.messages.push(assistantMessage);
       this.messageRevision = null;
-      this.persistHistory();
+      // 延迟合并落盘：新建 assistant 消息时避免同步全量序列化阻塞主线程
+      // （流式期间高频调用 ensureAssistantMessage，同步 persist 会放大卡顿）。
+      this.scheduleDeferredPersist();
       return this.messages.find((item) => item.id === messageId && item.role === "assistant") ?? assistantMessage;
     },
     syncToolMessages(turnId: string, toolActivities?: ToolActivity[] | null, persist = true) {
@@ -3001,6 +3121,17 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
 
+        // 历史模式下终态事件：仅解锁运行态，不污染历史视图（防止状态永久卡死）
+        if (isHistoricalMode(this.historyCursorMode)) {
+          this.clearSubmissionWatchdog();
+          this.$patch((state) => {
+            state.isSubmitting = false;
+            state.activeTurnId = null;
+            state.phase = "ready";
+          });
+          return;
+        }
+
         // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
@@ -3050,6 +3181,7 @@ export const useRuntimeStore = defineStore("runtime", {
         // 立即解锁 isSubmitting/activeTurnId/phase，让用户马上可以发起新一轮对话；
         // trace 终态投影（深拷贝 + upsert）推迟到 STAGE 2 的宏任务中执行，不再阻塞解锁。
         const unlockedPhase = completedPhase === "completed" ? "ready" : completedPhase;
+        this.clearSubmissionWatchdog();
         this.$patch((state) => {
           state.isSubmitting = false;
           state.activeTurnId = null;
@@ -3366,6 +3498,17 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
 
+        // 历史模式下终态事件：仅解锁运行态，不污染历史视图（防止状态永久卡死）
+        if (isHistoricalMode(this.historyCursorMode)) {
+          this.clearSubmissionWatchdog();
+          this.$patch((state) => {
+            state.isSubmitting = false;
+            state.activeTurnId = null;
+            state.phase = "ready";
+          });
+          return;
+        }
+
         // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
@@ -3427,6 +3570,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.outputTokens = payload.outputTokens ?? this.outputTokens;
         this.totalTokens = payload.totalTokens ?? this.totalTokens;
         this.firstTokenLatencyMs = payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs;
+        this.clearSubmissionWatchdog();
         this.isSubmitting = false;
         this.activeTurnId = null;
         this.activeRunId = null;
@@ -3527,6 +3671,17 @@ export const useRuntimeStore = defineStore("runtime", {
           return;
         }
 
+        // 历史模式下终态事件：仅解锁运行态，不污染历史视图（防止状态永久卡死）
+        if (isHistoricalMode(this.historyCursorMode)) {
+          this.clearSubmissionWatchdog();
+          this.$patch((state) => {
+            state.isSubmitting = false;
+            state.activeTurnId = null;
+            state.phase = "ready";
+          });
+          return;
+        }
+
         // ===== STAGE 1 (sync): Critical chat area mutations only =====
         this.commitTurnEventCursor(payload);
         this.flushBufferedStreamText(payload.turnId);
@@ -3578,6 +3733,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.providerSource = payload.providerSource ?? this.providerSource;
         this.providerMode = payload.providerMode ?? this.providerMode;
         this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        this.clearSubmissionWatchdog();
         this.isSubmitting = false;
         this.activeTurnId = null;
         this.activeRunId = null;
@@ -3757,6 +3913,7 @@ export const useRuntimeStore = defineStore("runtime", {
       debugLog("browser-preview:completed", {
         turnId: requestId
       });
+      this.clearSubmissionWatchdog();
       this.isSubmitting = false;
       this.activeTurnId = null;
       this.activeRunId = null;
@@ -3884,7 +4041,7 @@ export const useRuntimeStore = defineStore("runtime", {
         tokenCount: null
       });
       this.messageRevision = null;
-      this.persistHistory();
+      this.scheduleDeferredPersist();
       debugLog("submit", {
         turnId: requestId,
         messageLength: providerMessage.length,
@@ -3893,6 +4050,9 @@ export const useRuntimeStore = defineStore("runtime", {
       });
 
       this.isSubmitting = true;
+      this.startSubmissionWatchdog(requestId);
+      bindFrontendRecorderSession(this.sessionId);
+      bindFrontendRecorderTurn(requestId);
       this.error = null;
       this.phase = "calling_model";
       this.activeTurnId = requestId;
@@ -4061,6 +4221,7 @@ export const useRuntimeStore = defineStore("runtime", {
         this.phase = "failed";
         this.activeTurnId = null;
         this.activeRunId = null;
+        this.clearSubmissionWatchdog();
         this.traceSteps = createSubmitFailureTraceSteps();
         this.publishTraceTimeline(applyProviderPatchToTraceTimeline(
           createSubmitFailureTraceTimeline(),
