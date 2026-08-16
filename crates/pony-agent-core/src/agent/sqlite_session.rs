@@ -409,6 +409,95 @@ impl SqliteSessionBackend {
         Ok(())
     }
 
+    /// PA-090：refs 保护 prune——只删**无任何引用**且超过软上限的最旧记录。
+    /// `protected_turn_ids` = 顶层 refs ∪ 全部节点 refs 指向的 turn_id。
+    /// fail closed：protected 集合为空但表非空时（refs 缺失/损坏）零删除。
+    fn prune_session_traces_protected_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        limit: usize,
+        protected_turn_ids: &std::collections::HashSet<String>,
+    ) -> Result<(), String> {
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM session_turn_traces WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count trace rows: {e}"))?;
+
+        if count <= limit as i64 {
+            return Ok(());
+        }
+
+        // PA-090 fail-closed：protected 集合为空但表非空（refs 缺失/损坏）→ 零删除。
+        if protected_turn_ids.is_empty() {
+            return Ok(());
+        }
+
+        // 收集候选删除（最旧未引用）
+        let mut stmt = tx
+            .prepare(
+                "SELECT turn_id FROM session_turn_traces
+                 WHERE session_id = ?1
+                 ORDER BY trace_order ASC, updated_at_ms ASC, turn_id ASC",
+            )
+            .map_err(|e| format!("prepare prune scan: {e}"))?;
+        let rows = stmt
+            .query_map(params![session_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("query prune scan: {e}"))?;
+        let mut candidates: Vec<String> = Vec::new();
+        for turn_id in rows.filter_map(Result::ok) {
+            if !protected_turn_ids.contains(&turn_id) {
+                candidates.push(turn_id);
+            }
+        }
+
+        let excess = (count - limit as i64) as usize;
+        let to_delete = candidates.into_iter().take(excess).collect::<Vec<_>>();
+        if to_delete.is_empty() {
+            return Ok(());
+        }
+
+        let mut del_stmt = tx
+            .prepare("DELETE FROM session_turn_traces WHERE session_id = ?1 AND turn_id = ?2")
+            .map_err(|e| format!("prepare protected prune delete: {e}"))?;
+        for turn_id in &to_delete {
+            del_stmt
+                .execute(params![session_id, turn_id])
+                .map_err(|e| format!("protected prune delete: {e}"))?;
+        }
+
+        // 重排 trace_order
+        let mut reorder_stmt = tx
+            .prepare(
+                "SELECT turn_id FROM session_turn_traces
+                 WHERE session_id = ?1
+                 ORDER BY trace_order ASC, updated_at_ms ASC, turn_id ASC",
+            )
+            .map_err(|e| format!("prepare protected reorder scan: {e}"))?;
+        let remaining = reorder_stmt
+            .query_map(params![session_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("query protected reorder scan: {e}"))?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let mut update_stmt = tx
+            .prepare(
+                "UPDATE session_turn_traces
+                 SET trace_order = ?3
+                 WHERE session_id = ?1 AND turn_id = ?2",
+            )
+            .map_err(|e| format!("prepare protected reorder update: {e}"))?;
+        for (index, turn_id) in remaining.iter().enumerate() {
+            update_stmt
+                .execute(params![session_id, turn_id, index as i64])
+                .map_err(|e| format!("update protected trace order: {e}"))?;
+        }
+
+        Ok(())
+    }
+
     fn update_turn_trace_row_tx<F>(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -499,7 +588,27 @@ impl SqliteSessionBackend {
         table_traces: Vec<TurnTraceRecord>,
     ) -> Vec<TurnTraceRecord> {
         match session.trace_migration_state {
-            TraceMigrationState::TraceTableAuthoritative => table_traces,
+            TraceMigrationState::TraceTableAuthoritative => {
+                // PA-090：顶层 trace 按顶层 refs 过滤（只显示当前分支），
+                // 表是全量 Union（含所有节点引用的 trace，供 materialize）。
+                // refs 缺失（旧数据/未迁移）时回退全表。
+                match &session.turn_trace_refs {
+                    Some(refs) => {
+                        let by_id: HashMap<&str, &TurnTraceRecord> = table_traces
+                            .iter()
+                            .map(|trace| (trace.turn_id.as_str(), trace))
+                            .collect();
+                        refs.iter()
+                            .filter_map(|reference| {
+                                by_id
+                                    .get(reference.turn_id.as_str())
+                                    .map(|trace| (*trace).clone())
+                            })
+                            .collect()
+                    }
+                    None => table_traces,
+                }
+            }
             TraceMigrationState::LegacyBlob | TraceMigrationState::DualWrite => {
                 if table_traces.is_empty() {
                     return session.turn_trace_history.clone();
@@ -580,26 +689,28 @@ impl SessionBackend for SqliteSessionBackend {
                     session.conversation_id = id.clone();
                 }
                 let table_traces = self.read_session_traces(conn, &id).ok()?;
-                session.turn_trace_history = self.merge_trace_history(&session, table_traces);
-                // PA-088：节点 materialize——按 refs 从表恢复节点 trace。
+                session.turn_trace_history = self.merge_trace_history(&session, table_traces.clone());
+                // PA-088/PA-090：节点 materialize——按 refs 从**全量表**恢复节点 trace。
+                // 注意：by_id 必须从 table_traces（全量 Union）构建，而非顶层过滤后的
+                // session.turn_trace_history——否则 fork 分支/超 24 轮节点的 refs 会
+                // 解析不到（顶层只显示当前分支），且后续 union 重写会永久删除这些 trace。
                 // Some([]) = authoritative 且确实无 trace（清空不兜底）；
                 // Some(v) = 按 refs 查表组装（缺失的 turn 降级为空并告警）；
                 // None = legacy 旧数据（反序列化已带内嵌 trace，保持）。
+                let full_table_by_id: HashMap<&str, &TurnTraceRecord> = table_traces
+                    .iter()
+                    .map(|trace| (trace.turn_id.as_str(), trace))
+                    .collect();
                 for node in &mut session.history_nodes {
                     if let Some(refs) = &node.turn_trace_refs {
                         if refs.is_empty() {
                             node.turn_trace_history.clear();
                         } else {
-                            let by_id: HashMap<&str, &TurnTraceRecord> = session
-                                .turn_trace_history
-                                .iter()
-                                .map(|trace| (trace.turn_id.as_str(), trace))
-                                .collect();
                             let mut missing = 0usize;
                             node.turn_trace_history = refs
                                 .iter()
                                 .filter_map(|reference| {
-                                    match by_id.get(reference.turn_id.as_str()) {
+                                    match full_table_by_id.get(reference.turn_id.as_str()) {
                                         Some(trace) => Some((*trace).clone()),
                                         None => {
                                             missing += 1;
@@ -2033,9 +2144,226 @@ mod tests {
             .get("s1")
             .expect("session should exist after reload");
         assert_eq!(
-            loaded_session.turn_trace_history.len(),
+loaded_session.turn_trace_history.len(),
             30,
-            "Authoritative 会话 upsert 不应 prune 到 24 行"
+            "Authoritative �Ự upsert ��Ӧ prune �� 24 ��"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn protected_prune_keeps_referenced_traces_and_removes_unreferenced() {
+        // PA-090：refs 保护 prune——被节点/顶层 refs 引用的 trace 不删，
+        // 只删无引用且超限的最旧记录。
+        let dir = unique_dir("protected-prune");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("protected-prune.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+
+        // 写入 5 条 trace
+        for index in 0..5u64 {
+            assert!(matches!(
+                backend.upsert_turn_trace(
+                    "s1",
+                    &trace(&format!("turn-{index}"), "trace", index),
+                    index as usize,
+                ),
+                SessionBackendMutationResult::Succeeded
+            ));
+        }
+
+        // 保护 turn-0 和 turn-4（模拟节点 refs），limit=3 → 应删 turn-1, turn-2
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            let tx = guard.unchecked_transaction().expect("tx");
+            let protected: std::collections::HashSet<String> =
+                ["turn-0".to_string(), "turn-4".to_string()].into_iter().collect();
+            backend
+                .prune_session_traces_protected_tx(&tx, "s1", 3, &protected)
+                .expect("protected prune");
+            tx.commit().expect("commit");
+        } // guard 在此释放连接锁
+
+        let loaded = backend.load_store().expect("load");
+        let traces = &loaded.sessions["s1"].turn_trace_history;
+        let turn_ids: Vec<&str> = traces.iter().map(|t| t.turn_id.as_str()).collect();
+        assert_eq!(turn_ids.len(), 3);
+        assert!(turn_ids.contains(&"turn-0"), "被引用 trace 保留");
+        assert!(turn_ids.contains(&"turn-4"), "被引用 trace 保留");
+        assert!(!turn_ids.contains(&"turn-1"), "无引用最旧被删");
+        assert!(!turn_ids.contains(&"turn-2"), "无引用被删");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn protected_prune_fails_closed_when_all_referenced() {
+        // PA-090：全部被引用时零删除（fail closed 语义）。
+        let dir = unique_dir("protected-prune-all-ref");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("protected-prune-all-ref.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+        for index in 0..5u64 {
+            assert!(matches!(
+                backend.upsert_turn_trace(
+                    "s1",
+                    &trace(&format!("turn-{index}"), "trace", index),
+                    index as usize,
+                ),
+                SessionBackendMutationResult::Succeeded
+            ));
+        }
+
+        // 全部保护，limit=3 → 零删除（保留 5 条）
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            let tx = guard.unchecked_transaction().expect("tx");
+            let protected: std::collections::HashSet<String> =
+                (0..5u64).map(|i| format!("turn-{i}")).collect();
+            backend
+                .prune_session_traces_protected_tx(&tx, "s1", 3, &protected)
+                .expect("protected prune");
+            tx.commit().expect("commit");
+        } // guard 在此释放连接锁
+
+let loaded = backend.load_store().expect("load");
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history.len(),
+            5,
+            "全部被引用时零删除"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn protected_prune_fails_closed_when_protected_set_empty() {
+        // PA-090 P1-3：protected 集合为空但表非空（refs 缺失/损坏）→ 零删除。
+        let dir = unique_dir("protected-prune-empty");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("protected-prune-empty.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+        for index in 0..5u64 {
+            assert!(matches!(
+                backend.upsert_turn_trace(
+                    "s1",
+                    &trace(&format!("turn-{index}"), "trace", index),
+                    index as usize,
+                ),
+                SessionBackendMutationResult::Succeeded
+            ));
+        }
+
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            let tx = guard.unchecked_transaction().expect("tx");
+            let protected: std::collections::HashSet<String> = std::collections::HashSet::new();
+            backend
+                .prune_session_traces_protected_tx(&tx, "s1", 3, &protected)
+                .expect("protected prune");
+            tx.commit().expect("commit");
+        }
+
+        let loaded = backend.load_store().expect("load");
+        assert_eq!(
+            loaded.sessions["s1"].turn_trace_history.len(),
+            5,
+            "protected 为空时零删除（fail closed）"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn node_materialize_uses_full_table_not_top_level_filtered_subset() {
+        // PA-090 P0-1 回归：节点 materialize 必须从全量表解析 refs——
+        // 顶层 refs 过滤只作用于顶层显示；fork 分支/超 24 轮节点的 refs
+        // 若从过滤后子集解析会缺失，且后续 union 重写会永久删除这些 trace。
+        let dir = unique_dir("node-materialize-full-table");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("node-materialize-full-table.db");
+
+        let backend = Box::new(SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        ));
+        let mut store = SessionStore::with_backend(backend);
+        store.append_turn(Some("s1"), "第一问", "第一答", None, Vec::new());
+        store.record_turn_trace(Some("s1"), trace("turn-main", "main", 1));
+        store.append_turn(Some("s1"), "第二问", "第二答", None, Vec::new());
+        store.record_turn_trace(Some("s1"), trace("turn-main-2", "main-2", 2));
+
+        // fork 分支写入独有 trace
+        let (nodes_before, _, _) = store.load_history_graph(Some("s1"));
+        let first_node_id = nodes_before[0].node_id.clone();
+        store
+            .fork_from_history_node(Some("s1"), first_node_id.as_str(), None)
+            .expect("fork");
+        store.append_turn(Some("s1"), "分叉", "分叉答", None, Vec::new());
+        store.record_turn_trace(Some("s1"), trace("turn-fork", "fork", 3));
+
+        // 切回 main 分支并持久化（顶层 refs 只含 main 分支）
+        store
+            .switch_history_branch(Some("s1"), "branch-main", None)
+            .expect("switch to main");
+
+        // 重启：节点 materialize 应从全量表解析（含 fork 分支的 turn-fork）
+        let reloaded_backend = Box::new(SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        ));
+        let mut reloaded = SessionStore::with_backend(reloaded_backend);
+        let snapshot = reloaded.snapshot(Some("s1"), &[]);
+
+        // 顶层只显示 main 分支（2 条）
+        assert_eq!(snapshot.turn_trace_history.len(), 2);
+        assert_eq!(snapshot.turn_trace_history[1].turn_id, "turn-main-2");
+
+        // 所有节点 materialize 完整（含 fork 分支节点）——通过 backend.load_store
+        // 检查完整 SessionState（snapshot 是轻量投影，节点 trace 被清空）。
+        let inspect_backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let loaded_store = inspect_backend.load_store().expect("load store");
+        let loaded_session = loaded_store
+            .sessions
+            .get("s1")
+            .expect("session in loaded store");
+        let mut all_node_trace_ids: Vec<String> = Vec::new();
+        for node in loaded_session.history_nodes.iter() {
+            for trace in &node.turn_trace_history {
+                all_node_trace_ids.push(trace.turn_id.clone());
+            }
+        }
+        assert!(
+            all_node_trace_ids.contains(&"turn-fork".to_string()),
+            "fork 分支节点 trace 应从全量表 materialize（顶层过滤不影响节点）"
         );
 
         fs::remove_dir_all(&dir).ok();

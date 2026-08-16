@@ -3,37 +3,32 @@
 ## Basic Info
 
 - ID: PA-090
-- Status: Backlog
+- Status: Review
 - Priority: P1
 - Complexity: B
 - Owner: @orchestrator
 - Created At: 2026-08-15
-- Updated At: 2026-08-15
+- Updated At: 2026-08-16
 - OpenSpec Change: `session-storage-migration`（待创建）
-- Spec 状态: 待创建
+- Spec 状态: 通过（v3，3 轮对抗审核收敛 + 实施后 code-reviewer 审核修复）
 
 ## Background
 
-PA-088 已完成新写路径（WriteSeparate + 剥离 + refs + 轻量投影），但**存量会话**（LegacyBlob/DualWrite，含 43.77MB 大 blob）保持原样可读写，未受益。存量迁移是解决"打开历史大会话卡死"的最后一步。
-
-存量数据现状（实测）：
-- 最大会话 43.77MB（historyNodes 35.54MB 冗余）
-- 12 个会话、49 条 trace（session_turn_traces 表已有部分数据）
-- 节点 trace 与顶层 trace 可能不一致（节点有顶层已淘汰的 >24 轮 trace）
+PA-088 已完成新写路径（WriteSeparate + 节点 refs + 轻量投影），存量会话（LegacyBlob/DualWrite）保持原样：最大会话 43.77MB（historyNodes 冗余），打开时前端 JSON.parse 卡死。
 
 ## Goal
 
-1. **存量会话迁移**：LegacyBlob/DualWrite → TraceTableAuthoritative（剥离节点 trace + 生成 refs + 写表）
-2. **三源合并**：已有表 ∪ 顶层 blob trace ∪ 所有节点 trace，按 turn_id 去重取最新
-3. **refs 保护 prune**：只删无任何节点 refs 引用的 trace（软上限 + fail closed）
-4. **回滚能力**：迁移前备份 + 可 materialize 回填
-5. 迁移后最大会话 < 5MB（blob 剥离后）
+1. 存量会话迁移为 TraceTableAuthoritative（剥离顶层+节点 trace + 生成 refs + 写表）
+2. 三源合并（已有表 ∪ 顶层 blob ∪ 节点 trace），不丢任何 trace 最新版本
+3. refs 保护 prune（只删无节点引用的 trace）
+4. 迁移后 blob < 5MB，重启后 checkout/fork/branch 语义不变
+5. 可回滚（备份 + materialize 回填）
 
 ## Scope
 
-- `scripts/compact-sessions-db.mjs`：扩展为完整迁移脚本（事务 + per-session 幂等标记 + 三源合并 + turn_id 回填 + 置 Authoritative）
-- `crates/pony-agent-core/src/agent/sqlite_session.rs`：refs 保护 prune 实现（PA-088 已禁用 prune，此处补上）
-- 迁移后验证：重启加载、checkout、fork、branch 切换
+- `scripts/compact-sessions-db.mjs`：完整迁移脚本（进程检测 + VACUUM INTO 备份 + 三源合并 + per-session 事务 + 幂等 marker + fail closed + dry-run 不写库）
+- `crates/pony-agent-core/src/agent/session.rs`：ReplaceAll 全调用点 union + collect_trace_union 稳定顺序
+- `crates/pony-agent-core/src/agent/sqlite_session.rs`：refs 保护 prune + 节点 materialize 用全量表 + 顶层 refs 过滤
 
 ## Non-Goals
 
@@ -42,32 +37,38 @@ PA-088 已完成新写路径（WriteSeparate + 剥离 + refs + 轻量投影）�
 
 ## Acceptance Criteria
 
-1. 存量会话迁移后：blob < 5MB、节点仅 refs、表含全量 Union
-2. 迁移幂等可重跑（per-session 标记 + checksum）
-3. 迁移事务原子（中途崩溃可恢复）
-4. 迁移后重启：checkout/fork/branch 语义不变（materialize 正确）
-5. refs 保护 prune：被节点引用的 trace 不删
-6. 回滚：备份恢复 + materialize 回填
+1. 存量会话迁移后：blob < 5MB、顶层+节点仅 refs、表含全量 Union、状态 `trace_table_authoritative`
+2. 迁移幂等可重跑（四条件跳过 + checksum + --force 决策矩阵）
+3. 迁移事务原子（崩溃可恢复，fail closed）
+4. 迁移后重启：checkout/fork/branch 语义不变（ReplaceAll 全调用点 union + 节点 materialize 全量表）
+5. refs 保护 prune：被引用不删、损坏 fail closed
+6. 回滚：备份恢复（精确）+ materialize 回填（降级）
+7. 迁移后顶层 trace 顺序与迁移前一致
 
 ## Review Plan
 
-- @consultant：迁移策略（三源 precedence / tie-break / 幂等标记 / 回滚）
-- @code-reviewer：脚本安全性（事务 / 崩溃恢复 / 数据完整性）
-- @tester：迁移测试（dry-run / 实跑 / 崩溃注入 / 幂等重跑）
+- spec 3 轮对抗审核（@consultant × 2 + @code-reviewer × 1）→ v3 收敛
+- 实施后 code-reviewer 审核：P0-1（节点 materialize 全量表）+ P1-1~P1-5 全部修复
 
 ## Current Progress
 
-- PA-088 完成（新写路径 + 不 prune 预留）
-- 任务卡创建
+- **spec v3 通过**（3 轮审核收敛）
+- **实施完成**（2026-08-16）：
+  - 3.0 ReplaceAll 全调用点 union + collect_trace_union 稳定顺序 + 顶层 refs 过滤
+  - 3.1 迁移脚本重写（进程检测 fail-closed + VACUUM INTO 备份 + 三源合并 + per-session 事务 + 幂等四条件 + checksum 比对 + prune 接线 + fail closed）
+  - 3.2 refs 保护 prune（3 个测试）
+- **真实迁移成功**：12 会话全部迁移，最大会话 43.77MB → 3.77MB（全部 < 5MB），289/289 refs 可解析，幂等重跑 12 跳过
+- **实施后审核**：code-reviewer 发现 P0-1（节点 materialize 用过滤后子集）+ P1-1~P1-5，全部修复
+- **验证**：core 793 测试通过（含 3 个新 prune 测试 + fork 节点 materialize 回归）
 
 ## Next Action
 
-- 创建 spec → 对抗审核 → 实施
+- 收口：OpenSpec change 归档、任务板更新、提交准备
 
 ## Blockers
 
-- 依赖 PA-088 完成（已满足）
+- 无
 
 ## Resume Hint
 
-- 先读 `scripts/compact-sessions-db.mjs`（现有止血脚本）、PA-088 spec v7（`management/task-system/03_TASKS/PA-088-spec.md`）、`sqlite_session.rs`（prune 逻辑 348-376）
+- 先读 `scripts/compact-sessions-db.mjs`（迁移脚本）、`crates/pony-agent-core/src/agent/sqlite_session.rs`（prune/materialize/merge）、spec v3

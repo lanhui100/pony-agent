@@ -2342,8 +2342,9 @@ impl SessionStore {
             self.backend.persist_session_with_trace_mutation(
                 session_id,
                 &prepared,
+                // PA-090：Authoritative 会话 ReplaceAll 用全量 Union（同主事务路径）。
                 SessionTraceMutation::ReplaceAll {
-                    traces: session.turn_trace_history.clone(),
+                    traces: collect_trace_union(session),
                 },
             ),
             SessionBackendMutationResult::Succeeded
@@ -2365,11 +2366,25 @@ impl SessionStore {
             return;
         };
         let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
+        // PA-090：Authoritative 会话的 ReplaceAll 改用全量 Union——
+        // 否则用顶层 trace（24 行截断）替换表会清空节点 refs 指向的 trace，
+        // 重启 materialize 全部 missing（checkout/restore/fork/switch 均走此路径）。
+        let effective_mutation = if matches!(
+            prepared.trace_migration_state,
+            TraceMigrationState::TraceTableAuthoritative
+        ) && matches!(mutation, SessionTraceMutation::ReplaceAll { .. })
+        {
+            SessionTraceMutation::ReplaceAll {
+                traces: collect_trace_union(session),
+            }
+        } else {
+            mutation.clone()
+        };
         let result = if session_is_persistable(session) {
             self.backend.persist_session_with_trace_mutation(
                 session_id,
                 &prepared,
-                mutation.clone(),
+                effective_mutation,
             )
         } else {
             SessionBackendMutationResult::Unsupported
@@ -2403,7 +2418,8 @@ impl SessionStore {
             )
         {
             let replace_all = SessionTraceMutation::ReplaceAll {
-                traces: session.turn_trace_history.clone(),
+                // PA-090：Authoritative 会话 NotFound 重试同样用全量 Union。
+                traces: collect_trace_union(session),
             };
             if matches!(
                 self.backend.persist_session_with_trace_mutation(
@@ -3340,26 +3356,47 @@ fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
     session.last_referenced_file = node.last_referenced_file.clone();
 }
 
-/// PA-088：收集会话的 trace 全量 Union（顶层 ∪ 全部节点 trace，按 turn_id 去重取最新）。
+/// PA-088/PA-090：收集会话的 trace 全量 Union（顶层 ∪ 全部节点 trace，按 turn_id 去重取最新）。
 /// 用于 Authoritative 会话写表——保证节点 refs 在重启 materialize 时可解析。
+/// **稳定顺序（PA-090）**：顶层 trace 原位顺序优先 → 节点独有 trace 按节点顺序追加；
+/// 同 turn_id 多版本取 updated_at 最新（同时间顶层优先）。禁止 HashMap 无序输出。
 fn collect_trace_union(session: &SessionState) -> Vec<TurnTraceRecord> {
     let mut by_id: HashMap<String, TurnTraceRecord> = HashMap::new();
+    let mut ordered: Vec<TurnTraceRecord> = Vec::new();
+
+    // 顶层原位优先
     for trace in &session.turn_trace_history {
-        by_id.insert(trace.turn_id.clone(), trace.clone());
-    }
-    for node in &session.history_nodes {
-        for trace in &node.turn_trace_history {
-            by_id
-                .entry(trace.turn_id.clone())
-                .and_modify(|existing| {
-                    if trace.updated_at > existing.updated_at {
-                        *existing = trace.clone();
-                    }
-                })
-                .or_insert_with(|| trace.clone());
+        if let Some(existing) = by_id.get(&trace.turn_id) {
+            if trace.updated_at > existing.updated_at {
+                if let Some(slot) = ordered.iter_mut().find(|t| t.turn_id == trace.turn_id) {
+                    *slot = trace.clone();
+                }
+                by_id.insert(trace.turn_id.clone(), trace.clone());
+            }
+        } else {
+            by_id.insert(trace.turn_id.clone(), trace.clone());
+            ordered.push(trace.clone());
         }
     }
-    by_id.into_values().collect()
+
+    // 节点独有按节点顺序追加
+    for node in &session.history_nodes {
+        for trace in &node.turn_trace_history {
+            if let Some(existing) = by_id.get(&trace.turn_id) {
+                if trace.updated_at > existing.updated_at {
+                    if let Some(slot) = ordered.iter_mut().find(|t| t.turn_id == trace.turn_id) {
+                        *slot = trace.clone();
+                    }
+                    by_id.insert(trace.turn_id.clone(), trace.clone());
+                }
+            } else {
+                by_id.insert(trace.turn_id.clone(), trace.clone());
+                ordered.push(trace.clone());
+            }
+        }
+    }
+
+    ordered
 }
 
 /// PA-088：轻量节点投影——清空节点内嵌 trace（保留 turnId/refs/摘要/元数据）。
