@@ -71,13 +71,18 @@ PA-088/090 已把最大会话从 43.77MB 压到 3.77MB，但存储模型仍是"�
   - 验证：core 794 测试通过
 - **阶段 4 完成**（2026-08-17）：影子校验 `scripts/verify-normalized-shadow.mjs`
   - 对比维度：消息逐条（role/content/status/ordinal/turn_id）、trace 集合、节点集合、cursor、元数据
+  - blob 侧 trace 从旧 session_turn_traces 表读（Authoritative 会话 blob 已剥离）
   - **12 会话全部一致，0 处差异**（影子校验通过）
-- **阶段 5-6 待推进**（切读 + 6a/6b）
+- **阶段 5 完成**（2026-08-17）：切读——`load_store_normalized`
+  - load_store 按 `storage.normalized.v1.phase` 分派（observing/retired → 规范化 loader）
+  - 规范化 loader：从 normalized_* 表重建 SessionState（messages→history、trace 表→turn_trace_history、snapshot_json→节点快照、refs materialize、cursor）
+  - 测试：load_store_normalized_rebuilds_session_from_normalized_tables（切读重建）
+  - 验证：core 795 测试通过 + 生产库数据完整性验证（消息 role 交替/节点 snapshot/trace raw_json 可解析）
+- **阶段 6 待推进**（6a/6b：tombstone 表 fencing + 删 blob）
 
 ## Next Action
 
-- 阶段 5：切读（写保持双写）
-- 阶段 6：6a/6b（tombstone 表 fencing）
+- 阶段 6：6a（drain/freeze/barrier + 切换点 backup）/ 6b（tombstone 表 + 删 blob）
 
 ## Blockers
 
