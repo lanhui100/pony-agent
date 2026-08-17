@@ -62,12 +62,19 @@ PA-088/090 已把最大会话从 43.77MB 压到 3.77MB，但存储模型仍是"�
   - 12 会话全部回填成功（98 messages / 61 turns / 61 traces / 244 steps / 641 timeline / 81 activities / 73 nodes）
   - 幂等 marker（storage.normalized.v1:{session_id}）+ checksum 版本化 SHA-256
   - 幂等重跑 12 跳过，0 失败
-- **阶段 3-6 待推进**（materialize 原子协议 + 双写 + 影子校验 + 切读 + 6a/6b）
+- **阶段 3 完成**（2026-08-17）：PersistCommand 双写
+  - `PersistCommand` 枚举（10 命令）+ `epoch` barrier（旧 epoch 拒绝）
+  - `SessionBackend::persist_command` trait 方法（默认 Unsupported）
+  - `SqliteSessionBackend` 统一事务双写：blob（旧 sessions 表）+ 旧 session_turn_traces 表 + normalized_* 表
+  - `sync_blob_trace_tx` 双写同步辅助
+  - 测试：persist_command_writes_normalized_tables_and_checks_epoch（双写 + epoch barrier）
+  - 验证：core 794 测试通过
+- **阶段 4-6 待推进**（影子校验 + 切读 + 6a/6b）
 
 ## Next Action
 
-- 阶段 3：Authoritative→DualWrite materialize 原子协议（epoch barrier + ref 有序校验）+ PersistCommand 双写
-- 阶段 4-6：影子校验 + 切读 + 6a/6b（tombstone 表 fencing）
+- 阶段 4：影子校验（新旧 loader canonical compare）
+- 阶段 5-6：切读 + 6a/6b（tombstone 表 fencing）
 
 ## Blockers
 

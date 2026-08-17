@@ -708,11 +708,141 @@ pub struct TurnTraceRecord {
     pub updated_at: u64,
 }
 
+/// PA-089 阶段 3：规范化双写命令（spec 3.2/3.7 定稿）。
+/// 每个命令由 SqliteSessionBackend 在**统一事务**内同时写 blob（旧 sessions 表）
+/// 与 normalized_* 表。`epoch` 用于迁移 barrier——旧 epoch 命令在 materialize 后拒绝。
+#[derive(Clone, Debug)]
+pub enum PersistCommand {
+    AppendMessage {
+        epoch: u64,
+        session_id: String,
+        message: TurnHistoryMessage,
+        ordinal: usize,
+    },
+    UpsertTurn {
+        epoch: u64,
+        session_id: String,
+        turn: TurnStateRecord,
+    },
+    AppendTrace {
+        epoch: u64,
+        session_id: String,
+        trace: TurnTraceRecord,
+        trace_order: usize,
+    },
+    UpdateTraceTerminal {
+        epoch: u64,
+        session_id: String,
+        turn_id: String,
+        terminal_patch: TraceTerminalPatch,
+    },
+    AppendHookRecords {
+        epoch: u64,
+        session_id: String,
+        turn_id: String,
+        hook_trace_records: Vec<HookTraceRecord>,
+        updated_at: u64,
+    },
+    UpdateHistoryNode {
+        epoch: u64,
+        session_id: String,
+        node: HistoryNode,
+    },
+    UpdateCursor {
+        epoch: u64,
+        session_id: String,
+        cursor: HistoryCursor,
+    },
+    UpdateSessionMeta {
+        epoch: u64,
+        session_id: String,
+        meta_patch: SessionMetaPatch,
+    },
+    RemoveSession {
+        epoch: u64,
+        session_id: String,
+    },
+    PublishMetadata {
+        epoch: u64,
+        key: String,
+        value: String,
+    },
+}
+
+/// turn 的规范化记录（normalized_turns 行）。
+#[derive(Clone, Debug)]
+pub struct TurnStateRecord {
+    pub turn_id: String,
+    pub ordinal: usize,
+    pub phase: Option<String>,
+    pub status: Option<String>,
+    pub user_message_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub completed_at_ms: Option<u64>,
+    pub updated_at_ms: u64,
+}
+
+/// trace 终态补丁（normalized_turn_traces 更新）。
+#[derive(Clone, Debug)]
+pub struct TraceTerminalPatch {
+    pub event_id: Option<String>,
+    pub event_type: Option<String>,
+    pub event_version: Option<String>,
+    pub sequence: Option<u64>,
+    pub emitted_at_ms: Option<u64>,
+    pub updated_at: u64,
+    pub phase: Option<String>,
+}
+
+/// 会话元数据补丁（normalized_sessions 更新）。
+#[derive(Clone, Debug)]
+pub struct SessionMetaPatch {
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub turn_count: Option<usize>,
+    pub last_referenced_file: Option<String>,
+    pub updated_at_ms: Option<u64>,
+}
+
+/// 命令执行结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersistCommandOutcome {
+    Succeeded,
+    Unsupported,
+    /// 旧 epoch 命令被拒绝（materialize barrier 后）。
+    StaleEpoch,
+    Failed,
+}
+
+impl PersistCommand {
+    /// 命令所属 epoch（迁移 barrier 用）。
+    pub fn epoch(&self) -> u64 {
+        match self {
+            PersistCommand::AppendMessage { epoch, .. }
+            | PersistCommand::UpsertTurn { epoch, .. }
+            | PersistCommand::AppendTrace { epoch, .. }
+            | PersistCommand::UpdateTraceTerminal { epoch, .. }
+            | PersistCommand::AppendHookRecords { epoch, .. }
+            | PersistCommand::UpdateHistoryNode { epoch, .. }
+            | PersistCommand::UpdateCursor { epoch, .. }
+            | PersistCommand::UpdateSessionMeta { epoch, .. }
+            | PersistCommand::RemoveSession { epoch, .. }
+            | PersistCommand::PublishMetadata { epoch, .. } => *epoch,
+        }
+    }
+}
+
 pub trait SessionBackend: Send + Sync {
     fn load_store(&self) -> Option<PersistedStore>;
     fn save_store(&self, store: &PersistedStore);
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {
         SeparateTraceTableMode::Off
+    }
+    /// PA-089 阶段 3：规范化双写命令（blob + normalized_* 表统一事务）。
+    /// 默认 Unsupported——File/Memory backend 无需实现；SqliteSessionBackend 实现。
+    fn persist_command(&self, _command: PersistCommand) -> PersistCommandOutcome {
+        PersistCommandOutcome::Unsupported
     }
     fn upsert_session(&self, _session_id: &str, _session: &SessionState) -> bool {
         false

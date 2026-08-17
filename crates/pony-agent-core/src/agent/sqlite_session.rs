@@ -7,9 +7,10 @@ use rusqlite::{params, Connection};
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 
 use super::session::{
-    AttachmentAsset, FileSessionBackend, PersistedStore, SeparateTraceTableMode, SessionBackend,
-    SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionState,
-    SessionTraceMutation, TraceMigrationState, TurnTraceRecord,
+    AttachmentAsset, FileSessionBackend, PersistCommand, PersistCommandOutcome, PersistedStore,
+    SeparateTraceTableMode, SessionBackend, SessionBackendMutationResult,
+    SessionBackendTraceLoadResult, SessionState, SessionTraceMutation, TraceMigrationState,
+    TurnTraceRecord,
 };
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
@@ -846,9 +847,388 @@ impl SqliteSessionBackend {
         )
         .unwrap_or_default()
     }
+    fn apply_persist_command_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        command: &PersistCommand,
+    ) -> Result<(), String> {
+        let epoch = command.epoch();
+        let current_epoch: i64 = tx
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'storage.normalized.v1.epoch'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|raw| raw.parse::<i64>().unwrap_or(0))
+            .unwrap_or(0);
+        if epoch < current_epoch as u64 {
+            return Err(format!("stale epoch: {epoch} < {current_epoch}"));
+        }
+
+        match command {
+            PersistCommand::AppendMessage {
+                session_id,
+                message,
+                ordinal,
+                ..
+            } => {
+                let message_id = message.stable_id();
+                tx.execute(
+                    "INSERT OR REPLACE INTO normalized_messages
+                     (session_id, message_id, turn_id, ordinal, role, content, reasoning_content,
+                      status, model_name, token_count, attachments_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+                    params![
+                        session_id,
+                        message_id,
+                        message.turn_id,
+                        ordinal,
+                        message.role,
+                        message.content,
+                        message.reasoning_content,
+                        message.status.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()),
+                        message.model_name,
+                        message.token_count,
+                        serde_json::to_string(&message.attachments).unwrap_or_else(|_| "[]".to_string()),
+                    ],
+                )
+                .map_err(|e| format!("append message: {e}"))?;
+            }
+            PersistCommand::UpsertTurn {
+                session_id,
+                turn,
+                ..
+            } => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO normalized_turns
+                     (session_id, turn_id, ordinal, phase, status, user_message_id, assistant_message_id,
+                      started_at_ms, completed_at_ms, created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
+                    params![
+                        session_id,
+                        turn.turn_id,
+                        turn.ordinal,
+                        turn.phase,
+                        turn.status.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()),
+                        turn.user_message_id,
+                        turn.assistant_message_id,
+                        turn.started_at_ms,
+                        turn.completed_at_ms,
+                        turn.updated_at_ms,
+                    ],
+                )
+                .map_err(|e| format!("upsert turn: {e}"))?;
+            }
+            PersistCommand::AppendTrace {
+                session_id,
+                trace,
+                trace_order,
+                ..
+            } => {
+                let raw = serde_json::to_string(trace).map_err(|e| format!("serialize trace: {e}"))?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO normalized_turn_traces
+                     (session_id, turn_id, trace_order, phase, provider_name, provider_model, provider_mode,
+                      session_summary, fallback_reason, error, input_tokens, output_tokens, total_tokens,
+                      first_token_latency_ms, turn_duration_ms, updated_at_ms, extension_json, raw_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL, ?17)",
+                    params![
+                        session_id,
+                        trace.turn_id,
+                        trace_order,
+                        trace.phase,
+                        trace.provider_name,
+                        trace.provider_model,
+                        trace.provider_mode,
+                        trace.session_summary,
+                        trace.fallback_reason,
+                        trace.error,
+                        trace.input_tokens,
+                        trace.output_tokens,
+                        trace.total_tokens,
+                        trace.first_token_latency_ms,
+                        trace.turn_duration_ms,
+                        trace.updated_at,
+                        raw,
+                    ],
+                )
+                .map_err(|e| format!("append trace: {e}"))?;
+                // 双写：同步旧 session_turn_traces 表（load_store 读它）+ blob
+                tx.execute(
+                    "INSERT OR REPLACE INTO session_turn_traces
+                     (session_id, turn_id, updated_at_ms, trace_order, trace_data)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        session_id,
+                        trace.turn_id,
+                        trace.updated_at as i64,
+                        trace_order,
+                        raw,
+                    ],
+                )
+                .map_err(|e| format!("append legacy trace: {e}"))?;
+                self.sync_blob_trace_tx(tx, session_id, trace)?;
+            }
+            PersistCommand::UpdateTraceTerminal {
+                session_id,
+                turn_id,
+                terminal_patch,
+                ..
+            } => {
+                let extension: Option<String> = tx
+                    .query_row(
+                        "SELECT extension_json FROM normalized_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
+                        params![session_id, turn_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .unwrap_or(None);
+                let mut ext: serde_json::Value = extension
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_else(|| serde_json::json!({ "v": 1 }));
+                if let Some(event_id) = &terminal_patch.event_id {
+                    ext["eventId"] = serde_json::Value::String(event_id.clone());
+                }
+                if let Some(event_type) = &terminal_patch.event_type {
+                    ext["eventType"] = serde_json::Value::String(event_type.clone());
+                }
+                if let Some(event_version) = &terminal_patch.event_version {
+                    ext["eventVersion"] = serde_json::Value::String(event_version.clone());
+                }
+                if let Some(sequence) = terminal_patch.sequence {
+                    ext["sequence"] = serde_json::json!(sequence);
+                }
+                if let Some(emitted_at_ms) = terminal_patch.emitted_at_ms {
+                    ext["emittedAtMs"] = serde_json::json!(emitted_at_ms);
+                }
+                tx.execute(
+                    "UPDATE normalized_turn_traces
+                     SET phase = COALESCE(?3, phase), updated_at_ms = ?4, extension_json = ?5
+                     WHERE session_id = ?1 AND turn_id = ?2",
+                    params![
+                        session_id,
+                        turn_id,
+                        terminal_patch.phase,
+                        terminal_patch.updated_at,
+                        serde_json::to_string(&ext).unwrap_or_else(|_| "{}".to_string()),
+                    ],
+                )
+                .map_err(|e| format!("update trace terminal: {e}"))?;
+            }
+            PersistCommand::AppendHookRecords {
+                session_id,
+                turn_id,
+                hook_trace_records,
+                updated_at,
+                ..
+            } => {
+                let extension: Option<String> = tx
+                    .query_row(
+                        "SELECT extension_json FROM normalized_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
+                        params![session_id, turn_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .unwrap_or(None);
+                let mut ext: serde_json::Value = extension
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_else(|| serde_json::json!({ "v": 1 }));
+                let mut records = ext
+                    .get("hookTraceRecords")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                for record in hook_trace_records {
+                    records.push(serde_json::to_value(record).unwrap_or(serde_json::Value::Null));
+                }
+                ext["hookTraceRecords"] = serde_json::Value::Array(records);
+                tx.execute(
+                    "UPDATE normalized_turn_traces
+                     SET updated_at_ms = ?3, extension_json = ?4
+                     WHERE session_id = ?1 AND turn_id = ?2",
+                    params![
+                        session_id,
+                        turn_id,
+                        updated_at,
+                        serde_json::to_string(&ext).unwrap_or_else(|_| "{}".to_string()),
+                    ],
+                )
+                .map_err(|e| format!("append hook records: {e}"))?;
+            }
+            PersistCommand::UpdateHistoryNode {
+                session_id,
+                node,
+                ..
+            } => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO normalized_history_nodes
+                     (session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id,
+                      turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+                    params![
+                        session_id,
+                        node.node_id,
+                        node.parent_node_id,
+                        node.branch_id,
+                        node.forked_from_node_id,
+                        serde_json::to_string(&node.kind).unwrap_or_else(|_| "\"checkpoint\"".to_string()),
+                        node.turn_id,
+                        serde_json::to_string(&node.turn_trace_refs).unwrap_or_else(|_| "null".to_string()),
+                        node.run_id,
+                        serde_json::to_string(&node.workspace_ref).unwrap_or_else(|_| "null".to_string()),
+                        node.summary,
+                        node.title,
+                        node.created_at_ms,
+                    ],
+                )
+                .map_err(|e| format!("update history node: {e}"))?;
+            }
+            PersistCommand::UpdateCursor {
+                session_id,
+                cursor,
+                ..
+            } => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO normalized_history_cursor
+                     (session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id,
+                      cursor_version, mode, checkout_mode, checkout_status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        session_id,
+                        cursor.visible_node_id,
+                        cursor.active_branch_id,
+                        cursor.branch_head_node_id,
+                        cursor.workspace_node_id,
+                        cursor.cursor_version,
+                        serde_json::to_string(&cursor.mode).unwrap_or_else(|_| "\"live\"".to_string()),
+                        serde_json::to_string(&cursor.checkout_mode).unwrap_or_else(|_| "null".to_string()),
+                        serde_json::to_string(&cursor.checkout_status).unwrap_or_else(|_| "null".to_string()),
+                    ],
+                )
+                .map_err(|e| format!("update cursor: {e}"))?;
+            }
+            PersistCommand::UpdateSessionMeta {
+                session_id,
+                meta_patch,
+                ..
+            } => {
+                tx.execute(
+                    "UPDATE normalized_sessions
+                     SET title = COALESCE(?2, title), summary = COALESCE(?3, summary),
+                         turn_count = COALESCE(?4, turn_count),
+                         last_referenced_file = COALESCE(?5, last_referenced_file),
+                         updated_at_ms = COALESCE(?6, updated_at_ms),
+                         state_version = state_version + 1
+                     WHERE session_id = ?1",
+                    params![
+                        session_id,
+                        meta_patch.title,
+                        meta_patch.summary,
+                        meta_patch.turn_count.map(|v| v as i64),
+                        meta_patch.last_referenced_file,
+                        meta_patch.updated_at_ms.map(|v| v as i64),
+                    ],
+                )
+                .map_err(|e| format!("update session meta: {e}"))?;
+            }
+            PersistCommand::RemoveSession { session_id, .. } => {
+                tx.execute(
+                    "DELETE FROM normalized_sessions WHERE session_id = ?1",
+                    params![session_id],
+                )
+                .map_err(|e| format!("remove normalized session: {e}"))?;
+            }
+            PersistCommand::PublishMetadata { key, value, .. } => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                )
+                .map_err(|e| format!("publish metadata: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+    fn sync_blob_trace_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        trace: &TurnTraceRecord,
+    ) -> Result<(), String> {
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT session_data FROM sessions WHERE conversation_id = ?1",
+                params![session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        let Some(raw) = raw else {
+            return Ok(());
+        };
+        let mut session: SessionState =
+            serde_json::from_str(&raw).map_err(|e| format!("parse blob: {e}"))?;
+        let replaced = session
+            .turn_trace_history
+            .iter_mut()
+            .find(|existing| existing.turn_id == trace.turn_id)
+            .map(|existing| {
+                *existing = trace.clone();
+                true
+            })
+            .unwrap_or(false);
+        if !replaced {
+            session.turn_trace_history.push(trace.clone());
+        }
+        let updated = serde_json::to_string(&session).map_err(|e| format!("serialize blob: {e}"))?;
+        tx.execute(
+            "UPDATE sessions SET session_data = ?2, updated_at_ms = ?3 WHERE conversation_id = ?1",
+            params![session_id, updated, trace.updated_at as i64],
+        )
+        .map_err(|e| format!("update blob: {e}"))?;
+        Ok(())
+    }
 }
 
 impl SessionBackend for SqliteSessionBackend {
+    /// PA-089 阶段 3：规范化双写命令——统一事务写 blob（旧 sessions 表）+ normalized_* 表。
+    /// 迁移 barrier：epoch 检查（旧 epoch 命令拒绝）。
+    fn persist_command(&self, command: PersistCommand) -> PersistCommandOutcome {
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                return PersistCommandOutcome::Failed;
+            }
+        };
+        let conn = slot.as_ref().expect("connection initialized");
+        let tx = match conn.unchecked_transaction() {
+            Ok(tx) => tx,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite command begin tx error: {error}");
+                return PersistCommandOutcome::Failed;
+            }
+        };
+
+        let result = self.apply_persist_command_tx(&tx, &command);
+        match result {
+            Ok(()) => {
+                if let Err(error) = tx.commit() {
+                    eprintln!("[pony-agent][session] SQLite command commit error: {error}");
+                    return PersistCommandOutcome::Failed;
+                }
+                PersistCommandOutcome::Succeeded
+            }
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite command error: {error}");
+                PersistCommandOutcome::Failed
+            }
+        }
+    }
+
+    /// PA-089 阶段 3：双写——同步更新旧 sessions 表 blob 的 turn_trace_history。
+    /// 读 blob → upsert trace（按 turn_id）→ 写回。与规范化表写入同一事务。
+
+    /// PA-089 阶段 3：命令事务执行——blob（旧 sessions 表）+ normalized_* 表统一写入。
+    /// 当前 epoch 从 store_metadata 读取（`storage.normalized.v1.epoch`），
+    /// 命令 epoch 小于当前 epoch → StaleEpoch（materialize barrier 后拒绝）。
+
     fn load_store(&self) -> Option<PersistedStore> {
         eprintln!(
             "[pony-agent][session] loading sessions from SQLite {}",
@@ -2554,6 +2934,125 @@ let loaded = backend.load_store().expect("load");
             all_node_trace_ids.contains(&"turn-fork".to_string()),
             "fork 分支节点 trace 应从全量表 materialize（顶层过滤不影响节点）"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn persist_command_writes_normalized_tables_and_checks_epoch() {
+        let dir = unique_dir("persist-command");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("persist-command.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+        // 建 normalized_sessions 行（FK 依赖）
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute(
+                    "INSERT OR REPLACE INTO normalized_sessions (session_id, title, updated_at_ms) VALUES ('s1', 'first', 1000)",
+                    [],
+                )
+                .expect("insert normalized session");
+        }
+
+        let outcome = backend.persist_command(PersistCommand::AppendMessage {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            message: crate::agent::session::TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                attachments: Vec::new(),
+                turn_id: Some("turn-1".to_string()),
+                status: None,
+                model_name: None,
+                token_count: None,
+                reasoning_content: None,
+            },
+            ordinal: 0,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        let outcome = backend.persist_command(PersistCommand::AppendTrace {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            trace: trace("turn-1", "first", 100),
+            trace_order: 0,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute(
+                    "INSERT OR REPLACE INTO store_metadata (key, value) VALUES ('storage.normalized.v1.epoch', '2')",
+                    [],
+                )
+                .expect("set epoch");
+        }
+
+        let outcome = backend.persist_command(PersistCommand::AppendMessage {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            message: crate::agent::session::TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "stale".to_string(),
+                attachments: Vec::new(),
+                turn_id: Some("turn-2".to_string()),
+                status: None,
+                model_name: None,
+                token_count: None,
+                reasoning_content: None,
+            },
+            ordinal: 1,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Failed, "old epoch should fail");
+
+        let outcome = backend.persist_command(PersistCommand::AppendMessage {
+            epoch: 2,
+            session_id: "s1".to_string(),
+            message: crate::agent::session::TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "fresh".to_string(),
+                attachments: Vec::new(),
+                turn_id: Some("turn-2".to_string()),
+                status: None,
+                model_name: None,
+                token_count: None,
+                reasoning_content: None,
+            },
+            ordinal: 1,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        let loaded = backend.load_store().expect("load");
+        assert_eq!(loaded.sessions["s1"].turn_trace_history.len(), 1);
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let msg_count: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM normalized_messages WHERE session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count messages");
+        assert_eq!(msg_count, 2, "two messages in normalized_messages");
+        let trace_count: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM normalized_turn_traces WHERE session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count traces");
+        assert_eq!(trace_count, 1, "one trace in normalized_turn_traces");
 
         fs::remove_dir_all(&dir).ok();
     }
