@@ -763,7 +763,7 @@ fn volatile_context_note(
             "not a git repo".to_string()
         };
         notes.push(format!(
-            "Environment: cwd={}, platform={}, date={}, tz={}, {}.",
+            "Environment: cwd={}, platform={}, date={}, tz={}, {}. 工作区工具（搜索/读取/写入）仅限 cwd 目录内，依赖源码（如 ../crates）不在搜索范围内，需通过 path 参数或明确路径访问。",
             env_info.cwd,
             env_info.platform,
             env_info.current_date,

@@ -5840,6 +5840,10 @@ fn recover_tool_followup_completion<P: crate::agent::provider::ProviderClient>(
             Some("tool_followup_recovery_dropped_redundant_tool_call".to_string()),
         );
         response.tool_call = None;
+        // 兜底：若模型未产出可读文本，注入本地总结（避免"拦截后零产出"）
+        if response.output_text.trim().is_empty() {
+            response.output_text = build_local_recovery_fallback_text(&synthetic_tool_result, hop_records);
+        }
         response.assistant_message = Some(match response.reasoning_content_value.as_ref() {
             Some(reasoning_value) => provider_native_assistant_message_with_reasoning_value(
                 &response.output_text,
@@ -6064,6 +6068,10 @@ fn recover_tool_followup_completion_stream<P: crate::agent::provider::ProviderCl
             Some("tool_followup_recovery_dropped_redundant_tool_call".to_string()),
         );
         response.tool_call = None;
+        // 兜底：若模型未产出可读文本，注入本地总结（避免"拦截后零产出"）
+        if response.output_text.trim().is_empty() {
+            response.output_text = build_local_recovery_fallback_text(&synthetic_tool_result, hop_records);
+        }
         response.assistant_message = Some(match response.reasoning_content_value.as_ref() {
             Some(reasoning_value) => provider_native_assistant_message_with_reasoning_value(
                 &response.output_text,
@@ -6197,6 +6205,45 @@ fn build_tool_followup_recovery_tool_result(
             .unwrap_or_else(|_| recovery_reason.to_string()),
         duration_ms: 0,
     }
+}
+
+/// 兜底文本：recovery 响应丢弃冗余 tool_call 后，若模型没有给出可用文本（output_text 为空），
+/// 本地构造一段基于既有 hop 上下文的总结，保证用户始终获得可读产出，避免"拦截后零产出"。
+fn build_local_recovery_fallback_text(
+    synthetic_tool_result: &crate::agent::tools::ToolResult,
+    hop_records: &[ToolTurnHopRecord],
+) -> String {
+    let recent_summaries = hop_records
+        .iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|hop| {
+            format!(
+                "- {}: {}",
+                hop.tool_call.name,
+                local_tool_result_summary(&hop.tool_result)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let reason = synthetic_tool_result
+        .output
+        .lines()
+        .next()
+        .unwrap_or("已停止重复的工具调用")
+        .to_string();
+    format!(
+        "已停止重复探索并进入本地收口。\n原因：{}\n\n最近已拿到的上下文：\n{}\n\n如需更精确答案，请直接基于以上内容作答，或明确指出信息缺口。",
+        preview_text(&reason, 240),
+        if recent_summaries.is_empty() {
+            "- 暂无可复用的工具结果。".to_string()
+        } else {
+            recent_summaries
+        }
+    )
 }
 
 fn build_local_tool_followup_recovery_response(
@@ -6492,6 +6539,12 @@ fn canonicalize_tool_argument_value(value: &Value) -> Value {
             let mut keys = map.keys().cloned().collect::<Vec<_>>();
             keys.sort();
             for key in keys {
+                // `description` 是系统提示要求模型在每次工具调用时附上的自由文本说明，
+                // 措辞每次可能不同；它不属于任何工具 schema 的正式参数，若参与签名，
+                // 模型只要换一种措辞就能绕过同一 turn 内的重复调用检测，导致重复检索。
+                if key == "description" {
+                    continue;
+                }
                 if let Some(entry) = map.get(&key) {
                     normalized.insert(key, canonicalize_tool_argument_value(entry));
                 }

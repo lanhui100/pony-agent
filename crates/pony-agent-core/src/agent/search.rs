@@ -171,7 +171,10 @@ impl SearchEngine {
 
         let file_glob = match opts.file_pattern.as_deref() {
             Some(pattern) if !pattern.trim().is_empty() => {
-                Some(compile_glob(pattern, opts.glob_case_insensitive)?)
+                // 保留原始 pattern 字符串：无 glob 元字符的模式（如 `.rs`）按"路径子串过滤"
+                // 语义匹配（工具契约如此描述），而非 glob 字面量——否则 `.rs` 只会匹配名为
+                // `.rs` 的隐藏文件，导致所有目标文件被跳过（scannedFiles=0 的根因）。
+                Some((compile_glob(pattern, opts.glob_case_insensitive)?, pattern.to_string()))
             }
             _ => None,
         };
@@ -212,8 +215,8 @@ impl SearchEngine {
 
             let path = entry.path();
             let relative = relative_path(root, path);
-            if let Some(glob) = &file_glob {
-                if !glob_matches(glob, &relative) {
+            if let Some((glob, raw_pattern)) = &file_glob {
+                if !glob_matches_with_substring(glob, raw_pattern, &relative) {
                     continue;
                 }
             }
@@ -392,6 +395,38 @@ fn glob_matches(matcher: &GlobMatcher, relative: &str) -> bool {
         .next()
         .map(|basename| matcher.is_match(basename))
         .unwrap_or(false)
+}
+
+/// Glob 匹配优先；当原始模式不含 glob 元字符（`*?[]{}` 等）时，按"路径子串过滤"回退：
+/// 相对路径或其 basename 包含该子串即命中。这样工具契约中描述的 `.rs`、`src/agent`
+/// 等子串过滤按直觉工作，而不是被 globset 当作字面量点文件名（导致 scannedFiles=0）。
+fn glob_matches_with_substring(matcher: &GlobMatcher, raw_pattern: &str, relative: &str) -> bool {
+    if glob_matches(matcher, relative) {
+        return true;
+    }
+    if !contains_glob_meta(raw_pattern) {
+        let lower_pattern = raw_pattern.to_lowercase();
+        let relative_lower = relative.to_lowercase();
+        if relative_lower.contains(&lower_pattern) {
+            return true;
+        }
+        if relative
+            .rsplit('/')
+            .next()
+            .map(|basename| basename.to_lowercase().contains(&lower_pattern))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 判断 glob 模式字符串是否包含 glob 元字符（此时应保持 glob 语义）。
+fn contains_glob_meta(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')' | '!'))
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {

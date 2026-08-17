@@ -4904,6 +4904,8 @@ fn compile_path_glob(pattern: &str) -> Result<(), String> {
 /// Mirrors the `SearchEngine`'s glob semantics (design Decision 9): a pattern matches the
 /// workspace-relative path or its basename, so `*.rs` matches files in any subdirectory. Used by
 /// the file-root branches of `search_text`/`glob_files` and by the file-root post-filter.
+/// 与 search.rs 保持一致：无 glob 元字符的模式按"路径子串过滤"回退（如 `.rs` 匹配
+/// `src/tauri_adapter.rs`），避免被 globset 当作字面量点文件名导致 0 命中。
 fn glob_matches_path_or_basename(relative: &str, pattern: &str) -> bool {
     let matcher = globset::GlobBuilder::new(pattern)
         .case_insensitive(true)
@@ -4915,11 +4917,22 @@ fn glob_matches_path_or_basename(relative: &str, pattern: &str) -> bool {
     if matcher.is_match(relative) {
         return true;
     }
-    relative
-        .rsplit('/')
-        .next()
-        .map(|basename| matcher.is_match(basename))
-        .unwrap_or(false)
+    let basename = relative.rsplit('/').next().unwrap_or(relative);
+    if matcher.is_match(basename) {
+        return true;
+    }
+    if !pattern
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')' | '!'))
+    {
+        let lower_pattern = pattern.to_lowercase();
+        if relative.to_lowercase().contains(&lower_pattern)
+            || basename.to_lowercase().contains(&lower_pattern)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn denied_run_command_reason(command: &str) -> Option<String> {
