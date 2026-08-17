@@ -3659,4 +3659,54 @@ let loaded = backend.load_store().expect("load");
         fs::remove_dir_all(&dir).ok();
     }
 
+
+    #[test]
+    fn tombstone_view_forwards_writes_to_session_blobs() {
+        // PA-089 6a：sessions 视图 + INSTEAD OF trigger 应转发 INSERT/UPDATE/DELETE
+        // 到 session_blobs（修复 "cannot modify sessions because it is a view"）。
+        let dir = unique_dir("tombstone-view");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("tombstone-view.db");
+
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        // 模拟 6a：sessions → session_blobs + 视图 + trigger
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard.execute("ALTER TABLE sessions RENAME TO session_blobs", []).expect("rename");
+            guard.execute("CREATE VIEW sessions AS SELECT conversation_id, title, updated_at_ms, session_data FROM session_blobs", []).expect("view");
+            guard.execute(
+                "CREATE TRIGGER trg_sessions_insert INSTEAD OF INSERT ON sessions BEGIN INSERT OR REPLACE INTO session_blobs (conversation_id, title, updated_at_ms, session_data) VALUES (NEW.conversation_id, NEW.title, NEW.updated_at_ms, NEW.session_data); END;",
+                [],
+            ).expect("insert trigger");
+            guard.execute(
+                "CREATE TRIGGER trg_sessions_update INSTEAD OF UPDATE ON sessions BEGIN INSERT OR REPLACE INTO session_blobs (conversation_id, title, updated_at_ms, session_data) VALUES (OLD.conversation_id, NEW.title, NEW.updated_at_ms, NEW.session_data); END;",
+                [],
+            ).expect("update trigger");
+            guard.execute(
+                "CREATE TRIGGER trg_sessions_delete INSTEAD OF DELETE ON sessions BEGIN DELETE FROM session_blobs WHERE conversation_id = OLD.conversation_id; END;",
+                [],
+            ).expect("delete trigger");
+        }
+
+        // upsert_session 写 sessions 视图 → 应转发到 session_blobs
+        let session = minimal_session("s1", "first", 1000);
+        assert!(backend.upsert_session("s1", &session), "upsert via view should succeed");
+
+        // remove_session 删 sessions 视图 → 应转发
+        assert!(backend.remove_session("s1", &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new()), "remove via view should succeed");
+
+        // 验证 session_blobs 已被删除
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let count: i64 = guard
+            .query_row("SELECT COUNT(*) FROM session_blobs WHERE conversation_id = 's1'", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 0, "remove 应转发到 session_blobs");
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
