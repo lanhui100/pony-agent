@@ -115,9 +115,186 @@ impl SqliteSessionBackend {
                 PRIMARY KEY (session_id, turn_id)
              );
              CREATE INDEX IF NOT EXISTS idx_session_turn_traces_session_updated
-                ON session_turn_traces (session_id, trace_order, updated_at_ms);",
+                ON session_turn_traces (session_id, trace_order, updated_at_ms);
+             PRAGMA foreign_keys = ON;",
         )
         .map_err(|e| format!("schema: {e}"))?;
+        self.ensure_normalized_schema(conn)?;
+        Ok(())
+    }
+
+    /// PA-089 阶段 1：规范化并行表（方案 A——旧 sessions 保留为 blob 表，
+    /// 新增 normalized_* 表，阶段 6b 再改名/删除旧表）。
+    /// 本阶段只建表，不改变任何旧读写路径；回填（阶段 2）前这些表为空。
+    fn ensure_normalized_schema(&self, conn: &Connection) -> Result<(), String> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS normalized_sessions (
+                session_id TEXT PRIMARY KEY,
+                workspace_id TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                last_referenced_file TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                state_version INTEGER NOT NULL DEFAULT 0,
+                trace_migration_state TEXT NOT NULL DEFAULT 'legacy_blob',
+                turn_trace_refs_json TEXT,
+                provider_native_transcript_json TEXT,
+                memory_json TEXT
+             );
+             CREATE TABLE IF NOT EXISTS normalized_turns (
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                phase TEXT,
+                status TEXT,
+                user_message_id TEXT,
+                assistant_message_id TEXT,
+                started_at_ms INTEGER,
+                completed_at_ms INTEGER,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, turn_id),
+                UNIQUE (session_id, ordinal),
+                FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS normalized_messages (
+                message_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                turn_id TEXT,
+                ordinal INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                reasoning_content TEXT,
+                status TEXT,
+                model_name TEXT,
+                token_count INTEGER,
+                attachments_json TEXT,
+                created_at_ms INTEGER,
+                UNIQUE (session_id, ordinal),
+                FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_normalized_messages_session_turn_role
+                ON normalized_messages (session_id, turn_id, role);
+             CREATE TABLE IF NOT EXISTS normalized_turn_traces (
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                trace_order INTEGER NOT NULL DEFAULT 0,
+                phase TEXT,
+                provider_name TEXT,
+                provider_model TEXT,
+                provider_mode TEXT,
+                session_summary TEXT,
+                fallback_reason TEXT,
+                error TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                first_token_latency_ms INTEGER,
+                turn_duration_ms INTEGER,
+                updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                extension_json TEXT,
+                PRIMARY KEY (session_id, turn_id),
+                FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS normalized_trace_steps (
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                kind TEXT,
+                state TEXT,
+                label TEXT,
+                text TEXT,
+                error TEXT,
+                duration_ms INTEGER,
+                extension_json TEXT,
+                PRIMARY KEY (session_id, turn_id, ordinal),
+                FOREIGN KEY (session_id, turn_id) REFERENCES normalized_turn_traces(session_id, turn_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS normalized_trace_timeline (
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                entry_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                kind TEXT,
+                label TEXT,
+                state TEXT,
+                text TEXT,
+                reasoning_content TEXT,
+                duration_ms INTEGER,
+                extension_json TEXT,
+                PRIMARY KEY (session_id, turn_id, entry_id),
+                FOREIGN KEY (session_id, turn_id) REFERENCES normalized_turn_traces(session_id, turn_id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_normalized_timeline_seq
+                ON normalized_trace_timeline (session_id, turn_id, sequence);
+             CREATE TABLE IF NOT EXISTS normalized_tool_activities (
+                activity_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                timeline_entry_id TEXT,
+                parent_activity_id TEXT,
+                name TEXT NOT NULL,
+                canonical_tool_name TEXT,
+                status TEXT NOT NULL,
+                description TEXT,
+                arguments_preview TEXT,
+                result_preview TEXT,
+                result_bytes INTEGER,
+                result_truncated INTEGER NOT NULL DEFAULT 0,
+                error_json TEXT,
+                duration_seconds REAL,
+                created_at_ms INTEGER,
+                FOREIGN KEY (session_id, turn_id) REFERENCES normalized_turn_traces(session_id, turn_id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_normalized_tool_activities_turn
+                ON normalized_tool_activities (session_id, turn_id, created_at_ms);
+             CREATE TABLE IF NOT EXISTS normalized_history_branches (
+                branch_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                base_node_id TEXT,
+                head_node_id TEXT,
+                forked_from_branch_id TEXT,
+                forked_from_node_id TEXT,
+                label TEXT NOT NULL DEFAULT '',
+                created_at_ms INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS normalized_history_nodes (
+                node_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                parent_node_id TEXT,
+                branch_id TEXT NOT NULL,
+                forked_from_node_id TEXT,
+                kind TEXT NOT NULL DEFAULT 'checkpoint',
+                turn_id TEXT,
+                turn_trace_refs_json TEXT,
+                run_id TEXT,
+                workspace_ref_json TEXT,
+                summary TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                created_at_ms INTEGER NOT NULL DEFAULT 0,
+                snapshot_json TEXT,
+                FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_normalized_history_nodes_branch
+                ON normalized_history_nodes (session_id, branch_id, parent_node_id);
+             CREATE TABLE IF NOT EXISTS normalized_history_cursor (
+                session_id TEXT PRIMARY KEY,
+                visible_node_id TEXT,
+                active_branch_id TEXT,
+                branch_head_node_id TEXT,
+                workspace_node_id TEXT,
+                cursor_version INTEGER NOT NULL DEFAULT 0,
+                mode TEXT NOT NULL DEFAULT 'live',
+                checkout_mode TEXT,
+                checkout_status TEXT,
+                FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
+             );",
+        )
+        .map_err(|e| format!("normalized schema: {e}"))?;
         Ok(())
     }
 

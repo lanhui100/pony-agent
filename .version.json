@@ -1655,16 +1655,28 @@
           "from": "0.1.65"
         }
       ]
+    },
+    {
+      "commit": "da1c130",
+      "timestamp": "2026-08-17T09:44:06+08:00",
+      "bumps": [
+        {
+          "from": "0.1.66",
+          "segment": "patch",
+          "component": "core",
+          "to": "0.1.67"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-08-17T01:58:04+08:00",
+  "lastBump": "2026-08-17T09:44:06+08:00",
   "tauri": {
     "patch": 78,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 66,
+    "patch": 67,
     "minor": 1,
     "major": 0
   }
