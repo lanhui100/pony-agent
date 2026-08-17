@@ -125,6 +125,7 @@ impl SqliteSessionBackend {
 
     /// PA-089 阶段 1：规范化并行表（方案 A——旧 sessions 保留为 blob 表，
     /// 新增 normalized_* 表，阶段 6b 再改名/删除旧表）。
+    /// v6：复合主键 + raw_json 逃生舱 + history_state_evidence 独立列（与 spec 3.6 定稿一致）。
     /// 本阶段只建表，不改变任何旧读写路径；回填（阶段 2）前这些表为空。
     fn ensure_normalized_schema(&self, conn: &Connection) -> Result<(), String> {
         conn.execute_batch(
@@ -141,6 +142,7 @@ impl SqliteSessionBackend {
                 trace_migration_state TEXT NOT NULL DEFAULT 'legacy_blob',
                 turn_trace_refs_json TEXT,
                 provider_native_transcript_json TEXT,
+                history_state_evidence_json TEXT,
                 memory_json TEXT
              );
              CREATE TABLE IF NOT EXISTS normalized_turns (
@@ -160,8 +162,8 @@ impl SqliteSessionBackend {
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
              CREATE TABLE IF NOT EXISTS normalized_messages (
-                message_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
                 turn_id TEXT,
                 ordinal INTEGER NOT NULL,
                 role TEXT NOT NULL,
@@ -172,6 +174,7 @@ impl SqliteSessionBackend {
                 token_count INTEGER,
                 attachments_json TEXT,
                 created_at_ms INTEGER,
+                PRIMARY KEY (session_id, message_id),
                 UNIQUE (session_id, ordinal),
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
@@ -195,6 +198,7 @@ impl SqliteSessionBackend {
                 turn_duration_ms INTEGER,
                 updated_at_ms INTEGER NOT NULL DEFAULT 0,
                 extension_json TEXT,
+                raw_json TEXT,
                 PRIMARY KEY (session_id, turn_id),
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
@@ -209,6 +213,7 @@ impl SqliteSessionBackend {
                 error TEXT,
                 duration_ms INTEGER,
                 extension_json TEXT,
+                raw_json TEXT,
                 PRIMARY KEY (session_id, turn_id, ordinal),
                 FOREIGN KEY (session_id, turn_id) REFERENCES normalized_turn_traces(session_id, turn_id) ON DELETE CASCADE
              );
@@ -224,15 +229,16 @@ impl SqliteSessionBackend {
                 reasoning_content TEXT,
                 duration_ms INTEGER,
                 extension_json TEXT,
+                raw_json TEXT,
                 PRIMARY KEY (session_id, turn_id, entry_id),
                 FOREIGN KEY (session_id, turn_id) REFERENCES normalized_turn_traces(session_id, turn_id) ON DELETE CASCADE
              );
              CREATE INDEX IF NOT EXISTS idx_normalized_timeline_seq
                 ON normalized_trace_timeline (session_id, turn_id, sequence);
              CREATE TABLE IF NOT EXISTS normalized_tool_activities (
-                activity_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 turn_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
                 timeline_entry_id TEXT,
                 parent_activity_id TEXT,
                 name TEXT NOT NULL,
@@ -246,13 +252,17 @@ impl SqliteSessionBackend {
                 error_json TEXT,
                 duration_seconds REAL,
                 created_at_ms INTEGER,
+                extension_json TEXT,
+                raw_json TEXT,
+                timeline_variants_json TEXT,
+                PRIMARY KEY (session_id, turn_id, activity_id),
                 FOREIGN KEY (session_id, turn_id) REFERENCES normalized_turn_traces(session_id, turn_id) ON DELETE CASCADE
              );
              CREATE INDEX IF NOT EXISTS idx_normalized_tool_activities_turn
                 ON normalized_tool_activities (session_id, turn_id, created_at_ms);
              CREATE TABLE IF NOT EXISTS normalized_history_branches (
-                branch_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL,
                 base_node_id TEXT,
                 head_node_id TEXT,
                 forked_from_branch_id TEXT,
@@ -260,11 +270,12 @@ impl SqliteSessionBackend {
                 label TEXT NOT NULL DEFAULT '',
                 created_at_ms INTEGER NOT NULL DEFAULT 0,
                 updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, branch_id),
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
              CREATE TABLE IF NOT EXISTS normalized_history_nodes (
-                node_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 parent_node_id TEXT,
                 branch_id TEXT NOT NULL,
                 forked_from_node_id TEXT,
@@ -277,6 +288,7 @@ impl SqliteSessionBackend {
                 title TEXT NOT NULL DEFAULT '',
                 created_at_ms INTEGER NOT NULL DEFAULT 0,
                 snapshot_json TEXT,
+                PRIMARY KEY (session_id, node_id),
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
              CREATE INDEX IF NOT EXISTS idx_normalized_history_nodes_branch

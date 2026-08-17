@@ -176,11 +176,52 @@ load_history_graph(session_id) -> HistoryGraph
 
 **migration_state 落库**：`store_metadata` key `storage.normalized.v1.phase`（全局）+ 会话级 marker `{migration_state, normalized_ready, shadow_passed, checksum}`（复用 `storage_dedup.v1:{sessionId}` 模式）。
 
-## 4. 影响面与依赖
+### 3.6 阶段 2 回填逐字段契约（v6 定稿）
 
-- **后端**：sqlite_session.rs、session.rs、control_plane、trace_persistence.rs
-- **前端**：runtime.ts、lib/runtime/*
-- **依赖**：PA-088/090 已完成
+**唯一 authoritative DDL（P0-1/P0-2 闭合）**：复合主键 + 复合 FK + `raw_json` 列 + session-level evidence 字段，**与阶段 1 已提交 DDL 不一致 → 删除重建（normalized 表确认 0 行，方案 C）**。DDL v2 包含：
+- messages：`PRIMARY KEY (session_id, message_id)` + `UNIQUE (session_id, ordinal)`
+- tool_activities：`PRIMARY KEY (session_id, turn_id, activity_id)`
+- history_nodes：`PRIMARY KEY (session_id, node_id)`；history_branches：`PRIMARY KEY (session_id, branch_id)`
+- 每张 trace 子表加 `raw_json` 列（完整原始对象，版本化）
+- normalized_sessions 加 `history_state_evidence_json`（独立列，不塞 memory_json）
+
+**确定性规则（P0-4/5/6 闭合）**：
+- `TurnTraceRecord.session_id = None` → **补当前 session**（与 blob 会话一致）；`Some(x) ≠ 当前` → fail-closed
+- 同一 activity 多个 timeline variant → `timeline_variants_json`（**数组**，record-level 为 authoritative 第 0 项，其余按出现序）
+- message_id 后缀 `-{n}`：按 `(session_id, turn_id, role)` 分组内 ordinal 递增
+- **ordinal 全局分配（P0-6）**：先按"消息 turn（首个 user ordinal）→ trace-only turn（按 trace_order）→ 后续新增"排序后**统一重新编号**（不依赖各自来源序号），保证 `UNIQUE(session_id, ordinal)` 无碰撞
+
+**checksum（P0-7 闭合）**：**版本化 SHA-256**（`sha256:v1:` 前缀）；字段编码 `类型标签 + 长度前缀 + 值`（防 NUL 歧义）；JSON 用 RFC 8785 canonical；REAL 用唯一 round-trip 十进制（`ryu` 格式）；覆盖全部规范化表按 `(session_id, 表名, 主键)` 排序；升级 canonical 规则时保留 spec version，禁止新旧算法直接比较。
+
+### 3.7 阶段 3 materialize 原子协议（v6 定稿）
+
+- **PersistCommand 带 `epoch: u64` 字段**：enqueue 在 admission gate 内校验 epoch；actor 执行前再次校验；**旧 epoch 命令拒绝 + 明确 ACK**（防 materialize 后迟到命令穿透）
+- ref 有序校验：顶层 + **每个节点分别**校验有序序列（非 union）；`version` 的 canonical 对照源 = trace 表 `trace_order`（version 缺失时用 updated_at_ms + trace_order 兜底）
+- 三处状态同步（blob traceMigrationState + normalized_sessions.trace_migration_state + 会话 marker）同事务
+- **提交后内存刷新失败 → 保持 gate 关闭 + 强制重启**（不静默继续）
+- marker 值统一：`{migration_state: "dual_write", normalized_ready: false, shadow_passed: false, checksum: ...}`（`dual_write` 是字段值非整个 marker）
+
+### 3.8 阶段 6a/6b 完整状态机（v6 定稿）
+
+**phase 转换表（含启动恢复动作）**：
+| phase | 进入条件 | 崩溃重启恢复动作 |
+|---|---|---|
+| prepare | 开始切换 | backup manifest 存在 + checksum 匹配 → 继续；否则重建 backup 后继续 |
+| frozen | prepare 完成 | 继续观察（trigger 已装） |
+| observing | frozen + 观察窗口 | 继续观察 |
+| retire_pending | 观察通过 | 检查 tombstone 表已建 + phase 已写 → 继续 6b；否则重做 |
+| retired | 6b 完成 | 终态（tombstone 门禁常驻） |
+| rollback_pending | 回滚决定 | 完成回滚 → rolled_back |
+| rolled_back | 回滚完成 | 终态（恢复双写） |
+
+**fencing（P0-8 修正）**：
+- frozen 后：数据库 trigger `RAISE(ABORT)` 拒绝写旧 `sessions` 表
+- **rollback 前同事务撤销/授权 trigger**（防自锁：rollback 需要写 blob 但 trigger 拒绝）
+- **6b 防旧版重建 `sessions`**：**保留名为 `sessions` 的只读 tombstone 表**（或只读 view）阻止旧版 `CREATE TABLE IF NOT EXISTS` 重建——**不能依赖被 DROP 表上的 trigger**（DROP TABLE 自动删除附属 trigger，且 trigger 无法拦截 CREATE TABLE）
+
+**backup identity**：外部 manifest（实例 ID + schema/user_version + 源 checksum + backup checksum + phase + timestamp）；观察窗口后恢复 backup 会丢 frozen 后规范化写（声明 RPO + 人工确认）。
+
+## 4. 影响面与依赖
 
 ## 5. 任务拆解（分阶段）
 
@@ -229,3 +270,6 @@ load_history_graph(session_id) -> HistoryGraph
 - 阶段 1（建表）：有条件放行——建表前须补：FK ON DELETE CASCADE 实际 DDL、nullable/NOT NULL/默认值、state_version/created_at_ms/history_state_evidence 落位、snapshot_json 完整字段契约（含 turn_trace_history 语义）、TurnTraceRecord/TraceTimelineEntry/TurnToolActivity 逐字段映射矩阵、schema version/phase/旧版本读写门禁
 - 阶段 2-6：暂不通过——需补：回填逐字段契约（history_state_evidence/created_at/state_version/turns 并集）、materialize 原子协议（同事务 + 写队列 barrier + 缺 ref fail-closed + marker 值统一 dual_write）、6a 持久化状态机（prepare/frozen/observing/rollback_pending/rolled_back + writer fencing + rollback 前冻结规范化写）
 **剩余风险**：memory_json 结构契约、snapshot_json 超限策略、tool_activities 去重键（record-level vs timeline-level）、message_id -{n} 计算规则、ordinal 作用域（session 内）
+### v4（2026-08-16）：补全阶段 2-6 执行级契约——3.6 回填逐字段矩阵、3.7 materialize 原子协议、3.8 6a 持久化状态机。待复审。
+### v5（2026-08-16）：采纳 v4 复审（B+C 混合方案）——复合主键、trace 三源合并、TurnTraceRecord 逐字段补全、子结构无损映射、turns ordinal fallback、checksum 定义、materialize 三处状态同步 + ref 有序校验 + barrier + 独立 marker namespace、6a prepare 崩溃恢复 + rolled_back 完成态 + backup manifest + trigger fencing。待复审。
+### v6（2026-08-16，定稿）：采纳 v5 复审——唯一 authoritative DDL（复合主键 + raw_json + history_state_evidence 独立列，与阶段 1 DDL 不一致 → 删除重建方案 C，normalized 表确认 0 行）、session_id=None 补当前 session、timeline_variants_json 数组、ordinal 全局重新编号（防 UNIQUE 碰撞）、checksum 版本化 SHA-256 + 类型标签长度前缀 + RFC 8785 + ryu 十进制、PersistCommand 带 epoch + admission gate 双校验、ref version canonical 源 = trace_order、提交后内存刷新失败强制重启、6a/6b 完整转换表（retire_pending）+ 每 phase 崩溃恢复、rollback 同事务撤销 trigger（防自锁）、**6b 用只读 tombstone 表防旧版重建 sessions（trigger 无法拦截 CREATE TABLE）**。阶段 1 DDL 已同步升级（复合主键/raw_json/evidence 列）。
