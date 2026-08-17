@@ -69,12 +69,15 @@ PA-088/090 已把最大会话从 43.77MB 压到 3.77MB，但存储模型仍是"�
   - `sync_blob_trace_tx` 双写同步辅助
   - 测试：persist_command_writes_normalized_tables_and_checks_epoch（双写 + epoch barrier）
   - 验证：core 794 测试通过
-- **阶段 4-6 待推进**（影子校验 + 切读 + 6a/6b）
+- **阶段 4 完成**（2026-08-17）：影子校验 `scripts/verify-normalized-shadow.mjs`
+  - 对比维度：消息逐条（role/content/status/ordinal/turn_id）、trace 集合、节点集合、cursor、元数据
+  - **12 会话全部一致，0 处差异**（影子校验通过）
+- **阶段 5-6 待推进**（切读 + 6a/6b）
 
 ## Next Action
 
-- 阶段 4：影子校验（新旧 loader canonical compare）
-- 阶段 5-6：切读 + 6a/6b（tombstone 表 fencing）
+- 阶段 5：切读（写保持双写）
+- 阶段 6：6a/6b（tombstone 表 fencing）
 
 ## Blockers
 
