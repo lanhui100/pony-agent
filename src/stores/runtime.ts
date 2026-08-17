@@ -3189,7 +3189,10 @@ export const useRuntimeStore = defineStore("runtime", {
         });
 
         // Yield to browser — let Vue flush reactivity + DOM for chat area
-        window.setTimeout(() => {
+        // Yield to browser — let Vue flush reactivity + DOM for chat area.
+        // PA-089 优化：STAGE 2 改 runLowPriorityTurnWork（requestIdleCallback 空闲执行）——
+        // completed 后不再用 setTimeout(0) 抢占主线程做 trace 深拷贝（实测 500ms+ 卡顿源）。
+        runLowPriorityTurnWork(() => {
           if (
             this.sessionId !== completedSessionId ||
             isHistoricalMode(this.historyCursorMode) ||
@@ -3458,7 +3461,7 @@ export const useRuntimeStore = defineStore("runtime", {
             traceCacheHitInputTokens:
               this.turnTraceHistory.find((turn) => turn.turnId === payload.turnId)?.cacheHitInputTokens ?? null
           });
-        }, 0);
+        });
       });
 
       const failedUnlisten = await safeListen<TurnStreamEvent>("turn:failed", ({ payload }) => {
