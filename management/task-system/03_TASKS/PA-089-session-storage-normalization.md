@@ -77,12 +77,17 @@ PA-088/090 已把最大会话从 43.77MB 压到 3.77MB，但存储模型仍是"�
   - load_store 按 `storage.normalized.v1.phase` 分派（observing/retired → 规范化 loader）
   - 规范化 loader：从 normalized_* 表重建 SessionState（messages→history、trace 表→turn_trace_history、snapshot_json→节点快照、refs materialize、cursor）
   - 测试：load_store_normalized_rebuilds_session_from_normalized_tables（切读重建）
-  - 验证：core 795 测试通过 + 生产库数据完整性验证（消息 role 交替/节点 snapshot/trace raw_json 可解析）
-- **阶段 6 待推进**（6a/6b：tombstone 表 fencing + 删 blob）
+  - 验证：core 795 测试通过 + 生产库数据完整性验证
+- **阶段 6a 完成**（2026-08-17）：切换脚本 `scripts/finalize-normalized.mjs`
+  - 6a freeze：切换点 backup（integrity ok）+ tombstone（sessions → session_blobs 视图）+ phase=frozen
+  - 验证：tombstone 视图可读（旧代码兼容）、blob 数据保留（12 行可回滚）、规范化数据完整
+  - **应用下次启动将走规范化读取（写仍双写）——需用户启动验证**
+- **阶段 6b 待执行**（观察确认后）：retire + 删 blob（不可逆）
 
 ## Next Action
 
-- 阶段 6：6a（drain/freeze/barrier + 切换点 backup）/ 6b（tombstone 表 + 删 blob）
+- **用户验证**：启动应用确认规范化读取正常（对话/历史/trace 面板）
+- 观察确认后：`node scripts/finalize-normalized.mjs --retire` → 观察 → `--delete-blob`（不可逆）
 
 ## Blockers
 
