@@ -56,17 +56,18 @@ PA-088/090 已把最大会话从 43.77MB 压到 3.77MB，但存储模型仍是"�
 
 ## Current Progress
 
-- **spec v3 通过**（3 轮对抗审核：阶段 0-1 有条件通过，阶段 2-6 需补执行级契约）
-- **阶段 0-1 完成**（2026-08-16）：
-  - 阶段 0：备份逻辑（复用 PA-090 脚本 VACUUM INTO + integrity_check + 进程检测）
-  - 阶段 1：`ensure_normalized_schema`——10 张 normalized_* 并行表（方案 A：旧 sessions 保留为 blob 表）+ FK ON DELETE CASCADE + 索引 + PRAGMA foreign_keys=ON
-  - 验证：core 793 测试通过（建表不影响旧路径）+ 生产库 DDL 执行成功
-- **阶段 2-6 待推进**（需先补执行级契约：回填逐字段矩阵、materialize 原子协议、6a 状态机）
+- **spec v6 定稿**（6 轮对抗审核：阶段 0-1 有条件通过，阶段 2-6 契约定稿）
+- **阶段 0-1 完成**（2026-08-16）：备份 + normalized_* 并行表 DDL（v6：复合主键 + raw_json + evidence 列）
+- **阶段 2 完成**（2026-08-17）：回填脚本 `scripts/migrate-sessions-schema.mjs`
+  - 12 会话全部回填成功（98 messages / 61 turns / 61 traces / 244 steps / 641 timeline / 81 activities / 73 nodes）
+  - 幂等 marker（storage.normalized.v1:{session_id}）+ checksum 版本化 SHA-256
+  - 幂等重跑 12 跳过，0 失败
+- **阶段 3-6 待推进**（materialize 原子协议 + 双写 + 影子校验 + 切读 + 6a/6b）
 
 ## Next Action
 
-- 阶段 2（回填）：补回填逐字段契约（history_state_evidence/created_at/state_version/turns 并集/message_id 规则）→ 实施回填脚本
-- 阶段 3-6：materialize 原子协议 + 双写 + 影子校验 + 切读 + 6a/6b
+- 阶段 3：Authoritative→DualWrite materialize 原子协议（epoch barrier + ref 有序校验）+ PersistCommand 双写
+- 阶段 4-6：影子校验 + 切读 + 6a/6b（tombstone 表 fencing）
 
 ## Blockers
 
