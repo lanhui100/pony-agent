@@ -1,6 +1,6 @@
 [package]
 name = "pony-agent-core"
-version = "0.1.70"
+version = "0.1.71"
 edition = "2021"
 
 [lib]
@@ -35,6 +35,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["linux-nati
 
 [dev-dependencies]
 zip = "8.6"
+
 
 
 

@@ -2510,6 +2510,67 @@ impl SessionStore {
         } else {
             mutation.clone()
         };
+        // PA-089 阶段 3 接线：Authoritative 会话的增量 trace mutation 走 PersistCommand
+        // 增量命令（AppendTrace/UpdateTraceTerminal/AppendHookRecords）——只写变化行，
+        // 替代全量 persist_session_with_trace_mutation（每次全量序列化 blob + 重建表，
+        // 是"生成结束后卡顿"的根因：completed 后全量写 3.77MB blob + 全部 trace 行）。
+        let is_authoritative = matches!(
+            prepared.trace_migration_state,
+            TraceMigrationState::TraceTableAuthoritative
+        );
+        if is_authoritative && session_is_persistable(session) {
+            let command = match &effective_mutation {
+                SessionTraceMutation::UpsertOne { trace, trace_order } => {
+                    Some(PersistCommand::AppendTrace {
+                        epoch: 1,
+                        session_id: session_id.to_string(),
+                        trace: trace.clone(),
+                        trace_order: *trace_order,
+                    })
+                }
+                SessionTraceMutation::UpdateTerminalEvent {
+                    turn_id,
+                    event_id,
+                    event_type,
+                    event_version,
+                    sequence,
+                    emitted_at_ms,
+                    updated_at,
+                } => Some(PersistCommand::UpdateTraceTerminal {
+                    epoch: 1,
+                    session_id: session_id.to_string(),
+                    turn_id: turn_id.clone(),
+                    terminal_patch: TraceTerminalPatch {
+                        event_id: event_id.clone(),
+                        event_type: event_type.clone(),
+                        event_version: event_version.clone(),
+                        sequence: *sequence,
+                        emitted_at_ms: *emitted_at_ms,
+                        updated_at: *updated_at,
+                        phase: None,
+                    },
+                }),
+                SessionTraceMutation::AppendHookRecords {
+                    turn_id,
+                    hook_trace_records,
+                    updated_at,
+                } => Some(PersistCommand::AppendHookRecords {
+                    epoch: 1,
+                    session_id: session_id.to_string(),
+                    turn_id: turn_id.clone(),
+                    hook_trace_records: hook_trace_records.clone(),
+                    updated_at: *updated_at,
+                }),
+                _ => None,
+            };
+            if let Some(command) = command {
+                let outcome = self.backend.persist_command(command);
+                if matches!(outcome, PersistCommandOutcome::Succeeded) {
+                    return;
+                }
+                // 命令失败 → 回退全量路径（不丢数据）
+            }
+        }
         let result = if session_is_persistable(session) {
             self.backend.persist_session_with_trace_mutation(
                 session_id,

@@ -603,6 +603,8 @@ impl SqliteSessionBackend {
     /// PA-090：refs 保护 prune——只删**无任何引用**且超过软上限的最旧记录。
     /// `protected_turn_ids` = 顶层 refs ∪ 全部节点 refs 指向的 turn_id。
     /// fail closed：protected 集合为空但表非空时（refs 缺失/损坏）零删除。
+    /// 预留：PA-089 阶段 6b（规范化权威后）由运行时按 refs 保护调用；当前未接线。
+    #[allow(dead_code)]
     fn prune_session_traces_protected_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -866,6 +868,28 @@ impl SqliteSessionBackend {
             return Err(format!("stale epoch: {epoch} < {current_epoch}"));
         }
 
+        // 确保 normalized_sessions 行存在（FK 依赖）：命令可能来自未回填的会话
+        // （如缺失行修复/新会话），INSERT OR IGNORE 兜底。
+        if !matches!(command, PersistCommand::PublishMetadata { .. }) {
+            let session_id = match command {
+                PersistCommand::AppendMessage { session_id, .. }
+                | PersistCommand::UpsertTurn { session_id, .. }
+                | PersistCommand::AppendTrace { session_id, .. }
+                | PersistCommand::UpdateTraceTerminal { session_id, .. }
+                | PersistCommand::AppendHookRecords { session_id, .. }
+                | PersistCommand::UpdateHistoryNode { session_id, .. }
+                | PersistCommand::UpdateCursor { session_id, .. }
+                | PersistCommand::UpdateSessionMeta { session_id, .. }
+                | PersistCommand::RemoveSession { session_id, .. } => session_id,
+                PersistCommand::PublishMetadata { .. } => unreachable!(),
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO normalized_sessions (session_id, title, updated_at_ms) VALUES (?1, '', 0)",
+                params![session_id],
+            )
+            .map_err(|e| format!("ensure normalized session: {e}"))?;
+        }
+
         match command {
             PersistCommand::AppendMessage {
                 session_id,
@@ -1014,6 +1038,20 @@ impl SqliteSessionBackend {
                     ],
                 )
                 .map_err(|e| format!("update trace terminal: {e}"))?;
+                // 同步旧 session_turn_traces 表（load_store 读它）
+                self.sync_legacy_trace_update_tx(
+                    tx,
+                    session_id,
+                    turn_id,
+                    &serde_json::json!({
+                        "eventId": terminal_patch.event_id,
+                        "eventType": terminal_patch.event_type,
+                        "eventVersion": terminal_patch.event_version,
+                        "sequence": terminal_patch.sequence,
+                        "emittedAtMs": terminal_patch.emitted_at_ms,
+                    }),
+                    terminal_patch.updated_at,
+                )?;
             }
             PersistCommand::AppendHookRecords {
                 session_id,
@@ -1053,6 +1091,14 @@ impl SqliteSessionBackend {
                     ],
                 )
                 .map_err(|e| format!("append hook records: {e}"))?;
+                // 同步旧 session_turn_traces 表
+                self.sync_legacy_trace_update_tx(
+                    tx,
+                    session_id,
+                    turn_id,
+                    &serde_json::json!({ "hookTraceRecords": hook_trace_records }),
+                    *updated_at,
+                )?;
             }
             PersistCommand::UpdateHistoryNode {
                 session_id,
@@ -1161,28 +1207,44 @@ impl SqliteSessionBackend {
             )
             .ok();
         let Some(raw) = raw else {
+            // blob 行不存在（新会话未全量保存过）→ 创建最小行（剥离语义：blob 不存 trace）
+            let session = SessionState {
+                conversation_id: session_id.to_string(),
+                title: String::new(),
+                summary: String::new(),
+                history: Vec::new(),
+                provider_native_transcript: Vec::new(),
+                turn_trace_history: Vec::new(),
+                trace_migration_state: TraceMigrationState::TraceTableAuthoritative,
+                turn_trace_refs: None,
+                long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: None,
+                updated_at_ms: trace.updated_at,
+                history_nodes: Vec::new(),
+                history_branches: Vec::new(),
+                history_cursor: HistoryCursor::default(),
+                workspace_id: None,
+            };
+            let initial = serde_json::to_string(&session).map_err(|e| format!("serialize blob: {e}"))?;
+            tx.execute(
+                "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
+                 VALUES (?1, '', ?2, ?3)",
+                params![session_id, trace.updated_at as i64, initial],
+            )
+            .map_err(|e| format!("insert blob: {e}"))?;
             return Ok(());
         };
-        let mut session: SessionState =
-            serde_json::from_str(&raw).map_err(|e| format!("parse blob: {e}"))?;
-        let replaced = session
-            .turn_trace_history
-            .iter_mut()
-            .find(|existing| existing.turn_id == trace.turn_id)
-            .map(|existing| {
-                *existing = trace.clone();
-                true
-            })
-            .unwrap_or(false);
-        if !replaced {
-            session.turn_trace_history.push(trace.clone());
-        }
-        let updated = serde_json::to_string(&session).map_err(|e| format!("serialize blob: {e}"))?;
+        // 剥离语义：blob 不存 trace（WriteSeparate + Authoritative），只更新 updated_at_ms。
+        // trace 数据在 session_turn_traces / normalized_turn_traces 表（load_store 表优先）。
         tx.execute(
-            "UPDATE sessions SET session_data = ?2, updated_at_ms = ?3 WHERE conversation_id = ?1",
-            params![session_id, updated, trace.updated_at as i64],
+            "UPDATE sessions SET updated_at_ms = ?2 WHERE conversation_id = ?1",
+            params![session_id, trace.updated_at as i64],
         )
-        .map_err(|e| format!("update blob: {e}"))?;
+        .map_err(|e| format!("update blob ts: {e}"))?;
         Ok(())
     }
     fn load_store_normalized(&self, conn: &Connection) -> Option<PersistedStore> {
@@ -1469,6 +1531,81 @@ impl SqliteSessionBackend {
             path_authorizations,
         })
     }
+    fn sync_legacy_trace_update_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        turn_id: &str,
+        patch: &serde_json::Value,
+        updated_at: u64,
+    ) -> Result<(), String> {
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT trace_data FROM session_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
+                params![session_id, turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        let Some(raw) = raw else {
+            // 行缺失（被删/未写）→ 从 normalized_turn_traces.raw_json 重建修复
+            let normalized_raw: Option<String> = tx
+                .query_row(
+                    "SELECT raw_json FROM normalized_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
+                    params![session_id, turn_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            let Some(normalized_raw) = normalized_raw else {
+                return Ok(());
+            };
+            let mut trace: serde_json::Value =
+                serde_json::from_str(&normalized_raw).map_err(|e| format!("parse normalized trace: {e}"))?;
+            if let serde_json::Value::Object(map) = &mut trace {
+                if let serde_json::Value::Object(patch_map) = patch {
+                    for (key, value) in patch_map {
+                        if !value.is_null() {
+                            map.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            trace["updatedAt"] = serde_json::json!(updated_at);
+            let updated = serde_json::to_string(&trace).map_err(|e| format!("serialize trace: {e}"))?;
+            let order: i64 = tx
+                .query_row(
+                    "SELECT trace_order FROM normalized_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
+                    params![session_id, turn_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            tx.execute(
+                "INSERT OR REPLACE INTO session_turn_traces (session_id, turn_id, updated_at_ms, trace_order, trace_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, turn_id, updated_at as i64, order, updated],
+            )
+            .map_err(|e| format!("repair legacy trace: {e}"))?;
+            return Ok(());
+        };
+        let mut trace: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse legacy trace: {e}"))?;
+        if let serde_json::Value::Object(map) = &mut trace {
+            if let serde_json::Value::Object(patch_map) = patch {
+                for (key, value) in patch_map {
+                    if !value.is_null() {
+                        map.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        trace["updatedAt"] = serde_json::json!(updated_at);
+        let updated = serde_json::to_string(&trace).map_err(|e| format!("serialize legacy trace: {e}"))?;
+        tx.execute(
+            "UPDATE session_turn_traces SET trace_data = ?3, updated_at_ms = ?4 WHERE session_id = ?1 AND turn_id = ?2",
+            params![session_id, turn_id, updated, updated_at as i64],
+        )
+        .map_err(|e| format!("update legacy trace: {e}"))?;
+        Ok(())
+    }
 }
 
 impl SessionBackend for SqliteSessionBackend {
@@ -1507,9 +1644,11 @@ impl SessionBackend for SqliteSessionBackend {
         }
     }
 
+    /// PA-089 阶段 3：双写——同步旧 session_turn_traces 表（load_store 读它）。
+    /// 读 trace_data JSON → 合并 patch → 写回。
+
     /// PA-089 阶段 3：双写——同步更新旧 sessions 表 blob 的 turn_trace_history。
     /// 读 blob → upsert trace（按 turn_id）→ 写回。与规范化表写入同一事务。
-
     fn load_store(&self) -> Option<PersistedStore> {
         eprintln!(
             "[pony-agent][session] loading sessions from SQLite {}",
@@ -3441,4 +3580,5 @@ let loaded = backend.load_store().expect("load");
 
         fs::remove_dir_all(&dir).ok();
     }
+
 }
