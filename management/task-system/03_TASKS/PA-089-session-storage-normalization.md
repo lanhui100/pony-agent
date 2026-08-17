@@ -83,6 +83,11 @@ PA-088/090 已把最大会话从 43.77MB 压到 3.77MB，但存储模型仍是"�
   - 验证：tombstone 视图可读（旧代码兼容）、blob 数据保留（12 行可回滚）、规范化数据完整
   - **应用下次启动将走规范化读取（写仍双写）——需用户启动验证**
 - **阶段 6b 待执行**（观察确认后）：retire + 删 blob（不可逆）
+- **卡顿优化 3 项**（2026-08-17，基于 debug 埋点验证）：
+  1. 后端：Authoritative trace mutation 走 PersistCommand 增量（completed 后 heavy 2.5s → 0）
+  2. 前端：STAGE 2 trace 投影改 rIC 空闲执行（completed 后 500ms medium）
+  3. 前端：切换会话 traceTimeline 深拷贝延迟 rIC + cloneToolActivities artifacts 浅拷贝
+  4. 后端：load_store_normalized 批量预取（启动 N+1 查询 → 全表一次）
 
 ## Next Action
 

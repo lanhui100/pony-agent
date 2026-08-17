@@ -775,6 +775,37 @@ impl SqliteSessionBackend {
         Ok(traces)
     }
 
+    /// PA-089 优化：批量读取全部会话的 trace（一次查询替代每会话一次 = N+1）。
+    fn read_all_session_traces(&self, conn: &Connection) -> Result<HashMap<String, Vec<TurnTraceRecord>>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, trace_data FROM session_turn_traces
+                 ORDER BY session_id, trace_order ASC, updated_at_ms ASC, turn_id ASC",
+            )
+            .map_err(|e| format!("prepare all traces load: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query all traces load: {e}"))?;
+        let mut by_session: HashMap<String, Vec<TurnTraceRecord>> = HashMap::new();
+        for row in rows {
+            let (session_id, raw) = row.map_err(|e| format!("read all trace row: {e}"))?;
+            match serde_json::from_str::<TurnTraceRecord>(&raw) {
+                Ok(trace) => {
+                    by_session.entry(session_id).or_default().push(trace);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[pony-agent][session] malformed trace row for session {}: {}",
+                        session_id, error
+                    );
+                }
+            }
+        }
+        Ok(by_session)
+    }
+
     fn merge_trace_history(
         &self,
         session: &SessionState,
@@ -1275,6 +1306,90 @@ impl SqliteSessionBackend {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
 
+        // PA-089 优化：批量预取全部子表（一次查询替代每会话 5 次查询 = N+1），
+        // 消除启动时 load_store_normalized 的 1.5s 卡顿。
+        let all_messages = conn
+            .prepare("SELECT session_id, message_id, turn_id, ordinal, role, content, reasoning_content, status, model_name, token_count, attachments_json FROM normalized_messages ORDER BY session_id, ordinal")
+            .ok()?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            })
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let all_traces = self.read_all_session_traces(conn).unwrap_or_default();
+        let all_nodes = conn
+            .prepare("SELECT session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json FROM normalized_history_nodes ORDER BY session_id")
+            .ok()?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                ))
+            })
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let all_branches = conn
+            .prepare("SELECT session_id, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms FROM normalized_history_branches ORDER BY session_id")
+            .ok()?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            })
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        let all_cursors = conn
+            .prepare("SELECT session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status FROM normalized_history_cursor ORDER BY session_id")
+            .ok()?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
         let mut sessions: HashMap<String, SessionState> = HashMap::new();
         for (session_id, (title, summary, turn_count, last_referenced_file, _created_at, updated_at_ms, state_version, trace_migration_state, turn_trace_refs_json, provider_native_transcript_json, history_state_evidence_json, memory_json, workspace_id)) in session_rows {
             let mut session = SessionState {
@@ -1325,23 +1440,13 @@ impl SqliteSessionBackend {
                 // 目前仅记录日志，revision 逻辑归阶段 5 前端分页
             }
 
-            // messages → history
-            let messages = conn
-                .prepare("SELECT message_id, turn_id, ordinal, role, content, reasoning_content, status, model_name, token_count, attachments_json FROM normalized_messages WHERE session_id = ?1 ORDER BY ordinal")
-                .ok()?
-                .query_map(params![session_id], |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<i64>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                    ))
+            // messages → history（批量预取）
+            let messages = all_messages
+                .iter()
+                .filter(|(sid, _, _, _, _, _, _, _)| sid == &session_id)
+                .map(|(_, turn_id, content, reasoning_content, status, model_name, token_count, attachments_json)| {
+                    (turn_id.clone(), content.clone(), reasoning_content.clone(), status.clone(), model_name.clone(), token_count.clone(), attachments_json.clone())
                 })
-                .ok()?
-                .filter_map(Result::ok)
                 .collect::<Vec<_>>();
             for (turn_id, content, reasoning_content, status, model_name, token_count, attachments_json) in messages {
                 session.history.push(TurnHistoryMessage {
@@ -1371,33 +1476,17 @@ impl SqliteSessionBackend {
                 }
             }
 
-            // traces → turn_trace_history（从旧 session_turn_traces 读，raw_json 优先）
-            let table_traces = self.read_session_traces(conn, &session_id).unwrap_or_default();
+            // traces → turn_trace_history（批量预取）
+            let table_traces = all_traces.get(&session_id).cloned().unwrap_or_default();
             session.turn_trace_history = table_traces.clone();
 
-            // history_nodes（snapshot_json → 完整节点）
-            let node_rows = conn
-                .prepare("SELECT node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json FROM normalized_history_nodes WHERE session_id = ?1")
-                .ok()?
-                .query_map(params![session_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, String>(9)?,
-                        row.get::<_, String>(10)?,
-                        row.get::<_, i64>(11)?,
-                        row.get::<_, Option<String>>(12)?,
-                    ))
+            // history_nodes（批量预取）
+            let node_rows = all_nodes
+                .iter()
+                .filter(|(sid, _, _, _, _, _, _, _, _, _, _, _, _, _)| sid == &session_id)
+                .map(|(_, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json)| {
+                    (node_id.clone(), parent_node_id.clone(), branch_id.clone(), forked_from_node_id.clone(), kind.clone(), turn_id.clone(), turn_trace_refs_json.clone(), run_id.clone(), workspace_ref_json.clone(), summary.clone(), title.clone(), *created_at_ms, snapshot_json.clone())
                 })
-                .ok()?
-                .filter_map(Result::ok)
                 .collect::<Vec<_>>();
             let full_table_by_id: HashMap<&str, &TurnTraceRecord> = table_traces
                 .iter()
@@ -1456,59 +1545,48 @@ impl SqliteSessionBackend {
                 session.history_nodes.push(node);
             }
 
-            // history_branches
-            let branches = conn
-                .prepare("SELECT branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms FROM normalized_history_branches WHERE session_id = ?1")
-                .ok()?
-                .query_map(params![session_id], |row| {
-                    Ok(HistoryBranch {
-                        branch_id: row.get(0)?,
-                        session_id: session_id.clone(),
-                        base_node_id: row.get(1)?,
-                        head_node_id: row.get(2)?,
-                        forked_from_branch_id: row.get(3)?,
-                        forked_from_node_id: row.get(4)?,
-                        label: row.get(5)?,
-                        created_at_ms: row.get::<_, i64>(6)? as u64,
-                        updated_at_ms: row.get::<_, i64>(7)? as u64,
-                    })
+            // history_branches（批量预取）
+            session.history_branches = all_branches
+                .iter()
+                .filter(|(sid, _, _, _, _, _, _, _, _)| sid == &session_id)
+                .map(|(_, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms)| HistoryBranch {
+                    branch_id: branch_id.clone(),
+                    session_id: session_id.clone(),
+                    base_node_id: base_node_id.clone(),
+                    head_node_id: head_node_id.clone(),
+                    forked_from_branch_id: forked_from_branch_id.clone(),
+                    forked_from_node_id: forked_from_node_id.clone(),
+                    label: label.clone(),
+                    created_at_ms: *created_at_ms as u64,
+                    updated_at_ms: *updated_at_ms as u64,
                 })
-                .ok()?
-                .filter_map(Result::ok)
                 .collect::<Vec<_>>();
-            session.history_branches = branches;
 
-            // history_cursor
-            if let Some(cursor_row) = conn
-                .query_row(
-                    "SELECT visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status FROM normalized_history_cursor WHERE session_id = ?1",
-                    params![session_id],
-                    |row| {
-                        Ok(HistoryCursor {
-                            session_id: session_id.clone(),
-                            visible_node_id: row.get(0)?,
-                            active_branch_id: row.get(1)?,
-                            branch_head_node_id: row.get(2)?,
-                            workspace_node_id: row.get(3)?,
-                            cursor_version: row.get::<_, i64>(4)? as u64,
-                            mode: row
-                                .get::<_, Option<String>>(5)?
-                                .and_then(|raw| serde_json::from_str(&raw).ok())
-                                .unwrap_or(HistoryCursorMode::Live),
-                            checkout_mode: row
-                                .get::<_, Option<String>>(6)?
-                                .and_then(|raw| serde_json::from_str(&raw).ok())
-                                .unwrap_or(HistoryCheckoutMode::TranscriptOnly),
-                            checkout_status: row
-                                .get::<_, Option<String>>(7)?
-                                .and_then(|raw| serde_json::from_str(&raw).ok())
-                                .unwrap_or(HistoryCheckoutStatus::NotRequested),
-                        })
-                    },
-                )
-                .ok()
+            // history_cursor（批量预取）
+            if let Some((_, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status)) = all_cursors
+                .iter()
+                .find(|(sid, _, _, _, _, _, _, _, _)| sid == &session_id)
             {
-                session.history_cursor = cursor_row;
+                session.history_cursor = HistoryCursor {
+                    session_id: session_id.clone(),
+                    visible_node_id: visible_node_id.clone(),
+                    active_branch_id: active_branch_id.clone(),
+                    branch_head_node_id: branch_head_node_id.clone(),
+                    workspace_node_id: workspace_node_id.clone(),
+                    cursor_version: *cursor_version as u64,
+                    mode: mode
+                        .clone()
+                        .and_then(|raw| serde_json::from_str(&raw).ok())
+                        .unwrap_or(HistoryCursorMode::Live),
+                    checkout_mode: checkout_mode
+                        .clone()
+                        .and_then(|raw| serde_json::from_str(&raw).ok())
+                        .unwrap_or(HistoryCheckoutMode::TranscriptOnly),
+                    checkout_status: checkout_status
+                        .clone()
+                        .and_then(|raw| serde_json::from_str(&raw).ok())
+                        .unwrap_or(HistoryCheckoutStatus::NotRequested),
+                };
             }
 
             sessions.insert(session_id, session);

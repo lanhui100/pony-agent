@@ -1189,8 +1189,19 @@ export const useRuntimeStore = defineStore("runtime", {
       this.firstTokenLatencyMs = restoredState?.firstTokenLatencyMs ?? blankFields.firstTokenLatencyMs;
       this.toolActivities = [];
       this.traceSteps = createDefaultTraceSteps();
-      const restoredTraceTimeline = cloneTraceTimeline(this.turnTraceHistory[this.turnTraceHistory.length - 1]?.traceTimeline);
-      this.publishTraceTimeline(restoredTraceTimeline.length ? restoredTraceTimeline : createDefaultTraceTimeline());
+      // 优化（PA-089）：切换会话时 traceTimeline 深拷贝延迟到 rIC——
+      // 避免同步深拷贝（cloneTraceTimeline + cloneToolActivities）阻塞主线程
+      // （实测切换会话 1.5-1.9s 卡顿源之一）。先发布默认 timeline，空闲时再深拷贝。
+      const lastTraceTimeline = this.turnTraceHistory[this.turnTraceHistory.length - 1]?.traceTimeline;
+      this.publishTraceTimeline(createDefaultTraceTimeline());
+      if (lastTraceTimeline?.length) {
+        runLowPriorityTurnWork(() => {
+          const restored = cloneTraceTimeline(lastTraceTimeline);
+          if (restored.length) {
+            this.publishTraceTimeline(restored);
+          }
+        });
+      }
       this.phase = resolveRestoredPersistedPhase(
         restoredState?.phase ?? null,
         restoredState?.canonicalTerminalPhase ?? null,

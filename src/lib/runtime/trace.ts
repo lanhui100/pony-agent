@@ -157,9 +157,11 @@ export function cloneHookTraceRecords(hookTraceRecords?: HookTraceRecord[] | nul
 }
 
 export function cloneToolActivities(toolActivities?: ToolActivity[] | null) {
+  // PA-089 优化：artifacts 改浅拷贝（只读展示，条目不可变；深拷贝嵌套对象
+  // 在 completed 后 rIC 执行时仍占主线程 500ms——浅拷贝消除该成本）。
   return (toolActivities ?? []).map((tool) => ({
     ...tool,
-    artifacts: tool.artifacts ? tool.artifacts.map((artifact) => ({ ...artifact })) : null,
+    artifacts: tool.artifacts ? [...tool.artifacts] : null,
     error: tool.error ? { ...tool.error } : null,
     capabilityInvocation: tool.capabilityInvocation
       ? {
