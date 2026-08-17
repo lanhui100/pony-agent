@@ -2199,7 +2199,11 @@ export const useRuntimeStore = defineStore("runtime", {
         const pending = this.pendingThrottledTraceTimeline;
         this.pendingThrottledTraceTimeline = null;
         if (pending) {
-          this.updateActiveTraceTimeline(pending);
+          // 优化：timeline 深拷贝（updateActiveTraceTimeline → cloneTraceTimeline）
+          // 改 rIC 空闲执行——流式期间不抢占主线程渲染（高频卡顿源之一）。
+          runLowPriorityTurnWork(() => {
+            this.updateActiveTraceTimeline(pending);
+          });
         }
       }, TRACE_TIMELINE_THROTTLE_MS);
     },
@@ -2212,7 +2216,10 @@ export const useRuntimeStore = defineStore("runtime", {
       const pending = this.pendingThrottledTraceTimeline;
       this.pendingThrottledTraceTimeline = null;
       if (pending) {
-        this.updateActiveTraceTimeline(pending);
+        // 优化：深拷贝改 rIC 空闲执行（同 scheduleThrottledTraceTimeline）。
+        runLowPriorityTurnWork(() => {
+          this.updateActiveTraceTimeline(pending);
+        });
       }
     },
     clearPendingTraceTimeline() {
