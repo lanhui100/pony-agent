@@ -77,35 +77,16 @@ function setPhase(db, phase) {
 }
 
 // ── tombstone 表（防旧版 CREATE TABLE IF NOT EXISTS 重建 sessions）──
-// 保留名为 sessions 的视图：旧版 CREATE TABLE IF NOT EXISTS sessions 会因
+// 保留名为 sessions 的只读视图/表：旧版 CREATE TABLE IF NOT EXISTS sessions 会因
 // 表已存在而跳过（不重建），新代码用 normalized 表不受影响。
-// 视图加 INSTEAD OF trigger：INSERT/UPDATE/DELETE 转发到 session_blobs——
-// 兼容所有写路径（save_store/upsert/remove 仍写 sessions 名）。
 function installTombstone(db) {
-  // 旧 sessions 表重命名为 session_blobs（保留数据），建 tombstone 视图 + 转发 trigger
+  // 旧 sessions 表重命名为 session_blobs（保留数据），建只读 tombstone
   db.exec("ALTER TABLE sessions RENAME TO session_blobs");
   db.exec(`CREATE VIEW sessions AS SELECT conversation_id, title, updated_at_ms, session_data FROM session_blobs`);
-  db.exec(`CREATE TRIGGER IF NOT EXISTS trg_sessions_insert INSTEAD OF INSERT ON sessions
-    BEGIN
-      INSERT OR REPLACE INTO session_blobs (conversation_id, title, updated_at_ms, session_data)
-      VALUES (NEW.conversation_id, NEW.title, NEW.updated_at_ms, NEW.session_data);
-    END;
-    CREATE TRIGGER IF NOT EXISTS trg_sessions_update INSTEAD OF UPDATE ON sessions
-    BEGIN
-      INSERT OR REPLACE INTO session_blobs (conversation_id, title, updated_at_ms, session_data)
-      VALUES (OLD.conversation_id, NEW.title, NEW.updated_at_ms, NEW.session_data);
-    END;
-    CREATE TRIGGER IF NOT EXISTS trg_sessions_delete INSTEAD OF DELETE ON sessions
-    BEGIN
-      DELETE FROM session_blobs WHERE conversation_id = OLD.conversation_id;
-    END;`);
-  console.log("tombstone 已装：sessions → session_blobs（视图 + INSTEAD OF trigger 转发读写）");
+  console.log("tombstone 已装：sessions → session_blobs（视图保留只读访问）");
 }
 
 function removeTombstone(db) {
-  db.exec("DROP TRIGGER IF EXISTS trg_sessions_insert");
-  db.exec("DROP TRIGGER IF EXISTS trg_sessions_update");
-  db.exec("DROP TRIGGER IF EXISTS trg_sessions_delete");
   db.exec("DROP VIEW IF EXISTS sessions");
   db.exec("ALTER TABLE session_blobs RENAME TO sessions");
   console.log("tombstone 已移除：session_blobs → sessions");

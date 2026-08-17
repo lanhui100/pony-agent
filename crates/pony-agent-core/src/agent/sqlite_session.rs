@@ -1230,14 +1230,17 @@ impl SqliteSessionBackend {
         session_id: &str,
         trace: &TurnTraceRecord,
     ) -> Result<(), String> {
-        let raw: Option<String> = tx
+        // 剥离语义：blob 不存 trace（WriteSeparate + Authoritative），只维护 updated_at_ms。
+        // 仅检查 blob 行是否存在（不需要读取 session_data 内容）。
+        let exists: bool = tx
             .query_row(
-                "SELECT session_data FROM sessions WHERE conversation_id = ?1",
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE conversation_id = ?1)",
                 params![session_id],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, i64>(0),
             )
-            .ok();
-        let Some(raw) = raw else {
+            .map(|value| value != 0)
+            .unwrap_or(false);
+        if !exists {
             // blob 行不存在（新会话未全量保存过）→ 创建最小行（剥离语义：blob 不存 trace）
             let session = SessionState {
                 conversation_id: session_id.to_string(),
@@ -1268,7 +1271,7 @@ impl SqliteSessionBackend {
             )
             .map_err(|e| format!("insert blob: {e}"))?;
             return Ok(());
-        };
+        }
         // 剥离语义：blob 不存 trace（WriteSeparate + Authoritative），只更新 updated_at_ms。
         // trace 数据在 session_turn_traces / normalized_turn_traces 表（load_store 表优先）。
         tx.execute(
