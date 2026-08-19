@@ -794,8 +794,8 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
 // 主对话渲染与 trace 渲染解耦：agentTurnEvents 的推导结果按 turn 缓存，
 // 避免 traceTimeline/turnTraceHistory 每次变化都对所有 turn 全量重推导
 // （traceTimelineForTurn + modelTraceEntries + 多 hop 内容拼接）。
-// 只缓存非活跃 turn：流式中的 turn 内容持续变化且展示状态由 streaming
-// presentation 驱动，缓存无收益，直接重算。
+// 只缓存非活跃 turn：流式中的 turn 内容持续变化且多 hop content 结构复杂，
+// 增量更新易破坏 hop 语义，直接全量重算。
 const turnEventCache = new Map<
   string,
   { timelineRef: TraceTimelineEntry[] | null; signature: string; events: AgentTurnEvent[] }

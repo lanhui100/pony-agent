@@ -136,6 +136,11 @@ pub struct HistoryNode {
     /// PA-088：持久化时生成的轻量 trace 引用（节点不再内嵌完整 trace）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_trace_refs: Option<Vec<TurnTraceRef>>,
+    /// PA-093：节点覆盖的事件区间（引用化）。`None` = legacy（内嵌快照兜底）；
+    /// `Some((start, end))` = 该节点状态可由事件流 seq [start, end] 折叠重建
+    /// （新节点不再内嵌 history/transcript/trace 快照，checkout 时水位回退）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_seq_range: Option<(u64, u64)>,
     #[serde(default)]
     pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
     #[serde(default)]
@@ -176,6 +181,11 @@ pub struct HistoryCursor {
     pub workspace_node_id: Option<String>,
     #[serde(default)]
     pub cursor_version: u64,
+    /// PA-093：当前事件水位（已落盘事件总数，seq 0-based）。与 cursor_version
+    /// 并存：cursor_version 保持旧语义（前端兼容），event_watermark 供前端
+    /// 展示/后续水位校验（wire 新增字段，旧客户端不传则跳过校验）。
+    #[serde(default)]
+    pub event_watermark: u64,
     #[serde(default)]
     pub mode: HistoryCursorMode,
     #[serde(default)]
@@ -340,6 +350,14 @@ pub struct SessionState {
     pub history_branches: Vec<HistoryBranch>,
     #[serde(default)]
     pub history_cursor: HistoryCursor,
+    /// PA-093：会话事件水位（已落盘事件总数；turn 终态 flush 后由控制平面更新）。
+    /// commit_history_node_from_live_state 以之为引用化区间的起点。
+    #[serde(default)]
+    pub event_watermark: u64,
+    /// PA-093：最近一次节点提交时的水位（引用化区间起点；commit 时记录，
+    /// finalize 时与 event_watermark 形成区间 [last_commit_watermark, new - 1]）。
+    #[serde(default)]
+    pub last_commit_watermark: u64,
     /// Workspace 归属（PA-079）：None → 投影为默认 workspace。serde default 兼容旧数据。
     #[serde(default)]
     pub workspace_id: Option<String>,
@@ -762,6 +780,15 @@ pub enum PersistCommand {
         epoch: u64,
         session_id: String,
     },
+    /// PA-091：turn 终态事件批次落盘（与快照写入同事务）。
+    FlushEvents {
+        epoch: u64,
+        session_id: String,
+        turn_id: String,
+        /// PA-093：事件归属分支（阶段 3 起分支可见性推导的基石；legacy 数据 'main'）。
+        branch_id: String,
+        events: Vec<crate::agent::turn_event::TurnEvent>,
+    },
     PublishMetadata {
         epoch: u64,
         key: String,
@@ -828,6 +855,7 @@ impl PersistCommand {
             | PersistCommand::UpdateCursor { epoch, .. }
             | PersistCommand::UpdateSessionMeta { epoch, .. }
             | PersistCommand::RemoveSession { epoch, .. }
+            | PersistCommand::FlushEvents { epoch, .. }
             | PersistCommand::PublishMetadata { epoch, .. } => *epoch,
         }
     }
@@ -859,6 +887,20 @@ pub trait SessionBackend: Send + Sync {
     }
     fn load_session_traces(&self, _session_id: &str) -> SessionBackendTraceLoadResult {
         SessionBackendTraceLoadResult::Unsupported
+    }
+    /// PA-093：读取会话事件流 `(seq, branch_id, event)`（seq 升序，可截断）。
+    /// 默认返回空（File/Memory backend 不支持——引用化节点在非 SQLite 后端下
+    /// checkout 退化为空视图并告警；生产路径恒为 SqliteSessionBackend）。
+    fn load_turn_events(
+        &self,
+        _session_id: &str,
+        _up_to_seq: Option<u64>,
+    ) -> Vec<(u64, String, crate::agent::turn_event::TurnEvent)> {
+        Vec::new()
+    }
+    /// PA-093：当前事件水位（已落盘事件总数）。默认 0（非 SQLite 后端无事件流）。
+    fn load_event_watermark(&self, _session_id: &str) -> u64 {
+        0
     }
     fn replace_session_traces(
         &self,
@@ -922,6 +964,10 @@ pub struct SessionStore {
     attachment_root: PathBuf,
     memory_write_hook_executor: Arc<dyn MemoryWriteHookExecutor>,
     history_state_hook_executor: Arc<dyn HistoryStateHookExecutor>,
+    /// PA-093：节点 → 投影状态缓存 `(end_seq, history, trace)`。节点 commit 后其
+    /// 事件区间不再追加 → 缓存天然有效（无需失效协议）；重启后由重折叠重建。
+    /// 内存态，不参与持久化。
+    projection_cache: HashMap<String, (u64, Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>)>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -1049,6 +1095,7 @@ impl SessionStore {
             attachment_root,
             memory_write_hook_executor: Arc::new(NoopMemoryWriteHookExecutor),
             history_state_hook_executor: Arc::new(NoopHistoryStateHookExecutor),
+            projection_cache: HashMap::new(),
         };
         if should_save {
             store.save_to_backend();
@@ -1593,6 +1640,19 @@ impl SessionStore {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
         let mut blocked_error = None;
+        // PA-093：块外预折叠——引用化节点由事件流重建视图（&mut self 与
+        // ensure_session 借用互斥，先算结果，块内以纯函数应用）。
+        let fold_result: Option<(Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>)> = {
+            let pre_node = self
+                .sessions
+                .get(&session_key)
+                .and_then(|s| history_node(s, node_id))
+                .cloned();
+            pre_node
+                .as_ref()
+                .filter(|n| n.event_seq_range.is_some())
+                .map(|n| self.fold_node_views(&session_key, n))
+        };
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
@@ -1670,7 +1730,16 @@ impl SessionStore {
                 {
                     branch.head_node_id = Some(node.node_id.clone());
                 }
-                hydrate_session_from_node(session, &node);
+                // PA-093：引用化节点 → 事件折叠重建视图（水位回退）；legacy → 旧路径。
+                match &fold_result {
+                    Some((history, trace)) => hydrate_session_from_projection(
+                        session,
+                        &node,
+                        history.clone(),
+                        trace.clone(),
+                    ),
+                    None => hydrate_session_from_node(session, &node),
+                }
                 session.history_cursor.visible_node_id = Some(node.node_id.clone());
                 session.history_cursor.active_branch_id = Some(branch_id.clone());
                 session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
@@ -1689,6 +1758,18 @@ impl SessionStore {
                     }
                 };
                 bump_cursor_version(&mut session.history_cursor);
+                // PA-093：水位同步到 cursor（wire 面世，前端可获知当前事件水位）。
+                session.history_cursor.event_watermark = session.event_watermark;
+                // PA-093：checkout 是视图切换事实，append 事件（分支可见性推导基石）。
+                crate::agent::turn_flow::emit_global_event(
+                    &session_key,
+                    "checkpoint",
+                    crate::agent::turn_event::TurnEvent::CheckpointCheckout {
+                        node_id: node.node_id.clone(),
+                        mode: serde_json::to_string(&requested_mode)
+                            .unwrap_or_else(|_| "transcript_only".to_string()),
+                    },
+                );
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -1772,6 +1853,26 @@ impl SessionStore {
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
         let mut blocked_error = None;
         let mut restored_node_id = None;
+        // PA-093：块外预折叠（引用化分支头节点由事件流重建视图）。
+        let fold_result: Option<(Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>)> = {
+            let pre_node = self.sessions.get(&session_key).and_then(|s| {
+                let target = branch_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| s.history_cursor.active_branch_id.clone())
+                    .unwrap_or_else(|| DEFAULT_HISTORY_BRANCH_ID.to_string());
+                s.history_branches
+                    .iter()
+                    .find(|b| b.branch_id == target)
+                    .and_then(|b| b.head_node_id.clone())
+                    .and_then(|nid| history_node(s, &nid).cloned())
+            });
+            pre_node
+                .as_ref()
+                .filter(|n| n.event_seq_range.is_some())
+                .map(|n| self.fold_node_views(&session_key, n))
+        };
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
@@ -1821,7 +1922,16 @@ impl SessionStore {
                 let node = history_node(session, &node_id)
                     .cloned()
                     .ok_or_else(|| format!("unknown history node: {node_id}"))?;
-                hydrate_session_from_node(session, &node);
+                // PA-093：引用化节点 → 事件折叠重建视图；legacy → 旧路径。
+                match &fold_result {
+                    Some((history, trace)) => hydrate_session_from_projection(
+                        session,
+                        &node,
+                        history.clone(),
+                        trace.clone(),
+                    ),
+                    None => hydrate_session_from_node(session, &node),
+                }
                 session.history_cursor.visible_node_id = Some(node.node_id.clone());
                 session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
                 session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
@@ -1830,6 +1940,16 @@ impl SessionStore {
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
                 bump_cursor_version(&mut session.history_cursor);
+                session.history_cursor.event_watermark = session.event_watermark;
+                // PA-093：分支恢复 = 视图切换事实，append 事件。
+                crate::agent::turn_flow::emit_global_event(
+                    &session_key,
+                    "checkpoint",
+                    crate::agent::turn_event::TurnEvent::CheckpointCheckout {
+                        node_id: node.node_id.clone(),
+                        mode: "transcript_only".to_string(),
+                    },
+                );
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -1877,6 +1997,18 @@ impl SessionStore {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
         let mut blocked_error = None;
+        // PA-093：块外预折叠（引用化源节点由事件流重建视图）。
+        let fold_result: Option<(Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>)> = {
+            let pre_node = self
+                .sessions
+                .get(&session_key)
+                .and_then(|s| history_node(s, node_id))
+                .cloned();
+            pre_node
+                .as_ref()
+                .filter(|n| n.event_seq_range.is_some())
+                .map(|n| self.fold_node_views(&session_key, n))
+        };
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
@@ -1926,7 +2058,16 @@ impl SessionStore {
                     created_at_ms,
                     updated_at_ms: created_at_ms,
                 });
-                hydrate_session_from_node(session, &source_node);
+                // PA-093：引用化节点 → 事件折叠重建视图；legacy → 旧路径。
+                match &fold_result {
+                    Some((history, trace)) => hydrate_session_from_projection(
+                        session,
+                        &source_node,
+                        history.clone(),
+                        trace.clone(),
+                    ),
+                    None => hydrate_session_from_node(session, &source_node),
+                }
                 session.history_cursor.visible_node_id = Some(source_node.node_id.clone());
                 session.history_cursor.active_branch_id = Some(new_branch_id.clone());
                 session.history_cursor.branch_head_node_id = Some(source_node.node_id.clone());
@@ -1935,6 +2076,17 @@ impl SessionStore {
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
                 bump_cursor_version(&mut session.history_cursor);
+                session.history_cursor.event_watermark = session.event_watermark;
+                // PA-093：fork 是分支事实，append 事件（新分支事件携带 branch_id，
+                // 折叠时按血缘链推导可见集合）。
+                crate::agent::turn_flow::emit_global_event(
+                    &session_key,
+                    "fork",
+                    crate::agent::turn_event::TurnEvent::ForkCreated {
+                        branch_id: new_branch_id.clone(),
+                        from_node_id: source_node.node_id.clone(),
+                    },
+                );
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -1981,6 +2133,20 @@ impl SessionStore {
         let hook_executor = Arc::clone(&self.history_state_hook_executor);
         let mut blocked_error = None;
         let mut target_node_id = None;
+        // PA-093：块外预折叠（引用化分支头节点由事件流重建视图）。
+        let fold_result: Option<(Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>)> = {
+            let pre_node = self.sessions.get(&session_key).and_then(|s| {
+                s.history_branches
+                    .iter()
+                    .find(|b| b.branch_id == branch_id)
+                    .and_then(|b| b.head_node_id.clone())
+                    .and_then(|nid| history_node(s, &nid).cloned())
+            });
+            pre_node
+                .as_ref()
+                .filter(|n| n.event_seq_range.is_some())
+                .map(|n| self.fold_node_views(&session_key, n))
+        };
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
@@ -2025,7 +2191,16 @@ impl SessionStore {
                 let node = history_node(session, &node_id)
                     .cloned()
                     .ok_or_else(|| format!("unknown history node: {node_id}"))?;
-                hydrate_session_from_node(session, &node);
+                // PA-093：引用化节点 → 事件折叠重建视图；legacy → 旧路径。
+                match &fold_result {
+                    Some((history, trace)) => hydrate_session_from_projection(
+                        session,
+                        &node,
+                        history.clone(),
+                        trace.clone(),
+                    ),
+                    None => hydrate_session_from_node(session, &node),
+                }
                 session.history_cursor.visible_node_id = Some(node.node_id.clone());
                 session.history_cursor.active_branch_id = Some(branch.branch_id.clone());
                 session.history_cursor.branch_head_node_id = Some(node.node_id.clone());
@@ -2034,6 +2209,16 @@ impl SessionStore {
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
                 bump_cursor_version(&mut session.history_cursor);
+                session.history_cursor.event_watermark = session.event_watermark;
+                // PA-093：分支切换 = 视图切换事实，append 事件。
+                crate::agent::turn_flow::emit_global_event(
+                    &session_key,
+                    "checkpoint",
+                    crate::agent::turn_event::TurnEvent::CheckpointCheckout {
+                        node_id: node.node_id.clone(),
+                        mode: "transcript_only".to_string(),
+                    },
+                );
                 refresh_session_metadata(session, true);
                 if let Some(resolved_envelope) = build_history_state_hook_envelope(
                     session,
@@ -2350,6 +2535,8 @@ impl SessionStore {
                     session_id: session_id.to_string(),
                     ..HistoryCursor::default()
                 },
+                event_watermark: 0,
+                last_commit_watermark: 0,
                 workspace_id: None,
             })
     }
@@ -2417,6 +2604,124 @@ impl SessionStore {
     /// 列出全部授权条目。
     pub fn list_authorizations(&self) -> Vec<crate::agent::path_permission::AuthorizedPathEntry> {
         self.path_authorizations.entries()
+    }
+
+    /// PA-093：读取会话事件流（backend 支持时）；否则空。
+    pub fn load_turn_events(
+        &self,
+        session_id: &str,
+        up_to_seq: Option<u64>,
+    ) -> Vec<(u64, String, crate::agent::turn_event::TurnEvent)> {
+        self.backend.load_turn_events(session_id, up_to_seq)
+    }
+
+    /// PA-093：当前事件水位（backend 支持时）；否则 0。
+    pub fn load_event_watermark(&self, session_id: &str) -> u64 {
+        self.backend.load_event_watermark(session_id)
+    }
+
+    /// PA-093：当前 active 分支（事件落列用）；会话不存在时 None。
+    pub fn session_active_branch_id(&self, session_id: &str) -> Option<String> {
+        self.sessions.get(session_id).and_then(|session| {
+            session
+                .history_cursor
+                .active_branch_id
+                .clone()
+                .or_else(|| Some(DEFAULT_HISTORY_BRANCH_ID.to_string()))
+        })
+    }
+
+    /// PA-093：flush 成功后同步会话水位 + 将 branch head 节点升级为引用化
+    /// （commit 先于 flush 的时序下，节点先以 legacy 快照提交，事件落盘后
+    /// 清空快照并记录事件区间——flush 失败则节点保持 legacy，数据不丢）。
+    /// 幂等：水位未增长或无新节点时无操作。
+    pub fn finalize_event_watermark(&mut self, session_id: &str, _turn_id: &str) {
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return;
+        };
+        let new_watermark = self.backend.load_event_watermark(session_id);
+        if new_watermark <= session.event_watermark {
+            return;
+        }
+        session.event_watermark = new_watermark;
+        // branch head 节点 = 最近一次 commit 的节点（单线程 turn 流程保证）。
+        if let Some(head_id) = session.history_cursor.branch_head_node_id.clone() {
+            if let Some(node) = session
+                .history_nodes
+                .iter_mut()
+                .find(|n| n.node_id == head_id)
+            {
+                if node.event_seq_range.is_none()
+                    && new_watermark > session.last_commit_watermark
+                {
+                    node.event_seq_range =
+                        Some((session.last_commit_watermark, new_watermark - 1));
+                    // 引用化：事件可重建的视图字段不再内嵌快照。
+                    node.history.clear();
+                    node.provider_native_transcript.clear();
+                    node.turn_trace_history.clear();
+                }
+            }
+        }
+        session.last_commit_watermark = new_watermark;
+    }
+
+    /// PA-093：折叠事件流到节点区间终点，得到会话视图（history/trace）。
+    /// 优先命中投影缓存（节点区间不可变 → 缓存天然有效）；未命中时全量重折叠。
+    fn fold_node_views(
+        &mut self,
+        session_id: &str,
+        node: &HistoryNode,
+    ) -> (Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>) {
+        let Some((_start, end)) = node.event_seq_range else {
+            return (node.history.clone(), node.turn_trace_history.clone());
+        };
+        if let Some((cached_end, history, trace)) = self.projection_cache.get(&node.node_id) {
+            if *cached_end == end {
+                return (history.clone(), trace.clone());
+            }
+        }
+        let events = self.backend.load_turn_events(session_id, Some(end));
+        if events.is_empty() {
+            eprintln!(
+                "[pony-agent][session] event stream empty for referenced node {} (backend without event support?); falling back to empty view",
+                node.node_id
+            );
+        }
+        let (history, trace) = {
+            let session = self.sessions.get(session_id).expect("session exists");
+            fold_session_views(
+                &events,
+                &node.branch_id,
+                &session.history_nodes,
+                &session.history_branches,
+            )
+        };
+        self.projection_cache
+            .insert(node.node_id.clone(), (end, history.clone(), trace.clone()));
+        (history, trace)
+    }
+
+    /// PA-091：turn 终态 flush 事件批次（与快照写入同事务，由 backend 保证）。
+    /// 返回是否成功；失败时调用方只记日志（contained，不阻断流）。
+    pub fn persist_events(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        branch_id: &str,
+        events: Vec<crate::agent::turn_event::TurnEvent>,
+    ) -> bool {
+        if events.is_empty() {
+            return true;
+        }
+        let outcome = self.backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            branch_id: branch_id.to_string(),
+            events,
+        });
+        matches!(outcome, PersistCommandOutcome::Succeeded)
     }
 
     fn save_to_backend(&self) {
@@ -2711,6 +3016,49 @@ impl SessionStore {
             },
             now_timestamp_ms(),
         );
+        // PA-093：时间旅行——引用化节点由事件流折叠重建视图（克隆会话，不污染
+        // 当前内存态；legacy 节点走 snapshot_from_state 内嵌快照路径）。
+        if let Some(nid) = node_id {
+            let is_referenced = history_node(session, nid)
+                .map(|node| node.event_seq_range.is_some())
+                .unwrap_or(false);
+            if is_referenced {
+                let mut view = session.clone();
+                let node = history_node(&view, nid)
+                    .cloned()
+                    .expect("node exists after check");
+                let (history, trace) = fold_session_views(
+                    &self.backend.load_turn_events(
+                        session_id,
+                        node.event_seq_range.map(|(_, e)| e),
+                    ),
+                    &node.branch_id,
+                    &view.history_nodes,
+                    &view.history_branches,
+                );
+                hydrate_session_from_projection(&mut view, &node, history, trace);
+                // 节点视角 cursor（与 snapshot_from_state 节点路径语义对齐），
+                // 然后走会话路径组装（折叠视图在 session 字段，非节点快照）。
+                let branch_head_node_id = view
+                    .history_branches
+                    .iter()
+                    .find(|b| b.branch_id == node.branch_id)
+                    .and_then(|b| b.head_node_id.clone());
+                view.history_cursor.visible_node_id = Some(node.node_id.clone());
+                view.history_cursor.active_branch_id = Some(node.branch_id.clone());
+                view.history_cursor.branch_head_node_id = branch_head_node_id.clone();
+                view.history_cursor.workspace_node_id = Some(node.node_id.clone());
+                view.history_cursor.mode =
+                    if branch_head_node_id.as_deref() == Some(node.node_id.as_str()) {
+                        HistoryCursorMode::Live
+                    } else {
+                        HistoryCursorMode::Historical
+                    };
+                view.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
+                view.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
+                return snapshot_from_state(&view, attachment_assets, None);
+            }
+        }
         snapshot_from_state(session, attachment_assets, node_id)
     }
 
@@ -2877,6 +3225,8 @@ fn default_snapshot_for_session(session_key: &str, node_id: Option<&str>) -> Ses
             session_id: session_key.to_string(),
             ..HistoryCursor::default()
         },
+        event_watermark: 0,
+        last_commit_watermark: 0,
         workspace_id: None,
     };
     snapshot_from_state(&session, Vec::new(), node_id)
@@ -2926,6 +3276,7 @@ fn snapshot_from_state(
             branch_head_node_id: branch_head_node_id.clone(),
             workspace_node_id: Some(selected_node.node_id.clone()),
             cursor_version: session.history_cursor.cursor_version,
+            event_watermark: session.history_cursor.event_watermark,
             mode: if branch_head_node_id.as_deref() == Some(selected_node.node_id.as_str()) {
                 HistoryCursorMode::Live
             } else {
@@ -3133,6 +3484,7 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
             turn_count: 0,
             last_referenced_file: None,
             created_at_ms: session.updated_at_ms.saturating_sub(1),
+            event_seq_range: None,
         });
         let user_indexes = session
             .history
@@ -3174,6 +3526,8 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                event_watermark: 0,
+                last_commit_watermark: 0,
                 workspace_id: session.workspace_id.clone(),
             };
             refresh_session_metadata(&mut materialized, false);
@@ -3220,6 +3574,7 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 turn_count: materialized.turn_count,
                 last_referenced_file: materialized.last_referenced_file.clone(),
                 created_at_ms: session.updated_at_ms.saturating_add(turn_index as u64),
+                event_seq_range: None,
             });
         }
         changed = true;
@@ -3275,6 +3630,7 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                         turn_count: 0,
                         last_referenced_file: None,
                         created_at_ms,
+                        event_seq_range: None,
                     },
                 );
                 if let Some(first_node) = session.history_nodes.get_mut(first_index + 1) {
@@ -3368,7 +3724,11 @@ fn prepare_session_for_new_turn(session: &mut SessionState) {
     let Some(visible_node) = history_node(session, &visible_node_id).cloned() else {
         return;
     };
-    hydrate_session_from_node(session, &visible_node);
+    // PA-093：引用化节点（事件流重建视图）不在续写路径重复 hydrate——
+    // checkout/restore/switch 已折叠填充；此处仅创建隐式 fork 分支。
+    if visible_node.event_seq_range.is_none() {
+        hydrate_session_from_node(session, &visible_node);
+    }
     let previous_branch_id = session
         .history_cursor
         .active_branch_id
@@ -3450,7 +3810,12 @@ fn commit_history_node_from_live_state(
         turn_count: session.turn_count,
         last_referenced_file: session.last_referenced_file.clone(),
         created_at_ms,
+        // PA-093：引用化由 finalize_event_watermark 在事件 flush 后升级
+        // （commit 先于 flush 的时序下，此处先以 legacy 快照提交）。
+        event_seq_range: None,
     });
+    // PA-093：记录本次提交时的事件水位（引用化区间起点）。
+    session.last_commit_watermark = session.event_watermark;
     if let Some(branch) = history_branch_mut(session, &branch_id) {
         if branch.base_node_id.is_none() {
             branch.base_node_id = Some(node_id.clone());
@@ -3486,27 +3851,31 @@ fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) 
     };
     node.summary = summary;
     node.title = title;
-    node.history = history;
-    node.provider_native_transcript = provider_native_transcript;
-    node.turn_trace_history = turn_trace_history;
-    // PA-088：同步更新 turn_id 与 refs，保持内存态与持久化重算一致
-    // （前端 checkpoint 列表直接读 node.turnId）。
-    node.turn_id = node.turn_trace_history.last().map(|trace| trace.turn_id.clone());
-    node.turn_trace_refs = Some(
-        node.turn_trace_history
-            .iter()
-            .map(|trace| TurnTraceRef {
-                turn_id: trace.turn_id.clone(),
-                updated_at_ms: trace.updated_at,
-                version: None,
-            })
-            .collect(),
-    );
-    node.long_term_memory_entries = long_term_memory_entries;
-    node.memory_write_evidence = memory_write_evidence;
-    node.memory_write_hook_trace_records = memory_write_hook_trace_records;
-    node.turn_count = turn_count;
-    node.last_referenced_file = last_referenced_file;
+    // PA-093：引用化节点（event_seq_range 已定）不再内嵌快照——事件流是
+    // 唯一真源，sync 只同步元数据（summary/title/run_id），避免快照复活。
+    if node.event_seq_range.is_none() {
+        node.history = history;
+        node.provider_native_transcript = provider_native_transcript;
+        node.turn_trace_history = turn_trace_history;
+        // PA-088：同步更新 turn_id 与 refs，保持内存态与持久化重算一致
+        // （前端 checkpoint 列表直接读 node.turnId）。
+        node.turn_id = node.turn_trace_history.last().map(|trace| trace.turn_id.clone());
+        node.turn_trace_refs = Some(
+            node.turn_trace_history
+                .iter()
+                .map(|trace| TurnTraceRef {
+                    turn_id: trace.turn_id.clone(),
+                    updated_at_ms: trace.updated_at,
+                    version: None,
+                })
+                .collect(),
+        );
+        node.long_term_memory_entries = long_term_memory_entries;
+        node.memory_write_evidence = memory_write_evidence;
+        node.memory_write_hook_trace_records = memory_write_hook_trace_records;
+        node.turn_count = turn_count;
+        node.last_referenced_file = last_referenced_file;
+    }
     if run_id.is_some() {
         node.run_id = run_id;
     }
@@ -3545,6 +3914,59 @@ fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
     session.memory_write_hook_trace_records = node.memory_write_hook_trace_records.clone();
     session.turn_count = node.turn_count;
     session.last_referenced_file = node.last_referenced_file.clone();
+}
+
+/// PA-093：引用化节点 → 会话内存态（history/transcript/trace 由事件折叠提供，
+/// memory/摘要等节点元数据仍从节点拷贝；transcript 事件流不覆盖 → 引用化后为空，
+/// 前端 transcript 视图依赖 trace 数据，文档已声明降级）。
+fn hydrate_session_from_projection(
+    session: &mut SessionState,
+    node: &HistoryNode,
+    history: Vec<TurnHistoryMessage>,
+    trace: Vec<TurnTraceRecord>,
+) {
+    session.title = node.title.clone();
+    session.summary = node.summary.clone();
+    session.history = history;
+    session.provider_native_transcript = node.provider_native_transcript.clone();
+    session.turn_trace_history = trace;
+    session.long_term_memory_entries = node.long_term_memory_entries.clone();
+    session.memory_write_evidence = node.memory_write_evidence.clone();
+    session.memory_write_hook_trace_records = node.memory_write_hook_trace_records.clone();
+    session.turn_count = node.turn_count;
+    session.last_referenced_file = node.last_referenced_file.clone();
+}
+
+/// PA-093：事件流 → 会话视图（history/trace 双投影，按分支可见集合过滤）。
+/// 可见集合语义：初始 = 目标节点所在分支的血缘链（折叠目标是该节点的视图）；
+/// 流内 `checkpoint/checkout` 事件按序重放更新集合（历史切换序列正确重放）；
+/// 其余事件 branch_id ∉ 可见集合则跳过（被撤回分支的事件不复活）。
+fn fold_session_views(
+    events: &[(u64, String, crate::agent::turn_event::TurnEvent)],
+    node_branch_id: &str,
+    nodes: &[HistoryNode],
+    branches: &[HistoryBranch],
+) -> (Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>) {
+    use crate::agent::projection::{
+        fold_all_with_branches, HistoryProjectionState, TraceProjectionState,
+    };
+    let node_branch: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.node_id.as_str(), n.branch_id.as_str()))
+        .collect();
+    let history_state = fold_all_with_branches::<_, HistoryProjectionState>(
+        events,
+        node_branch_id,
+        &node_branch,
+        branches,
+    );
+    let trace_state = fold_all_with_branches::<_, TraceProjectionState>(
+        events,
+        node_branch_id,
+        &node_branch,
+        branches,
+    );
+    (history_state.messages(), trace_state.traces())
 }
 
 /// PA-088/PA-090：收集会话的 trace 全量 Union（顶层 ∪ 全部节点 trace，按 turn_id 去重取最新）。
@@ -5002,6 +5424,8 @@ fn default_sessions() -> SessionMap {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            event_watermark: 0,
+            last_commit_watermark: 0,
         },
     );
     sessions
@@ -5415,6 +5839,7 @@ fn load_attachment_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct StaticMemoryWriteHookExecutor {
@@ -5566,6 +5991,8 @@ mod tests {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             },
         );
         let snapshot = store.snapshot(Some(session_id), &[]);
@@ -5718,6 +6145,8 @@ mod tests {
                     ..Default::default()
                 },
                 workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             },
         );
         let snapshot = store
@@ -5832,6 +6261,8 @@ mod tests {
                     ..Default::default()
                 },
                 workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             },
         );
 
@@ -7885,6 +8316,8 @@ mod tests {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             },
         );
 
@@ -7951,6 +8384,8 @@ mod tests {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             },
         );
 
@@ -8037,6 +8472,8 @@ mod tests {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             },
         );
 
@@ -8108,6 +8545,8 @@ mod tests {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             },
         );
 
@@ -9592,10 +10031,13 @@ mod tests {
                 turn_count: 2,
                 last_referenced_file: None,
                 created_at_ms: 250,
+            event_seq_range: None,
             }],
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            event_watermark: 0,
+            last_commit_watermark: 0,
         };
 
         let prepared = session_state_for_backend(&session, SeparateTraceTableMode::WriteSeparate);
@@ -9646,6 +10088,8 @@ mod tests {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            event_watermark: 0,
+            last_commit_watermark: 0,
         };
 
         let prepared = session_state_for_backend(&session, SeparateTraceTableMode::WriteSeparate);
@@ -9710,6 +10154,7 @@ mod tests {
                     turn_count: 1,
                     last_referenced_file: None,
                     created_at_ms: 100,
+                event_seq_range: None,
                 },
                 HistoryNode {
                     node_id: "node-2".to_string(),
@@ -9738,16 +10183,205 @@ mod tests {
                     turn_count: 2,
                     last_referenced_file: None,
                     created_at_ms: 200,
+                event_seq_range: None,
                 },
             ],
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            event_watermark: 0,
+            last_commit_watermark: 0,
         };
 
         let union = collect_trace_union(&session);
         let mut turn_ids: Vec<String> = union.iter().map(|trace| trace.turn_id.clone()).collect();
         turn_ids.sort();
         assert_eq!(turn_ids, vec!["turn-1".to_string(), "turn-2".to_string()]);
+
     }
-}
+    // ── PA-093 checkpoint 引用化（阶段 3）测试 ──
+
+    fn pa093_sqlite_store(tag: &str) -> (SessionStore, std::path::PathBuf, String) {
+        use crate::agent::sqlite_session::SqliteSessionBackend;
+        use crate::agent::session::SeparateTraceTableMode;
+        let dir = std::env::temp_dir().join(format!(
+            "pa093-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let backend = Box::new(SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        ));
+        let session_id = format!("pa093-{tag}");
+        (SessionStore::with_backend(backend), dir, session_id)
+    }
+
+    fn pa093_flush(
+        store: &mut SessionStore, session_id: &str, turn_id: &str,
+        branch_id: &str, events: &[TurnEvent],
+    ) {
+        let branch = branch_id.to_string();
+        assert!(store.persist_events(session_id, turn_id, &branch, events.to_vec()));
+        store.finalize_event_watermark(session_id, turn_id);
+    }
+
+    fn pa093_turn_events(turn_id: &str, user_text: &str, assistant_text: &str) -> Vec<TurnEvent> {
+        vec![
+            TurnEvent::TurnStart { turn_id: turn_id.to_string() },
+            TurnEvent::UserMessage { turn_id: turn_id.to_string(), text: user_text.to_string(), attachments: Vec::new() },
+            TurnEvent::AssistantMessage { turn_id: turn_id.to_string(), step: 0, text: assistant_text.to_string(), reasoning_content: None, usage: None, chunk_missing: None },
+            TurnEvent::TurnEnd { turn_id: turn_id.to_string(), reason: TurnEndReason::Completed, turn_duration_ms: None },
+        ]
+    }
+
+    fn pa093_first_turn_node_id(store: &SessionStore, session_id: &str) -> String {
+        let session = store.sessions.get(session_id).expect("session");
+        session.history_nodes.iter().find(|n| n.kind == HistoryNodeKind::TurnCommitted).expect("turn node").node_id.clone()
+    }
+
+    #[test]
+    fn pa093_commit_finalize_upgrades_node_to_referenced() {
+        let (mut store, dir, sid) = pa093_sqlite_store("finalize");
+        store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
+        let head = {
+            let s = store.sessions.get(&sid).expect("session");
+            s.history_cursor.branch_head_node_id.clone().expect("head")
+        };
+        let s = store.sessions.get(&sid).expect("session");
+        let node = s.history_nodes.iter().find(|n| n.node_id == head).expect("node");
+        assert!(node.event_seq_range.is_none(), "pre-flush legacy");
+        assert_eq!(node.history.len(), 2, "pre-flush keeps snapshot");
+        drop(s);
+        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        let s = store.sessions.get(&sid).expect("session");
+        let node = s.history_nodes.iter().find(|n| n.node_id == head).expect("node");
+        assert_eq!(node.event_seq_range, Some((0, 3)), "range covered");
+        assert!(node.history.is_empty(), "snapshot cleared");
+        assert!(node.turn_trace_history.is_empty(), "trace cleared");
+        assert_eq!(s.event_watermark, 4);
+        assert_eq!(s.last_commit_watermark, 4);
+        drop(s);
+        store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-2", "branch-main", &pa093_turn_events("turn-2", "second", "reply2"));
+        let s = store.sessions.get(&sid).expect("session");
+        let nodes = &s.history_nodes;
+        assert_eq!(nodes[nodes.len() - 1].event_seq_range, Some((4, 7)), "contiguous range");
+        drop(s);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pa093_checkout_referenced_node_folds_events() {
+        let (mut store, dir, sid) = pa093_sqlite_store("checkout");
+        store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-2", "branch-main", &pa093_turn_events("turn-2", "second", "reply2"));
+        let node1 = pa093_first_turn_node_id(&store, &sid);
+        let snapshot = store.checkout_history_node(Some(&sid), &node1, HistoryCheckoutMode::TranscriptOnly, None).expect("checkout");
+        assert_eq!(snapshot.history.len(), 2, "folded view has turn 1 only");
+        assert!(snapshot.history.iter().all(|m| m.content != "reply2"), "watermark rollback");
+        assert_eq!(snapshot.history_cursor.event_watermark, 8, "cursor watermark");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pa093_restore_branch_head_folds_referenced_branch() {
+        // P1-1：restore_branch_head 对引用化分支头节点的折叠路径
+        let (mut store, dir, sid) = pa093_sqlite_store("restore");
+        store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        let node1 = pa093_first_turn_node_id(&store, &sid);
+        let fork_snapshot = store.fork_from_history_node(Some(&sid), &node1, None).expect("fork");
+        let fork_branch = fork_snapshot.history_cursor.active_branch_id.expect("active branch");
+        store.append_turn(Some(&sid), "fork-q", "fork-answer", None, Vec::new());
+        pa093_flush(&mut store, &sid, "fork-turn", &fork_branch, &pa093_turn_events("fork-turn", "fork-q", "fork-answer"));
+        let restored = store.restore_branch_head(Some(&sid), Some(&fork_branch), None).expect("restore");
+        assert!(restored.history.iter().any(|m| m.content == "fork-answer"), "restore folds fork events");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pa093_fork_from_referenced_node_folds_source_view() {
+        // P1-1：fork_from_history_node 对引用化源节点的折叠路径
+        let (mut store, dir, sid) = pa093_sqlite_store("fork-fold");
+        store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        let node1 = pa093_first_turn_node_id(&store, &sid);
+        let fork_snapshot = store.fork_from_history_node(Some(&sid), &node1, None).expect("fork");
+        assert_eq!(fork_snapshot.history.len(), 2, "fork view folds source node events");
+        assert_eq!(fork_snapshot.history[0].content, "first");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pa093_checkout_legacy_node_falls_back_to_snapshot() {
+        let (mut store, dir, sid) = pa093_sqlite_store("legacy");
+        store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
+        store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
+        let node1 = pa093_first_turn_node_id(&store, &sid);
+        let snapshot = store.checkout_history_node(Some(&sid), &node1, HistoryCheckoutMode::TranscriptOnly, None).expect("legacy checkout");
+        assert_eq!(snapshot.history.len(), 2, "legacy snapshot");
+        assert!(snapshot.history.iter().all(|m| m.content != "reply2"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pa093_time_travel_loads_referenced_node_state() {
+        let (mut store, dir, sid) = pa093_sqlite_store("travel");
+        store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-2", "branch-main", &pa093_turn_events("turn-2", "second", "reply2"));
+        let node1 = pa093_first_turn_node_id(&store, &sid);
+        let snapshot = store.snapshot_for_session_at(&sid, Some(&node1));
+        assert_eq!(snapshot.history.len(), 2, "traveled = node1");
+        assert!(snapshot.history.iter().all(|m| m.content != "reply2"));
+        let current = store.snapshot_for_session(&sid);
+        assert_eq!(current.history.len(), 4, "live untouched");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pa093_fork_visibility_filters_events() {
+        let (mut store, dir, sid) = pa093_sqlite_store("fork-vis");
+        store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
+        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        let node1 = pa093_first_turn_node_id(&store, &sid);
+        let fork_snapshot = store.fork_from_history_node(Some(&sid), &node1, None).expect("fork");
+        let fork_branch = fork_snapshot.history_cursor.active_branch_id.expect("active branch");
+        assert_ne!(fork_branch, "branch-main");
+        store.append_turn(Some(&sid), "fork-q", "fork-answer", None, Vec::new());
+        pa093_flush(&mut store, &sid, "fork-turn", &fork_branch, &pa093_turn_events("fork-turn", "fork-q", "fork-answer"));
+        let main_snapshot = store.switch_history_branch(Some(&sid), "branch-main", None).expect("switch to main");
+        assert!(main_snapshot.history.iter().all(|m| m.content != "fork-answer"), "fork invisible after switch");
+        let fork_again = store.switch_history_branch(Some(&sid), &fork_branch, None).expect("switch back");
+        assert!(fork_again.history.iter().any(|m| m.content == "fork-answer"), "fork visible again");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pa093_fold_10k_events_stays_under_budget() {
+        let mut events = Vec::with_capacity(10_000);
+        for i in 0..1_000u32 {
+            let tid = format!("t{i}");
+            events.push(("branch-main".to_string(), TurnEvent::TurnStart { turn_id: tid.clone() }));
+            events.push(("branch-main".to_string(), TurnEvent::UserMessage { turn_id: tid.clone(), text: format!("q{i}"), attachments: Vec::new() }));
+            events.push(("branch-main".to_string(), TurnEvent::AssistantMessage { turn_id: tid.clone(), step: 0, text: format!("a{i}"), reasoning_content: None, usage: None, chunk_missing: None }));
+            events.push(("branch-main".to_string(), TurnEvent::TurnEnd { turn_id: tid.clone(), reason: TurnEndReason::Completed, turn_duration_ms: None }));
+        }
+        let with_seq: Vec<(u64, String, TurnEvent)> = events.into_iter().enumerate().map(|(seq, (b, e))| (seq as u64, b, e)).collect();
+        let started = std::time::Instant::now();
+        let (history, _) = fold_session_views(&with_seq, "branch-main", &[], &[]);
+        let elapsed = started.elapsed();
+        assert_eq!(history.len(), 24, "window truncated");
+        let budget = if cfg!(debug_assertions) { 2000 } else { 100 };
+        assert!(elapsed.as_millis() < budget, "10k refold took {}ms", elapsed.as_millis());
+    }
+}

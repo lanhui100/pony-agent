@@ -9,7 +9,7 @@ use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTra
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::context::RetrievedContextState;
@@ -17,6 +17,54 @@ use super::runtime::{TurnResult, TurnStreamEvent};
 
 pub trait TurnEventSink {
     fn emit(&self, name: &str, payload: TurnStreamEvent);
+    /// 事件溯源（PA-091）：将 turn 内过程事实入事件缓冲（默认空实现——
+    /// 生产路径经全局注册表持久化；测试 sink 可覆写为收集）。
+    /// 持久化失败 contained（只记日志不阻断流）；构造失败由调用方 fail loud。
+    fn persist(&self, _event: crate::agent::turn_event::TurnEvent) {}
+}
+
+/// PA-091：全局事件持久化注册表（OnceLock 模式，与 turn_event_sequence_registry 一致）。
+/// 生产路径由 HostControlPlane 初始化时注册（持有 sessions_rwlock 的 Arc）；
+/// 测试可注册 mock / 清空。签名：(session_id, turn_id, event, is_terminal)。
+type EventPersistFn = dyn Fn(&str, &str, crate::agent::turn_event::TurnEvent, bool) + Send + Sync;
+
+static EVENT_PERSIST_REGISTRY: OnceLock<Mutex<Option<Arc<EventPersistFn>>>> = OnceLock::new();
+
+fn event_persist_registry() -> &'static Mutex<Option<Arc<EventPersistFn>>> {
+    EVENT_PERSIST_REGISTRY.get_or_init(|| Mutex::new(None))
+}
+
+/// 注册生产事件持久化通道（幂等：重复注册覆盖）。
+pub fn register_event_persist(f: Arc<EventPersistFn>) {
+    let mut slot = event_persist_registry()
+        .lock()
+        .expect("event persist registry lock poisoned");
+    *slot = Some(f);
+}
+
+/// 清空事件持久化通道（测试用）。
+pub fn clear_event_persist() {
+    let mut slot = event_persist_registry()
+        .lock()
+        .expect("event persist registry lock poisoned");
+    *slot = None;
+}
+
+/// PA-093：非 turn 生命周期事实（checkpoint/checkout、fork/created）经全局
+/// 注册表落盘（立即 flush）。turn_id 用语义化字面量（事件无 turn 归属，列非空）。
+/// 未注册通道（测试/老路径）时静默跳过——与 turn 事件路径的 contained 语义一致。
+pub fn emit_global_event(session_id: &str, turn_id: &str, event: crate::agent::turn_event::TurnEvent) {
+    if let Some(persist) = current_event_persist() {
+        persist(session_id, turn_id, event, true);
+    }
+}
+
+/// 当前注册的持久化通道（None = 未注册，事件不落盘）。
+fn current_event_persist() -> Option<Arc<EventPersistFn>> {
+    event_persist_registry()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
 }
 
 pub struct PreparedTurn {
@@ -526,9 +574,108 @@ pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEven
             .map(|tools| tools.len())
             .unwrap_or(0)
     );
-    sink.emit(name, payload);
+    sink.emit(name, payload.clone());
+    // PA-091：事件溯源——构造 TurnEvent 经全局注册表持久化（缓冲 + turn 终态 flush）。
+    // 构造失败 fail loud（数据完整性错误）；持久化失败由注册通道 contained。
+    if let Some(event) = build_turn_event(name, &payload) {
+        if let Some(persist) = current_event_persist() {
+            let session_id = payload.session_id.as_deref().unwrap_or("");
+            let is_terminal = matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled");
+            persist(session_id, &payload.turn_id, event, is_terminal);
+        }
+    }
     if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
         clear_turn_event_sequence(&terminal_turn_id);
+    }
+}
+
+/// PA-091：TurnStreamEvent → TurnEvent 映射（design.md 映射表）。
+/// `turn:output_end` / `turn:trace` / `turn.context_built` 显式不落盘（返回 None）。
+fn build_turn_event(name: &str, payload: &TurnStreamEvent) -> Option<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+    match name {
+        "turn:started" => Some(TurnEvent::TurnStart {
+            turn_id: payload.turn_id.clone(),
+        }),
+        "turn:delta" => {
+            // reasoning-only chunk（无 text）也落盘（text 为空串），保证
+            // "every emitted event SHALL be persisted" 的语义完整。
+            Some(TurnEvent::AssistantChunk {
+                turn_id: payload.turn_id.clone(),
+                // 阶段 1 单步语义：step 固定 0（写时聚合键 (turn_id, step) 生效）。
+                step: 0,
+                text: payload.text.clone().unwrap_or_default(),
+            })
+        }
+        "turn:completed" => Some(TurnEvent::AssistantMessage {
+            turn_id: payload.turn_id.clone(),
+            step: 0,
+            text: payload.text.clone().unwrap_or_default(),
+            reasoning_content: payload.reasoning_content.clone(),
+            usage: payload_usage(payload),
+            chunk_missing: None,
+        }),
+        "turn:failed" => Some(TurnEvent::TurnEnd {
+            turn_id: payload.turn_id.clone(),
+            reason: TurnEndReason::Error,
+            turn_duration_ms: payload.turn_duration_ms,
+        }),
+        "turn:cancelled" => Some(TurnEvent::TurnEnd {
+            turn_id: payload.turn_id.clone(),
+            reason: TurnEndReason::Cancelled,
+            turn_duration_ms: payload.turn_duration_ms,
+        }),
+        "turn:tool" => build_tool_event(payload),
+        _ => None,
+    }
+}
+
+/// 从终态 payload 的 token 字段构造 usage（全 None 时返回 None）。
+fn payload_usage(payload: &TurnStreamEvent) -> Option<crate::agent::provider::TokenUsage> {
+    if payload.input_tokens.is_none()
+        && payload.cache_hit_input_tokens.is_none()
+        && payload.reasoning_tokens.is_none()
+        && payload.output_tokens.is_none()
+        && payload.total_tokens.is_none()
+    {
+        return None;
+    }
+    Some(crate::agent::provider::TokenUsage {
+        input_tokens: payload.input_tokens,
+        cache_hit_input_tokens: payload.cache_hit_input_tokens,
+        cache_hit_source: None,
+        reasoning_tokens: payload.reasoning_tokens,
+        output_tokens: payload.output_tokens,
+        total_tokens: payload.total_tokens,
+    })
+}
+
+/// turn:tool → ToolCall（running）/ ToolResult（completed），取最后一个 activity。
+fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::TurnEvent;
+    let activity = payload.tool_activities.as_deref()?.last()?;
+    let step = payload.sequence.unwrap_or(0) as u32;
+    if activity.status == "running" {
+        Some(TurnEvent::ToolCall {
+            turn_id: payload.turn_id.clone(),
+            step,
+            call_id: activity.id.clone(),
+            name: activity.name.clone(),
+            arguments: activity.arguments_text.clone().unwrap_or_default(),
+            started_at_ms: None,
+        })
+    } else {
+        Some(TurnEvent::ToolResult {
+            turn_id: payload.turn_id.clone(),
+            step,
+            call_id: activity.id.clone(),
+            result: activity.result_text.clone(),
+            error: activity.error.as_ref().map(|e| e.to_string()),
+            status: Some(activity.status.clone()),
+            duration_ms: activity.duration_seconds.map(|seconds| (seconds * 1000.0) as u64),
+            artifacts: activity.artifacts.clone(),
+            capability_invocation: activity.capability_invocation.clone(),
+        })
     }
 }
 
@@ -716,6 +863,205 @@ mod tests {
     impl TurnEventSink for RecordingSink {
         fn emit(&self, name: &str, payload: TurnStreamEvent) {
             self.events.borrow_mut().push((name.to_string(), payload));
+        }
+    }
+
+    fn sample_payload(turn_id: &str, kind: &str, text: Option<&str>) -> TurnStreamEvent {
+        TurnStreamEvent {
+            event_id: None,
+            session_id: Some("s1".to_string()),
+            turn_id: turn_id.to_string(),
+            kind: kind.to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("calling_model".to_string()),
+            text: text.map(str::to_string),
+            reasoning_content: None,
+            error: None,
+            provider_requested_name: None,
+            provider_name: None,
+            provider_protocol: None,
+            provider_model: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+        }
+    }
+
+    #[test]
+    fn event_name_mapping_table_driven() {
+        use crate::agent::turn_event::TurnEvent;
+        // 8 种现有发射名 → 映射断言（design.md 映射表）
+        let cases: Vec<(&str, Option<&str>)> = vec![
+            ("turn:started", Some("turn/start")),
+            ("turn:delta", Some("assistant/chunk")),
+            ("turn:output_end", None),
+            ("turn:completed", Some("assistant/message")),
+            ("turn:failed", Some("turn/end")),
+            ("turn:cancelled", Some("turn/end")),
+            ("turn:trace", None),
+            ("turn:tool", None), // 无 tool_activities 时不落盘
+        ];
+        for (name, expected) in cases {
+            let payload = sample_payload("turn-1", name, Some("hi"));
+            let event = build_turn_event(name, &payload);
+            match expected {
+                Some(type_name) => {
+                    let event = event.unwrap_or_else(|| panic!("{name} must map to {type_name}"));
+                    assert_eq!(event.type_name(), type_name, "{name} mapping");
+                }
+                None => assert!(event.is_none(), "{name} must not persist"),
+            }
+        }
+        // reason 分支断言：failed → Error，cancelled → Cancelled
+        use crate::agent::turn_event::TurnEndReason;
+        let failed = build_turn_event("turn:failed", &sample_payload("t1", "turn:failed", None))
+            .expect("failed event");
+        match failed {
+            TurnEvent::TurnEnd { reason, .. } => {
+                assert_eq!(reason, TurnEndReason::Error, "failed reason");
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+        let cancelled =
+            build_turn_event("turn:cancelled", &sample_payload("t1", "turn:cancelled", None))
+                .expect("cancelled event");
+        match cancelled {
+            TurnEvent::TurnEnd { reason, .. } => {
+                assert_eq!(reason, TurnEndReason::Cancelled, "cancelled reason");
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+    }
+
+    #[test]
+    fn emit_event_persist_channel_buffers_aggregates_and_flushes() {
+        use crate::agent::turn_event::TurnEvent;
+        use std::sync::{Arc, Mutex};
+        // 注册测试持久化通道：收集 (session_id, turn_id, events, is_terminal)
+        let received: Arc<Mutex<Vec<(String, String, Vec<TurnEvent>, bool)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingSink::new();
+        let received_clone = Arc::clone(&received);
+        register_event_persist(Arc::new(
+            move |session_id, turn_id, event, is_terminal| {
+                received_clone
+                    .lock()
+                    .expect("received lock")
+                    .push((
+                        session_id.to_string(),
+                        turn_id.to_string(),
+                        vec![event],
+                        is_terminal,
+                    ));
+            },
+        ));
+        // emit 序列：started → delta ×2（同 turn 应合并为一条 chunk）→ completed
+        emit_event(&sink, "turn:started", sample_payload("turn-1", "turn:started", None));
+        emit_event(&sink, "turn:delta", sample_payload("turn-1", "turn:delta", Some("hel")));
+        emit_event(&sink, "turn:delta", sample_payload("turn-1", "turn:delta", Some("lo")));
+        emit_event(
+            &sink,
+            "turn:completed",
+            sample_payload("turn-1", "turn:completed", Some("hello")),
+        );
+        // 验证：4 次 emit → 4 条通道记录（聚合在持久化闭包内做，通道收到原事件；
+        // 聚合正确性由 control_plane 闭包负责——此处验证 emit→persist 链路与终态标记）
+        let records = received.lock().expect("received lock");
+        assert_eq!(records.len(), 4, "every emitted event reaches persist");
+        assert_eq!(records[0].3, false, "started not terminal");
+        assert_eq!(records[3].3, true, "completed is terminal");
+        assert_eq!(records[0].2[0].type_name(), "turn/start");
+        assert_eq!(records[1].2[0].type_name(), "assistant/chunk");
+        assert_eq!(records[3].2[0].type_name(), "assistant/message");
+        drop(records);
+        clear_event_persist();
+    }
+
+    #[test]
+    fn event_mapping_tool_started_and_completed() {
+        use crate::agent::turn_event::TurnEvent;
+        use crate::agent::telemetry::TurnToolActivity;
+        // running → ToolCall
+        let mut payload = sample_payload("turn-1", "turn:tool", None);
+        payload.tool_activities = Some(vec![TurnToolActivity {
+            id: "act-1".to_string(),
+            name: "bash".to_string(),
+            canonical_tool_name: None,
+            display_name_zh: None,
+            status: "running".to_string(),
+            description: "run".to_string(),
+            arguments_text: Some("{}".to_string()),
+            result_text: None,
+            duration_seconds: None,
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }]);
+        let event = build_turn_event("turn:tool", &payload).expect("tool call event");
+        assert_eq!(event.type_name(), "tool/call");
+        // completed → ToolResult
+        payload.tool_activities = Some(vec![TurnToolActivity {
+            id: "act-1".to_string(),
+            name: "bash".to_string(),
+            canonical_tool_name: None,
+            display_name_zh: None,
+            status: "done".to_string(),
+            description: "run".to_string(),
+            arguments_text: Some("{}".to_string()),
+            result_text: Some("ok".to_string()),
+            duration_seconds: Some(0.5),
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }]);
+        let event = build_turn_event("turn:tool", &payload).expect("tool result event");
+        assert_eq!(event.type_name(), "tool/result");
+        match event {
+            TurnEvent::ToolResult {
+                result, duration_ms, ..
+            } => {
+                assert_eq!(result.as_deref(), Some("ok"));
+                assert_eq!(duration_ms, Some(500));
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn event_mapping_completed_carries_usage() {
+        use crate::agent::turn_event::TurnEvent;
+        let mut payload = sample_payload("turn-1", "turn:completed", Some("done"));
+        payload.input_tokens = Some(100);
+        payload.output_tokens = Some(50);
+        payload.total_tokens = Some(150);
+        let event = build_turn_event("turn:completed", &payload).expect("completed event");
+        match event {
+            TurnEvent::AssistantMessage { usage, text, .. } => {
+                assert_eq!(text, "done");
+                let usage = usage.expect("usage present");
+                assert_eq!(usage.input_tokens, Some(100));
+                assert_eq!(usage.output_tokens, Some(50));
+            }
+            _ => panic!("expected AssistantMessage"),
         }
     }
 

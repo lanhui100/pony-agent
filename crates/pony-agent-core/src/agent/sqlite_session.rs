@@ -16,6 +16,125 @@ use super::session::{
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
 
+/// 测试注入开关：flush_events_tx 在事件行写入后、计数器更新前强制失败，
+/// 用于验证"事件 + 快照"同事务的回滚原子性（PA-091）。
+/// 按 db 路径后缀匹配（全局标志避免误伤并行测试的其他 backend）。
+#[cfg(test)]
+pub static TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+/// PA-091：从 blob 会话状态反推事件（回填用）。
+/// - history 按 user 消息切分 turn 边界（无法配对的消息按"单条消息 = 独立 turn"合成）；
+/// - assistant 消息携带 `chunk_missing: true`（过程 chunk 不可恢复）；
+/// - tool_activities → ToolCall/ToolResult（缺 started_at/duration 的字段为 None）；
+/// - provider_call_records → ProviderUsage（usage 缺失时以 turn 级 token 字段反推）。
+fn derive_events_from_session(
+    session: &crate::agent::session::SessionState,
+) -> Vec<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+    let mut events: Vec<TurnEvent> = Vec::new();
+    let mut current_turn: Option<String> = None;
+    for message in &session.history {
+        match message.role.as_str() {
+            "user" => {
+                if let Some(turn_id) = current_turn.take() {
+                    events.push(TurnEvent::TurnEnd {
+                        turn_id,
+                        reason: TurnEndReason::Completed,
+                        turn_duration_ms: None,
+                    });
+                }
+                let turn_id = message
+                    .turn_id
+                    .clone()
+                    .unwrap_or_else(|| format!("backfill-{}", events.len()));
+                events.push(TurnEvent::TurnStart {
+                    turn_id: turn_id.clone(),
+                });
+                events.push(TurnEvent::UserMessage {
+                    turn_id: turn_id.clone(),
+                    text: message.content.clone(),
+                    attachments: message.attachments.clone(),
+                });
+                current_turn = Some(turn_id);
+            }
+            "assistant" => {
+                let turn_id = current_turn
+                    .clone()
+                    .unwrap_or_else(|| format!("backfill-{}", events.len()));
+                events.push(TurnEvent::AssistantMessage {
+                    turn_id: turn_id.clone(),
+                    step: 0,
+                    text: message.content.clone(),
+                    reasoning_content: message.reasoning_content.clone(),
+                    usage: None,
+                    chunk_missing: Some(true),
+                });
+            }
+            _ => {}
+        }
+    }
+    if let Some(turn_id) = current_turn {
+        events.push(TurnEvent::TurnEnd {
+            turn_id,
+            reason: TurnEndReason::Completed,
+            turn_duration_ms: None,
+        });
+    }
+    // trace 反推 tool / provider 事件
+    for trace in &session.turn_trace_history {
+        let turn_id = trace.turn_id.clone();
+        for activity in &trace.tool_activities {
+            if activity.status == "running" {
+                events.push(TurnEvent::ToolCall {
+                    turn_id: turn_id.clone(),
+                    step: 0,
+                    call_id: activity.id.clone(),
+                    name: activity.name.clone(),
+                    arguments: activity.arguments_text.clone().unwrap_or_default(),
+                    started_at_ms: None,
+                });
+            } else {
+                events.push(TurnEvent::ToolResult {
+                    turn_id: turn_id.clone(),
+                    step: 0,
+                    call_id: activity.id.clone(),
+                    result: activity.result_text.clone(),
+                    error: activity.error.as_ref().map(|e| e.to_string()),
+                    status: Some(activity.status.clone()),
+                    duration_ms: activity.duration_seconds.map(|s| (s * 1000.0) as u64),
+                    artifacts: activity.artifacts.clone(),
+                    capability_invocation: activity.capability_invocation.clone(),
+                });
+            }
+        }
+        for record in &trace.provider_call_records {
+            events.push(TurnEvent::ProviderUsage {
+                turn_id: turn_id.clone(),
+                step: 0,
+                request_kind: record.request_kind.clone(),
+                usage: crate::agent::provider::TokenUsage {
+                    input_tokens: record.input_tokens,
+                    cache_hit_input_tokens: record.cache_hit_input_tokens,
+                    cache_hit_source: None,
+                    reasoning_tokens: record.reasoning_tokens,
+                    output_tokens: record.output_tokens,
+                    total_tokens: record.total_tokens,
+                },
+                cache_hit_input_tokens: record.cache_hit_input_tokens,
+                cache_miss_input_tokens: record.cache_miss_input_tokens,
+                prefix_mutation_reasons: Vec::new(),
+                first_token_latency_ms: record.first_token_latency_ms,
+                turn_duration_ms: record.turn_duration_ms,
+                latency_kind: record.latency_kind.clone(),
+                provider: trace.provider_name.clone().unwrap_or_default(),
+                model: trace.provider_model.clone().unwrap_or_default(),
+            });
+        }
+    }
+    events
+}
+
 /// SQLite-backed session storage.
 ///
 /// Stores each session as an individual row with a JSON blob, enabling:
@@ -118,6 +237,29 @@ impl SqliteSessionBackend {
              );
              CREATE INDEX IF NOT EXISTS idx_session_turn_traces_session_updated
                 ON session_turn_traces (session_id, trace_order, updated_at_ms);
+             CREATE TABLE IF NOT EXISTS turn_events (
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL DEFAULT 'main',
+                seq INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (session_id, seq)
+             );
+             CREATE INDEX IF NOT EXISTS idx_turn_events_turn
+                ON turn_events (session_id, turn_id);
+             CREATE TABLE IF NOT EXISTS turn_events_archive (
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                archived_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (session_id, seq)
+             );
              PRAGMA foreign_keys = ON;",
         )
         .map_err(|e| format!("schema: {e}"))?;
@@ -290,6 +432,7 @@ impl SqliteSessionBackend {
                 title TEXT NOT NULL DEFAULT '',
                 created_at_ms INTEGER NOT NULL DEFAULT 0,
                 snapshot_json TEXT,
+                event_seq_range_json TEXT,
                 PRIMARY KEY (session_id, node_id),
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
@@ -309,6 +452,18 @@ impl SqliteSessionBackend {
              );",
         )
         .map_err(|e| format!("normalized schema: {e}"))?;
+        // PA-093：旧库迁移——CREATE TABLE IF NOT EXISTS 不补列，显式 ALTER
+        // （列已存在时忽略错误，幂等）。
+        let _ = conn.execute(
+            "ALTER TABLE normalized_history_cursor
+             ADD COLUMN event_watermark INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE normalized_history_nodes
+             ADD COLUMN event_seq_range_json TEXT",
+            [],
+        );
         Ok(())
     }
 
@@ -911,7 +1066,8 @@ impl SqliteSessionBackend {
                 | PersistCommand::UpdateHistoryNode { session_id, .. }
                 | PersistCommand::UpdateCursor { session_id, .. }
                 | PersistCommand::UpdateSessionMeta { session_id, .. }
-                | PersistCommand::RemoveSession { session_id, .. } => session_id,
+                | PersistCommand::RemoveSession { session_id, .. }
+                | PersistCommand::FlushEvents { session_id, .. } => session_id,
                 PersistCommand::PublishMetadata { .. } => unreachable!(),
             };
             tx.execute(
@@ -1139,8 +1295,8 @@ impl SqliteSessionBackend {
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_history_nodes
                      (session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id,
-                      turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+                      turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14)",
                     params![
                         session_id,
                         node.node_id,
@@ -1155,6 +1311,7 @@ impl SqliteSessionBackend {
                         node.summary,
                         node.title,
                         node.created_at_ms,
+                        serde_json::to_string(&node.event_seq_range).unwrap_or_else(|_| "null".to_string()),
                     ],
                 )
                 .map_err(|e| format!("update history node: {e}"))?;
@@ -1167,8 +1324,8 @@ impl SqliteSessionBackend {
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_history_cursor
                      (session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id,
-                      cursor_version, mode, checkout_mode, checkout_status)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                      cursor_version, mode, checkout_mode, checkout_status, event_watermark)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         session_id,
                         cursor.visible_node_id,
@@ -1179,6 +1336,7 @@ impl SqliteSessionBackend {
                         serde_json::to_string(&cursor.mode).unwrap_or_else(|_| "\"live\"".to_string()),
                         serde_json::to_string(&cursor.checkout_mode).unwrap_or_else(|_| "null".to_string()),
                         serde_json::to_string(&cursor.checkout_status).unwrap_or_else(|_| "null".to_string()),
+                        cursor.event_watermark,
                     ],
                 )
                 .map_err(|e| format!("update cursor: {e}"))?;
@@ -1214,6 +1372,15 @@ impl SqliteSessionBackend {
                 )
                 .map_err(|e| format!("remove normalized session: {e}"))?;
             }
+            PersistCommand::FlushEvents {
+                session_id,
+                turn_id,
+                branch_id,
+                events,
+                ..
+            } => {
+                self.flush_events_tx(tx, session_id, turn_id, branch_id, events)?;
+            }
             PersistCommand::PublishMetadata { key, value, .. } => {
                 tx.execute(
                     "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
@@ -1223,6 +1390,124 @@ impl SqliteSessionBackend {
             }
         }
         Ok(())
+    }
+    /// turn 终态 flush：为事件批次分配连续 seq（0-based，从计数器起）并写入
+    /// `turn_events`，计数器与事件行同事务更新。`#[cfg(test)]` 注入点位于
+    /// 事件行写入与计数器更新之间，用于验证事务回滚（两表均无残留）。
+    fn flush_events_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        turn_id: &str,
+        branch_id: &str,
+        events: &[crate::agent::turn_event::TurnEvent],
+    ) -> Result<(), String> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let counter_key = format!("turn_event_seq:{session_id}");
+        // 计数器缺失（legacy/损坏）时以 MAX(seq)+1 修复（避免 PK 冲突静默丢事件）。
+        let next_seq: i64 = tx
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = ?1",
+                params![counter_key],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|raw| raw.parse::<i64>().unwrap_or(0))
+            .unwrap_or_else(|_| {
+                tx.query_row(
+                    "SELECT COALESCE(MAX(seq), -1) + 1 FROM turn_events WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+            });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        for (offset, event) in events.iter().enumerate() {
+            let seq = next_seq + offset as i64;
+            let payload = serde_json::to_string(event)
+                .map_err(|e| format!("flush event serialize: {e}"))?;
+            tx.execute(
+                "INSERT INTO turn_events
+                 (session_id, turn_id, branch_id, seq, event_type, payload, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![session_id, turn_id, branch_id, seq, event.type_name(), payload, now],
+            )
+            .map_err(|e| format!("flush event insert: {e}"))?;
+        }
+        #[cfg(test)]
+        if let Some(suffix) = TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
+            .lock()
+            .expect("inject lock poisoned")
+            .as_ref()
+        {
+            if self.db_path.to_string_lossy().contains(suffix.as_str()) {
+                return Err("test-injected flush failure after event rows".to_string());
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+            params![counter_key, (next_seq + events.len() as i64).to_string()],
+        )
+        .map_err(|e| format!("flush event counter: {e}"))?;
+        Ok(())
+    }
+
+    /// PA-091：迁移回填——从 blob 反推事件（per-session 幂等）。
+    /// 数据损失承认：blob 被 `DEFAULT_HISTORY_LIMIT` 截断，只回填最近 24 turn；
+    /// chunk 过程不可恢复 → `chunk_missing` 标记。返回回填的会话数。
+    pub fn backfill_turn_events(&self) -> Result<usize, String> {
+        let slot = self.connection().map_err(|e| format!("open: {e}"))?;
+        let conn = slot.as_ref().expect("connection initialized");
+        let session_ids: Vec<String> = conn
+            .prepare("SELECT conversation_id FROM sessions")
+            .map_err(|e| format!("list sessions: {e}"))?
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("query sessions: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("collect sessions: {e}"))?;
+        let mut backfilled = 0usize;
+        for session_id in session_ids {
+            let marker_key = format!("turn_event_backfill:{session_id}");
+            let done: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM store_metadata WHERE key = ?1)",
+                    params![marker_key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|v| v != 0)
+                .unwrap_or(false);
+            if done {
+                continue;
+            }
+            let data: String = conn
+                .query_row(
+                    "SELECT session_data FROM sessions WHERE conversation_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("read blob {session_id}: {e}"))?;
+            let session: crate::agent::session::SessionState = serde_json::from_str(&data)
+                .map_err(|e| format!("parse blob {session_id}: {e}"))?;
+            let events = derive_events_from_session(&session);
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| format!("begin tx: {e}"))?;
+            if !events.is_empty() {
+                self.flush_events_tx(&tx, &session_id, "backfill", "main", &events)?;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, 'done')",
+                params![marker_key],
+            )
+            .map_err(|e| format!("backfill marker: {e}"))?;
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
+            backfilled += 1;
+        }
+        Ok(backfilled)
     }
     fn sync_blob_trace_tx(
         &self,
@@ -1262,6 +1547,8 @@ impl SqliteSessionBackend {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
+            event_watermark: 0,
+            last_commit_watermark: 0,
             };
             let initial = serde_json::to_string(&session).map_err(|e| format!("serialize blob: {e}"))?;
             tx.execute(
@@ -1331,7 +1618,7 @@ impl SqliteSessionBackend {
             .collect::<Vec<_>>();
         let all_traces = self.read_all_session_traces(conn).unwrap_or_default();
         let all_nodes = conn
-            .prepare("SELECT session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json FROM normalized_history_nodes ORDER BY session_id")
+            .prepare("SELECT session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json FROM normalized_history_nodes ORDER BY session_id")
             .ok()?
             .query_map([], |row| {
                 Ok((
@@ -1349,6 +1636,7 @@ impl SqliteSessionBackend {
                     row.get::<_, String>(11)?,
                     row.get::<_, i64>(12)?,
                     row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
                 ))
             })
             .ok()?
@@ -1374,7 +1662,7 @@ impl SqliteSessionBackend {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         let all_cursors = conn
-            .prepare("SELECT session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status FROM normalized_history_cursor ORDER BY session_id")
+            .prepare("SELECT session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status, event_watermark FROM normalized_history_cursor ORDER BY session_id")
             .ok()?
             .query_map([], |row| {
                 Ok((
@@ -1387,6 +1675,7 @@ impl SqliteSessionBackend {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .ok()?
@@ -1419,6 +1708,8 @@ impl SqliteSessionBackend {
                 history_nodes: Vec::new(),
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
+                event_watermark: 0,
+                last_commit_watermark: 0,
                 workspace_id,
             };
             // 记忆四件套（memory_json）
@@ -1486,16 +1777,16 @@ impl SqliteSessionBackend {
             // history_nodes（批量预取）
             let node_rows = all_nodes
                 .iter()
-                .filter(|(sid, _, _, _, _, _, _, _, _, _, _, _, _, _)| sid == &session_id)
-                .map(|(_, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json)| {
-                    (node_id.clone(), parent_node_id.clone(), branch_id.clone(), forked_from_node_id.clone(), kind.clone(), turn_id.clone(), turn_trace_refs_json.clone(), run_id.clone(), workspace_ref_json.clone(), summary.clone(), title.clone(), *created_at_ms, snapshot_json.clone())
+                .filter(|(sid, _, _, _, _, _, _, _, _, _, _, _, _, _, _)| sid == &session_id)
+                .map(|(_, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json)| {
+                    (node_id.clone(), parent_node_id.clone(), branch_id.clone(), forked_from_node_id.clone(), kind.clone(), turn_id.clone(), turn_trace_refs_json.clone(), run_id.clone(), workspace_ref_json.clone(), summary.clone(), title.clone(), *created_at_ms, snapshot_json.clone(), event_seq_range_json.clone())
                 })
                 .collect::<Vec<_>>();
             let full_table_by_id: HashMap<&str, &TurnTraceRecord> = table_traces
                 .iter()
                 .map(|trace| (trace.turn_id.as_str(), trace))
                 .collect();
-            for (node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json) in node_rows {
+            for (node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json) in node_rows {
                 let mut node = HistoryNode {
                     node_id,
                     session_id: session_id.clone(),
@@ -1521,6 +1812,8 @@ impl SqliteSessionBackend {
                     turn_count: 0,
                     last_referenced_file: None,
                     created_at_ms: created_at_ms as u64,
+                    event_seq_range: event_seq_range_json
+                        .and_then(|raw| serde_json::from_str(&raw).ok()),
                 };
                 // snapshot_json → 节点快照
                 if let Some(raw) = snapshot_json {
@@ -1566,9 +1859,9 @@ impl SqliteSessionBackend {
                 .collect::<Vec<_>>();
 
             // history_cursor（批量预取）
-            if let Some((_, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status)) = all_cursors
+            if let Some((_, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status, event_watermark)) = all_cursors
                 .iter()
-                .find(|(sid, _, _, _, _, _, _, _, _)| sid == &session_id)
+                .find(|(sid, _, _, _, _, _, _, _, _, _)| sid == &session_id)
             {
                 session.history_cursor = HistoryCursor {
                     session_id: session_id.clone(),
@@ -1577,6 +1870,7 @@ impl SqliteSessionBackend {
                     branch_head_node_id: branch_head_node_id.clone(),
                     workspace_node_id: workspace_node_id.clone(),
                     cursor_version: *cursor_version as u64,
+                    event_watermark: *event_watermark as u64,
                     mode: mode
                         .clone()
                         .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -2023,6 +2317,94 @@ impl SessionBackend for SqliteSessionBackend {
                 SessionBackendTraceLoadResult::Loaded(Vec::new())
             }
         }
+    }
+
+    /// PA-093：读取会话事件流 `(seq, branch_id, event)`（seq 升序，可截断）。
+    fn load_turn_events(
+        &self,
+        session_id: &str,
+        up_to_seq: Option<u64>,
+    ) -> Vec<(u64, String, crate::agent::turn_event::TurnEvent)> {
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                return Vec::new();
+            }
+        };
+        let conn = slot.as_ref().expect("connection initialized");
+        let sql = match up_to_seq {
+            Some(upper) => format!(
+                "SELECT seq, branch_id, payload FROM turn_events
+                 WHERE session_id = ?1 AND seq <= {upper} ORDER BY seq"
+            ),
+            None => {
+                "SELECT seq, branch_id, payload FROM turn_events
+                 WHERE session_id = ?1 ORDER BY seq"
+                    .to_string()
+            }
+        };
+        let mut events = Vec::new();
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite load turn events prepare error: {error}");
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }) {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite load turn events query error: {error}");
+                return Vec::new();
+            }
+        };
+        for row in rows {
+            let Ok((seq, branch_id, payload)) = row else {
+                continue;
+            };
+            match serde_json::from_str::<crate::agent::turn_event::TurnEvent>(&payload) {
+                Ok(event) => events.push((seq, branch_id, event)),
+                Err(error) => eprintln!(
+                    "[pony-agent][session] load turn event {seq} parse error: {error} (skipped)"
+                ),
+            }
+        }
+        events
+    }
+
+    /// PA-093：当前事件水位（turn_event_seq:{session_id} 计数器；缺失 → MAX(seq)+1）。
+    fn load_event_watermark(&self, session_id: &str) -> u64 {
+        let slot = match self.connection() {
+            Ok(slot) => slot,
+            Err(error) => {
+                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                return 0;
+            }
+        };
+        let conn = slot.as_ref().expect("connection initialized");
+        let counter_key = format!("turn_event_seq:{session_id}");
+        conn.query_row(
+            "SELECT value FROM store_metadata WHERE key = ?1",
+            params![counter_key],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|raw| raw.parse::<u64>().unwrap_or(0))
+        .unwrap_or_else(|_| {
+            conn.query_row(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM turn_events WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v.max(0) as u64)
+            .unwrap_or(0)
+        })
     }
 
     fn replace_session_traces(
@@ -2489,6 +2871,8 @@ mod tests {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+        event_watermark: 0,
+        last_commit_watermark: 0,
         }
     }
 
@@ -3204,6 +3588,8 @@ mod tests {
             history_branches: Vec::new(),
             history_cursor: Default::default(),
             workspace_id: None,
+        event_watermark: 0,
+        last_commit_watermark: 0,
         };
         assert!(
             backend.upsert_session("s1", &session),
@@ -3709,6 +4095,567 @@ let loaded = backend.load_store().expect("load");
             .query_row("SELECT COUNT(*) FROM session_blobs WHERE conversation_id = 's1'", [], |r| r.get(0))
             .expect("count");
         assert_eq!(count, 0, "remove 应转发到 session_blobs");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flush_events_writes_turn_events_with_contiguous_seq() {
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let dir = unique_dir("flush-events");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("flush-events.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+
+        let events = vec![
+            TurnEvent::TurnStart {
+                turn_id: "turn-1".into(),
+            },
+            TurnEvent::AssistantChunk {
+                turn_id: "turn-1".into(),
+                step: 0,
+                text: "hi".into(),
+            },
+            TurnEvent::TurnEnd {
+                turn_id: "turn-1".into(),
+                reason: TurnEndReason::Completed,
+                turn_duration_ms: Some(100),
+            },
+        ];
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-1".to_string(),
+            branch_id: "main".to_string(),
+            events: events.clone(),
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let rows: Vec<(i64, String, String)> = guard
+            .prepare("SELECT seq, event_type, payload FROM turn_events WHERE session_id = 's1' ORDER BY seq")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(rows.len(), 3, "all events persisted");
+        for (index, (seq, event_type, payload)) in rows.iter().enumerate() {
+            assert_eq!(*seq, index as i64, "seq must be 0-based contiguous");
+            assert_eq!(event_type, &events[index].type_name());
+            let decoded: TurnEvent = serde_json::from_str(payload).expect("decode payload");
+            // 语义等价：反序列化后重序列化与原始序列化一致。
+            assert_eq!(
+                serde_json::to_string(&decoded).expect("re-serialize"),
+                serde_json::to_string(&events[index]).expect("serialize"),
+                "payload round-trip"
+            );
+        }
+        // 计数器已推进
+        let counter: String = guard
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'turn_event_seq:s1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("counter");
+        assert_eq!(counter, "3");
+        // 释放连接锁后再写（Mutex 单连接，持锁调用 persist_command 会死锁）
+        drop(guard);
+        drop(conn);
+
+        // 第二次 flush seq 衔接（3 起）
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-2".to_string(),
+            branch_id: "main".to_string(),
+            events: vec![TurnEvent::TurnStart {
+                turn_id: "turn-2".into(),
+            }],
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let seq: i64 = guard
+            .query_row(
+                "SELECT seq FROM turn_events WHERE session_id = 's1' AND turn_id = 'turn-2'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("seq");
+        assert_eq!(seq, 3, "seq continues across batches");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flush_events_rolls_back_on_injected_failure() {
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let dir = unique_dir("flush-events-rollback");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("flush-events-rollback.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+
+        TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
+            .lock()
+            .expect("inject lock")
+            .replace("flush-events-rollback".to_string());
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-1".to_string(),
+            branch_id: "main".to_string(),
+            events: vec![
+                TurnEvent::TurnStart {
+                    turn_id: "turn-1".into(),
+                },
+                TurnEvent::TurnEnd {
+                    turn_id: "turn-1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: None,
+                },
+            ],
+        });
+        TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
+            .lock()
+            .expect("inject lock")
+            .take();
+        assert_eq!(outcome, PersistCommandOutcome::Failed, "injected failure");
+
+        // 事务回滚：事件行与计数器均无残留
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let count: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM turn_events WHERE session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 0, "event rows must roll back");
+        let counter_exists: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM store_metadata WHERE key = 'turn_event_seq:s1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("counter count");
+        assert_eq!(counter_exists, 0, "counter must roll back");
+        // 释放连接锁后再写（Mutex 单连接，持锁调用 persist_command 会死锁）
+        drop(guard);
+        drop(conn);
+
+        // 注入关闭后重试成功（seq 从 0 起，无空洞）
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-1".to_string(),
+            branch_id: "main".to_string(),
+            events: vec![TurnEvent::TurnStart {
+                turn_id: "turn-1".into(),
+            }],
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let seq: i64 = guard
+            .query_row(
+                "SELECT seq FROM turn_events WHERE session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("seq");
+        assert_eq!(seq, 0, "retry starts from 0 after rollback");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flush_events_empty_batch_is_noop() {
+        let dir = unique_dir("flush-events-empty");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("flush-events-empty.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-1".to_string(),
+            branch_id: "main".to_string(),
+            events: Vec::new(),
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded, "empty batch is noop");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flush_events_concurrent_seq_no_duplicate_no_gap() {
+        use crate::agent::turn_event::TurnEvent;
+        use std::sync::{Arc, Barrier};
+        let dir = unique_dir("flush-events-concurrent");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("flush-events-concurrent.db");
+        let backend = Arc::new(SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        ));
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+
+        // 双线程各 flush 100 个事件（连接 Mutex 串行化 seq 分配；spec 数值对齐）
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for thread_id in 0..2u32 {
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..100u32 {
+                    let outcome = backend.persist_command(PersistCommand::FlushEvents {
+                        epoch: 1,
+                        session_id: "s1".to_string(),
+                        turn_id: format!("turn-{thread_id}-{i}"),
+                        branch_id: "main".to_string(),
+                        events: vec![TurnEvent::TurnStart {
+                            turn_id: format!("turn-{thread_id}-{i}"),
+                        }],
+                    });
+                    assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+                }
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("thread join");
+        }
+
+        // 100 行 seq 0-99 连续无重复
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let seqs: Vec<i64> = guard
+            .prepare("SELECT seq FROM turn_events WHERE session_id = 's1' ORDER BY seq")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(seqs.len(), 200, "all events persisted");
+        for (index, seq) in seqs.iter().enumerate() {
+            assert_eq!(*seq, index as i64, "seq contiguous, no duplicate/gap");
+        }
+        let counter: String = guard
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'turn_event_seq:s1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("counter");
+        assert_eq!(counter, "200");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backfill_resumes_partially_backfilled_sessions() {
+        let dir = unique_dir("backfill-resume");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("backfill-resume.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        // 两个会话（s1/s2 各一条 user 消息）
+        for (sid, content) in [("s1", "hello-1"), ("s2", "hello-2")] {
+            let mut session = minimal_session(sid, "title", 1000);
+            session.history = vec![crate::agent::session::TurnHistoryMessage {
+                role: "user".to_string(),
+                content: content.to_string(),
+                attachments: Vec::new(),
+                turn_id: Some(format!("turn-{sid}")),
+                status: None,
+                model_name: None,
+                token_count: None,
+                reasoning_content: None,
+            }];
+            assert!(backend.upsert_session(sid, &session));
+        }
+        // 首次干净回填：两个会话都完成
+        let count = backend.backfill_turn_events().expect("first backfill");
+        assert_eq!(count, 2, "both sessions backfilled");
+        let count = backend.backfill_turn_events().expect("second backfill");
+        assert_eq!(count, 0, "idempotent no-op");
+
+        // 模拟"s2 回填未完成"（崩溃于 s2 中途）：删 s2 标记与事件，注入使 s2 flush 失败
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute(
+                    "DELETE FROM store_metadata WHERE key = 'turn_event_backfill:s2'",
+                    [],
+                )
+                .expect("delete marker");
+            guard
+                .execute("DELETE FROM turn_events WHERE session_id = 's2'", [])
+                .expect("delete s2 events");
+            drop(guard);
+            drop(conn);
+        }
+        TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
+            .lock()
+            .expect("inject lock")
+            .replace("backfill-resume.db".to_string());
+        // 注入使 s2 的 flush 失败 → backfill_turn_events 返回 Err（预期）：
+        // s2 无事件残留，s1 已完成跳过
+        let _ = backend.backfill_turn_events();
+        TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
+            .lock()
+            .expect("inject lock")
+            .take();
+        // 注入使 s2 的 flush 回滚：s2 无事件残留；s1 已完成（跳过，不受影响）
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let s1_done: i64 = guard
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM store_metadata WHERE key = 'turn_event_backfill:s1')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("s1 marker");
+        assert_eq!(s1_done, 1, "s1 completed sessions skip on resume");
+        let s2_events: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM turn_events WHERE session_id = 's2'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("s2 count");
+        assert_eq!(s2_events, 0, "s2 failed flush left no events (rollback)");
+        drop(guard);
+        drop(conn);
+        // 注入关闭后重跑：s2 从断点续跑完成
+        let count = backend.backfill_turn_events().expect("final backfill");
+        assert_eq!(count, 1, "s2 backfilled after injection cleared");
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let s2_events: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM turn_events WHERE session_id = 's2'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("s2 count");
+        assert_eq!(s2_events, 3, "s2 derived events (start/user/end)");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backfill_derives_tool_and_provider_events_from_trace() {
+        use crate::agent::turn_event::TurnEvent;
+        let dir = unique_dir("backfill-trace");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("backfill-trace.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.history = vec![crate::agent::session::TurnHistoryMessage {
+            role: "user".to_string(),
+            content: "run".to_string(),
+            attachments: Vec::new(),
+            turn_id: Some("turn-1".to_string()),
+            status: None,
+            model_name: None,
+            token_count: None,
+            reasoning_content: None,
+        }];
+        // trace：tool_activities（running + done）+ provider_call_records
+        let mut trace = trace("turn-1", "first", 100);
+        trace.tool_activities = vec![
+            crate::agent::telemetry::TurnToolActivity {
+                id: "act-1".to_string(),
+                name: "bash".to_string(),
+                canonical_tool_name: None,
+                display_name_zh: None,
+                status: "running".to_string(),
+                description: "run".to_string(),
+                arguments_text: Some("{}".to_string()),
+                result_text: None,
+                duration_seconds: None,
+                parent_activity_id: None,
+                artifacts: None,
+                error: None,
+                capability_invocation: None,
+            },
+            crate::agent::telemetry::TurnToolActivity {
+                id: "act-1".to_string(),
+                name: "bash".to_string(),
+                canonical_tool_name: None,
+                display_name_zh: None,
+                status: "done".to_string(),
+                description: "run".to_string(),
+                arguments_text: Some("{}".to_string()),
+                result_text: Some("ok".to_string()),
+                duration_seconds: Some(0.5),
+                parent_activity_id: None,
+                artifacts: None,
+                error: None,
+                capability_invocation: None,
+            },
+        ];
+        trace.provider_call_records = vec![crate::agent::telemetry::ProviderCallCacheRecord {
+            request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+            provider_source: None,
+            provider_mode: None,
+            input_tokens: Some(100),
+            cache_hit_input_tokens: Some(40),
+            cache_hit_source: None,
+            cache_miss_input_tokens: Some(60),
+            reasoning_tokens: Some(10),
+            output_tokens: Some(50),
+            total_tokens: Some(160),
+            first_token_latency_ms: Some(88),
+            turn_duration_ms: Some(500),
+            latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+            prefix_mutation_reasons: Vec::new(),
+        }];
+        session.turn_trace_history = vec![trace];
+        assert!(backend.upsert_session("s1", &session));
+
+        backend.backfill_turn_events().expect("backfill");
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let types: Vec<String> = guard
+            .prepare(
+                "SELECT event_type FROM turn_events WHERE session_id = 's1' ORDER BY seq",
+            )
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        // turn/start, user/message, tool/call, tool/result, provider/usage
+        assert!(
+            types.iter().any(|t| t == "tool/call"),
+            "tool/call derived: {types:?}"
+        );
+        assert!(
+            types.iter().any(|t| t == "tool/result"),
+            "tool/result derived: {types:?}"
+        );
+        assert!(
+            types.iter().any(|t| t == "provider/usage"),
+            "provider/usage derived: {types:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backfill_derives_events_and_is_per_session_idempotent() {
+        use crate::agent::turn_event::TurnEvent;
+        let dir = unique_dir("backfill");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("backfill.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        // 构造带 history + trace 的会话
+        let mut session = minimal_session("s1", "first", 1000);
+        session.history = vec![
+            crate::agent::session::TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                attachments: Vec::new(),
+                turn_id: Some("turn-1".to_string()),
+                status: None,
+                model_name: None,
+                token_count: None,
+                reasoning_content: None,
+            },
+            crate::agent::session::TurnHistoryMessage {
+                role: "assistant".to_string(),
+                content: "hi".to_string(),
+                attachments: Vec::new(),
+                turn_id: Some("turn-1".to_string()),
+                status: None,
+                model_name: None,
+                token_count: None,
+                reasoning_content: None,
+            },
+        ];
+        assert!(backend.upsert_session("s1", &session));
+
+        let count = backend.backfill_turn_events().expect("backfill");
+        assert_eq!(count, 1, "one session backfilled");
+
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let rows: Vec<(i64, String)> = guard
+            .prepare("SELECT seq, event_type FROM turn_events WHERE session_id = 's1' ORDER BY seq")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        // turn/start, user/message, assistant/message, turn/end
+        assert_eq!(rows.len(), 4, "derived events");
+        let types: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            types,
+            vec!["turn/start", "user/message", "assistant/message", "turn/end"]
+        );
+        // assistant/message 带 chunk_missing
+        let payload: String = guard
+            .query_row(
+                "SELECT payload FROM turn_events WHERE session_id = 's1' AND event_type = 'assistant/message'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("payload");
+        let decoded: TurnEvent = serde_json::from_str(&payload).expect("decode");
+        match decoded {
+            TurnEvent::AssistantMessage { chunk_missing, .. } => {
+                assert_eq!(chunk_missing, Some(true), "chunk_missing marker");
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+        drop(guard);
+        drop(conn);
+
+        // 幂等：第二次回填跳过
+        let count = backend.backfill_turn_events().expect("backfill again");
+        assert_eq!(count, 0, "second run is no-op");
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let total: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM turn_events WHERE session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(total, 4, "no duplicate events");
 
         fs::remove_dir_all(&dir).ok();
     }

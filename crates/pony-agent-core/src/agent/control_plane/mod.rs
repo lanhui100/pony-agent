@@ -933,6 +933,44 @@ impl HostControlPlaneBuilder {
         let mut runtime = self.runtime.unwrap_or_else(AgentRuntime::new);
         let capability_registry = runtime.capability_registry_snapshot();
         let sessions_rwlock = runtime.sessions_handle();
+        // PA-091：注册事件持久化通道（缓冲 + turn 终态 flush）。
+        // 闭包按 turn_id 累积事件，终态（completed/failed/cancelled）时经
+        // SessionStore.persist_events 与快照同事务落盘；失败只记日志（contained）。
+        {
+            let sessions = Arc::clone(&sessions_rwlock);
+            let buffer: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<crate::agent::turn_event::TurnEvent>>>> =
+                Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let persist = move |session_id: &str, turn_id: &str, event: crate::agent::turn_event::TurnEvent, is_terminal: bool| {
+                let mut buf = buffer.lock().unwrap_or_else(|e| {
+                    eprintln!("[pony-agent][runtime] event buffer lock poisoned: {e}, recovering");
+                    e.into_inner()
+                });
+                // 写时聚合：同一 turn 的连续 AssistantChunk 合并为一条（
+                // append-only 不可变 + seq 连续与聚合的一致性由"emit 时合并"保证）。
+                if let crate::agent::turn_event::TurnEvent::AssistantChunk { text, .. } = &event {
+                    if let Some(last) = buf.get_mut(turn_id).and_then(|v| v.last_mut()) {
+                        if let crate::agent::turn_event::TurnEvent::AssistantChunk {
+                            text: last_text,
+                            ..
+                        } = last
+                        {
+                            last_text.push_str(text);
+                            if is_terminal {
+                                let events = buf.remove(turn_id).unwrap_or_default();
+                                flush_events(&sessions, session_id, turn_id, events);
+                            }
+                            return;
+                        }
+                    }
+                }
+                buf.entry(turn_id.to_string()).or_default().push(event);
+                if is_terminal {
+                    let events = buf.remove(turn_id).unwrap_or_default();
+                    flush_events(&sessions, session_id, turn_id, events);
+                }
+            };
+            crate::agent::turn_flow::register_event_persist(Arc::new(persist));
+        }
         // The graph run store and the governed ask dispatcher are shared with the runtime so the
         // Ask control surface (`ask_answer` / `graph_resume_ask`) hits the exact pending-request
         // store and run bindings the runtime's turn loop persists (design.md Decision 5, P1-1).
@@ -967,6 +1005,45 @@ impl Default for HostControlPlaneBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// PA-091：事件缓冲 flush（与快照同事务由 SessionStore.persist_events 保证）。
+/// 失败只记日志（contained，不阻断流）；session_id 缺失时丢弃并告警。
+/// PA-093：事件携带当前 active 分支（branch_id 落列）；flush 成功后同步
+/// 会话水位并升级 branch head 节点为引用化（finalize_event_watermark）。
+fn flush_events(
+    sessions: &Arc<RwLock<crate::agent::session::SessionStore>>,
+    session_id: &str,
+    turn_id: &str,
+    events: Vec<crate::agent::turn_event::TurnEvent>,
+) {
+    if events.is_empty() {
+        return;
+    }
+    if session_id.is_empty() {
+        eprintln!("[pony-agent][runtime] event flush skipped: missing session_id turn={turn_id}");
+        return;
+    }
+    let mut sessions = sessions.write().unwrap_or_else(|e| {
+        eprintln!("[pony-agent][runtime] sessions lock poisoned: {e}, recovering");
+        e.into_inner()
+    });
+    let branch_id = sessions
+        .session_active_branch_id(session_id)
+        .unwrap_or_else(|| "main".to_string());
+    if !sessions.persist_events(session_id, turn_id, &branch_id, events.clone()) {
+        eprintln!(
+            "[pony-agent][runtime] event flush failed: session={session_id} turn={turn_id} events={} first_type={}",
+            events.len(),
+            events
+                .first()
+                .map(|e| e.type_name())
+                .unwrap_or("none")
+        );
+        return;
+    }
+    // PA-093：水位同步 + 节点引用化升级（幂等；失败只记日志）。
+    sessions.finalize_event_watermark(session_id, turn_id);
 }
 
 pub struct DesktopHostPreset;

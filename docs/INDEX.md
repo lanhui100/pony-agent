@@ -50,6 +50,7 @@
 ## 3. 决策记录
 
 - [决策记录索引](decisions/README.md)
+- [0008 会话数据架构向事件溯源演进（分阶段落地）](decisions/0008-event-sourcing-evolution.md)
 
 ## 4. 开发指南
 
@@ -93,6 +94,10 @@
 
 - [OpenSpec 根目录](../openspec)
 - [复杂任务交付 canonical spec](../openspec/specs/spec-driven-delivery/spec.md)
+- [事件溯源演进：阶段 1 turn 内事件日志（ADR 0008）](../openspec/changes/turn-event-log/proposal.md)
+- [事件溯源演进：阶段 2 投影层（ADR 0008）](../openspec/changes/session-projection-layer/proposal.md)
+- [事件溯源演进：阶段 3 checkpoint 引用化（ADR 0008）](../openspec/changes/checkpoint-event-referencing/proposal.md)
+- [事件溯源演进：阶段 4 trace 事件化（ADR 0008）](../openspec/changes/trace-event-projection/proposal.md)
 - [第一波工具面 canonical spec](../openspec/specs/first-wave-tool-surface/spec.md)
 - [第二波工具面 canonical spec](../openspec/specs/second-wave-tool-surface/spec.md)
 - [第三波工具面 canonical spec](../openspec/specs/third-wave-default-tool-alignment/spec.md)

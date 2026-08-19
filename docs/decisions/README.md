@@ -19,6 +19,7 @@
 - [0005 第一阶段视觉方向采用暖色极简风](0005-visual-direction-warm-minimalism.md)
 - [0006 API Key 存储从 env-first 演进到统一 SecretStore](0006-api-key-evolution-env-first.md)
 - [0007 将缓存命中提升为一等产品指标，按阶段落地](0007-cache-hit-as-first-class-product-metric.md)
+- [0008 会话数据架构向事件溯源演进（分阶段落地）](0008-event-sourcing-evolution.md)
 
 ## 维护规则
 
