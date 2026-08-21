@@ -20,6 +20,9 @@
 
 ## Ready
 
+- `PA-095` 事件溯源收尾——ADR 0008 承诺缺口关闭（P0）
+  说明：**2026-08-21 由 ADR 完成度审核立卡**。PA-091~094 四阶段主体落地后，对照 ADR 原文逐项审核确认 7 项缺口：①同步 `run_turn` 绕过事件流（生产入口零事件）；②`append_turn` 未改造为事件折叠（阶段 2 核心承诺，整包 upsert 写放大未消除）；③blob↔事件折叠对拍测试缺失（豁免清单未固化）；④StepStart/StepEnd 不发射 + AssistantChunk 固定 step=0（多 hop timeline 重建分歧）；⑤`event_schema_version` 仅定义常量从未写入/校验；⑥`cursor_version` 未退役（23 处引用，双版本并存）；⑦trace cache 仍内嵌全量 observation（R4b 违例）。OpenSpec change 待创建（`event-sourcing-closeout`）。
+
 - `PA-084` trace 面板初始化折叠与懒渲染（P0）
   说明：**已完成并收口（2026-08-14）**——`activePanel` 默认 `""`、`HomeTracePanel` body `v-if="open"` 懒挂载（header 常驻）、折叠时 `liveTraceTurn` 返回 null（消除冻结引用污染）。实现后审核 P1 已修复。OpenSpec change 待归档：`trace-panel-collapse-by-default`。
 
@@ -51,6 +54,14 @@
 
 ## Done
 
+- `PA-094` trace 事件化（阶段 4：事件溯源演进）（P0）
+  说明：**已完成并收口（2026-08-20）**——trace 表降级为投影缓存（`event_watermark` 水位，清表可重建，事件权威；`SessionStore::with_backend` 加载时缓存空 + 事件存在 → 事件全量折叠重建 + AppendTrace 回写预热）；`TraceProjection` timeline 事件折叠映射表（step/start→call_model、tool/call→call_tool、tool/result→return_result、chunk 文本聚合、turn/end 结算 token、build_context 条目带 ref）；`ProviderCallCacheRecord` 由 `MetricsProjection.by_turn_records` 重建（addReplacing 原位覆盖，豁免 updated_at/event_id/sequence/emitted_at_ms）；大字段外置（`ContextObservation` 事件引用 `bco:<turn_id>:<seq>` + `build_context_observations` 表 + `load_build_context_observation` host command + 前端按需加载 + legacy backfill 派生）；`turn:completed/failed/cancelled` 发射 turn/end + provider/usage（per-call 逐条）+ user/message（turn:started）。**三轮 3 路对抗审核（code-reviewer + consultant + tester + ox-alpha 模型）全部采纳修复**：seq=0 watermark、completed 拆批、ProviderUsage step 坍缩、UserMessage 缺失、多分支重建丢失、事件缓冲跨 session、前端 ref 缓存串数据、prefix reason Debug 格式、顶层 token 非累计、普通 streaming watermark、failed/cancelled usage 缺失、legacy observation 清表丢失、重建回写预热。验证：core 849 + src-tauri 6 + 前端 399 全绿。OpenSpec change 已归档：`openspec/changes/archive/2026-08-20-trace-event-projection/`，canonical spec：`openspec/specs/trace-event-projection/spec.md`。后续架构级事项（同步 run_turn 事件化、事件/缓存事务边界、AssistantChunk 逻辑 step 等）登记为后续任务。
+- `PA-093` checkpoint 引用化（阶段 3：事件溯源演进）（P0）
+  说明：**已完成并收口（2026-08-18）**——`HistoryNode.event_seq_range` + `HistoryCursor.event_watermark` + `SessionState.event_watermark/last_commit_watermark`、checkout/fork 事件化（branch_id 透传）、分支可见性（血缘链 + checkout 重放）、时间线回放 + cursor_version 收敛、`fold_all_with_branches`。验证：core 831 全绿 + 8 项 pa093 定向测试。OpenSpec change：`checkpoint-event-referencing`。
+- `PA-092` 投影层（阶段 2：事件溯源演进）（P0）
+  说明：**已完成并收口（2026-08-18）**——`Projection` trait（init/apply/view）+ History/Trace/Plan/Metrics 四投影、`append_turn` 重构为事件 + 投影折叠、trace 投影（seq 水位 + higher-seq-wins）、MetricsProjection（addReplacing 四桶）、golden fixture。验证：core 823 全绿 + 12 项投影测试。OpenSpec change：`session-projection-layer`。
+- `PA-091` turn 事件日志（阶段 1：事件溯源演进）（P0）
+  说明：**已完成并收口（2026-08-18）**——`turn_events` append-only 表（branch_id）+ `turn_events_archive`、`TurnEvent` enum 15 类事件、`TurnEventSink::persist` 事件模型（turn 动态 flush + blob 同事务）、事件映射（8 条路径）、per-session 幂等回填。验证：core 全绿。OpenSpec change：`turn-event-log`。
 - `PA-080` Workspace 路径权限边界（P0）
   说明：**已完成并收口（2026-08-13）**——`path_permission.rs` 统一路径判定（组件级前缀比较 + Windows 大小写折叠 + 可注入 canonicalizer）+ 18 项对抗测试、`AuthorizeStore` 授权清单（SQLite store_metadata key=`path_authorizations.v1` + JSON fallback）、写边界（workspace 根递归 + 受控 tmp，`outside_workspace_write_denied`）、读边界（外部需授权，`requires_authorization`）、宿主 `authorize_path`（仅 read）/`revoke_authorization`/`list_authorizations`、锁序登记。**实现后 3 路对抗审核**：@code-reviewer（P0 edit 写判定 / P1-1 Run cwd / P1-2 会话 root）+ @consultant（P0 会话 root 并发串扰 → 方案 A 显式 `ToolExecutionContext`、生产链路按 workspaceId 解析 root、错误码结构化信封、Run sandbox 基准、fallback tmp 覆盖）全部修复。最终验证：core lib 775 + tool_router_regression 13 + session_regression 5 + provider_registry 8 + src-tauri lib 6 + 前端 vitest 377 全绿。提交：`2db0b0e`（实现）+ `a1b75d8`（审核修复）。OpenSpec change 已归档：`openspec/changes/archive/2026-08-13-workspace-path-permission-boundary/`，canonical spec：`openspec/specs/workspace-path-permission/spec.md`。
 
