@@ -16,6 +16,7 @@ import type {
   TurnTraceRecord
 } from "../../types/runtime";
 import { errorLog } from "./utils";
+import { safeInvoke } from "../tauri";
 import { resolveFallbackTimelineRuntimePhase } from "./phases";
 
 export function toolStatusToMessageStatus(status: ToolActivity["status"]): ChatMessage["status"] {
@@ -59,6 +60,7 @@ export function cloneTraceTimeline(traceTimeline?: TraceTimelineEntry[] | null):
     // it, and the frontend never reads it back from stored timeline entries.
     // Keeping it would cause N × deep-clone on every terminal event, blocking
     // the main thread and freezing the page at turn end.
+    // PA-094：新数据走 buildContextObservationRef（按需加载），ref 保留。
     buildContextObservation: null,
     toolActivities: cloneToolActivities(entry.toolActivities)
   }));
@@ -673,6 +675,26 @@ export function normalizeTurnTraceRecord(trace: TurnTraceRecord): TurnTraceRecor
     providerCallRecords: cloneProviderCallRecords(trace.providerCallRecords),
     hookTraceRecords: cloneHookTraceRecords(trace.hookTraceRecords)
   };
+}
+
+/**
+ * PA-094：大字段外置——按引用加载 build_context_observation 全量 payload。
+ * 引用格式 `bco:<turn_id>:<seq>`；未命中返回 null（legacy 内嵌数据走
+ * buildContextObservation 字段，无需调用）。浏览器预览模式返回 null。
+ */
+export async function loadBuildContextObservation(
+  sessionId: string,
+  observationRef: string
+): Promise<BuildContextObservation | null> {
+  try {
+    return await safeInvoke<BuildContextObservation | null>("load_build_context_observation", {
+      sessionId,
+      observationRef
+    });
+  } catch (error) {
+    errorLog("load_build_context_observation", { error: String(error) });
+    return null;
+  }
 }
 
 export function buildAssistantModelLabel(providerName?: string | null, modelName?: string | null) {

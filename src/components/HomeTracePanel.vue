@@ -34,6 +34,7 @@ import {
   buildTurnPrefixHeights,
   estimateTurnHeight
 } from "@/lib/runtime/trace-virtual-scroll";
+import { loadBuildContextObservation } from "@/lib/runtime/trace";
 
 type DetailRowTone = "default" | "muted" | "warning" | "danger";
 type InputKind = "text" | "image" | "video" | "audio";
@@ -903,7 +904,8 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
   const kind = props.canonicalKind(entry.kind);
 
   if (kind === "build_context") {
-    buildContextRows(entry.buildContextObservation ?? turn.buildContextObservation).forEach((row) => rows.push(row));
+    const buildContextObservation = resolveBuildContextObservation(turn, entry);
+    buildContextRows(buildContextObservation).forEach((row) => rows.push(row));
     pushRow(rows, "请求目标", entry.providerRequestedName ?? turn.providerRequestedName);
     pushRow(rows, "Provider", entry.providerName);
     pushRow(rows, "Protocol", entry.providerProtocol);
@@ -912,7 +914,7 @@ function buildTimelineRows(turn: TurnTraceRecord, entry: TraceTimelineEntry) {
     pushRow(
       rows,
       "观测说明",
-      entry.buildContextObservation ?? turn.buildContextObservation
+      buildContextObservation
         ? "这里展示的是本轮真正发给模型的请求，不是 retrieval state 的替身。"
         : "当前还没有可展示的 request observation。",
       { multiline: true, tone: "muted" }
@@ -939,7 +941,7 @@ function buildTimelineDetailSections(turn: TurnTraceRecord, entry: TraceTimeline
   const kind = props.canonicalKind(entry.kind);
 
   if (kind === "build_context") {
-    const buildContextObservation = entry.buildContextObservation ?? turn.buildContextObservation;
+    const buildContextObservation = resolveBuildContextObservation(turn, entry);
     const contextSections: Array<[string, string, string]> = [
       ["stable", "稳定前缀", buildContextText(buildContextObservation, "stablePrefixText")],
       ["semi", "半稳定上下文", buildContextText(buildContextObservation, "semiStableContextText")],
@@ -1307,6 +1309,69 @@ watch(orderedTurnTraceSignature, () => {
     activeTraceDetailKey.value = "";
   }
 });
+
+// PA-094：大字段外置——按引用异步加载 build_context_observation（ref 存在且
+// 内嵌 payload 为 null 时）。加载结果缓存到 ref 状态，buildContextRows 消费。
+// 审核 P1：缓存键含 sessionId（turn_id 非全局唯一，跨会话同 ref 会串数据）；
+// watch 键监听 turnId + ref 集合（ref 后到也触发）；Set 去重避免重复 IPC。
+const loadedObservations = ref<Record<string, BuildContextObservation | null>>({});
+const observationCacheKey = (sessionId: string, refValue: string) => `${sessionId}:${refValue}`;
+watch(
+  () =>
+    props.turns
+      .map((turn) => `${turn.turnId}|${turn.buildContextObservationRef ?? ""}|${(turn.traceTimeline ?? []).map((e) => e.buildContextObservationRef ?? "").join(",")}`)
+      .join(";"),
+  async () => {
+    const sessionId = props.sessionId;
+    const pending = new Set<string>();
+    for (const turn of props.turns) {
+      const turnRef = turn.buildContextObservationRef;
+      if (turnRef && !turn.buildContextObservation) {
+        pending.add(observationCacheKey(sessionId, turnRef));
+      }
+      for (const entry of turn.traceTimeline ?? []) {
+        const entryRef = entry.buildContextObservationRef;
+        if (entryRef && !entry.buildContextObservation) {
+          pending.add(observationCacheKey(sessionId, entryRef));
+        }
+      }
+    }
+    for (const key of pending) {
+      if (key in loadedObservations.value) {
+        continue;
+      }
+      const refValue = key.slice(sessionId.length + 1);
+      const observation = await loadBuildContextObservation(sessionId, refValue);
+      loadedObservations.value = { ...loadedObservations.value, [key]: observation };
+    }
+  },
+  { immediate: true }
+);
+
+// 会话切换时清空缓存（避免旧 session 的 in-flight 结果写入新视图）。
+watch(
+  () => props.sessionId,
+  () => {
+    loadedObservations.value = {};
+  }
+);
+
+/** PA-094：解析 build_context_observation——内嵌 payload 优先，其次按引用加载的缓存。 */
+function resolveBuildContextObservation(
+  turn: TurnTraceRecord,
+  entry: TraceTimelineEntry
+): BuildContextObservation | null | undefined {
+  return (
+    entry.buildContextObservation ??
+    turn.buildContextObservation ??
+    (entry.buildContextObservationRef
+      ? loadedObservations.value[observationCacheKey(props.sessionId, entry.buildContextObservationRef)]
+      : null) ??
+    (turn.buildContextObservationRef
+      ? loadedObservations.value[observationCacheKey(props.sessionId, turn.buildContextObservationRef)]
+      : null)
+  );
+}
 </script>
 
 <template>

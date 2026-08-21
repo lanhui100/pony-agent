@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::session::{TurnHistoryMessage, TurnTraceRecord};
+use crate::agent::session::{TraceTimelineEntry, TurnHistoryMessage, TurnTraceRecord};
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity};
 use crate::agent::turn_event::{TurnEndReason, TurnEvent};
 
@@ -108,9 +108,7 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                 if let Some((_, last)) = state.messages.last_mut() {
                     if last.role == "assistant" {
                         last.status = Some(match reason {
-                            TurnEndReason::Completed => {
-                                crate::agent::session::MessageStatus::Done
-                            }
+                            TurnEndReason::Completed => crate::agent::session::MessageStatus::Done,
                             _ => crate::agent::session::MessageStatus::Error,
                         });
                     }
@@ -150,6 +148,9 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
 }
 
 /// trace 投影：step/tool/chunk/turn-end 折叠为 `TurnTraceRecord`（按 turn 聚合）。
+/// PA-094：新增 trace_timeline 事件折叠（映射表见 design.md §2）——
+/// step/start → call_model、tool/call → call_tool、tool/result → return_result、
+/// assistant/chunk → 文本聚合到 call_model、turn/end → 结算 token 指标。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TraceProjectionState {
     by_turn: HashMap<String, TurnTraceRecord>,
@@ -159,21 +160,51 @@ pub struct TraceProjectionState {
     chunk_text: HashMap<String, String>,
     /// turn_id → 最近 provider/model（终态信封回填用）。
     provider_model: HashMap<String, (String, String)>,
+    /// turn_id → timeline 条目（事件折叠产物，PA-094）。
+    timeline: HashMap<String, Vec<TraceTimelineEntry>>,
+    /// turn_id → 下一个 timeline sequence（1-based 单调递增）。
+    timeline_seq: HashMap<String, u64>,
+    /// turn_id → step → call_model 条目在 timeline 中的索引（chunk/usage 聚合落点）。
+    call_model_index: HashMap<String, HashMap<u32, usize>>,
+    /// turn_id → call_id → call_tool 条目在 timeline 中的索引（tool/result 回填）。
+    /// 键用 call_id 而非 step：`build_tool_event` 以 turn 事件序号作 step，
+    /// ToolCall 与 ToolResult 的 step 必然不同，按 step 回填会 miss（审核 P0）。
+    call_tool_index: HashMap<String, HashMap<String, usize>>,
+    /// turn_id → 累计 token 指标（ProviderUsage 聚合，turn/end 结算）。
+    token_metrics: HashMap<String, TurnTokenMetrics>,
+    /// turn_id → build_context_observation 引用（ContextObservation 事件折叠，
+    /// turn/end 结算时生成 build_context timeline 条目——design.md §2 映射表）。
+    context_ref: HashMap<String, String>,
+}
+
+/// 单 turn 累计 token 指标（turn/end 结算进 trace 与 timeline call_model 条目）。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct TurnTokenMetrics {
+    input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    first_token_latency_ms: Option<u64>,
 }
 
 impl TraceProjectionState {
     pub fn traces(&self) -> Vec<TurnTraceRecord> {
         let mut traces: Vec<TurnTraceRecord> = self.by_turn.values().cloned().collect();
+        // 未结算 turn（无 TurnEnd）：挂载残留 timeline（事件折叠产物）。
+        for trace in &mut traces {
+            if trace.trace_timeline.is_empty() {
+                if let Some(timeline) = self.timeline.get(&trace.turn_id) {
+                    trace.trace_timeline = timeline.clone();
+                }
+            }
+        }
         // 按 turn 起始 seq 排序（插入序近似；turn_id 字典序会错乱 turn-10 < turn-2）。
         let mut order: Vec<(u64, String)> = self
             .by_turn
             .iter()
             .map(|(turn_id, _)| {
-                let start = self
-                    .watermark
-                    .get(turn_id)
-                    .copied()
-                    .unwrap_or(u64::MAX);
+                let start = self.watermark.get(turn_id).copied().unwrap_or(u64::MAX);
                 (start, turn_id.clone())
             })
             .collect();
@@ -187,8 +218,84 @@ impl TraceProjectionState {
         traces
     }
 
-    pub fn trace_for_turn(&self, turn_id: &str) -> Option<&TurnTraceRecord> {
-        self.by_turn.get(turn_id)
+    /// 返回 turn 的 trace（含事件折叠 timeline；未结算 turn 挂载残留 timeline）。
+    pub fn trace_for_turn(&self, turn_id: &str) -> Option<TurnTraceRecord> {
+        let mut trace = self.by_turn.get(turn_id)?.clone();
+        if trace.trace_timeline.is_empty() {
+            if let Some(timeline) = self.timeline.get(turn_id) {
+                trace.trace_timeline = timeline.clone();
+            }
+        }
+        Some(trace)
+    }
+}
+
+/// 下一个 timeline sequence（1-based 单调递增）。
+fn next_timeline_seq(state: &mut TraceProjectionState, turn_id: &str) -> u64 {
+    let next = state.timeline_seq.entry(turn_id.to_string()).or_insert(1);
+    let value = *next;
+    *next += 1;
+    value
+}
+
+/// 确保 turn 的 step 存在 call_model 条目（StepStart 创建；chunk/usage 兜底创建），
+/// 返回条目在 timeline 中的索引。
+fn ensure_call_model_entry(
+    state: &mut TraceProjectionState,
+    turn_id: &str,
+    step: u32,
+    _seq: u64,
+) -> usize {
+    if let Some(index) = state
+        .call_model_index
+        .get(turn_id)
+        .and_then(|m| m.get(&step))
+    {
+        return *index;
+    }
+    let sequence = next_timeline_seq(state, turn_id);
+    let timeline = state.timeline.entry(turn_id.to_string()).or_default();
+    let index = timeline.len();
+    timeline.push(TraceTimelineEntry {
+        id: format!("model-{sequence}"),
+        kind: "call_model".to_string(),
+        label: format!("CALL MODEL #{}", step + 1),
+        state: "completed".to_string(),
+        sequence,
+        ..Default::default()
+    });
+    state
+        .call_model_index
+        .entry(turn_id.to_string())
+        .or_default()
+        .insert(step, index);
+    index
+}
+
+/// turn/end 结算 timeline：无 StepStart 事件时兜底补建 call_model 条目，
+/// 末条 call_model 补 turn_duration_ms。
+fn settle_timeline(state: &mut TraceProjectionState, turn_id: &str, turn_duration_ms: Option<u64>) {
+    let has_call_model = state
+        .timeline
+        .get(turn_id)
+        .map(|t| t.iter().any(|e| e.kind == "call_model"))
+        .unwrap_or(false);
+    if !has_call_model {
+        let sequence = next_timeline_seq(state, turn_id);
+        let timeline = state.timeline.entry(turn_id.to_string()).or_default();
+        timeline.push(TraceTimelineEntry {
+            id: format!("model-{sequence}"),
+            kind: "call_model".to_string(),
+            label: "CALL MODEL #1".to_string(),
+            state: "completed".to_string(),
+            sequence,
+            ..Default::default()
+        });
+    }
+    if let Some(timeline) = state.timeline.get_mut(turn_id) {
+        if let Some(entry) = timeline.iter_mut().rev().find(|e| e.kind == "call_model") {
+            entry.turn_duration_ms = turn_duration_ms;
+        }
     }
 }
 
@@ -202,13 +309,31 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
             return;
         };
         // higher-seq-wins：`>=` 语义——同 seq 重放帧不重复应用（design.md:36）。
-        if state.watermark.get(&turn_id).copied().unwrap_or(0) >= seq {
-            return;
+        // 审核 P0：`unwrap_or(0)` 在首个事件 seq=0 时 `0 >= 0` 会误跳过，
+        // 必须用 Option 判断（未记录水位 = 未处理，任何 seq 都应用）。
+        if let Some(watermark) = state.watermark.get(&turn_id) {
+            if *watermark >= seq {
+                return;
+            }
         }
         state.watermark.insert(turn_id.clone(), seq);
         match event {
-            TurnEvent::AssistantChunk { text, .. } => {
-                // chunk 文本聚合（design.md:35）：不逐条 push step，累积到 turn/end 结算。
+            TurnEvent::StepStart {
+                step,
+                first_token_latency_ms,
+                ..
+            } => {
+                // step/start → call_model 条目（design.md 映射表）。
+                ensure_call_model_entry(state, &turn_id, *step, seq);
+                if let Some(metrics) = state.token_metrics.get_mut(&turn_id) {
+                    metrics.first_token_latency_ms = *first_token_latency_ms;
+                }
+            }
+            TurnEvent::AssistantChunk { step, text, .. } => {
+                // chunk 文本聚合（design.md:35）：聚合到对应 step 的 call_model 条目。
+                let index = ensure_call_model_entry(state, &turn_id, *step, seq);
+                let entry = &mut state.timeline.get_mut(&turn_id).expect("timeline")[index];
+                entry.text = Some(entry.text.clone().unwrap_or_default() + text);
                 state
                     .chunk_text
                     .entry(turn_id.clone())
@@ -234,11 +359,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                     trace
                 });
                 // 同 call_id 去重：已存在的 running activity 不重复 push。
-                if !trace
-                    .tool_activities
-                    .iter()
-                    .any(|a| a.id == *call_id)
-                {
+                if !trace.tool_activities.iter().any(|a| a.id == *call_id) {
                     trace.tool_activities.push(TurnToolActivity {
                         id: call_id.clone(),
                         name: name.clone(),
@@ -255,6 +376,39 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         capability_invocation: None,
                     });
                 }
+                // tool/call → call_tool 条目（tool_activities 挂载该 activity）。
+                let sequence = next_timeline_seq(state, &turn_id);
+                let timeline = state.timeline.entry(turn_id.clone()).or_default();
+                let index = timeline.len();
+                timeline.push(TraceTimelineEntry {
+                    id: format!("tool-{sequence}"),
+                    kind: "call_tool".to_string(),
+                    label: format!("CALL TOOL · {name}"),
+                    state: "running".to_string(),
+                    sequence,
+                    tool_activities: vec![TurnToolActivity {
+                        id: call_id.clone(),
+                        name: name.clone(),
+                        canonical_tool_name: None,
+                        display_name_zh: None,
+                        status: "running".to_string(),
+                        description: name.clone(),
+                        arguments_text: Some(arguments.clone()),
+                        result_text: None,
+                        duration_seconds: None,
+                        parent_activity_id: None,
+                        artifacts: None,
+                        error: None,
+                        capability_invocation: None,
+                    }],
+                    text: Some(name.clone()),
+                    ..Default::default()
+                });
+                state
+                    .call_tool_index
+                    .entry(turn_id.clone())
+                    .or_default()
+                    .insert(call_id.clone(), index);
             }
             TurnEvent::ToolResult {
                 call_id,
@@ -276,10 +430,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                     trace
                 });
                 // 更新对应 activity 的终态字段（按 call_id 匹配）。
-                if let Some(activity) = trace
-                    .tool_activities
-                    .iter_mut()
-                    .find(|a| a.id == *call_id)
+                if let Some(activity) = trace.tool_activities.iter_mut().find(|a| a.id == *call_id)
                 {
                     activity.status = status.clone().unwrap_or_else(|| {
                         if error.is_some() {
@@ -300,9 +451,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         name: String::new(),
                         canonical_tool_name: None,
                         display_name_zh: None,
-                        status: status
-                            .clone()
-                            .unwrap_or_else(|| "done".to_string()),
+                        status: status.clone().unwrap_or_else(|| "done".to_string()),
                         description: String::new(),
                         arguments_text: None,
                         result_text: result.clone(),
@@ -313,19 +462,143 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         capability_invocation: capability_invocation.clone(),
                     });
                 }
+                // tool/result → return_result 条目 + 回填 call_tool 条目的 tool_activities。
+                let sequence = next_timeline_seq(state, &turn_id);
+                let timeline = state.timeline.entry(turn_id.clone()).or_default();
+                timeline.push(TraceTimelineEntry {
+                    id: format!("return-{sequence}"),
+                    kind: "return_result".to_string(),
+                    label: "RETURN RESULT".to_string(),
+                    state: status.clone().unwrap_or_else(|| "completed".to_string()),
+                    sequence,
+                    text: result.clone(),
+                    error: error.clone(),
+                    ..Default::default()
+                });
+                // 回填 call_tool 条目：tool_activities 更新为终态（按 call_id 匹配，
+                // 与 ToolCall 的索引键一致——step 语义差异不影响回填）。
+                if let Some(step_index) = state
+                    .call_tool_index
+                    .get(&turn_id)
+                    .and_then(|m| m.get(call_id))
+                {
+                    if let Some(entry) = timeline.get_mut(*step_index) {
+                        if let Some(activity) =
+                            entry.tool_activities.iter_mut().find(|a| a.id == *call_id)
+                        {
+                            activity.status = status.clone().unwrap_or_else(|| "done".to_string());
+                            activity.result_text = result.clone();
+                            activity.duration_seconds = duration_ms.map(|ms| ms as f64 / 1000.0);
+                            activity.artifacts = artifacts.clone();
+                            activity.capability_invocation = capability_invocation.clone();
+                            activity.error = error.clone().map(serde_json::Value::String);
+                        }
+                        entry.state = status.clone().unwrap_or_else(|| "completed".to_string());
+                    }
+                }
             }
             TurnEvent::ProviderUsage {
-                provider, model, ..
+                step,
+                usage,
+                cache_hit_input_tokens,
+                first_token_latency_ms,
+                turn_duration_ms,
+                provider,
+                model,
+                ..
             } => {
                 state
                     .provider_model
                     .insert(turn_id.clone(), (provider.clone(), model.clone()));
+                // 累计 token 指标（turn/end 结算）。审核 P1：多次 ProviderUsage 时
+                // 顶层字段是 turn 级累计（saturating_add，与 MetricsProjection 惯例
+                // 一致）；(None, None) 合并为 None（保留"未知"语义，避免渲染为 0）；
+                // first_token_latency_ms 取首次（首 token 延迟）。
+                fn merge_tokens(acc: Option<u64>, next: Option<u64>) -> Option<u64> {
+                    match (acc, next) {
+                        (None, None) => None,
+                        (acc, next) => Some(acc.unwrap_or(0).saturating_add(next.unwrap_or(0))),
+                    }
+                }
+                let metrics = state.token_metrics.entry(turn_id.clone()).or_default();
+                metrics.input_tokens = merge_tokens(metrics.input_tokens, usage.input_tokens);
+                metrics.cache_hit_input_tokens =
+                    merge_tokens(metrics.cache_hit_input_tokens, *cache_hit_input_tokens);
+                metrics.reasoning_tokens =
+                    merge_tokens(metrics.reasoning_tokens, usage.reasoning_tokens);
+                metrics.output_tokens = merge_tokens(metrics.output_tokens, usage.output_tokens);
+                metrics.total_tokens = merge_tokens(metrics.total_tokens, usage.total_tokens);
+                metrics.first_token_latency_ms =
+                    first_token_latency_ms.or(metrics.first_token_latency_ms);
+                // 回填 call_model 条目 token 指标。
+                let index = ensure_call_model_entry(state, &turn_id, *step, seq);
+                let entry = &mut state.timeline.get_mut(&turn_id).expect("timeline")[index];
+                entry.input_tokens = usage.input_tokens;
+                entry.cache_hit_input_tokens = *cache_hit_input_tokens;
+                entry.reasoning_tokens = usage.reasoning_tokens;
+                entry.output_tokens = usage.output_tokens;
+                entry.total_tokens = usage.total_tokens;
+                entry.first_token_latency_ms = *first_token_latency_ms;
+                entry.turn_duration_ms = *turn_duration_ms;
+                entry.provider_name = Some(provider.clone());
+                entry.provider_model = Some(model.clone());
+            }
+            TurnEvent::ContextObservation {
+                observation_ref, ..
+            } => {
+                // PA-094：大字段外置——trace 记录只存引用（全量 payload 按需加载）。
+                let trace = state.by_turn.entry(turn_id.clone()).or_insert_with(|| {
+                    let mut trace = TurnTraceRecord {
+                        turn_id: turn_id.clone(),
+                        title: String::new(),
+                        ..Default::default()
+                    };
+                    trace.turn_id = turn_id.clone();
+                    trace
+                });
+                if let Some(ref_value) = observation_ref {
+                    trace.build_context_observation_ref = Some(ref_value.clone());
+                    // 记录引用，turn/end 结算时生成 build_context timeline 条目。
+                    state.context_ref.insert(turn_id.clone(), ref_value.clone());
+                }
             }
             TurnEvent::TurnEnd {
                 reason,
                 turn_duration_ms,
                 ..
             } => {
+                // 结算 timeline：兜底补建 call_model + 末条补 turn_duration_ms
+                // （独立于 by_turn 借用，先结算再挂载）。
+                settle_timeline(state, &turn_id, *turn_duration_ms);
+                // PA-094：build_context 条目（ContextObservation 事件折叠）——
+                // 插入 timeline 开头并重排 sequence（与运行时产物结构对齐，
+                // design.md §2 映射表；prepare_retrieval 需 payload 判断，豁免）。
+                if let Some(ref_value) = state.context_ref.remove(&turn_id) {
+                    if let Some(timeline) = state.timeline.get_mut(&turn_id) {
+                        timeline.insert(
+                            0,
+                            TraceTimelineEntry {
+                                id: "context-1".to_string(),
+                                kind: "build_context".to_string(),
+                                label: "BUILD CONTEXT".to_string(),
+                                state: "completed".to_string(),
+                                sequence: 1,
+                                build_context_observation_ref: Some(ref_value),
+                                ..Default::default()
+                            },
+                        );
+                        for (index, entry) in timeline.iter_mut().enumerate() {
+                            entry.sequence = (index + 1) as u64;
+                        }
+                    }
+                }
+                let timeline = state.timeline.remove(&turn_id);
+                state.call_model_index.remove(&turn_id);
+                state.call_tool_index.remove(&turn_id);
+                state.timeline_seq.remove(&turn_id);
+                let metrics = state.token_metrics.remove(&turn_id);
+                let chunk_text = state.chunk_text.remove(&turn_id);
+                let provider_model = state.provider_model.get(&turn_id).cloned();
                 let trace = state.by_turn.entry(turn_id.clone()).or_insert_with(|| {
                     let mut trace = TurnTraceRecord {
                         turn_id: turn_id.clone(),
@@ -337,12 +610,14 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                 });
                 trace.turn_duration_ms = *turn_duration_ms;
                 // chunk 文本结算进 trace（文本聚合的落点）。
-                if let Some(text) = state.chunk_text.remove(&turn_id) {
-                    trace.trace_steps.push(crate::agent::telemetry::TurnTraceStep {
-                        id: format!("chunk-{seq}"),
-                        label: "assistant_output".to_string(),
-                        state: "completed".to_string(),
-                    });
+                if let Some(text) = chunk_text {
+                    trace
+                        .trace_steps
+                        .push(crate::agent::telemetry::TurnTraceStep {
+                            id: format!("chunk-{seq}"),
+                            label: "assistant_output".to_string(),
+                            state: "completed".to_string(),
+                        });
                     let _ = text;
                 }
                 // 终态信封：event_type 由 reason 映射；title/phase/sequence 等
@@ -355,9 +630,22 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                     }
                 });
                 trace.sequence = Some(seq);
-                if let Some((provider, model)) = state.provider_model.get(&turn_id) {
-                    trace.provider_name = Some(provider.clone());
-                    trace.provider_model = Some(model.clone());
+                if let Some((provider, model)) = provider_model {
+                    trace.provider_name = Some(provider);
+                    trace.provider_model = Some(model);
+                }
+                // turn/end → 结算 token 指标（design.md 映射表）。
+                if let Some(metrics) = metrics {
+                    trace.input_tokens = metrics.input_tokens;
+                    trace.cache_hit_input_tokens = metrics.cache_hit_input_tokens;
+                    trace.reasoning_tokens = metrics.reasoning_tokens;
+                    trace.output_tokens = metrics.output_tokens;
+                    trace.total_tokens = metrics.total_tokens;
+                    trace.first_token_latency_ms = metrics.first_token_latency_ms;
+                }
+                // 挂载事件折叠 timeline。
+                if let Some(timeline) = timeline {
+                    trace.trace_timeline = timeline;
                 }
             }
             _ => {}
@@ -397,8 +685,13 @@ pub struct MetricsProjectionState {
     pub last: Option<ProviderCallCacheRecord>,
     /// per-turn 聚合（模型监控 drilldown）。
     pub by_turn: HashMap<String, TurnUsageAggregate>,
+    /// PA-094：per-turn ProviderCallCacheRecord 列表（由 ProviderUsage 事件重建，
+    /// wire 兼容保留字段；trace 不再独立存储）。
+    pub by_turn_records: HashMap<String, Vec<ProviderCallCacheRecord>>,
     /// addReplacing 键：(turn_id, step) → 已累计的贡献（替换时回退）。
     replaced: HashMap<(String, u32), StepContribution>,
+    /// PA-094：addReplacing 键：(turn_id, step) → by_turn_records 中的索引（原位覆盖）。
+    record_index: HashMap<(String, u32), usize>,
     /// per-turn 水位（`>=` 语义防同 seq 重放；与 TraceProjection 粒度一致）。
     watermark: HashMap<String, u64>,
 }
@@ -452,8 +745,11 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
             return;
         };
         // higher-seq-wins（per-turn）：`>=` 语义——同 seq 重放帧不重复应用。
-        if state.watermark.get(&turn_id).copied().unwrap_or(0) >= seq {
-            return;
+        // 审核 P0：`unwrap_or(0)` 在首个事件 seq=0 时误跳过，用 Option 判断。
+        if let Some(watermark) = state.watermark.get(&turn_id) {
+            if *watermark >= seq {
+                return;
+            }
         }
         state.watermark.insert(turn_id.clone(), seq);
         match event {
@@ -463,6 +759,7 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                 usage,
                 cache_hit_input_tokens,
                 cache_miss_input_tokens,
+                prefix_mutation_reasons,
                 first_token_latency_ms,
                 turn_duration_ms,
                 request_kind,
@@ -503,8 +800,9 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     aggregate: aggregate.clone(),
                 };
                 // addReplacing：同一 (turn_id, step) 替换（回退旧贡献再累计）。
-                if let Some(previous) =
-                    state.replaced.insert((turn_id.clone(), *step), contribution)
+                if let Some(previous) = state
+                    .replaced
+                    .insert((turn_id.clone(), *step), contribution)
                 {
                     state.uncached_input_tokens = state
                         .uncached_input_tokens
@@ -567,8 +865,9 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     turn_agg.cache_miss_input_tokens = turn_agg
                         .cache_miss_input_tokens
                         .saturating_add(aggregate.cache_miss_input_tokens);
-                    turn_agg.output_tokens =
-                        turn_agg.output_tokens.saturating_add(aggregate.output_tokens);
+                    turn_agg.output_tokens = turn_agg
+                        .output_tokens
+                        .saturating_add(aggregate.output_tokens);
                     turn_agg.total_tokens =
                         turn_agg.total_tokens.saturating_add(aggregate.total_tokens);
                 }
@@ -591,8 +890,53 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     first_token_latency_ms: *first_token_latency_ms,
                     turn_duration_ms: *turn_duration_ms,
                     latency_kind: latency_kind.clone(),
-                    prefix_mutation_reasons: Vec::new(),
+                    prefix_mutation_reasons: prefix_mutation_reasons
+                        .iter()
+                        .filter_map(|reason| {
+                            serde_json::from_value(serde_json::Value::String(reason.clone())).ok()
+                        })
+                        .collect(),
                 });
+                // PA-094：per-turn ProviderCallCacheRecord 重建（design.md §5）。
+                // 重建字段集：request_kind、usage 四桶、cache_hit/cache_miss、
+                // prefix_mutation_reasons、first_token_latency_ms、turn_duration_ms、
+                // latency_kind、provider/model。豁免：updated_at/event_id/sequence/
+                // emitted_at_ms（时钟/序列语义，trace 记录级字段）。
+                let record = ProviderCallCacheRecord {
+                    request_kind: request_kind.clone(),
+                    provider_source: Some(provider.clone()),
+                    provider_mode: None,
+                    input_tokens: usage.input_tokens,
+                    cache_hit_input_tokens: *cache_hit_input_tokens,
+                    cache_hit_source: None,
+                    cache_miss_input_tokens: *cache_miss_input_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
+                    output_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
+                    first_token_latency_ms: *first_token_latency_ms,
+                    turn_duration_ms: *turn_duration_ms,
+                    latency_kind: latency_kind.clone(),
+                    prefix_mutation_reasons: prefix_mutation_reasons
+                        .iter()
+                        .filter_map(|reason| {
+                            serde_json::from_value(serde_json::Value::String(reason.clone())).ok()
+                        })
+                        .collect(),
+                };
+                // addReplacing：同一 (turn_id, step) 原位覆盖（与 totals 替换语义一致）。
+                if let Some(index) = state.record_index.get(&(turn_id.clone(), *step)).copied() {
+                    if let Some(records) = state.by_turn_records.get_mut(turn_id) {
+                        if let Some(slot) = records.get_mut(index) {
+                            *slot = record;
+                        }
+                    }
+                } else {
+                    let records = state.by_turn_records.entry(turn_id.clone()).or_default();
+                    state
+                        .record_index
+                        .insert((turn_id.clone(), *step), records.len());
+                    records.push(record);
+                }
                 let _ = model;
             }
             TurnEvent::TurnEnd {
@@ -603,6 +947,7 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                 }
                 // turn 结束：清理该 turn 的 replaced 条目（不再有 usage 事件）。
                 state.replaced.retain(|(tid, _), _| tid != &turn_id);
+                state.record_index.retain(|(tid, _), _| tid != &turn_id);
             }
             _ => {}
         }
@@ -640,9 +985,7 @@ pub fn fold_all_with_branches<S, P: Projection<S>>(
                 visible = branch_lineage(branch, branches);
             }
         }
-        if matches!(event, TurnEvent::CheckpointCheckout { .. })
-            || visible.contains(branch_id)
-        {
+        if matches!(event, TurnEvent::CheckpointCheckout { .. }) || visible.contains(branch_id) {
             P::apply(&mut state, *seq, event);
         }
     }
@@ -840,7 +1183,11 @@ mod tests {
         assert_eq!(trace.tool_activities[0].status, "done");
         assert_eq!(trace.tool_activities[0].result_text.as_deref(), Some("ok"));
         assert_eq!(trace.tool_activities[0].duration_seconds, Some(0.5));
-        assert_eq!(trace.turn_duration_ms, Some(500), "turn duration from turn/end");
+        assert_eq!(
+            trace.turn_duration_ms,
+            Some(500),
+            "turn duration from turn/end"
+        );
         // 终态信封：completed → turn.completed
         assert_eq!(trace.event_type.as_deref(), Some("turn.completed"));
     }
@@ -953,10 +1300,12 @@ mod tests {
         let events = vec![mk(1, "t1", 0), mk(2, "t1", 1), mk(3, "t2", 0)];
         let state = fold_all::<_, MetricsProjectionState>(&events);
         let totals = state.totals();
-        let by_turn_sum = |key: fn(&TurnUsageAggregate) -> u64| {
-            state.by_turn.values().map(key).sum::<u64>()
-        };
-        assert_eq!(totals.uncached_input, by_turn_sum(|a| a.cache_miss_input_tokens));
+        let by_turn_sum =
+            |key: fn(&TurnUsageAggregate) -> u64| state.by_turn.values().map(key).sum::<u64>();
+        assert_eq!(
+            totals.uncached_input,
+            by_turn_sum(|a| a.cache_miss_input_tokens)
+        );
         assert_eq!(totals.cache_read, by_turn_sum(|a| a.cache_hit_input_tokens));
         assert_eq!(totals.output, by_turn_sum(|a| a.output_tokens));
     }
@@ -1028,5 +1377,679 @@ mod tests {
         let json = serde_json::to_string(&metrics).expect("serialize");
         let decoded: MetricsProjectionState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.totals(), metrics.totals());
+    }
+
+    /// PA-094：timeline 事件折叠映射表（design.md §2 表驱动）。
+    /// step/start → call_model、tool/call → call_tool、tool/result → return_result、
+    /// assistant/chunk → 文本聚合到 call_model、turn/end → 结算 token 指标。
+    #[test]
+    fn trace_projection_timeline_folding_table_driven() {
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "t1".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::StepStart {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    first_token_latency_ms: Some(88),
+                },
+            ),
+            (
+                2,
+                TurnEvent::AssistantChunk {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    text: "hel".into(),
+                },
+            ),
+            (
+                3,
+                TurnEvent::AssistantChunk {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    text: "lo".into(),
+                },
+            ),
+            (
+                4,
+                TurnEvent::ToolCall {
+                    turn_id: "t1".into(),
+                    step: 1,
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    started_at_ms: Some(1000),
+                },
+            ),
+            (
+                5,
+                TurnEvent::ToolResult {
+                    turn_id: "t1".into(),
+                    step: 1,
+                    call_id: "c1".into(),
+                    result: Some("ok".into()),
+                    error: None,
+                    status: Some("done".into()),
+                    duration_ms: Some(500),
+                    artifacts: None,
+                    capability_invocation: None,
+                },
+            ),
+            (
+                6,
+                TurnEvent::ProviderUsage {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                    usage: crate::agent::provider::TokenUsage {
+                        input_tokens: Some(100),
+                        cache_hit_input_tokens: Some(40),
+                        cache_hit_source: None,
+                        reasoning_tokens: Some(10),
+                        output_tokens: Some(50),
+                        total_tokens: Some(160),
+                    },
+                    cache_hit_input_tokens: Some(40),
+                    cache_miss_input_tokens: Some(60),
+                    prefix_mutation_reasons: Vec::new(),
+                    first_token_latency_ms: Some(88),
+                    turn_duration_ms: Some(500),
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                    provider: "deepseek".into(),
+                    model: "deepseek-chat".into(),
+                },
+            ),
+            (
+                7,
+                TurnEvent::TurnEnd {
+                    turn_id: "t1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(1200),
+                },
+            ),
+        ];
+        let state = fold_all::<_, TraceProjectionState>(&events);
+        let trace = state.trace_for_turn("t1").expect("trace");
+        // 映射表断言：call_model（step/start）→ call_tool（tool/call）→
+        // return_result（tool/result）→ call_model（ProviderUsage 回填 step 0）。
+        let kinds: Vec<&str> = trace
+            .trace_timeline
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["call_model", "call_tool", "return_result"],
+            "timeline mapping table"
+        );
+        // step/start → call_model：chunk 文本聚合（assistant/chunk → call_model.text）。
+        let model_entry = &trace.trace_timeline[0];
+        assert_eq!(model_entry.kind, "call_model");
+        assert_eq!(
+            model_entry.text.as_deref(),
+            Some("hello"),
+            "chunk aggregation"
+        );
+        // ProviderUsage 回填 call_model token 指标。
+        assert_eq!(model_entry.input_tokens, Some(100));
+        assert_eq!(model_entry.cache_hit_input_tokens, Some(40));
+        assert_eq!(model_entry.output_tokens, Some(50));
+        assert_eq!(model_entry.total_tokens, Some(160));
+        assert_eq!(model_entry.first_token_latency_ms, Some(88));
+        assert_eq!(model_entry.provider_name.as_deref(), Some("deepseek"));
+        // tool/call → call_tool：tool_activities 挂载 + tool/result 回填终态。
+        let tool_entry = &trace.trace_timeline[1];
+        assert_eq!(tool_entry.kind, "call_tool");
+        assert_eq!(tool_entry.tool_activities.len(), 1);
+        assert_eq!(tool_entry.tool_activities[0].status, "done");
+        assert_eq!(
+            tool_entry.tool_activities[0].result_text.as_deref(),
+            Some("ok")
+        );
+        assert_eq!(tool_entry.tool_activities[0].duration_seconds, Some(0.5));
+        // tool/result → return_result。
+        let return_entry = &trace.trace_timeline[2];
+        assert_eq!(return_entry.kind, "return_result");
+        assert_eq!(return_entry.text.as_deref(), Some("ok"));
+        // turn/end → 结算 token 指标（trace 记录级）。
+        assert_eq!(trace.turn_duration_ms, Some(1200));
+        assert_eq!(trace.input_tokens, Some(100));
+        assert_eq!(trace.output_tokens, Some(50));
+        assert_eq!(trace.total_tokens, Some(160));
+        assert_eq!(trace.first_token_latency_ms, Some(88));
+        // 末条 call_model 补 turn_duration_ms（turn/end 结算）。
+        assert_eq!(model_entry.turn_duration_ms, Some(1200));
+    }
+
+    /// PA-094：无 StepStart 事件时（当前运行时未发射），chunk/usage 兜底创建
+    /// call_model 条目，turn/end 兜底补建。
+    #[test]
+    fn trace_projection_timeline_fallback_without_step_start() {
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "t1".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::AssistantChunk {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    text: "hi".into(),
+                },
+            ),
+            (
+                2,
+                TurnEvent::TurnEnd {
+                    turn_id: "t1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(300),
+                },
+            ),
+        ];
+        let state = fold_all::<_, TraceProjectionState>(&events);
+        let trace = state.trace_for_turn("t1").expect("trace");
+        assert_eq!(trace.trace_timeline.len(), 1, "fallback call_model entry");
+        assert_eq!(trace.trace_timeline[0].kind, "call_model");
+        assert_eq!(trace.trace_timeline[0].text.as_deref(), Some("hi"));
+        assert_eq!(trace.trace_timeline[0].turn_duration_ms, Some(300));
+    }
+
+    /// PA-094：timeline 折叠水位幂等——同 seq 重放不重复 push timeline 条目。
+    #[test]
+    fn trace_projection_timeline_same_seq_replay_is_idempotent() {
+        let event = TurnEvent::ToolCall {
+            turn_id: "t1".into(),
+            step: 1,
+            call_id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            started_at_ms: None,
+        };
+        let mut state = TraceProjectionState::init();
+        TraceProjectionState::apply(&mut state, 5, &event);
+        TraceProjectionState::apply(&mut state, 5, &event); // 同 seq 重放
+        let trace = state.trace_for_turn("t1").expect("trace");
+        assert_eq!(
+            trace.trace_timeline.len(),
+            1,
+            "timeline replay must not duplicate"
+        );
+        assert_eq!(trace.trace_timeline[0].kind, "call_tool");
+    }
+
+    /// PA-094（审核 P0）：首个事件 seq=0 不被 watermark 跳过（`unwrap_or(0) >= 0`
+    /// 会误判已处理——修复后未记录水位时任何 seq 都应用）。
+    #[test]
+    fn trace_projection_first_event_seq_zero_is_applied() {
+        // TurnStart 不创建 by_turn 条目，用 ToolCall 验证 seq=0 被应用。
+        let event = TurnEvent::ToolCall {
+            turn_id: "t1".into(),
+            step: 0,
+            call_id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+            started_at_ms: None,
+        };
+        let mut state = TraceProjectionState::init();
+        TraceProjectionState::apply(&mut state, 0, &event);
+        let trace = state.trace_for_turn("t1").expect("trace");
+        assert_eq!(trace.turn_id, "t1", "seq=0 first event must be applied");
+        assert_eq!(trace.trace_timeline.len(), 1, "call_tool entry folded");
+        assert_eq!(trace.trace_timeline[0].kind, "call_tool");
+        // MetricsProjection 同样不跳过 seq=0。
+        let usage_event = TurnEvent::ProviderUsage {
+            turn_id: "t1".into(),
+            step: 0,
+            request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+            usage: crate::agent::provider::TokenUsage {
+                input_tokens: Some(100),
+                cache_hit_input_tokens: None,
+                cache_hit_source: None,
+                reasoning_tokens: None,
+                output_tokens: Some(50),
+                total_tokens: Some(150),
+            },
+            cache_hit_input_tokens: None,
+            cache_miss_input_tokens: None,
+            prefix_mutation_reasons: Vec::new(),
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+            provider: "deepseek".into(),
+            model: "deepseek-chat".into(),
+        };
+        let mut metrics = MetricsProjectionState::init();
+        MetricsProjectionState::apply(&mut metrics, 0, &usage_event);
+        assert_eq!(
+            metrics.by_turn_records.get("t1").map(|r| r.len()),
+            Some(1),
+            "seq=0 usage event must be applied"
+        );
+    }
+
+    /// PA-094（审核 P0）：真实 step 语义——`build_tool_event` 以 turn 事件序号作
+    /// step（ToolCall 与 ToolResult 的 step 必然不同），call_tool 回填按 call_id
+    /// 匹配，step 差异不影响终态回填。
+    #[test]
+    fn trace_projection_tool_backfill_with_real_step_semantics() {
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "t1".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::StepStart {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    first_token_latency_ms: None,
+                },
+            ),
+            (
+                2,
+                TurnEvent::AssistantChunk {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    text: "hi".into(),
+                },
+            ),
+            // turn:tool(running) → seq 3（ToolCall step=3，turn 事件序号语义）
+            (
+                3,
+                TurnEvent::ToolCall {
+                    turn_id: "t1".into(),
+                    step: 3,
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    started_at_ms: None,
+                },
+            ),
+            // turn:tool(completed) → seq 5（ToolResult step=5，与 ToolCall 不同）
+            (
+                5,
+                TurnEvent::ToolResult {
+                    turn_id: "t1".into(),
+                    step: 5,
+                    call_id: "c1".into(),
+                    result: Some("ok".into()),
+                    error: None,
+                    status: Some("done".into()),
+                    duration_ms: Some(500),
+                    artifacts: None,
+                    capability_invocation: None,
+                },
+            ),
+            (
+                6,
+                TurnEvent::TurnEnd {
+                    turn_id: "t1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(800),
+                },
+            ),
+        ];
+        let state = fold_all::<_, TraceProjectionState>(&events);
+        let trace = state.trace_for_turn("t1").expect("trace");
+        let kinds: Vec<&str> = trace
+            .trace_timeline
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["call_model", "call_tool", "return_result"],
+            "timeline with real step semantics"
+        );
+        // call_tool 条目回填成功（step 差异不影响 call_id 匹配）。
+        let tool_entry = &trace.trace_timeline[1];
+        assert_eq!(tool_entry.kind, "call_tool");
+        assert_eq!(tool_entry.tool_activities.len(), 1);
+        assert_eq!(tool_entry.tool_activities[0].status, "done");
+        assert_eq!(
+            tool_entry.tool_activities[0].result_text.as_deref(),
+            Some("ok")
+        );
+        assert_eq!(tool_entry.tool_activities[0].duration_seconds, Some(0.5));
+        // return_result 条目非孤儿（text 携带结果）。
+        let return_entry = &trace.trace_timeline[2];
+        assert_eq!(return_entry.kind, "return_result");
+        assert_eq!(return_entry.text.as_deref(), Some("ok"));
+        // turn/end 结算：token 指标 + timeline 挂载。
+        assert_eq!(trace.turn_duration_ms, Some(800));
+        assert_eq!(trace.trace_timeline.len(), 3);
+    }
+
+    /// PA-094：ContextObservation 事件 → trace 记录只存引用（大字段外置）。
+    #[test]
+    fn trace_projection_context_observation_sets_ref() {
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "t1".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::ContextObservation {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    observation: None,
+                    observation_ref: Some("bco:t1:1".into()),
+                },
+            ),
+            (
+                2,
+                TurnEvent::TurnEnd {
+                    turn_id: "t1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: None,
+                },
+            ),
+        ];
+        let state = fold_all::<_, TraceProjectionState>(&events);
+        let trace = state.trace_for_turn("t1").expect("trace");
+        assert_eq!(
+            trace.build_context_observation_ref.as_deref(),
+            Some("bco:t1:1"),
+            "trace 记录只存引用"
+        );
+        assert!(
+            trace.build_context_observation.is_none(),
+            "新数据不内嵌全量 payload"
+        );
+        // build_context timeline 条目（turn/end 结算生成，带引用，sequence 重排）。
+        // 无 StepStart 时 settle_timeline 兜底补建 call_model，故 2 条。
+        assert_eq!(
+            trace.trace_timeline.len(),
+            2,
+            "build_context + fallback call_model"
+        );
+        assert_eq!(trace.trace_timeline[0].kind, "build_context");
+        assert_eq!(trace.trace_timeline[0].sequence, 1);
+        assert_eq!(
+            trace.trace_timeline[0]
+                .build_context_observation_ref
+                .as_deref(),
+            Some("bco:t1:1"),
+            "build_context entry carries ref"
+        );
+        assert_eq!(trace.trace_timeline[1].kind, "call_model");
+        assert_eq!(trace.trace_timeline[1].sequence, 2);
+    }
+
+    /// PA-094（审核 P0）：ContextObservation + 完整 turn → timeline 结构对齐运行时
+    /// 产物（build_context 在开头，sequence 连续重排）。
+    #[test]
+    fn trace_projection_build_context_entry_prepended_and_sequence_renumbered() {
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "t1".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::ContextObservation {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    observation: None,
+                    observation_ref: Some("bco:t1:1".into()),
+                },
+            ),
+            (
+                2,
+                TurnEvent::StepStart {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    first_token_latency_ms: None,
+                },
+            ),
+            (
+                3,
+                TurnEvent::ToolCall {
+                    turn_id: "t1".into(),
+                    step: 3,
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    started_at_ms: None,
+                },
+            ),
+            (
+                4,
+                TurnEvent::ToolResult {
+                    turn_id: "t1".into(),
+                    step: 5,
+                    call_id: "c1".into(),
+                    result: Some("ok".into()),
+                    error: None,
+                    status: Some("done".into()),
+                    duration_ms: Some(500),
+                    artifacts: None,
+                    capability_invocation: None,
+                },
+            ),
+            (
+                5,
+                TurnEvent::TurnEnd {
+                    turn_id: "t1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(800),
+                },
+            ),
+        ];
+        let state = fold_all::<_, TraceProjectionState>(&events);
+        let trace = state.trace_for_turn("t1").expect("trace");
+        let kinds: Vec<&str> = trace
+            .trace_timeline
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["build_context", "call_model", "call_tool", "return_result"],
+            "build_context prepended, aligned with runtime timeline structure"
+        );
+        // sequence 连续重排（1-based）。
+        let sequences: Vec<u64> = trace.trace_timeline.iter().map(|e| e.sequence).collect();
+        assert_eq!(sequences, vec![1, 2, 3, 4], "sequence renumbered");
+        // build_context 条目带引用。
+        assert_eq!(
+            trace.trace_timeline[0]
+                .build_context_observation_ref
+                .as_deref(),
+            Some("bco:t1:1")
+        );
+    }
+
+    /// PA-094（审核 P1）：多次 ProviderUsage 时顶层 token 指标为 turn 级累计
+    /// （saturating_add），first_token_latency_ms 取首次；(None, None) 合并为 None。
+    #[test]
+    fn trace_projection_top_level_tokens_accumulate_across_usages() {
+        let mk_usage =
+            |input: u64, output: u64, total: u64, ttft: Option<u64>| TurnEvent::ProviderUsage {
+                turn_id: "t1".into(),
+                step: 0,
+                request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                usage: crate::agent::provider::TokenUsage {
+                    input_tokens: Some(input),
+                    cache_hit_input_tokens: None,
+                    cache_hit_source: None,
+                    reasoning_tokens: None,
+                    output_tokens: Some(output),
+                    total_tokens: Some(total),
+                },
+                cache_hit_input_tokens: None,
+                cache_miss_input_tokens: None,
+                prefix_mutation_reasons: Vec::new(),
+                first_token_latency_ms: ttft,
+                turn_duration_ms: None,
+                latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                provider: "deepseek".into(),
+                model: "deepseek-chat".into(),
+            };
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "t1".into(),
+                },
+            ),
+            (1, mk_usage(100, 50, 150, Some(88))),
+            (2, mk_usage(80, 30, 110, None)),
+            (
+                3,
+                TurnEvent::TurnEnd {
+                    turn_id: "t1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(1200),
+                },
+            ),
+        ];
+        let state = fold_all::<_, TraceProjectionState>(&events);
+        let trace = state.trace_for_turn("t1").expect("trace");
+        // turn/end 结算：顶层字段 = 多次 usage 累计。
+        assert_eq!(trace.input_tokens, Some(180), "input accumulated");
+        assert_eq!(trace.output_tokens, Some(80), "output accumulated");
+        assert_eq!(trace.total_tokens, Some(260), "total accumulated");
+        // first_token_latency_ms 取首次。
+        assert_eq!(trace.first_token_latency_ms, Some(88), "first ttft wins");
+    }
+
+    /// PA-094：MetricsProjection 从 ProviderUsage 重建 ProviderCallCacheRecord
+    /// （design.md §5 重建字段集；豁免 updated_at/event_id/sequence/emitted_at_ms）。
+    #[test]
+    fn metrics_projection_rebuilds_provider_call_records() {
+        let usage = crate::agent::provider::TokenUsage {
+            input_tokens: Some(100),
+            cache_hit_input_tokens: Some(40),
+            cache_hit_source: None,
+            reasoning_tokens: Some(10),
+            output_tokens: Some(50),
+            total_tokens: Some(160),
+        };
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                1,
+                TurnEvent::ProviderUsage {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                    usage: usage.clone(),
+                    cache_hit_input_tokens: Some(40),
+                    cache_miss_input_tokens: Some(60),
+                    prefix_mutation_reasons: vec!["session_summary_changed".into()],
+                    first_token_latency_ms: Some(88),
+                    turn_duration_ms: Some(500),
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                    provider: "deepseek".into(),
+                    model: "deepseek-chat".into(),
+                },
+            ),
+            (
+                2,
+                TurnEvent::ProviderUsage {
+                    turn_id: "t1".into(),
+                    step: 1,
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::ToolFollowup,
+                    usage: usage.clone(),
+                    cache_hit_input_tokens: Some(40),
+                    cache_miss_input_tokens: Some(60),
+                    prefix_mutation_reasons: Vec::new(),
+                    first_token_latency_ms: None,
+                    turn_duration_ms: Some(300),
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::BufferedResponse,
+                    provider: "deepseek".into(),
+                    model: "deepseek-chat".into(),
+                },
+            ),
+        ];
+        let state = fold_all::<_, MetricsProjectionState>(&events);
+        let records = state.by_turn_records.get("t1").expect("records");
+        assert_eq!(records.len(), 2, "per-step records");
+        // 重建字段集断言（design.md §5）。
+        let first = &records[0];
+        assert_eq!(
+            first.request_kind,
+            crate::agent::telemetry::ProviderRequestKind::InitialRequest
+        );
+        assert_eq!(first.provider_source.as_deref(), Some("deepseek"));
+        assert_eq!(first.input_tokens, Some(100));
+        assert_eq!(first.cache_hit_input_tokens, Some(40));
+        assert_eq!(first.cache_miss_input_tokens, Some(60));
+        assert_eq!(first.reasoning_tokens, Some(10));
+        assert_eq!(first.output_tokens, Some(50));
+        assert_eq!(first.total_tokens, Some(160));
+        assert_eq!(first.first_token_latency_ms, Some(88));
+        assert_eq!(first.turn_duration_ms, Some(500));
+        assert_eq!(
+            first.latency_kind,
+            crate::agent::telemetry::ProviderLatencyKind::ProviderStream
+        );
+        assert_eq!(first.prefix_mutation_reasons.len(), 1);
+        assert_eq!(
+            first.prefix_mutation_reasons[0],
+            crate::agent::provider::PrefixMutationReason::SessionSummaryChanged
+        );
+        // 豁免清单：updated_at/event_id/sequence/emitted_at_ms 不在记录上
+        // （时钟/序列语义，trace 记录级字段）。
+        let second = &records[1];
+        assert_eq!(
+            second.request_kind,
+            crate::agent::telemetry::ProviderRequestKind::ToolFollowup
+        );
+        assert_eq!(
+            second.latency_kind,
+            crate::agent::telemetry::ProviderLatencyKind::BufferedResponse
+        );
+    }
+
+    /// PA-094：同一 (turn_id, step) 的 ProviderUsage 替换 → 记录原位覆盖（不重复）。
+    #[test]
+    fn metrics_projection_provider_call_records_add_replacing() {
+        let mk = |seq: u64, input: u64| {
+            (
+                seq,
+                TurnEvent::ProviderUsage {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                    usage: crate::agent::provider::TokenUsage {
+                        input_tokens: Some(input),
+                        cache_hit_input_tokens: None,
+                        cache_hit_source: None,
+                        reasoning_tokens: None,
+                        output_tokens: Some(50),
+                        total_tokens: Some(input + 50),
+                    },
+                    cache_hit_input_tokens: None,
+                    cache_miss_input_tokens: None,
+                    prefix_mutation_reasons: Vec::new(),
+                    first_token_latency_ms: None,
+                    turn_duration_ms: None,
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                    provider: "deepseek".into(),
+                    model: "deepseek-chat".into(),
+                },
+            )
+        };
+        let events = vec![mk(1, 100), mk(2, 200)];
+        let state = fold_all::<_, MetricsProjectionState>(&events);
+        let records = state.by_turn_records.get("t1").expect("records");
+        assert_eq!(records.len(), 1, "same step replaces in place");
+        assert_eq!(records[0].input_tokens, Some(200), "latest value wins");
     }
 }

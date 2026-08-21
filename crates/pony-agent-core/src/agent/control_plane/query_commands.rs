@@ -49,6 +49,22 @@ impl HostControlPlane {
             .load_turn_traces(session_id)
     }
 
+    /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。
+    /// 引用格式 `bco:<turn_id>:<seq>`；未命中返回 None（legacy 内嵌数据走 trace 字段）。
+    pub fn load_build_context_observation(
+        &self,
+        session_id: &str,
+        observation_ref: &str,
+    ) -> Option<crate::agent::provider::BuildContextObservation> {
+        self.sessions_rwlock
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .load_build_context_observation(session_id, observation_ref)
+    }
+
     pub fn load_model_monitor_summary(
         &self,
         query: ModelMonitorSummaryQuery,

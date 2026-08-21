@@ -545,6 +545,8 @@ pub enum SessionTraceMutation {
         sequence: Option<u64>,
         emitted_at_ms: Option<u64>,
         updated_at: u64,
+        /// PA-094：trace 缓存行水位（事件日志水位，None 时保持原值）。
+        event_watermark: Option<u64>,
     },
     AppendHookRecords {
         turn_id: String,
@@ -662,6 +664,11 @@ pub struct TraceTimelineEntry {
     pub provider_source: Option<String>,
     pub provider_mode: Option<String>,
     pub build_context_observation: Option<BuildContextObservation>,
+    /// PA-094：大字段外置引用（`bco:<turn_id>:<seq>`）。事件折叠重建的
+    /// build_context 条目只带引用（全量 payload 按需加载）；legacy 内嵌数据
+    /// 保留 `build_context_observation` 读取兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_context_observation_ref: Option<String>,
     #[serde(default)]
     pub tool_activities: Vec<TurnToolActivity>,
     pub text: Option<String>,
@@ -712,6 +719,10 @@ pub struct TurnTraceRecord {
     pub provider_source: Option<String>,
     pub provider_mode: Option<String>,
     pub build_context_observation: Option<BuildContextObservation>,
+    /// PA-094：大字段外置引用（`bco:<turn_id>:<seq>`）。新数据走引用（事件折叠
+    /// 产物），legacy 内嵌数据保留 `build_context_observation` 读取兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_context_observation_ref: Option<String>,
     pub session_summary: Option<String>,
     pub fallback_reason: Option<String>,
     pub error: Option<String>,
@@ -820,6 +831,9 @@ pub struct TraceTerminalPatch {
     pub emitted_at_ms: Option<u64>,
     pub updated_at: u64,
     pub phase: Option<String>,
+    /// PA-094：trace 表降级为投影缓存——行带 seq 水位（事件日志水位，
+    /// 清表重建时用于对齐折叠范围；annotate 时捕获会话水位）。
+    pub event_watermark: Option<u64>,
 }
 
 /// 会话元数据补丁（normalized_sessions 更新）。
@@ -901,6 +915,15 @@ pub trait SessionBackend: Send + Sync {
     /// PA-093：当前事件水位（已落盘事件总数）。默认 0（非 SQLite 后端无事件流）。
     fn load_event_watermark(&self, _session_id: &str) -> u64 {
         0
+    }
+    /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。
+    /// 默认 None（非 SQLite 后端无独立表；legacy 内嵌数据走 trace 字段）。
+    fn load_build_context_observation(
+        &self,
+        _session_id: &str,
+        _observation_ref: &str,
+    ) -> Option<crate::agent::provider::BuildContextObservation> {
+        None
     }
     fn replace_session_traces(
         &self,
@@ -1066,6 +1089,35 @@ impl SessionStore {
             }
             if backfill_attachment_reference_assets(session) {
                 should_save = true;
+            }
+        }
+        // PA-094：trace 表降级为投影缓存——加载时若 trace 缓存为空但事件流存在，
+        // 从事件全量折叠重建（事件权威，清表可重建，spec 1a）。
+        // 审核 P1：折叠全量（不按 active branch 过滤，避免多分支 trace 丢失）；
+        // 折叠结果为空时不置 should_save（避免每次启动全量 refold + 全量 save）。
+        // 审核 P1-3：重建结果回写 trace 表（AppendTrace，sequence=终态 seq 作水位）
+        // ——否则被清过缓存的会话每次启动都全量重折叠，"投影缓存"定位失效。
+        for session in sessions.values_mut() {
+            if session.turn_trace_history.is_empty() {
+                let events = backend.load_turn_events(&session.conversation_id, None);
+                if !events.is_empty() {
+                    let traces = fold_session_traces_all(&events);
+                    if !traces.is_empty() {
+                        for (order, trace) in traces.iter().enumerate() {
+                            let mut cache_trace = trace.clone();
+                            cache_trace.sequence =
+                                Some(events.last().map(|(seq, _, _)| *seq).unwrap_or(0));
+                            let _ = backend.persist_command(PersistCommand::AppendTrace {
+                                epoch: 1,
+                                session_id: session.conversation_id.clone(),
+                                trace: cache_trace,
+                                trace_order: order,
+                            });
+                        }
+                        session.turn_trace_history = traces;
+                        should_save = true;
+                    }
+                }
             }
         }
         let rebuilt_assets = rebuild_attachment_assets_from_sessions(&sessions, &attachment_assets);
@@ -1380,7 +1432,7 @@ impl SessionStore {
         let persisted_event_id = event_id.clone();
         let persisted_event_type = event_type.clone();
         let persisted_event_version = event_version.clone();
-        {
+        let persisted_event_watermark = {
             let session = self.sessions.get_mut(&session_key)?;
             let trace = session
                 .turn_trace_history
@@ -1394,7 +1446,9 @@ impl SessionStore {
             trace.emitted_at_ms = emitted_at_ms;
             trace.updated_at = now_timestamp_ms();
             refresh_session_metadata(session, true);
-        }
+            // PA-094：trace 缓存行水位 = 会话事件日志水位（终态 flush 后已推进）。
+            session.event_watermark
+        };
         let updated_at = self
             .sessions
             .get(&session_key)
@@ -1416,6 +1470,7 @@ impl SessionStore {
                 sequence,
                 emitted_at_ms,
                 updated_at,
+                event_watermark: Some(persisted_event_watermark),
             },
         ))
     }
@@ -1471,6 +1526,7 @@ impl SessionStore {
                 sequence,
                 emitted_at_ms,
                 updated_at,
+                event_watermark: None,
             },
         );
         Some(snapshot)
@@ -2551,7 +2607,8 @@ impl SessionStore {
         name: &str,
         root_path: &str,
     ) -> Result<crate::agent::workspace::WorkspaceRecord, String> {
-        let record = crate::agent::workspace::create_workspace_entry(&mut self.workspaces, name, root_path)?;
+        let record =
+            crate::agent::workspace::create_workspace_entry(&mut self.workspaces, name, root_path)?;
         self.save_to_backend();
         Ok(record)
     }
@@ -2586,7 +2643,10 @@ impl SessionStore {
 
     /// 显式授权一个路径（仅读；目标必须存在）。变更即持久化（store_metadata
     /// key=`path_authorizations.v1`），重启后生效。
-    pub fn authorize_path(&mut self, canonical: PathBuf) -> Result<crate::agent::path_permission::AuthorizedPathEntry, String> {
+    pub fn authorize_path(
+        &mut self,
+        canonical: PathBuf,
+    ) -> Result<crate::agent::path_permission::AuthorizedPathEntry, String> {
         let entry = self.path_authorizations.grant(canonical)?;
         self.save_to_backend();
         Ok(entry)
@@ -2613,6 +2673,16 @@ impl SessionStore {
         up_to_seq: Option<u64>,
     ) -> Vec<(u64, String, crate::agent::turn_event::TurnEvent)> {
         self.backend.load_turn_events(session_id, up_to_seq)
+    }
+
+    /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。
+    pub fn load_build_context_observation(
+        &self,
+        session_id: &str,
+        observation_ref: &str,
+    ) -> Option<crate::agent::provider::BuildContextObservation> {
+        self.backend
+            .load_build_context_observation(session_id, observation_ref)
     }
 
     /// PA-093：当前事件水位（backend 支持时）；否则 0。
@@ -2651,11 +2721,8 @@ impl SessionStore {
                 .iter_mut()
                 .find(|n| n.node_id == head_id)
             {
-                if node.event_seq_range.is_none()
-                    && new_watermark > session.last_commit_watermark
-                {
-                    node.event_seq_range =
-                        Some((session.last_commit_watermark, new_watermark - 1));
+                if node.event_seq_range.is_none() && new_watermark > session.last_commit_watermark {
+                    node.event_seq_range = Some((session.last_commit_watermark, new_watermark - 1));
                     // 引用化：事件可重建的视图字段不再内嵌快照。
                     node.history.clear();
                     node.provider_native_transcript.clear();
@@ -2841,6 +2908,7 @@ impl SessionStore {
                     sequence,
                     emitted_at_ms,
                     updated_at,
+                    event_watermark,
                 } => Some(PersistCommand::UpdateTraceTerminal {
                     epoch: 1,
                     session_id: session_id.to_string(),
@@ -2853,6 +2921,7 @@ impl SessionStore {
                         emitted_at_ms: *emitted_at_ms,
                         updated_at: *updated_at,
                         phase: None,
+                        event_watermark: *event_watermark,
                     },
                 }),
                 SessionTraceMutation::AppendHookRecords {
@@ -3028,10 +3097,9 @@ impl SessionStore {
                     .cloned()
                     .expect("node exists after check");
                 let (history, trace) = fold_session_views(
-                    &self.backend.load_turn_events(
-                        session_id,
-                        node.event_seq_range.map(|(_, e)| e),
-                    ),
+                    &self
+                        .backend
+                        .load_turn_events(session_id, node.event_seq_range.map(|(_, e)| e)),
                     &node.branch_id,
                     &view.history_nodes,
                     &view.history_branches,
@@ -3792,7 +3860,10 @@ fn commit_history_node_from_live_state(
         history: session.history.clone(),
         provider_native_transcript: session.provider_native_transcript.clone(),
         turn_trace_history: session.turn_trace_history.clone(),
-        turn_id: session.turn_trace_history.last().map(|trace| trace.turn_id.clone()),
+        turn_id: session
+            .turn_trace_history
+            .last()
+            .map(|trace| trace.turn_id.clone()),
         turn_trace_refs: Some(
             session
                 .turn_trace_history
@@ -3859,7 +3930,10 @@ fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) 
         node.turn_trace_history = turn_trace_history;
         // PA-088：同步更新 turn_id 与 refs，保持内存态与持久化重算一致
         // （前端 checkpoint 列表直接读 node.turnId）。
-        node.turn_id = node.turn_trace_history.last().map(|trace| trace.turn_id.clone());
+        node.turn_id = node
+            .turn_trace_history
+            .last()
+            .map(|trace| trace.turn_id.clone());
         node.turn_trace_refs = Some(
             node.turn_trace_history
                 .iter()
@@ -3948,7 +4022,8 @@ fn fold_session_views(
     branches: &[HistoryBranch],
 ) -> (Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>) {
     use crate::agent::projection::{
-        fold_all_with_branches, HistoryProjectionState, TraceProjectionState,
+        fold_all_with_branches, HistoryProjectionState, MetricsProjectionState,
+        TraceProjectionState,
     };
     let node_branch: HashMap<&str, &str> = nodes
         .iter()
@@ -3966,7 +4041,43 @@ fn fold_session_views(
         &node_branch,
         branches,
     );
-    (history_state.messages(), trace_state.traces())
+    // PA-094：ProviderCallCacheRecord 由 MetricsProjection 生成（design.md §5）——
+    // trace 记录不再独立存储，重建时从 ProviderUsage 事件派生并挂载。
+    let metrics_state = fold_all_with_branches::<_, MetricsProjectionState>(
+        events,
+        node_branch_id,
+        &node_branch,
+        branches,
+    );
+    let mut traces = trace_state.traces();
+    for trace in &mut traces {
+        if let Some(records) = metrics_state.by_turn_records.get(&trace.turn_id) {
+            trace.provider_call_records = records.clone();
+        }
+    }
+    (history_state.messages(), traces)
+}
+
+/// PA-094（审核 P1）：全量折叠 trace（不带分支过滤）——trace 缓存重建专用。
+/// 事件权威：缓存是投影缓存，`record_turn_trace` 写入所有 turn 的 trace，
+/// 清表重建必须还原全集（按 active branch 过滤会丢失其他分支的 trace）。
+fn fold_session_traces_all(
+    events: &[(u64, String, crate::agent::turn_event::TurnEvent)],
+) -> Vec<TurnTraceRecord> {
+    use crate::agent::projection::{fold_all, MetricsProjectionState, TraceProjectionState};
+    let events2: Vec<(u64, crate::agent::turn_event::TurnEvent)> = events
+        .iter()
+        .map(|(seq, _, event)| (*seq, event.clone()))
+        .collect();
+    let trace_state = fold_all::<_, TraceProjectionState>(&events2);
+    let metrics_state = fold_all::<_, MetricsProjectionState>(&events2);
+    let mut traces = trace_state.traces();
+    for trace in &mut traces {
+        if let Some(records) = metrics_state.by_turn_records.get(&trace.turn_id) {
+            trace.provider_call_records = records.clone();
+        }
+    }
+    traces
 }
 
 /// PA-088/PA-090：收集会话的 trace 全量 Union（顶层 ∪ 全部节点 trace，按 turn_id 去重取最新）。
@@ -4089,7 +4200,10 @@ fn session_state_for_backend(
                     })
                     .collect(),
             );
-            node.turn_id = node.turn_trace_history.last().map(|trace| trace.turn_id.clone());
+            node.turn_id = node
+                .turn_trace_history
+                .last()
+                .map(|trace| trace.turn_id.clone());
             node.turn_trace_history.clear();
         }
     }
@@ -4132,6 +4246,7 @@ fn trace_action_from_mutation(mutation: SessionTraceMutation) -> TracePersistenc
             sequence,
             emitted_at_ms,
             updated_at,
+            event_watermark: _,
         } => TracePersistenceAction::UpdateTerminalEvent {
             turn_id,
             event_id,
@@ -7852,7 +7967,11 @@ mod tests {
             image_attachments,
         );
         store.refresh_attachment_catalog();
-        assert_eq!(store.list_attachment_assets(None).len(), 1, "图片资产应保留");
+        assert_eq!(
+            store.list_attachment_assets(None).len(),
+            1,
+            "图片资产应保留"
+        );
     }
 
     #[test]
@@ -7861,11 +7980,16 @@ mod tests {
         let mut store = SessionStore::memory_only();
         let workspaces = store.list_workspaces();
         assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+        assert_eq!(
+            workspaces[0].id,
+            crate::agent::workspace::DEFAULT_WORKSPACE_ID
+        );
 
         let root = std::env::temp_dir().join(format!("pa079-store-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let created = store.create_workspace("Docs", root.to_str().unwrap()).unwrap();
+        let created = store
+            .create_workspace("Docs", root.to_str().unwrap())
+            .unwrap();
         assert!(created.id.starts_with("ws-docs-"));
 
         assert_eq!(store.list_workspaces().len(), 2);
@@ -7877,7 +8001,9 @@ mod tests {
         assert!(store.resolve_workspace_root(None).is_ok());
 
         // 重复 root 拒绝
-        assert!(store.create_workspace("Docs2", root.to_str().unwrap()).is_err());
+        assert!(store
+            .create_workspace("Docs2", root.to_str().unwrap())
+            .is_err());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -7890,10 +8016,16 @@ mod tests {
         assert!(store.sessions["ws-session"].workspace_id.is_none());
 
         store.stamp_workspace_id("ws-session", "ws-proj-1");
-        assert_eq!(store.sessions["ws-session"].workspace_id.as_deref(), Some("ws-proj-1"));
+        assert_eq!(
+            store.sessions["ws-session"].workspace_id.as_deref(),
+            Some("ws-proj-1")
+        );
 
         store.stamp_workspace_id("ws-session", "ws-proj-2");
-        assert_eq!(store.sessions["ws-session"].workspace_id.as_deref(), Some("ws-proj-1"));
+        assert_eq!(
+            store.sessions["ws-session"].workspace_id.as_deref(),
+            Some("ws-proj-1")
+        );
     }
 
     #[test]
@@ -7923,7 +8055,10 @@ mod tests {
             map.remove("workspaceId");
         }
         let restored: SessionState = serde_json::from_str(&value.to_string()).unwrap();
-        assert_eq!(restored.workspace_id, None, "旧 blob 无 workspace_id → None");
+        assert_eq!(
+            restored.workspace_id, None,
+            "旧 blob 无 workspace_id → None"
+        );
         assert_eq!(restored.title, "旧标题");
         assert_eq!(restored.summary, "旧摘要");
         assert_eq!(restored.turn_count, 3);
@@ -7946,7 +8081,10 @@ mod tests {
         let store = SessionStore::with_backend(Box::new(backend));
         let workspaces = store.list_workspaces();
         assert_eq!(workspaces.len(), 1, "损坏回退后应只剩默认 workspace");
-        assert_eq!(workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+        assert_eq!(
+            workspaces[0].id,
+            crate::agent::workspace::DEFAULT_WORKSPACE_ID
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -8615,6 +8753,7 @@ mod tests {
                     provider_source: Some("provider_decision".to_string()),
                     provider_mode: Some("live".to_string()),
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     tool_activities: Vec::new(),
                     text: Some("ok".to_string()),
                     reasoning_content: None,
@@ -8707,6 +8846,7 @@ mod tests {
                 provider_source: Some("provider_decision".to_string()),
                 provider_mode: Some("live".to_string()),
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("测试 trace 持久化".to_string()),
                 fallback_reason: None,
                 error: None,
@@ -8851,6 +8991,7 @@ mod tests {
                 provider_source: Some("provider_decision".to_string()),
                 provider_mode: Some("live".to_string()),
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("多边界 hook 持久化".to_string()),
                 fallback_reason: None,
                 error: None,
@@ -8919,6 +9060,7 @@ mod tests {
                     provider_source: None,
                     provider_mode: None,
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     tool_activities: Vec::new(),
                     text: Some("ok".to_string()),
                     reasoning_content: None,
@@ -8956,6 +9098,7 @@ mod tests {
                 provider_source: None,
                 provider_mode: None,
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("等待回写".to_string()),
                 fallback_reason: None,
                 error: None,
@@ -9068,6 +9211,7 @@ mod tests {
                 provider_source: None,
                 provider_mode: None,
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("append hook trace".to_string()),
                 fallback_reason: None,
                 error: None,
@@ -9286,6 +9430,7 @@ mod tests {
                         provider_source: Some("provider_decision".to_string()),
                         provider_mode: Some("live".to_string()),
                         build_context_observation: None,
+                        build_context_observation_ref: None,
                         tool_activities: Vec::new(),
                         text: Some("final answer".to_string()),
                         reasoning_content: None,
@@ -9312,6 +9457,7 @@ mod tests {
                         provider_source: Some("provider_decision".to_string()),
                         provider_mode: Some("live".to_string()),
                         build_context_observation: None,
+                        build_context_observation_ref: None,
                         tool_activities: Vec::new(),
                         text: None,
                         reasoning_content: None,
@@ -9336,6 +9482,7 @@ mod tests {
                 provider_source: Some("provider_decision".to_string()),
                 provider_mode: Some("live".to_string()),
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("checkpoint boundary summary".to_string()),
                 fallback_reason: None,
                 error: None,
@@ -9421,6 +9568,7 @@ mod tests {
                     provider_source: Some("provider_decision".to_string()),
                     provider_mode: Some("live".to_string()),
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     tool_activities: Vec::new(),
                     text: Some("failed terminal".to_string()),
                     reasoning_content: None,
@@ -9494,6 +9642,7 @@ mod tests {
                 provider_source: Some("provider_decision".to_string()),
                 provider_mode: Some("live".to_string()),
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("failed summary".to_string()),
                 fallback_reason: None,
                 error: Some("hook blocked finalize".to_string()),
@@ -9578,6 +9727,7 @@ mod tests {
                     provider_source: None,
                     provider_mode: None,
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     tool_activities: Vec::new(),
                     text: Some("hook blocked finalize".to_string()),
                     reasoning_content: None,
@@ -9601,6 +9751,7 @@ mod tests {
                 provider_source: None,
                 provider_mode: None,
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("hook blocked finalize".to_string()),
                 fallback_reason: None,
                 error: Some("hook blocked finalize".to_string()),
@@ -9670,6 +9821,7 @@ mod tests {
                     provider_source: Some("provider_decision".to_string()),
                     provider_mode: Some("live".to_string()),
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     tool_activities: vec![TurnToolActivity {
                         id: "tool-1".to_string(),
                         name: "workspace_list_files".to_string(),
@@ -9754,6 +9906,7 @@ mod tests {
                 provider_source: Some("provider_decision".to_string()),
                 provider_mode: Some("live".to_string()),
                 build_context_observation: None,
+                build_context_observation_ref: None,
                 session_summary: Some("cancelled summary".to_string()),
                 fallback_reason: Some("stopped_by_user".to_string()),
                 error: Some("stopped_by_user".to_string()),
@@ -10031,7 +10184,7 @@ mod tests {
                 turn_count: 2,
                 last_referenced_file: None,
                 created_at_ms: 250,
-            event_seq_range: None,
+                event_seq_range: None,
             }],
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
@@ -10154,7 +10307,7 @@ mod tests {
                     turn_count: 1,
                     last_referenced_file: None,
                     created_at_ms: 100,
-                event_seq_range: None,
+                    event_seq_range: None,
                 },
                 HistoryNode {
                     node_id: "node-2".to_string(),
@@ -10183,7 +10336,7 @@ mod tests {
                     turn_count: 2,
                     last_referenced_file: None,
                     created_at_ms: 200,
-                event_seq_range: None,
+                    event_seq_range: None,
                 },
             ],
             history_branches: Vec::new(),
@@ -10197,13 +10350,12 @@ mod tests {
         let mut turn_ids: Vec<String> = union.iter().map(|trace| trace.turn_id.clone()).collect();
         turn_ids.sort();
         assert_eq!(turn_ids, vec!["turn-1".to_string(), "turn-2".to_string()]);
-
     }
     // ── PA-093 checkpoint 引用化（阶段 3）测试 ──
 
     fn pa093_sqlite_store(tag: &str) -> (SessionStore, std::path::PathBuf, String) {
-        use crate::agent::sqlite_session::SqliteSessionBackend;
         use crate::agent::session::SeparateTraceTableMode;
+        use crate::agent::sqlite_session::SqliteSessionBackend;
         let dir = std::env::temp_dir().join(format!(
             "pa093-{tag}-{}-{}",
             std::process::id(),
@@ -10223,8 +10375,11 @@ mod tests {
     }
 
     fn pa093_flush(
-        store: &mut SessionStore, session_id: &str, turn_id: &str,
-        branch_id: &str, events: &[TurnEvent],
+        store: &mut SessionStore,
+        session_id: &str,
+        turn_id: &str,
+        branch_id: &str,
+        events: &[TurnEvent],
     ) {
         let branch = branch_id.to_string();
         assert!(store.persist_events(session_id, turn_id, &branch, events.to_vec()));
@@ -10233,16 +10388,39 @@ mod tests {
 
     fn pa093_turn_events(turn_id: &str, user_text: &str, assistant_text: &str) -> Vec<TurnEvent> {
         vec![
-            TurnEvent::TurnStart { turn_id: turn_id.to_string() },
-            TurnEvent::UserMessage { turn_id: turn_id.to_string(), text: user_text.to_string(), attachments: Vec::new() },
-            TurnEvent::AssistantMessage { turn_id: turn_id.to_string(), step: 0, text: assistant_text.to_string(), reasoning_content: None, usage: None, chunk_missing: None },
-            TurnEvent::TurnEnd { turn_id: turn_id.to_string(), reason: TurnEndReason::Completed, turn_duration_ms: None },
+            TurnEvent::TurnStart {
+                turn_id: turn_id.to_string(),
+            },
+            TurnEvent::UserMessage {
+                turn_id: turn_id.to_string(),
+                text: user_text.to_string(),
+                attachments: Vec::new(),
+            },
+            TurnEvent::AssistantMessage {
+                turn_id: turn_id.to_string(),
+                step: 0,
+                text: assistant_text.to_string(),
+                reasoning_content: None,
+                usage: None,
+                chunk_missing: None,
+            },
+            TurnEvent::TurnEnd {
+                turn_id: turn_id.to_string(),
+                reason: TurnEndReason::Completed,
+                turn_duration_ms: None,
+            },
         ]
     }
 
     fn pa093_first_turn_node_id(store: &SessionStore, session_id: &str) -> String {
         let session = store.sessions.get(session_id).expect("session");
-        session.history_nodes.iter().find(|n| n.kind == HistoryNodeKind::TurnCommitted).expect("turn node").node_id.clone()
+        session
+            .history_nodes
+            .iter()
+            .find(|n| n.kind == HistoryNodeKind::TurnCommitted)
+            .expect("turn node")
+            .node_id
+            .clone()
     }
 
     #[test]
@@ -10254,13 +10432,27 @@ mod tests {
             s.history_cursor.branch_head_node_id.clone().expect("head")
         };
         let s = store.sessions.get(&sid).expect("session");
-        let node = s.history_nodes.iter().find(|n| n.node_id == head).expect("node");
+        let node = s
+            .history_nodes
+            .iter()
+            .find(|n| n.node_id == head)
+            .expect("node");
         assert!(node.event_seq_range.is_none(), "pre-flush legacy");
         assert_eq!(node.history.len(), 2, "pre-flush keeps snapshot");
         drop(s);
-        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-1",
+            "branch-main",
+            &pa093_turn_events("turn-1", "first", "reply1"),
+        );
         let s = store.sessions.get(&sid).expect("session");
-        let node = s.history_nodes.iter().find(|n| n.node_id == head).expect("node");
+        let node = s
+            .history_nodes
+            .iter()
+            .find(|n| n.node_id == head)
+            .expect("node");
         assert_eq!(node.event_seq_range, Some((0, 3)), "range covered");
         assert!(node.history.is_empty(), "snapshot cleared");
         assert!(node.turn_trace_history.is_empty(), "trace cleared");
@@ -10268,10 +10460,20 @@ mod tests {
         assert_eq!(s.last_commit_watermark, 4);
         drop(s);
         store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-2", "branch-main", &pa093_turn_events("turn-2", "second", "reply2"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-2",
+            "branch-main",
+            &pa093_turn_events("turn-2", "second", "reply2"),
+        );
         let s = store.sessions.get(&sid).expect("session");
         let nodes = &s.history_nodes;
-        assert_eq!(nodes[nodes.len() - 1].event_seq_range, Some((4, 7)), "contiguous range");
+        assert_eq!(
+            nodes[nodes.len() - 1].event_seq_range,
+            Some((4, 7)),
+            "contiguous range"
+        );
         drop(s);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -10280,14 +10482,39 @@ mod tests {
     fn pa093_checkout_referenced_node_folds_events() {
         let (mut store, dir, sid) = pa093_sqlite_store("checkout");
         store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-1",
+            "branch-main",
+            &pa093_turn_events("turn-1", "first", "reply1"),
+        );
         store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-2", "branch-main", &pa093_turn_events("turn-2", "second", "reply2"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-2",
+            "branch-main",
+            &pa093_turn_events("turn-2", "second", "reply2"),
+        );
         let node1 = pa093_first_turn_node_id(&store, &sid);
-        let snapshot = store.checkout_history_node(Some(&sid), &node1, HistoryCheckoutMode::TranscriptOnly, None).expect("checkout");
+        let snapshot = store
+            .checkout_history_node(
+                Some(&sid),
+                &node1,
+                HistoryCheckoutMode::TranscriptOnly,
+                None,
+            )
+            .expect("checkout");
         assert_eq!(snapshot.history.len(), 2, "folded view has turn 1 only");
-        assert!(snapshot.history.iter().all(|m| m.content != "reply2"), "watermark rollback");
-        assert_eq!(snapshot.history_cursor.event_watermark, 8, "cursor watermark");
+        assert!(
+            snapshot.history.iter().all(|m| m.content != "reply2"),
+            "watermark rollback"
+        );
+        assert_eq!(
+            snapshot.history_cursor.event_watermark, 8,
+            "cursor watermark"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10296,14 +10523,36 @@ mod tests {
         // P1-1：restore_branch_head 对引用化分支头节点的折叠路径
         let (mut store, dir, sid) = pa093_sqlite_store("restore");
         store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-1",
+            "branch-main",
+            &pa093_turn_events("turn-1", "first", "reply1"),
+        );
         let node1 = pa093_first_turn_node_id(&store, &sid);
-        let fork_snapshot = store.fork_from_history_node(Some(&sid), &node1, None).expect("fork");
-        let fork_branch = fork_snapshot.history_cursor.active_branch_id.expect("active branch");
+        let fork_snapshot = store
+            .fork_from_history_node(Some(&sid), &node1, None)
+            .expect("fork");
+        let fork_branch = fork_snapshot
+            .history_cursor
+            .active_branch_id
+            .expect("active branch");
         store.append_turn(Some(&sid), "fork-q", "fork-answer", None, Vec::new());
-        pa093_flush(&mut store, &sid, "fork-turn", &fork_branch, &pa093_turn_events("fork-turn", "fork-q", "fork-answer"));
-        let restored = store.restore_branch_head(Some(&sid), Some(&fork_branch), None).expect("restore");
-        assert!(restored.history.iter().any(|m| m.content == "fork-answer"), "restore folds fork events");
+        pa093_flush(
+            &mut store,
+            &sid,
+            "fork-turn",
+            &fork_branch,
+            &pa093_turn_events("fork-turn", "fork-q", "fork-answer"),
+        );
+        let restored = store
+            .restore_branch_head(Some(&sid), Some(&fork_branch), None)
+            .expect("restore");
+        assert!(
+            restored.history.iter().any(|m| m.content == "fork-answer"),
+            "restore folds fork events"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10312,10 +10561,22 @@ mod tests {
         // P1-1：fork_from_history_node 对引用化源节点的折叠路径
         let (mut store, dir, sid) = pa093_sqlite_store("fork-fold");
         store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-1",
+            "branch-main",
+            &pa093_turn_events("turn-1", "first", "reply1"),
+        );
         let node1 = pa093_first_turn_node_id(&store, &sid);
-        let fork_snapshot = store.fork_from_history_node(Some(&sid), &node1, None).expect("fork");
-        assert_eq!(fork_snapshot.history.len(), 2, "fork view folds source node events");
+        let fork_snapshot = store
+            .fork_from_history_node(Some(&sid), &node1, None)
+            .expect("fork");
+        assert_eq!(
+            fork_snapshot.history.len(),
+            2,
+            "fork view folds source node events"
+        );
         assert_eq!(fork_snapshot.history[0].content, "first");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -10326,7 +10587,14 @@ mod tests {
         store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
         store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
         let node1 = pa093_first_turn_node_id(&store, &sid);
-        let snapshot = store.checkout_history_node(Some(&sid), &node1, HistoryCheckoutMode::TranscriptOnly, None).expect("legacy checkout");
+        let snapshot = store
+            .checkout_history_node(
+                Some(&sid),
+                &node1,
+                HistoryCheckoutMode::TranscriptOnly,
+                None,
+            )
+            .expect("legacy checkout");
         assert_eq!(snapshot.history.len(), 2, "legacy snapshot");
         assert!(snapshot.history.iter().all(|m| m.content != "reply2"));
         std::fs::remove_dir_all(&dir).ok();
@@ -10336,9 +10604,21 @@ mod tests {
     fn pa093_time_travel_loads_referenced_node_state() {
         let (mut store, dir, sid) = pa093_sqlite_store("travel");
         store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-1",
+            "branch-main",
+            &pa093_turn_events("turn-1", "first", "reply1"),
+        );
         store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-2", "branch-main", &pa093_turn_events("turn-2", "second", "reply2"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-2",
+            "branch-main",
+            &pa093_turn_events("turn-2", "second", "reply2"),
+        );
         let node1 = pa093_first_turn_node_id(&store, &sid);
         let snapshot = store.snapshot_for_session_at(&sid, Some(&node1));
         assert_eq!(snapshot.history.len(), 2, "traveled = node1");
@@ -10352,17 +10632,50 @@ mod tests {
     fn pa093_fork_visibility_filters_events() {
         let (mut store, dir, sid) = pa093_sqlite_store("fork-vis");
         store.append_turn(Some(&sid), "first", "reply1", None, Vec::new());
-        pa093_flush(&mut store, &sid, "turn-1", "branch-main", &pa093_turn_events("turn-1", "first", "reply1"));
+        pa093_flush(
+            &mut store,
+            &sid,
+            "turn-1",
+            "branch-main",
+            &pa093_turn_events("turn-1", "first", "reply1"),
+        );
         let node1 = pa093_first_turn_node_id(&store, &sid);
-        let fork_snapshot = store.fork_from_history_node(Some(&sid), &node1, None).expect("fork");
-        let fork_branch = fork_snapshot.history_cursor.active_branch_id.expect("active branch");
+        let fork_snapshot = store
+            .fork_from_history_node(Some(&sid), &node1, None)
+            .expect("fork");
+        let fork_branch = fork_snapshot
+            .history_cursor
+            .active_branch_id
+            .expect("active branch");
         assert_ne!(fork_branch, "branch-main");
         store.append_turn(Some(&sid), "fork-q", "fork-answer", None, Vec::new());
-        pa093_flush(&mut store, &sid, "fork-turn", &fork_branch, &pa093_turn_events("fork-turn", "fork-q", "fork-answer"));
-        let main_snapshot = store.switch_history_branch(Some(&sid), "branch-main", None).expect("switch to main");
-        assert!(main_snapshot.history.iter().all(|m| m.content != "fork-answer"), "fork invisible after switch");
-        let fork_again = store.switch_history_branch(Some(&sid), &fork_branch, None).expect("switch back");
-        assert!(fork_again.history.iter().any(|m| m.content == "fork-answer"), "fork visible again");
+        pa093_flush(
+            &mut store,
+            &sid,
+            "fork-turn",
+            &fork_branch,
+            &pa093_turn_events("fork-turn", "fork-q", "fork-answer"),
+        );
+        let main_snapshot = store
+            .switch_history_branch(Some(&sid), "branch-main", None)
+            .expect("switch to main");
+        assert!(
+            main_snapshot
+                .history
+                .iter()
+                .all(|m| m.content != "fork-answer"),
+            "fork invisible after switch"
+        );
+        let fork_again = store
+            .switch_history_branch(Some(&sid), &fork_branch, None)
+            .expect("switch back");
+        assert!(
+            fork_again
+                .history
+                .iter()
+                .any(|m| m.content == "fork-answer"),
+            "fork visible again"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -10371,17 +10684,204 @@ mod tests {
         let mut events = Vec::with_capacity(10_000);
         for i in 0..1_000u32 {
             let tid = format!("t{i}");
-            events.push(("branch-main".to_string(), TurnEvent::TurnStart { turn_id: tid.clone() }));
-            events.push(("branch-main".to_string(), TurnEvent::UserMessage { turn_id: tid.clone(), text: format!("q{i}"), attachments: Vec::new() }));
-            events.push(("branch-main".to_string(), TurnEvent::AssistantMessage { turn_id: tid.clone(), step: 0, text: format!("a{i}"), reasoning_content: None, usage: None, chunk_missing: None }));
-            events.push(("branch-main".to_string(), TurnEvent::TurnEnd { turn_id: tid.clone(), reason: TurnEndReason::Completed, turn_duration_ms: None }));
+            events.push((
+                "branch-main".to_string(),
+                TurnEvent::TurnStart {
+                    turn_id: tid.clone(),
+                },
+            ));
+            events.push((
+                "branch-main".to_string(),
+                TurnEvent::UserMessage {
+                    turn_id: tid.clone(),
+                    text: format!("q{i}"),
+                    attachments: Vec::new(),
+                },
+            ));
+            events.push((
+                "branch-main".to_string(),
+                TurnEvent::AssistantMessage {
+                    turn_id: tid.clone(),
+                    step: 0,
+                    text: format!("a{i}"),
+                    reasoning_content: None,
+                    usage: None,
+                    chunk_missing: None,
+                },
+            ));
+            events.push((
+                "branch-main".to_string(),
+                TurnEvent::TurnEnd {
+                    turn_id: tid.clone(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: None,
+                },
+            ));
         }
-        let with_seq: Vec<(u64, String, TurnEvent)> = events.into_iter().enumerate().map(|(seq, (b, e))| (seq as u64, b, e)).collect();
+        let with_seq: Vec<(u64, String, TurnEvent)> = events
+            .into_iter()
+            .enumerate()
+            .map(|(seq, (b, e))| (seq as u64, b, e))
+            .collect();
         let started = std::time::Instant::now();
         let (history, _) = fold_session_views(&with_seq, "branch-main", &[], &[]);
         let elapsed = started.elapsed();
         assert_eq!(history.len(), 24, "window truncated");
         let budget = if cfg!(debug_assertions) { 2000 } else { 100 };
-        assert!(elapsed.as_millis() < budget, "10k refold took {}ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < budget,
+            "10k refold took {}ms",
+            elapsed.as_millis()
+        );
     }
-}
+
+    /// PA-094：集成验证——真实 turn 的 trace 视图与消息视图同源（同一份事件派生）。
+    /// fold_session_views 同时折叠 HistoryProjection 与 TraceProjection（+ MetricsProjection
+    /// 的 ProviderCallCacheRecord 挂载），消息与 trace 来自同一事件流。
+    #[test]
+    fn pa094_trace_and_message_views_same_source() {
+        use crate::agent::projection::MetricsProjectionState;
+        let events: Vec<(u64, String, TurnEvent)> = vec![
+            (
+                0,
+                "branch-main".to_string(),
+                TurnEvent::TurnStart {
+                    turn_id: "turn-1".into(),
+                },
+            ),
+            (
+                1,
+                "branch-main".to_string(),
+                TurnEvent::UserMessage {
+                    turn_id: "turn-1".into(),
+                    text: "hello".into(),
+                    attachments: Vec::new(),
+                },
+            ),
+            (
+                2,
+                "branch-main".to_string(),
+                TurnEvent::AssistantChunk {
+                    turn_id: "turn-1".into(),
+                    step: 0,
+                    text: "hi".into(),
+                },
+            ),
+            (
+                3,
+                "branch-main".to_string(),
+                TurnEvent::ToolCall {
+                    turn_id: "turn-1".into(),
+                    step: 1,
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    started_at_ms: None,
+                },
+            ),
+            (
+                4,
+                "branch-main".to_string(),
+                TurnEvent::ToolResult {
+                    turn_id: "turn-1".into(),
+                    step: 1,
+                    call_id: "c1".into(),
+                    result: Some("ok".into()),
+                    error: None,
+                    status: Some("done".into()),
+                    duration_ms: Some(500),
+                    artifacts: None,
+                    capability_invocation: None,
+                },
+            ),
+            (
+                5,
+                "branch-main".to_string(),
+                TurnEvent::ProviderUsage {
+                    turn_id: "turn-1".into(),
+                    step: 0,
+                    request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                    usage: crate::agent::provider::TokenUsage {
+                        input_tokens: Some(100),
+                        cache_hit_input_tokens: Some(40),
+                        cache_hit_source: None,
+                        reasoning_tokens: Some(10),
+                        output_tokens: Some(50),
+                        total_tokens: Some(160),
+                    },
+                    cache_hit_input_tokens: Some(40),
+                    cache_miss_input_tokens: Some(60),
+                    prefix_mutation_reasons: Vec::new(),
+                    first_token_latency_ms: Some(88),
+                    turn_duration_ms: Some(500),
+                    latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                    provider: "deepseek".into(),
+                    model: "deepseek-chat".into(),
+                },
+            ),
+            (
+                6,
+                "branch-main".to_string(),
+                TurnEvent::AssistantMessage {
+                    turn_id: "turn-1".into(),
+                    step: 0,
+                    text: "hi".into(),
+                    reasoning_content: None,
+                    usage: None,
+                    chunk_missing: None,
+                },
+            ),
+            (
+                7,
+                "branch-main".to_string(),
+                TurnEvent::TurnEnd {
+                    turn_id: "turn-1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(1200),
+                },
+            ),
+        ];
+        let (history, traces) = fold_session_views(&events, "branch-main", &[], &[]);
+        // 消息视图：user + assistant（同源事件派生）。
+        assert_eq!(history.len(), 2, "message view from events");
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].content, "hello");
+        assert_eq!(history[1].role, "assistant");
+        assert_eq!(history[1].content, "hi");
+        // trace 视图：同一事件流派生（timeline 折叠 + tool_activities + token 指标）。
+        assert_eq!(traces.len(), 1, "trace view from events");
+        let trace = &traces[0];
+        assert_eq!(trace.turn_id, "turn-1");
+        let kinds: Vec<&str> = trace
+            .trace_timeline
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["call_model", "call_tool", "return_result"],
+            "timeline folded from same events"
+        );
+        assert_eq!(trace.tool_activities.len(), 1);
+        assert_eq!(trace.tool_activities[0].status, "done");
+        assert_eq!(trace.turn_duration_ms, Some(1200));
+        // ProviderCallCacheRecord 由 MetricsProjection 挂载（wire 兼容保留字段）。
+        assert_eq!(trace.provider_call_records.len(), 1);
+        assert_eq!(
+            trace.provider_call_records[0].provider_source.as_deref(),
+            Some("deepseek")
+        );
+        assert_eq!(trace.provider_call_records[0].input_tokens, Some(100));
+        // 消息视图与 trace 视图同源：assistant 文本 == timeline call_model 文本。
+        let model_entry = trace
+            .trace_timeline
+            .iter()
+            .find(|e| e.kind == "call_model")
+            .expect("call_model entry");
+        assert_eq!(
+            model_entry.text.as_deref(),
+            Some("hi"),
+            "message and trace share the same event-derived text"
+        );
+    }
+}

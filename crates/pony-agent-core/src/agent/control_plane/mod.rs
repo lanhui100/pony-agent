@@ -24,14 +24,12 @@ use crate::agent::hooks::{
     build_submission_plan_run_control_hook_envelope, CanonicalGraphRunEventType,
     RunControlCheckpointContext, RunControlHookEnvelope,
 };
-use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
 use crate::agent::plan_state::PlanStore;
+use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
 use crate::agent::runtime::{
-    AgentRuntime, AgentRuntimeBuilder, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult,
-    TurnStreamEvent,
+    AgentRuntime, AgentRuntimeBuilder, RunTurnFacts, TurnInput, TurnResult, TurnStreamEvent,
+    SUSPENDED_TURN_PHASE,
 };
-use crate::agent::tool_runtime::{RuntimeClock, SystemClock};
-use crate::agent::tools::ToolRegistrySnapshot;
 use crate::agent::session::{
     build_missing_run_control_audit_summary, HistoryBranch,
     HistoryCheckoutMode as SessionHistoryCheckoutMode, HistoryCursor, HistoryNode,
@@ -39,6 +37,8 @@ use crate::agent::session::{
     RunControlAuditSummary, SessionOverview, SessionSnapshot, SessionStore, TurnTraceRecord,
     WorkspaceRef,
 };
+use crate::agent::tool_runtime::{RuntimeClock, SystemClock};
+use crate::agent::tools::ToolRegistrySnapshot;
 use crate::agent::turn_flow::TurnEventSink;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -934,21 +934,33 @@ impl HostControlPlaneBuilder {
         let capability_registry = runtime.capability_registry_snapshot();
         let sessions_rwlock = runtime.sessions_handle();
         // PA-091：注册事件持久化通道（缓冲 + turn 终态 flush）。
-        // 闭包按 turn_id 累积事件，终态（completed/failed/cancelled）时经
+        // 闭包按 (session_id, turn_id) 累积事件，终态（completed/failed/cancelled）时经
         // SessionStore.persist_events 与快照同事务落盘；失败只记日志（contained）。
+        // 审核 P1：key 用 (session_id, turn_id) 而非仅 turn_id——同一 control plane
+        // 可并发处理不同 session 的同名 turn_id，仅按 turn_id 索引会跨 session 串数据。
         {
             let sessions = Arc::clone(&sessions_rwlock);
-            let buffer: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<crate::agent::turn_event::TurnEvent>>>> =
-                Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-            let persist = move |session_id: &str, turn_id: &str, event: crate::agent::turn_event::TurnEvent, is_terminal: bool| {
+            let buffer: Arc<
+                std::sync::Mutex<
+                    std::collections::HashMap<
+                        (String, String),
+                        Vec<crate::agent::turn_event::TurnEvent>,
+                    >,
+                >,
+            > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let persist = move |session_id: &str,
+                                turn_id: &str,
+                                event: crate::agent::turn_event::TurnEvent,
+                                is_terminal: bool| {
                 let mut buf = buffer.lock().unwrap_or_else(|e| {
                     eprintln!("[pony-agent][runtime] event buffer lock poisoned: {e}, recovering");
                     e.into_inner()
                 });
+                let key = (session_id.to_string(), turn_id.to_string());
                 // 写时聚合：同一 turn 的连续 AssistantChunk 合并为一条（
                 // append-only 不可变 + seq 连续与聚合的一致性由"emit 时合并"保证）。
                 if let crate::agent::turn_event::TurnEvent::AssistantChunk { text, .. } = &event {
-                    if let Some(last) = buf.get_mut(turn_id).and_then(|v| v.last_mut()) {
+                    if let Some(last) = buf.get_mut(&key).and_then(|v| v.last_mut()) {
                         if let crate::agent::turn_event::TurnEvent::AssistantChunk {
                             text: last_text,
                             ..
@@ -956,16 +968,16 @@ impl HostControlPlaneBuilder {
                         {
                             last_text.push_str(text);
                             if is_terminal {
-                                let events = buf.remove(turn_id).unwrap_or_default();
+                                let events = buf.remove(&key).unwrap_or_default();
                                 flush_events(&sessions, session_id, turn_id, events);
                             }
                             return;
                         }
                     }
                 }
-                buf.entry(turn_id.to_string()).or_default().push(event);
+                buf.entry(key.clone()).or_default().push(event);
                 if is_terminal {
-                    let events = buf.remove(turn_id).unwrap_or_default();
+                    let events = buf.remove(&key).unwrap_or_default();
                     flush_events(&sessions, session_id, turn_id, events);
                 }
             };
@@ -974,7 +986,9 @@ impl HostControlPlaneBuilder {
         // The graph run store and the governed ask dispatcher are shared with the runtime so the
         // Ask control surface (`ask_answer` / `graph_resume_ask`) hits the exact pending-request
         // store and run bindings the runtime's turn loop persists (design.md Decision 5, P1-1).
-        let graph_runs = Arc::new(Mutex::new(self.graph_runs.unwrap_or_else(GraphRunStore::new)));
+        let graph_runs = Arc::new(Mutex::new(
+            self.graph_runs.unwrap_or_else(GraphRunStore::new),
+        ));
         runtime.set_graph_run_store(Arc::clone(&graph_runs));
         let ask_dispatcher = self
             .ask_dispatcher
@@ -1614,12 +1628,36 @@ impl HostControlPlane {
         );
 
         let runtime = self.runtime.read().expect("runtime lock poisoned");
+        // 审核 P0：普通 streaming 路径补 terminal trace annotation（与 graph
+        // streaming 路径一致）——终态信封（event_id/sequence 等）写回 trace 记录，
+        // 否则 trace 缓存行 watermark 停留 0，无法可靠判断缓存是否覆盖事件流。
+        let recording_sink = RecordingTurnEventSink::new(sink);
         runtime.start_turn_stream_with_control(
-            sink,
+            &recording_sink,
             &self.execution_control,
             command.turn_id,
             command.input,
         );
+        if let Some((
+            session_id,
+            turn_id,
+            event_id,
+            event_type,
+            event_version,
+            sequence,
+            emitted_at_ms,
+        )) = recording_sink.terminal_trace_annotation()
+        {
+            let _ = runtime.annotate_turn_trace_terminal_event(
+                session_id.as_deref(),
+                &turn_id,
+                event_id,
+                event_type,
+                event_version,
+                sequence,
+                emitted_at_ms,
+            );
+        }
     }
 
     pub fn stop_turn(&self, command: StopTurnCommand) -> StopTurnResponse {
@@ -1969,9 +2007,8 @@ fn default_graph_run_store() -> GraphRunStore {
 /// executes through via [`HostControlPlaneBuilder::ask_dispatcher`] so both observe the same
 /// pending-request store.
 fn default_ask_dispatcher() -> Arc<GovernedDispatcher> {
-    let registry = Arc::new(
-        ToolRegistrySnapshot::builtin().expect("builtin registry must validate"),
-    );
+    let registry =
+        Arc::new(ToolRegistrySnapshot::builtin().expect("builtin registry must validate"));
     let clock: Arc<dyn RuntimeClock> = Arc::new(SystemClock);
     Arc::new(GovernedDispatcher::new(registry, clock))
 }
@@ -2662,8 +2699,8 @@ mod tests {
     use crate::agent::context::DefaultTurnContextBuilder;
     use crate::agent::dispatcher::DispatchContext;
     use crate::agent::graph::{
-        GraphAskWaitBinding, GraphDecisionKind, GraphDecisionReason, GraphEngine, GraphRunEventKind,
-        GraphRunPhase, GraphRunStore, GraphRunner,
+        GraphAskWaitBinding, GraphDecisionKind, GraphDecisionReason, GraphEngine,
+        GraphRunEventKind, GraphRunPhase, GraphRunStore, GraphRunner,
     };
     use crate::agent::hooks::{
         turn_hook_point_for_planner_hook_point, AgentHookDescriptor, AgentHookExecutor,
@@ -3117,7 +3154,14 @@ mod tests {
 
         // 未注册 workspace → 明确错误
         let err = control_plane
-            .import_attachment("a.txt", "aGVsbG8=", "text/plain", Some("ws-nope"), None, None)
+            .import_attachment(
+                "a.txt",
+                "aGVsbG8=",
+                "text/plain",
+                Some("ws-nope"),
+                None,
+                None,
+            )
             .expect_err("未注册 workspace 应被拒绝");
         assert!(err.contains("workspace 不存在"), "err={err}");
 
@@ -3133,15 +3177,27 @@ mod tests {
             Some(root.to_str().unwrap()),
             None,
         );
-        assert!(ok.is_ok(), "默认 workspace + root_override 应被允许: {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "默认 workspace + root_override 应被允许: {ok:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
 
         // 注册一个 workspace 后，import 落其 root
         let ws_root = std::env::temp_dir().join(format!("pa079-ws-import-{}", std::process::id()));
         std::fs::create_dir_all(&ws_root).unwrap();
-        let created = control_plane.create_workspace("Import Target", ws_root.to_str().unwrap()).unwrap();
+        let created = control_plane
+            .create_workspace("Import Target", ws_root.to_str().unwrap())
+            .unwrap();
         let imported = control_plane
-            .import_attachment("doc.pdf", "aGVsbG8=", "application/pdf", Some(&created.id), None, None)
+            .import_attachment(
+                "doc.pdf",
+                "aGVsbG8=",
+                "application/pdf",
+                Some(&created.id),
+                None,
+                None,
+            )
             .unwrap();
         assert!(imported.path.starts_with(ws_root.join(".tmp/imports")));
         assert_eq!(
@@ -3407,6 +3463,7 @@ mod tests {
                     provider_source: Some("provider_decision".to_string()),
                     provider_mode: Some("live".to_string()),
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     session_summary: Some("runtime hook trace".to_string()),
                     fallback_reason: None,
                     error: None,
@@ -3532,6 +3589,7 @@ mod tests {
                     provider_source: Some("provider_decision".to_string()),
                     provider_mode: Some("live".to_string()),
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     session_summary: Some("failed summary".to_string()),
                     fallback_reason: None,
                     error: Some("hook blocked finalize".to_string()),
@@ -3620,6 +3678,7 @@ mod tests {
                     provider_source: Some("provider_stream".to_string()),
                     provider_mode: Some("live".to_string()),
                     build_context_observation: None,
+                    build_context_observation_ref: None,
                     session_summary: Some("cancelled summary".to_string()),
                     fallback_reason: Some("stopped_by_user".to_string()),
                     error: Some("stopped_by_user".to_string()),
@@ -7970,8 +8029,11 @@ mod tests {
     #[test]
     fn ask_control_plane_surface_lists_answers_cancels_and_expires() {
         let registry = Arc::new(
-            ToolRegistrySnapshot::from_descriptors("test-ask-snapshot", vec![host_mediated_ask_descriptor()])
-                .expect("ask registry must build"),
+            ToolRegistrySnapshot::from_descriptors(
+                "test-ask-snapshot",
+                vec![host_mediated_ask_descriptor()],
+            )
+            .expect("ask registry must build"),
         );
         let dispatcher = Arc::new(GovernedDispatcher::new(
             registry,
@@ -7997,15 +8059,36 @@ mod tests {
                 },
                 &context,
             );
-            outcome.control_outcome.expect("ask control outcome").request_id
+            outcome
+                .control_outcome
+                .expect("ask control outcome")
+                .request_id
         };
 
         let request_id = dispatch("call-1", "first");
 
         // list_pending_asks returns the Interaction request, filterable by session.
-        assert_eq!(control_plane.list_pending_asks(None).as_array().map(Vec::len), Some(1));
-        assert_eq!(control_plane.list_pending_asks(Some("session-1")).as_array().map(Vec::len), Some(1));
-        assert_eq!(control_plane.list_pending_asks(Some("session-2")).as_array().map(Vec::len), Some(0));
+        assert_eq!(
+            control_plane
+                .list_pending_asks(None)
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            control_plane
+                .list_pending_asks(Some("session-1"))
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            control_plane
+                .list_pending_asks(Some("session-2"))
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
         let listed = control_plane.list_pending_asks(None);
         assert_eq!(listed[0]["requestId"].as_str(), Some(request_id.as_str()));
         assert_eq!(listed[0]["requestKind"].as_str(), Some("interaction"));
@@ -8057,7 +8140,12 @@ mod tests {
         assert_eq!(created["steps"].as_array().map(Vec::len), Some(2));
 
         let merged = control_plane
-            .plan_merge("session-1", "plan-1", 1, json!({ "name": "c", "summary": "sc" }))
+            .plan_merge(
+                "session-1",
+                "plan-1",
+                1,
+                json!({ "name": "c", "summary": "sc" }),
+            )
             .expect("merge");
         assert_eq!(merged["revision"].as_u64(), Some(2));
         assert_eq!(merged["steps"].as_array().map(Vec::len), Some(3));
@@ -8084,7 +8172,13 @@ mod tests {
         assert_eq!(replaced["kind"].as_str(), Some("refactor"));
         assert_eq!(replaced["revision"].as_u64(), Some(4));
 
-        assert_eq!(control_plane.plan_list("session-1").as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            control_plane
+                .plan_list("session-1")
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
         let got = control_plane.plan_get("session-1", "plan-1").expect("get");
         assert_eq!(got["planId"].as_str(), Some("plan-1"));
 
@@ -8099,8 +8193,11 @@ mod tests {
     #[test]
     fn graph_ask_wait_control_plane_surface_binds_lists_and_resumes() {
         let registry = Arc::new(
-            ToolRegistrySnapshot::from_descriptors("test-ask-snapshot", vec![host_mediated_ask_descriptor()])
-                .expect("ask registry must build"),
+            ToolRegistrySnapshot::from_descriptors(
+                "test-ask-snapshot",
+                vec![host_mediated_ask_descriptor()],
+            )
+            .expect("ask registry must build"),
         );
         let dispatcher = Arc::new(GovernedDispatcher::new(
             registry,
@@ -8109,7 +8206,11 @@ mod tests {
         let mut graph_store = GraphRunStore::new();
         GraphRunner::new().start_run(
             &mut graph_store,
-            GraphEngine::new("state-machine-v1").start_run("run-ask", "ask flow", Some("session-1")),
+            GraphEngine::new("state-machine-v1").start_run(
+                "run-ask",
+                "ask flow",
+                Some("session-1"),
+            ),
         );
         let control_plane = HostControlPlaneBuilder::new()
             .ask_dispatcher(Arc::clone(&dispatcher))
@@ -8131,8 +8232,13 @@ mod tests {
             },
             &context,
         );
-        let request_id = outcome.control_outcome.expect("ask control outcome").request_id;
-        let pending = dispatcher.pending_request(&request_id).expect("pending ask");
+        let request_id = outcome
+            .control_outcome
+            .expect("ask control outcome")
+            .request_id;
+        let pending = dispatcher
+            .pending_request(&request_id)
+            .expect("pending ask");
 
         let binding = GraphAskWaitBinding {
             request_id: request_id.clone(),
@@ -8167,24 +8273,25 @@ mod tests {
         );
 
         // The host answers through the shared dispatcher (CAS consumes the pending request).
-        let authorization =
-            crate::agent::dispatcher::ControlRequestAuthorization::for_request(
-                &pending,
-                Some(json!("continue")),
-            );
+        let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+            &pending,
+            Some(json!("continue")),
+        );
         let consumed = control_plane
             .ask_dispatcher
             .answer_control_request(&request_id, &authorization)
             .expect("answer must succeed on shared dispatcher");
-        assert_eq!(
-            consumed.request.state,
-            PendingControlRequestState::Consumed
-        );
+        assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
 
         // Stale version rejected by the graph resume (binding version must be presented, not the
         // post-consumption request version).
         let stale = control_plane
-            .graph_resume_ask("run-ask", &request_id, pending.version + 1, json!("continue"))
+            .graph_resume_ask(
+                "run-ask",
+                &request_id,
+                pending.version + 1,
+                json!("continue"),
+            )
             .expect_err("stale graph resume must fail closed");
         assert!(stale.contains("stale"), "{stale}");
 
@@ -8192,10 +8299,22 @@ mod tests {
             .graph_resume_ask("run-ask", &request_id, pending.version, json!("continue"))
             .expect("resume");
         assert_eq!(resumed["callId"].as_str(), Some("call-1"));
-        assert_eq!(resumed["terminalResult"]["toolCallId"].as_str(), Some("call-1"));
-        assert_eq!(resumed["terminalResult"]["output"]["answer"].as_str(), Some("continue"));
+        assert_eq!(
+            resumed["terminalResult"]["toolCallId"].as_str(),
+            Some("call-1")
+        );
+        assert_eq!(
+            resumed["terminalResult"]["output"]["answer"].as_str(),
+            Some("continue")
+        );
 
-        assert_eq!(control_plane.graph_list_ask_waits("run-ask").as_array().map(Vec::len), Some(0));
+        assert_eq!(
+            control_plane
+                .graph_list_ask_waits("run-ask")
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
     }
 
     struct ForcedToolPlanner {
@@ -8253,10 +8372,8 @@ mod tests {
         // answering through the shared dispatcher must let `graph_resume_ask` inject exactly one
         // terminal result keyed to the original tool-call id.
         let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-        let workspace = std::env::temp_dir().join(format!(
-            "pony-ask-cp-stream-test-{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("pony-ask-cp-stream-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&workspace).expect("create temp workspace for ask cp stream test");
         let server = MockHttpServer::start(Vec::new());
@@ -8320,7 +8437,10 @@ mod tests {
         // The Ask request was persisted against the real run/turn, and the run is bound.
         let pending = control_plane.ask_dispatcher.pending_requests();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].request_kind, PendingControlRequestKind::Interaction);
+        assert_eq!(
+            pending[0].request_kind,
+            PendingControlRequestKind::Interaction
+        );
         assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-stream"));
         assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-stream"));
         assert_eq!(pending[0].turn_id, "run-ask-stream-turn-1");
@@ -8337,21 +8457,28 @@ mod tests {
         );
 
         // Host answers through the shared dispatcher (same store the runtime persisted into).
-        let authorization =
-            crate::agent::dispatcher::ControlRequestAuthorization::for_request(
-                &pending[0],
-                Some(json!("继续")),
-            );
+        let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+            &pending[0],
+            Some(json!("继续")),
+        );
         let consumed = control_plane
             .ask_dispatcher
             .answer_control_request(&request_id, &authorization)
             .expect("answer must succeed on shared dispatcher");
         assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
-        assert_eq!(consumed.answer.as_ref().and_then(Value::as_str), Some("继续"));
+        assert_eq!(
+            consumed.answer.as_ref().and_then(Value::as_str),
+            Some("继续")
+        );
 
         // Graph resume injects exactly one terminal result for the original tool-call id.
         let resumed = control_plane
-            .graph_resume_ask("run-ask-stream", &request_id, expected_version, json!("继续"))
+            .graph_resume_ask(
+                "run-ask-stream",
+                &request_id,
+                expected_version,
+                json!("继续"),
+            )
             .expect("graph resume must succeed");
         assert_eq!(resumed["callId"].as_str(), Some(original_call_id.as_str()));
         assert_eq!(
@@ -8379,10 +8506,8 @@ mod tests {
         // Regression: the app.s exact entry (prepare_start_graph_run_stream →
         // execute_graph_run_stream) with a real workspace tool + followup must complete, not hang.
         let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-        let workspace = std::env::temp_dir().join(format!(
-            "pony-repro-glob-cp-{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("pony-repro-glob-cp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&workspace).expect("create temp workspace for repro");
         std::fs::write(workspace.join("a.txt"), "hello").expect("write file");
@@ -8407,7 +8532,9 @@ mod tests {
             Box::new(StaticResolver {
                 selection: test_provider_selection(server.base_url.clone()),
             }),
-            Box::new(crate::agent::governed_executor::build_governed_executor(None, None)),
+            Box::new(crate::agent::governed_executor::build_governed_executor(
+                None, None,
+            )),
             Box::new(ForcedToolPlanner {
                 tool_name: "workspace_glob_files".to_string(),
                 arguments: json!({ "pattern": "**/*" }),

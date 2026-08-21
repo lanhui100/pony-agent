@@ -1817,16 +1817,34 @@
         }
       ],
       "commit": "5eb022b"
+    },
+    {
+      "timestamp": "2026-08-21T15:15:39+08:00",
+      "commit": "f487439",
+      "bumps": [
+        {
+          "to": "0.1.77",
+          "from": "0.1.76",
+          "component": "core",
+          "segment": "patch"
+        },
+        {
+          "to": "0.1.83",
+          "from": "0.1.82",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-08-19T11:41:16+08:00",
+  "lastBump": "2026-08-21T15:15:39+08:00",
   "tauri": {
-    "patch": 82,
+    "patch": 83,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 76,
+    "patch": 77,
     "minor": 1,
     "major": 0
   }

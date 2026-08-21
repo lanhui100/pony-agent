@@ -274,6 +274,9 @@ export type TraceTimelineEntry = {
   providerSource?: string | null;
   providerMode?: string | null;
   buildContextObservation?: BuildContextObservation | null;
+  /** PA-094：大字段外置引用（`bco:<turn_id>:<seq>`）。事件折叠重建的
+   *  build_context 条目只带引用（全量 payload 按需加载）。 */
+  buildContextObservationRef?: string | null;
   toolActivities?: ToolActivity[];
   text?: string | null;
   reasoningContent?: string | null;
@@ -767,6 +770,9 @@ export type TurnTraceRecord = {
   providerSource?: string | null;
   providerMode?: string | null;
   buildContextObservation?: BuildContextObservation | null;
+  /** PA-094：大字段外置引用（`bco:<turn_id>:<seq>`）。新数据走引用（按需加载），
+   *  legacy 内嵌数据保留 buildContextObservation 读取兼容。 */
+  buildContextObservationRef?: string | null;
   sessionSummary?: string | null;
   fallbackReason?: string | null;
   error?: string | null;

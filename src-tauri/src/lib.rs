@@ -520,6 +520,17 @@ fn load_session_traces(
     control_plane.load_session_traces(&session_id)
 }
 
+/// PA-094：大字段外置——按引用加载 build_context_observation 全量 payload。
+/// 引用格式 `bco:<turn_id>:<seq>`；未命中返回 null（legacy 内嵌数据走 trace 字段）。
+#[tauri::command]
+fn load_build_context_observation(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    observation_ref: String,
+) -> Option<agent::provider::BuildContextObservation> {
+    control_plane.load_build_context_observation(&session_id, &observation_ref)
+}
+
 #[tauri::command]
 fn load_session_runtime_view(
     control_plane: State<'_, HostControlPlane>,
@@ -898,6 +909,7 @@ pub fn run() {
             revoke_authorization,
             list_authorizations,
             load_session_traces,
+            load_build_context_observation,
             load_model_monitor_summary,
             load_model_monitor_session_drilldown,
             load_history_graph,

@@ -10,8 +10,8 @@ use super::session::{
     AttachmentAsset, FileSessionBackend, HistoryBranch, HistoryCheckoutMode, HistoryCheckoutStatus,
     HistoryCursor, HistoryCursorMode, HistoryNode, HistoryNodeKind, PersistCommand,
     PersistCommandOutcome, PersistedStore, SeparateTraceTableMode, SessionBackend,
-    SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionState, SessionTraceMutation,
-    TraceMigrationState, TurnHistoryMessage, TurnTraceRecord,
+    SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionState,
+    SessionTraceMutation, TraceMigrationState, TurnHistoryMessage, TurnTraceRecord,
 };
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
@@ -84,6 +84,17 @@ fn derive_events_from_session(
     // trace 反推 tool / provider 事件
     for trace in &session.turn_trace_history {
         let turn_id = trace.turn_id.clone();
+        // 审核 P1：legacy 内嵌 build_context_observation 派生 ContextObservation
+        // 事件（内存带 payload，flush 时经外置逻辑自动落 bco 表）——否则清表
+        // 重建后 observation 为 None 且无 ref，数据永久丢失。
+        if let Some(observation) = &trace.build_context_observation {
+            events.push(TurnEvent::ContextObservation {
+                turn_id: turn_id.clone(),
+                step: 0,
+                observation: Some(observation.clone()),
+                observation_ref: None,
+            });
+        }
         for activity in &trace.tool_activities {
             if activity.status == "running" {
                 events.push(TurnEvent::ToolCall {
@@ -108,10 +119,12 @@ fn derive_events_from_session(
                 });
             }
         }
-        for record in &trace.provider_call_records {
+        for (index, record) in trace.provider_call_records.iter().enumerate() {
             events.push(TurnEvent::ProviderUsage {
                 turn_id: turn_id.clone(),
-                step: 0,
+                // 审核 P1：step 按记录序号递增（addReplacing 键 (turn_id, step)，
+                // 全 0 会让多条记录坍缩为一条，重建 provider_call_records 数据缺失）。
+                step: index as u32,
                 request_kind: record.request_kind.clone(),
                 usage: crate::agent::provider::TokenUsage {
                     input_tokens: record.input_tokens,
@@ -449,6 +462,14 @@ impl SqliteSessionBackend {
                 checkout_mode TEXT,
                 checkout_status TEXT,
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS build_context_observations (
+                session_id TEXT NOT NULL,
+                observation_ref TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, observation_ref),
+                FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );",
         )
         .map_err(|e| format!("normalized schema: {e}"))?;
@@ -462,6 +483,12 @@ impl SqliteSessionBackend {
         let _ = conn.execute(
             "ALTER TABLE normalized_history_nodes
              ADD COLUMN event_seq_range_json TEXT",
+            [],
+        );
+        // PA-094：trace 表降级为投影缓存——行带 seq 水位（折叠水位，清表可重建）。
+        let _ = conn.execute(
+            "ALTER TABLE normalized_turn_traces
+             ADD COLUMN event_watermark INTEGER NOT NULL DEFAULT 0",
             [],
         );
         Ok(())
@@ -556,7 +583,11 @@ impl SqliteSessionBackend {
                 if normalized_session.trace_migration_state
                     != TraceMigrationState::TraceTableAuthoritative
                 {
-                    self.replace_session_traces_tx(&tx, id, &normalized_session.turn_trace_history)?;
+                    self.replace_session_traces_tx(
+                        &tx,
+                        id,
+                        &normalized_session.turn_trace_history,
+                    )?;
                 }
             }
         }
@@ -604,10 +635,7 @@ impl SqliteSessionBackend {
                     "skill_source_snapshots",
                     serde_json::to_string(&store.skill_source_snapshots).ok(),
                 ),
-                (
-                    "workspaces",
-                    serde_json::to_string(&store.workspaces).ok(),
-                ),
+                ("workspaces", serde_json::to_string(&store.workspaces).ok()),
                 (
                     "path_authorizations.v1",
                     serde_json::to_string(&store.path_authorizations).ok(),
@@ -931,7 +959,10 @@ impl SqliteSessionBackend {
     }
 
     /// PA-089 优化：批量读取全部会话的 trace（一次查询替代每会话一次 = N+1）。
-    fn read_all_session_traces(&self, conn: &Connection) -> Result<HashMap<String, Vec<TurnTraceRecord>>, String> {
+    fn read_all_session_traces(
+        &self,
+        conn: &Connection,
+    ) -> Result<HashMap<String, Vec<TurnTraceRecord>>, String> {
         let mut stmt = conn
             .prepare(
                 "SELECT session_id, trace_data FROM session_turn_traces
@@ -1098,18 +1129,20 @@ impl SqliteSessionBackend {
                         message.role,
                         message.content,
                         message.reasoning_content,
-                        message.status.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()),
+                        message
+                            .status
+                            .as_ref()
+                            .map(|s| serde_json::to_string(s).unwrap_or_default()),
                         message.model_name,
                         message.token_count,
-                        serde_json::to_string(&message.attachments).unwrap_or_else(|_| "[]".to_string()),
+                        serde_json::to_string(&message.attachments)
+                            .unwrap_or_else(|_| "[]".to_string()),
                     ],
                 )
                 .map_err(|e| format!("append message: {e}"))?;
             }
             PersistCommand::UpsertTurn {
-                session_id,
-                turn,
-                ..
+                session_id, turn, ..
             } => {
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_turns
@@ -1137,13 +1170,17 @@ impl SqliteSessionBackend {
                 trace_order,
                 ..
             } => {
-                let raw = serde_json::to_string(trace).map_err(|e| format!("serialize trace: {e}"))?;
+                let raw =
+                    serde_json::to_string(trace).map_err(|e| format!("serialize trace: {e}"))?;
+                // PA-094：trace 表降级为投影缓存——行带 seq 水位（折叠水位；
+                // 写入时通常为 0，终态 annotate 时由 UpdateTraceTerminal 更新）。
+                let event_watermark = trace.sequence.unwrap_or(0);
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_turn_traces
                      (session_id, turn_id, trace_order, phase, provider_name, provider_model, provider_mode,
                       session_summary, fallback_reason, error, input_tokens, output_tokens, total_tokens,
-                      first_token_latency_ms, turn_duration_ms, updated_at_ms, extension_json, raw_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL, ?17)",
+                      first_token_latency_ms, turn_duration_ms, updated_at_ms, extension_json, raw_json, event_watermark)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, NULL, ?17, ?18)",
                     params![
                         session_id,
                         trace.turn_id,
@@ -1162,6 +1199,7 @@ impl SqliteSessionBackend {
                         trace.turn_duration_ms,
                         trace.updated_at,
                         raw,
+                        event_watermark,
                     ],
                 )
                 .map_err(|e| format!("append trace: {e}"))?;
@@ -1214,7 +1252,8 @@ impl SqliteSessionBackend {
                 }
                 tx.execute(
                     "UPDATE normalized_turn_traces
-                     SET phase = COALESCE(?3, phase), updated_at_ms = ?4, extension_json = ?5
+                     SET phase = COALESCE(?3, phase), updated_at_ms = ?4, extension_json = ?5,
+                         event_watermark = COALESCE(?6, event_watermark)
                      WHERE session_id = ?1 AND turn_id = ?2",
                     params![
                         session_id,
@@ -1222,6 +1261,7 @@ impl SqliteSessionBackend {
                         terminal_patch.phase,
                         terminal_patch.updated_at,
                         serde_json::to_string(&ext).unwrap_or_else(|_| "{}".to_string()),
+                        terminal_patch.event_watermark,
                     ],
                 )
                 .map_err(|e| format!("update trace terminal: {e}"))?;
@@ -1288,9 +1328,7 @@ impl SqliteSessionBackend {
                 )?;
             }
             PersistCommand::UpdateHistoryNode {
-                session_id,
-                node,
-                ..
+                session_id, node, ..
             } => {
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_history_nodes
@@ -1317,9 +1355,7 @@ impl SqliteSessionBackend {
                 .map_err(|e| format!("update history node: {e}"))?;
             }
             PersistCommand::UpdateCursor {
-                session_id,
-                cursor,
-                ..
+                session_id, cursor, ..
             } => {
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_history_cursor
@@ -1428,13 +1464,24 @@ impl SqliteSessionBackend {
             .unwrap_or(0);
         for (offset, event) in events.iter().enumerate() {
             let seq = next_seq + offset as i64;
-            let payload = serde_json::to_string(event)
+            // PA-094：大字段外置——ContextObservation 事件携带全量 payload 时，
+            // 写入 build_context_observations 表并改为只含引用的落盘形态。
+            let payload = self
+                .serialize_event_with_observation_externalization(tx, session_id, seq, event)
                 .map_err(|e| format!("flush event serialize: {e}"))?;
             tx.execute(
                 "INSERT INTO turn_events
                  (session_id, turn_id, branch_id, seq, event_type, payload, created_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![session_id, turn_id, branch_id, seq, event.type_name(), payload, now],
+                params![
+                    session_id,
+                    turn_id,
+                    branch_id,
+                    seq,
+                    event.type_name(),
+                    payload,
+                    now
+                ],
             )
             .map_err(|e| format!("flush event insert: {e}"))?;
         }
@@ -1454,6 +1501,75 @@ impl SqliteSessionBackend {
         )
         .map_err(|e| format!("flush event counter: {e}"))?;
         Ok(())
+    }
+
+    /// PA-094：大字段外置——`ContextObservation` 事件序列化。
+    /// 事件内存形态携带全量 payload（`observation`）时，将 payload 写入
+    /// `build_context_observations` 表（ref = `bco:<turn_id>:<seq>`，seq 为事件日志
+    /// seq），并返回只含引用的落盘形态 JSON；否则原样序列化。
+    /// 与事件行同事务（外置失败 → 事件行回滚，无孤儿引用）。
+    fn serialize_event_with_observation_externalization(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        seq: i64,
+        event: &crate::agent::turn_event::TurnEvent,
+    ) -> Result<String, String> {
+        if let crate::agent::turn_event::TurnEvent::ContextObservation {
+            turn_id,
+            step,
+            observation,
+            observation_ref,
+        } = event
+        {
+            if let Some(payload) = observation {
+                let resolved_ref = observation_ref
+                    .clone()
+                    .unwrap_or_else(|| format!("bco:{turn_id}:{seq}"));
+                let payload_json = serde_json::to_string(payload)
+                    .map_err(|e| format!("serialize context observation: {e}"))?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                tx.execute(
+                    "INSERT OR REPLACE INTO build_context_observations
+                     (session_id, observation_ref, payload_json, created_at_ms)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![session_id, resolved_ref, payload_json, now],
+                )
+                .map_err(|e| format!("store context observation: {e}"))?;
+                let ref_event = crate::agent::turn_event::TurnEvent::ContextObservation {
+                    turn_id: turn_id.clone(),
+                    step: *step,
+                    observation: None,
+                    observation_ref: Some(resolved_ref),
+                };
+                return serde_json::to_string(&ref_event)
+                    .map_err(|e| format!("serialize context observation ref: {e}"));
+            }
+        }
+        serde_json::to_string(event).map_err(|e| format!("serialize event: {e}"))
+    }
+
+    /// PA-094：按引用加载 build_context_observation 全量 payload（host command 后端）。
+    /// 引用格式 `bco:<turn_id>:<seq>`；未命中返回 None（legacy 内嵌数据走 trace 字段）。
+    pub fn load_build_context_observation(
+        &self,
+        session_id: &str,
+        observation_ref: &str,
+    ) -> Option<crate::agent::provider::BuildContextObservation> {
+        let slot = self.connection().ok()?;
+        let conn = slot.as_ref()?;
+        let payload: String = conn
+            .query_row(
+                "SELECT payload_json FROM build_context_observations
+                 WHERE session_id = ?1 AND observation_ref = ?2",
+                params![session_id, observation_ref],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&payload).ok()
     }
 
     /// PA-091：迁移回填——从 blob 反推事件（per-session 幂等）。
@@ -1490,8 +1606,8 @@ impl SqliteSessionBackend {
                     |row| row.get(0),
                 )
                 .map_err(|e| format!("read blob {session_id}: {e}"))?;
-            let session: crate::agent::session::SessionState = serde_json::from_str(&data)
-                .map_err(|e| format!("parse blob {session_id}: {e}"))?;
+            let session: crate::agent::session::SessionState =
+                serde_json::from_str(&data).map_err(|e| format!("parse blob {session_id}: {e}"))?;
             let events = derive_events_from_session(&session);
             let tx = conn
                 .unchecked_transaction()
@@ -1547,10 +1663,11 @@ impl SqliteSessionBackend {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
-            event_watermark: 0,
-            last_commit_watermark: 0,
+                event_watermark: 0,
+                last_commit_watermark: 0,
             };
-            let initial = serde_json::to_string(&session).map_err(|e| format!("serialize blob: {e}"))?;
+            let initial =
+                serde_json::to_string(&session).map_err(|e| format!("serialize blob: {e}"))?;
             tx.execute(
                 "INSERT OR REPLACE INTO sessions (conversation_id, title, updated_at_ms, session_data)
                  VALUES (?1, '', ?2, ?3)",
@@ -1683,7 +1800,25 @@ impl SqliteSessionBackend {
             .collect::<Vec<_>>();
 
         let mut sessions: HashMap<String, SessionState> = HashMap::new();
-        for (session_id, (title, summary, turn_count, last_referenced_file, _created_at, updated_at_ms, state_version, trace_migration_state, turn_trace_refs_json, provider_native_transcript_json, history_state_evidence_json, memory_json, workspace_id)) in session_rows {
+        for (
+            session_id,
+            (
+                title,
+                summary,
+                turn_count,
+                last_referenced_file,
+                _created_at,
+                updated_at_ms,
+                state_version,
+                trace_migration_state,
+                turn_trace_refs_json,
+                provider_native_transcript_json,
+                history_state_evidence_json,
+                memory_json,
+                workspace_id,
+            ),
+        ) in session_rows
+        {
             let mut session = SessionState {
                 conversation_id: session_id.clone(),
                 title,
@@ -1693,7 +1828,8 @@ impl SqliteSessionBackend {
                     .and_then(|raw| serde_json::from_str(&raw).ok())
                     .unwrap_or_default(),
                 turn_trace_history: Vec::new(),
-                trace_migration_state: serde_json::from_str(&trace_migration_state).unwrap_or(TraceMigrationState::LegacyBlob),
+                trace_migration_state: serde_json::from_str(&trace_migration_state)
+                    .unwrap_or(TraceMigrationState::LegacyBlob),
                 turn_trace_refs: turn_trace_refs_json
                     .and_then(|raw| serde_json::from_str(&raw).ok()),
                 long_term_memory_entries: Vec::new(),
@@ -1738,11 +1874,39 @@ impl SqliteSessionBackend {
             let messages = all_messages
                 .iter()
                 .filter(|(sid, _, _, _, _, _, _, _)| sid == &session_id)
-                .map(|(_, turn_id, content, reasoning_content, status, model_name, token_count, attachments_json)| {
-                    (turn_id.clone(), content.clone(), reasoning_content.clone(), status.clone(), model_name.clone(), token_count.clone(), attachments_json.clone())
-                })
+                .map(
+                    |(
+                        _,
+                        turn_id,
+                        content,
+                        reasoning_content,
+                        status,
+                        model_name,
+                        token_count,
+                        attachments_json,
+                    )| {
+                        (
+                            turn_id.clone(),
+                            content.clone(),
+                            reasoning_content.clone(),
+                            status.clone(),
+                            model_name.clone(),
+                            token_count.clone(),
+                            attachments_json.clone(),
+                        )
+                    },
+                )
                 .collect::<Vec<_>>();
-            for (turn_id, content, reasoning_content, status, model_name, token_count, attachments_json) in messages {
+            for (
+                turn_id,
+                content,
+                reasoning_content,
+                status,
+                model_name,
+                token_count,
+                attachments_json,
+            ) in messages
+            {
                 session.history.push(TurnHistoryMessage {
                     role: "assistant".to_string(),
                     content,
@@ -1778,15 +1942,64 @@ impl SqliteSessionBackend {
             let node_rows = all_nodes
                 .iter()
                 .filter(|(sid, _, _, _, _, _, _, _, _, _, _, _, _, _, _)| sid == &session_id)
-                .map(|(_, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json)| {
-                    (node_id.clone(), parent_node_id.clone(), branch_id.clone(), forked_from_node_id.clone(), kind.clone(), turn_id.clone(), turn_trace_refs_json.clone(), run_id.clone(), workspace_ref_json.clone(), summary.clone(), title.clone(), *created_at_ms, snapshot_json.clone(), event_seq_range_json.clone())
-                })
+                .map(
+                    |(
+                        _,
+                        node_id,
+                        parent_node_id,
+                        branch_id,
+                        forked_from_node_id,
+                        kind,
+                        turn_id,
+                        turn_trace_refs_json,
+                        run_id,
+                        workspace_ref_json,
+                        summary,
+                        title,
+                        created_at_ms,
+                        snapshot_json,
+                        event_seq_range_json,
+                    )| {
+                        (
+                            node_id.clone(),
+                            parent_node_id.clone(),
+                            branch_id.clone(),
+                            forked_from_node_id.clone(),
+                            kind.clone(),
+                            turn_id.clone(),
+                            turn_trace_refs_json.clone(),
+                            run_id.clone(),
+                            workspace_ref_json.clone(),
+                            summary.clone(),
+                            title.clone(),
+                            *created_at_ms,
+                            snapshot_json.clone(),
+                            event_seq_range_json.clone(),
+                        )
+                    },
+                )
                 .collect::<Vec<_>>();
             let full_table_by_id: HashMap<&str, &TurnTraceRecord> = table_traces
                 .iter()
                 .map(|trace| (trace.turn_id.as_str(), trace))
                 .collect();
-            for (node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json) in node_rows {
+            for (
+                node_id,
+                parent_node_id,
+                branch_id,
+                forked_from_node_id,
+                kind,
+                turn_id,
+                turn_trace_refs_json,
+                run_id,
+                workspace_ref_json,
+                summary,
+                title,
+                created_at_ms,
+                snapshot_json,
+                event_seq_range_json,
+            ) in node_rows
+            {
                 let mut node = HistoryNode {
                     node_id,
                     session_id: session_id.clone(),
@@ -1818,13 +2031,32 @@ impl SqliteSessionBackend {
                 // snapshot_json → 节点快照
                 if let Some(raw) = snapshot_json {
                     if let Ok(snap) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        node.history = snap.get("history").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
-                        node.provider_native_transcript = snap.get("providerNativeTranscript").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
-                        node.long_term_memory_entries = snap.get("longTermMemoryEntries").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
-                        node.memory_write_evidence = snap.get("memoryWriteEvidence").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
-                        node.memory_write_hook_trace_records = snap.get("memoryWriteHookTraceRecords").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
-                        node.turn_count = snap.get("turnCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        node.last_referenced_file = snap.get("lastReferencedFile").and_then(|v| v.as_str()).map(str::to_string);
+                        node.history = snap
+                            .get("history")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        node.provider_native_transcript = snap
+                            .get("providerNativeTranscript")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        node.long_term_memory_entries = snap
+                            .get("longTermMemoryEntries")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        node.memory_write_evidence = snap
+                            .get("memoryWriteEvidence")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        node.memory_write_hook_trace_records = snap
+                            .get("memoryWriteHookTraceRecords")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        node.turn_count =
+                            snap.get("turnCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        node.last_referenced_file = snap
+                            .get("lastReferencedFile")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
                     }
                 }
                 // 节点 trace materialize（按 refs 从全量表）
@@ -1834,7 +2066,11 @@ impl SqliteSessionBackend {
                     } else {
                         node.turn_trace_history = refs
                             .iter()
-                            .filter_map(|reference| full_table_by_id.get(reference.turn_id.as_str()).map(|t| (*t).clone()))
+                            .filter_map(|reference| {
+                                full_table_by_id
+                                    .get(reference.turn_id.as_str())
+                                    .map(|t| (*t).clone())
+                            })
                             .collect();
                     }
                 }
@@ -1845,21 +2081,44 @@ impl SqliteSessionBackend {
             session.history_branches = all_branches
                 .iter()
                 .filter(|(sid, _, _, _, _, _, _, _, _)| sid == &session_id)
-                .map(|(_, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms)| HistoryBranch {
-                    branch_id: branch_id.clone(),
-                    session_id: session_id.clone(),
-                    base_node_id: base_node_id.clone(),
-                    head_node_id: head_node_id.clone(),
-                    forked_from_branch_id: forked_from_branch_id.clone(),
-                    forked_from_node_id: forked_from_node_id.clone(),
-                    label: label.clone(),
-                    created_at_ms: *created_at_ms as u64,
-                    updated_at_ms: *updated_at_ms as u64,
-                })
+                .map(
+                    |(
+                        _,
+                        branch_id,
+                        base_node_id,
+                        head_node_id,
+                        forked_from_branch_id,
+                        forked_from_node_id,
+                        label,
+                        created_at_ms,
+                        updated_at_ms,
+                    )| HistoryBranch {
+                        branch_id: branch_id.clone(),
+                        session_id: session_id.clone(),
+                        base_node_id: base_node_id.clone(),
+                        head_node_id: head_node_id.clone(),
+                        forked_from_branch_id: forked_from_branch_id.clone(),
+                        forked_from_node_id: forked_from_node_id.clone(),
+                        label: label.clone(),
+                        created_at_ms: *created_at_ms as u64,
+                        updated_at_ms: *updated_at_ms as u64,
+                    },
+                )
                 .collect::<Vec<_>>();
 
             // history_cursor（批量预取）
-            if let Some((_, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status, event_watermark)) = all_cursors
+            if let Some((
+                _,
+                visible_node_id,
+                active_branch_id,
+                branch_head_node_id,
+                workspace_node_id,
+                cursor_version,
+                mode,
+                checkout_mode,
+                checkout_status,
+                event_watermark,
+            )) = all_cursors
                 .iter()
                 .find(|(sid, _, _, _, _, _, _, _, _, _)| sid == &session_id)
             {
@@ -1933,8 +2192,8 @@ impl SqliteSessionBackend {
             let Some(normalized_raw) = normalized_raw else {
                 return Ok(());
             };
-            let mut trace: serde_json::Value =
-                serde_json::from_str(&normalized_raw).map_err(|e| format!("parse normalized trace: {e}"))?;
+            let mut trace: serde_json::Value = serde_json::from_str(&normalized_raw)
+                .map_err(|e| format!("parse normalized trace: {e}"))?;
             if let serde_json::Value::Object(map) = &mut trace {
                 if let serde_json::Value::Object(patch_map) = patch {
                     for (key, value) in patch_map {
@@ -1945,7 +2204,8 @@ impl SqliteSessionBackend {
                 }
             }
             trace["updatedAt"] = serde_json::json!(updated_at);
-            let updated = serde_json::to_string(&trace).map_err(|e| format!("serialize trace: {e}"))?;
+            let updated =
+                serde_json::to_string(&trace).map_err(|e| format!("serialize trace: {e}"))?;
             let order: i64 = tx
                 .query_row(
                     "SELECT trace_order FROM normalized_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
@@ -1973,7 +2233,8 @@ impl SqliteSessionBackend {
             }
         }
         trace["updatedAt"] = serde_json::json!(updated_at);
-        let updated = serde_json::to_string(&trace).map_err(|e| format!("serialize legacy trace: {e}"))?;
+        let updated =
+            serde_json::to_string(&trace).map_err(|e| format!("serialize legacy trace: {e}"))?;
         tx.execute(
             "UPDATE session_turn_traces SET trace_data = ?3, updated_at_ms = ?4 WHERE session_id = ?1 AND turn_id = ?2",
             params![session_id, turn_id, updated, updated_at as i64],
@@ -2202,7 +2463,8 @@ impl SessionBackend for SqliteSessionBackend {
         // PA-088：authoritative 会话跳过——blob 已被剥离 trace，若用空 trace 替换
         // 表会清空数据（表由 save_to_backend 在剥离前写入）。
         if session.trace_migration_state != TraceMigrationState::TraceTableAuthoritative {
-            if let Err(e) = self.replace_session_traces_tx(&tx, session_id, &session.turn_trace_history)
+            if let Err(e) =
+                self.replace_session_traces_tx(&tx, session_id, &session.turn_trace_history)
             {
                 eprintln!("[pony-agent][session] SQLite replace traces error: {e}");
                 return false;
@@ -2338,11 +2600,9 @@ impl SessionBackend for SqliteSessionBackend {
                 "SELECT seq, branch_id, payload FROM turn_events
                  WHERE session_id = ?1 AND seq <= {upper} ORDER BY seq"
             ),
-            None => {
-                "SELECT seq, branch_id, payload FROM turn_events
+            None => "SELECT seq, branch_id, payload FROM turn_events
                  WHERE session_id = ?1 ORDER BY seq"
-                    .to_string()
-            }
+                .to_string(),
         };
         let mut events = Vec::new();
         let mut stmt = match conn.prepare(&sql) {
@@ -2626,6 +2886,7 @@ impl SessionBackend for SqliteSessionBackend {
                 sequence,
                 emitted_at_ms,
                 updated_at,
+                event_watermark: _,
             } => match self.update_turn_trace_row_tx(&tx, session_id, &turn_id, |trace| {
                 trace.session_id = Some(session_id.to_string());
                 trace.event_id = event_id.clone();
@@ -2748,6 +3009,7 @@ mod tests {
             provider_source: None,
             provider_mode: None,
             build_context_observation: None,
+            build_context_observation_ref: None,
             session_summary: None,
             fallback_reason: None,
             error: None,
@@ -2817,7 +3079,10 @@ mod tests {
         let store = SessionStore::with_backend(Box::new(backend));
         let workspaces = store.list_workspaces();
         assert_eq!(workspaces.len(), 1, "损坏回退后应只剩默认 workspace");
-        assert_eq!(workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+        assert_eq!(
+            workspaces[0].id,
+            crate::agent::workspace::DEFAULT_WORKSPACE_ID
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -2836,16 +3101,21 @@ mod tests {
         let root = dir.join("ws-root");
         fs::create_dir_all(&root).unwrap();
         let mut store = PersistedStore::default();
-        store.workspaces.push(crate::agent::workspace::WorkspaceRecord {
-            id: crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string(),
-            name: "默认工作区".to_string(),
-            root_path: root.display().to_string(),
-        });
+        store
+            .workspaces
+            .push(crate::agent::workspace::WorkspaceRecord {
+                id: crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string(),
+                name: "默认工作区".to_string(),
+                root_path: root.display().to_string(),
+            });
         backend.save_store(&store);
 
         let loaded = backend.load_store().unwrap();
         assert_eq!(loaded.workspaces.len(), 1);
-        assert_eq!(loaded.workspaces[0].id, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+        assert_eq!(
+            loaded.workspaces[0].id,
+            crate::agent::workspace::DEFAULT_WORKSPACE_ID
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -2871,8 +3141,8 @@ mod tests {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
-        event_watermark: 0,
-        last_commit_watermark: 0,
+            event_watermark: 0,
+            last_commit_watermark: 0,
         }
     }
 
@@ -3588,8 +3858,8 @@ mod tests {
             history_branches: Vec::new(),
             history_cursor: Default::default(),
             workspace_id: None,
-        event_watermark: 0,
-        last_commit_watermark: 0,
+            event_watermark: 0,
+            last_commit_watermark: 0,
         };
         assert!(
             backend.upsert_session("s1", &session),
@@ -3616,7 +3886,7 @@ mod tests {
             .get("s1")
             .expect("session should exist after reload");
         assert_eq!(
-loaded_session.turn_trace_history.len(),
+            loaded_session.turn_trace_history.len(),
             30,
             "Authoritative �Ự upsert ��Ӧ prune �� 24 ��"
         );
@@ -3658,7 +3928,9 @@ loaded_session.turn_trace_history.len(),
             let guard = conn.as_ref().expect("initialized");
             let tx = guard.unchecked_transaction().expect("tx");
             let protected: std::collections::HashSet<String> =
-                ["turn-0".to_string(), "turn-4".to_string()].into_iter().collect();
+                ["turn-0".to_string(), "turn-4".to_string()]
+                    .into_iter()
+                    .collect();
             backend
                 .prune_session_traces_protected_tx(&tx, "s1", 3, &protected)
                 .expect("protected prune");
@@ -3715,7 +3987,7 @@ loaded_session.turn_trace_history.len(),
             tx.commit().expect("commit");
         } // guard 在此释放连接锁
 
-let loaded = backend.load_store().expect("load");
+        let loaded = backend.load_store().expect("load");
         assert_eq!(
             loaded.sessions["s1"].turn_trace_history.len(),
             5,
@@ -3917,7 +4189,11 @@ let loaded = backend.load_store().expect("load");
             },
             ordinal: 1,
         });
-        assert_eq!(outcome, PersistCommandOutcome::Failed, "old epoch should fail");
+        assert_eq!(
+            outcome,
+            PersistCommandOutcome::Failed,
+            "old epoch should fail"
+        );
 
         let outcome = backend.persist_command(PersistCommand::AppendMessage {
             epoch: 2,
@@ -4043,11 +4319,13 @@ let loaded = backend.load_store().expect("load");
         );
 
         // cursor 重建
-        assert_eq!(session.history_cursor.visible_node_id.as_deref(), Some("node-1"));
+        assert_eq!(
+            session.history_cursor.visible_node_id.as_deref(),
+            Some("node-1")
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
-
 
     #[test]
     fn tombstone_view_forwards_writes_to_session_blobs() {
@@ -4065,7 +4343,9 @@ let loaded = backend.load_store().expect("load");
         {
             let conn = backend.connection().expect("connection");
             let guard = conn.as_ref().expect("initialized");
-            guard.execute("ALTER TABLE sessions RENAME TO session_blobs", []).expect("rename");
+            guard
+                .execute("ALTER TABLE sessions RENAME TO session_blobs", [])
+                .expect("rename");
             guard.execute("CREATE VIEW sessions AS SELECT conversation_id, title, updated_at_ms, session_data FROM session_blobs", []).expect("view");
             guard.execute(
                 "CREATE TRIGGER trg_sessions_insert INSTEAD OF INSERT ON sessions BEGIN INSERT OR REPLACE INTO session_blobs (conversation_id, title, updated_at_ms, session_data) VALUES (NEW.conversation_id, NEW.title, NEW.updated_at_ms, NEW.session_data); END;",
@@ -4083,16 +4363,32 @@ let loaded = backend.load_store().expect("load");
 
         // upsert_session 写 sessions 视图 → 应转发到 session_blobs
         let session = minimal_session("s1", "first", 1000);
-        assert!(backend.upsert_session("s1", &session), "upsert via view should succeed");
+        assert!(
+            backend.upsert_session("s1", &session),
+            "upsert via view should succeed"
+        );
 
         // remove_session 删 sessions 视图 → 应转发
-        assert!(backend.remove_session("s1", &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new()), "remove via view should succeed");
+        assert!(
+            backend.remove_session(
+                "s1",
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
+            "remove via view should succeed"
+        );
 
         // 验证 session_blobs 已被删除
         let conn = backend.connection().expect("connection");
         let guard = conn.as_ref().expect("initialized");
         let count: i64 = guard
-            .query_row("SELECT COUNT(*) FROM session_blobs WHERE conversation_id = 's1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM session_blobs WHERE conversation_id = 's1'",
+                [],
+                |r| r.get(0),
+            )
             .expect("count");
         assert_eq!(count, 0, "remove 应转发到 session_blobs");
 
@@ -4300,7 +4596,11 @@ let loaded = backend.load_store().expect("load");
             branch_id: "main".to_string(),
             events: Vec::new(),
         });
-        assert_eq!(outcome, PersistCommandOutcome::Succeeded, "empty batch is noop");
+        assert_eq!(
+            outcome,
+            PersistCommandOutcome::Succeeded,
+            "empty batch is noop"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -4545,9 +4845,7 @@ let loaded = backend.load_store().expect("load");
         let conn = backend.connection().expect("connection");
         let guard = conn.as_ref().expect("initialized");
         let types: Vec<String> = guard
-            .prepare(
-                "SELECT event_type FROM turn_events WHERE session_id = 's1' ORDER BY seq",
-            )
+            .prepare("SELECT event_type FROM turn_events WHERE session_id = 's1' ORDER BY seq")
             .expect("prepare")
             .query_map([], |row| row.get(0))
             .expect("query")
@@ -4623,7 +4921,12 @@ let loaded = backend.load_store().expect("load");
         let types: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(
             types,
-            vec!["turn/start", "user/message", "assistant/message", "turn/end"]
+            vec![
+                "turn/start",
+                "user/message",
+                "assistant/message",
+                "turn/end"
+            ]
         );
         // assistant/message 带 chunk_missing
         let payload: String = guard
@@ -4656,6 +4959,415 @@ let loaded = backend.load_store().expect("load");
             )
             .expect("count");
         assert_eq!(total, 4, "no duplicate events");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PA-094：大字段外置——flush ContextObservation 事件时，全量 payload 写入
+    /// build_context_observations 表，事件落盘形态只含引用；load 返回与原始一致。
+    #[test]
+    fn flush_events_externalizes_context_observation() {
+        use crate::agent::provider::BuildContextObservation;
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let dir = unique_dir("flush-bco");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("flush-bco.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+
+        let observation = BuildContextObservation {
+            request_format: "chat".into(),
+            message_count: 3,
+            image_count: 0,
+            tool_count: 2,
+            temperature: 0.7,
+            max_output_tokens: 4096,
+            stable_prefix_text: "stable-prefix".into(),
+            semi_stable_context_text: "semi".into(),
+            volatile_input_text: "volatile".into(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".into(),
+            tool_definitions_text: "tools".into(),
+        };
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-1".to_string(),
+            branch_id: "main".to_string(),
+            events: vec![
+                TurnEvent::TurnStart {
+                    turn_id: "turn-1".into(),
+                },
+                TurnEvent::ContextObservation {
+                    turn_id: "turn-1".into(),
+                    step: 0,
+                    observation: Some(observation.clone()),
+                    observation_ref: None,
+                },
+                TurnEvent::TurnEnd {
+                    turn_id: "turn-1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: None,
+                },
+            ],
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        // 事件落盘形态只含引用（ref = bco:turn-1:1，seq 1）。
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let payload: String = guard
+            .query_row(
+                "SELECT payload FROM turn_events
+                 WHERE session_id = 's1' AND event_type = 'context/observation'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("event payload");
+        assert!(
+            !payload.contains("requestFormat"),
+            "event payload must not embed full observation: {payload}"
+        );
+        assert!(payload.contains("bco:turn-1:1"), "ref form: {payload}");
+        let decoded: TurnEvent = serde_json::from_str(&payload).expect("decode");
+        match decoded {
+            TurnEvent::ContextObservation {
+                observation,
+                observation_ref,
+                ..
+            } => {
+                assert!(observation.is_none(), "no payload in ref form");
+                assert_eq!(observation_ref.as_deref(), Some("bco:turn-1:1"));
+            }
+            _ => panic!("expected ContextObservation"),
+        }
+        // 全量 payload 在独立表。
+        let stored: String = guard
+            .query_row(
+                "SELECT payload_json FROM build_context_observations
+                 WHERE session_id = 's1' AND observation_ref = 'bco:turn-1:1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("stored payload");
+        let stored_obs: BuildContextObservation =
+            serde_json::from_str(&stored).expect("decode stored");
+        assert_eq!(
+            serde_json::to_string(&stored_obs).expect("serialize stored"),
+            serde_json::to_string(&observation).expect("serialize original"),
+            "load returns payload identical to original"
+        );
+        drop(guard);
+        drop(conn);
+
+        // host command 后端：按引用加载返回与原始一致。
+        let loaded = backend
+            .load_build_context_observation("s1", "bco:turn-1:1")
+            .expect("load by ref");
+        assert_eq!(
+            serde_json::to_string(&loaded).expect("serialize loaded"),
+            serde_json::to_string(&observation).expect("serialize original"),
+            "load_build_context_observation returns original payload"
+        );
+        // 未命中返回 None。
+        assert!(backend
+            .load_build_context_observation("s1", "bco:missing:9")
+            .is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PA-094：trace 表降级为投影缓存——行带 seq 水位；清表后从事件全量重建，
+    /// 与事件折叠结果一致（事件权威；时钟/序列字段豁免）。
+    #[test]
+    fn trace_cache_watermark_and_clear_rebuild() {
+        use crate::agent::projection::{fold_all, TraceProjectionState};
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let dir = unique_dir("trace-cache-rebuild");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("trace-cache-rebuild.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+
+        // 事件序列（真实 turn 形态：start → chunk → tool → result → end）。
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "turn-1".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::AssistantChunk {
+                    turn_id: "turn-1".into(),
+                    step: 0,
+                    text: "hi".into(),
+                },
+            ),
+            (
+                2,
+                TurnEvent::ToolCall {
+                    turn_id: "turn-1".into(),
+                    step: 1,
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    started_at_ms: None,
+                },
+            ),
+            (
+                3,
+                TurnEvent::ToolResult {
+                    turn_id: "turn-1".into(),
+                    step: 1,
+                    call_id: "c1".into(),
+                    result: Some("ok".into()),
+                    error: None,
+                    status: Some("done".into()),
+                    duration_ms: Some(500),
+                    artifacts: None,
+                    capability_invocation: None,
+                },
+            ),
+            (
+                4,
+                TurnEvent::TurnEnd {
+                    turn_id: "turn-1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(800),
+                },
+            ),
+        ];
+        let flush_events: Vec<TurnEvent> = events.iter().map(|(_, e)| e.clone()).collect();
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-1".to_string(),
+            branch_id: "main".to_string(),
+            events: flush_events,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        // 事件权威：折叠事件得到期望 trace（含 timeline 折叠产物）。
+        let expected = fold_all::<_, TraceProjectionState>(&events);
+        let expected_trace = expected.trace_for_turn("turn-1").expect("expected trace");
+
+        // 写入缓存行（投影缓存 upsert，带 seq 水位 = 终态事件 seq）。
+        let mut cache_trace = expected_trace.clone();
+        cache_trace.sequence = Some(4);
+        let outcome = backend.persist_command(PersistCommand::AppendTrace {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            trace: cache_trace.clone(),
+            trace_order: 0,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        // 行带 seq 水位。
+        let conn = backend.connection().expect("connection");
+        let guard = conn.as_ref().expect("initialized");
+        let watermark: i64 = guard
+            .query_row(
+                "SELECT event_watermark FROM normalized_turn_traces
+                 WHERE session_id = 's1' AND turn_id = 'turn-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("watermark");
+        assert_eq!(watermark, 4, "cache row carries fold watermark");
+        drop(guard);
+        drop(conn);
+
+        // 清表重建：清空 trace 表 → 从事件全量重建 → 与事件折叠一致（事件权威）。
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute("DELETE FROM normalized_turn_traces", [])
+                .expect("clear trace cache");
+            guard
+                .execute("DELETE FROM session_turn_traces", [])
+                .expect("clear legacy trace cache");
+        }
+        let rebuilt = fold_all::<_, TraceProjectionState>(&events);
+        let rebuilt_trace = rebuilt.trace_for_turn("turn-1").expect("rebuilt trace");
+        // 事件权威断言：重建 == 事件折叠（timeline/tool_activities/token 指标）。
+        assert_eq!(
+            serde_json::to_string(&rebuilt_trace.trace_timeline).expect("timeline json"),
+            serde_json::to_string(&expected_trace.trace_timeline).expect("expected timeline json"),
+            "rebuilt timeline equals event fold"
+        );
+        assert_eq!(
+            serde_json::to_string(&rebuilt_trace.tool_activities).expect("tools json"),
+            serde_json::to_string(&expected_trace.tool_activities).expect("expected tools json"),
+            "rebuilt tool_activities equals event fold"
+        );
+        assert_eq!(
+            rebuilt_trace.turn_duration_ms,
+            expected_trace.turn_duration_ms
+        );
+        assert_eq!(rebuilt_trace.event_type, expected_trace.event_type);
+        assert_eq!(rebuilt_trace.sequence, expected_trace.sequence);
+        // 豁免清单：updated_at/event_id/emitted_at_ms 不参与重建断言
+        // （时钟/序列语义，design.md §5 显式豁免）。
+        assert_eq!(
+            rebuilt_trace.updated_at, 0,
+            "rebuilt trace has no clock fields"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PA-094（审核 P0）：backend 真实清表重建——清空 trace 表后经
+    /// SessionStore::with_backend 加载，trace 从事件全量折叠重建（事件权威，
+    /// spec 1a 的 Cache rebuild 场景走真实加载路径，非内存平凡断言）。
+    #[test]
+    fn trace_cache_clear_rebuilds_from_events_on_store_load() {
+        use crate::agent::projection::{fold_all, TraceProjectionState};
+        use crate::agent::session::SessionStore;
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let dir = unique_dir("trace-clear-rebuild-load");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("trace-clear-rebuild-load.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path,
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut session = minimal_session("s1", "first", 1000);
+        session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+        assert!(backend.upsert_session("s1", &session));
+
+        // 事件序列（真实 turn 形态）。
+        let events: Vec<(u64, TurnEvent)> = vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "turn-1".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::AssistantChunk {
+                    turn_id: "turn-1".into(),
+                    step: 0,
+                    text: "hi".into(),
+                },
+            ),
+            (
+                2,
+                TurnEvent::ToolCall {
+                    turn_id: "turn-1".into(),
+                    step: 3,
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    started_at_ms: None,
+                },
+            ),
+            (
+                3,
+                TurnEvent::ToolResult {
+                    turn_id: "turn-1".into(),
+                    step: 5,
+                    call_id: "c1".into(),
+                    result: Some("ok".into()),
+                    error: None,
+                    status: Some("done".into()),
+                    duration_ms: Some(500),
+                    artifacts: None,
+                    capability_invocation: None,
+                },
+            ),
+            (
+                4,
+                TurnEvent::TurnEnd {
+                    turn_id: "turn-1".into(),
+                    reason: TurnEndReason::Completed,
+                    turn_duration_ms: Some(800),
+                },
+            ),
+        ];
+        let flush_events: Vec<TurnEvent> = events.iter().map(|(_, e)| e.clone()).collect();
+        let outcome = backend.persist_command(PersistCommand::FlushEvents {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            turn_id: "turn-1".to_string(),
+            branch_id: "main".to_string(),
+            events: flush_events,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        // 写入缓存行（模拟正常运行的投影缓存）。
+        let expected = fold_all::<_, TraceProjectionState>(&events);
+        let expected_trace = expected.trace_for_turn("turn-1").expect("expected trace");
+        let mut cache_trace = expected_trace.clone();
+        cache_trace.sequence = Some(4);
+        let outcome = backend.persist_command(PersistCommand::AppendTrace {
+            epoch: 1,
+            session_id: "s1".to_string(),
+            trace: cache_trace.clone(),
+            trace_order: 0,
+        });
+        assert_eq!(outcome, PersistCommandOutcome::Succeeded);
+
+        // 清空 trace 表（缓存可丢弃——事件权威）。
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute("DELETE FROM normalized_turn_traces", [])
+                .expect("clear trace cache");
+            guard
+                .execute("DELETE FROM session_turn_traces", [])
+                .expect("clear legacy trace cache");
+        }
+
+        // 真实加载路径：SessionStore::with_backend → 检测 trace 缓存为空 +
+        // 事件存在 → 从事件全量折叠重建。
+        let mut store = SessionStore::with_backend(Box::new(backend));
+        let snapshot = store.snapshot_at(Some("s1"), None, &[]);
+        assert_eq!(
+            snapshot.turn_trace_history.len(),
+            1,
+            "trace rebuilt on load"
+        );
+        let loaded_trace = &snapshot.turn_trace_history[0];
+        assert_eq!(loaded_trace.turn_id, "turn-1");
+        // 与事件折叠一致（timeline/tool_activities/token 指标）。
+        assert_eq!(
+            serde_json::to_string(&loaded_trace.trace_timeline).expect("timeline json"),
+            serde_json::to_string(&expected_trace.trace_timeline).expect("expected timeline json"),
+            "rebuilt timeline equals event fold"
+        );
+        assert_eq!(
+            serde_json::to_string(&loaded_trace.tool_activities).expect("tools json"),
+            serde_json::to_string(&expected_trace.tool_activities).expect("expected tools json"),
+            "rebuilt tool_activities equals event fold"
+        );
+        assert_eq!(
+            loaded_trace.turn_duration_ms,
+            expected_trace.turn_duration_ms
+        );
+        assert_eq!(loaded_trace.event_type, expected_trace.event_type);
+        // 豁免清单：时钟/序列字段不参与重建断言。
+        assert_eq!(
+            loaded_trace.updated_at, 0,
+            "rebuilt trace has no clock fields"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

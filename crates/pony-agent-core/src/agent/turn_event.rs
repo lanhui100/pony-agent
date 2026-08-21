@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::agent::provider::TokenUsage;
+use crate::agent::provider::{BuildContextObservation, TokenUsage};
 use crate::agent::session::AttachmentReference;
 use crate::agent::telemetry::{
     CapabilityInvocationRecord, ProviderLatencyKind, ProviderRequestKind,
@@ -148,6 +148,20 @@ pub enum TurnEvent {
         branch_id: String,
         from_node_id: String,
     },
+    /// PA-094：大字段外置——build_context_observation 事件化。
+    /// 事件只存引用（`observation_ref = "bco:<turn_id>:<seq>"`，seq 为事件日志 seq，
+    /// flush 时由 `flush_events_tx` 分配），全量 payload 存独立表
+    /// `build_context_observations`。内存构造期携带全量 payload（`observation`，
+    /// serde skip 不落盘）；落盘形态只含引用（反序列化后 `observation` 为 None）。
+    /// 新增事件类型不 bump `EVENT_SCHEMA_VERSION`（结构变更才 bump）。
+    ContextObservation {
+        turn_id: String,
+        step: u32,
+        #[serde(skip)]
+        observation: Option<BuildContextObservation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation_ref: Option<String>,
+    },
 }
 
 impl TurnEvent {
@@ -169,6 +183,7 @@ impl TurnEvent {
             TurnEvent::CheckpointCreated { .. } => "checkpoint/created",
             TurnEvent::CheckpointCheckout { .. } => "checkpoint/checkout",
             TurnEvent::ForkCreated { .. } => "fork/created",
+            TurnEvent::ContextObservation { .. } => "context/observation",
         }
     }
 
@@ -184,7 +199,8 @@ impl TurnEvent {
             | TurnEvent::AssistantMessage { turn_id, .. }
             | TurnEvent::ToolCall { turn_id, .. }
             | TurnEvent::ToolResult { turn_id, .. }
-            | TurnEvent::ProviderUsage { turn_id, .. } => Some(turn_id),
+            | TurnEvent::ProviderUsage { turn_id, .. }
+            | TurnEvent::ContextObservation { turn_id, .. } => Some(turn_id),
             TurnEvent::PlanUpdate { .. }
             | TurnEvent::HistorySquash { .. }
             | TurnEvent::CheckpointCreated { .. }
@@ -300,6 +316,12 @@ mod tests {
                 branch_id: "b2".into(),
                 from_node_id: "n1".into(),
             },
+            TurnEvent::ContextObservation {
+                turn_id: "t1".into(),
+                step: 0,
+                observation: None,
+                observation_ref: Some("bco:t1:3".into()),
+            },
         ];
         for event in &events {
             let json = serde_json::to_string(event).expect("serialize");
@@ -346,5 +368,77 @@ mod tests {
     #[test]
     fn schema_version_is_stable() {
         assert_eq!(EVENT_SCHEMA_VERSION, 1);
+    }
+
+    #[test]
+    fn context_observation_round_trip_ref_form_and_payload_form() {
+        // 落盘形态（引用）：反序列化后 observation 为 None，observation_ref 保留。
+        let ref_event = TurnEvent::ContextObservation {
+            turn_id: "t1".into(),
+            step: 0,
+            observation: None,
+            observation_ref: Some("bco:t1:3".into()),
+        };
+        let json = serde_json::to_string(&ref_event).expect("serialize ref form");
+        assert!(
+            !json.contains("requestFormat"),
+            "ref form must not embed payload: {json}"
+        );
+        let decoded: TurnEvent = serde_json::from_str(&json).expect("deserialize ref form");
+        match decoded {
+            TurnEvent::ContextObservation {
+                observation,
+                observation_ref,
+                ..
+            } => {
+                assert!(observation.is_none(), "ref form has no payload");
+                assert_eq!(observation_ref.as_deref(), Some("bco:t1:3"));
+            }
+            _ => panic!("expected ContextObservation"),
+        }
+        // 内存构造形态（全量 payload）：serde skip 不落盘，重序列化后仍为引用形态。
+        let payload_form = TurnEvent::ContextObservation {
+            turn_id: "t1".into(),
+            step: 0,
+            observation: Some(BuildContextObservation {
+                request_format: "chat".into(),
+                message_count: 2,
+                image_count: 0,
+                tool_count: 1,
+                temperature: 0.7,
+                max_output_tokens: 4096,
+                stable_prefix_text: "prefix".into(),
+                semi_stable_context_text: String::new(),
+                volatile_input_text: "input".into(),
+                prefix_mutation_reasons: Vec::new(),
+                context_refresh_reason: None,
+                instruction_scope_sources: Vec::new(),
+                conversation_carry_mode: None,
+                request_messages_text: "messages".into(),
+                tool_definitions_text: "tools".into(),
+            }),
+            observation_ref: None,
+        };
+        let payload_json = serde_json::to_string(&payload_form).expect("serialize payload form");
+        assert!(
+            !payload_json.contains("requestFormat"),
+            "payload must be externalized, not embedded: {payload_json}"
+        );
+        let decoded_payload: TurnEvent =
+            serde_json::from_str(&payload_json).expect("deserialize payload form");
+        match decoded_payload {
+            TurnEvent::ContextObservation {
+                observation,
+                observation_ref,
+                ..
+            } => {
+                assert!(observation.is_none(), "payload dropped after serialize");
+                assert!(observation_ref.is_none(), "no ref assigned yet");
+            }
+            _ => panic!("expected ContextObservation"),
+        }
+        // type_name / turn_id 语义
+        assert_eq!(ref_event.type_name(), "context/observation");
+        assert_eq!(ref_event.turn_id(), Some("t1"));
     }
 }

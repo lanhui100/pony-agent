@@ -53,7 +53,11 @@ pub fn clear_event_persist() {
 /// PA-093：非 turn 生命周期事实（checkpoint/checkout、fork/created）经全局
 /// 注册表落盘（立即 flush）。turn_id 用语义化字面量（事件无 turn 归属，列非空）。
 /// 未注册通道（测试/老路径）时静默跳过——与 turn 事件路径的 contained 语义一致。
-pub fn emit_global_event(session_id: &str, turn_id: &str, event: crate::agent::turn_event::TurnEvent) {
+pub fn emit_global_event(
+    session_id: &str,
+    turn_id: &str,
+    event: crate::agent::turn_event::TurnEvent,
+) {
     if let Some(persist) = current_event_persist() {
         persist(session_id, turn_id, event, true);
     }
@@ -577,11 +581,47 @@ pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEven
     sink.emit(name, payload.clone());
     // PA-091：事件溯源——构造 TurnEvent 经全局注册表持久化（缓冲 + turn 终态 flush）。
     // 构造失败 fail loud（数据完整性错误）；持久化失败由注册通道 contained。
+    // 审核 P0：turn:completed 的 assistant/message 不标记 terminal——由额外发射的
+    // turn/end 统一触发 flush，避免拆批（AssistantMessage 先行落盘、TurnEnd 第二批，
+    // 两事务间崩溃会留下半终态事件流）。failed/cancelled 无额外事件，保持 terminal。
     if let Some(event) = build_turn_event(name, &payload) {
         if let Some(persist) = current_event_persist() {
             let session_id = payload.session_id.as_deref().unwrap_or("");
-            let is_terminal = matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled");
+            let is_terminal = matches!(name, "turn:failed" | "turn:cancelled");
             persist(session_id, &payload.turn_id, event, is_terminal);
+        }
+    }
+    // PA-094：大字段外置——turn:started 携带 build_context_observation 时，额外落一条
+    // context/observation 事件（内存携带全量 payload，flush 时外置到独立表）。
+    if let Some(observation_event) = build_context_observation_event(name, &payload) {
+        if let Some(persist) = current_event_persist() {
+            let session_id = payload.session_id.as_deref().unwrap_or("");
+            persist(session_id, &payload.turn_id, observation_event, false);
+        }
+    }
+    // PA-094（审核 P0）：turn:started 额外发射 user/message——用户消息事件化，
+    // HistoryProjection 从事件重建用户消息的前提（生产路径此前不发射该事件，
+    // 事件重建的会话视图缺 user 消息）。payload.text 携带用户消息文本。
+    if let Some(user_event) = build_user_message_event(name, &payload) {
+        if let Some(persist) = current_event_persist() {
+            let session_id = payload.session_id.as_deref().unwrap_or("");
+            persist(session_id, &payload.turn_id, user_event, false);
+        }
+    }
+    // PA-094：turn:completed 额外发射 provider/usage（usage 结算事件，MetricsProjection
+    // 重建 ProviderCallCacheRecord 的事件源）与 turn/end（终态结算，TraceProjection
+    // 的 token 指标/timeline 挂载依赖 turn/end 触发）。顺序：usage → end（end 为
+    // terminal，触发 flush 时整批一起落盘——含 assistant/message，单事务）。
+    for usage_event in build_provider_usage_event(name, &payload) {
+        if let Some(persist) = current_event_persist() {
+            let session_id = payload.session_id.as_deref().unwrap_or("");
+            persist(session_id, &payload.turn_id, usage_event, false);
+        }
+    }
+    if let Some(end_event) = build_turn_end_event(name, &payload) {
+        if let Some(persist) = current_event_persist() {
+            let session_id = payload.session_id.as_deref().unwrap_or("");
+            persist(session_id, &payload.turn_id, end_event, true);
         }
     }
     if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
@@ -589,9 +629,158 @@ pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEven
     }
 }
 
+/// PA-094：build_context_observation 事件化——turn:started 携带观察时构造
+/// `ContextObservation` 事件（内存形态携带全量 payload；落盘形态只含引用）。
+fn build_context_observation_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    if name != "turn:started" {
+        return None;
+    }
+    let observation = payload.build_context_observation.as_ref()?;
+    Some(crate::agent::turn_event::TurnEvent::ContextObservation {
+        turn_id: payload.turn_id.clone(),
+        step: 0,
+        observation: Some(observation.clone()),
+        observation_ref: None,
+    })
+}
+
+/// PA-094（审核 P0）：user/message 事件化——turn:started 携带用户消息文本时构造
+/// `UserMessage` 事件（HistoryProjection 从事件重建用户消息的前提）。
+/// 附件消息的用户消息重建不完整（TurnStreamEvent 无 attachments 字段，已知限制）。
+fn build_user_message_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    if name != "turn:started" {
+        return None;
+    }
+    let text = payload.text.clone()?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::agent::turn_event::TurnEvent::UserMessage {
+        turn_id: payload.turn_id.clone(),
+        text,
+        attachments: Vec::new(),
+    })
+}
+
+/// PA-094：provider/usage 事件化——turn 终态（completed/failed/cancelled）携带
+/// token 结算字段时构造 `ProviderUsage` 事件（MetricsProjection 重建
+/// ProviderCallCacheRecord 的事件源；生产路径此前不发射该事件，重建记录恒为空
+/// ——审核 P0 修复）。审核 P1：failed/cancelled 同样发射（多 hop turn 中途失败
+/// 时已消耗的 token 不丢失）。
+/// 优先逐条发射 `payload.provider_call_records`（step 递增，per-call 粒度，
+/// request_kind/latency/prefix_mutation_reasons 保真）；无 records 时回退到
+/// 累计 token 单条（step=0，turn 级结算）。
+fn build_provider_usage_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Vec<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::TurnEvent;
+    if !matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+        return Vec::new();
+    }
+    // per-call 粒度：逐条发射 provider_call_records（step 递增）。
+    if let Some(records) = payload.provider_call_records.as_deref() {
+        if !records.is_empty() {
+            return records
+                .iter()
+                .enumerate()
+                .map(|(index, record)| {
+                    let usage = crate::agent::provider::TokenUsage {
+                        input_tokens: record.input_tokens,
+                        cache_hit_input_tokens: record.cache_hit_input_tokens,
+                        cache_hit_source: record.cache_hit_source.clone(),
+                        reasoning_tokens: record.reasoning_tokens,
+                        output_tokens: record.output_tokens,
+                        total_tokens: record.total_tokens,
+                    };
+                    TurnEvent::ProviderUsage {
+                        turn_id: payload.turn_id.clone(),
+                        step: index as u32,
+                        request_kind: record.request_kind.clone(),
+                        usage,
+                        cache_hit_input_tokens: record.cache_hit_input_tokens,
+                        cache_miss_input_tokens: record.cache_miss_input_tokens,
+                        prefix_mutation_reasons: record
+                            .prefix_mutation_reasons
+                            .iter()
+                            .filter_map(|reason| {
+                                // 审核 P1：用 serde 序列化（snake_case，如
+                                // "session_summary_changed"）而非 Debug 格式
+                                // （"SessionSummaryChanged"）——projection 按
+                                // snake_case 反序列化，Debug 名称会全部丢失。
+                                serde_json::to_value(reason)
+                                    .ok()
+                                    .and_then(|value| value.as_str().map(str::to_string))
+                            })
+                            .collect(),
+                        first_token_latency_ms: record.first_token_latency_ms,
+                        turn_duration_ms: record.turn_duration_ms,
+                        latency_kind: record.latency_kind.clone(),
+                        provider: record
+                            .provider_source
+                            .clone()
+                            .unwrap_or_else(|| payload.provider_name.clone().unwrap_or_default()),
+                        model: payload.provider_model.clone().unwrap_or_default(),
+                    }
+                })
+                .collect();
+        }
+    }
+    // 回退：累计 token 单条（turn 级结算）。
+    let Some(usage) = payload_usage(payload) else {
+        return Vec::new();
+    };
+    vec![TurnEvent::ProviderUsage {
+        turn_id: payload.turn_id.clone(),
+        step: 0,
+        request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+        usage,
+        cache_hit_input_tokens: payload.cache_hit_input_tokens,
+        cache_miss_input_tokens: payload.input_tokens.and_then(|input| {
+            payload
+                .cache_hit_input_tokens
+                .map(|hit| input.saturating_sub(hit))
+        }),
+        prefix_mutation_reasons: Vec::new(),
+        first_token_latency_ms: payload.first_token_latency_ms,
+        turn_duration_ms: payload.turn_duration_ms,
+        latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+        provider: payload.provider_name.clone().unwrap_or_default(),
+        model: payload.provider_model.clone().unwrap_or_default(),
+    }]
+}
+
+/// PA-094：turn/end 事件化——turn:completed 额外构造 `TurnEnd`（reason=Completed）。
+/// 此前 completed 只落 assistant/message，投影的 turn/end 结算（token 指标、
+/// timeline 挂载、event_type 标记）永不触发——审核 P0 修复。failed/cancelled
+/// 已由 build_turn_event 发射 TurnEnd，此处不重复。
+fn build_turn_end_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+    if name != "turn:completed" {
+        return None;
+    }
+    Some(TurnEvent::TurnEnd {
+        turn_id: payload.turn_id.clone(),
+        reason: TurnEndReason::Completed,
+        turn_duration_ms: payload.turn_duration_ms,
+    })
+}
+
 /// PA-091：TurnStreamEvent → TurnEvent 映射（design.md 映射表）。
 /// `turn:output_end` / `turn:trace` / `turn.context_built` 显式不落盘（返回 None）。
-fn build_turn_event(name: &str, payload: &TurnStreamEvent) -> Option<crate::agent::turn_event::TurnEvent> {
+fn build_turn_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
     use crate::agent::turn_event::{TurnEndReason, TurnEvent};
     match name {
         "turn:started" => Some(TurnEvent::TurnStart {
@@ -672,7 +861,9 @@ fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_even
             result: activity.result_text.clone(),
             error: activity.error.as_ref().map(|e| e.to_string()),
             status: Some(activity.status.clone()),
-            duration_ms: activity.duration_seconds.map(|seconds| (seconds * 1000.0) as u64),
+            duration_ms: activity
+                .duration_seconds
+                .map(|seconds| (seconds * 1000.0) as u64),
             artifacts: activity.artifacts.clone(),
             capability_invocation: activity.capability_invocation.clone(),
         })
@@ -939,15 +1130,93 @@ mod tests {
             }
             _ => panic!("expected TurnEnd"),
         }
-        let cancelled =
-            build_turn_event("turn:cancelled", &sample_payload("t1", "turn:cancelled", None))
-                .expect("cancelled event");
+        let cancelled = build_turn_event(
+            "turn:cancelled",
+            &sample_payload("t1", "turn:cancelled", None),
+        )
+        .expect("cancelled event");
         match cancelled {
             TurnEvent::TurnEnd { reason, .. } => {
                 assert_eq!(reason, TurnEndReason::Cancelled, "cancelled reason");
             }
             _ => panic!("expected TurnEnd"),
         }
+    }
+
+    /// PA-094：turn:started 携带 build_context_observation → 额外构造
+    /// context/observation 事件（内存形态携带全量 payload，落盘形态只含引用）。
+    #[test]
+    fn context_observation_event_built_from_started_payload() {
+        use crate::agent::provider::BuildContextObservation;
+        use crate::agent::turn_event::TurnEvent;
+        let mut payload = sample_payload("turn-1", "turn:started", None);
+        payload.build_context_observation = Some(BuildContextObservation {
+            request_format: "chat".into(),
+            message_count: 2,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.7,
+            max_output_tokens: 4096,
+            stable_prefix_text: String::new(),
+            semi_stable_context_text: String::new(),
+            volatile_input_text: String::new(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".into(),
+            tool_definitions_text: "tools".into(),
+        });
+        let event =
+            build_context_observation_event("turn:started", &payload).expect("observation event");
+        match event {
+            TurnEvent::ContextObservation {
+                turn_id,
+                step,
+                observation,
+                observation_ref,
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(step, 0);
+                assert!(observation.is_some(), "payload carried in memory");
+                assert!(observation_ref.is_none(), "ref assigned at flush");
+            }
+            _ => panic!("expected ContextObservation"),
+        }
+        // 非 started 事件不构造。
+        let delta = sample_payload("turn-1", "turn:delta", Some("hi"));
+        assert!(build_context_observation_event("turn:delta", &delta).is_none());
+        // 无 observation 的 started 不构造。
+        let bare = sample_payload("turn-1", "turn:started", None);
+        assert!(build_context_observation_event("turn:started", &bare).is_none());
+    }
+
+    /// PA-094（审核 P0）：turn:started 携带用户消息文本时额外发射 user/message
+    /// 事件（HistoryProjection 从事件重建用户消息的前提）。
+    #[test]
+    fn started_emits_user_message_event() {
+        use crate::agent::turn_event::TurnEvent;
+        let mut payload = sample_payload("turn-1", "turn:started", None);
+        payload.text = Some("hello world".to_string());
+        let event = build_user_message_event("turn:started", &payload).expect("user event");
+        match event {
+            TurnEvent::UserMessage {
+                turn_id,
+                text,
+                attachments,
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(text, "hello world");
+                assert!(attachments.is_empty());
+            }
+            _ => panic!("expected UserMessage"),
+        }
+        // 非 started 不发射。
+        let delta = sample_payload("turn-1", "turn:delta", Some("hi"));
+        assert!(build_user_message_event("turn:delta", &delta).is_none());
+        // 无文本的 started 不发射。
+        let bare = sample_payload("turn-1", "turn:started", None);
+        assert!(build_user_message_event("turn:started", &bare).is_none());
     }
 
     #[test]
@@ -959,45 +1228,67 @@ mod tests {
             Arc::new(Mutex::new(Vec::new()));
         let sink = RecordingSink::new();
         let received_clone = Arc::clone(&received);
-        register_event_persist(Arc::new(
-            move |session_id, turn_id, event, is_terminal| {
-                received_clone
-                    .lock()
-                    .expect("received lock")
-                    .push((
-                        session_id.to_string(),
-                        turn_id.to_string(),
-                        vec![event],
-                        is_terminal,
-                    ));
-            },
-        ));
+        register_event_persist(Arc::new(move |session_id, turn_id, event, is_terminal| {
+            received_clone.lock().expect("received lock").push((
+                session_id.to_string(),
+                turn_id.to_string(),
+                vec![event],
+                is_terminal,
+            ));
+        }));
         // emit 序列：started → delta ×2（同 turn 应合并为一条 chunk）→ completed
-        emit_event(&sink, "turn:started", sample_payload("turn-1", "turn:started", None));
-        emit_event(&sink, "turn:delta", sample_payload("turn-1", "turn:delta", Some("hel")));
-        emit_event(&sink, "turn:delta", sample_payload("turn-1", "turn:delta", Some("lo")));
+        emit_event(
+            &sink,
+            "turn:started",
+            sample_payload("turn-1", "turn:started", None),
+        );
+        emit_event(
+            &sink,
+            "turn:delta",
+            sample_payload("turn-1", "turn:delta", Some("hel")),
+        );
+        emit_event(
+            &sink,
+            "turn:delta",
+            sample_payload("turn-1", "turn:delta", Some("lo")),
+        );
         emit_event(
             &sink,
             "turn:completed",
             sample_payload("turn-1", "turn:completed", Some("hello")),
         );
-        // 验证：4 次 emit → 4 条通道记录（聚合在持久化闭包内做，通道收到原事件；
-        // 聚合正确性由 control_plane 闭包负责——此处验证 emit→persist 链路与终态标记）
+        // 验证：4 次 emit → 5 条通道记录（聚合在持久化闭包内做，通道收到原事件；
+        // 聚合正确性由 control_plane 闭包负责——此处验证 emit→persist 链路与终态标记。
+        // PA-094：completed 额外发射 turn/end（终态结算事件），故 5 条；
+        // provider/usage 仅在携带 token 结算字段时发射（sample 无 token，不发射）。
+        // 审核 P0：completed 的 assistant/message 不标记 terminal（由 turn/end
+        // 统一触发 flush，避免拆批），故 records[3] 为 false、records[4] 为 true。
+        // 全局 EVENT_PERSIST_REGISTRY 可能被并行测试污染，只统计本 turn 的记录。
         let records = received.lock().expect("received lock");
-        assert_eq!(records.len(), 4, "every emitted event reaches persist");
-        assert_eq!(records[0].3, false, "started not terminal");
-        assert_eq!(records[3].3, true, "completed is terminal");
-        assert_eq!(records[0].2[0].type_name(), "turn/start");
-        assert_eq!(records[1].2[0].type_name(), "assistant/chunk");
-        assert_eq!(records[3].2[0].type_name(), "assistant/message");
+        let own: Vec<_> = records
+            .iter()
+            .filter(|(_, turn_id, _, _)| turn_id == "turn-1")
+            .cloned()
+            .collect();
+        assert_eq!(own.len(), 5, "every emitted event reaches persist");
+        assert_eq!(own[0].3, false, "started not terminal");
+        assert_eq!(
+            own[3].3, false,
+            "completed assistant/message not terminal (deferred)"
+        );
+        assert_eq!(own[4].3, true, "completed turn/end is terminal");
+        assert_eq!(own[0].2[0].type_name(), "turn/start");
+        assert_eq!(own[1].2[0].type_name(), "assistant/chunk");
+        assert_eq!(own[3].2[0].type_name(), "assistant/message");
+        assert_eq!(own[4].2[0].type_name(), "turn/end");
         drop(records);
         clear_event_persist();
     }
 
     #[test]
     fn event_mapping_tool_started_and_completed() {
-        use crate::agent::turn_event::TurnEvent;
         use crate::agent::telemetry::TurnToolActivity;
+        use crate::agent::turn_event::TurnEvent;
         // running → ToolCall
         let mut payload = sample_payload("turn-1", "turn:tool", None);
         payload.tool_activities = Some(vec![TurnToolActivity {
@@ -1037,7 +1328,9 @@ mod tests {
         assert_eq!(event.type_name(), "tool/result");
         match event {
             TurnEvent::ToolResult {
-                result, duration_ms, ..
+                result,
+                duration_ms,
+                ..
             } => {
                 assert_eq!(result.as_deref(), Some("ok"));
                 assert_eq!(duration_ms, Some(500));
@@ -1063,6 +1356,170 @@ mod tests {
             }
             _ => panic!("expected AssistantMessage"),
         }
+    }
+
+    /// PA-094（审核 P0）：turn:completed 携带 token 结算字段时额外发射
+    /// provider/usage（MetricsProjection 重建 ProviderCallCacheRecord 的事件源）
+    /// 与 turn/end（终态结算，TraceProjection 的 token 指标/timeline 挂载依赖）。
+    #[test]
+    fn completed_emits_provider_usage_and_turn_end() {
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let mut payload = sample_payload("turn-1", "turn:completed", Some("done"));
+        payload.input_tokens = Some(100);
+        payload.cache_hit_input_tokens = Some(40);
+        payload.reasoning_tokens = Some(10);
+        payload.output_tokens = Some(50);
+        payload.total_tokens = Some(160);
+        payload.first_token_latency_ms = Some(88);
+        payload.turn_duration_ms = Some(1200);
+        payload.provider_name = Some("deepseek".to_string());
+        payload.provider_model = Some("deepseek-chat".to_string());
+        // provider/usage 事件：无 provider_call_records 时回退 turn 级结算
+        // （step=0，InitialRequest）。
+        let usage_events = build_provider_usage_event("turn:completed", &payload);
+        assert_eq!(usage_events.len(), 1, "fallback single usage event");
+        match &usage_events[0] {
+            TurnEvent::ProviderUsage {
+                turn_id,
+                step,
+                request_kind,
+                usage,
+                cache_hit_input_tokens,
+                cache_miss_input_tokens,
+                first_token_latency_ms,
+                turn_duration_ms,
+                latency_kind,
+                provider,
+                model,
+                ..
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(*step, 0);
+                assert_eq!(
+                    request_kind,
+                    &crate::agent::telemetry::ProviderRequestKind::InitialRequest
+                );
+                assert_eq!(usage.input_tokens, Some(100));
+                assert_eq!(usage.output_tokens, Some(50));
+                assert_eq!(*cache_hit_input_tokens, Some(40));
+                assert_eq!(*cache_miss_input_tokens, Some(60), "input - cache_hit");
+                assert_eq!(*first_token_latency_ms, Some(88));
+                assert_eq!(*turn_duration_ms, Some(1200));
+                assert_eq!(
+                    latency_kind,
+                    &crate::agent::telemetry::ProviderLatencyKind::ProviderStream
+                );
+                assert_eq!(provider, "deepseek");
+                assert_eq!(model, "deepseek-chat");
+            }
+            _ => panic!("expected ProviderUsage"),
+        }
+        // per-call 粒度：携带 provider_call_records 时逐条发射（step 递增）。
+        payload.provider_call_records = Some(vec![
+            crate::agent::telemetry::ProviderCallCacheRecord {
+                request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                provider_source: Some("deepseek".to_string()),
+                provider_mode: None,
+                input_tokens: Some(100),
+                cache_hit_input_tokens: Some(40),
+                cache_hit_source: None,
+                cache_miss_input_tokens: Some(60),
+                reasoning_tokens: Some(10),
+                output_tokens: Some(50),
+                total_tokens: Some(160),
+                first_token_latency_ms: Some(88),
+                turn_duration_ms: Some(500),
+                latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                prefix_mutation_reasons: Vec::new(),
+            },
+            crate::agent::telemetry::ProviderCallCacheRecord {
+                request_kind: crate::agent::telemetry::ProviderRequestKind::ToolFollowup,
+                provider_source: Some("deepseek".to_string()),
+                provider_mode: None,
+                input_tokens: Some(80),
+                cache_hit_input_tokens: Some(30),
+                cache_hit_source: None,
+                cache_miss_input_tokens: Some(50),
+                reasoning_tokens: Some(5),
+                output_tokens: Some(30),
+                total_tokens: Some(115),
+                first_token_latency_ms: None,
+                turn_duration_ms: Some(300),
+                latency_kind: crate::agent::telemetry::ProviderLatencyKind::BufferedResponse,
+                prefix_mutation_reasons: vec![
+                    crate::agent::provider::PrefixMutationReason::SessionSummaryChanged,
+                    crate::agent::provider::PrefixMutationReason::HistoryBoundaryShifted,
+                ],
+            },
+        ]);
+        let per_call_events = build_provider_usage_event("turn:completed", &payload);
+        assert_eq!(per_call_events.len(), 2, "per-call usage events");
+        match &per_call_events[0] {
+            TurnEvent::ProviderUsage {
+                step, request_kind, ..
+            } => {
+                assert_eq!(*step, 0);
+                assert_eq!(
+                    request_kind,
+                    &crate::agent::telemetry::ProviderRequestKind::InitialRequest
+                );
+            }
+            _ => panic!("expected ProviderUsage"),
+        }
+        match &per_call_events[1] {
+            TurnEvent::ProviderUsage {
+                step,
+                request_kind,
+                latency_kind,
+                turn_duration_ms,
+                prefix_mutation_reasons,
+                ..
+            } => {
+                assert_eq!(*step, 1, "step increments per call");
+                assert_eq!(
+                    request_kind,
+                    &crate::agent::telemetry::ProviderRequestKind::ToolFollowup
+                );
+                assert_eq!(
+                    latency_kind,
+                    &crate::agent::telemetry::ProviderLatencyKind::BufferedResponse
+                );
+                assert_eq!(*turn_duration_ms, Some(300));
+                // 审核 P1：prefix_mutation_reasons 用 serde 序列化（snake_case），
+                // 而非 Debug 格式——projection 按 snake_case 反序列化。
+                assert_eq!(
+                    prefix_mutation_reasons,
+                    &vec![
+                        "session_summary_changed".to_string(),
+                        "history_boundary_shifted".to_string()
+                    ],
+                    "prefix reasons serialized as snake_case"
+                );
+            }
+            _ => panic!("expected ProviderUsage"),
+        }
+        // turn/end 事件：reason=Completed。
+        let end_event = build_turn_end_event("turn:completed", &payload).expect("end event");
+        match end_event {
+            TurnEvent::TurnEnd {
+                turn_id,
+                reason,
+                turn_duration_ms,
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(reason, TurnEndReason::Completed);
+                assert_eq!(turn_duration_ms, Some(1200));
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+        // 非 completed 不发射。
+        let started = sample_payload("turn-1", "turn:started", None);
+        assert!(build_provider_usage_event("turn:started", &started).is_empty());
+        assert!(build_turn_end_event("turn:started", &started).is_none());
+        // 无 token 的 completed 不发射 provider/usage（但 turn/end 仍发射）。
+        let bare = sample_payload("turn-1", "turn:completed", Some("done"));
+        assert!(build_provider_usage_event("turn:completed", &bare).is_empty());
+        assert!(build_turn_end_event("turn:completed", &bare).is_some());
     }
 
     #[test]
