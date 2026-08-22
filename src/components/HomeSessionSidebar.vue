@@ -176,6 +176,15 @@ const sidebarRows = computed<SidebarRow[]>(() => {
   return rows;
 });
 
+// PA-081 调优：激活 Workspace 显示名（注册表名优先；浏览器模式降级文案）。
+const activeWorkspaceName = computed(() => {
+  const active = workspaceList.value.find((workspace) => workspace.id === activeWorkspaceId.value);
+  if (active?.name) {
+    return active.name;
+  }
+  return isTauriRuntime ? "默认工作区" : "默认";
+});
+
 const hasAnyHiddenSessions = computed(() =>
   sessionGroups.value.some((group) => group.sessions.length > GROUP_SESSION_PREVIEW_LIMIT)
 );
@@ -550,9 +559,11 @@ function clearPendingDeleteSession(session: SessionOverview) {
       </div>
 
       <template v-else>
-        <div class="mt-4 flex items-center justify-between gap-2" data-testid="session-sidebar-actions">
+        <!-- PA-081 调优：新对话 + 激活 Workspace 徽章同行——"在哪个项目下工作"
+             一目了然；徽章点击直达工作区管理，消除三层概念堆叠。 -->
+        <div class="mt-4 flex items-center gap-1.5" data-testid="session-sidebar-actions">
           <button
-            class="flex w-full h-8 items-center gap-2 px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
+            class="flex h-8 min-w-0 flex-1 items-center gap-2 px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
             :class="menuInteractiveClass"
             type="button"
             :disabled="!canCreateSession"
@@ -562,6 +573,21 @@ function clearPendingDeleteSession(session: SessionOverview) {
           >
             <Plus class="h-3.5 w-3.5" />
             <span>新对话</span>
+          </button>
+          <button
+            class="inline-flex h-8 max-w-[9rem] shrink-0 items-center gap-1 rounded-[0.35rem] px-2 text-[11px] font-medium transition"
+            :class="
+              workspaceSectionOpen
+                ? 'bg-[#f3c98d] text-stone-900'
+                : 'bg-[#fbf4e8] text-stone-600 hover:bg-[#f7e3bf] hover:text-stone-900'
+            "
+            type="button"
+            :title="`当前工作区：${activeWorkspaceName}（点击管理工作区）`"
+            data-testid="session-sidebar-active-workspace"
+            @click="toggleWorkspaceSection"
+          >
+            <Folder class="h-3 w-3 shrink-0" />
+            <span class="truncate">{{ activeWorkspaceName }}</span>
           </button>
         </div>
 
