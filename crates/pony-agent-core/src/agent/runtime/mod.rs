@@ -16142,6 +16142,131 @@ mod parity {
         assert_eq!(rebuilt_hops, 3, "rebuilt call_model entries equal hop count");
     }
 
+    /// 冒烟回归探针：多 hop 工具流式 turn 落库后的会话历史——assistant 条目
+    /// content 只能是最终模型文本；工具调用参数 JSON / 结果文本 / 描述不得进入
+    /// 对话正文（否则前端恢复会话时会把工具内容当对话消息渲染）。
+    #[test]
+    fn history_after_multi_hop_tool_turn_keeps_tool_content_out_of_assistant_text() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-history-tool-leak-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        const SESSION: &str = "history-tool-leak";
+        let mut outcome: Option<Vec<crate::agent::session::TurnHistoryMessage>> = None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![
+                sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "找到了，继续读取。"}}]}),
+                    json!({"choices": [{"delta": {"tool_calls": [
+                        {"index": 0, "id": "call_read_file", "type": "function",
+                         "function": {"name": "workspace_read_file", "arguments": "{\"path\":\"tauri.conf.json\"}"}}
+                    ]}}]}),
+                ]),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "历史泄漏探针最终答案。"}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
+                ]),
+            ]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                SESSION,
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                SESSION,
+                control_plane.event_flush_channel(),
+            );
+            control_plane.start_turn_stream(
+                &RecordingTurnEventSink::new(),
+                StartTurnStreamCommand {
+                    turn_id: "history-tool-leak-turn".to_string(),
+                    input: TurnInput {
+                        message: "历史泄漏探针问题".to_string(),
+                        display_message: None,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        workspace_mode: None,
+                        session_id: Some(SESSION.to_string()),
+                        node_id: None,
+                        history: Vec::new(),
+                        images: Vec::new(),
+                        workspace_id: None,
+                    },
+                },
+            );
+            drop(_persist_guard);
+            drop(_flush_guard);
+            server.finish();
+
+            let events = control_plane
+                .load_turn_events_checked(SESSION, None)
+                .expect("event table readable");
+            let terminal_reached = events
+                .last()
+                .map(|(_, _, event)| event.type_name() == "turn/end")
+                .unwrap_or(false);
+            if !terminal_reached {
+                continue;
+            }
+            let snapshot = control_plane.load_session_snapshot(
+                crate::agent::control_plane::SessionSnapshotQuery {
+                    session_id: Some(SESSION.to_string()),
+                },
+            );
+            outcome = Some(snapshot.history);
+            break;
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let history =
+            outcome.expect("multi-hop tool turn scenario never reached terminal");
+
+        let assistants: Vec<&crate::agent::session::TurnHistoryMessage> = history
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 1, "one assistant history entry");
+        let assistant_content = assistants[0].content.as_str();
+        assert_eq!(
+            assistant_content, "历史泄漏探针最终答案。",
+            "assistant history content must be the final model text only"
+        );
+        for leak_marker in [
+            "workspace_list_files",
+            "workspace_read_file",
+            "\"path\"",
+            "先调用",
+            "找到了，继续读取",
+            "tauri.conf.json",
+        ] {
+            assert!(
+                !assistant_content.contains(leak_marker),
+                "assistant history content must not contain tool-call info ({leak_marker}): {assistant_content:?}"
+            );
+        }
+    }
+
     /// 场景：plan 前 cancelled 流式 turn——phase=cancelled 对拍；重建不虚构
     /// 未发生的模型调用（settle 兜底收窄）。
     #[test]

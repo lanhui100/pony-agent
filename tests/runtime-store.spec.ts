@@ -5906,6 +5906,122 @@ describe("runtime session resilience", () => {
     nowSpy.mockRestore();
   });
 
+  it("folding return_result keeps call_model body text and never adopts tool result text", async () => {
+    const { cloneTraceTimeline } = await import("@/lib/runtime/trace");
+
+    const folded = cloneTraceTimeline([
+      { id: "context-1", kind: "build_context", label: "BUILD CONTEXT", state: "completed", sequence: 1 },
+      // hop 1：模型文本 + 工具 + 工具结果（PA-095 起 return_result.text = 工具结果文本）
+      { id: "model-2", kind: "call_model", label: "CALL MODEL #1", state: "completed", sequence: 2, text: "hop one model text" },
+      { id: "tool-3", kind: "call_tool", label: "CALL TOOL #1 · Read", state: "completed", sequence: 3 },
+      { id: "return-4", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 4, text: "TOOL_RESULT_ONE_JSON" },
+      // hop 2：最终模型文本
+      { id: "model-5", kind: "call_model", label: "CALL MODEL #2", state: "completed", sequence: 5, text: "final answer" }
+    ]);
+
+    expect(folded.map((entry) => entry.kind)).toEqual([
+      "build_context",
+      "call_model",
+      "call_tool",
+      "call_model"
+    ]);
+    // 折叠只合并 token/耗时等元数据；正文文本以 call_model 自身为准，
+    // 工具结果文本不得进入对话正文（冒烟 bug：工具结果被当 assistant 消息渲染）。
+    expect(folded[1]?.text).toBe("hop one model text");
+    expect(folded[3]?.text).toBe("final answer");
+    expect(folded.some((entry) => entry.text === "TOOL_RESULT_ONE_JSON")).toBe(false);
+  });
+
+  it("keeps tool result text out of conversation-bound call_model entries on multi-hop completion", async () => {
+    const store = useRuntimeStore();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(8181);
+    const eventHandlers = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: Record<string, unknown> }) => void);
+      return () => {};
+    });
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "inspect_host") {
+        return { runs: [] };
+      }
+
+      if (command === "start_graph_run_stream") {
+        return {
+          run: { id: "run-stream-multihop-tool-result-leak" },
+          turnId: "8181"
+        };
+      }
+
+      if (command === "list_sessions") {
+        return [] satisfies SessionOverview[];
+      }
+
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    store.$patch({
+      sessionId: "stream-session-multihop",
+      draftMessage: "multi hop question",
+      phase: "idle",
+      messages: []
+    });
+
+    await store.submitTurn();
+
+    eventHandlers.get("turn:started")?.({
+      payload: {
+        turnId: "8181",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        traceSteps: store.traceSteps,
+        traceTimeline: [
+          { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1 },
+          { id: "context-2", kind: "build_context", label: "BUILD CONTEXT", state: "completed", sequence: 2 },
+          { id: "model-3", kind: "call_model", label: "CALL MODEL #1", state: "active", sequence: 3 }
+        ]
+      }
+    });
+
+    // PA-095 后端 completed timeline 形态：每跳 [call_model, call_tool, return_result]，
+    // return_result.text 携带工具结果文本（与事件折叠重建同构）。
+    eventHandlers.get("turn:completed")?.({
+      payload: {
+        turnId: "8181",
+        text: "final answer",
+        providerName: "OpenAI",
+        providerModel: "gpt-5",
+        toolActivities: [],
+        traceSteps: store.traceSteps,
+        traceTimeline: [
+          { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1 },
+          { id: "context-2", kind: "build_context", label: "BUILD CONTEXT", state: "completed", sequence: 2 },
+          { id: "model-3", kind: "call_model", label: "CALL MODEL #1", state: "completed", sequence: 3, text: "hop one model text" },
+          { id: "tool-4", kind: "call_tool", label: "CALL TOOL #1 · workspace_list_files", state: "completed", sequence: 4, toolActivities: [] },
+          { id: "return-5", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 5, text: "{\"entries\":[\"Cargo.toml\",\"src\"]}" },
+          { id: "model-6", kind: "call_model", label: "CALL MODEL #2", state: "completed", sequence: 6, text: "hop two model text" },
+          { id: "tool-7", kind: "call_tool", label: "CALL TOOL #2 · workspace_read_file", state: "completed", sequence: 7, toolActivities: [] },
+          { id: "return-8", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 8, text: "fn main() {}" },
+          { id: "model-9", kind: "call_model", label: "CALL MODEL #3", state: "completed", sequence: 9, text: "final answer" }
+        ]
+      }
+    } as any);
+
+    await flushDeferredTurnWork();
+    await flushMicrotasks();
+
+    const timeline = store.turnTraceHistory[0]?.traceTimeline ?? [];
+    const modelTexts = timeline
+      .filter((entry) => entry.kind === "call_model")
+      .map((entry) => entry.text ?? "");
+    expect(modelTexts).toEqual(["hop one model text", "hop two model text", "final answer"]);
+    const joinedConversationBoundText = modelTexts.join("\n");
+    expect(joinedConversationBoundText).not.toContain("{\"entries\":[\"Cargo.toml\",\"src\"]}");
+    expect(joinedConversationBoundText).not.toContain("fn main() {}");
+    nowSpy.mockRestore();
+  });
+
   it("ignores non-provider cache-hit candidates on completion", async () => {
     const store = useRuntimeStore();
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(6262);

@@ -91,8 +91,14 @@ export function cloneTraceTimeline(traceTimeline?: TraceTimelineEntry[] | null):
     folded[lastModelIndex] = {
       ...modelEntry,
       state: entry.state ?? modelEntry.state,
-      text: entry.text ?? modelEntry.text ?? null,
-      reasoningContent: entry.reasoningContent ?? modelEntry.reasoningContent ?? null,
+      // 冒烟修复：PA-095 起 return_result 条目的 text 携带工具结果文本
+      // （tool/result → return_result，与事件折叠重建同构），不再是 legacy 的
+      // "模型最终输出"载体。若沿用 `entry.text ?? modelEntry.text` 合并，
+      // 工具参数/结果会覆盖前一跳模型文本，并在主对话区被 agentTurnEvents
+      // 当作 assistant 正文渲染。因此正文（text/reasoningContent）一律以
+      // call_model 自身为准；折叠只合并 token/耗时/终态等元数据。
+      text: modelEntry.text ?? null,
+      reasoningContent: modelEntry.reasoningContent ?? null,
       fallbackReason: entry.fallbackReason ?? modelEntry.fallbackReason ?? null,
       error: entry.error ?? modelEntry.error ?? null,
       inputTokens: entry.inputTokens ?? modelEntry.inputTokens ?? null,

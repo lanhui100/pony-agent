@@ -3486,6 +3486,82 @@ it.skip("keeps reasoning menu available for visibility toggle even when effort i
     expect(children.indexOf(toolPanels[1]!.element)).toBeLessThan(children.indexOf(contentPanels[1]!.element));
   });
 
+  it("renders tool results only as tool cards, never as assistant conversation body (multi-hop return_result)", async () => {
+    const { normalizeTurnTraceRecord } = await import("@/lib/runtime/trace");
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      messages: [
+        createMessage({
+          id: "user-multihop-return-leak",
+          turnId: "turn-multihop-return-leak",
+          role: "user",
+          content: "look around"
+        }),
+        createMessage({
+          id: "tool-turn-multihop-return-leak-read",
+          turnId: "turn-multihop-return-leak",
+          role: "tool",
+          toolName: "List",
+          detail: "list complete",
+          status: "done"
+        }),
+        createMessage({
+          id: "assistant-multihop-return-leak",
+          turnId: "turn-multihop-return-leak",
+          role: "assistant",
+          content: "final answer",
+          status: "done"
+        }),
+        createMessage({
+          id: "tool-turn-multihop-return-leak-readfile",
+          turnId: "turn-multihop-return-leak",
+          role: "tool",
+          toolName: "Read",
+          detail: "read complete",
+          status: "done"
+        })
+      ],
+      turnTraceHistory: [
+        // 生产水合路径同构：normalizeTurnTraceRecord 内部走 cloneTraceTimeline 折叠
+        // return_result（PA-095 起 return_result.text = 工具结果文本）。
+        normalizeTurnTraceRecord({
+          ...createTrace({
+            turnId: "turn-multihop-return-leak",
+            phase: "completed",
+            error: null,
+            toolActivities: []
+          }),
+          traceTimeline: [
+            { id: "leak-model-1", kind: "call_model", label: "CALL MODEL #1", state: "completed", sequence: 10, text: "hop one text" },
+            { id: "leak-tool-1", kind: "call_tool", label: "CALL TOOL #1 · List", state: "completed", sequence: 20, toolActivities: [{ id: "leak-list", name: "List", status: "done" }] },
+            { id: "leak-return-1", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 30, text: "TOOL_RESULT_LIST_JSON_SHOULD_NOT_RENDER" },
+            { id: "leak-model-2", kind: "call_model", label: "CALL MODEL #2", state: "completed", sequence: 40, text: "hop two text" },
+            { id: "leak-tool-2", kind: "call_tool", label: "CALL TOOL #2 · Read", state: "completed", sequence: 50, toolActivities: [{ id: "leak-read", name: "Read", status: "done" }] },
+            { id: "leak-return-2", kind: "return_result", label: "RETURN RESULT", state: "completed", sequence: 60, text: "TOOL_RESULT_FILE_TEXT_SHOULD_NOT_RENDER" },
+            { id: "leak-model-3", kind: "call_model", label: "CALL MODEL #3", state: "completed", sequence: 70, text: "final answer" }
+          ]
+        } as any)
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const shellText = wrapper.get(".conversation-agent-shell").text();
+    // 工具结果只能出现在工具卡片信息中，不得作为 assistant 对话正文渲染。
+    expect(shellText).not.toContain("TOOL_RESULT_LIST_JSON_SHOULD_NOT_RENDER");
+    expect(shellText).not.toContain("TOOL_RESULT_FILE_TEXT_SHOULD_NOT_RENDER");
+    const contentPanels = wrapper.findAll(".assistant-response-panel");
+    expect(contentPanels.map((panel) => panel.text())).toEqual([
+      "hop one text",
+      "hop two text",
+      "final answer"
+    ]);
+  });
+
   it("reserves exact tool trace matches before assigning legacy same-name fallbacks", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({
