@@ -1,5 +1,7 @@
 # ADR 0002：优先使用 Tauri UI 作为运行时测试界面
 
+Status: implemented
+
 ## 背景
 
 Pony Agent 当前阶段的重点是理解和重构 Rust 智能体核心，而不是复刻 Hermes 的终端交互体验。

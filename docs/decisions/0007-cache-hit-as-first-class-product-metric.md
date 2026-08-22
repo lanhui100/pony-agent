@@ -1,5 +1,7 @@
 # 0007 将缓存命中提升为一等产品指标，但按阶段落地
 
+Status: implemented
+
 ## 背景
 
 Pony Agent 正在从单轮 runtime、工具调用、多轮会话逐步演进到 graph 编排与高级能力。

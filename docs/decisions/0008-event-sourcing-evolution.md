@@ -1,5 +1,7 @@
 # 0008 会话数据架构向事件溯源演进（分阶段落地）
 
+Status: implemented
+
 ## 背景
 
 Pony Agent 的会话数据目前是"状态快照"模型：`SessionSnapshot` 整包 JSON blob 存于 SQLite（`sessions.session_data`），trace 独立表迁移中（`SeparateTraceTableMode`），checkpoint 以 `HistoryNode` 内嵌完整快照。与 DeepSeek Harness（dsh）的事件溯源架构对比后（见 `docs/analysis/deepseek-harness-architecture-comparison-2026-08-14.md` 及 2026-08-18 的深入对比讨论），确认现状存在四类结构性问题：

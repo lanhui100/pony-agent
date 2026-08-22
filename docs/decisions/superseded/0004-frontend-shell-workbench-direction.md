@@ -1,5 +1,7 @@
 # 0004 前端工作台先采用原生 TypeScript + Vite 壳层
 
+Status: superseded — 由 [ADR 0003](../0003-frontend-stack-vue-pinia-no-router.md) 接替（前端改用 Vue 3 + Pinia）
+
 ## 背景
 
 当前工作区并不是完整的 Vue 版多面板工程，而是一版更轻量的 `TypeScript + Vite + Tauri` 壳层。用户当前的核心诉求也不是立刻补齐复杂前端框架能力，而是先把桌面端壳层、Rust 桥接和学习式界面跑通。

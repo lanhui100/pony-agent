@@ -1,5 +1,7 @@
 # ADR 0003：前端使用 Vue 3 + Pinia，暂不上 vue-router
 
+Status: implemented
+
 ## 背景
 
 当前前端骨架是 `Vite + TypeScript + 原生 DOM`，不适合长期承载智能体工作台。

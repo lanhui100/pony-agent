@@ -1,5 +1,7 @@
 # ADR 0001：双轨重构，保留 Hermes 作为参考实现
 
+Status: implemented
+
 ## 背景
 
 Hermes 是一个大型 Python 智能体工程，具备复杂的主循环、工具系统、记忆与平台接入能力。

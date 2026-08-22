@@ -1,5 +1,7 @@
 # 0006 API Key 存储从 env-first 演进到统一 SecretStore
 
+Status: implemented
+
 ## 背景
 
 Pony Agent 当前处于学习式重构阶段，主线目标是持续打通这些核心能力：
