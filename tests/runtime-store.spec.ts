@@ -1,4 +1,4 @@
-﻿import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import type {
   AttachmentAsset,
@@ -2952,7 +2952,8 @@ describe("runtime session resilience", () => {
         turnCount: 0,
         lastReferencedFile: null,
         updatedAtMs: 0,
-        workspaceId: null
+        // PA-081：瞬态条目携带激活 Workspace（未选择 → default）。
+        workspaceId: "default"
       },
       {
         conversationId: "browser-current",
@@ -2961,7 +2962,8 @@ describe("runtime session resilience", () => {
         turnCount: 1,
         lastReferencedFile: null,
         updatedAtMs: 4000,
-        workspaceId: null
+        // PA-081：本地重建条目透传会话归属（无显式归属 → default 组）。
+        workspaceId: "default"
       }
     ]);
     expect(Object.keys(readPersistedSessions().sessions)).toEqual(["browser-current"]);

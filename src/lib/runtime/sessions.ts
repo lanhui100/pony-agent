@@ -669,11 +669,12 @@ export function buildSessionOverviewFromPersistedState(
       legacyTraceHistory.length > 0
         ? legacyTraceHistory[legacyTraceHistory.length - 1]!.updatedAt
         : Date.now(),
-    workspaceId: null
+    // PA-081（审核 P2）：透传会话归属，防止本地列表变更后分组漂移到默认组。
+    workspaceId: state.sessionWorkspaceId?.trim() || null
   };
 }
 
-export function buildSessionOverviewFromRuntimeState(state: Pick<RuntimeState, "sessionId" | "sessionSummary" | "messages" | "turnTraceHistory">): SessionOverview | null {
+export function buildSessionOverviewFromRuntimeState(state: Pick<RuntimeState, "sessionId" | "sessionSummary" | "messages" | "turnTraceHistory" | "sessionWorkspaceId">): SessionOverview | null {
   if (!hasPersistableMessages(state.messages)) {
     return null;
   }
@@ -686,7 +687,8 @@ export function buildSessionOverviewFromRuntimeState(state: Pick<RuntimeState, "
     turnCount: state.messages.filter((message) => message.role === "user").length,
     lastReferencedFile: null,
     updatedAtMs: latestTrace?.updatedAt ?? Date.now(),
-    workspaceId: null
+    // PA-081（审核 P2）：透传会话归属（同上——分组事实而非可丢元数据）。
+    workspaceId: state.sessionWorkspaceId?.trim() || null
   };
 }
 

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { defineComponent, nextTick } from "vue";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import { useRuntimeStore } from "@/stores/runtime";
 import type {
@@ -50,7 +50,9 @@ function createSession(partial: Partial<SessionOverview> = {}): SessionOverview 
     summary: partial.summary ?? "Summary",
     turnCount: partial.turnCount ?? 1,
     lastReferencedFile: partial.lastReferencedFile ?? null,
-    updatedAtMs: partial.updatedAtMs ?? 1000
+    updatedAtMs: partial.updatedAtMs ?? 1000,
+    // PA-081：workspaceId 必须透传（分组归属的输入；缺失 → 默认组）。
+    workspaceId: partial.workspaceId ?? null
   };
 }
 
@@ -165,7 +167,7 @@ describe("HomeSessionSidebar", () => {
       messages: []
     });
 
-    const wrapper = mountSidebar();
+        const wrapper = mountSidebar();
     await nextTick();
 
     expect(wrapper.text()).toContain("未保存");
@@ -297,28 +299,26 @@ describe("HomeSessionSidebar", () => {
     expect(otherRow).not.toContain("src/demo.ts");
   });
 
-  it("shows only the first five conversations by default and expands in batches of five", async () => {
+  it("shows only the first five sessions per group and reveals all groups at once via show-all", async () => {
     seedManySidebarSessions(12);
 
     const wrapper = mountSidebar();
     await nextTick();
 
+    // 组预览上限：每组前 5 条；计数徽标按全量计算。
     expect(wrapper.find('[data-testid="session-switch-session-1"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-switch-session-5"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-switch-session-6"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="session-sidebar-group-default"]').text()).toContain("12");
     expect(wrapper.get('[data-testid="session-sidebar-show-more-conversations"]').text()).toContain("显示全部");
 
+    // PA-081："显示全部"一键解除所有组的会话数上限（不做 per-group 分页）。
     await wrapper.get('[data-testid="session-sidebar-show-more-conversations"]').trigger("click");
     await nextTick();
 
     expect(wrapper.find('[data-testid="session-switch-session-10"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="session-switch-session-11"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="session-sidebar-show-more-conversations"]').exists()).toBe(true);
-
-    await wrapper.get('[data-testid="session-sidebar-show-more-conversations"]').trigger("click");
-    await nextTick();
-
     expect(wrapper.find('[data-testid="session-switch-session-12"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="session-sidebar-group-default"]').text()).toContain("12");
     expect(wrapper.find('[data-testid="session-sidebar-show-more-conversations"]').exists()).toBe(false);
   });
 
@@ -709,5 +709,294 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.find('[data-testid="session-sidebar-history-graph"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="session-sidebar-history-restore"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="session-sidebar-history-fork"]').exists()).toBe(false);
+  });
+
+  // ── PA-081：Workspace 两级树 ──────────────────────────────────────────────
+
+  it("groups sessions under their workspace and keeps orphan sessions in a trailing ungrouped group", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      workspaceList: [
+        { id: "default", name: "默认工作区", rootPath: "D:/default" },
+        { id: "ws-demo", name: "演示项目", rootPath: "D:/demo" }
+      ],
+      workspaceListLoaded: true,
+      activeWorkspaceId: "default",
+      sessionList: [
+        createSession({ conversationId: "session-current", title: "默认组会话" }),
+        createSession({ conversationId: "session-demo", title: "演示组会话", workspaceId: "ws-demo" }),
+        createSession({ conversationId: "session-orphan", title: "孤儿会话", workspaceId: "ws-gone" })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    // store 侧：patch 的 workspaceId 必须原样保留（防回归探针）。
+    expect(runtimeStore.sessionList.map((session) => session.workspaceId)).toEqual([
+      null,
+      "ws-demo",
+      "ws-gone"
+    ]);
+
+    // 组顺序：注册表顺序，孤儿"未分组"最后（精确选择器，避免空态提示前缀碰撞）。
+    const defaultHeader = wrapper.get('[data-testid="session-sidebar-group-default"]').element;
+    const demoHeader = wrapper.get('[data-testid="session-sidebar-group-ws-demo"]').element;
+    const orphanHeader = wrapper
+      .get('[data-testid="session-sidebar-group-__ungrouped__"]')
+      .element;
+    expect(defaultHeader.textContent).toContain("默认工作区");
+    expect(demoHeader.textContent).toContain("演示项目");
+    expect(orphanHeader.textContent).toContain("未分组");
+    expect(
+      defaultHeader.compareDocumentPosition(demoHeader) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      demoHeader.compareDocumentPosition(orphanHeader) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+
+    // 行为断言成员归属：折叠 ws-demo 仅隐藏演示组会话；折叠未分组隐藏孤儿。
+    await wrapper.get('[data-testid="session-sidebar-group-ws-demo"]').trigger("click");
+    await nextTick();
+    expect(wrapper.find('[data-testid="session-switch-session-demo"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-switch-session-orphan"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="session-sidebar-group-__ungrouped__"]').trigger("click");
+    await nextTick();
+    expect(wrapper.find('[data-testid="session-switch-session-orphan"]').exists()).toBe(false);
+  });
+
+  it("places the transient new-chat entry into the active workspace group", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-transient",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [],
+      workspaceList: [
+        { id: "default", name: "默认工作区", rootPath: "D:/default" },
+        { id: "ws-demo", name: "演示项目", rootPath: "D:/demo" }
+      ],
+      workspaceListLoaded: true,      activeWorkspaceId: "ws-demo",
+      sessionList: [
+        createSession({ conversationId: "session-saved", title: "默认组会话" })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    // 瞬态条目（未保存）应与激活组同现：激活组（演示项目）内可见瞬态行。
+    const demoGroupHeader = wrapper.get('[data-testid="session-sidebar-group-ws-demo"]');
+    expect(demoGroupHeader.text()).toContain("演示项目");
+    expect(wrapper.find('[data-testid="session-switch-session-transient"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("未保存");
+    // 默认组仅含已保存会话。
+    expect(wrapper.find('[data-testid="session-switch-session-saved"]').exists()).toBe(true);
+  });
+
+  it("persists workspace group collapse state across remounts and ignores stale keys", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      workspaceList: [{ id: "default", name: "默认工作区", rootPath: "D:/default" }],
+      workspaceListLoaded: true,
+      activeWorkspaceId: "default",
+      sessionList: [
+        createSession({ conversationId: "session-current", title: "默认组会话" })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-current"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="session-sidebar-group-default"]').trigger("click");
+    await nextTick();
+    expect(wrapper.find('[data-testid="session-switch-session-current"]').exists()).toBe(false);
+    expect(window.localStorage.getItem("pony-agent.session-sidebar-workspace-groups.v1")).toBe(
+      JSON.stringify(["default"])
+    );
+
+    wrapper.unmount();
+
+    // 预置过期 key（组已不存在）→ 重挂载时被忽略，不影响合法折叠态。
+    window.localStorage.setItem(
+      "pony-agent.session-sidebar-workspace-groups.v1",
+      JSON.stringify(["default", "ws-stale"])
+    );
+    const remounted = mountSidebar();
+    await nextTick();
+
+    // 过期 key 被读取忽略（不影响合法折叠态）；存储本体允许保留，仅在下次
+    // 用户切换时按当前合法组裁剪。
+    expect(remounted.find('[data-testid="session-switch-session-current"]').exists()).toBe(false);
+  });
+
+  it("activating a workspace only switches the creation target and never hides other groups", async () => {
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "workspace_list") {
+        return [
+          { id: "default", name: "默认工作区", rootPath: "D:/default" },
+          { id: "ws-demo", name: "演示项目", rootPath: "D:/demo" }
+        ];
+      }
+      return null;
+    });
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      activeWorkspaceId: "default",
+      sessionList: [
+        createSession({ conversationId: "session-current", title: "默认组会话" }),
+        createSession({ conversationId: "session-demo", title: "演示组会话", workspaceId: "ws-demo" })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await flushPromises();
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-workspace-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="workspace-activate-ws-demo"]').trigger("click");
+
+    expect(runtimeStore.activeWorkspaceId).toBe("ws-demo");
+    expect(window.localStorage.getItem("pony-agent.active-workspace.v1")).toBe("ws-demo");
+    // AC2：切换激活组不隐藏其他组——两组会话均保持可见。
+    expect(wrapper.find('[data-testid="session-switch-session-current"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-switch-session-demo"]').exists()).toBe(true);
+  });
+
+  it("creates a workspace from the manage form and auto-activates it", async () => {
+    const runtimeStore = useRuntimeStore();
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "workspace_list") {
+        return [{ id: "default", name: "默认工作区", rootPath: "D:/default" }];
+      }
+      if (command === "workspace_create") {
+        return {
+          id: "ws-created",
+          name: String(args?.name ?? ""),
+          rootPath: String(args?.rootPath ?? "")
+        };
+      }
+      return null;
+    });
+
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      sessionList: [createSession({ conversationId: "session-current", title: "默认组会话" })]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+    await nextTick();
+
+    await wrapper.get('[data-testid="session-sidebar-workspace-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="workspace-new-open-form"]').trigger("click");
+    await wrapper.get('[data-testid="workspace-new-name"]').setValue("新项目");
+    await wrapper.get('[data-testid="workspace-new-path"]').setValue("D:/new-project");
+    await wrapper.get('[data-testid="workspace-new-submit"]').trigger("click");
+    await nextTick();
+    await nextTick();
+
+    expect(runtimeStore.activeWorkspaceId).toBe("ws-created");
+    expect(runtimeStore.workspaceList.some((workspace) => workspace.id === "ws-created")).toBe(true);
+    expect(
+      wrapper.get('[data-testid="workspace-row-ws-created"]').text()
+    ).toContain("激活");
+  });
+
+  it("keeps only the default group and disables workspace management in browser mode", async () => {
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      sessionList: [createSession({ conversationId: "session-current", title: "默认组会话" })]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+    await nextTick();
+
+    // 浏览器模式：仅默认组 + 管理禁用提示。
+    expect(wrapper.find('[data-testid="session-sidebar-group-default"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("浏览器");
+    expect(wrapper.find('[data-testid="workspace-new-open-form"]').exists()).toBe(false);
+  });
+
+  it("auto-expands the persisted-collapsed group containing the current session (explicit collapse this boot wins)", async () => {
+    window.localStorage.setItem(
+      "pony-agent.session-sidebar-workspace-groups.v1",
+      JSON.stringify(["default"])
+    );
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-a",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [],
+      workspaceList: [{ id: "default", name: "默认工作区", rootPath: "D:/default" }],
+      workspaceListLoaded: true,
+      activeWorkspaceId: "default",
+      sessionList: [
+        createSession({ conversationId: "session-a", title: "会话 A" }),
+        createSession({ conversationId: "session-b", title: "会话 B" })
+      ]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    // 持久化折叠生效：当前会话行不可见。
+    expect(wrapper.find('[data-testid="session-switch-session-a"]').exists()).toBe(false);
+
+    // 切换到同组的另一会话 → 该组自动展开（本 boot 未显式折叠过该组）。
+    runtimeStore.$patch({ sessionId: "session-b" });
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-switch-session-b"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-switch-session-a"]').exists()).toBe(true);
+  });
+
+  it("shows the workspace empty hint for a group without sessions", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [createMessage({ content: "existing content" })],
+      workspaceList: [
+        { id: "default", name: "默认工作区", rootPath: "D:/default" },
+        { id: "ws-empty", name: "空项目", rootPath: "D:/empty" }
+      ],
+      workspaceListLoaded: true,
+      activeWorkspaceId: "default",
+      sessionList: [createSession({ conversationId: "session-current", title: "默认组会话" })]
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="session-sidebar-group-ws-empty"]').text()).toContain("空项目");
+    expect(
+      wrapper.get('[data-testid="session-sidebar-group-empty-ws-empty"]').text()
+    ).toContain("该工作区暂无对话");
   });
 });

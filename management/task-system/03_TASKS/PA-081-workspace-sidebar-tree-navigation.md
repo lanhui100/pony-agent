@@ -53,10 +53,16 @@
 
 - 3 路对抗审核（2026-08-09）已完成，findings 全部采纳；spec/proposal/design/tasks 已修订（激活 localStorage 单一真相源、AC 语义改写"切换不隐藏组"、瞬态条目带 workspaceId、孤儿"未分组"、"显示全部"解除组上限等）。详见 `02_REVIEWS/2026-08-09-pa078-081-spec-review.md`。
 - 无未解决 P0/P1，spec 通过审核，可进入实现。
+- **2026-08-22 实现完成**：
+  - **store**：`workspaceList`/`activeWorkspaceId`/`workspaceListLoaded` 状态；`loadWorkspaces`（幂等 + contained 失败降级）/`normalizeActiveWorkspace`（激活项不在注册表→回退 default 并清理残留 key）/`createNewWorkspace`（成功自动激活）/`activateWorkspace`（localStorage 单一真相源 `pony-agent.active-workspace.v1`）；瞬态"新对话"与 TurnInput 均携带 `activeWorkspaceId ?? default`。
+  - **分组纯函数** `src/lib/runtime/sidebar-groups.ts`：None→default、命中注册表→对应组、未知 id→尾部"未分组"、空组保留（空态面）、折叠持久化读写（`pony-agent.session-sidebar-workspace-groups.v1`，读取忽略未知 key、写入按当前合法组裁剪）。
+  - **组件** `HomeSessionSidebar.vue`：扁平行模型（group-header/session/group-empty）单份会话行模板复用；组头名称+全量计数徽标+折叠；"显示全部"一键解除所有组预览上限（每组前 5）；Workspace 管理节（列表/切换/新建表单，浏览器模式禁用 + 提示）；空态"暂无对话"。
+  - **测试**：新增 `tests/sidebar-groups.spec.ts`（7 项纯函数契约：None→default/合成默认组/孤儿尾置/空组保留/瞬态归激活组/折叠往返/损坏容错）；扩展 `HomeSessionSidebar.spec.ts` 7 项组件用例（分组顺序/瞬态归组/折叠持久化+过期 key 忽略/切换不隐藏组/新建自动激活/浏览器模式/空态）；`runtime-store.spec.ts` 瞬态期望同步。
+- **验证**：vitest **413 passed + 10 skipped（23 文件）全绿**；vue-tsc + vite build 通过。
 
 ## Next Action
 
-- 按 `openspec/changes/workspace-sidebar-tree-navigation/tasks.md` 顺序实现（依赖 PA-079 数据模型与 PA-080 权限反馈语义）。
+- 实施后双路代码审核 → 采纳修复 → 归档 change → 提交。
 
 ## Blockers
 

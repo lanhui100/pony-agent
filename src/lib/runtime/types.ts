@@ -34,11 +34,18 @@ export type RunningTurn = {
 export type RuntimeState = {
   sessionId: string;
   sessionList: SessionOverview[];
+  // PA-081：当前会话归属的 Workspace（创建时冻结；submitTurn 以会话归属优先，
+  // 防止"会话在 B 组、工具在 A root 执行"的跨项目错位）。
+  sessionWorkspaceId: string;
   sessionOperation: "initializing" | "switching" | "deleting" | null;
   sessionHydrating: boolean;
   deletingSessionSet: Record<string, boolean>;
   sessionSwitchToken: number;
   sessionError: string | null;
+  // PA-081：Workspace 树导航状态。
+  workspaceList: import("./workspace-api").WorkspaceRecord[];
+  workspaceListLoaded: boolean;
+  activeWorkspaceId: string;
   phase: RuntimePhase;
   health: HealthPayload | null;
   error: string | null;
@@ -110,6 +117,8 @@ export type RuntimeState = {
 export type PersistedRuntimeState = {
   cachedStateVersion: number;
   phase: RuntimePhase;
+  // PA-081：会话归属 Workspace（浏览器持久化往返保持分组稳定）。
+  sessionWorkspaceId?: string;
   canonicalTerminalPhase?: "completed" | "failed" | "cancelled";
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];

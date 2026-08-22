@@ -46,6 +46,15 @@ import type {
 import type { PersistedRuntimeState, RuntimeState } from "@/lib/runtime/types";
 import type { HistoryCheckoutWireResult } from "@/lib/runtime/history";
 import {
+  ACTIVE_WORKSPACE_STORAGE_KEY,
+  DEFAULT_WORKSPACE_ID
+} from "@/lib/runtime/workspace-constants";
+import {
+  createWorkspace as invokeCreateWorkspace,
+  fetchWorkspaces,
+  type WorkspaceRecord
+} from "@/lib/runtime/workspace-api";
+import {
   debugLog,
   isDebugLoggingEnabled,
   measureHostRead,
@@ -207,8 +216,21 @@ import {
 // （completed/failed/cancelled），强制解锁，杜绝"终态事件被丢弃 → 永久卡死"。
 const SUBMISSION_WATCHDOG_TIMEOUT_MS = 120_000;
 
-export const useRuntimeStore = defineStore("runtime", {
-  state: (): RuntimeState => {
+// PA-081：激活 Workspace 初值——localStorage 单一真相源，缺失/异常回退 default
+// （注册表加载后若不在列表内会再次归一并清理残留 key）。
+function resolveInitialActiveWorkspaceId(): string {
+  if (typeof window === "undefined") {
+    return DEFAULT_WORKSPACE_ID;
+  }
+  try {
+    const stored = window.localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+    return stored && stored.trim() !== "" ? stored : DEFAULT_WORKSPACE_ID;
+  } catch {
+    return DEFAULT_WORKSPACE_ID;
+  }
+}
+
+export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState => {
     const persisted = loadPersistedRuntimeState(DEFAULT_SESSION_ID);
 
       return {
@@ -219,6 +241,12 @@ export const useRuntimeStore = defineStore("runtime", {
         deletingSessionSet: {},
         sessionSwitchToken: 0,
         sessionError: null,
+        // PA-081：Workspace 树导航状态（注册表 + 激活项 localStorage 单一真相源）。
+        workspaceList: [] as WorkspaceRecord[],
+        workspaceListLoaded: false,
+        activeWorkspaceId: resolveInitialActiveWorkspaceId(),
+        sessionWorkspaceId:
+          persisted?.sessionWorkspaceId?.trim() || DEFAULT_WORKSPACE_ID,
       phase: resolveRestoredPersistedPhase(
         persisted?.phase ?? null,
         persisted?.canonicalTerminalPhase ?? null,
@@ -662,7 +690,9 @@ export const useRuntimeStore = defineStore("runtime", {
         cursorVersion: this.cursorVersion,
         initialRollbackActive: this.initialRollbackActive,
         checkpoint: this.latestExecutionCheckpoint ? { ...this.latestExecutionCheckpoint } : null,
-        runningTurnId: this.activeTurnId
+        runningTurnId: this.activeTurnId,
+        // PA-081：会话归属随持久化往返（浏览器恢复保持分组稳定）。
+        sessionWorkspaceId: this.sessionWorkspaceId
       };
 
       try {
@@ -1757,6 +1787,79 @@ export const useRuntimeStore = defineStore("runtime", {
         reason: hasCachedState ? "cached-session" : "interactive-switch-no-host-read"
       });
     },
+    // PA-081：Workspace 注册表加载（Tauri 可用时；失败 contained 保持空列表）。
+    // 幂等：已加载过则跳过（侧边栏挂载可能多次触发）。
+    async loadWorkspaces() {
+      if (this.workspaceListLoaded) {
+        return;
+      }
+      if (!isTauriAvailable()) {
+        this.workspaceList = [];
+        this.workspaceListLoaded = true;
+        this.normalizeActiveWorkspace();
+        return;
+      }
+      try {
+        const workspaces = await fetchWorkspaces();
+        // 防御：mock/异常通道可能返回非数组（contained 保持空列表）。
+        this.workspaceList = Array.isArray(workspaces) ? workspaces : [];
+        this.workspaceListLoaded = true;
+        this.normalizeActiveWorkspace();
+      } catch (error) {
+        // 失败不锁死（loaded 保持 false 允许重试）；照常归一激活项（空注册表 →
+        // 残留的失效激活 id 回退 default 并清 key），防止孤儿 id 经 TurnInput
+        // 首轮盖章进会话（实施后审核 P2）。
+        this.workspaceList = [];
+        debugLog("workspace:list:failed", { error: String(error) });
+        this.normalizeActiveWorkspace();
+      }
+    },
+    // 激活项不在注册表内 → 回退 default 并清理残留 localStorage key。
+    normalizeActiveWorkspace() {
+      const exists = this.workspaceList.some((workspace) => workspace.id === this.activeWorkspaceId);
+      if (exists) {
+        return;
+      }
+      if (this.activeWorkspaceId !== DEFAULT_WORKSPACE_ID && typeof window !== "undefined") {
+        try {
+          window.localStorage.removeItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+        } catch {
+          // 存储不可写：忽略（内存态已归一）。
+        }
+      }
+      this.activeWorkspaceId = DEFAULT_WORKSPACE_ID;
+    },
+    async createNewWorkspace(name: string, rootPath: string): Promise<WorkspaceRecord | null> {
+      const trimmedName = name.trim();
+      const trimmedPath = rootPath.trim();
+      if (!trimmedName || !trimmedPath) {
+        return null;
+      }
+      try {
+        const record = await invokeCreateWorkspace(trimmedName, trimmedPath);
+        this.workspaceList = [
+          ...this.workspaceList.filter((workspace) => workspace.id !== record.id),
+          record
+        ];
+        // 成功即自动激活（PA-081 契约：createWorkspace 成功自动激活）。
+        this.activateWorkspace(record.id);
+        return record;
+      } catch (error) {
+        debugLog("workspace:create:failed", { error: String(error) });
+        return null;
+      }
+    },
+    activateWorkspace(workspaceId: string) {
+      // 仅切换"新会话创建目标"，不隐藏其他组（AC2）；localStorage 单一真相源。
+      this.activeWorkspaceId = workspaceId;
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(ACTIVE_WORKSPACE_STORAGE_KEY, workspaceId);
+        } catch {
+          // 存储不可写：内存态生效即可。
+        }
+      }
+    },
     async createSession() {
       // 新建会话意图即清空待发送附件（即使空消息 no-op 也清，避免残留携带）
       this.clearPendingAttachments();
@@ -1788,8 +1891,15 @@ export const useRuntimeStore = defineStore("runtime", {
       this.phase = "idle";
       this.sessionError = null;
       const dedupedCurrentSessionList = this.sessionList.filter((session) => session.conversationId !== nextSessionId);
+      // PA-081：新会话归属创建时的激活 Workspace（冻结；submitTurn 以会话归属优先）。
+      this.sessionWorkspaceId = this.activeWorkspaceId || DEFAULT_WORKSPACE_ID;
+      const transientOverview = {
+        ...createTransientSessionOverview(nextSessionId),
+        // PA-081：瞬态"新对话"归属当前激活 Workspace（空 → default）。
+        workspaceId: this.sessionWorkspaceId
+      };
       this.sessionList = ensureUniqueSessionList([
-        createTransientSessionOverview(nextSessionId),
+        transientOverview,
         ...(currentOverview ? [currentOverview] : []),
         ...dedupedCurrentSessionList.filter(
           (session) => session.conversationId !== currentOverview?.conversationId
@@ -4035,8 +4145,13 @@ export const useRuntimeStore = defineStore("runtime", {
         nodeId: this.visibleNodeId,
         history: buildTurnHistory(this.messages),
         images,
-        // PA-079 传输通道：本轮恒 null（→ 默认 workspace）；PA-081 起改传 activeWorkspaceId
-        workspaceId: null
+        // PA-079/PA-081 传输通道：以会话自身归属优先（防止"会话在 B 组、工具在
+        // A root 执行"的跨项目错位——实施后审核 P1），transient/无归属时回退激活项。
+        workspaceId:
+          this.sessionList.find((session) => session.conversationId === this.sessionId)?.workspaceId?.trim() ||
+          this.sessionWorkspaceId ||
+          this.activeWorkspaceId ||
+          DEFAULT_WORKSPACE_ID
       };
 
       const requestId = String(Date.now());
