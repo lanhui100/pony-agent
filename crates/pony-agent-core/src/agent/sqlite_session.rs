@@ -23,6 +23,23 @@ const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
 pub static TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
 
+/// PA-095 #7：trace 行 JSON 打补丁——buildContextObservation 置空 +
+/// buildContextObservationRef 写入（camelCase 与 TurnTraceRecord serde 一致）。
+/// 只动这两个键，其余键原样保留；解析失败返回 None（调用方记日志跳过）。
+fn patch_trace_json_observation_ref(json: &str, reference: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let object = value.as_object_mut()?;
+    object.insert(
+        "buildContextObservation".to_string(),
+        serde_json::Value::Null,
+    );
+    object.insert(
+        "buildContextObservationRef".to_string(),
+        serde_json::Value::String(reference.to_string()),
+    );
+    serde_json::to_string(&value).ok()
+}
+
 /// PA-091：从 blob 会话状态反推事件（回填用）。
 /// - history 按 user 消息切分 turn 边界（无法配对的消息按"单条消息 = 独立 turn"合成）；
 /// - assistant 消息携带 `chunk_missing: true`（过程 chunk 不可恢复）；
@@ -276,6 +293,13 @@ impl SqliteSessionBackend {
              PRAGMA foreign_keys = ON;",
         )
         .map_err(|e| format!("schema: {e}"))?;
+        // PA-095：事件 schema 版本契约——缺失视为 v1 并回填（存量库保持可读）；
+        // INSERT OR IGNORE 保留已有值（版本升级由迁移分支显式改写）。
+        conn.execute(
+            "INSERT OR IGNORE INTO store_metadata (key, value) VALUES ('events.schema_version', ?1)",
+            params![crate::agent::turn_event::EVENT_SCHEMA_VERSION.to_string()],
+        )
+        .map_err(|e| format!("schema version seed: {e}"))?;
         self.ensure_normalized_schema(conn)?;
         Ok(())
     }
@@ -489,6 +513,16 @@ impl SqliteSessionBackend {
         let _ = conn.execute(
             "ALTER TABLE normalized_turn_traces
              ADD COLUMN event_watermark INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        // PA-095 #6（实施后审核 P2）：cursor_version 退役的一次性升级校正——
+        // 存量行的 cursor_version 是旧 bump-count 语义，与 event_watermark 不等；
+        // 不校正则客户端以旧值作 expected_cursor_version 会陷入永久冲突循环。
+        // 幂等（相等行为 no-op）；水位为 0 的全新/纯 legacy 会话不动。
+        let _ = conn.execute(
+            "UPDATE normalized_history_cursor
+             SET cursor_version = event_watermark
+             WHERE cursor_version != event_watermark AND event_watermark > 0",
             [],
         );
         Ok(())
@@ -927,6 +961,44 @@ impl SqliteSessionBackend {
         Ok(())
     }
 
+    /// PA-095 #7（实施后审核 P1）：读侧水合——ref-only 行按引用还原 observation
+    /// （"读路径优先 ref、缺失回退内嵌"承诺的落实）；已有内嵌 payload 的 legacy 行
+    /// 原样返回；ref 缺失/未命中 contained（日志 + 保持 None）。
+    fn hydrate_trace_observation(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        mut trace: TurnTraceRecord,
+    ) -> TurnTraceRecord {
+        if trace.build_context_observation.is_some() {
+            return trace;
+        }
+        let Some(reference) = trace.build_context_observation_ref.clone() else {
+            return trace;
+        };
+        match conn.query_row(
+            "SELECT payload_json FROM build_context_observations
+             WHERE session_id = ?1 AND observation_ref = ?2",
+            params![session_id, reference],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(payload) => {
+                match serde_json::from_str::<crate::agent::provider::BuildContextObservation>(
+                    &payload,
+                ) {
+                    Ok(observation) => trace.build_context_observation = Some(observation),
+                    Err(error) => eprintln!(
+                        "[pony-agent][session] observation payload decode failed for {reference}: {error}"
+                    ),
+                }
+            }
+            Err(error) => eprintln!(
+                "[pony-agent][session] observation ref {reference} not resolvable for session {session_id}: {error}"
+            ),
+        }
+        trace
+    }
+
     fn read_session_traces(
         &self,
         conn: &Connection,
@@ -946,7 +1018,9 @@ impl SqliteSessionBackend {
         for row in rows {
             let raw = row.map_err(|e| format!("read trace row: {e}"))?;
             match serde_json::from_str::<TurnTraceRecord>(&raw) {
-                Ok(trace) => traces.push(trace),
+                Ok(trace) => {
+                    traces.push(self.hydrate_trace_observation(conn, session_id, trace))
+                }
                 Err(error) => {
                     eprintln!(
                         "[pony-agent][session] malformed trace row for session {}: {}",
@@ -979,7 +1053,8 @@ impl SqliteSessionBackend {
             let (session_id, raw) = row.map_err(|e| format!("read all trace row: {e}"))?;
             match serde_json::from_str::<TurnTraceRecord>(&raw) {
                 Ok(trace) => {
-                    by_session.entry(session_id).or_default().push(trace);
+                    let hydrated = self.hydrate_trace_observation(conn, &session_id, trace);
+                    by_session.entry(session_id).or_default().push(hydrated);
                 }
                 Err(error) => {
                     eprintln!(
@@ -1442,6 +1517,8 @@ impl SqliteSessionBackend {
             return Ok(());
         }
         let counter_key = format!("turn_event_seq:{session_id}");
+        // PA-095 #7：本批外置的 observation 引用（turn_id → ref），flush 内同事务回填。
+        let mut observation_refs: Vec<(String, String)> = Vec::new();
         // 计数器缺失（legacy/损坏）时以 MAX(seq)+1 修复（避免 PK 冲突静默丢事件）。
         let next_seq: i64 = tx
             .query_row(
@@ -1469,6 +1546,19 @@ impl SqliteSessionBackend {
             let payload = self
                 .serialize_event_with_observation_externalization(tx, session_id, seq, event)
                 .map_err(|e| format!("flush event serialize: {e}"))?;
+            // PA-095 #7：记录本批外置的 observation 引用（同事务回填 trace 行）。
+            if let crate::agent::turn_event::TurnEvent::ContextObservation {
+                turn_id: observation_turn_id,
+                step: _,
+                observation: Some(_),
+                observation_ref,
+            } = event
+            {
+                let resolved = observation_ref
+                    .clone()
+                    .unwrap_or_else(|| format!("bco:{observation_turn_id}:{seq}"));
+                observation_refs.push((observation_turn_id.clone(), resolved));
+            }
             tx.execute(
                 "INSERT INTO turn_events
                  (session_id, turn_id, branch_id, seq, event_type, payload, created_at_ms)
@@ -1500,7 +1590,78 @@ impl SqliteSessionBackend {
             params![counter_key, (next_seq + events.len() as i64).to_string()],
         )
         .map_err(|e| format!("flush event counter: {e}"))?;
+        // PA-095 #7：同事务回填——外置 payload 的引用写回 trace 缓存行
+        // （session_turn_traces.trace_data 与 normalized_turn_traces.raw_json），
+        // trace 行不再内嵌 observation 副本（引用加载路径 PA-094 已有）。
+        for (observation_turn_id, reference) in &observation_refs {
+            self.backfill_trace_observation_ref_tx(
+                tx,
+                session_id,
+                observation_turn_id,
+                reference,
+            );
+        }
         Ok(())
+    }
+
+    /// PA-095 #7：把外置 observation 引用回填到 trace 缓存行 JSON
+    /// （buildContextObservation 置空 + buildContextObservationRef 写入）。
+    /// 两张表任一命中即算成功；两表均无该 turn 行时记日志跳过（live 行尚未落库）。
+    fn backfill_trace_observation_ref_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        turn_id: &str,
+        reference: &str,
+    ) {
+        let mut patched_any = false;
+        if let Some((data,)) = tx
+            .query_row(
+                "SELECT trace_data FROM session_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
+                params![session_id, turn_id],
+                |row| row.get::<_, String>(0).map(|data| (data,)),
+            )
+            .ok()
+        {
+            if let Some(patched) = patch_trace_json_observation_ref(&data, reference) {
+                if tx
+                    .execute(
+                        "UPDATE session_turn_traces SET trace_data = ?3
+                         WHERE session_id = ?1 AND turn_id = ?2",
+                        params![session_id, turn_id, patched],
+                    )
+                    .is_ok()
+                {
+                    patched_any = true;
+                }
+            }
+        }
+        if let Some((raw,)) = tx
+            .query_row(
+                "SELECT raw_json FROM normalized_turn_traces WHERE session_id = ?1 AND turn_id = ?2",
+                params![session_id, turn_id],
+                |row| row.get::<_, String>(0).map(|raw| (raw,)),
+            )
+            .ok()
+        {
+            if let Some(patched) = patch_trace_json_observation_ref(&raw, reference) {
+                if tx
+                    .execute(
+                        "UPDATE normalized_turn_traces SET raw_json = ?3
+                         WHERE session_id = ?1 AND turn_id = ?2",
+                        params![session_id, turn_id, patched],
+                    )
+                    .is_ok()
+                {
+                    patched_any = true;
+                }
+            }
+        }
+        if !patched_any {
+            eprintln!(
+                "[pony-agent][session] observation ref backfill skipped: no trace row session={session_id} turn={turn_id}"
+            );
+        }
     }
 
     /// PA-094：大字段外置——`ContextObservation` 事件序列化。
@@ -2242,9 +2403,152 @@ impl SqliteSessionBackend {
         .map_err(|e| format!("update legacy trace: {e}"))?;
         Ok(())
     }
+
+    /// PA-095：事件 schema 版本校验（四分支：匹配 / 缺失 key 视为 v1 并回填 /
+    /// 不匹配 Err / 读取异常 Err）。缺失 key 的回填保证存量库首次访问后补齐契约。
+    fn validate_event_schema_conn(&self, conn: &rusqlite::Connection) -> Result<u64, String> {
+        let recorded = conn
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'events.schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        match recorded {
+            Some(raw) => {
+                let version: u64 = raw
+                    .parse()
+                    .map_err(|_| format!("events.schema_version unparsable: {raw}"))?;
+                if version == crate::agent::turn_event::EVENT_SCHEMA_VERSION {
+                    Ok(version)
+                } else {
+                    Err(format!(
+                        "event schema version mismatch: store={} current={}",
+                        version,
+                        crate::agent::turn_event::EVENT_SCHEMA_VERSION
+                    ))
+                }
+            }
+            None => {
+                // 缺失 key（本 change 之前的存量库）：视为 v1 并回填。
+                conn.execute(
+                    "INSERT OR REPLACE INTO store_metadata (key, value) VALUES ('events.schema_version', ?1)",
+                    params![crate::agent::turn_event::EVENT_SCHEMA_VERSION.to_string()],
+                )
+                .map_err(|e| format!("schema version backfill: {e}"))?;
+                Ok(crate::agent::turn_event::EVENT_SCHEMA_VERSION)
+            }
+        }
+    }
+
+    /// PA-095：带契约校验的事件加载——版本不匹配或 payload 解析失败即 fail loud
+    /// （Err 上抛，调用方标记会话 degraded），不再静默跳过坏行。
+    fn load_turn_events_checked_impl(
+        &self,
+        session_id: &str,
+        up_to_seq: Option<u64>,
+    ) -> Result<Vec<(u64, String, crate::agent::turn_event::TurnEvent)>, String> {
+        let slot = self.connection().map_err(|e| format!("sqlite open: {e}"))?;
+        let conn = slot.as_ref().expect("connection initialized");
+        self.validate_event_schema_conn(conn)?;
+        let sql = match up_to_seq {
+            Some(upper) => format!(
+                "SELECT seq, branch_id, payload FROM turn_events
+                 WHERE session_id = ?1 AND seq <= {upper} ORDER BY seq"
+            ),
+            None => "SELECT seq, branch_id, payload FROM turn_events
+                 WHERE session_id = ?1 ORDER BY seq"
+                .to_string(),
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("query: {e}"))?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (seq, branch_id, payload) = row.map_err(|e| format!("row: {e}"))?;
+            let event = match serde_json::from_str::<crate::agent::turn_event::TurnEvent>(&payload)
+            {
+                Ok(event) => event,
+                Err(error) => {
+                    // PA-095：ignorable 清单内的未知类型跳过（清单当前为空，
+                    // 全部 fail loud）；清单外 fail loud 并标记会话 degraded。
+                    let event_type = serde_json::from_str::<serde_json::Value>(&payload)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("type")
+                                .and_then(|tag| tag.as_str())
+                                .map(str::to_string)
+                        });
+                    let ignorable = event_type
+                        .as_deref()
+                        .is_some_and(|tag| {
+                            crate::agent::turn_event::IGNORABLE_EVENT_TYPES.contains(&tag)
+                        });
+                    if ignorable {
+                        continue;
+                    }
+                    return Err(format!(
+                        "event stream degraded: session={session_id} seq={seq} parse error: {error}"
+                    ));
+                }
+            };
+            events.push((seq, branch_id, event));
+        }
+        Ok(events)
+    }
 }
 
 impl SessionBackend for SqliteSessionBackend {
+    /// PA-095：事件 schema 版本校验（trait 入口）。
+    fn validate_event_schema(&self) -> Result<u64, String> {
+        let slot = self.connection().map_err(|e| format!("sqlite open: {e}"))?;
+        let conn = slot.as_ref().expect("connection initialized");
+        self.validate_event_schema_conn(conn)
+    }
+
+    /// PA-095：带契约校验的事件加载（trait 入口，fail loud）。
+    fn load_turn_events_checked(
+        &self,
+        session_id: &str,
+        up_to_seq: Option<u64>,
+    ) -> Result<Vec<(u64, String, crate::agent::turn_event::TurnEvent)>, String> {
+        self.load_turn_events_checked_impl(session_id, up_to_seq)
+    }
+
+    /// PA-095 #2：SQLite 后端具备事件表能力（append_turn 物化不回退）。
+    fn supports_turn_events(&self) -> bool {
+        true
+    }
+
+    /// PA-095 #7：列出会话已外置的 observation 引用（flush 后附加到内存
+    /// trace 缓存行，防异步 worker REPLACE 覆盖回填）。查询失败 contained 空。
+    fn load_observation_refs(&self, session_id: &str) -> Vec<String> {
+        let Some(slot) = self.connection().ok() else {
+            return Vec::new();
+        };
+        let Some(conn) = slot.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT observation_ref FROM build_context_observations WHERE session_id = ?1",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))
+        else {
+            return Vec::new();
+        };
+        rows.filter_map(|row| row.ok()).collect()
+    }
+
     /// PA-089 阶段 3：规范化双写命令——统一事务写 blob（旧 sessions 表）+ normalized_* 表。
     /// 迁移 barrier：epoch 检查（旧 epoch 命令拒绝）。
     fn persist_command(&self, command: PersistCommand) -> PersistCommandOutcome {
@@ -2671,8 +2975,7 @@ impl SessionBackend for SqliteSessionBackend {
         &self,
         session_id: &str,
         traces: &[TurnTraceRecord],
-    ) -> SessionBackendMutationResult {
-        let slot = match self.connection() {
+    ) -> SessionBackendMutationResult {        let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
                 eprintln!("[pony-agent][session] SQLite open error: {error}");
@@ -4963,6 +5266,131 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// PA-095：事件 schema 版本契约四分支——匹配 / 缺失 key（legacy 库视为 v1 并
+    /// 回填）/ 不匹配 Err / 坏 payload fail loud（degraded 上抛，不静默跳过）。
+    #[test]
+    fn event_schema_version_contract_four_branches() {
+        use crate::agent::turn_event::TurnEvent;
+        let dir = unique_dir("schema-version");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("schema-version.db");
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        );
+
+        // 分支 1：新建库 → ensure_schema 已写入当前版本 → 校验通过。
+        assert_eq!(
+            backend.validate_event_schema().expect("fresh store valid"),
+            crate::agent::turn_event::EVENT_SCHEMA_VERSION,
+            "fresh store matches current version"
+        );
+
+        // 分支 2：缺失 key（模拟 legacy 库）→ 删除后校验视为 v1 并回填。
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute(
+                    "DELETE FROM store_metadata WHERE key = 'events.schema_version'",
+                    [],
+                )
+                .expect("delete version key");
+        }
+        assert_eq!(
+            backend.validate_event_schema().expect("legacy store valid"),
+            crate::agent::turn_event::EVENT_SCHEMA_VERSION,
+            "missing key treated as v1"
+        );
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            let backfilled: String = guard
+                .query_row(
+                    "SELECT value FROM store_metadata WHERE key = 'events.schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("backfilled");
+            assert_eq!(
+                backfilled,
+                crate::agent::turn_event::EVENT_SCHEMA_VERSION.to_string(),
+                "missing key backfilled on validate"
+            );
+        }
+
+        // 分支 3：版本不匹配 → Err（数据不可用，非部分视图）。
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute(
+                    "UPDATE store_metadata SET value = '999' WHERE key = 'events.schema_version'",
+                    [],
+                )
+                .expect("bump to future version");
+        }
+        let mismatch = backend.validate_event_schema();
+        assert!(mismatch.is_err(), "version mismatch must fail loud");
+        assert!(
+            mismatch.unwrap_err().contains("mismatch"),
+            "error names the mismatch"
+        );
+        // 不匹配时 load_turn_events_checked 同样拒绝。
+        assert!(backend.load_turn_events_checked("s1", None).is_err());
+
+        // 恢复版本，写入一条坏 payload 事件。
+        {
+            let conn = backend.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            guard
+                .execute(
+                    "UPDATE store_metadata SET value = ?1 WHERE key = 'events.schema_version'",
+                    params![crate::agent::turn_event::EVENT_SCHEMA_VERSION.to_string()],
+                )
+                .expect("restore version");
+            guard
+                .execute(
+                    "INSERT INTO turn_events (session_id, turn_id, branch_id, seq, event_type, payload, created_at_ms)
+                     VALUES ('s1', 't1', 'main', 0, 'alien/event', '{\"type\":\"alien/event\"}', 0)",
+                    [],
+                )
+                .expect("insert malformed event");
+        }
+
+        // 分支 4：坏 payload → checked 加载 fail loud（Err 含定位信息）；
+        // 兼容入口 load_turn_events 保持旧行为（跳过坏行）供 legacy 调用方过渡。
+        let checked = backend.load_turn_events_checked("s1", None);
+        assert!(checked.is_err(), "malformed payload must fail loud");
+        assert!(
+            checked.unwrap_err().contains("degraded"),
+            "error marks stream degraded"
+        );
+        let unchecked = SessionBackend::load_turn_events(&backend, "s1", None);
+        assert_eq!(unchecked.len(), 0, "legacy path skips bad row (transition)");
+
+        // PA-095：SessionStore 层——坏 payload 上抛同时标记会话 degraded；
+        // 正常会话不受影响。
+        let store = crate::agent::session::SessionStore::with_backend(Box::new(
+            SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                SeparateTraceTableMode::WriteSeparate,
+            ),
+        ));
+        assert!(!store.is_event_stream_degraded("s1"), "clean before load");
+        assert!(store.load_turn_events_checked("s1", None).is_err());
+        assert!(
+            store.is_event_stream_degraded("s1"),
+            "session marked degraded after failed load"
+        );
+        assert!(
+            !store.is_event_stream_degraded("other"),
+            "unrelated session untouched"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// PA-094：大字段外置——flush ContextObservation 事件时，全量 payload 写入
     /// build_context_observations 表，事件落盘形态只含引用；load 返回与原始一致。
     #[test]
@@ -5081,6 +5509,213 @@ mod tests {
         assert!(backend
             .load_build_context_observation("s1", "bco:missing:9")
             .is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PA-095 #7：trace cache ref-only——live 写入剥离 observation payload；
+    /// flush 同事务把外置引用回填 trace 行；legacy 内嵌数据读取兼容不变。
+    #[test]
+    fn pa095_ref_only_trace_rows_backfill_and_legacy_reads() {
+        use crate::agent::provider::BuildContextObservation;
+        use crate::agent::session::{
+            SessionStore, TraceMigrationState, TurnTraceRecord,
+        };
+        use crate::agent::turn_event::TurnEvent;
+        let dir = unique_dir("pa095-ref-only");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ref-only.db");
+
+        let observation = BuildContextObservation {
+            request_format: "chat".into(),
+            message_count: 2,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.7,
+            max_output_tokens: 4096,
+            stable_prefix_text: "stable".into(),
+            semi_stable_context_text: String::new(),
+            volatile_input_text: "input".into(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".into(),
+            tool_definitions_text: "tools".into(),
+        };
+
+        // Authoritative 会话种子（与 flush_events_externalizes_context_observation 一致）。
+        {
+            let backend = SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                SeparateTraceTableMode::WriteSeparate,
+            );
+            let mut session = minimal_session("s9", "first", 1000);
+            session.trace_migration_state = TraceMigrationState::TraceTableAuthoritative;
+            assert!(backend.upsert_session("s9", &session));
+        }
+
+        // live 写入：trace 携带全量 payload → 缓存行剥离。
+        let mut store = SessionStore::with_backend(Box::new(
+            SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                SeparateTraceTableMode::WriteSeparate,
+            ),
+        ));
+        store.record_turn_trace(
+            Some("s9"),
+            TurnTraceRecord {
+                turn_id: "t1".to_string(),
+                title: "t1".to_string(),
+                phase: "completed".to_string(),
+                build_context_observation: Some(observation.clone()),
+                ..Default::default()
+            },
+        );
+
+        let raw_conn = rusqlite::Connection::open(&db_path).expect("open raw");
+        let trace_data: String = raw_conn
+            .query_row(
+                "SELECT trace_data FROM session_turn_traces WHERE session_id = 's9' AND turn_id = 't1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session_turn_traces row");
+        assert!(
+            !trace_data.contains("requestFormat"),
+            "live trace_data must not embed observation payload: {trace_data}"
+        );
+        let raw_json: String = raw_conn
+            .query_row(
+                "SELECT raw_json FROM normalized_turn_traces WHERE session_id = 's9' AND turn_id = 't1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("normalized_turn_traces row (Authoritative dual-write)");
+        assert!(
+            !raw_json.contains("requestFormat"),
+            "live raw_json must not embed observation payload: {raw_json}"
+        );
+
+        // flush 外置事件 → 同事务回填 ref 到 trace 行。
+        store.persist_events(
+            "s9",
+            "t1",
+            "main",
+            vec![TurnEvent::ContextObservation {
+                turn_id: "t1".into(),
+                step: 0,
+                observation: Some(observation.clone()),
+                observation_ref: None,
+            }],
+        );
+        let trace_data_after: String = raw_conn
+            .query_row(
+                "SELECT trace_data FROM session_turn_traces WHERE session_id = 's9' AND turn_id = 't1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("trace row after flush");
+        assert!(
+            trace_data_after.contains("\"buildContextObservationRef\":\"bco:t1:"),
+            "flush backfills observation ref into trace row: {trace_data_after}"
+        );
+        assert!(
+            !trace_data_after.contains("requestFormat"),
+            "backfilled row stays payload-free: {trace_data_after}"
+        );
+
+        // 引用加载与原始一致。
+        drop(raw_conn);
+        let reader = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let reference = {
+            let conn = reader.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            let reference: String = guard
+                .query_row(
+                    "SELECT observation_ref FROM build_context_observations WHERE session_id = 's9'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("observation ref");
+            reference
+        };
+        let loaded = reader
+            .load_build_context_observation("s9", &reference)
+            .expect("load by ref");
+        assert_eq!(
+            serde_json::to_string(&loaded).expect("serialize loaded"),
+            serde_json::to_string(&observation).expect("serialize original"),
+            "ref load matches original payload"
+        );
+
+        // 读侧水合（实施后审核 P1）：ref-only 行读回时按 ref 还原 payload——
+        // "读路径优先 ref、缺失回退内嵌"承诺的落实验证。
+        {
+            let mut hydration_store = SessionStore::with_backend(Box::new(
+                SqliteSessionBackend::new_with_trace_mode(
+                    db_path.clone(),
+                    SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let hydration_snapshot = hydration_store.snapshot(Some("s9"), &[]);
+            let hydrated_trace = hydration_snapshot
+                .turn_trace_history
+                .iter()
+                .find(|trace| trace.turn_id == "t1")
+                .expect("t1 trace loads");
+            let hydrated_observation = hydrated_trace
+                .build_context_observation
+                .as_ref()
+                .expect("ref-only row hydrates observation on read");
+            assert_eq!(
+                serde_json::to_string(hydrated_observation).expect("serialize hydrated"),
+                serde_json::to_string(&observation).expect("serialize original"),
+                "hydration returns original payload"
+            );
+        }
+
+        // legacy 内嵌数据仍可读：直接插入 legacy 形态行，重载后保留内嵌 observation。
+        {
+            let conn = reader.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            let legacy_json = format!(
+                r#"{{"turnId":"t-legacy","title":"legacy","phase":"completed","buildContextObservation":{}}}"#,
+                serde_json::to_string(&observation).expect("serialize legacy obs")
+            );
+            guard
+                .execute(
+                    "INSERT OR REPLACE INTO session_turn_traces
+                     (session_id, turn_id, updated_at_ms, trace_order, trace_data)
+                     VALUES ('s9', 't-legacy', 1001, 1, ?1)",
+                    [&legacy_json],
+                )
+                .expect("insert legacy row");
+        }
+        // legacy 内嵌数据仍可读：legacy 形态行（含 buildContextObservation 全量
+        // payload）必须能被读路径反序列化（serde 兼容；水合只对 ref-only 行生效，
+        // 已有内嵌 payload 的行原样保留）。
+        {
+            let conn = reader.connection().expect("connection");
+            let guard = conn.as_ref().expect("initialized");
+            let legacy_raw: String = guard
+                .query_row(
+                    "SELECT trace_data FROM session_turn_traces WHERE session_id = 's9' AND turn_id = 't-legacy'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("legacy row present");
+            let legacy_record: TurnTraceRecord =
+                serde_json::from_str(&legacy_raw).expect("legacy row deserializes");
+            let legacy_observation = legacy_record
+                .build_context_observation
+                .as_ref()
+                .expect("legacy embedded observation preserved");
+            assert_eq!(legacy_observation.request_format, "chat");
+        }
 
         fs::remove_dir_all(&dir).ok();
     }

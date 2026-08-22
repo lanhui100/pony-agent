@@ -23,10 +23,19 @@ pub trait TurnEventSink {
     fn persist(&self, _event: crate::agent::turn_event::TurnEvent) {}
 }
 
+/// PA-095：同步入口（run_turn）的事件通道 sink——emit 空实现（同步 API 无流式
+/// 推送），事件持久化经全局注册表进行（与 sink 无关），使同步入口产生与
+/// streaming 入口等价的事件流。
+pub struct NoopTurnEventSink;
+
+impl TurnEventSink for NoopTurnEventSink {
+    fn emit(&self, _name: &str, _payload: TurnStreamEvent) {}
+}
+
 /// PA-091：全局事件持久化注册表（OnceLock 模式，与 turn_event_sequence_registry 一致）。
 /// 生产路径由 HostControlPlane 初始化时注册（持有 sessions_rwlock 的 Arc）；
 /// 测试可注册 mock / 清空。签名：(session_id, turn_id, event, is_terminal)。
-type EventPersistFn = dyn Fn(&str, &str, crate::agent::turn_event::TurnEvent, bool) + Send + Sync;
+pub type EventPersistFn = dyn Fn(&str, &str, crate::agent::turn_event::TurnEvent, bool) + Send + Sync;
 
 static EVENT_PERSIST_REGISTRY: OnceLock<Mutex<Option<Arc<EventPersistFn>>>> = OnceLock::new();
 
@@ -39,6 +48,16 @@ pub fn register_event_persist(f: Arc<EventPersistFn>) {
     let mut slot = event_persist_registry()
         .lock()
         .expect("event persist registry lock poisoned");
+    // PA-095 #3（实施后审核 P2）：覆盖非同源通道时告警——多控制面并存时
+    // 后建者的单槽注册会劫持先建者未绑定会话的事件流（结构性已知问题，
+    // 登记于任务卡；测试侧应使用会话绑定路由）。
+    if let Some(previous) = slot.as_ref() {
+        if !Arc::ptr_eq(previous, &f) {
+            eprintln!(
+                "[pony-agent][runtime] event persist channel overwritten by a new control plane (multi-control-plane setups must route per session)"
+            );
+        }
+    }
     *slot = Some(f);
 }
 
@@ -51,15 +70,19 @@ pub fn clear_event_persist() {
 }
 
 /// PA-093：非 turn 生命周期事实（checkpoint/checkout、fork/created）经全局
-/// 注册表落盘（立即 flush）。turn_id 用语义化字面量（事件无 turn 归属，列非空）。
+/// 注册表落盘。turn_id 用语义化字面量（事件无 turn 归属，列非空）。
 /// 未注册通道（测试/老路径）时静默跳过——与 turn 事件路径的 contained 语义一致。
+/// PA-095 #3：is_terminal=false——history 命令在持有 sessions 写锁时调用本函数，
+/// 终态内联 flush 会同线程重入写锁死锁（fork 实测挂死）；改为仅入缓冲，由
+/// history 命令包装释放写锁后的 flush_session_buffered_events 提交（或并入下一条
+/// turn 终态批）。内存后端 flush 失败 contained（与既有语义一致）。
 pub fn emit_global_event(
     session_id: &str,
     turn_id: &str,
     event: crate::agent::turn_event::TurnEvent,
 ) {
-    if let Some(persist) = current_event_persist() {
-        persist(session_id, turn_id, event, true);
+    if let Some(persist) = resolve_event_persist(session_id) {
+        persist(session_id, turn_id, event, false);
     }
 }
 
@@ -69,6 +92,240 @@ fn current_event_persist() -> Option<Arc<EventPersistFn>> {
         .lock()
         .ok()
         .and_then(|slot| slot.clone())
+}
+
+/// PA-095：分发事件到生产通道与测试多播 sink。生产单槽可被任意
+/// HostControlPlane 构建覆盖（并行测试下互相抢占），测试多播 sink 只能被
+/// 注册它的测试清除——依赖全局通道断言的测试必须走多播 sink。
+fn dispatch_event_persist(
+    session_id: &str,
+    turn_id: &str,
+    event: crate::agent::turn_event::TurnEvent,
+    is_terminal: bool,
+) {
+    // PA-095 #3（实施后审核 P1）：匿名 turn（session_id=None）归一到默认会话——
+    // 其 history/trace 本就落默认会话，事件缓冲键若保留 "" 将无人 flush（永久滞留）。
+    let resolved_session_id = if session_id.is_empty() {
+        crate::agent::session::DEFAULT_SESSION_ID
+    } else {
+        session_id
+    };
+    if let Some(persist) = resolve_event_persist(resolved_session_id) {
+        persist(resolved_session_id, turn_id, event.clone(), is_terminal);
+    }
+    #[cfg(test)]
+    for sink in event_persist_test_sinks()
+        .lock()
+        .expect("event persist test sinks lock poisoned")
+        .iter()
+    {
+        sink(session_id, turn_id, event.clone(), is_terminal);
+    }
+}
+
+/// PA-095 #3：事件通道解析——会话绑定优先，回退全局默认单槽。会话绑定是
+/// "按 session 所有权路由的多通道模型"（任务卡登记的结构性改进）的落地：
+/// 并行测试中各场景把自身控制面的通道绑到自己的 session，全局默认槽被其他
+/// 测试构建覆盖不再影响本会话的事件落盘；生产路径无绑定时行为不变。
+fn resolve_event_persist(session_id: &str) -> Option<Arc<EventPersistFn>> {
+    #[cfg(test)]
+    if let Some(bound) = session_event_persist_binding(session_id) {
+        return Some(bound);
+    }
+    current_event_persist()
+}
+
+/// PA-095：测试专用多播 sink 注册表（与生产单槽独立）。
+#[cfg(test)]
+static EVENT_PERSIST_TEST_SINKS: OnceLock<Mutex<Vec<Arc<EventPersistFn>>>> = OnceLock::new();
+
+#[cfg(test)]
+fn event_persist_test_sinks() -> &'static Mutex<Vec<Arc<EventPersistFn>>> {
+    EVENT_PERSIST_TEST_SINKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// PA-095：注册测试专用多播持久化 sink（不受生产单槽覆盖影响）。
+/// 返回守卫——Drop 时仅移除本 sink（并行测试互不清除对方注册）。
+#[cfg(test)]
+pub fn register_event_persist_test_sink(
+    f: Arc<EventPersistFn>,
+) -> EventPersistTestSinkGuard {
+    let mut sinks = event_persist_test_sinks()
+        .lock()
+        .expect("event persist test sinks lock poisoned");
+    sinks.push(Arc::clone(&f));
+    drop(sinks);
+    EventPersistTestSinkGuard { sink: f }
+}
+
+/// PA-095：测试多播 sink 守卫——Drop 按指针相等移除自身。
+#[cfg(test)]
+pub struct EventPersistTestSinkGuard {
+    sink: Arc<EventPersistFn>,
+}
+
+#[cfg(test)]
+impl Drop for EventPersistTestSinkGuard {
+    fn drop(&mut self) {
+        let mut sinks = event_persist_test_sinks()
+            .lock()
+            .expect("event persist test sinks lock poisoned");
+        sinks.retain(|sink| !Arc::ptr_eq(sink, &self.sink));
+    }
+}
+
+/// PA-095 #3：会话绑定事件持久化通道（测试专用）——session 所有权路由，
+/// 优先于全局默认单槽；守卫 Drop 时解除绑定。
+#[cfg(test)]
+static SESSION_EVENT_PERSIST_BINDINGS: OnceLock<Mutex<HashMap<String, Arc<EventPersistFn>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn session_event_persist_bindings(
+) -> &'static Mutex<HashMap<String, Arc<EventPersistFn>>> {
+    SESSION_EVENT_PERSIST_BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn session_event_persist_binding(session_id: &str) -> Option<Arc<EventPersistFn>> {
+    session_event_persist_bindings()
+        .lock()
+        .ok()?
+        .get(session_id)
+        .cloned()
+}
+
+/// PA-095 #3：绑定会话的事件持久化通道（测试专用）；返回守卫，Drop 解绑。
+#[cfg(test)]
+pub fn bind_event_persist_session(
+    session_id: &str,
+    f: Arc<EventPersistFn>,
+) -> SessionEventPersistBindingGuard {
+    session_event_persist_bindings()
+        .lock()
+        .expect("session event persist bindings lock poisoned")
+        .insert(session_id.to_string(), Arc::clone(&f));
+    SessionEventPersistBindingGuard {
+        session_id: session_id.to_string(),
+        bound: f,
+    }
+}
+
+#[cfg(test)]
+pub struct SessionEventPersistBindingGuard {
+    session_id: String,
+    bound: Arc<EventPersistFn>,
+}
+
+#[cfg(test)]
+impl Drop for SessionEventPersistBindingGuard {
+    fn drop(&mut self) {
+        // PA-095 #3（实施后审核 P2）：仅当当前占用者仍是自己时才解绑——
+        // 同名 session 的嵌套/并行绑定不得被先结束的守卫误摘。
+        if let Ok(mut bindings) = session_event_persist_bindings().lock() {
+            if bindings
+                .get(&self.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
+            {
+                bindings.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// PA-095 #2：会话级事件缓冲 flush 请求——append_turn 物化前确保该会话的
+/// 缓冲事件已提交事件表（commit 先于清空，由注册闭包保证）。生产由
+/// HostControlPlaneBuilder 注册（与持久化闭包同源缓冲）；未注册（无控制面 /
+/// 测试直连 store）返回 Ok(0)。
+pub type EventFlushFn = dyn Fn(&str) -> Result<usize, String> + Send + Sync;
+
+static EVENT_FLUSH_REGISTRY: OnceLock<Mutex<Option<Arc<EventFlushFn>>>> = OnceLock::new();
+
+/// PA-095 #3：会话绑定 flush 通道（测试专用）——与持久化绑定同原理。
+#[cfg(test)]
+static SESSION_EVENT_FLUSH_BINDINGS: OnceLock<Mutex<HashMap<String, Arc<EventFlushFn>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn session_event_flush_bindings() -> &'static Mutex<HashMap<String, Arc<EventFlushFn>>> {
+    SESSION_EVENT_FLUSH_BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// PA-095 #3：绑定会话的 flush 请求通道（测试专用）；返回守卫，Drop 解绑。
+#[cfg(test)]
+pub fn bind_event_flush_session(
+    session_id: &str,
+    f: Arc<EventFlushFn>,
+) -> SessionEventFlushBindingGuard {
+    session_event_flush_bindings()
+        .lock()
+        .expect("session event flush bindings lock poisoned")
+        .insert(session_id.to_string(), Arc::clone(&f));
+    SessionEventFlushBindingGuard {
+        session_id: session_id.to_string(),
+        bound: f,
+    }
+}
+
+#[cfg(test)]
+pub struct SessionEventFlushBindingGuard {
+    session_id: String,
+    bound: Arc<EventFlushFn>,
+}
+
+#[cfg(test)]
+impl Drop for SessionEventFlushBindingGuard {
+    fn drop(&mut self) {
+        // 同 persist 守卫——仅解绑自己（Arc::ptr_eq 校验）。
+        if let Ok(mut bindings) = session_event_flush_bindings().lock() {
+            if bindings
+                .get(&self.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
+            {
+                bindings.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+fn event_flush_registry() -> &'static Mutex<Option<Arc<EventFlushFn>>> {
+    EVENT_FLUSH_REGISTRY.get_or_init(|| Mutex::new(None))
+}
+
+/// 注册会话级 flush 请求通道（幂等：重复注册覆盖）。
+pub fn register_event_flush(f: Arc<EventFlushFn>) {
+    let mut slot = event_flush_registry()
+        .lock()
+        .expect("event flush registry lock poisoned");
+    *slot = Some(f);
+}
+
+/// 清空 flush 请求通道（测试用）。
+pub fn clear_event_flush() {
+    let mut slot = event_flush_registry()
+        .lock()
+        .expect("event flush registry lock poisoned");
+    *slot = None;
+}
+
+/// 请求提交某会话的全部缓冲事件；返回提交的事件数（0 = 无缓冲）。
+/// PA-095 #3：会话绑定 flush 通道优先（session 所有权路由），回退全局注册。
+pub fn flush_session_buffered_events(session_id: &str) -> Result<usize, String> {
+    #[cfg(test)]
+    if let Some(bound) = session_event_flush_bindings()
+        .lock()
+        .ok()
+        .and_then(|bindings| bindings.get(session_id).cloned())
+    {
+        return bound(session_id);
+    }
+    match event_flush_registry().lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .map(|f| Arc::clone(f) as Arc<EventFlushFn>)
+    }) {
+        Some(flush) => flush(session_id),
+        None => Ok(0),
+    }
 }
 
 pub struct PreparedTurn {
@@ -224,7 +481,7 @@ pub fn emit_stream_failed(
     hook_trace_records: Option<Vec<HookTraceRecord>>,
     error: String,
     session_id: Option<String>,
-) {
+) -> TurnEventEnvelope {
     emit_event(
         sink,
         "turn:failed",
@@ -262,8 +519,9 @@ pub fn emit_stream_failed(
             provider_call_records,
             hook_trace_records,
             session_summary: None,
+            step: None,
         },
-    );
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -318,6 +576,7 @@ pub fn emit_stream_cancelled(
             provider_call_records,
             hook_trace_records: None,
             session_summary: None,
+            step: None,
         },
     );
 }
@@ -350,7 +609,70 @@ pub fn emit_stream_event(
     hook_trace_records: Option<Vec<HookTraceRecord>>,
     session_summary: Option<String>,
     session_id: Option<String>,
-) {
+) -> TurnEventEnvelope {
+    emit_stream_event_with_step(
+        sink,
+        name,
+        turn_id,
+        kind,
+        phase,
+        text,
+        reasoning_content,
+        provider_meta,
+        provider_source,
+        provider_mode,
+        fallback_reason,
+        build_context_observation,
+        input_tokens,
+        cache_hit_input_tokens,
+        reasoning_tokens,
+        output_tokens,
+        total_tokens,
+        first_token_latency_ms,
+        turn_duration_ms,
+        trace_steps,
+        trace_timeline,
+        tool_activities,
+        provider_call_records,
+        hook_trace_records,
+        session_summary,
+        session_id,
+        None,
+    )
+}
+
+/// PA-095 #4：携带逻辑 hop step 的事件发射（delta/chunk 归属 hop、
+/// turn:trace(calling_model) 触发 StepStart）。
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stream_event_with_step(
+    sink: &impl TurnEventSink,
+    name: &str,
+    turn_id: String,
+    kind: &str,
+    phase: Option<&str>,
+    text: Option<String>,
+    reasoning_content: Option<String>,
+    provider_meta: Option<&ProviderEventMeta>,
+    provider_source: Option<String>,
+    provider_mode: Option<String>,
+    fallback_reason: Option<String>,
+    build_context_observation: Option<BuildContextObservation>,
+    input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    trace_steps: Option<Vec<TurnTraceStep>>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
+    session_summary: Option<String>,
+    session_id: Option<String>,
+    step: Option<u32>,
+) -> TurnEventEnvelope {
     let is_delta_event = name == "turn:delta";
     emit_event(
         sink,
@@ -405,8 +727,9 @@ pub fn emit_stream_event(
                 hook_trace_records
             },
             session_summary,
+            step,
         },
-    );
+    )
 }
 
 fn resolve_canonical_event_type(
@@ -549,7 +872,11 @@ pub fn emit_turn_failed(
     );
 }
 
-pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEvent) {
+pub fn emit_event(
+    sink: &impl TurnEventSink,
+    name: &str,
+    payload: TurnStreamEvent,
+) -> TurnEventEnvelope {
     let mut payload = payload;
     let terminal_turn_id = payload.turn_id.clone();
     let next_sequence = next_turn_event_sequence(&payload.turn_id);
@@ -585,47 +912,58 @@ pub fn emit_event(sink: &impl TurnEventSink, name: &str, payload: TurnStreamEven
     // turn/end 统一触发 flush，避免拆批（AssistantMessage 先行落盘、TurnEnd 第二批，
     // 两事务间崩溃会留下半终态事件流）。failed/cancelled 无额外事件，保持 terminal。
     if let Some(event) = build_turn_event(name, &payload) {
-        if let Some(persist) = current_event_persist() {
-            let session_id = payload.session_id.as_deref().unwrap_or("");
-            let is_terminal = matches!(name, "turn:failed" | "turn:cancelled");
-            persist(session_id, &payload.turn_id, event, is_terminal);
-        }
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        let is_terminal = matches!(name, "turn:failed" | "turn:cancelled");
+        dispatch_event_persist(session_id, &payload.turn_id, event, is_terminal);
     }
     // PA-094：大字段外置——turn:started 携带 build_context_observation 时，额外落一条
     // context/observation 事件（内存携带全量 payload，flush 时外置到独立表）。
     if let Some(observation_event) = build_context_observation_event(name, &payload) {
-        if let Some(persist) = current_event_persist() {
-            let session_id = payload.session_id.as_deref().unwrap_or("");
-            persist(session_id, &payload.turn_id, observation_event, false);
-        }
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, observation_event, false);
     }
     // PA-094（审核 P0）：turn:started 额外发射 user/message——用户消息事件化，
     // HistoryProjection 从事件重建用户消息的前提（生产路径此前不发射该事件，
     // 事件重建的会话视图缺 user 消息）。payload.text 携带用户消息文本。
     if let Some(user_event) = build_user_message_event(name, &payload) {
-        if let Some(persist) = current_event_persist() {
-            let session_id = payload.session_id.as_deref().unwrap_or("");
-            persist(session_id, &payload.turn_id, user_event, false);
-        }
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, user_event, false);
+    }
+    // PA-095 #4：step/start 事件化（初始 call 由 turn:started 承担 step 0，
+    // followup call 由 turn:trace(calling_model) 携带 hop 索引触发）。
+    if let Some(step_start_event) = build_step_start_event(name, &payload) {
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, step_start_event, false);
     }
     // PA-094：turn:completed 额外发射 provider/usage（usage 结算事件，MetricsProjection
     // 重建 ProviderCallCacheRecord 的事件源）与 turn/end（终态结算，TraceProjection
     // 的 token 指标/timeline 挂载依赖 turn/end 触发）。顺序：usage → end（end 为
     // terminal，触发 flush 时整批一起落盘——含 assistant/message，单事务）。
-    for usage_event in build_provider_usage_event(name, &payload) {
-        if let Some(persist) = current_event_persist() {
-            let session_id = payload.session_id.as_deref().unwrap_or("");
-            persist(session_id, &payload.turn_id, usage_event, false);
-        }
+    // PA-095 #4：per-call 结算——usage 与 step/end 相邻成对发射
+    // （usage[i] 紧跟 step_end[i]，投影的 call_model 条目结算落点一致）。
+    let usage_events = build_provider_usage_event(name, &payload);
+    let step_end_events = build_step_end_events(name, &payload, usage_events.len());
+    for pair in usage_events.into_iter().zip(step_end_events) {
+        let (usage_event, step_end_event) = pair;
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, usage_event, false);
+        dispatch_event_persist(session_id, &payload.turn_id, step_end_event, false);
     }
     if let Some(end_event) = build_turn_end_event(name, &payload) {
-        if let Some(persist) = current_event_persist() {
-            let session_id = payload.session_id.as_deref().unwrap_or("");
-            persist(session_id, &payload.turn_id, end_event, true);
-        }
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, end_event, true);
     }
     if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
         clear_turn_event_sequence(&terminal_turn_id);
+    }
+    // PA-095：返回本次发射的信封（调用方可复用为 TurnResult 终态信封，
+    // 避免二次分配序列号造成事件流与结果信封错位）。
+    TurnEventEnvelope {
+        event_id: payload.event_id.clone().unwrap_or_default(),
+        event_type: payload.event_type.clone().unwrap_or_default(),
+        event_version: payload.event_version.clone().unwrap_or_default(),
+        sequence: payload.sequence.unwrap_or(0),
+        emitted_at_ms: payload.emitted_at_ms.unwrap_or(0),
     }
 }
 
@@ -666,6 +1004,56 @@ fn build_user_message_event(
         text,
         attachments: Vec::new(),
     })
+}
+
+/// PA-095 #4：step/start 事件化——每次 provider call 发射 StepStart（投影折叠为
+/// 该 step 的 call_model 条目）。两个触发点：
+/// - turn:started（phase=calling_model）→ 初始 call 的 StepStart{step:0}；
+/// - turn:trace(calling_model) 且 payload.step ≥ 1 → followup call 的
+///   StepStart{step:k}（运行时 followup 循环填充 hop 索引；直连路径的
+///   calling_model trace 不带 step，不重复发射——初始 call 已由 started 覆盖）。
+fn build_step_start_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    match name {
+        "turn:started" => Some(crate::agent::turn_event::TurnEvent::StepStart {
+            turn_id: payload.turn_id.clone(),
+            step: 0,
+            first_token_latency_ms: None,
+        }),
+        "turn:trace"
+            if payload.phase.as_deref() == Some("calling_model")
+                && payload.step.is_some_and(|step| step >= 1) =>
+        {
+            Some(crate::agent::turn_event::TurnEvent::StepStart {
+                turn_id: payload.turn_id.clone(),
+                step: payload.step.unwrap_or(0),
+                first_token_latency_ms: payload.first_token_latency_ms,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// PA-095 #4：step/end 事件化——ProviderUsage 同点结算（每条 usage 记录配对
+/// 一条 StepEnd{step}，相邻发射；spec："step/end at settlement"）。仅
+/// turn:completed 结算（failed/cancelled 无 usage 数据可结算，TurnEnd(Error)
+/// 已承担终态；投影 settle_timeline 对未闭合 step 容忍）。
+fn build_step_end_events(
+    name: &str,
+    payload: &TurnStreamEvent,
+    usage_count: usize,
+) -> Vec<crate::agent::turn_event::TurnEvent> {
+    if name != "turn:completed" || usage_count == 0 {
+        return Vec::new();
+    }
+    (0..usage_count as u32)
+        .map(|step| crate::agent::turn_event::TurnEvent::StepEnd {
+            turn_id: payload.turn_id.clone(),
+            step,
+        })
+        .collect()
 }
 
 /// PA-094：provider/usage 事件化——turn 终态（completed/failed/cancelled）携带
@@ -722,10 +1110,14 @@ fn build_provider_usage_event(
                         first_token_latency_ms: record.first_token_latency_ms,
                         turn_duration_ms: record.turn_duration_ms,
                         latency_kind: record.latency_kind.clone(),
-                        provider: record
-                            .provider_source
+                        // PA-095 #3：provider 取名称（与存储 trace 的 provider 维度
+                        // 同语义）；record.source 仅作无名称时的回退。
+                        provider: payload
+                            .provider_name
                             .clone()
-                            .unwrap_or_else(|| payload.provider_name.clone().unwrap_or_default()),
+                            .unwrap_or_else(|| {
+                                record.provider_source.clone().unwrap_or_default()
+                            }),
                         model: payload.provider_model.clone().unwrap_or_default(),
                     }
                 })
@@ -791,8 +1183,9 @@ fn build_turn_event(
             // "every emitted event SHALL be persisted" 的语义完整。
             Some(TurnEvent::AssistantChunk {
                 turn_id: payload.turn_id.clone(),
-                // 阶段 1 单步语义：step 固定 0（写时聚合键 (turn_id, step) 生效）。
-                step: 0,
+                // PA-095 #4：chunk 归属逻辑 hop（0-based；缺省归 step 0，
+                // 与 legacy 无 step 的 wire payload 兼容）。
+                step: payload.step.unwrap_or(0),
                 text: payload.text.clone().unwrap_or_default(),
             })
         }
@@ -1092,6 +1485,7 @@ mod tests {
             provider_call_records: None,
             hook_trace_records: None,
             session_summary: None,
+            step: None,
         }
     }
 
@@ -1270,17 +1664,21 @@ mod tests {
             .filter(|(_, turn_id, _, _)| turn_id == "turn-1")
             .cloned()
             .collect();
-        assert_eq!(own.len(), 5, "every emitted event reaches persist");
+        // PA-095 #4：started 额外发射 step/start（初始 call 的 StepStart{0}），
+        // 通道记录 5 → 6：[turn/start, step/start, chunk, chunk, assistant/message, turn/end]。
+        assert_eq!(own.len(), 6, "every emitted event reaches persist");
         assert_eq!(own[0].3, false, "started not terminal");
         assert_eq!(
-            own[3].3, false,
+            own[4].3, false,
             "completed assistant/message not terminal (deferred)"
         );
-        assert_eq!(own[4].3, true, "completed turn/end is terminal");
+        assert_eq!(own[5].3, true, "completed turn/end is terminal");
         assert_eq!(own[0].2[0].type_name(), "turn/start");
-        assert_eq!(own[1].2[0].type_name(), "assistant/chunk");
-        assert_eq!(own[3].2[0].type_name(), "assistant/message");
-        assert_eq!(own[4].2[0].type_name(), "turn/end");
+        assert_eq!(own[1].2[0].type_name(), "step/start");
+        assert_eq!(own[2].2[0].type_name(), "assistant/chunk");
+        assert_eq!(own[3].2[0].type_name(), "assistant/chunk");
+        assert_eq!(own[4].2[0].type_name(), "assistant/message");
+        assert_eq!(own[5].2[0].type_name(), "turn/end");
         drop(records);
         clear_event_persist();
     }

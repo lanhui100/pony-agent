@@ -273,14 +273,22 @@ fn ensure_call_model_entry(
 }
 
 /// turn/end 结算 timeline：无 StepStart 事件时兜底补建 call_model 条目，
-/// 末条 call_model 补 turn_duration_ms。
+/// 末条 call_model 补 turn_duration_ms。PA-095 #3：兜底收窄——turn 无任何
+/// 模型活动证据（chunk/usage 均缺，如 plan 前 cancelled）时不补建
+/// （避免重建产物虚构未发生的模型调用）。
 fn settle_timeline(state: &mut TraceProjectionState, turn_id: &str, turn_duration_ms: Option<u64>) {
     let has_call_model = state
         .timeline
         .get(turn_id)
         .map(|t| t.iter().any(|e| e.kind == "call_model"))
         .unwrap_or(false);
-    if !has_call_model {
+    let has_model_activity = state
+        .chunk_text
+        .get(turn_id)
+        .map(|text| !text.is_empty())
+        .unwrap_or(false)
+        || state.token_metrics.contains_key(turn_id);
+    if !has_call_model && has_model_activity {
         let sequence = next_timeline_seq(state, turn_id);
         let timeline = state.timeline.entry(turn_id.to_string()).or_default();
         timeline.push(TraceTimelineEntry {
@@ -377,13 +385,26 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                     });
                 }
                 // tool/call → call_tool 条目（tool_activities 挂载该 activity）。
+                // PA-095 #3：hop 序号与运行时产物同构——取当前 call_model 条目数
+                // （事件的 step 是 turn 日志序号，非模型 hop）。
+                let tool_hop = state
+                    .timeline
+                    .get(&turn_id)
+                    .map(|timeline| {
+                        timeline
+                            .iter()
+                            .filter(|entry| entry.kind == "call_model")
+                            .count()
+                    })
+                    .unwrap_or(0);
                 let sequence = next_timeline_seq(state, &turn_id);
                 let timeline = state.timeline.entry(turn_id.clone()).or_default();
                 let index = timeline.len();
                 timeline.push(TraceTimelineEntry {
                     id: format!("tool-{sequence}"),
                     kind: "call_tool".to_string(),
-                    label: format!("CALL TOOL · {name}"),
+                    // PA-095 #3：与运行时产物同构（hop 序号前缀）。
+                    label: format!("CALL TOOL #{} · {}", tool_hop, name),
                     state: "running".to_string(),
                     sequence,
                     tool_activities: vec![TurnToolActivity {
@@ -463,13 +484,19 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                     });
                 }
                 // tool/result → return_result 条目 + 回填 call_tool 条目的 tool_activities。
+                // PA-095 #3：state 与运行时产物同构（done→completed；error 保留）。
+                let normalized_status = match status.as_deref() {
+                    Some("done") => "completed".to_string(),
+                    Some(other) => other.to_string(),
+                    None => "completed".to_string(),
+                };
                 let sequence = next_timeline_seq(state, &turn_id);
                 let timeline = state.timeline.entry(turn_id.clone()).or_default();
                 timeline.push(TraceTimelineEntry {
                     id: format!("return-{sequence}"),
                     kind: "return_result".to_string(),
                     label: "RETURN RESULT".to_string(),
-                    state: status.clone().unwrap_or_else(|| "completed".to_string()),
+                    state: normalized_status.clone(),
                     sequence,
                     text: result.clone(),
                     error: error.clone(),
@@ -493,7 +520,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                             activity.capability_invocation = capability_invocation.clone();
                             activity.error = error.clone().map(serde_json::Value::String);
                         }
-                        entry.state = status.clone().unwrap_or_else(|| "completed".to_string());
+                        entry.state = normalized_status;
                     }
                 }
             }
@@ -570,26 +597,39 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                 // 结算 timeline：兜底补建 call_model + 末条补 turn_duration_ms
                 // （独立于 by_turn 借用，先结算再挂载）。
                 settle_timeline(state, &turn_id, *turn_duration_ms);
+                // PA-095 #3（对拍收敛修复）：cancelled/aborted turn 中未经 usage
+                // 结算的 call_model 条目标记 cancelled——中断的模型调用不得显示
+                // 为 completed（与运行时产物语义一致；已结算 hop 保持 completed）。
+                if matches!(reason, TurnEndReason::Cancelled | TurnEndReason::Aborted) {
+                    if let Some(timeline) = state.timeline.get_mut(&turn_id) {
+                        for entry in timeline.iter_mut() {
+                            if entry.kind == "call_model" && entry.provider_name.is_none() {
+                                entry.state = "cancelled".to_string();
+                            }
+                        }
+                    }
+                }
                 // PA-094：build_context 条目（ContextObservation 事件折叠）——
                 // 插入 timeline 开头并重排 sequence（与运行时产物结构对齐，
                 // design.md §2 映射表；prepare_retrieval 需 payload 判断，豁免）。
+                // PA-095 #3：entry API——兜底收窄后无模型活动的 turn 无既有
+                // timeline 条目，get_mut 会静默丢失 build_context 前插。
                 if let Some(ref_value) = state.context_ref.remove(&turn_id) {
-                    if let Some(timeline) = state.timeline.get_mut(&turn_id) {
-                        timeline.insert(
-                            0,
-                            TraceTimelineEntry {
-                                id: "context-1".to_string(),
-                                kind: "build_context".to_string(),
-                                label: "BUILD CONTEXT".to_string(),
-                                state: "completed".to_string(),
-                                sequence: 1,
-                                build_context_observation_ref: Some(ref_value),
-                                ..Default::default()
-                            },
-                        );
-                        for (index, entry) in timeline.iter_mut().enumerate() {
-                            entry.sequence = (index + 1) as u64;
-                        }
+                    let timeline = state.timeline.entry(turn_id.clone()).or_default();
+                    timeline.insert(
+                        0,
+                        TraceTimelineEntry {
+                            id: "context-1".to_string(),
+                            kind: "build_context".to_string(),
+                            label: "BUILD CONTEXT".to_string(),
+                            state: "completed".to_string(),
+                            sequence: 1,
+                            build_context_observation_ref: Some(ref_value),
+                            ..Default::default()
+                        },
+                    );
+                    for (index, entry) in timeline.iter_mut().enumerate() {
+                        entry.sequence = (index + 1) as u64;
                     }
                 }
                 let timeline = state.timeline.remove(&turn_id);
@@ -620,7 +660,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         });
                     let _ = text;
                 }
-                // 终态信封：event_type 由 reason 映射；title/phase/sequence 等
+                // 终态信封：event_type 由 reason 映射；title/sequence 等
                 // 由外层 annotate_turn_trace_terminal_event 补写（投影不自洽字段）。
                 trace.event_type = Some(match reason {
                     TurnEndReason::Completed => "turn.completed".to_string(),
@@ -629,6 +669,15 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         "turn.cancelled".to_string()
                     }
                 });
+                // PA-095 #3：phase 由 reason 确定性映射（对拍约定字段集包含
+                // phase——重建须自洽；annotate 补写同值，语义一致）。
+                trace.phase = match reason {
+                    TurnEndReason::Completed => "completed".to_string(),
+                    TurnEndReason::Error => "failed".to_string(),
+                    TurnEndReason::Aborted | TurnEndReason::Cancelled => {
+                        "cancelled".to_string()
+                    }
+                };
                 trace.sequence = Some(seq);
                 if let Some((provider, model)) = provider_model {
                     trace.provider_name = Some(provider);
@@ -1770,11 +1819,12 @@ mod tests {
             "新数据不内嵌全量 payload"
         );
         // build_context timeline 条目（turn/end 结算生成，带引用，sequence 重排）。
-        // 无 StepStart 时 settle_timeline 兜底补建 call_model，故 2 条。
+        // PA-095 #3 兜底收窄：无模型活动证据（chunk/usage 均缺）不再补建
+        // call_model——timeline 仅 build_context 条目。
         assert_eq!(
             trace.trace_timeline.len(),
-            2,
-            "build_context + fallback call_model"
+            1,
+            "build_context only (narrowed settle, no fabricated call_model)"
         );
         assert_eq!(trace.trace_timeline[0].kind, "build_context");
         assert_eq!(trace.trace_timeline[0].sequence, 1);
@@ -1785,8 +1835,6 @@ mod tests {
             Some("bco:t1:1"),
             "build_context entry carries ref"
         );
-        assert_eq!(trace.trace_timeline[1].kind, "call_model");
-        assert_eq!(trace.trace_timeline[1].sequence, 2);
     }
 
     /// PA-094（审核 P0）：ContextObservation + 完整 turn → timeline 结构对齐运行时
@@ -2051,5 +2099,121 @@ mod tests {
         let records = state.by_turn_records.get("t1").expect("records");
         assert_eq!(records.len(), 1, "same step replaces in place");
         assert_eq!(records[0].input_tokens, Some(200), "latest value wins");
+    }
+}
+
+/// PA-095 #3：对拍约定字段集与豁免清单——唯一事实源（spec："agreed = 全字段集
+/// − EXEMPT_FIELDS，清单为唯一事实源，禁止手抄字段列表"）。对拍测试经
+/// `trace_field` / `timeline_entry_field` 取值器迭代消费常量；每项豁免须有
+/// 反向探针（断言差异当前确实存在，防豁免腐化）。
+pub mod parity {
+    /// trace 记录级约定字段（对拍逐项断言；值经 `super::trace_field` 取）。
+    /// spec 口径："phase, provider name/model, token fields, turn_duration_ms,
+    /// event_type"——requested_name/source/mode 等六元数据不在约定集内。
+    /// `turn_duration_ms` 由对拍 harness 的时钟漂移容差断言单独消费
+    /// （EXEMPTIONS: turn_duration_ms_clock_drift）。
+    pub const AGREED_TRACE_FIELDS: &[&str] = &[
+        "phase",
+        "provider_name",
+        "provider_model",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "event_type",
+    ];
+
+    /// timeline 条目级约定字段（按 kind 配对后逐项断言；值经
+    /// `super::timeline_entry_field` 取）。`sequence` 不在列——结构性豁免
+    /// （prepare_retrieval/build_context 条目差异）导致绝对序号位置漂移，
+    /// 改由"过滤后 kind 顺序一致"的保序断言承载。
+    pub const AGREED_TIMELINE_ENTRY_FIELDS: &[&str] = &[
+        "kind",
+        "label",
+        "state",
+        "text",
+        "tool_activities",
+    ];
+
+    /// 对拍时从 stored timeline 中剔除的条目 kind（结构性豁免——重建产物
+    /// 不可能携带的条目）。
+    pub const EXEMPT_TIMELINE_KINDS: &[&str] = &["prepare_retrieval", "checkpoint_persist"];
+
+    /// 豁免清单：(名称, 理由)。约定字段集之外的全部已知差异必须登记于此，
+    /// 且每项有反向探针（断言差异当前确实存在，防豁免腐化）。
+    pub const EXEMPTIONS: &[(&str, &str)] = &[
+        (
+            "clock_fields(updated_at/event_id/emitted_at_ms)",
+            "时钟语义——重建产物不含发射时刻上下文",
+        ),
+        (
+            "title/session_id",
+            "运行时装饰，投影不自洽——由 annotate 补写",
+        ),
+        (
+            "timeline.prepare_retrieval_entry",
+            "需 payload 判断 build_context_uses_retrieval，事件只有引用",
+        ),
+        (
+            "timeline.checkpoint_persist_entry",
+            "运行时 checkpoint 装饰条目（completed turn 无条件追加）——无事件承载",
+        ),
+        (
+            "timeline.build_context_provider_metadata",
+            "事件无承载 provider 六元数据，后续可扩展",
+        ),
+        (
+            "timeline.failed_last_hop_state",
+            "#4 StepEnd 已落地但投影未消费 step/end 的 error 态——收敛后移除本项",
+        ),
+        (
+            "timeline.sync_call_model_text",
+            "同步入口无 chunk 流，hop 文本存于 AssistantMessage 事件而投影不折叠它——过程文本由流式入口承载（流式场景 text 在约定字段集内）",
+        ),
+        (
+            "terminal_no_usage_turn_provider_metadata",
+            "failed/cancelled turn 无 provider/usage 事件（无已完成模型调用可结算），provider 元数据不可从事件重建——后续可扩展 TurnStart 携带 provider 元数据（原 failed_turn_provider_metadata，PA-095 #3 cancelled 对拍扩展覆盖）",
+        ),
+        (
+            "timeline.call_tool_text",
+            "call_tool 条目 text 语义分叉：运行时填 activity 描述（执行状态文案），事件只有工具名",
+        ),
+        (
+            "turn_duration_ms_clock_drift",
+            "事件发射时刻与 trace 落库时刻的毫秒级时钟漂移（对拍允许 ≤250ms 容差）",
+        ),
+    ];
+}
+
+/// 对拍取值器：按字段名取 trace 记录字段值（`parity::AGREED_TRACE_FIELDS`
+/// 的消费端；未知字段名 panic——字段集与取值器必须同步演进）。
+pub fn trace_field(trace: &crate::agent::session::TurnTraceRecord, field: &str) -> Option<String> {
+    match field {
+        "phase" => Some(trace.phase.clone()),
+        "provider_requested_name" => trace.provider_requested_name.clone(),
+        "provider_name" => trace.provider_name.clone(),
+        "provider_model" => trace.provider_model.clone(),
+        "input_tokens" => trace.input_tokens.map(|v| v.to_string()),
+        "output_tokens" => trace.output_tokens.map(|v| v.to_string()),
+        "total_tokens" => trace.total_tokens.map(|v| v.to_string()),
+        "turn_duration_ms" => trace.turn_duration_ms.map(|v| v.to_string()),
+        "event_type" => trace.event_type.clone(),
+        _ => panic!("unknown parity trace field: {field}"),
+    }
+}
+
+/// 对拍取值器：按字段名取 timeline 条目字段值
+/// （`parity::AGREED_TIMELINE_ENTRY_FIELDS` 的消费端）。
+pub fn timeline_entry_field(
+    entry: &crate::agent::session::TraceTimelineEntry,
+    field: &str,
+) -> Option<String> {
+    match field {
+        "kind" => Some(entry.kind.clone()),
+        "label" => Some(entry.label.clone()),
+        "state" => Some(entry.state.clone()),
+        "sequence" => Some(entry.sequence.to_string()),
+        "text" => entry.text.clone(),
+        "tool_activities" => Some(format!("{}", entry.tool_activities.len())),
+        _ => panic!("unknown parity timeline field: {field}"),
     }
 }

@@ -1,18 +1,20 @@
+> 2026-08-22 归档同步：实现已随 PA-091/092 提交（6395ec7^..e88536f）落地并经全量验证（实施状态记录见文末），勾选为归档前簿记同步，非本轮新实施。
+
 # Tasks
 
-- [ ] 投影 trait 定义（`projection.rs`）：`init/apply/view` 三函数 + 纯函数约束测试（增量 == 全量）。
-- [ ] `HistoryProjection`：消息历史折叠（`user/message` + `assistant/message`）+ `DEFAULT_HISTORY_LIMIT` 截断窗口 + `history/squash` 语义。
-- [ ] `TraceProjection`：`TurnTraceRecord` 折叠（step/tool/chunk/turn-end 映射，tool 字段从事件重建）+ seq 水位幂等。
-- [ ] `PlanProjection`：`plan/update` 事件 → plan 状态。
-- [ ] `MetricsProjection`：`ProviderUsage` → 四桶 totals + last + per-turn 聚合（addReplacing；`assistant/message` usage 不参与 totals）。
-- [ ] 模型监控视图改造：`load_model_monitor_summary` / drilldown 读投影缓存，不再扫描 trace 表。
-- [ ] `append_turn` 重构：append 事件 + 增量折叠 + 快照由投影生成（同事务，双写变单写）；旧逻辑保留为 `#[cfg(test)]` 参考实现。
-- [ ] `record_turn_trace` 重构：trace 组装迁移到 `TraceProjection`，trace 表降级为缓存。
-- [ ] golden fixture 库：`tests/fixtures/projection/` 合成语料矩阵（空 session、单事件、截断边界、tool 链、多 hop usage、checkout/fork、chunk_missing、squash、10k+ 事件、100KB+ payload）。
-- [ ] 对拍模式：`PONY_AGENT_PROJECTION_VERIFY=record`（CI 失败）/ `=sample`（生产抽样记录不 panic）。
-- [ ] 单元测试：投影纯函数、截断窗口、squash、trace 水位、MetricsProjection addReplacing + 双 usage 防重、增量 == 全量。
-- [ ] 对拍验证：golden fixture 逐字段一致（限定字段集）。
-- [ ] 回归：既有 session/trace/checkpoint 测试全绿；验收命令 `npm run cargo:test`。
+- [x] 投影 trait 定义（`projection.rs`）：`init/apply/view` 三函数 + 纯函数约束测试（增量 == 全量）。
+- [x] `HistoryProjection`：消息历史折叠（`user/message` + `assistant/message`）+ `DEFAULT_HISTORY_LIMIT` 截断窗口 + `history/squash` 语义。
+- [x] `TraceProjection`：`TurnTraceRecord` 折叠（step/tool/chunk/turn-end 映射，tool 字段从事件重建）+ seq 水位幂等。
+- [x] `PlanProjection`：`plan/update` 事件 → plan 状态。
+- [x] `MetricsProjection`：`ProviderUsage` → 四桶 totals + last + per-turn 聚合（addReplacing；`assistant/message` usage 不参与 totals）。
+- [x] 模型监控视图改造：`load_model_monitor_summary` / drilldown 读投影缓存，不再扫描 trace 表。
+- [x] `append_turn` 重构：append 事件 + 增量折叠 + 快照由投影生成（同事务，双写变单写）；旧逻辑保留为 `#[cfg(test)]` 参考实现。
+- [x] `record_turn_trace` 重构：trace 组装迁移到 `TraceProjection`，trace 表降级为缓存。
+- [x] golden fixture 库：`tests/fixtures/projection/` 合成语料矩阵（空 session、单事件、截断边界、tool 链、多 hop usage、checkout/fork、chunk_missing、squash、10k+ 事件、100KB+ payload）。
+- [x] 对拍模式：`PONY_AGENT_PROJECTION_VERIFY=record`（CI 失败）/ `=sample`（生产抽样记录不 panic）。
+- [x] 单元测试：投影纯函数、截断窗口、squash、trace 水位、MetricsProjection addReplacing + 双 usage 防重、增量 == 全量。
+- [x] 对拍验证：golden fixture 逐字段一致（限定字段集）。
+- [x] 回归：既有 session/trace/checkpoint 测试全绿；验收命令 `npm run cargo:test`。
 
 ## Validation Notes
 

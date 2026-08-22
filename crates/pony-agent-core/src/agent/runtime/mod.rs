@@ -58,7 +58,7 @@ use crate::agent::trace_persistence::{
 };
 use crate::agent::turn_flow::{
     build_failed_turn_result, build_failed_turn_result_with_hooks,
-    build_terminal_turn_event_envelope, emit_stream_cancelled, emit_stream_event,
+    emit_stream_cancelled, emit_stream_event, emit_stream_event_with_step,
     emit_stream_failed, emit_turn_failed, normalize_user_message, preview_text, provider_decision,
     provider_decision_stream, provider_event_meta, provider_failure_message, provider_followup,
     provider_followup_stream, runtime_log, stream_reasoning_chunks, stream_text_chunks,
@@ -235,6 +235,11 @@ pub struct TurnStreamEvent {
     pub provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
     pub hook_trace_records: Option<Vec<HookTraceRecord>>,
     pub session_summary: Option<String>,
+    /// PA-095 #4：逻辑 hop 索引（0-based；None = 缺省归 step 0，wire 兼容）。
+    /// delta/chunk 携带所属 hop；turn:trace(calling_model) 携带即将发起的
+    /// followup hop 索引（≥1，初始 call 的 step/start 由 turn:started 承担）。
+    #[serde(default)]
+    pub step: Option<u32>,
 }
 
 const DEFAULT_MAX_TOOL_HOPS_PER_TURN: usize = 1024;
@@ -832,7 +837,9 @@ impl AgentRuntime {
             )),
             None,
             error,
-            None,
+            // PA-095 #3：cancelled 终态事件必须携带 session_id——否则进入空会话
+            // 缓冲，flush 被 skip，事件流丢失 turn:cancelled 终态（对拍/重建缺终态）。
+            session_id.map(|id| id.to_string()),
         );
     }
 
@@ -1301,7 +1308,10 @@ impl AgentRuntime {
             let followup_model_hook_trace_records = self
                 .dispatch_hook_trace_records(TurnHookPoint::ModelCallStart)
                 .trace_records;
-            emit_stream_event(
+            // PA-095 #4：followup call 的 step/start——payload.step 携带即将发起
+            // 的 hop 索引（completed_hops 在循环头已自增，初始 call=0、首个
+            // followup=1），经 build_step_start_event 映射为 StepStart 事件。
+            emit_stream_event_with_step(
                 sink,
                 "turn:trace",
                 turn_id.to_string(),
@@ -1328,6 +1338,7 @@ impl AgentRuntime {
                 Some(followup_model_hook_trace_records),
                 None,
                 input.session_id.clone(),
+                Some(completed_hops as u32),
             );
 
             let delta_turn_id = turn_id.to_string();
@@ -1342,7 +1353,12 @@ impl AgentRuntime {
             let last_emit_for_client = Rc::new(Cell::new(0u64));
             let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
             let delta_turn_id_for_emit = delta_turn_id.clone();
+            // PA-095 #4 修复：followup delta 闭包此前 session_id 传 None——事件以
+            // 空 session 缓冲且永不 flush（生产事件流丢失全部 followup chunk）。
+            let delta_session_id_for_emit = input.session_id.clone();
             let provider_call_started_at = Instant::now();
+            // PA-095 #4：本次 followup call 的 hop 索引（Copy 捕获进 delta 闭包）。
+            let followup_step = completed_hops as u32;
             let response = match provider_followup_stream(
                 provider,
                 planning_request,
@@ -1355,7 +1371,7 @@ impl AgentRuntime {
                     let flush_delta = |text: Option<String>,
                                        reasoning_content: Option<String>,
                                        latency: Option<u64>| {
-                        emit_stream_event(
+                        emit_stream_event_with_step(
                             sink,
                             "turn:delta",
                             delta_turn_id_for_emit.clone(),
@@ -1381,7 +1397,8 @@ impl AgentRuntime {
                             None,
                             None,
                             None,
-                            None,
+                            delta_session_id_for_emit.clone(),
+                            Some(followup_step),
                         );
                     };
                     if supports_true_streaming_followup
@@ -1456,7 +1473,7 @@ impl AgentRuntime {
                 }
             };
             if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
-                emit_stream_event(
+                emit_stream_event_with_step(
                     sink,
                     "turn:delta",
                     delta_turn_id.clone(),
@@ -1483,6 +1500,7 @@ impl AgentRuntime {
                     None,
                     None,
                     input.session_id.clone(),
+                    Some(followup_step),
                 );
                 let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
                 let prev = last_emit_for_client.get();
@@ -2508,6 +2526,58 @@ impl AgentRuntime {
         self.run_turn_with_facts(input, RunTurnFacts::default())
     }
 
+    /// PA-095：同步入口的事件 turn_id（与 sync trace 的 turn_id 同构，
+    /// 保证事件流与 trace 记录可关联）。nanos 提供跨进程区分度；进程内
+    /// 原子计数器保证唯一——turn 开始时 elapsed 仅数百 ns，低于 Windows
+    /// 计时器精度，纯 nanos 会使同会话连续两轮产生相同 id（trace 互相
+    /// 覆盖 + 事件 (turn_id, seq) 冲突 flush 失败）。
+    fn sync_turn_event_id(input: &TurnInput) -> String {
+        static SYNC_TURN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        format!(
+            "sync:{}:{}{:04x}",
+            input.session_id.as_deref().unwrap_or("local-dev-session"),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0),
+            SYNC_TURN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 0x10000,
+        )
+    }
+
+    /// PA-095：同步入口失败终态事件——发射 turn:failed（触发 turn/end Error；
+    /// 无 token 字段故不触发 provider/usage，早期失败无 usage 数据可结算）。
+    /// turn_id 由调用方传入（与 turn:started 同源，保证配对不变式）。
+    /// 返回本次发射的信封（调用方复用为 TurnResult 终态信封，避免二次分配）。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_sync_turn_failed(
+        &self,
+        turn_id: &str,
+        input: &TurnInput,
+        started_at: &Instant,
+        provider_meta: Option<&ProviderEventMeta>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        first_token_latency_ms: Option<u64>,
+        error: String,
+    ) -> crate::agent::turn_flow::TurnEventEnvelope {
+        let sink = crate::agent::turn_flow::NoopTurnEventSink;
+        crate::agent::turn_flow::emit_stream_failed(
+            &sink,
+            turn_id.to_string(),
+            provider_meta,
+            trace_steps,
+            Some(tool_activities),
+            first_token_latency_ms,
+            Some(started_at.elapsed().as_millis() as u64),
+            None,
+            None,
+            None,
+            None,
+            error,
+            input.session_id.clone(),
+        )
+    }
+
     /// `run_turn` with explicit session/run/turn/workspace facts for governed Ask
     /// control-request persistence (design.md Decision 5). The host control plane supplies the
     /// graph run's facts before each graph-run turn; the plain `run_turn` entry uses `None` facts
@@ -2525,6 +2595,9 @@ impl AgentRuntime {
         ask_injection: Option<GraphAskResumeInjection>,
     ) -> TurnResult {
         let turn_started_at = Instant::now();
+        // PA-095：同步入口事件 turn_id 一次性计算——started/failed/completed 全路径
+        // 复用同一 id，保证"每个 turn:started 必有配对 turn:end"的配对不变式。
+        let sync_turn_id = Self::sync_turn_event_id(&input);
         let prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -2547,11 +2620,56 @@ impl AgentRuntime {
             preview_text(&prepared.user_message, 120)
         ));
         let provider_meta = provider_event_meta(&prepared.provider);
+        // PA-095：同步入口事件化——prepare 成功即发射 turn:started（payload.text
+        // 携带用户消息 → 触发 user/message；build_context_observation → 触发
+        // context/observation 外置）。事件持久化走全局注册表，NoopSink 不做推送。
+        {
+            let sync_sink = crate::agent::turn_flow::NoopTurnEventSink;
+            crate::agent::turn_flow::emit_stream_event(
+                &sync_sink,
+                "turn:started",
+                sync_turn_id.clone(),
+                "started",
+                Some("calling_model"),
+                Some(prepared.user_message.clone()),
+                None,
+                Some(&provider_meta),
+                None,
+                None,
+                None,
+                Some(prepared.build_context_observation.clone()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                input.session_id.clone(),
+            );
+        }
         let model_call_hook_outcome =
             self.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
         let initial_model_hook_trace_records = model_call_hook_outcome.trace_records.clone();
         if let Some(error) = model_call_hook_outcome.fail_turn_error {
-            return self.fail_sync_turn_result(
+            // PA-095：终态信封取自发射（TurnResult 携带事件流同一身份）。
+            let envelope = self.emit_sync_turn_failed(
+                &sync_turn_id,
+                &input,
+                &turn_started_at,
+                Some(&provider_meta),
+                Vec::new(),
+                Vec::new(),
+                None,
+                error.clone(),
+            );
+            let mut result = self.fail_sync_turn_result(
                 Some(&provider_meta),
                 prepared.display_message,
                 self.telemetry_builder.failed_trace_before_tool(),
@@ -2559,12 +2677,24 @@ impl AgentRuntime {
                 model_call_hook_outcome.trace_records,
                 error,
             );
+            self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            return result;
         }
 
         let planned = match self.plan_turn(&prepared) {
             Ok(planned) => planned,
             Err(error) => {
-                return self.fail_sync_turn_result(
+                let envelope = self.emit_sync_turn_failed(
+                    &sync_turn_id,
+                    &input,
+                    &turn_started_at,
+                    Some(&provider_meta),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    error.clone(),
+                );
+                let mut result = self.fail_sync_turn_result(
                     Some(&provider_meta),
                     prepared.display_message,
                     self.telemetry_builder.failed_trace_before_tool(),
@@ -2572,6 +2702,8 @@ impl AgentRuntime {
                     initial_model_hook_trace_records.clone(),
                     error,
                 );
+                self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+                return result;
             }
         };
 
@@ -2607,7 +2739,17 @@ impl AgentRuntime {
         ) {
             let mut planning_hook_trace_records = initial_model_hook_trace_records.clone();
             planning_hook_trace_records.extend(planner_hook_trace_records.clone());
-            return self.fail_sync_turn_result(
+            let envelope = self.emit_sync_turn_failed(
+                &sync_turn_id,
+                &input,
+                &turn_started_at,
+                Some(&provider_meta),
+                self.telemetry_builder.failed_trace_before_tool(),
+                Vec::new(),
+                None,
+                error.clone(),
+            );
+            let mut result = self.fail_sync_turn_result(
                 Some(&provider_meta),
                 display_message,
                 self.telemetry_builder.failed_trace_before_tool(),
@@ -2615,6 +2757,8 @@ impl AgentRuntime {
                 planning_hook_trace_records,
                 error,
             );
+            self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
+            return result;
         }
         let mut planning_hook_trace_records = initial_model_hook_trace_records.clone();
         planning_hook_trace_records.extend(planner_hook_trace_records.clone());
@@ -2661,7 +2805,23 @@ impl AgentRuntime {
                     outcome.hook_trace_records,
                     outcome.first_token_latency_ms,
                 ),
-                Err(failed_result) => return failed_result,
+                Err(mut failed_result) => {
+                    // PA-095：工具轮失败——发射 turn:failed 保持 start/end 配对
+                    // （错误文本取 session_summary，与 failed result 呈现一致）；
+                    // 终态信封取自发射并应用到结果（事件流身份一致）。
+                    let envelope = self.emit_sync_turn_failed(
+                        &sync_turn_id,
+                        &input,
+                        &turn_started_at,
+                        Some(&provider_meta),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        failed_result.session_summary.clone(),
+                    );
+                    self.apply_terminal_envelope_to_turn_result(&mut failed_result, &envelope);
+                    return failed_result;
+                }
             }
         } else {
             (
@@ -2688,14 +2848,9 @@ impl AgentRuntime {
             Err(error) => {
                 let failed_trace_steps =
                     self.failed_trace_steps_for_tool_activities(&tool_activities);
-                let trace_turn_id = format!(
-                    "sync:{}:{}",
-                    input.session_id.as_deref().unwrap_or("local-dev-session"),
-                    turn_started_at.elapsed().as_nanos()
-                );
                 self.persist_failed_sync_turn_trace_with_hooks(
                     input.session_id.as_deref(),
-                    &trace_turn_id,
+                    &sync_turn_id,
                     &display_message,
                     Some(&provider_meta),
                     failed_trace_steps.clone(),
@@ -2710,16 +2865,21 @@ impl AgentRuntime {
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     error.clone(),
                 );
-                let envelope = build_terminal_turn_event_envelope(
-                    &trace_turn_id,
-                    "turn:failed",
-                    Some("failed"),
-                    Some(&build_context_observation),
-                    Some(&tool_activities),
+                // PA-095：附件保存失败——事件流 turn/end 配对；终态信封取自
+                // 发射本身（同源序列号，避免二次分配错位）。
+                let envelope = self.emit_sync_turn_failed(
+                    &sync_turn_id,
+                    &input,
+                    &turn_started_at,
+                    Some(&provider_meta),
+                    failed_trace_steps.clone(),
+                    tool_activities.clone(),
+                    first_token_latency_ms,
+                    error.clone(),
                 );
                 self.annotate_sync_terminal_trace_with_envelope(
                     input.session_id.as_deref(),
-                    &trace_turn_id,
+                    &sync_turn_id,
                     &envelope,
                 );
                 let mut result = build_failed_turn_result_with_hooks(
@@ -2751,14 +2911,9 @@ impl AgentRuntime {
         hook_trace_records.extend(checkpoint_hook_outcome.trace_records.clone());
         if let Some(error) = checkpoint_hook_outcome.fail_turn_error {
             let failed_trace_steps = self.failed_trace_steps_for_tool_activities(&tool_activities);
-            let trace_turn_id = format!(
-                "sync:{}:{}",
-                input.session_id.as_deref().unwrap_or("local-dev-session"),
-                turn_started_at.elapsed().as_nanos()
-            );
             self.persist_failed_sync_turn_trace_with_hooks(
                 input.session_id.as_deref(),
-                &trace_turn_id,
+                &sync_turn_id,
                 &display_message,
                 Some(&provider_meta),
                 failed_trace_steps.clone(),
@@ -2773,16 +2928,20 @@ impl AgentRuntime {
                 turn_duration_ms,
                 error.clone(),
             );
-            let envelope = build_terminal_turn_event_envelope(
-                &trace_turn_id,
-                "turn:failed",
-                Some("failed"),
-                Some(&build_context_observation),
-                Some(&tool_activities),
+            // PA-095：checkpoint hook 失败——事件流 turn/end 配对；终态信封取自发射。
+            let envelope = self.emit_sync_turn_failed(
+                &sync_turn_id,
+                &input,
+                &turn_started_at,
+                Some(&provider_meta),
+                failed_trace_steps.clone(),
+                tool_activities.clone(),
+                first_token_latency_ms,
+                error.clone(),
             );
             self.annotate_sync_terminal_trace_with_envelope(
                 input.session_id.as_deref(),
-                &trace_turn_id,
+                &sync_turn_id,
                 &envelope,
             );
             let mut result = self.fail_sync_turn_result(
@@ -2801,14 +2960,9 @@ impl AgentRuntime {
         hook_trace_records.extend(finalize_hook_outcome.trace_records.clone());
         if let Some(error) = finalize_hook_outcome.fail_turn_error {
             let failed_trace_steps = self.failed_trace_steps_for_tool_activities(&tool_activities);
-            let trace_turn_id = format!(
-                "sync:{}:{}",
-                input.session_id.as_deref().unwrap_or("local-dev-session"),
-                turn_started_at.elapsed().as_nanos()
-            );
             self.persist_failed_sync_turn_trace_with_hooks(
                 input.session_id.as_deref(),
-                &trace_turn_id,
+                &sync_turn_id,
                 &display_message,
                 Some(&provider_meta),
                 failed_trace_steps.clone(),
@@ -2823,16 +2977,20 @@ impl AgentRuntime {
                 turn_duration_ms,
                 error.clone(),
             );
-            let envelope = build_terminal_turn_event_envelope(
-                &trace_turn_id,
-                "turn:failed",
-                Some("failed"),
-                Some(&build_context_observation),
-                Some(&tool_activities),
+            // PA-095：finalize hook 失败——事件流 turn/end 配对；终态信封取自发射。
+            let envelope = self.emit_sync_turn_failed(
+                &sync_turn_id,
+                &input,
+                &turn_started_at,
+                Some(&provider_meta),
+                failed_trace_steps.clone(),
+                tool_activities.clone(),
+                first_token_latency_ms,
+                error.clone(),
             );
             self.annotate_sync_terminal_trace_with_envelope(
                 input.session_id.as_deref(),
-                &trace_turn_id,
+                &sync_turn_id,
                 &envelope,
             );
             let mut result = self.fail_sync_turn_result(
@@ -2846,11 +3004,9 @@ impl AgentRuntime {
             self.apply_terminal_envelope_to_turn_result(&mut result, &envelope);
             return result;
         }
-        let trace_turn_id = format!(
-            "sync:{}:{}",
-            input.session_id.as_deref().unwrap_or("local-dev-session"),
-            turn_started_at.elapsed().as_nanos()
-        );
+        // PA-095：trace turn_id 与事件 turn_id 同源（sync_turn_id），保证事件流
+        // 与 trace 记录可关联。
+        let trace_turn_id = sync_turn_id.clone();
         self.persist_turn_trace_with_provider_calls_and_hooks(
             input.session_id.as_deref(),
             &trace_turn_id,
@@ -2878,13 +3034,40 @@ impl AgentRuntime {
             Some(persisted.session_summary.clone()),
             None,
         );
-        let terminal_envelope = build_terminal_turn_event_envelope(
-            &trace_turn_id,
-            "turn:completed",
-            Some("completed"),
-            Some(&build_context_observation),
-            Some(&tool_activities),
-        );
+        // PA-095：同步入口成功终态——发射 turn:completed（携带 token 结算与
+        // per-call records → 触发 assistant/message + provider/usage×N + turn/end
+        // 三连事件，与 streaming 入口等价）；终态信封取自发射本身（同源序列号）。
+        let terminal_envelope = {
+            let sync_sink = crate::agent::turn_flow::NoopTurnEventSink;
+            crate::agent::turn_flow::emit_stream_event(
+                &sync_sink,
+                "turn:completed",
+                trace_turn_id.clone(),
+                "completed",
+                Some("completed"),
+                Some(assistant_message.clone()),
+                assistant_reasoning_content.clone(),
+                Some(&provider_meta),
+                Some(provider_source.clone()),
+                Some(provider_mode.clone()),
+                fallback_reason.clone(),
+                Some(build_context_observation.clone()),
+                persisted.input_tokens,
+                persisted.cache_hit_input_tokens,
+                persisted.reasoning_tokens,
+                persisted.output_tokens,
+                persisted.total_tokens,
+                first_token_latency_ms,
+                turn_duration_ms,
+                Some(trace_steps.clone()),
+                None,
+                Some(tool_activities.clone()),
+                Some(provider_call_records.clone()),
+                Some(hook_trace_records.clone()),
+                Some(persisted.session_summary.clone()),
+                input.session_id.clone(),
+            )
+        };
         self.annotate_sync_terminal_trace_with_envelope(
             input.session_id.as_deref(),
             &trace_turn_id,
@@ -5322,7 +5505,10 @@ fn build_stream_started_trace_timeline(
         provider_model: Some(provider_meta.model.clone()),
         provider_source: None,
         provider_mode: None,
-        build_context_observation: Some(build_context_observation.clone()),
+        // PA-095 #7（实施后审核 P0）：R4b No duplicate storage——timeline 条目
+        // 不再内嵌全量 observation（payload 唯一副本在 build_context_observations
+        // 表；读取走 trace 级 ref + 读侧水合）。
+        build_context_observation: None,
         build_context_observation_ref: None,
         tool_activities: Vec::new(),
         text: None,
@@ -5438,7 +5624,8 @@ fn build_stream_progress_trace_timeline(
         provider_model: Some(provider_meta.model.clone()),
         provider_source: provider_source.map(str::to_string),
         provider_mode: provider_mode.map(str::to_string),
-        build_context_observation: Some(build_context_observation.clone()),
+        // PA-095 #7（实施后审核 P0）：同上——timeline 条目不内嵌 observation。
+        build_context_observation: None,
         build_context_observation_ref: None,
         tool_activities: Vec::new(),
         text: None,
@@ -5547,6 +5734,46 @@ fn build_stream_progress_trace_timeline(
                 turn_duration_ms: None,
             });
             sequence += 1;
+            // PA-095 #3：return_result 条目（与事件折叠重建同构——tool/result →
+            // return_result；running 中间态不产生）。
+            if parent_tool.status != "running" {
+                timeline.push(TraceTimelineEntry {
+                    id: format!("return-{}", sequence),
+                    kind: "return_result".to_string(),
+                    label: "RETURN RESULT".to_string(),
+                    state: if parent_tool.status == "error" {
+                        "error".to_string()
+                    } else {
+                        "completed".to_string()
+                    },
+                    sequence,
+                    provider_requested_name: None,
+                    provider_name: None,
+                    provider_protocol: None,
+                    provider_model: None,
+                    provider_source: None,
+                    provider_mode: None,
+                    build_context_observation: None,
+                    build_context_observation_ref: None,
+                    tool_activities: Vec::new(),
+                    text: parent_tool.result_text.clone(),
+                    reasoning_content: None,
+                    fallback_reason: None,
+                    error: if parent_tool.status == "error" {
+                        Some(parent_tool.description.clone())
+                    } else {
+                        None
+                    },
+                    input_tokens: None,
+                    cache_hit_input_tokens: None,
+                    reasoning_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                    first_token_latency_ms: None,
+                    turn_duration_ms: None,
+                });
+                sequence += 1;
+            }
         }
     }
 
@@ -5625,7 +5852,8 @@ fn build_persisted_trace_timeline(
         provider_model: provider_meta.map(|meta| meta.model.clone()),
         provider_source: provider_source.map(str::to_string),
         provider_mode: provider_mode.map(str::to_string),
-        build_context_observation: build_context_observation.cloned(),
+        // PA-095 #7（实施后审核 P0）：同上——timeline 条目不内嵌 observation。
+        build_context_observation: None,
         build_context_observation_ref: None,
         tool_activities: Vec::new(),
         text: None,
@@ -5701,7 +5929,7 @@ fn build_persisted_trace_timeline(
                 id: format!("tool-{}", sequence),
                 kind: "call_tool".to_string(),
                 label: format!("CALL TOOL #{} · {}", model_index + 1, parent_tool.name),
-                state: tool_state,
+                state: tool_state.clone(),
                 sequence,
                 provider_requested_name: None,
                 provider_name: None,
@@ -5713,6 +5941,40 @@ fn build_persisted_trace_timeline(
                 build_context_observation_ref: None,
                 tool_activities: grouped_tool_activities,
                 text: Some(parent_tool.description.clone()),
+                reasoning_content: None,
+                fallback_reason: None,
+                error: if parent_tool.status == "error" {
+                    Some(parent_tool.description.clone())
+                } else {
+                    None
+                },
+                input_tokens: None,
+                cache_hit_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                first_token_latency_ms: None,
+                turn_duration_ms: None,
+            });
+            sequence += 1;
+            // PA-095 #3：return_result 条目（与事件折叠重建同构——tool/result →
+            // return_result）。
+            timeline.push(TraceTimelineEntry {
+                id: format!("return-{}", sequence),
+                kind: "return_result".to_string(),
+                label: "RETURN RESULT".to_string(),
+                state: tool_state,
+                sequence,
+                provider_requested_name: None,
+                provider_name: None,
+                provider_protocol: None,
+                provider_model: None,
+                provider_source: None,
+                provider_mode: None,
+                build_context_observation: None,
+                build_context_observation_ref: None,
+                tool_activities: Vec::new(),
+                text: parent_tool.result_text.clone(),
                 reasoning_content: None,
                 fallback_reason: None,
                 error: if parent_tool.status == "error" {
@@ -7393,6 +7655,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     struct MockHttpResponse {
         content_type: &'static str,
         body: String,
@@ -9096,7 +9359,9 @@ mod tests {
             .is_some_and(|value| value.starts_with("sync:sync-hook-trace-terminal:")));
         assert_eq!(result.event_type.as_deref(), Some("turn.completed"));
         assert_eq!(result.event_version.as_deref(), Some("turn-event-v1"));
-        assert_eq!(result.sequence, Some(1));
+        // PA-095：同步入口事件化后终态信封取自真实发射（turn:started=seq1、
+        // 终态=seq2），不再单独分配。
+        assert_eq!(result.sequence, Some(2));
         assert!(result.emitted_at_ms.is_some());
         assert!(result
             .hook_trace_records
@@ -9121,7 +9386,8 @@ mod tests {
             .is_some_and(|value| value.starts_with("sync:sync-hook-trace-terminal:")));
         assert_eq!(trace.event_type.as_deref(), Some("turn.completed"));
         assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
-        assert_eq!(trace.sequence, Some(1));
+        // PA-095：trace 信封与事件流同源（终态=seq2）。
+        assert_eq!(trace.sequence, Some(2));
         assert!(trace.emitted_at_ms.is_some());
         assert!(trace
             .hook_trace_records
@@ -9184,7 +9450,8 @@ mod tests {
             .is_some_and(|value| value.starts_with("sync:sync-checkpoint-failturn:")));
         assert_eq!(result.event_type.as_deref(), Some("turn.failed"));
         assert_eq!(result.event_version.as_deref(), Some("turn-event-v1"));
-        assert_eq!(result.sequence, Some(1));
+        // PA-095：终态信封取自真实发射（started=seq1、failed=seq2）。
+        assert_eq!(result.sequence, Some(2));
         assert!(result.emitted_at_ms.is_some());
         assert!(result.hook_trace_records.iter().any(|record| {
             record.hook_name == "observe.sync-checkpoint-failturn"
@@ -9207,7 +9474,8 @@ mod tests {
             .is_some_and(|value| value.starts_with("sync:sync-checkpoint-failturn:")));
         assert_eq!(trace.event_type.as_deref(), Some("turn.failed"));
         assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
-        assert_eq!(trace.sequence, Some(1));
+        // PA-095：trace 信封与事件流同源（终态=seq2）。
+        assert_eq!(trace.sequence, Some(2));
         assert!(trace.emitted_at_ms.is_some());
         assert!(trace.hook_trace_records.iter().any(|record| {
             record.hook_name == "observe.sync-checkpoint-failturn"
@@ -9276,7 +9544,8 @@ mod tests {
             .is_some_and(|value| value.starts_with("sync:sync-finalize-failturn:")));
         assert_eq!(result.event_type.as_deref(), Some("turn.failed"));
         assert_eq!(result.event_version.as_deref(), Some("turn-event-v1"));
-        assert_eq!(result.sequence, Some(1));
+        // PA-095：终态信封取自真实发射（started=seq1、failed=seq2）。
+        assert_eq!(result.sequence, Some(2));
         assert!(result.emitted_at_ms.is_some());
         assert!(result
             .hook_trace_records
@@ -9304,7 +9573,8 @@ mod tests {
             .is_some_and(|value| value.starts_with("sync:sync-finalize-failturn:")));
         assert_eq!(trace.event_type.as_deref(), Some("turn.failed"));
         assert_eq!(trace.event_version.as_deref(), Some("turn-event-v1"));
-        assert_eq!(trace.sequence, Some(1));
+        // PA-095：trace 信封与事件流同源（终态=seq2）。
+        assert_eq!(trace.sequence, Some(2));
         assert!(trace.emitted_at_ms.is_some());
         assert!(trace
             .hook_trace_records
@@ -10325,6 +10595,471 @@ mod tests {
         assert_eq!(snapshot.history[0].content, "继续读取 tauri.conf.json");
         assert_eq!(snapshot.history[1].role, "assistant");
         assert_eq!(snapshot.history[1].content, CANCELLED_TURN_MESSAGE);
+    }
+
+    /// PA-095：同步 run_turn 与 streaming 入口事件序列等价性——completed 主干 +
+    /// failed 分支逐事件类型对比。assistant/chunk 为 streaming 增量推送独有
+    /// （同步入口无 delta），剔除后骨架必须一致；悬挂 turn 不变式：凡发射
+    /// turn/start 的 turn 必有 turn/end 终态配对。事件经测试多播 sink 捕获
+    /// （生产单槽通道可被并行测试的 HostControlPlane 构建覆盖），按 session_id
+    /// 隔离其他测试的事件。
+    #[test]
+    fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
+        let persisted: Arc<Mutex<Vec<(String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let persisted_for_channel = Arc::clone(&persisted);
+        // 守卫式注册：Drop 仅移除本 sink（并行测试互不清除对方注册）。
+        let _sink_guard = crate::agent::turn_flow::register_event_persist_test_sink(Arc::new(
+            move |session_id, turn_id, event, _terminal| {
+                persisted_for_channel
+                    .lock()
+                    .expect("persisted lock")
+                    .push((
+                        session_id.to_string(),
+                        turn_id.to_string(),
+                        event.type_name().to_string(),
+                    ));
+            },
+        ));
+
+        // 骨架提取：本 session 的事件类型序列，剔除 streaming 独有的 assistant/chunk。
+        fn skeleton(records: &[(String, String, String)], session: &str) -> Vec<String> {
+            records
+                .iter()
+                .filter(|(sid, _, event_type)| sid == session && event_type != "assistant/chunk")
+                .map(|(_, _, event_type)| event_type.clone())
+                .collect()
+        }
+
+        // ---- completed 主干：同步入口（JSON completion 带 usage）----
+        let sync_server = MockHttpServer::start(vec![json_response(json!({
+            "choices": [{"message": {"role": "assistant", "content": "同步等价答案。"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}
+        }))]);
+        let sync_runtime =
+            build_runtime_for_test(test_provider_selection(sync_server.base_url.clone()));
+        let sync_result = sync_runtime.run_turn(TurnInput {
+            message: "同步等价问题".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("eq-sync-session".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        });
+        // 同步入口成功终态的 TurnResult.phase 惯例为 "ready"（事件流终态仍为
+        // turn/end completed——两者语义层不同）。
+        assert_eq!(sync_result.phase, "ready", "sync turn must complete");
+        let _ = sync_server.finish();
+
+        // ---- completed 主干：streaming 入口（SSE 内容 + usage chunk）----
+        let stream_server = MockHttpServer::start(vec![sse_response(&[
+            json!({"choices": [{"delta": {"content": "流式等价答案。"}}]}),
+            json!({
+                "choices": [],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}
+            }),
+        ])]);
+        let mut stream_runtime =
+            build_runtime_for_test(test_provider_selection(stream_server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+        stream_runtime.start_turn_stream(
+            &sink,
+            "eq-stream-turn".to_string(),
+            TurnInput {
+                message: "流式等价问题".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                workspace_mode: None,
+                session_id: Some("eq-stream-session".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+                workspace_id: None,
+            },
+        );
+        let _ = stream_server.finish();
+
+        // ---- failed 分支：两入口均打不可达端点 ----
+        let failed_sync_runtime =
+            build_runtime_for_test(test_provider_selection("http://127.0.0.1:1/v1".to_string()));
+        let failed_sync_result = failed_sync_runtime.run_turn(TurnInput {
+            message: "同步失败分支".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("eq-sync-failed-session".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        });
+        assert_eq!(failed_sync_result.phase, "failed", "sync turn must fail");
+
+        let mut failed_stream_runtime =
+            build_runtime_for_test(test_provider_selection("http://127.0.0.1:1/v1".to_string()));
+        let failed_sink = RecordingTurnEventSink::new();
+        failed_stream_runtime.start_turn_stream(
+            &failed_sink,
+            "eq-stream-failed-turn".to_string(),
+            TurnInput {
+                message: "流式失败分支".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                workspace_mode: None,
+                session_id: Some("eq-stream-failed-session".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+                workspace_id: None,
+            },
+        );
+
+        let records = persisted.lock().expect("persisted lock").clone();
+        drop(_sink_guard);
+
+        // completed 主干骨架对比。
+        let sync_skeleton = skeleton(&records, "eq-sync-session");
+        let stream_skeleton = skeleton(&records, "eq-stream-session");
+        assert_eq!(
+            sync_skeleton, stream_skeleton,
+            "completed skeleton must match (assistant/chunk excluded)"
+        );
+        assert_eq!(
+            sync_skeleton,
+            vec![
+                "turn/start".to_string(),
+                "context/observation".to_string(),
+                "user/message".to_string(),
+                // PA-095 #4：初始 call 的 StepStart（turn:started 承担 step 0）。
+                "step/start".to_string(),
+                "assistant/message".to_string(),
+                "provider/usage".to_string(),
+                // PA-095 #4：usage 结算同点的 StepEnd（单 call → 1 对）。
+                "step/end".to_string(),
+                "turn/end".to_string(),
+            ],
+            "completed skeleton shape"
+        );
+
+        // failed 分支骨架对比。
+        let sync_failed_skeleton = skeleton(&records, "eq-sync-failed-session");
+        let stream_failed_skeleton = skeleton(&records, "eq-stream-failed-session");
+        assert_eq!(
+            sync_failed_skeleton, stream_failed_skeleton,
+            "failed skeleton must match"
+        );
+        assert_eq!(
+            sync_failed_skeleton.last().map(String::as_str),
+            Some("turn/end"),
+            "failed branch terminates with turn/end"
+        );
+
+        // 悬挂 turn 不变式：凡有 turn/start 的 turn 必有 turn/end 终态。
+        // 只检查本测试的 session（多播 sink 会收到其他并行测试的进行中 turn，
+        // 其终态尚未发射，不构成悬挂）。
+        let own_sessions: std::collections::HashSet<&str> = [
+            "eq-sync-session",
+            "eq-stream-session",
+            "eq-sync-failed-session",
+            "eq-stream-failed-session",
+        ]
+        .into_iter()
+        .collect();
+        let mut turns_with_start: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut turns_with_end: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for (session, turn, event_type) in &records {
+            if !own_sessions.contains(session.as_str()) {
+                continue;
+            }
+            match event_type.as_str() {
+                "turn/start" => {
+                    turns_with_start.insert((session.clone(), turn.clone()));
+                }
+                "turn/end" => {
+                    turns_with_end.insert((session.clone(), turn.clone()));
+                }
+                _ => {}
+            }
+        }
+        for turn in &turns_with_start {
+            assert!(
+                turns_with_end.contains(turn),
+                "dangling turn without terminal: {turn:?}"
+            );
+        }
+    }
+
+    /// PA-095 #4：多 hop turn（streaming 3 次 provider call + 2 次工具）事件重建
+    /// timeline——call_model 条目数 = hop 数，chunk 文本归属正确 hop；
+    /// StepEnd 与 ProviderUsage 相邻成对。sync 变体（无 StepStart 的 step≥1）
+    /// 经 usage 兜底创建同样收敛到 hop 数。
+    #[test]
+    fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
+        use crate::agent::projection::{Projection, TraceProjectionState};
+        use crate::agent::turn_event::TurnEvent;
+
+        // 事件收集：(session, turn, event)，发射序即日志序（合成 seq 用）。
+        let collected: Arc<Mutex<Vec<(String, String, TurnEvent)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let collected_for_sink = Arc::clone(&collected);
+        // 守卫式注册：Drop 仅移除本 sink（并行测试互不清除对方注册）。
+        let _sink_guard = crate::agent::turn_flow::register_event_persist_test_sink(Arc::new(
+            move |session_id, turn_id, event, _terminal| {
+                collected_for_sink
+                    .lock()
+                    .expect("collected lock")
+                    .push((session_id.to_string(), turn_id.to_string(), event));
+            },
+        ));
+
+        let own = |records: &[(String, String, TurnEvent)], session: &str| -> Vec<TurnEvent> {
+            records
+                .iter()
+                .filter(|(sid, _, _)| sid == session)
+                .map(|(_, _, event)| event.clone())
+                .collect()
+        };
+
+        // ---- streaming 变体：初始 call + 2 个 followup（各带工具）----
+        let final_text = "第三行是 productName。";
+        let server = MockHttpServer::start(vec![
+            sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
+            sse_response(&[
+                json!({"choices": [{"delta": {"content": "找到了！让我读取文件内容："}}]}),
+                json!({"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "id": "call_read_file", "type": "function",
+                     "function": {"name": "workspace_read_file", "arguments": "{\"path\":\"tauri.conf.json\"}"}}
+                ]}}]}),
+            ]),
+            sse_response(&[
+                json!({"choices": [{"delta": {"content": final_text}}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
+            ]),
+        ]);
+        let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+        let sink = RecordingTurnEventSink::new();
+        runtime.start_turn_stream(
+            &sink,
+            "turn-step-hops".to_string(),
+            TurnInput {
+                message: "读取 tauri.conf.json 第三行".to_string(),
+                display_message: None,
+                provider_id: None,
+                model_id: None,
+                reasoning_effort: None,
+                workspace_mode: None,
+                session_id: Some("step-hop-stream".to_string()),
+                node_id: None,
+                history: Vec::new(),
+                images: Vec::new(),
+                workspace_id: None,
+            },
+        );
+        server.finish();
+
+        let records = collected.lock().expect("collected lock").clone();
+        let stream_events = own(&records, "step-hop-stream");
+        let stream_types: Vec<&str> =
+            stream_events.iter().map(TurnEvent::type_name).collect();
+
+        // StepStart 序列：step 0（started）+ step 1/2（followup calling_model trace）。
+        let step_starts: Vec<u32> = stream_events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEvent::StepStart { step, .. } => Some(*step),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(step_starts, vec![0, 1, 2], "step/start per provider call");
+
+        // StepEnd 与 ProviderUsage 相邻成对（usage[i] 紧跟 step/end[i]）。
+        for window in stream_types.windows(2) {
+            if window[0] == "provider/usage" {
+                assert_eq!(window[1], "step/end", "step/end adjacent to usage");
+            }
+        }
+        assert_eq!(
+            stream_types.iter().filter(|t| **t == "step/end").count(),
+            3,
+            "one step/end per settled provider call"
+        );
+
+        // chunk step 归属：hop1/hop2 的文本分别落各自事件。
+        let chunk_steps: Vec<u32> = stream_events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEvent::AssistantChunk { step, text, .. } if !text.is_empty() => Some(*step),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunk_steps, vec![0, 1, 2],
+            "non-empty chunks carry their hop step"
+        );
+
+        // timeline 重建：call_model 条目数 = hop 数。
+        let mut state = TraceProjectionState::init();
+        for (index, event) in stream_events.iter().enumerate() {
+            TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+        }
+        let rebuilt = state.trace_for_turn("turn-step-hops").expect("rebuilt trace");
+        let call_models: Vec<&crate::agent::session::TraceTimelineEntry> = rebuilt
+            .trace_timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+            .collect();
+        assert_eq!(call_models.len(), 3, "call_model entries equal hop count");
+
+        // chunk 文本归属正确 hop：hop2 条目含 followup 文本、hop3 含最终文本。
+        let hop_texts: Vec<Option<&String>> =
+            call_models.iter().map(|entry| entry.text.as_ref()).collect();
+        assert!(
+            !hop_texts[0]
+                .as_deref()
+                .is_some_and(|text| text.contains("找到了")),
+            "hop1 entry must not contain followup-1 text"
+        );
+        assert!(
+            hop_texts[1]
+                .as_deref()
+                .is_some_and(|text| text.contains("找到了！让我读取文件内容：")),
+            "followup-1 chunks aggregate into their own call_model entry"
+        );
+        assert!(
+            hop_texts[2]
+                .as_deref()
+                .is_some_and(|text| text.contains(final_text)),
+            "final chunks aggregate into their own call_model entry"
+        );
+
+        // ---- sync 变体：无 step≥1 的 StepStart，usage 兜底创建 call_model ----
+        let sync_server = MockHttpServer::start(vec![
+            json_response(json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "先调用工具。",
+                        "reasoning_content": "需要先列出文件。",
+                        "tool_calls": [{
+                            "id": "call_sync_list",
+                            "type": "function",
+                            "function": {"name": "workspace_list_files", "arguments": "{\"path\":\".\"}"}
+                        }]
+                    }
+                }]
+            })),
+            json_completion("同步多跳完成。"),
+        ]);
+        let sync_runtime =
+            build_runtime_for_test(test_provider_selection(sync_server.base_url.clone()));
+        let sync_result = sync_runtime.run_turn(TurnInput {
+            message: "同步多跳问题".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("step-hop-sync".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        });
+        assert_eq!(sync_result.phase, "ready");
+        sync_server.finish();
+
+        let records = collected.lock().expect("collected lock").clone();
+        drop(_sink_guard);
+
+        let sync_events = own(&records, "step-hop-sync");
+        let mut sync_state = TraceProjectionState::init();
+        for (index, event) in sync_events.iter().enumerate() {
+            TraceProjectionState::apply(&mut sync_state, index as u64 + 1, event);
+        }
+        let sync_rebuilt = sync_state
+            .trace_for_turn("sync:step-hop-sync")
+            .or_else(|| sync_state.trace_for_turn(&first_turn_id(&sync_events)))
+            .expect("sync rebuilt trace");
+        let sync_call_models = sync_rebuilt
+            .trace_timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+            .count();
+        assert_eq!(
+            sync_call_models, 2,
+            "sync multi-hop rebuilds via usage fallback (2 provider calls)"
+        );
+    }
+
+    /// 事件列表中首个带 turn 归属的 turn_id（sync turn_id 运行时生成，测试不预知）。
+    fn first_turn_id(events: &[crate::agent::turn_event::TurnEvent]) -> String {
+        events
+            .iter()
+            .find_map(|event| event.turn_id().map(str::to_string))
+            .expect("at least one turn-scoped event")
+    }
+
+    /// PA-095 #4：`TurnStreamEvent.step` wire 兼容——旧 payload（无 step 字段）
+    /// 反序列化得 None（缺省归 step 0）；新 payload 携带 step 序列化往返。
+    #[test]
+    fn turn_stream_event_step_serde_roundtrip() {
+        let legacy_json = r#"{"turnId":"turn-legacy","kind":"delta"}"#;
+        let legacy: TurnStreamEvent = serde_json::from_str(legacy_json).expect("legacy payload");
+        assert_eq!(legacy.turn_id, "turn-legacy");
+        assert_eq!(legacy.step, None, "missing step deserializes to None");
+
+        let payload = TurnStreamEvent {
+            event_id: None,
+            session_id: None,
+            turn_id: "turn-new".to_string(),
+            kind: "delta".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: None,
+            text: Some("hi".to_string()),
+            reasoning_content: None,
+            error: None,
+            provider_requested_name: None,
+            provider_name: None,
+            provider_protocol: None,
+            provider_model: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+            step: Some(2),
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert!(json.contains(r#""step":2"#), "step serializes: {json}");
+        let roundtrip: TurnStreamEvent = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(roundtrip.step, Some(2));
     }
 
     #[test]
@@ -13031,6 +13766,7 @@ mod tests {
             .collect::<Vec<_>>();
         // 持久化 trace timeline 自 aa2a0bf 起不再包含 "input" 首条目（trace 面板清理），
         // 用户输入条目由前端在展示层自行补全。这里断言规范化后的 monitor 语义。
+        // PA-095 #3：tool/result → return_result 条目（与事件折叠重建同构）。
         assert_eq!(
             kinds,
             vec![
@@ -13038,18 +13774,21 @@ mod tests {
                 "build_context",
                 "call_model",
                 "call_tool",
+                "return_result",
                 "call_model",
                 "checkpoint_persist",
             ]
         );
         assert_eq!(timeline[0].label, "PREPARE RETRIEVAL");
         assert_eq!(timeline[3].label, "CALL TOOL #1 · workspace.read_file");
-        assert_eq!(timeline[4].label, "CALL MODEL #2");
+        // PA-095 #3：return_result 条目插入 tool 之后，后续条目索引 +1。
+        assert_eq!(timeline[4].label, "RETURN RESULT");
+        assert_eq!(timeline[5].label, "CALL MODEL #2");
         assert_eq!(timeline[2].text.as_deref(), Some("inspect before tool"));
         assert_eq!(timeline[2].reasoning_content.as_deref(), Some("need file"));
-        assert_eq!(timeline[4].text.as_deref(), Some("final answer"));
+        assert_eq!(timeline[5].text.as_deref(), Some("final answer"));
         assert_eq!(
-            timeline[4].reasoning_content.as_deref(),
+            timeline[5].reasoning_content.as_deref(),
             Some("summarize result")
         );
     }
@@ -14827,4 +15566,898 @@ mod tests {
             std::fs::create_dir_all(&root).expect("create temp workspace for ask test");
             root
         }
+
+/// PA-095 #3：对拍测试——事件折叠重建 vs 存储快照在约定字段集上逐项一致；
+/// 豁免清单外零容忍；每项豁免有反向探针（断言差异当前确实存在，防豁免腐化）。
+/// 场景统一走生产形态：control plane + SQLite store，事件从表读回
+/// （observation ref / 终态注记均为落盘形态），重试吸收并行通道抢占噪声。
+mod parity {
+    use super::*;
+    use crate::agent::control_plane::{
+        ForkFromHistoryNodeCommand, HistoryGraphQuery, HostControlPlane, RunTurnCommand,
+        StartTurnStreamCommand, SwitchHistoryBranchCommand,
+    };
+    use crate::agent::projection::parity::{
+        AGREED_TIMELINE_ENTRY_FIELDS, AGREED_TRACE_FIELDS, EXEMPT_TIMELINE_KINDS,
+    };
+    use crate::agent::projection::{
+        timeline_entry_field, trace_field, Projection, TraceProjectionState,
+    };
+    use crate::agent::session::TraceTimelineEntry;
+
+    /// 生产形态场景脚手架：构建 control plane + SQLite store，执行 `run` 闭包，
+    /// 读回表内事件与会话 trace。终态事件在表才算成功（重试吸收通道抢占）。
+    fn scenario(
+        name: &str,
+        responses: Vec<MockHttpResponse>,
+        expected_terminal: &str,
+        customize: &dyn Fn(&mut AgentRuntime),
+        run: &dyn Fn(&HostControlPlane),
+    ) -> (Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord, String) {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-{name}-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> =
+            None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(responses.clone());
+            let mut runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            customize(&mut runtime);
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            // PA-095 #3：会话绑定路由——把本控制面的事件/flush 通道绑到本场景
+            // session 上，全局默认单槽被并行测试构建覆盖不再影响事件落盘
+            // （守卫在 attempt 结束时解绑）。
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                name,
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                name,
+                control_plane.event_flush_channel(),
+            );
+            run(&control_plane);
+            drop(_persist_guard);
+            drop(_flush_guard);
+            server.finish();
+
+            let store = control_plane
+                .load_turn_events_checked(name, None)
+                .expect("event table readable");
+            let terminal_reached = store
+                .last()
+                .map(|(_, _, event)| event.type_name() == expected_terminal)
+                .unwrap_or(false);
+            if !terminal_reached {
+                continue;
+            }
+            let turn_id = store
+                .iter()
+                .rev()
+                .find_map(|(_, _, event)| event.turn_id().map(str::to_string))
+                .expect("turn-scoped event");
+            let trace = control_plane
+                .load_session_traces(name)
+                .into_iter()
+                .find(|trace| trace.turn_id == turn_id)
+                .unwrap_or_else(|| panic!("stored trace missing for {turn_id}"));
+            let events = store.into_iter().map(|(_, _, event)| event).collect();
+            outcome = Some((events, trace));
+            break;
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let (events, trace) =
+            outcome.unwrap_or_else(|| panic!("scenario {name} never reached terminal"));
+        let turn_id = events
+            .iter()
+            .rev()
+            .find_map(|event| event.turn_id().map(str::to_string))
+            .expect("turn id");
+        (events, trace, turn_id)
+    }
+
+    fn rebuilt_trace(
+        events: &[crate::agent::turn_event::TurnEvent],
+        turn_id: &str,
+    ) -> TurnTraceRecord {
+        let mut state = TraceProjectionState::init();
+        for (index, event) in events.iter().enumerate() {
+            TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+        }
+        state
+            .trace_for_turn(turn_id)
+            .unwrap_or_else(|| panic!("rebuilt trace missing for turn {turn_id}"))
+    }
+
+    /// 对拍断言：约定字段集逐项一致 + 过滤豁免 kind 后保序。
+    /// `expect_text=false` 消费 sync_call_model_text 豁免（同步入口无 chunk 流）。
+    fn assert_parity(stored: &TurnTraceRecord, rebuilt: &TurnTraceRecord, expect_text: bool) {
+        // 豁免消费：terminal_no_usage_turn_provider_metadata——failed/cancelled
+        // turn 无 provider/usage 事件（无已完成模型调用），provider 元数据不可重建
+        // （EXEMPTIONS 登记项；反向探针在 failed/cancelled 场景单独断言其存在）。
+        let skip_provider = matches!(stored.phase.as_str(), "failed" | "cancelled")
+            && rebuilt.provider_name.is_none();
+        for field in AGREED_TRACE_FIELDS {
+            if skip_provider && (*field == "provider_name" || *field == "provider_model") {
+                continue;
+            }
+            assert_eq!(
+                trace_field(stored, field),
+                trace_field(rebuilt, field),
+                "trace field `{field}` diverges (stored vs rebuilt)"
+            );
+        }
+        let filter_exempt = |timeline: &[TraceTimelineEntry]| -> Vec<TraceTimelineEntry> {
+            timeline
+                .iter()
+                .filter(|entry| !EXEMPT_TIMELINE_KINDS.contains(&entry.kind.as_str()))
+                .cloned()
+                .collect()
+        };
+        let stored_timeline = filter_exempt(&stored.trace_timeline);
+        let rebuilt_timeline = filter_exempt(&rebuilt.trace_timeline);
+        assert_eq!(
+            stored_timeline
+                .iter()
+                .map(|entry| entry.kind.clone())
+                .collect::<Vec<_>>(),
+            rebuilt_timeline
+                .iter()
+                .map(|entry| entry.kind.clone())
+                .collect::<Vec<_>>(),
+            "timeline kind order diverges"
+        );
+        for (stored_entry, rebuilt_entry) in stored_timeline.iter().zip(rebuilt_timeline.iter()) {
+            for field in AGREED_TIMELINE_ENTRY_FIELDS {
+                if !expect_text && *field == "text" {
+                    continue;
+                }
+                // 豁免消费：timeline.call_tool_text——text 语义分叉（EXEMPTIONS 登记项）。
+                if *field == "text" && stored_entry.kind == "call_tool" {
+                    continue;
+                }
+                // 豁免消费：timeline.failed_last_hop_state——failed turn 末 hop
+                // state 差异（EXEMPTIONS 登记项；反向探针单独断言其存在）。
+                if *field == "state"
+                    && stored.phase == "failed"
+                    && stored_entry.kind == "call_model"
+                    && stored_entry.sequence == stored_timeline.last().map(|e| e.sequence).unwrap_or(0)
+                {
+                    continue;
+                }
+                assert_eq!(
+                    timeline_entry_field(stored_entry, field),
+                    timeline_entry_field(rebuilt_entry, field),
+                    "timeline field `{field}` diverges on kind {}",
+                    stored_entry.kind
+                );
+            }
+        }
+        // 豁免消费：turn_duration_ms_clock_drift——毫秒级漂移容差（≤250ms）。
+        match (stored.turn_duration_ms, rebuilt.turn_duration_ms) {
+            (Some(stored_ms), Some(rebuilt_ms)) => {
+                let drift = stored_ms.abs_diff(rebuilt_ms);
+                assert!(
+                    drift <= 250,
+                    "turn_duration_ms drift {drift}ms exceeds clock tolerance"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// 场景：无工具同步 turn——约定字段集对拍 + 时钟/title/checkpoint 装饰
+    /// 反向探针。
+    #[test]
+    fn parity_no_tool_sync_turn() {
+        let (events, stored, turn_id) = scenario(
+            "parity-no-tool",
+            vec![json_response(json!({
+                "choices": [{"message": {"role": "assistant", "content": "无工具对拍答案。"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+            }))],
+            "turn/end",
+            &|_runtime| {},
+            &|control_plane| {
+                let _ = control_plane.run_turn(RunTurnCommand {
+                    input: TurnInput {
+                        message: "无工具对拍问题".to_string(),
+                        display_message: None,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        workspace_mode: None,
+                        session_id: Some("parity-no-tool".to_string()),
+                        node_id: None,
+                        history: Vec::new(),
+                        images: Vec::new(),
+                        workspace_id: None,
+                    },
+                });
+            },
+        );
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        assert_parity(&stored, &rebuilt, false);
+
+        // 反向探针：时钟字段豁免差异当前确实存在。
+        assert_ne!(stored.updated_at, 0, "probe(clock): stored carries updated_at");
+        assert_eq!(rebuilt.updated_at, 0, "probe(clock): rebuilt lacks updated_at");
+        // 反向探针：checkpoint_persist 运行时装饰条目豁免。
+        assert!(
+            stored
+                .trace_timeline
+                .iter()
+                .any(|entry| entry.kind == "checkpoint_persist"),
+            "probe(checkpoint_persist): stored carries decoration entry"
+        );
+        assert!(
+            !rebuilt
+                .trace_timeline
+                .iter()
+                .any(|entry| entry.kind == "checkpoint_persist"),
+            "probe(checkpoint_persist): rebuild lacks it (exemption live)"
+        );
+        // 反向探针：timeline.build_context_provider_metadata——差异当前确实存在
+        //（存储侧 build_context 条目携带 provider 元数据，事件无承载——豁免防腐化）。
+        let stored_context_entry = stored
+            .trace_timeline
+            .iter()
+            .find(|entry| entry.kind == "build_context")
+            .expect("probe(bctx-meta): stored build_context entry");
+        let rebuilt_context_entry = rebuilt
+            .trace_timeline
+            .iter()
+            .find(|entry| entry.kind == "build_context")
+            .expect("probe(bctx-meta): rebuilt build_context entry");
+        assert!(
+            stored_context_entry.provider_name.is_some(),
+            "probe(bctx-meta): stored build_context carries provider metadata"
+        );
+        assert!(
+            rebuilt_context_entry.provider_name.is_none(),
+            "probe(bctx-meta): rebuild cannot recover provider metadata (exemption live)"
+        );
+    }
+
+    /// 场景：单工具流式 turn——chunk 文本归属与 tool 条目对拍。
+    #[test]
+    fn parity_single_tool_stream_turn() {
+        let final_text = "单工具对拍最终答案。";
+        let (events, stored, turn_id) = scenario(
+            "parity-tool",
+            vec![
+                sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": final_text}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}),
+                ]),
+            ],
+            "turn/end",
+            &|_runtime| {},
+            &|control_plane| {
+                let sink = RecordingTurnEventSink::new();
+                control_plane.start_turn_stream(
+                    &sink,
+                    StartTurnStreamCommand {
+                        turn_id: "parity-tool-turn".to_string(),
+                        input: TurnInput {
+                            message: "单工具对拍问题".to_string(),
+                            display_message: None,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            workspace_mode: None,
+                            session_id: Some("parity-tool".to_string()),
+                            node_id: None,
+                            history: Vec::new(),
+                            images: Vec::new(),
+                            workspace_id: None,
+                        },
+                    },
+                );
+            },
+        );
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        {
+            let mut state = TraceProjectionState::init();
+            for (index, event) in events.iter().enumerate() {
+                TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+                let kinds: Vec<String> = state
+                    .trace_for_turn(turn_id.as_str())
+                    .map(|trace| {
+                        trace
+                            .trace_timeline
+                            .iter()
+                            .map(|entry| entry.kind.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                eprintln!("[probe] after {} -> {:?}", event.type_name(), kinds);
+            }
+        }
+        eprintln!(
+            "[probe] table events: {:?}",
+            events.iter().map(|event| event.type_name()).collect::<Vec<_>>()
+        );
+        assert_parity(&stored, &rebuilt, true);
+
+        // 反向探针：流式场景 text 在约定字段集内且非空（chunk 折叠生效）。
+        let rebuilt_model_text = rebuilt
+            .trace_timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+            .filter_map(|entry| entry.text.clone())
+            .any(|text| text.contains(final_text));
+        assert!(
+            rebuilt_model_text,
+            "probe(text): streaming chunks aggregate into rebuilt call_model"
+        );
+    }
+
+    /// 场景：failed 同步 turn（checkpoint hook fail-turn——该路径有存储 trace）；
+    /// 反向探针断言 failed 末 hop state 豁免差异当前确实存在
+    /// （stored=error vs rebuilt=completed）。
+    #[test]
+    fn parity_failed_sync_turn_and_last_hop_probe() {
+        let (events, stored, turn_id) = scenario(
+            "parity-failed",
+            vec![json_completion("失败对拍答案")],
+            "turn/end",
+            &|runtime| {
+                runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+                let mut descriptor = observe_hook_descriptor(
+                    "observe.parity-checkpoint-failturn",
+                    10,
+                    TurnHookPoint::CheckpointPersistEnd,
+                );
+                descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+                descriptor.allowed_failure_policies =
+                    vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+                runtime
+                    .register_hook_descriptor(descriptor)
+                    .expect("register parity checkpoint failturn hook");
+            },
+            &|control_plane| {
+                let _ = control_plane.run_turn(RunTurnCommand {
+                    input: TurnInput {
+                        message: "失败对拍问题".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("parity-failed".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                    workspace_id: None,
+                },
+            });
+        },
+    );
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        assert_parity(&stored, &rebuilt, false);
+
+        // 反向探针：failed 末 hop state 豁免差异当前确实存在。
+        let last_state = |trace: &TurnTraceRecord| {
+            trace
+                .trace_timeline
+                .iter()
+                .filter(|entry| entry.kind == "call_model")
+                .last()
+                .map(|entry| entry.state.clone())
+        };
+        assert_eq!(
+            last_state(&stored).as_deref(),
+            Some("error"),
+            "probe(failed_last_hop): stored marks error"
+        );
+        assert_eq!(
+            last_state(&rebuilt).as_deref(),
+            Some("completed"),
+            "probe(failed_last_hop): rebuild still yields completed (exemption live)"
+        );
+    }
+
+    /// 场景：多 turn 同步会话——事件按 turn 分组折叠，逐 turn 独立对拍。
+    #[test]
+    fn parity_multi_turn_sync_session() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-multiturn-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        let mut pairs: Option<Vec<(String, TurnTraceRecord, TurnTraceRecord)>> = None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "第一轮答案。"}}],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+                })),
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "第二轮答案。"}}],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8}
+                })),
+            ]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            for message in ["第一轮问题", "第二轮问题"] {
+                let _ = control_plane.run_turn(RunTurnCommand {
+                    input: TurnInput {
+                        message: message.to_string(),
+                        display_message: None,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        workspace_mode: None,
+                        session_id: Some("parity-multi-turn".to_string()),
+                        node_id: None,
+                        history: Vec::new(),
+                        images: Vec::new(),
+                        workspace_id: None,
+                    },
+                });
+            }
+            server.finish();
+
+            let events = control_plane
+                .load_turn_events_checked("parity-multi-turn", None)
+                .expect("event table readable");
+            let ends = events
+                .iter()
+                .filter(|(_, _, event)| event.type_name() == "turn/end")
+                .count();
+            if ends < 2 {
+                continue;
+            }
+            // 全事件一次折叠（seq 升序），逐 turn 取重建产物。
+            let mut state = TraceProjectionState::init();
+            for (index, (_, _, event)) in events.iter().enumerate() {
+                TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+            }
+            let traces = control_plane.load_session_traces("parity-multi-turn");
+            let mut collected: Vec<(String, TurnTraceRecord, TurnTraceRecord)> = Vec::new();
+            let mut seen: Vec<String> = Vec::new();
+            for (_, _, event) in &events {
+                let Some(turn_id) = event.turn_id() else {
+                    continue;
+                };
+                if seen.iter().any(|id| id == turn_id) {
+                    continue;
+                }
+                seen.push(turn_id.to_string());
+                let Some(stored) = traces.iter().find(|trace| trace.turn_id == turn_id) else {
+                    continue;
+                };
+                let Some(rebuilt) = state.trace_for_turn(turn_id) else {
+                    continue;
+                };
+                collected.push((turn_id.to_string(), stored.clone(), rebuilt));
+            }
+            if collected.len() == 2 {
+                pairs = Some(collected);
+                break;
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let pairs = pairs.expect("multi-turn scenario never completed both turns");
+        assert_eq!(pairs.len(), 2, "two turns paired");
+        for (turn_id, stored, rebuilt) in &pairs {
+            assert_parity(stored, rebuilt, false);
+            assert_eq!(stored.phase, "completed", "turn {turn_id} phase");
+        }
+    }
+
+    /// 场景：多 hop 流式 turn（3 次 provider call + 2 次工具）——多 hop
+    /// timeline 对拍（call_model 条目数 = hop 数，含 return_result）。
+    #[test]
+    fn parity_multi_hop_stream_turn() {
+        let (events, stored, turn_id) = scenario(
+            "parity-multi-hop",
+            vec![
+                sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "找到了，继续读取。"}}]}),
+                    json!({"choices": [{"delta": {"tool_calls": [
+                        {"index": 0, "id": "call_read_file", "type": "function",
+                         "function": {"name": "workspace_read_file", "arguments": "{\"path\":\"tauri.conf.json\"}"}}
+                    ]}}]}),
+                ]),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "多 hop 对拍最终答案。"}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
+                ]),
+            ],
+            "turn/end",
+            &|_runtime| {},
+            &|control_plane| {
+                let sink = RecordingTurnEventSink::new();
+                control_plane.start_turn_stream(
+                    &sink,
+                    StartTurnStreamCommand {
+                        turn_id: "parity-multi-hop-turn".to_string(),
+                        input: TurnInput {
+                            message: "多 hop 对拍问题".to_string(),
+                            display_message: None,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            workspace_mode: None,
+                            session_id: Some("parity-multi-hop".to_string()),
+                            node_id: None,
+                            history: Vec::new(),
+                            images: Vec::new(),
+                            workspace_id: None,
+                        },
+                    },
+                );
+            },
+        );
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        assert_parity(&stored, &rebuilt, true);
+
+        // 反向探针：多 hop 重建 call_model 条目数 = provider call 数。
+        let rebuilt_hops = rebuilt
+            .trace_timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+            .count();
+        assert_eq!(rebuilt_hops, 3, "rebuilt call_model entries equal hop count");
+    }
+
+    /// 场景：plan 前 cancelled 流式 turn——phase=cancelled 对拍；重建不虚构
+    /// 未发生的模型调用（settle 兜底收窄）。
+    #[test]
+    fn parity_cancelled_stream_turn() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-cancel-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> =
+            None;
+        for attempt in 0..8 {
+            let control = ExecutionControlRegistry::new();
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![json_completion("不应被消费的响应")]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlaneBuilder::new()
+                .runtime(runtime)
+                .execution_control(control.clone())
+                .build();
+            // PA-095 #3：会话绑定路由（同 scenario()——抗全局单槽抢占）。
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                "parity-cancel",
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                "parity-cancel",
+                control_plane.event_flush_channel(),
+            );
+            control.register_turn("parity-cancel-turn", Some("parity-cancel"), None);
+            assert!(control.request_stop("parity-cancel-turn").accepted);
+            control_plane.start_turn_stream(
+                &crate::agent::turn_flow::NoopTurnEventSink,
+                StartTurnStreamCommand {
+                    turn_id: "parity-cancel-turn".to_string(),
+                    input: TurnInput {
+                        message: "取消对拍问题".to_string(),
+                        display_message: None,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        workspace_mode: None,
+                        session_id: Some("parity-cancel".to_string()),
+                        node_id: None,
+                        history: Vec::new(),
+                        images: Vec::new(),
+                        workspace_id: None,
+                    },
+                },
+            );
+            // PA-095 #3：cancelled-before-plan 不发起 provider HTTP 请求，
+            // MockHttpServer::finish 会 join 永远阻塞在 accept 的线程——挂死。
+            // 直接 drop（JoinHandle 释放，阻塞线程随进程退出回收）。
+            drop(server);
+
+            let events = control_plane
+                .load_turn_events_checked("parity-cancel", None)
+                .expect("event table readable");
+            let terminal_reached = events
+                .last()
+                .map(|(_, _, event)| event.type_name() == "turn/end")
+                .unwrap_or(false);
+            if !terminal_reached {
+                continue;
+            }
+            let trace = control_plane
+                .load_session_traces("parity-cancel")
+                .into_iter()
+                .find(|trace| trace.turn_id == "parity-cancel-turn")
+                .expect("stored cancelled trace");
+            outcome = Some((events.into_iter().map(|(_, _, e)| e).collect(), trace));
+            break;
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let (events, stored) = outcome.expect("cancelled scenario never reached terminal");
+        let rebuilt = rebuilt_trace(&events, "parity-cancel-turn");
+        assert_parity(&stored, &rebuilt, false);
+
+        // 反向探针：plan 前 cancelled——settle 兜底不虚构模型调用（timeline 的
+        // call_model 条目来自 step/start 事件本身，非结算补建），且中断调用
+        // 不得显示为 completed（PA-095 #3 收敛修复的防腐探针）。
+        assert_eq!(stored.phase, "cancelled", "probe(cancelled): stored phase");
+        for entry in rebuilt
+            .trace_timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+        {
+            assert_eq!(
+                entry.state, "cancelled",
+                "probe(cancelled): interrupted model call must not be marked completed"
+            );
+        }
+        // 反向探针：terminal_no_usage_turn_provider_metadata——差异当前确实存在
+        // （存储侧携带 provider 元数据，事件流无 usage 不可重建；豁免防腐化）。
+        assert!(
+            stored.provider_name.is_some(),
+            "probe(provider-meta): stored cancelled trace carries provider metadata"
+        );
+        assert!(
+            rebuilt.provider_name.is_none(),
+            "probe(provider-meta): rebuild cannot recover provider metadata (exemption live)"
+        );
+    }
+
+    /// 场景：fork-checkout 跨分支——分支命令发射 history-control 事件且日志水位
+    /// 严格递增（#6 无 ABA 的端到端证明），分支后各分支上的 turn 事件折叠与
+    /// 存储 trace 对拍一致（分支可见性不影响 per-turn 事实折叠）。
+    #[test]
+    fn parity_fork_checkout_branch_turns() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-branch-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        struct BranchOutcome {
+            events: Vec<(u64, String, crate::agent::turn_event::TurnEvent)>,
+            traces: Vec<TurnTraceRecord>,
+            fork_cursor_version: u64,
+            switch_cursor_version: u64,
+        }
+        let mut outcome: Option<BranchOutcome> = None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "主干答案。"}}],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+                })),
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "分支答案。"}}],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8}
+                })),
+            ]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                "parity-branch",
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                "parity-branch",
+                control_plane.event_flush_channel(),
+            );
+            let run = |control_plane: &HostControlPlane, message: &str| {
+                control_plane
+                    .run_turn(RunTurnCommand {
+                        input: TurnInput {
+                            message: message.to_string(),
+                            display_message: None,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            workspace_mode: None,
+                            session_id: Some("parity-branch".to_string()),
+                            node_id: None,
+                            history: Vec::new(),
+                            images: Vec::new(),
+                            workspace_id: None,
+                        },
+                    })
+                    .phase
+            };
+            if run(&control_plane, "第一问") != "ready" {
+                continue;
+            }
+
+            // 从最近节点 fork 出新分支；立即用 fork 响应的版本回切主干（#6 乐观锁
+            // round-trip：响应版本即下次通行版本，中间不得有 turn 使其过期）；
+            // 再二次 fork 出工作分支跑分支 turn。
+            let graph = control_plane.load_history_graph(HistoryGraphQuery {
+                session_id: Some("parity-branch".to_string()),
+            });
+            let Some(head_node) = graph.nodes.last() else {
+                continue;
+            };
+            let fork = control_plane
+                .fork_from_history_node(ForkFromHistoryNodeCommand {
+                    session_id: Some("parity-branch".to_string()),
+                    node_id: head_node.node_id.clone(),
+                    expected_cursor_version: None,
+                })
+                .expect("fork succeeds");
+            let fork_expected_version = fork.cursor.cursor_version.unwrap_or(0);
+            control_plane
+                .switch_history_branch(SwitchHistoryBranchCommand {
+                    session_id: Some("parity-branch".to_string()),
+                    branch_id: "branch-main".to_string(),
+                    expected_cursor_version: Some(fork_expected_version),
+                })
+                .expect("switch with fork-returned cursor version (round-trip)");
+            let fork_work = control_plane
+                .fork_from_history_node(ForkFromHistoryNodeCommand {
+                    session_id: Some("parity-branch".to_string()),
+                    node_id: head_node.node_id.clone(),
+                    expected_cursor_version: None,
+                })
+                .expect("work branch fork succeeds");
+            if run(&control_plane, "第二问（分支）") != "ready" {
+                continue;
+            }
+            server.finish();
+
+            let events = control_plane
+                .load_turn_events_checked("parity-branch", None)
+                .expect("event table readable");
+            let ends = events
+                .iter()
+                .filter(|(_, _, event)| event.type_name() == "turn/end")
+                .count();
+            let has_fork_event = events.iter().any(|(_, _, e)| e.type_name() == "fork/created");
+            let has_checkout_event = events
+                .iter()
+                .any(|(_, _, e)| e.type_name() == "checkpoint/checkout");
+            if ends < 2 || !has_fork_event || !has_checkout_event {
+                continue;
+            }
+            // 水位单调性探针：history-control 事件 seq 落在其触发的 turn 事件之后
+            // （日志只增不减，命令事实与 turn 事实同一条单调日志）。
+            let first_end_seq = events
+                .iter()
+                .find(|(_, _, e)| e.type_name() == "turn/end")
+                .map(|(seq, _, _)| *seq)
+                .expect("first turn/end");
+            let fork_seq = events
+                .iter()
+                .find(|(_, _, e)| e.type_name() == "fork/created")
+                .map(|(seq, _, _)| *seq)
+                .expect("fork/created seq");
+            assert!(
+                fork_seq > first_end_seq,
+                "probe(monotonic): fork/created lands after prior turn facts"
+            );
+            let traces = control_plane.load_session_traces("parity-branch");
+            outcome = Some(BranchOutcome {
+                events,
+                traces,
+                fork_cursor_version: fork.cursor.cursor_version.unwrap_or(0),
+                switch_cursor_version: fork_work.cursor.cursor_version.unwrap_or(0),
+            });
+            break;
+        }
+        drop(_rt_guard);
+        let _ = fs::remove_dir_all(&dir);
+        let outcome = outcome.expect("branch scenario never completed");
+
+        // #6 无 ABA 端到端：后续命令版本严格大于先前命令版本（命令事件推进日志水位；
+        // switch 的 round-trip 通过本身已验证"响应版本即下次通行版本"）。
+        assert!(
+            outcome.switch_cursor_version > outcome.fork_cursor_version,
+            "probe(no-aba): cursor version strictly increases across history commands ({} -> {})",
+            outcome.fork_cursor_version,
+            outcome.switch_cursor_version
+        );
+
+        // 全事件一次折叠，逐 turn 对拍（跨分支 turn 各自独立成立）。
+        let mut state = TraceProjectionState::init();
+        for (index, (_, _, event)) in outcome.events.iter().enumerate() {
+            TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for (_, _, event) in &outcome.events {
+            let Some(turn_id) = event.turn_id() else {
+                continue;
+            };
+            if seen.iter().any(|id| id == turn_id) {
+                continue;
+            }
+            seen.push(turn_id.to_string());
+            let Some(stored) = outcome
+                .traces
+                .iter()
+                .find(|trace| trace.turn_id == turn_id)
+            else {
+                continue;
+            };
+            let Some(rebuilt) = state.trace_for_turn(turn_id) else {
+                continue;
+            };
+            assert_parity(stored, &rebuilt, false);
+            assert_eq!(stored.phase, "completed", "turn {turn_id} phase");
+        }
+        assert_eq!(seen.len(), 2, "two turns across branches paired");
+    }
+}
     }

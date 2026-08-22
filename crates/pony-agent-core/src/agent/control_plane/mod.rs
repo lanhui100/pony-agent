@@ -860,6 +860,24 @@ pub struct HostControlPlane {
     pub ask_dispatcher: Arc<GovernedDispatcher>,
     /// Session-owned revisioned plan store backing the Plan control surface (Decision 6).
     plan_store: PlanStore,
+    /// PA-095 #3：本控制面的事件持久化通道句柄（会话绑定路由用）。
+    event_persist_channel: Arc<crate::agent::turn_flow::EventPersistFn>,
+    /// PA-095 #3：本控制面的缓冲 flush 请求通道句柄（会话绑定路由用）。
+    event_flush_channel: Arc<crate::agent::turn_flow::EventFlushFn>,
+}
+
+impl HostControlPlane {
+    /// PA-095 #3：取本控制面事件持久化通道句柄（测试面：会话绑定路由）。
+    #[cfg(test)]
+    pub fn event_persist_channel(&self) -> Arc<crate::agent::turn_flow::EventPersistFn> {
+        Arc::clone(&self.event_persist_channel)
+    }
+
+    /// PA-095 #3：取本控制面缓冲 flush 通道句柄（测试面：会话绑定路由）。
+    #[cfg(test)]
+    pub fn event_flush_channel(&self) -> Arc<crate::agent::turn_flow::EventFlushFn> {
+        Arc::clone(&self.event_flush_channel)
+    }
 }
 
 pub struct HostControlPlaneBuilder {
@@ -938,6 +956,10 @@ impl HostControlPlaneBuilder {
         // SessionStore.persist_events 与快照同事务落盘；失败只记日志（contained）。
         // 审核 P1：key 用 (session_id, turn_id) 而非仅 turn_id——同一 control plane
         // 可并发处理不同 session 的同名 turn_id，仅按 turn_id 索引会跨 session 串数据。
+        // PA-095 #3：通道句柄提升到外层作用域挂到 HostControlPlane 上
+        // （会话绑定路由的测试面入口）。
+        let mut event_persist_channel: Option<Arc<crate::agent::turn_flow::EventPersistFn>> = None;
+        let mut event_flush_channel: Option<Arc<crate::agent::turn_flow::EventFlushFn>> = None;
         {
             let sessions = Arc::clone(&sessions_rwlock);
             let buffer: Arc<
@@ -948,40 +970,120 @@ impl HostControlPlaneBuilder {
                     >,
                 >,
             > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            // PA-095 #2：persist 与 flush-requester 两个闭包共享同一缓冲与 store。
+            let buffer_for_flush = Arc::clone(&buffer);
+            let sessions_for_flush = Arc::clone(&sessions);
             let persist = move |session_id: &str,
                                 turn_id: &str,
                                 event: crate::agent::turn_event::TurnEvent,
                                 is_terminal: bool| {
-                let mut buf = buffer.lock().unwrap_or_else(|e| {
+                // PA-095 #3（实施后审核 P0）：缓冲锁不得跨越 flush——persist 闭包
+                // 持 buf mutex 调 flush_events（阻塞 sessions.write），而 history
+                // 命令线程持 sessions.write 发射全局事件时要抢同一把 buf mutex，
+                // 构成跨线程 ABBA 死锁。改为：锁内只做聚合/入队 + 终态批快照，
+                // 释放锁后再 flush，成功后重新加锁移除（commit 先于 clear）。
+                // 同 turn 单写者假设：快照与移除间隙内同 (session,turn) 的并发
+                // 入队在 turn 流程中不存在（发射方即当前写者）。
+                let mut flush_batch: Option<(
+                    String,
+                    String,
+                    Vec<crate::agent::turn_event::TurnEvent>,
+                )> = None;
+                {
+                    let mut buf = buffer.lock().unwrap_or_else(|e| {
+                        eprintln!(
+                            "[pony-agent][runtime] event buffer lock poisoned: {e}, recovering"
+                        );
+                        e.into_inner()
+                    });
+                    let key = (session_id.to_string(), turn_id.to_string());
+                    // 写时聚合：同一 turn 的连续 AssistantChunk 合并为一条（
+                    // append-only 不可变 + seq 连续与聚合的一致性由"emit 时合并"保证）。
+                    let mut merged_chunk = false;
+                    if let crate::agent::turn_event::TurnEvent::AssistantChunk { text, .. } =
+                        &event
+                    {
+                        if let Some(last) = buf.get_mut(&key).and_then(|v| v.last_mut()) {
+                            if let crate::agent::turn_event::TurnEvent::AssistantChunk {
+                                text: last_text,
+                                ..
+                            } = last
+                            {
+                                last_text.push_str(text);
+                                merged_chunk = true;
+                            }
+                        }
+                    }
+                    if !merged_chunk {
+                        buf.entry(key.clone()).or_default().push(event);
+                    }
+                    if is_terminal {
+                        // PA-095 #2：commit 先于 clear——flush 成功才移除缓冲
+                        // （失败保留可重试，防止 remove→flush 之间崩溃丢事件）。
+                        let events = buf.get(&key).cloned().unwrap_or_default();
+                        flush_batch =
+                            Some((session_id.to_string(), turn_id.to_string(), events));
+                    }
+                }
+                if let Some((sid, tid, events)) = flush_batch {
+                    if flush_events(&sessions, &sid, &tid, events) {
+                        let mut buf = buffer.lock().unwrap_or_else(|e| {
+                            eprintln!(
+                                "[pony-agent][runtime] event buffer lock poisoned: {e}, recovering"
+                            );
+                            e.into_inner()
+                        });
+                        buf.remove(&(sid, tid));
+                    }
+                }
+            };
+            // PA-095 #3：通道句柄保留在本控制面上（会话绑定路由用）。
+            let persist_channel: Arc<crate::agent::turn_flow::EventPersistFn> = Arc::new(persist);
+            crate::agent::turn_flow::register_event_persist(Arc::clone(&persist_channel));
+            event_persist_channel = Some(persist_channel);
+            // PA-095 #2：会话级 flush 请求通道——append_turn 物化前确保该会话的
+            // 缓冲事件已提交事件表。逐 key 提交成功才移除（commit 先于 clear）。
+            // 用 try_write：append_turn 在生产路径于 sessions 写锁内被调用，
+            // 阻塞式 write 会自锁死锁——锁忙时返回 Err（fail loud）而非挂死。
+            let flush_requester = move |session_id: &str| -> Result<usize, String> {
+                let mut buf = buffer_for_flush.lock().unwrap_or_else(|e| {
                     eprintln!("[pony-agent][runtime] event buffer lock poisoned: {e}, recovering");
                     e.into_inner()
                 });
-                let key = (session_id.to_string(), turn_id.to_string());
-                // 写时聚合：同一 turn 的连续 AssistantChunk 合并为一条（
-                // append-only 不可变 + seq 连续与聚合的一致性由"emit 时合并"保证）。
-                if let crate::agent::turn_event::TurnEvent::AssistantChunk { text, .. } = &event {
-                    if let Some(last) = buf.get_mut(&key).and_then(|v| v.last_mut()) {
-                        if let crate::agent::turn_event::TurnEvent::AssistantChunk {
-                            text: last_text,
-                            ..
-                        } = last
-                        {
-                            last_text.push_str(text);
-                            if is_terminal {
-                                let events = buf.remove(&key).unwrap_or_default();
-                                flush_events(&sessions, session_id, turn_id, events);
-                            }
-                            return;
-                        }
+                let keys: Vec<(String, String)> = buf
+                    .keys()
+                    .filter(|(sid, _)| sid == session_id)
+                    .cloned()
+                    .collect();
+                if keys.is_empty() {
+                    return Ok(0);
+                }
+                let mut sessions = sessions_for_flush.try_write().map_err(|_| {
+                    "sessions write lock busy while flushing buffered events (called under lock?)"
+                        .to_string()
+                })?;
+                let mut committed = 0usize;
+                for key in keys {
+                    let events = buf.get(&key).cloned().unwrap_or_default();
+                    if events.is_empty() {
+                        continue;
+                    }
+                    if commit_event_batch(&mut sessions, &key.0, &key.1, events) {
+                        committed += buf.remove(&key).map(|events| events.len()).unwrap_or(0);
+                    } else {
+                        return Err(format!(
+                            "event flush failed for session={session_id} turn={} (buffer retained)",
+                            key.1
+                        ));
                     }
                 }
-                buf.entry(key.clone()).or_default().push(event);
-                if is_terminal {
-                    let events = buf.remove(&key).unwrap_or_default();
-                    flush_events(&sessions, session_id, turn_id, events);
-                }
+                Ok(committed)
             };
-            crate::agent::turn_flow::register_event_persist(Arc::new(persist));
+            // PA-095 #3：flush 通道句柄同样保留（会话绑定路由用）。
+            let flush_channel: Arc<crate::agent::turn_flow::EventFlushFn> =
+                Arc::new(flush_requester);
+            crate::agent::turn_flow::register_event_flush(Arc::clone(&flush_channel));
+            event_flush_channel = Some(flush_channel);
         }
         // The graph run store and the governed ask dispatcher are shared with the runtime so the
         // Ask control surface (`ask_answer` / `graph_resume_ask`) hits the exact pending-request
@@ -1011,6 +1113,11 @@ impl HostControlPlaneBuilder {
             ),
             ask_dispatcher,
             plan_store: self.plan_store.unwrap_or_else(PlanStore::new),
+            // PA-095 #3：块内必然赋值（通道注册无条件执行）。
+            event_persist_channel: event_persist_channel
+                .expect("event persist channel registered in build"),
+            event_flush_channel: event_flush_channel
+                .expect("event flush channel registered in build"),
         }
     }
 }
@@ -1021,27 +1128,31 @@ impl Default for HostControlPlaneBuilder {
     }
 }
 
-/// PA-091：事件缓冲 flush（与快照同事务由 SessionStore.persist_events 保证）。
-/// 失败只记日志（contained，不阻断流）；session_id 缺失时丢弃并告警。
-/// PA-093：事件携带当前 active 分支（branch_id 落列）；flush 成功后同步
-/// 会话水位并升级 branch head 节点为引用化（finalize_event_watermark）。
-fn flush_events(
-    sessions: &Arc<RwLock<crate::agent::session::SessionStore>>,
+/// PA-095 #2：单批事件提交核心（调用方已持 sessions 写锁）——persist 成功后
+/// 同步水位；返回是否提交成功。
+fn commit_event_batch(
+    sessions: &mut crate::agent::session::SessionStore,
     session_id: &str,
     turn_id: &str,
     events: Vec<crate::agent::turn_event::TurnEvent>,
-) {
+) -> bool {
     if events.is_empty() {
-        return;
+        return true;
     }
     if session_id.is_empty() {
         eprintln!("[pony-agent][runtime] event flush skipped: missing session_id turn={turn_id}");
-        return;
+        return false;
     }
-    let mut sessions = sessions.write().unwrap_or_else(|e| {
-        eprintln!("[pony-agent][runtime] sessions lock poisoned: {e}, recovering");
-        e.into_inner()
-    });
+    // PA-095 #3（实施后审核 P1）：无事件后端（Memory/File）——事件无处可落，
+    // "失败保留可重试"会变成不可满足的永久滞留（逐 turn 无界累积 + O(N) 重扫）。
+    // 显式清除缓冲（contained 丢弃语义，与改造前行为对齐），仅记可观测日志。
+    if !sessions.supports_turn_events() {
+        eprintln!(
+            "[pony-agent][runtime] event flush dropped: backend without event support session={session_id} turn={turn_id} events={}",
+            events.len()
+        );
+        return true;
+    }
     let branch_id = sessions
         .session_active_branch_id(session_id)
         .unwrap_or_else(|| "main".to_string());
@@ -1054,10 +1165,38 @@ fn flush_events(
                 .map(|e| e.type_name())
                 .unwrap_or("none")
         );
-        return;
+        return false;
     }
     // PA-093：水位同步 + 节点引用化升级（幂等；失败只记日志）。
     sessions.finalize_event_watermark(session_id, turn_id);
+    // PA-095 #7（实施后审核 P2）：把本 turn 的 observation 引用附加到内存
+    // trace 缓存行——异步 trace worker 整行 REPLACE 时带上引用，防止覆盖掉
+    // flush 同事务回填的 ref。
+    sessions.attach_observation_refs_to_turn_trace(session_id, turn_id);
+    true
+}
+
+/// PA-091：事件缓冲 flush（与快照同事务由 SessionStore.persist_events 保证）。
+/// 失败只记日志（contained，不阻断流）；session_id 缺失时丢弃并告警。
+/// PA-095 #2：返回 persist 是否成功——调用方据此决定是否清空缓冲
+/// （commit 先于 clear 的原子序保证；失败保留缓冲可重试）。
+fn flush_events(
+    sessions: &Arc<RwLock<crate::agent::session::SessionStore>>,
+    session_id: &str,
+    turn_id: &str,
+    events: Vec<crate::agent::turn_event::TurnEvent>,
+) -> bool {
+    if events.is_empty() {
+        return true;
+    }
+    // PA-095 #3：阻塞式写锁（基线语义）——终态内联 flush 与 trace 持久化
+    // worker 的毫秒级锁竞争等待即可；同线程自锁面已由 emit_global_event 改
+    // 仅入缓冲（history 命令路径）结构性消除，此处不再需要 try_write。
+    let mut sessions = sessions.write().unwrap_or_else(|e| {
+        eprintln!("[pony-agent][runtime] sessions lock poisoned: {e}, recovering");
+        e.into_inner()
+    });
+    commit_event_batch(&mut sessions, session_id, turn_id, events)
 }
 
 pub struct DesktopHostPreset;
@@ -1134,7 +1273,32 @@ impl HostControlPlane {
 
     pub fn run_turn(&self, command: RunTurnCommand) -> TurnResult {
         let runtime = self.runtime.read().expect("runtime lock poisoned");
-        runtime.run_turn(command.input)
+        // PA-095 #3：入口返回前补提交缓冲事件（终态发射时 sessions 锁可能被
+        // trace 持久化 worker 占用而被 try_write 保留；此时锁已释放）。
+        let session_id_for_flush = command
+            .input
+            .session_id
+            .clone()
+            .unwrap_or_else(|| crate::agent::session::DEFAULT_SESSION_ID.to_string());
+        let result = runtime.run_turn(command.input);
+        drop(runtime);
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
+        result
+    }
+
+    /// PA-095 #3：事件流读面（宿主/对拍测试用）——带契约校验的已落盘事件。
+    pub fn load_turn_events_checked(
+        &self,
+        session_id: &str,
+        up_to_seq: Option<u64>,
+    ) -> Result<Vec<(u64, String, crate::agent::turn_event::TurnEvent)>, String> {
+        self.sessions_rwlock
+            .read()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .load_turn_events_checked(session_id, up_to_seq)
     }
 
     pub fn start_graph_run(
@@ -1556,6 +1720,16 @@ impl HostControlPlane {
             }
         };
 
+        // PA-095 #3（实施后审核 P2）：graph 流式入口同 run_turn——返回前确定性补
+        // 提交缓冲事件（终态内联 flush 失败时缓冲保留，此处锁已释放）。
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(
+            prepared
+                .input
+                .session_id
+                .as_deref()
+                .unwrap_or(crate::agent::session::DEFAULT_SESSION_ID),
+        );
+
         if turn_result.phase == SUSPENDED_TURN_PHASE {
             // The run is already `WaitingUser` with a bound Ask wait (design.md Decision 5): the
             // runtime set it via `bind_ask_wait` before the turn returned. No turn-result
@@ -1628,6 +1802,13 @@ impl HostControlPlane {
         );
 
         let runtime = self.runtime.read().expect("runtime lock poisoned");
+        // PA-095 #3：入口返回前补提交缓冲事件（终态发射时 sessions 锁可能被
+        // trace 持久化 worker 占用而被 try_write 保留；此时锁已释放）。
+        let session_id_for_flush = command
+            .input
+            .session_id
+            .clone()
+            .unwrap_or_else(|| crate::agent::session::DEFAULT_SESSION_ID.to_string());
         // 审核 P0：普通 streaming 路径补 terminal trace annotation（与 graph
         // streaming 路径一致）——终态信封（event_id/sequence 等）写回 trace 记录，
         // 否则 trace 缓存行 watermark 停留 0，无法可靠判断缓存是否覆盖事件流。
@@ -1658,6 +1839,8 @@ impl HostControlPlane {
                 emitted_at_ms,
             );
         }
+        drop(runtime);
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
     }
 
     pub fn stop_turn(&self, command: StopTurnCommand) -> StopTurnResponse {
@@ -1929,6 +2112,15 @@ impl HostControlPlane {
                 (turn_result, handoff, decision)
             }
         };
+
+        // PA-095 #3（实施后审核 P2）：graph 同步入口同 run_turn——返回前确定性
+        // 补提交缓冲事件（终态内联 flush 失败时缓冲保留，此处锁已释放）。
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(
+            input
+                .session_id
+                .as_deref()
+                .unwrap_or(crate::agent::session::DEFAULT_SESSION_ID),
+        );
 
         if turn_result.phase == SUSPENDED_TURN_PHASE {
             let run = {
@@ -3248,6 +3440,7 @@ mod tests {
                 provider_call_records: None,
                 hook_trace_records: None,
                 session_summary: None,
+                step: None,
             },
         );
 
@@ -6324,6 +6517,430 @@ mod tests {
         assert_eq!(summary.providers.len(), 1);
         assert_eq!(summary.models.len(), 1);
         server.finish();
+    }
+
+    /// PA-095 #2：计数代理——拦截 save_store（整包写）与 AppendMessage/
+    /// UpdateSessionMeta 命令，为写放大消除提供结构性断言。
+    use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
+    use crate::agent::hooks::HookTraceRecord;
+    use crate::agent::session::{
+        AttachmentAssetMap, PersistCommand, PersistCommandOutcome, PersistedStore,
+        SessionAttachmentIndex, SessionBackend, SessionBackendMutationResult,
+        SessionBackendTraceLoadResult, SessionState, SessionTraceMutation,
+    };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    struct CountingBackend {
+        inner: crate::agent::sqlite_session::SqliteSessionBackend,
+        save_store_count: Arc<std::sync::atomic::AtomicUsize>,
+        append_message_count: Arc<std::sync::atomic::AtomicUsize>,
+        update_meta_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SessionBackend for CountingBackend {
+        fn load_store(&self) -> Option<PersistedStore> {
+            self.inner.load_store()
+        }
+        fn save_store(&self, store: &PersistedStore) {
+            self.save_store_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.save_store(store);
+        }
+        fn trace_storage_mode(&self) -> crate::agent::session::SeparateTraceTableMode {
+            self.inner.trace_storage_mode()
+        }
+        fn persist_command(
+            &self,
+            command: PersistCommand,
+        ) -> crate::agent::session::PersistCommandOutcome {
+            match &command {
+                PersistCommand::AppendMessage { .. } => {
+                    self.append_message_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                PersistCommand::UpdateSessionMeta { .. } => {
+                    self.update_meta_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            self.inner.persist_command(command)
+        }
+        fn upsert_session(&self, session_id: &str, session: &SessionState) -> bool {
+            self.inner.upsert_session(session_id, session)
+        }
+        fn remove_session(
+            &self,
+            session_id: &str,
+            attachment_assets: &AttachmentAssetMap,
+            session_attachment_index: &SessionAttachmentIndex,
+            mcp_source_snapshots: &HashMap<String, McpSourceSnapshot>,
+            skill_source_snapshots: &HashMap<String, SkillSourceSnapshot>,
+        ) -> bool {
+            self.inner.remove_session(
+                session_id,
+                attachment_assets,
+                session_attachment_index,
+                mcp_source_snapshots,
+                skill_source_snapshots,
+            )
+        }
+        fn load_session_traces(&self, session_id: &str) -> SessionBackendTraceLoadResult {
+            self.inner.load_session_traces(session_id)
+        }
+        fn load_turn_events(
+            &self,
+            session_id: &str,
+            up_to_seq: Option<u64>,
+        ) -> Vec<(u64, String, crate::agent::turn_event::TurnEvent)> {
+            self.inner.load_turn_events(session_id, up_to_seq)
+        }
+        fn load_turn_events_checked(
+            &self,
+            session_id: &str,
+            up_to_seq: Option<u64>,
+        ) -> Result<Vec<(u64, String, crate::agent::turn_event::TurnEvent)>, String> {
+            self.inner.load_turn_events_checked(session_id, up_to_seq)
+        }
+        fn supports_turn_events(&self) -> bool {
+            self.inner.supports_turn_events()
+        }
+        fn validate_event_schema(&self) -> Result<u64, String> {
+            self.inner.validate_event_schema()
+        }
+        fn load_event_watermark(&self, session_id: &str) -> u64 {
+            self.inner.load_event_watermark(session_id)
+        }
+        fn load_build_context_observation(
+            &self,
+            session_id: &str,
+            observation_ref: &str,
+        ) -> Option<crate::agent::provider::BuildContextObservation> {
+            self.inner
+                .load_build_context_observation(session_id, observation_ref)
+        }
+        fn replace_session_traces(
+            &self,
+            session_id: &str,
+            traces: &[TurnTraceRecord],
+        ) -> SessionBackendMutationResult {
+            self.inner.replace_session_traces(session_id, traces)
+        }
+        fn upsert_turn_trace(
+            &self,
+            session_id: &str,
+            trace: &TurnTraceRecord,
+            trace_order: usize,
+        ) -> SessionBackendMutationResult {
+            self.inner.upsert_turn_trace(session_id, trace, trace_order)
+        }
+        fn update_turn_trace_terminal_event(
+            &self,
+            session_id: &str,
+            turn_id: &str,
+            event_id: Option<&str>,
+            event_type: Option<&str>,
+            event_version: Option<&str>,
+            sequence: Option<u64>,
+            emitted_at_ms: Option<u64>,
+            updated_at: u64,
+        ) -> SessionBackendMutationResult {
+            self.inner.update_turn_trace_terminal_event(
+                session_id,
+                turn_id,
+                event_id,
+                event_type,
+                event_version,
+                sequence,
+                emitted_at_ms,
+                updated_at,
+            )
+        }
+        fn append_turn_trace_hook_records(
+            &self,
+            session_id: &str,
+            turn_id: &str,
+            hook_trace_records: &[HookTraceRecord],
+            updated_at: u64,
+        ) -> SessionBackendMutationResult {
+            self.inner.append_turn_trace_hook_records(
+                session_id,
+                turn_id,
+                hook_trace_records,
+                updated_at,
+            )
+        }
+        fn persist_session_with_trace_mutation(
+            &self,
+            session_id: &str,
+            session: &SessionState,
+            mutation: SessionTraceMutation,
+        ) -> SessionBackendMutationResult {
+            self.inner
+                .persist_session_with_trace_mutation(session_id, session, mutation)
+        }
+        fn attachment_root(&self) -> Option<PathBuf> {
+            self.inner.attachment_root()
+        }
+    }
+
+    /// PA-095：graph sync fallback（control_plane.run_turn）端到端事件落盘——
+    /// 同步入口 turn 经生产注册通道（builder.build 注册的缓冲闭包）flush 到
+    /// SessionStore，事件流骨架与 streaming 入口等价（非仅声明受益）。
+    /// 用 SQLite 后端（MemoryBackend persist_command Unsupported，事件不落盘）。
+    /// 并行测试下全局单槽通道可能被其他测试的 control-plane 构建覆盖（结构性
+    /// 已知问题，登记于 PA-095 任务卡），重试重建以在调度噪声下保持确定性。
+    #[test]
+    fn graph_sync_run_turn_persists_event_stream_end_to_end() {
+        // provider HTTP 调用需要 tokio runtime 上下文（与 build_test_control_plane 一致）。
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-e2e-events-{stamp}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        let expected_types = [
+            "turn/start",
+            "context/observation",
+            "user/message",
+            // PA-095 #4：初始 call 的 StepStart + usage 结算同点的 StepEnd。
+            "step/start",
+            "assistant/message",
+            "provider/usage",
+            "step/end",
+            "turn/end",
+        ];
+        let mut loaded: Vec<(u64, String, crate::agent::turn_event::TurnEvent)> = Vec::new();
+        for attempt in 0..8 {
+            let server = MockHttpServer::start(vec![json_completion("端到端事件答案")]);
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{stamp}-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            // PA-095 #3：会话绑定路由——本控制面通道绑到 e2e session，
+            // 全局默认单槽被并行构建覆盖不再影响事件落盘（重试保留为兜底）。
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                "e2e-sync-events",
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                "e2e-sync-events",
+                control_plane.event_flush_channel(),
+            );
+
+            let result = control_plane.run_turn(RunTurnCommand {
+                input: TurnInput {
+                    message: "端到端事件问题".to_string(),
+                    display_message: None,
+                    provider_id: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    workspace_mode: None,
+                    session_id: Some("e2e-sync-events".to_string()),
+                    node_id: None,
+                    history: Vec::new(),
+                    images: Vec::new(),
+                    workspace_id: None,
+                },
+            });
+            assert_eq!(result.phase, "ready", "sync turn must complete");
+            server.finish();
+
+            // 事件经生产通道 flush 落盘（SessionStore.load_turn_events 读回）。
+            // 注意：pre-materialization flush 会先提交 started 批——表非空不代表
+            // 终态已落（终态批可能被并行抢占的通道吞掉），必须以 turn/end 在表
+            // 为完成判据。
+            loaded = control_plane
+                .sessions_rwlock
+                .read()
+                .expect("sessions lock poisoned")
+                .load_turn_events("e2e-sync-events", None);
+            let terminal_reached = loaded
+                .last()
+                .map(|(_, _, event)| event.type_name() == "turn/end")
+                .unwrap_or(false);
+            if terminal_reached {
+                break;
+            }
+        }
+
+        let types: Vec<&str> = loaded.iter().map(|(_, _, event)| event.type_name()).collect();
+        assert_eq!(
+            types, expected_types,
+            "event stream persisted end to end through the production channel"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PA-095 #2：append_turn 事件源物化生效（防架空探针）——caller 文本与事件
+    /// 文本不同时，history 必须取事件文本；assistant reasoning_content 随事件
+    /// 物化（caller 参数无此数据）。并行测试下生产单槽通道可能被其他 control
+    /// plane 构建抢占（结构性已知问题），重试重建保证确定性。
+    #[test]
+    fn append_turn_materializes_history_from_events_over_caller_text() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-mat-events-{stamp}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        let mut snapshot_history: Option<Vec<(String, Option<String>)>> = None;
+        let mut last_counters = None;
+        for attempt in 0..8 {
+            let save_store_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let append_message_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let update_meta_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let sessions = SessionStore::with_backend(Box::new(CountingBackend {
+                inner: crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+                save_store_count: Arc::clone(&save_store_count),
+                append_message_count: Arc::clone(&append_message_count),
+                update_meta_count: Arc::clone(&update_meta_count),
+            }));
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection("http://127.0.0.1:1/v1".to_string()),
+                }),
+                Box::new(ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            // builder.build() 注册 persist + flush 通道（绑定本 store）。
+            let control_plane = HostControlPlane::with_runtime(runtime);
+
+            let noop_sink = crate::agent::turn_flow::NoopTurnEventSink;
+            let emit = |name: &str, text: Option<String>, reasoning: Option<String>| {
+                crate::agent::turn_flow::emit_stream_event(
+                    &noop_sink,
+                    name,
+                    format!("mat-turn-{attempt}"),
+                    if name == "turn:started" { "started" } else { "completed" },
+                    Some(if name == "turn:started" { "calling_model" } else { "completed" }),
+                    text,
+                    reasoning,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("mat-s1".to_string()),
+                );
+            };
+            emit("turn:started", Some("事件用户文本".to_string()), None);
+            emit(
+                "turn:completed",
+                Some("事件助手文本".to_string()),
+                Some("事件推理".to_string()),
+            );
+
+            // append_turn 的 caller 文本故意与事件不同——物化必须取事件。
+            // 基线计数：store 构造期的迁移写（workspace 播种等）不计入
+            // append_turn 的结构性断言——只看 append_turn 前后的增量。
+            let baseline_save = save_store_count.load(std::sync::atomic::Ordering::SeqCst);
+            let baseline_appends = append_message_count.load(std::sync::atomic::Ordering::SeqCst);
+            let baseline_metas = update_meta_count.load(std::sync::atomic::Ordering::SeqCst);
+            let snapshot = control_plane
+                .sessions_rwlock
+                .write()
+                .expect("sessions lock poisoned")
+                .append_turn(
+                    Some("mat-s1"),
+                    "caller 用户文本",
+                    "caller 助手文本",
+                    None,
+                    Vec::new(),
+                );
+            let delta_save =
+                save_store_count.load(std::sync::atomic::Ordering::SeqCst) - baseline_save;
+            let delta_appends =
+                append_message_count.load(std::sync::atomic::Ordering::SeqCst) - baseline_appends;
+            let delta_metas =
+                update_meta_count.load(std::sync::atomic::Ordering::SeqCst) - baseline_metas;
+            let entries: Vec<(String, Option<String>)> = snapshot
+                .history
+                .iter()
+                .map(|message| {
+                    (
+                        message.content.clone(),
+                        message.reasoning_content.clone(),
+                    )
+                })
+                .collect();
+            // 物化生效判据：user 条目取事件文本（未生效 = 通道被抢，重试）。
+            if entries.first().map(|(content, _)| content.as_str()) == Some("事件用户文本") {
+                snapshot_history = Some(entries);
+                last_counters = Some((delta_save, delta_appends, delta_metas));
+                break;
+            }
+        }
+
+        let entries = snapshot_history.expect(
+            "materialization never took effect across retries (channel theft every attempt)",
+        );
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].0, "事件用户文本",
+            "user entry materialized from event, not caller"
+        );
+        assert_eq!(
+            entries[1].0, "事件助手文本",
+            "assistant entry materialized from event, not caller"
+        );
+        assert_eq!(
+            entries[1].1.as_deref(),
+            Some("事件推理"),
+            "reasoning_content derives from the event"
+        );
+
+        // 写放大消除的结构性证据（persist-command 拦截，append_turn 前后增量）：
+        // 消息级 turn 的整包 store 写（save_store）= 0；AppendMessage = 2
+        // （user+assistant）、UpdateSessionMeta = 1。
+        let (save_store, appends, metas) =
+            last_counters.expect("counters captured on successful attempt");
+        assert_eq!(
+            save_store, 0,
+            "message-only turn must not trigger whole-store writes"
+        );
+        assert_eq!(appends, 2, "two AppendMessage commands per turn");
+        assert_eq!(metas, 1, "one UpdateSessionMeta command per turn");
+
+        // 不 clear 全局注册表——并行测试的 control plane 可能正持有通道；
+        // 泄漏的闭包随进程结束回收（覆盖语义：下一个 builder 注册即替换）。
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

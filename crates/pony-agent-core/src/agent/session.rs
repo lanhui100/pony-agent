@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const DEFAULT_SESSION_ID: &str = "local-dev-session";
+pub(crate) const DEFAULT_SESSION_ID: &str = "local-dev-session";
 const DEFAULT_SESSION_SUMMARY: &str = "Pony Agent 本地开发会话";
 const DEFAULT_HISTORY_LIMIT: usize = 24;
 const DEFAULT_SESSION_TITLE: &str = "\u{65B0}\u{5BF9}\u{8BDD}";
@@ -27,8 +27,8 @@ const DEFAULT_ATTACHMENT_RECLAIM_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_HISTORY_BRANCH_ID: &str = "branch-main";
 
 type SessionMap = HashMap<String, SessionState>;
-type AttachmentAssetMap = HashMap<String, AttachmentAsset>;
-type SessionAttachmentIndex = HashMap<String, Vec<String>>;
+pub(crate) type AttachmentAssetMap = HashMap<String, AttachmentAsset>;
+pub(crate) type SessionAttachmentIndex = HashMap<String, Vec<String>>;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -475,25 +475,25 @@ pub struct SessionSnapshot {
     pub workspace_id: Option<String>,
 }
 
-fn bump_cursor_version(cursor: &mut HistoryCursor) {
-    cursor.cursor_version = cursor.cursor_version.saturating_add(1);
-}
-
+/// PA-095 #6：cursor_version 退役——乐观锁改水位比较。seq 水位本身单调递增
+/// （checkout/fork/restore/switch 发射 history-control 事件使日志水位只增不减，
+/// 消除 ABA 窗口），cursor_version 字段保留 wire 兼容但值恒等于水位镜像。
+/// 权威比较源是 session.event_watermark（cursor 字段仅在命令结算时镜像）。
 fn reject_stale_cursor_version(
-    cursor: &HistoryCursor,
+    session: &SessionState,
     expected_cursor_version: Option<u64>,
 ) -> Result<(), String> {
     let Some(expected) = expected_cursor_version else {
         return Ok(());
     };
 
-    if expected == cursor.cursor_version {
+    if expected == session.event_watermark {
         return Ok(());
     }
 
     Err(format!(
-        "history cursor conflict: expected revision {}, actual revision {}",
-        expected, cursor.cursor_version
+        "history cursor conflict: expected watermark {}, actual watermark {}",
+        expected, session.event_watermark
     ))
 }
 
@@ -912,6 +912,32 @@ pub trait SessionBackend: Send + Sync {
     ) -> Vec<(u64, String, crate::agent::turn_event::TurnEvent)> {
         Vec::new()
     }
+    /// PA-095：带契约校验的事件加载——版本不匹配或坏 payload fail loud（Err 上抛）。
+    /// 默认委托 `load_turn_events`（非 SQLite 后端无契约概念，恒 Ok）。
+    fn load_turn_events_checked(
+        &self,
+        session_id: &str,
+        up_to_seq: Option<u64>,
+    ) -> Result<Vec<(u64, String, crate::agent::turn_event::TurnEvent)>, String> {
+        Ok(self.load_turn_events(session_id, up_to_seq))
+    }
+    /// PA-095 #2：后端是否具备事件表能力（append_turn 物化的回退判据——仅
+    /// 真无事件后端允许回退调用方参数）。默认 false（Memory/File 等）。
+    fn supports_turn_events(&self) -> bool {
+        false
+    }
+    /// PA-095 #7（实施后审核 P2）：列出会话已外置的 observation 引用
+    /// （形如 `bco:<turn_id>:<seq>`）。默认空（非 SQLite 后端无独立表）。
+    /// 供 flush 后把 ref 附加到内存 trace 缓存行——防止异步 trace worker 的
+    /// 整行 REPLACE 把同事务回填的引用覆盖掉。
+    fn load_observation_refs(&self, _session_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// PA-095：事件 schema 版本校验（缺失视为 v1 并回填；不匹配 Err）。
+    /// 默认 Ok（非 SQLite 后端无 store_metadata 契约）。
+    fn validate_event_schema(&self) -> Result<u64, String> {
+        Ok(crate::agent::turn_event::EVENT_SCHEMA_VERSION)
+    }
     /// PA-093：当前事件水位（已落盘事件总数）。默认 0（非 SQLite 后端无事件流）。
     fn load_event_watermark(&self, _session_id: &str) -> u64 {
         0
@@ -922,8 +948,7 @@ pub trait SessionBackend: Send + Sync {
         &self,
         _session_id: &str,
         _observation_ref: &str,
-    ) -> Option<crate::agent::provider::BuildContextObservation> {
-        None
+    ) -> Option<crate::agent::provider::BuildContextObservation> {        None
     }
     fn replace_session_traces(
         &self,
@@ -991,6 +1016,9 @@ pub struct SessionStore {
     /// 事件区间不再追加 → 缓存天然有效（无需失效协议）；重启后由重折叠重建。
     /// 内存态，不参与持久化。
     projection_cache: HashMap<String, (u64, Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>)>,
+    /// PA-095：事件流 degraded 会话集合——`load_turn_events_checked` 遇坏 payload /
+    /// 版本不匹配时标记（fail loud 不静默跳过）；内存态，重启后随首次读取重建。
+    event_stream_degraded: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -1021,6 +1049,43 @@ pub struct FileSessionBackend {
 #[cfg(test)]
 pub struct MemorySessionBackend {
     attachment_root: PathBuf,
+}
+
+/// PA-095 #2：从事件流物化"最近一个 turn"的消息文本（append_turn 事件源）。
+/// 返回 `(Option<user 文本>, Option<(assistant 文本, reasoning)>)`；外层 None =
+/// 事件流无 turn 归属事件（直连 store 的 legacy 用法，调用方整体回退）；
+/// 内层 None = 该 turn 缺对应事件（如 failed turn 仅 user/message——assistant
+/// 按调用方参数补占位，与 append_failed_turn 语义对齐）。事件按 seq 升序，
+/// 最近 turn 取最后一个带归属的事件之 turn_id。
+fn materialize_last_turn_messages(
+    events: &[(u64, String, crate::agent::turn_event::TurnEvent)],
+) -> Option<(Option<String>, Option<(String, Option<String>)>)> {
+    use crate::agent::turn_event::TurnEvent;
+    let last_turn_id = events
+        .iter()
+        .rev()
+        .find_map(|(_, _, event)| event.turn_id().map(str::to_string))?;
+    let mut user_text: Option<String> = None;
+    let mut assistant: Option<(String, Option<String>)> = None;
+    for (_, _, event) in events {
+        if event.turn_id() != Some(last_turn_id.as_str()) {
+            continue;
+        }
+        match event {
+            TurnEvent::UserMessage { text, .. } => {
+                user_text = Some(text.clone());
+            }
+            TurnEvent::AssistantMessage {
+                text,
+                reasoning_content,
+                ..
+            } => {
+                assistant = Some((text.clone(), reasoning_content.clone()));
+            }
+            _ => {}
+        }
+    }
+    Some((user_text, assistant))
 }
 
 impl SessionStore {
@@ -1130,6 +1195,13 @@ impl SessionStore {
             session_attachment_index = rebuilt_index;
             should_save = true;
         }
+        // PA-095：启动时事件 schema 版本校验——不匹配 fail loud（强提示），
+        // 数据不可用而非部分视图；缺失 key 由 backend 回填（视为 v1）。
+        if let Err(error) = backend.validate_event_schema() {
+            eprintln!(
+                "[pony-agent][session] EVENT SCHEMA VERSION MISMATCH — event-sourced views unavailable: {error}"
+            );
+        }
         let store = Self {
             sessions,
             attachment_assets,
@@ -1146,6 +1218,7 @@ impl SessionStore {
             backend,
             attachment_root,
             memory_write_hook_executor: Arc::new(NoopMemoryWriteHookExecutor),
+            event_stream_degraded: std::sync::Mutex::new(std::collections::HashSet::new()),
             history_state_hook_executor: Arc::new(NoopHistoryStateHookExecutor),
             projection_cache: HashMap::new(),
         };
@@ -1240,21 +1313,62 @@ impl SessionStore {
         attachments: Vec<SessionAttachment>,
     ) -> SessionSnapshot {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        // PA-095 #2：事件源物化——事件能力后端先请求提交本会话缓冲（commit 先于
+        // 清空，由注册闭包保证），再按事件表物化本 turn 的消息文本；消息文本以
+        // 事件为源。回退仅限三类（均记录可观测日志）：真无事件后端
+        // （Memory/File）；事件流无 turn 归属事件（直连 store 的 legacy 用法）；
+        // 缓冲 flush 失败（提交不完整时按事件物化有错 turn 风险，整体回退更安全
+        // ——并行测试下全局注册表被外来 control plane 抢占亦落入此路径）。
+        // 事件读取失败（degraded/版本不匹配）属数据完整性错误，fail loud 上抛。
+        let (mut event_user, mut event_assistant) = (None, None);
+        if self.backend.supports_turn_events() {
+            match crate::agent::turn_flow::flush_session_buffered_events(&session_key) {
+                Ok(_) => match self.load_turn_events_checked(&session_key, None) {
+                    Ok(events) => match materialize_last_turn_messages(&events) {
+                        Some(materialized) => {
+                            (event_user, event_assistant) = materialized;
+                        }
+                        None => {
+                            eprintln!(
+                                "[pony-agent][session] append_turn: no turn-scoped events for session={session_key} (direct store usage?), falling back to caller text"
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        panic!("[pony-agent][session] append_turn materialization: event read failed (event stream degraded?): {error}");
+                    }
+                },
+                Err(error) => {
+                    eprintln!(
+                        "[pony-agent][session] append_turn: buffered event flush failed ({error}); falling back to caller text"
+                    );
+                }
+            }
+        }
+        let user_content = event_user.unwrap_or_else(|| user_message.to_string());
+        let (assistant_content, assistant_reasoning) = event_assistant
+            .unwrap_or_else(|| (assistant_message.to_string(), None));
         let memory_write_hook_executor = Arc::clone(&self.memory_write_hook_executor);
+        let history_len_before;
+        let mut appended_user: Option<TurnHistoryMessage> = None;
+        let mut appended_assistant: Option<TurnHistoryMessage> = None;
+        let mut meta_patch: Option<SessionMetaPatch> = None;
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
             prepare_session_for_new_turn(session);
+            history_len_before = session.history.len();
             session.history.push(TurnHistoryMessage {
                 role: "user".to_string(),
-                content: user_message.to_string(),
+                content: user_content,
                 attachments,
                 ..Default::default()
             });
             session.history.push(TurnHistoryMessage {
                 role: "assistant".to_string(),
-                content: assistant_message.to_string(),
+                content: assistant_content,
                 attachments: Vec::new(),
+                reasoning_content: assistant_reasoning,
                 ..Default::default()
             });
 
@@ -1274,11 +1388,69 @@ impl SessionStore {
             );
             refresh_session_metadata(session, true);
             commit_history_node_from_live_state(session, HistoryNodeKind::TurnCommitted, None);
+            // PA-095 #2：截断后取实际追加的两条（可能已被 LIMIT 截掉——此时命令
+            // 退化为仅元数据；normalized_messages 以 ordinal 幂等，不会错位）。
+            let window_start = history_len_before.min(session.history.len());
+            appended_user = session.history.get(window_start).cloned();
+            appended_assistant = session.history.get(window_start + 1).cloned();
+            meta_patch = Some(SessionMetaPatch {
+                title: Some(session.title.clone()),
+                summary: Some(session.summary.clone()),
+                turn_count: Some(session.turn_count),
+                last_referenced_file: session.last_referenced_file.clone(),
+                updated_at_ms: Some(session.updated_at_ms),
+            });
         }
         self.refresh_attachment_catalog();
         let snapshot = self.snapshot_for_session(&session_key);
 
-        self.save_to_backend();
+        // PA-095 #2：增量持久化（消除 store 级整包写）——消息经 AppendMessage
+        // 命令写 normalized_messages（observing 切读源）；元数据经
+        // UpdateSessionMeta；blob 行及其余 facet（transcript/memory/nodes/trace）
+        // 走既有单会话落库路径。事件能力后端不再调用 save_to_backend（全 store
+        // 扫描序列化 + 每 turn checkpoint 的写放大根因）。
+        if self.backend.supports_turn_events() {
+            for (ordinal, message) in [
+                (history_len_before, appended_user.take()),
+                (history_len_before + 1, appended_assistant.take()),
+            ] {
+                let Some(message) = message else { continue };
+                let outcome = self.backend.persist_command(PersistCommand::AppendMessage {
+                    epoch: 1,
+                    session_id: session_key.clone(),
+                    message,
+                    ordinal,
+                });
+                if !matches!(
+                    outcome,
+                    PersistCommandOutcome::Succeeded | PersistCommandOutcome::Unsupported
+                ) {
+                    eprintln!(
+                        "[pony-agent][session] append_turn incremental persist failed: {outcome:?}"
+                    );
+                }
+            }
+            if let Some(meta_patch) = meta_patch {
+                let outcome = self.backend.persist_command(PersistCommand::UpdateSessionMeta {
+                    epoch: 1,
+                    session_id: session_key.clone(),
+                    meta_patch,
+                });
+                if !matches!(
+                    outcome,
+                    PersistCommandOutcome::Succeeded | PersistCommandOutcome::Unsupported
+                ) {
+                    eprintln!(
+                        "[pony-agent][session] append_turn meta persist failed: {outcome:?}"
+                    );
+                }
+            }
+            // blob 行 + 非 normalized facet：单会话落库（内部含 Authoritative
+            // trace mutation / upsert 回退链，不触发 save_store 整包写）。
+            self.save_session_to_backend(&session_key);
+        } else {
+            self.save_to_backend();
+        }
         snapshot
     }
 
@@ -1362,6 +1534,11 @@ impl SessionStore {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
             trace.updated_at = now_timestamp_ms();
+            // PA-095 #7：live 写入剥离 observation 全量 payload（R4b No duplicate
+            // storage）——payload 已由事件 flush 外置到 build_context_observations 表，
+            // 引用由 flush 同事务回填到 trace 行；缓存行不再内嵌副本
+            // （legacy 内嵌数据读取兼容不变，读路径优先 ref、缺失回退内嵌）。
+            trace.build_context_observation = None;
 
             if let Some(existing) = session
                 .turn_trace_history
@@ -1712,7 +1889,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
-            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
+            reject_stale_cursor_version(&session, expected_cursor_version)?;
             let requested_mode = mode.clone();
             if let Some(start_envelope) = build_history_state_hook_envelope(
                 session,
@@ -1813,9 +1990,10 @@ impl SessionStore {
                         }
                     }
                 };
-                bump_cursor_version(&mut session.history_cursor);
-                // PA-093：水位同步到 cursor（wire 面世，前端可获知当前事件水位）。
+                // PA-095 #6：cursor_version 退役——值来源切换 event_watermark
+                // （wire 字段名不变，前端不透明使用）；冲突检测改水位比较。
                 session.history_cursor.event_watermark = session.event_watermark;
+                session.history_cursor.cursor_version = session.event_watermark;
                 // PA-093：checkout 是视图切换事实，append 事件（分支可见性推导基石）。
                 crate::agent::turn_flow::emit_global_event(
                     &session_key,
@@ -1932,7 +2110,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
-            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
+            reject_stale_cursor_version(&session, expected_cursor_version)?;
             let target_branch_id = branch_id
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -1995,8 +2173,10 @@ impl SessionStore {
                 session.history_cursor.mode = HistoryCursorMode::Live;
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
-                bump_cursor_version(&mut session.history_cursor);
+                // PA-095 #6：cursor_version 退役——值来源切换 event_watermark
+                // （wire 字段名不变，前端不透明使用）；冲突检测改水位比较。
                 session.history_cursor.event_watermark = session.event_watermark;
+                session.history_cursor.cursor_version = session.event_watermark;
                 // PA-093：分支恢复 = 视图切换事实，append 事件。
                 crate::agent::turn_flow::emit_global_event(
                     &session_key,
@@ -2068,7 +2248,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
-            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
+            reject_stale_cursor_version(&session, expected_cursor_version)?;
             if let Some(start_envelope) = build_history_state_hook_envelope(
                 session,
                 HistoryStateHookPoint::BranchForkStart,
@@ -2131,8 +2311,10 @@ impl SessionStore {
                 session.history_cursor.mode = HistoryCursorMode::Live;
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
-                bump_cursor_version(&mut session.history_cursor);
+                // PA-095 #6：cursor_version 退役——值来源切换 event_watermark
+                // （wire 字段名不变，前端不透明使用）；冲突检测改水位比较。
                 session.history_cursor.event_watermark = session.event_watermark;
+                session.history_cursor.cursor_version = session.event_watermark;
                 // PA-093：fork 是分支事实，append 事件（新分支事件携带 branch_id，
                 // 折叠时按血缘链推导可见集合）。
                 crate::agent::turn_flow::emit_global_event(
@@ -2206,7 +2388,7 @@ impl SessionStore {
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);
-            reject_stale_cursor_version(&session.history_cursor, expected_cursor_version)?;
+            reject_stale_cursor_version(&session, expected_cursor_version)?;
             if let Some(start_envelope) = build_history_state_hook_envelope(
                 session,
                 HistoryStateHookPoint::BranchSwitchStart,
@@ -2264,8 +2446,10 @@ impl SessionStore {
                 session.history_cursor.mode = HistoryCursorMode::Live;
                 session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
-                bump_cursor_version(&mut session.history_cursor);
+                // PA-095 #6：cursor_version 退役——值来源切换 event_watermark
+                // （wire 字段名不变，前端不透明使用）；冲突检测改水位比较。
                 session.history_cursor.event_watermark = session.event_watermark;
+                session.history_cursor.cursor_version = session.event_watermark;
                 // PA-093：分支切换 = 视图切换事实，append 事件。
                 crate::agent::turn_flow::emit_global_event(
                     &session_key,
@@ -2690,6 +2874,40 @@ impl SessionStore {
         self.backend.load_event_watermark(session_id)
     }
 
+    /// PA-095：事件 schema 版本校验（宿主读面入口；不匹配 Err 上抛）。
+    pub fn validate_event_schema(&self) -> Result<u64, String> {
+        self.backend.validate_event_schema()
+    }
+
+    /// PA-095：带契约校验的事件加载（坏 payload / 版本不匹配 fail loud）。
+    /// 失败时标记会话 event-stream-degraded（宿主可经 `is_event_stream_degraded`
+    /// 查询），错误经宿主 load API 上抛——不静默跳过。
+    pub fn load_turn_events_checked(
+        &self,
+        session_id: &str,
+        up_to_seq: Option<u64>,
+    ) -> Result<Vec<(u64, String, crate::agent::turn_event::TurnEvent)>, String> {
+        match self.backend.load_turn_events_checked(session_id, up_to_seq) {
+            Ok(events) => Ok(events),
+            Err(error) => {
+                self.event_stream_degraded
+                    .lock()
+                    .expect("event stream degraded lock poisoned")
+                    .insert(session_id.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    /// PA-095：会话事件流是否已标记 degraded（坏 payload / 版本不匹配后置位；
+    /// 内存态，重启后随首次读取重建）。
+    pub fn is_event_stream_degraded(&self, session_id: &str) -> bool {
+        self.event_stream_degraded
+            .lock()
+            .expect("event stream degraded lock poisoned")
+            .contains(session_id)
+    }
+
     /// PA-093：当前 active 分支（事件落列用）；会话不存在时 None。
     pub fn session_active_branch_id(&self, session_id: &str) -> Option<String> {
         self.sessions.get(session_id).and_then(|session| {
@@ -2714,6 +2932,9 @@ impl SessionStore {
             return;
         }
         session.event_watermark = new_watermark;
+        // PA-095 #6：写入点统一——cursor_version 镜像水位（wire 字段名不变）。
+        session.history_cursor.cursor_version = new_watermark;
+        session.history_cursor.event_watermark = new_watermark;
         // branch head 节点 = 最近一次 commit 的节点（单线程 turn 流程保证）。
         if let Some(head_id) = session.history_cursor.branch_head_node_id.clone() {
             if let Some(node) = session
@@ -2789,6 +3010,49 @@ impl SessionStore {
             events,
         });
         matches!(outcome, PersistCommandOutcome::Succeeded)
+    }
+
+    /// PA-095：后端是否具备事件持久化能力（Memory/File 为 false）。
+    pub fn supports_turn_events(&self) -> bool {
+        self.backend.supports_turn_events()
+    }
+
+    /// PA-095 #6（实施后审核 P1）：当前事件水位的只读访问（响应 cursor 版本
+    /// 重建用；不触发 load 路径的 ensure/save 副作用）。会话不存在返回 None。
+    pub fn current_event_watermark(&self, session_id: &str) -> Option<u64> {
+        self.sessions
+            .get(session_id)
+            .map(|session| session.event_watermark)
+    }
+
+    /// PA-095 #7（实施后审核 P2）：把该 turn 已外置的 observation 引用附加到
+    /// 内存 trace 缓存行——异步 trace worker 整行 REPLACE 时会带上引用，
+    /// 避免覆盖掉 flush 同事务回填的 ref。幂等（已有 ref 不覆盖）。
+    pub fn attach_observation_refs_to_turn_trace(&mut self, session_id: &str, turn_id: &str) {
+        if !self.backend.supports_turn_events() {
+            return;
+        }
+        let prefix = format!("bco:{turn_id}:");
+        let reference = match self
+            .backend
+            .load_observation_refs(session_id)
+            .into_iter()
+            .find(|reference| reference.starts_with(&prefix))
+        {
+            Some(reference) => reference,
+            None => return,
+        };
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            if let Some(trace) = session
+                .turn_trace_history
+                .iter_mut()
+                .find(|trace| trace.turn_id == turn_id)
+            {
+                if trace.build_context_observation_ref.is_none() {
+                    trace.build_context_observation_ref = Some(reference);
+                }
+            }
+        }
     }
 
     fn save_to_backend(&self) {
@@ -6172,6 +6436,210 @@ mod tests {
         assert!(history2[1].model_name.is_none());
     }
 
+    /// PA-095 #6：最小单节点会话种子（冲突检测/水位镜像测试共用）。
+    fn pa095_seed_single_node_session(store: &mut SessionStore, session_id: &str) {
+        let node_id = "node-1".to_string();
+        store.sessions.insert(
+            session_id.to_string(),
+            SessionState {
+                conversation_id: session_id.to_string(),
+                title: DEFAULT_SESSION_TITLE.to_string(),
+                summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                history: Vec::new(),
+                provider_native_transcript: Vec::new(),
+                turn_trace_history: Vec::new(),
+                trace_migration_state: TraceMigrationState::default(),
+                turn_trace_refs: None,
+                long_term_memory_entries: Vec::new(),
+                memory_write_evidence: Vec::new(),
+                memory_write_hook_trace_records: Vec::new(),
+                history_state_evidence: Vec::new(),
+                turn_count: 1,
+                last_referenced_file: None,
+                updated_at_ms: now_timestamp_ms(),
+                history_nodes: vec![HistoryNode {
+                    node_id: node_id.clone(),
+                    session_id: session_id.to_string(),
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    title: DEFAULT_SESSION_TITLE.to_string(),
+                    summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                    ..Default::default()
+                }],
+                history_branches: vec![HistoryBranch {
+                    branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+                    head_node_id: Some(node_id.clone()),
+                    ..Default::default()
+                }],
+                history_cursor: HistoryCursor {
+                    session_id: session_id.to_string(),
+                    visible_node_id: Some(node_id.clone()),
+                    active_branch_id: Some(DEFAULT_HISTORY_BRANCH_ID.to_string()),
+                    branch_head_node_id: Some(node_id.clone()),
+                    workspace_node_id: Some(node_id.clone()),
+                    mode: HistoryCursorMode::Live,
+                    ..Default::default()
+                },
+                workspace_id: None,
+                event_watermark: 0,
+                last_commit_watermark: 0,
+            },
+        );
+    }
+
+    /// PA-095 #6：四类 history-control command 冲突检测改水位比较——表驱动。
+    /// 精确当前水位放行、stale 水位拒绝（错误信息含 watermark 语义）、None 放行。
+    #[test]
+    fn pa095_history_command_conflict_detection_is_watermark_based() {
+        type HistoryCommand =
+            fn(&mut SessionStore, &str, Option<u64>) -> Result<SessionSnapshot, String>;
+        let commands: Vec<(&str, HistoryCommand)> = vec![
+            (
+                "checkout",
+                |store, sid, expected| {
+                    store.checkout_history_node(
+                        Some(sid),
+                        "node-1",
+                        HistoryCheckoutMode::TranscriptOnly,
+                        expected,
+                    )
+                },
+            ),
+            ("restore", |store, sid, expected| {
+                store.restore_branch_head(Some(sid), None, expected)
+            }),
+            ("fork", |store, sid, expected| {
+                store.fork_from_history_node(Some(sid), "node-1", expected)
+            }),
+            ("switch", |store, sid, expected| {
+                store.switch_history_branch(Some(sid), DEFAULT_HISTORY_BRANCH_ID, expected)
+            }),
+        ];
+        for (name, command) in commands {
+            let mut store = SessionStore::memory_only();
+            pa095_seed_single_node_session(&mut store, "conflict-s");
+            // None = 不做乐观并发检测，永远放行。
+            assert!(command(&mut store, "conflict-s", None).is_ok(), "{name}: None passes");
+            // 精确当前水位（0）→ 放行。
+            assert!(
+                command(&mut store, "conflict-s", Some(0)).is_ok(),
+                "{name}: exact watermark passes"
+            );
+            // stale 水位（单调域外）→ 冲突拒绝，语义指向 watermark。
+            let error = command(&mut store, "conflict-s", Some(7))
+                .expect_err(&format!("{name}: stale watermark must conflict"));
+            assert!(
+                error.contains("watermark"),
+                "{name}: conflict message must reference watermark: {error}"
+            );
+            // 命令成功后 cursor_version 镜像当前水位。
+            let snapshot = command(&mut store, "conflict-s", Some(0)).expect("{name}: pass again");
+            assert_eq!(
+                snapshot.history_cursor.cursor_version,
+                snapshot.history_cursor.event_watermark,
+                "{name}: cursor_version mirrors watermark"
+            );
+        }
+    }
+
+    /// PA-095 #6：checkout 后版本严格递增（无 ABA）——水位随事件提交只增不减，
+    /// cursor_version 恒等镜像；旧期望值在新水位下被拒绝。
+    #[test]
+    fn pa095_checkout_version_strictly_increases_with_watermark_no_aba() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let mut store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                std::env::temp_dir().join(format!("pony-pa095-watermark-{stamp}.db")),
+                SeparateTraceTableMode::Off,
+            ),
+        ));
+        pa095_seed_single_node_session(&mut store, "aba-s");
+        // 隔离并行噪声：本会话事件通道绑定为无操作（不落外部存储）。
+        let _binding = crate::agent::turn_flow::bind_event_persist_session(
+            "aba-s",
+            std::sync::Arc::new(|_, _, _, _| {}),
+        );
+
+        // 第一批事件提交 → 水位推进。
+        store.persist_events(
+            "aba-s",
+            "t1",
+            DEFAULT_HISTORY_BRANCH_ID,
+            vec![
+                crate::agent::turn_event::TurnEvent::UserMessage {
+                    turn_id: "t1".into(),
+                    text: "第一轮".into(),
+                    attachments: Vec::new(),
+                },
+                crate::agent::turn_event::TurnEvent::AssistantMessage {
+                    turn_id: "t1".into(),
+                    step: 0,
+                    text: "答复一".into(),
+                    reasoning_content: None,
+                    usage: None,
+                    chunk_missing: None,
+                },
+            ],
+        );
+        store.finalize_event_watermark("aba-s", "t1");
+        let watermark_1 = store.sessions.get("aba-s").unwrap().event_watermark;
+        assert!(watermark_1 >= 2, "first batch advances watermark");
+
+        // checkout（携带当前水位）→ 成功，版本镜像水位。
+        let snapshot = store
+            .checkout_history_node(
+                Some("aba-s"),
+                "node-1",
+                HistoryCheckoutMode::TranscriptOnly,
+                Some(watermark_1),
+            )
+            .expect("checkout with current watermark");
+        assert_eq!(snapshot.history_cursor.event_watermark, watermark_1);
+        assert_eq!(snapshot.history_cursor.cursor_version, watermark_1);
+
+        // 第二批事件提交 → 水位严格递增。
+        store.persist_events(
+            "aba-s",
+            "t2",
+            DEFAULT_HISTORY_BRANCH_ID,
+            vec![crate::agent::turn_event::TurnEvent::UserMessage {
+                turn_id: "t2".into(),
+                text: "第二轮".into(),
+                attachments: Vec::new(),
+            }],
+        );
+        store.finalize_event_watermark("aba-s", "t2");
+        let watermark_2 = store.sessions.get("aba-s").unwrap().event_watermark;
+        assert!(
+            watermark_2 > watermark_1,
+            "watermark strictly increases: {watermark_2} > {watermark_1}"
+        );
+
+        // 无 ABA：旧水位期望被新状态拒绝，当前水位放行。
+        let stale = store
+            .checkout_history_node(
+                Some("aba-s"),
+                "node-1",
+                HistoryCheckoutMode::TranscriptOnly,
+                Some(watermark_1),
+            )
+            .expect_err("stale watermark must be rejected (no ABA)");
+        assert!(stale.contains("watermark"), "{stale}");
+        store
+            .checkout_history_node(
+                Some("aba-s"),
+                "node-1",
+                HistoryCheckoutMode::TranscriptOnly,
+                Some(watermark_2),
+            )
+            .expect("current watermark passes");
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("pony-pa095-watermark-{stamp}.db")),
+        );
+    }
+
     #[test]
     fn checkout_history_node_metadata() {
         let mut store = SessionStore::memory_only();
@@ -6450,6 +6918,184 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    /// PA-095 #2：append_turn characterization 快照——改造（事件源物化）前录制
+    /// 现有可观测行为作回归防护：history 追加形态（user 带 attachments、assistant
+    /// 文本）、turn_count、transcript 扩展、SQLite blob 往返（重载一致）。
+    /// 改造后本测试必须保持全绿（豁免差异走对拍豁免清单，不在此处）。
+    #[test]
+    fn append_turn_characterization_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "pony-append-char-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("sessions.db");
+
+        let attachment = crate::agent::session::AttachmentReference {
+            id: "att-1".to_string(),
+            asset_id: String::new(),
+            name: Some("note.txt".to_string()),
+            mime_type: "text/plain".to_string(),
+            relative_path: "imports/note.txt".to_string(),
+            size_bytes: 12,
+            created_at_ms: 1_000,
+        };
+        let mut store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                SeparateTraceTableMode::WriteSeparate,
+            ),
+        ));
+        let snapshot = store.append_turn(
+            Some("char-snap"),
+            "问题Q",
+            "回答A",
+            Some(vec![serde_json::json!({"hop": 1})]),
+            vec![attachment.clone()],
+        );
+
+        // history 追加形态：user（带 attachments）+ assistant。
+        assert_eq!(snapshot.history.len(), 2, "one turn = two entries");
+        assert_eq!(snapshot.history[0].role, "user");
+        assert_eq!(snapshot.history[0].content, "问题Q");
+        assert_eq!(snapshot.history[0].attachments.len(), 1);
+        assert_eq!(snapshot.history[0].attachments[0].id, "att-1");
+        assert_eq!(snapshot.history[1].role, "assistant");
+        assert_eq!(snapshot.history[1].content, "回答A");
+        assert_eq!(snapshot.turn_count, 1);
+        assert!(snapshot
+            .provider_native_transcript
+            .iter()
+            .any(|value| value == &serde_json::json!({"hop": 1})));
+
+        // 第二轮：history 累积、turn_count 递增。
+        let snapshot = store.append_turn(
+            Some("char-snap"),
+            "问题Q2",
+            "回答A2",
+            None,
+            Vec::new(),
+        );
+        assert_eq!(snapshot.history.len(), 4);
+        assert_eq!(snapshot.history[2].content, "问题Q2");
+        assert_eq!(snapshot.history[3].content, "回答A2");
+        assert_eq!(snapshot.turn_count, 2);
+
+        // SQLite blob 往返：重载后 history 一致（改造不得破坏持久化语义）。
+        drop(store);
+        let mut reloaded = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                db_path,
+                SeparateTraceTableMode::WriteSeparate,
+            ),
+        ));
+        let reloaded_snapshot = reloaded.snapshot(Some("char-snap"), &[]);        let replayed: Vec<(String, String)> = reloaded_snapshot
+            .history
+            .iter()
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect();
+        assert_eq!(
+            replayed,
+            vec![
+                ("user".to_string(), "问题Q".to_string()),
+                ("assistant".to_string(), "回答A".to_string()),
+                ("user".to_string(), "问题Q2".to_string()),
+                ("assistant".to_string(), "回答A2".to_string()),
+            ],
+            "blob roundtrip preserves history"
+        );
+        assert_eq!(reloaded_snapshot.history[0].attachments.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PA-095 #2：物化选取逻辑——最近 turn 的 user/assistant 提取；
+    /// failed turn（仅 user/message）assistant 缺席由调用方补占位。
+    #[test]
+    fn materialize_last_turn_messages_picks_latest_turn() {
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let events = |events: Vec<TurnEvent>| {
+            events
+                .into_iter()
+                .enumerate()
+                .map(|(seq, event)| (seq as u64, "main".to_string(), event))
+                .collect::<Vec<_>>()
+        };
+        // 两个 turn：物化必须取最近一个。
+        let two_turns = events(vec![
+            TurnEvent::TurnStart {
+                turn_id: "t1".into(),
+            },
+            TurnEvent::UserMessage {
+                turn_id: "t1".into(),
+                text: "第一问".into(),
+                attachments: Vec::new(),
+            },
+            TurnEvent::AssistantMessage {
+                turn_id: "t1".into(),
+                step: 0,
+                text: "第一答".into(),
+                reasoning_content: None,
+                usage: None,
+                chunk_missing: None,
+            },
+            TurnEvent::TurnEnd {
+                turn_id: "t1".into(),
+                reason: TurnEndReason::Completed,
+                turn_duration_ms: Some(10),
+            },
+            TurnEvent::TurnStart {
+                turn_id: "t2".into(),
+            },
+            TurnEvent::UserMessage {
+                turn_id: "t2".into(),
+                text: "第二问".into(),
+                attachments: Vec::new(),
+            },
+            TurnEvent::AssistantMessage {
+                turn_id: "t2".into(),
+                step: 0,
+                text: "第二答".into(),
+                reasoning_content: Some("推理R".into()),
+                usage: None,
+                chunk_missing: None,
+            },
+        ]);
+        let (user, assistant) = materialize_last_turn_messages(&two_turns).expect("materialized");
+        assert_eq!(user.as_deref(), Some("第二问"));
+        assert_eq!(
+            assistant.as_ref().map(|(text, reasoning)| (text.as_str(), reasoning.as_deref())),
+            Some(("第二答", Some("推理R")))
+        );
+
+        // failed turn：仅 user/message——assistant 为 None（调用方补占位）。
+        let failed_turn = events(vec![
+            TurnEvent::TurnStart {
+                turn_id: "t3".into(),
+            },
+            TurnEvent::UserMessage {
+                turn_id: "t3".into(),
+                text: "失败问".into(),
+                attachments: Vec::new(),
+            },
+            TurnEvent::TurnEnd {
+                turn_id: "t3".into(),
+                reason: TurnEndReason::Error,
+                turn_duration_ms: None,
+            },
+        ]);
+        let (user, assistant) =
+            materialize_last_turn_messages(&failed_turn).expect("materialized");
+        assert_eq!(user.as_deref(), Some("失败问"));
+        assert!(assistant.is_none(), "failed turn has no assistant message");
+
+        // 无 turn 归属事件 → None（整体回退）。
+        assert!(materialize_last_turn_messages(&[]).is_none());
     }
 
     #[test]

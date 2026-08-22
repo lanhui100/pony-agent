@@ -15,6 +15,17 @@ impl AgentRuntime {
         attachments: Vec<SessionAttachment>,
         workspace_mode: Option<&str>,
     ) -> PersistedTurnOutcome {
+        // PA-095 #2：物化前置——在获取 sessions 写锁之前请求提交本会话缓冲事件
+        // （flush 闭包需要 sessions 写锁；持锁调用会自锁死锁）。提交后 append_turn
+        // 内部的 flush 为空操作（缓冲已清），物化从事件表读取本 turn 消息。
+        let flush_session_key = session_id.unwrap_or(crate::agent::session::DEFAULT_SESSION_ID);
+        if let Err(error) =
+            crate::agent::turn_flow::flush_session_buffered_events(flush_session_key)
+        {
+            eprintln!(
+                "[pony-agent][runtime] pre-materialization event flush failed: {error}"
+            );
+        }
         let updated_session = self
             .sessions
             .write()

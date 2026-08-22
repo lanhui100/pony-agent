@@ -13,6 +13,12 @@ use crate::agent::telemetry::{
 /// 事件 schema 版本：结构变更才 bump，新增事件类型不 bump（借鉴 dsh SESSION_FORMAT_VERSION）。
 pub const EVENT_SCHEMA_VERSION: u64 = 1;
 
+/// PA-095：ignorable 事件类型清单——读取时允许跳过的非必需事件类型
+/// （`type` 字段精确匹配）。当前为空：所有事件均为必需，未知/坏 payload
+/// 一律 fail loud。读取路径（`load_turn_events_checked`）消费该清单：
+/// 解析失败的事件若 type 在清单内则跳过，否则标记会话 degraded 并上抛。
+pub const IGNORABLE_EVENT_TYPES: &[&str] = &[];
+
 /// turn 结束原因（turn/end 事件的 reason）。
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

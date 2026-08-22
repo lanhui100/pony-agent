@@ -78,6 +78,15 @@ impl HostControlPlane {
         Self::history_cursor_state(&cursor)
     }
 
+    /// PA-095 #6（实施后审核 P1）：补 flush 后的当前事件水位——命令自身的
+    /// history-control 事件入账后的水位，保证"响应版本即下次通行版本"的
+    /// 乐观锁 round-trip。只读内存状态（不触发 load 路径的 ensure/save 副作用，
+    /// 那会把 checkout 的截断态"修复"回去）；None = 会话不存在/锁中毒（回退快照）。
+    fn fresh_cursor_version(control_plane: &Self, session_id: Option<&str>) -> Option<u64> {
+        let sessions = control_plane.sessions_rwlock.read().ok()?;
+        sessions.current_event_watermark(session_id?)
+    }
+
     pub fn checkout_history_node(
         &self,
         command: CheckoutHistoryNodeCommand,
@@ -100,9 +109,20 @@ impl HostControlPlane {
             command.expected_cursor_version,
         )?;
         drop(sessions);
+        // PA-095 #3：同 fork——释放写锁后立即重试提交锁内发射的全局事件。
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态——
+        // 命令自身 history-control 事件已入日志并推进水位，"响应版本即下次
+        // 通行版本"的乐观锁 round-trip 才成立（pre-flush 快照必然滞后一拍）。
         let message_state = Self::project_message_state(&snapshot);
         let message_delta = Self::diff_message_state(&before_state, &message_state);
-        let cursor = Self::history_cursor_state(&snapshot.history_cursor);
+        // PA-095 #6（实施后审核 P1）：结构取快照（load 路径有 ensure/save 副作用
+        // 不可重读——会把 checkout 截断态修复回去），版本数值取补 flush 后的当前
+        // 水位：命令自身 history-control 事件已入账，"响应版本即下次通行版本"。
+        let mut cursor = Self::history_cursor_state(&snapshot.history_cursor);
+        if let Some(watermark) = Self::fresh_cursor_version(self, Some(session_id.as_str())) {
+            cursor.cursor_version = Some(watermark);
+        }
         let applied_mode =
             Self::history_checkout_mode_from_session(snapshot.history_cursor.checkout_mode.clone());
         let degraded = matches!(
@@ -155,6 +175,9 @@ impl HostControlPlane {
             command.expected_cursor_version,
         )?;
         drop(sessions);
+        // PA-095 #3：同 fork——释放写锁后立即重试提交锁内发射的全局事件。
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态。
         let message_state = Self::project_message_state(&snapshot);
         let message_delta = Self::diff_message_state(&before_state, &message_state);
         let workspace_rollback_capable = snapshot
@@ -163,6 +186,10 @@ impl HostControlPlane {
             .find(|node| Some(node.node_id.as_str()) == snapshot.resolved_node_id.as_deref())
             .map(|node| node.workspace_ref.rollback_capable)
             .unwrap_or(false);
+        let mut cursor = Self::history_cursor_state(&snapshot.history_cursor);
+        if let Some(watermark) = Self::fresh_cursor_version(self, Some(session_id.as_str())) {
+            cursor.cursor_version = Some(watermark);
+        }
         Ok(RestoreBranchHeadResponse {
             session_id,
             branch_id: snapshot.history_cursor.active_branch_id.clone(),
@@ -176,7 +203,7 @@ impl HostControlPlane {
             history_state_audit_summary: Self::project_history_state_audit_summary(&snapshot),
             message_revision: message_state.revision,
             message_delta,
-            cursor: Self::history_cursor_state(&snapshot.history_cursor),
+            cursor,
         })
     }
 
@@ -201,6 +228,10 @@ impl HostControlPlane {
             command.expected_cursor_version,
         )?;
         drop(sessions);
+        // PA-095 #3：写锁内经 emit_global_event 发射的 ForkCreated 在内联 flush
+        // 时因锁忙被保留（try_write 化防自锁死锁）；释放锁后立即重试提交。
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态。
         let message_state = Self::project_message_state(&snapshot);
         let message_delta = Self::diff_message_state(&before_state, &message_state);
         let created_branch_id = snapshot
@@ -218,6 +249,10 @@ impl HostControlPlane {
         if branch_view.forked_from_branch_id.is_none() {
             branch_view.forked_from_branch_id = before.active_branch_id;
         }
+        let mut cursor = Self::history_cursor_state(&snapshot.history_cursor);
+        if let Some(watermark) = Self::fresh_cursor_version(self, Some(session_id.as_str())) {
+            cursor.cursor_version = Some(watermark);
+        }
         Ok(ForkFromHistoryNodeResponse {
             session_id,
             node_id: command.node_id,
@@ -226,7 +261,7 @@ impl HostControlPlane {
             history_state_audit_summary: Self::project_history_state_audit_summary(&snapshot),
             message_revision: message_state.revision,
             message_delta,
-            cursor: Self::history_cursor_state(&snapshot.history_cursor),
+            cursor,
         })
     }
 
@@ -250,8 +285,15 @@ impl HostControlPlane {
             command.expected_cursor_version,
         )?;
         drop(sessions);
+        // PA-095 #3：同 fork——释放写锁后立即重试提交锁内发射的全局事件。
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态。
         let message_state = Self::project_message_state(&snapshot);
         let message_delta = Self::diff_message_state(&before_state, &message_state);
+        let mut cursor = Self::history_cursor_state(&snapshot.history_cursor);
+        if let Some(watermark) = Self::fresh_cursor_version(self, Some(session_id.as_str())) {
+            cursor.cursor_version = Some(watermark);
+        }
         Ok(SwitchHistoryBranchResponse {
             session_id,
             branch_id: command.branch_id,
@@ -260,7 +302,7 @@ impl HostControlPlane {
             history_state_audit_summary: Self::project_history_state_audit_summary(&snapshot),
             message_revision: message_state.revision,
             message_delta,
-            cursor: Self::history_cursor_state(&snapshot.history_cursor),
+            cursor,
         })
     }
 

@@ -52,7 +52,7 @@ Prerequisites: event flush ordering SHALL be atomic — the event-table transact
 
 Rebuilding views from events SHALL match stored snapshots on the agreed field set. The agreed field set and exemption list SHALL be defined as constants in this change (single source of truth for tests):
 
-- **Agreed field set**: timeline entry (kind, label, state, sequence, text, tool_activities, token metrics) + trace record (phase, provider name/model, token fields, turn_duration_ms, event_type).
+- **Agreed field set**: timeline entry (kind, label, state, text, tool_activities; entry ORDER preserved via kind-sequence assertion rather than a numeric `sequence` field comparison; entry-level token metrics are covered by trace-level token fields) + trace record (phase, provider name/model, token fields, turn_duration_ms, event_type).
 - **Exemption list** (each with reason): `updated_at`/`event_id`/`emitted_at_ms` (clock semantics); `title`/`session_id` (runtime decoration, backfilled by annotate); `prepare_retrieval` entry (requires payload judgment unavailable from ref-only events); build_context provider six-field metadata (no event carrier); failed/cancelled last-hop state (converges after Step lifecycle events land, then removed from this list).
 
 Parity tests SHALL consume the exemption constants programmatically (agreed = full field set − exemptions), and each exemption SHALL carry a reverse probe asserting the deviation currently exists (preventing exemption rot).
@@ -102,7 +102,7 @@ The event store SHALL record `events.schema_version`; reads SHALL validate it. A
 
 ### Requirement: Watermark as cursor version (from session-cursor-view-contract)
 
-`cursor_version` SHALL be derived from the session event watermark (seq水位即版本); history-control conflict detection SHALL compare watermarks. The wire field name is retained. **Watermark monotonicity invariant**: checkout/fork/squash SHALL emit their history-control events (checkpoint/checkout, fork/created, history/squash) so the watermark strictly increases — rollback operations move the *projection position* but never rewind the *event log watermark*. This preserves optimistic-concurrency semantics (no ABA window): any interleaved change strictly advances the version.
+`cursor_version` SHALL be derived from the session event watermark (seq水位即版本); history-control conflict detection SHALL compare watermarks. The wire field name is retained. The version carried by a command response SHALL reflect the watermark **after the command's own history-control event has been committed** (post-flush), so that a client pipelining the returned version into its next command's `expected_cursor_version` succeeds (optimistic-concurrency round-trip). **Watermark monotonicity invariant**: checkout/fork/squash SHALL emit their history-control events (checkpoint/checkout, fork/created, history/squash) so the watermark strictly increases — rollback operations move the *projection position* but never rewind the *event log watermark*. This preserves optimistic-concurrency semantics (no ABA window): any interleaved committed change strictly advances the version.
 
 #### Scenario: Stale detection under monotonic watermark
 
@@ -119,7 +119,7 @@ The event store SHALL record `events.schema_version`; reads SHALL validate it. A
 
 ### Requirement: Trace cache stores observation by reference only (from trace-event-projection)
 
-New live trace cache writes SHALL NOT embed the build_context_observation payload; the reference SHALL be backfilled in the same transaction that externalizes the ContextObservation event.
+New live trace cache writes SHALL NOT embed the build_context_observation payload — neither on the trace record nor inside its timeline entries; the reference SHALL be backfilled in the same transaction that externalizes the ContextObservation event. Reads SHALL hydrate the payload from the reference (falling back to embedded payload for legacy rows).
 
 #### Scenario: No duplicate storage on live path
 
@@ -127,3 +127,10 @@ New live trace cache writes SHALL NOT embed the build_context_observation payloa
 - WHEN the trace cache row is inspected
 - THEN raw_json SHALL NOT contain the observation payload
 - AND the row's observation reference SHALL load a payload identical to the original
+
+#### Scenario: Ref-only row reads back hydrated
+
+- GIVEN a trace cache row written after this change (payload stripped, reference backfilled)
+- WHEN the session's traces are loaded through the host read plane
+- THEN the observation SHALL be resolved from the reference and equal the original payload
+- AND legacy rows carrying an embedded payload SHALL continue to deserialize unchanged

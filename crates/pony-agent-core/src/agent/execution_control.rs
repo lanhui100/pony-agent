@@ -52,14 +52,17 @@ struct RegistryState {
     turns: HashMap<String, ExecutionCheckpoint>,
 }
 
+/// PA-095 #3：可克隆（Arc 共享内部状态）——宿主与 builder 需各持一份句柄
+/// （如 cancelled 对拍场景先 request_stop 再注入 builder）。
+#[derive(Clone)]
 pub struct ExecutionControlRegistry {
-    state: Mutex<RegistryState>,
+    state: std::sync::Arc<Mutex<RegistryState>>,
 }
 
 impl ExecutionControlRegistry {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(RegistryState::default()),
+            state: std::sync::Arc::new(Mutex::new(RegistryState::default())),
         }
     }
 
@@ -69,6 +72,12 @@ impl ExecutionControlRegistry {
             eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
             e.into_inner()
         });
+        // PA-095 #3：重注册保留已设置的停止请求——turn 开始前 request_stop
+        // 的语义应跨注册存活（否则宿主预注册+停止会被入口注册覆盖丢失）。
+        let carried_stop_requested_at_ms =
+            state.turns.get(turn_id).and_then(|checkpoint| {
+                checkpoint.stop_requested_at_ms
+            });
         let mut checkpoint = ExecutionCheckpoint {
             contract_version: execution_checkpoint_contract_version().to_string(),
             turn_id: turn_id.to_string(),
@@ -98,7 +107,7 @@ impl ExecutionControlRegistry {
             error: None,
             started_at_ms: now,
             updated_at_ms: now,
-            stop_requested_at_ms: None,
+            stop_requested_at_ms: carried_stop_requested_at_ms,
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         state.turns.insert(turn_id.to_string(), checkpoint);
