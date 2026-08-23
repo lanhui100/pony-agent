@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+
+      # L3 穷举层的第一块基石：以下检查不可被 --no-verify 绕过
+      - name: 决策记录校验（L1 同款 + 穷举）
+        shell: pwsh
+        run: ./scripts/verify-decisions.ps1
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 前端单元测试
+        run: npm run test:unit
+
+      - name: Rust 检查（shared 槽位）
+        run: npm run cargo:check:shared

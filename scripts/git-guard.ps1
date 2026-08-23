@@ -27,6 +27,28 @@ $blockedPathPatterns = @(
 
 $blockedExtensions = @(".rlib", ".lib", ".a", ".pdb")
 $sizeLimitBytes = 20MB
+$textExtensions = @(
+  ".ps1", ".mjs", ".js", ".ts", ".tsx", ".vue", ".md", ".json",
+  ".yml", ".yaml", ".toml", ".rs", ".css", ".scss", ".html"
+)
+
+function Test-SingleTrailingNewline([string]$path) {
+  $extension = [System.IO.Path]::GetExtension($path).ToLowerInvariant()
+  if ($textExtensions -notcontains $extension) {
+    return $true
+  }
+  $bytes = [System.IO.File]::ReadAllBytes($path)
+  if ($bytes.Length -eq 0) {
+    return $true
+  }
+  if ($bytes[-1] -ne 10) {
+    return $false
+  }
+  if ($bytes.Length -ge 2 -and $bytes[-2] -eq 10) {
+    return $false
+  }
+  return $true
+}
 
 function Get-StagedPaths {
   $output = git diff --cached --name-only --diff-filter=AM
@@ -89,6 +111,12 @@ foreach ($path in $stagedPaths) {
   if ($size -gt $sizeLimitBytes) {
     $sizeMb = [math]::Round($size / 1MB, 2)
     $violations.Add("禁止提交超过 20MB 的文件: $path (${sizeMb}MB)")
+    continue
+  }
+
+  # L1 专属：文本文件必须以恰好一个换行符结尾（此检查只在提交层收账）
+  if ($Mode -eq "pre-commit" -and -not (Test-SingleTrailingNewline $path)) {
+    $violations.Add("文件必须以恰好一个换行符结尾: $path")
   }
 }
 

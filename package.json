@@ -11,6 +11,7 @@
     "dev:tauri:fresh": "npm run clean:tauri:light && npm run dev:tauri",
     "dev:tauri:cool:fresh": "npm run clean:tauri:light && npm run dev:tauri",
     "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
     "cargo:check": "cargo check --manifest-path src-tauri/Cargo.toml --target-dir target-check",
     "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test",
     "cargo:test:lib": "cargo test --manifest-path src-tauri/Cargo.toml --lib --target-dir target-test",

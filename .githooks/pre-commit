@@ -1,3 +1,9 @@
 #!/bin/sh
+# L1 pre-commit：秒级预算——暂存卫生 + 决策记录校验。不跑类型/测试/构建。
 pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-commit
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  exit $rc
+fi
+pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/verify-decisions.ps1"
 exit $?

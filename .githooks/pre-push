@@ -1,3 +1,5 @@
 #!/bin/sh
-pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-push
+# L2 pre-push：十秒级预算——只跑增量类型检查。
+# 卫生检查已在 pre-commit 执行；穷举矩阵与平台矩阵归 CI，此处不重复。
+npm run typecheck
 exit $?
