@@ -9,9 +9,8 @@ Pony Agent 第一阶段前端不是产品官网，也不是普通聊天页，而
 `App.vue` 作为根容器，通过 `currentPage` 管理多页切换（无 vue-router，用条件渲染实现）：
 
 - `home`：主工作台（三栏布局）
-- `providers`：Provider 配置页
-- `model-monitor`：模型监控页
-- `settings`：设置面板
+- `config`：配置页（tabs：通用 / 模型 / 工具；受控态不持久化）
+- `telemetry`：遥测页（coding：Trace + 指标双 tab，默认 Trace；work：仅指标 tab）
 
 ## 三栏布局（home 页面）
 
@@ -20,11 +19,10 @@ Pony Agent 第一阶段前端不是产品官网，也不是普通聊天页，而
 固定结构（冻结表面，未被任务明确邀请不允许修改）：
 
 1. 顶部品牌入口：`Pony Agent`（点击返回对话主页）
-2. 主操作：`新对话`
-3. 折叠菜单：`对话历史`（分页加载，每页 5 条）
-4. 折叠菜单：`模型管理`
-   - `模型配置`（切换到 providers 页面）
-   - `模型监控`（切换到 model-monitor 页面）
+2. 主操作行：`新对话`
+3. 折叠菜单：`工作区`（第一优先，头部显示激活工作区名；管理/新建/切换）
+4. 折叠菜单：`对话`（按 workspace 分组会话树，组内每页预览 5 条）
+5. 底部一级导航：`遥测/指标`（coding 显"遥测"、work 显"指标"，切换到 telemetry 页面）、`模型配置`（切换到 config 页模型 tab）、`设置`（切换到 config 页通用 tab）
 
 ### 中间对话工作区 `HomeWorkspace.vue`
 
@@ -37,39 +35,32 @@ Pony Agent 第一阶段前端不是产品官网，也不是普通聊天页，而
 - tool call 交互展示
 - 超时重试 pending 气泡
 
-### 右侧可观测性面板 `HomeSidebar.vue`
+### 右侧对话过程面板 `HomeSidebar.vue`
 
-可观测性区域，承载运行态信息：
+只承载对话过程信息（PA-096 起 trace/metrics/工具目录不再在此）：
 
-- **Status**：当前运行阶段、provider、session 状态
-- **Tools**：工具调用记录与观察
-- **Trace**：Turn 执行轨迹、phase 变化、timeline
-- **Retrieval**：本轮取用的上下文事实（history / attachment / memory）
+- **Status**：会话轮次/token 聚合、上下文用量、运行状态摘要
+- **Plan**：计划列表与步骤控制
 - **Diagnostics**：诊断信息（调试面板）
 
-右侧面板可通过 `rightSidebarOpen` 切换开闭，宽度可拖拽调整。
+右侧面板可通过 `rightSidebarOpen` 切换开闭。
 
 ## 独立页面
 
-### `ProviderConfigPage.vue`
+### `ConfigPage.vue`
 
-Provider/Model 配置管理：
-- 增删改 provider、model
-- 能力声明（capabilities）
-- API Key 管理（通过 SecretStore）
-- 模型选择与策略配置
+配置页 tab 容器（受控态，tab 不持久化）：
 
-### `ModelMonitorPage.vue`
+- 通用 tab：`ConfigGeneralSection.vue`（工作模式 coding/work、服务密钥）
+- 模型 tab：承载 `ProviderConfigPage.vue`（Provider/Model 配置管理）
+- 工具 tab：`ConfigToolsSection.vue`（可用工具目录与权限摘要，只读）
 
-模型监控与 telemetry 聚合：
-- 全量监控摘要（model_monitor_summary）
-- 会话级 drilldown（model_monitor_session_drilldown）
-- 工具调用统计、trace timeline、cache 命中
-- 能力来源与能力注册表查看
+### `TelemetryPage.vue`
 
-### `SettingsPanel.vue`
+遥测二级读面（经左栏一级键进入；coding 双 tab / work 仅指标）：
 
-应用设置面板。
+- Trace tab：`TraceInspector.vue` 承载 `HomeTracePanel`（expanded 全高模式）
+- 指标 tab：`ModelMonitorPage.vue`（embedded 嵌入模式），全量监控摘要与会话级 drilldown
 
 ## 组件清单
 
@@ -79,10 +70,12 @@ Provider/Model 配置管理：
 |------|------|
 | `HomeWorkspace.vue` | 对话主工作区 |
 | `HomeSessionSidebar.vue` | 左侧导航与会话列表 |
-| `HomeSidebar.vue` | 右侧可观测性面板 |
-| `ProviderConfigPage.vue` | Provider/Model 配置 |
-| `ModelMonitorPage.vue` | 模型监控与 telemetry |
-| `SettingsPanel.vue` | 应用设置 |
+| `HomeSidebar.vue` | 右侧对话过程面板（状态/计划/调试） |
+| `TraceInspector.vue` | 遥测页 Trace tab 宿主（消费 `useTraceProjection`） |
+| `telemetry/TelemetryPage.vue` | 二级遥测页（Trace + 指标 tabs） |
+| `config/ConfigPage.vue` | 配置页 tab 容器（通用/模型/工具） |
+| `ProviderConfigPage.vue` | Provider/Model 配置（配置页模型 tab） |
+| `ModelMonitorPage.vue` | 模型监控与 telemetry（遥测页指标 tab，支持 embedded） |
 | `AttachmentCenterPanel.vue` | 附件中心（查询/清理） |
 | `MarkdownRenderer.vue` | Markdown 渲染 |
 | `DebugPanel.vue` | 调试面板（事件日志） |
@@ -144,6 +137,7 @@ Provider 配置管理：
 | `lib/flight-recorder.ts` | 前端飞行记录仪 |
 | `lib/useStreamingPresentationState.ts` | 流式展示状态管理 |
 | `lib/useTimelineAutoScroll.ts` | 时间线自动滚动 |
+| `lib/runtime/useTraceProjection.ts` | 会话 trace 投影共享管线（聚合供给状态面板与遥测页） |
 | `lib/utils.ts` | 通用工具函数 |
 
 ## 当前 UI 风格约束

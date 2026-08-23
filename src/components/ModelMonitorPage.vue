@@ -14,6 +14,32 @@ import type {
 } from "@/types/runtime";
 
 const loadingSummary = ref(false);
+
+// PA-096：遥测页嵌入模式——去掉整页卡片壳与大标题块（宿主 TelemetryPage 提供壳与页头），
+// 保留刷新按钮行；默认 false 时行为与旧版完全一致。
+const props = withDefaults(
+  defineProps<{
+    embedded?: boolean;
+  }>(),
+  {
+    embedded: false
+  }
+);
+
+const rootClass = computed(() =>
+  props.embedded
+    ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+    : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.85rem] border border-stone-200/70 bg-white/82 px-5 py-5 sm:px-6"
+);
+
+const headerClass = computed(() =>
+  props.embedded
+    ? "flex flex-wrap items-start justify-between gap-4 border-b border-stone-200/70 px-5 pb-4 pt-5 sm:px-6"
+    : "flex flex-wrap items-start justify-between gap-4 border-b border-stone-200/70 pb-4"
+);
+
+// 嵌入模式根节点无 padding，状态容器自行补水平边距与底距。
+const contentPadClass = computed(() => (props.embedded ? "mx-5 mb-5 sm:mx-6" : ""));
 const loadingDrilldown = ref(false);
 const summaryError = ref<string | null>(null);
 const drilldownError = ref<string | null>(null);
@@ -415,16 +441,18 @@ onMounted(() => {
 </script>
 
 <template>
-  <section
-    class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[0.85rem] border border-stone-200/70 bg-white/82 px-5 py-5 sm:px-6"
-  >
-    <div class="flex flex-wrap items-start justify-between gap-4 border-b border-stone-200/70 pb-4">
-      <div>
+  <section :class="rootClass">
+    <div :class="headerClass">
+      <div v-if="!embedded">
         <p class="text-[11px] uppercase tracking-[0.22em] text-stone-400">Model Monitor</p>
         <h2 class="mt-2 text-[1.55rem] font-semibold tracking-[-0.03em] text-stone-950">模型监控</h2>
         <p class="mt-2 max-w-3xl text-[13px] leading-6 text-stone-500">
           聚合当前本地会话的请求量、延迟、缓存、检索参与度，并提供按会话下钻的 trace 证据。
         </p>
+      </div>
+      <div v-else class="min-w-0 flex-1">
+        <div class="text-sm font-semibold text-stone-900">模型监控</div>
+        <p class="mt-1 text-[12px] leading-5 text-stone-500">聚合请求量、延迟、缓存、检索参与度，支持按会话下钻。</p>
       </div>
 
       <button
@@ -438,15 +466,15 @@ onMounted(() => {
       </button>
     </div>
 
-    <div v-if="summaryError" class="mt-5 rounded-[0.8rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" data-testid="model-monitor-summary-error">
+    <div v-if="summaryError" :class="contentPadClass" class="mt-5 rounded-[0.8rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" data-testid="model-monitor-summary-error">
       {{ summaryError }}
     </div>
 
-    <div v-else-if="loadingSummary && !summary" class="mt-5 rounded-[0.8rem] border border-stone-200 bg-stone-50 px-4 py-8 text-center text-sm text-stone-500" data-testid="model-monitor-summary-loading">
+    <div v-else-if="loadingSummary && !summary" :class="contentPadClass" class="mt-5 rounded-[0.8rem] border border-stone-200 bg-stone-50 px-4 py-8 text-center text-sm text-stone-500" data-testid="model-monitor-summary-loading">
       正在加载监控摘要...
     </div>
 
-    <div v-else-if="summary" class="flex min-h-0 flex-1 flex-col">
+    <div v-else-if="summary" :class="contentPadClass" class="flex min-h-0 flex-1 flex-col">
       <div class="mt-5 grid gap-4 lg:grid-cols-5" data-testid="model-monitor-overview">
         <section
           v-for="card in overviewCards"

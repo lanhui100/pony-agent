@@ -27,7 +27,7 @@ const HomeSessionSidebarStub = defineComponent({
     return () =>
       h("div", {
         "data-testid": "home-session-sidebar-stub",
-        "data-current-page": props.currentPage,
+        "data-current-page": props.currentPage == null ? "" : String(props.currentPage),
         "data-force-collapsed": props.forceCollapsed ? "true" : "false"
       }, [
         h(
@@ -41,18 +41,18 @@ const HomeSessionSidebarStub = defineComponent({
         h(
           "button",
           {
-            "data-testid": "stub-nav-providers",
-            onClick: () => emit("navigate", "providers")
+            "data-testid": "stub-nav-models",
+            onClick: () => emit("navigate", "models")
           },
-          "go-providers"
+          "go-models"
         ),
         h(
           "button",
           {
-            "data-testid": "stub-nav-model-monitor",
-            onClick: () => emit("navigate", "model-monitor")
+            "data-testid": "stub-nav-telemetry",
+            onClick: () => emit("navigate", "telemetry")
           },
-          "go-model-monitor"
+          "go-telemetry"
         ),
         h(
           "button",
@@ -70,16 +70,44 @@ const HomeWorkspaceStub = defineComponent({
   template: '<div data-testid="home-workspace-stub">home-workspace</div>'
 });
 
-const ProviderConfigPageStub = defineComponent({
-  template: '<div data-testid="provider-config-page-stub">provider-config</div>'
+const ConfigPageStub = defineComponent({
+  props: {
+    tab: {
+      type: String,
+      default: "general"
+    }
+  },
+  emits: ["update:tab"],
+  setup(props, { emit }) {
+    return () =>
+      h("div", { "data-testid": "config-page-stub", "data-tab": props.tab }, [
+        h(
+          "button",
+          {
+            "data-testid": "stub-config-select-tools",
+            onClick: () => emit("update:tab", "tools")
+          },
+          "select-tools"
+        )
+      ]);
+  }
 });
 
-const ModelMonitorPageStub = defineComponent({
-  template: '<div data-testid="model-monitor-page-stub">model-monitor</div>'
-});
-
-const SettingsPanelStub = defineComponent({
-  template: '<div data-testid="settings-panel-stub">settings</div>'
+const TelemetryPageStub = defineComponent({
+  emits: ["navigate"],
+  setup(_props, { emit }) {
+    return () =>
+      h("div", { "data-testid": "telemetry-page-stub" }, [
+        h(
+          "button",
+          {
+            "data-testid": "stub-telemetry-back",
+            onClick: () => emit("navigate", "home")
+          },
+          "back"
+        )
+      ]);
+  }
 });
 
 const TooltipProviderStub = defineComponent({
@@ -93,9 +121,8 @@ function mountApp() {
         HomeSidebar: HomeSidebarStub,
         HomeSessionSidebar: HomeSessionSidebarStub,
         HomeWorkspace: HomeWorkspaceStub,
-        ProviderConfigPage: ProviderConfigPageStub,
-        ModelMonitorPage: ModelMonitorPageStub,
-        SettingsPanel: SettingsPanelStub,
+        ConfigPage: ConfigPageStub,
+        TelemetryPage: TelemetryPageStub,
         TooltipProvider: TooltipProviderStub
       }
     }
@@ -150,32 +177,54 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="tooltip-provider-stub"]').exists()).toBe(true);
   });
 
-  it("switches between home, provider config, model monitor, and settings from the sidebar", async () => {
+  it("switches between home, config (models/general tabs), and telemetry from the sidebar", async () => {
     const wrapper = mountApp();
 
-    await wrapper.get('[data-testid="stub-nav-providers"]').trigger("click");
-    expect(wrapper.find('[data-testid="provider-config-page-stub"]').exists()).toBe(true);
+    // 一级菜单"模型配置" → 配置页·模型 tab（provider 管理升为一级目的地）
+    await wrapper.get('[data-testid="stub-nav-models"]').trigger("click");
+    expect(wrapper.find('[data-testid="config-page-stub"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("models");
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("models");
+
+    await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
+    expect(wrapper.find('[data-testid="config-page-stub"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
+
+    // 遥测页：二级读面（coding 双 tab / work 仅指标，门禁由 TelemetryPage 自身负责）
+    await wrapper.get('[data-testid="stub-nav-telemetry"]').trigger("click");
+    expect(wrapper.find('[data-testid="telemetry-page-stub"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="stub-telemetry-back"]').trigger("click");
+    expect(wrapper.find('[data-testid="telemetry-page-stub"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
+
+    // 一级菜单"设置" → 配置页·通用 tab
+    await wrapper.get('[data-testid="stub-nav-settings"]').trigger("click");
+    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("general");
     expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
 
     await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
-    expect(wrapper.find('[data-testid="provider-config-page-stub"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="config-page-stub"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
+  });
 
-    await wrapper.get('[data-testid="stub-nav-model-monitor"]').trigger("click");
-    expect(wrapper.find('[data-testid="model-monitor-page-stub"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
-
-    await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
-    expect(wrapper.find('[data-testid="model-monitor-page-stub"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
+  it("keeps the config page as a controlled tab surface and clears sidebar highlight on the tools tab", async () => {
+    const wrapper = mountApp();
 
     await wrapper.get('[data-testid="stub-nav-settings"]').trigger("click");
-    expect(wrapper.find('[data-testid="settings-panel-stub"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("general");
 
+    // 配置页内部切到 tools：无对应左栏一级键 → 派生高亮为空
+    await wrapper.get('[data-testid="stub-config-select-tools"]').trigger("click");
+    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("tools");
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("");
+
+    // 回到 home 再进模型配置 → 显式目的地覆盖为 models tab
     await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
-    expect(wrapper.find('[data-testid="settings-panel-stub"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="stub-nav-models"]').trigger("click");
+    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("models");
   });
 
   it("lets the workspace toggle the right sidebar open state", async () => {

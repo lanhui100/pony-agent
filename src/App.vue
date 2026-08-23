@@ -6,19 +6,22 @@ import HomeSidebar from "@/components/HomeSidebar.vue";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import TitleBar from "@/components/TitleBar.vue";
-import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
-import ProviderConfigPage from "@/components/ProviderConfigPage.vue";
-import SettingsPanel from "@/components/SettingsPanel.vue";
+import TelemetryPage from "@/components/telemetry/TelemetryPage.vue";
+import ConfigPage from "@/components/config/ConfigPage.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useSettingsStore } from "@/stores/settings";
+import type { ConfigTab, SidebarNavigationPage } from "@/types/config";
 
-type AppPage = "home" | "providers" | "model-monitor" | "settings";
+type AppPage = "home" | "config" | "telemetry";
 
 const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "pony-agent.ui.right-sidebar-open";
 const AUTO_CLOSE_RIGHT_SIDEBAR_WIDTH = 1000;
 const AUTO_COLLAPSE_LEFT_SIDEBAR_WIDTH = 820;
 const currentPage = ref<AppPage>("home");
+// PA-096：配置页 tab 为会话内受控状态。两个一级键（模型配置/设置）本身是
+// 显式目的地，应用启动后总从 home 开始——持久化该值只会产生只写不读的死状态。
+const configTab = ref<ConfigTab>("general");
 const rightSidebarPreferredOpen = ref(true);
 const windowWidth = ref(typeof window !== "undefined" ? window.innerWidth : Number.POSITIVE_INFINITY);
 const providerStore = useProviderStore();
@@ -34,6 +37,36 @@ let longTaskObserver: PerformanceObserver | null = null;
 const forceCloseRightSidebar = computed(() => windowWidth.value < AUTO_CLOSE_RIGHT_SIDEBAR_WIDTH);
 const forceCollapseLeftSidebar = computed(() => windowWidth.value < AUTO_COLLAPSE_LEFT_SIDEBAR_WIDTH);
 const rightSidebarOpen = computed(() => rightSidebarPreferredOpen.value && !forceCloseRightSidebar.value);
+
+// PA-096：左栏一级键高亮跟随派生导航态；config+tools 无对应一级键 → 不点亮。
+const sessionSidebarActivePage = computed<SidebarNavigationPage | null>(() => {
+  if (currentPage.value === "config") {
+    if (configTab.value === "models") {
+      return "models";
+    }
+    if (configTab.value === "general") {
+      return "settings";
+    }
+    return null;
+  }
+  return currentPage.value;
+});
+
+// 左栏一级菜单请求映射：models/settings 打开配置页对应 tab，telemetry 直达遥测页。
+function handleSessionNavigate(page: SidebarNavigationPage) {
+  if (page === "home") {
+    currentPage.value = "home";
+    return;
+  }
+
+  if (page === "telemetry") {
+    currentPage.value = "telemetry";
+    return;
+  }
+
+  configTab.value = page === "models" ? "models" : "general";
+  currentPage.value = "config";
+}
 
 function logLifecycle(event: string) {
   console.info(`[pony-agent][app] ${event}`, {
@@ -168,7 +201,7 @@ watch(rightSidebarPreferredOpen, (value) => {
         class="flex min-h-0 flex-1 w-full min-w-0 gap-4 bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.10),transparent_26%),linear-gradient(180deg,#fdfbf9_0%,#faf7f2_48%,#f6f1ea_100%)] pb-3"
         data-testid="app-layout-shell"
       >
-        <HomeSessionSidebar :current-page="currentPage" :force-collapsed="forceCollapseLeftSidebar" @navigate="currentPage = $event" />
+        <HomeSessionSidebar :current-page="sessionSidebarActivePage" :force-collapsed="forceCollapseLeftSidebar" @navigate="handleSessionNavigate" />
 
         <section class="flex flex-col min-h-0 min-w-0 flex-1">
           <Transition
@@ -219,17 +252,13 @@ watch(rightSidebarPreferredOpen, (value) => {
               </button>
             </div>
 
-            <ProviderConfigPage
-              v-else-if="currentPage === 'providers'"
-              key="page-providers"
+            <ConfigPage
+              v-else-if="currentPage === 'config'"
+              key="page-config"
+              v-model:tab="configTab"
               class="h-full"
             />
-            <SettingsPanel
-              v-else-if="currentPage === 'settings'"
-              key="page-settings"
-              class="h-full"
-            />
-            <ModelMonitorPage v-else key="page-model-monitor" class="h-full" />
+            <TelemetryPage v-else key="page-telemetry" class="h-full" @navigate="handleSessionNavigate" />
           </Transition>
         </section>
       </section>

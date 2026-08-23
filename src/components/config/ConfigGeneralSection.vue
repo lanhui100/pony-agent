@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
-import { Check, ChevronRight, ExternalLink, LoaderCircle, Pencil, Save, Settings2, Shield } from "lucide-vue-next";
+import { Check, ChevronRight, ExternalLink, LoaderCircle, Pencil, Save, Shield } from "lucide-vue-next";
 import { useSettingsStore } from "@/stores/settings";
 import Input from "@/components/ui/Input.vue";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
+
+/**
+ * PA-096：配置页"通用" tab 内容（原 SettingsPanel 去壳版）。
+ * 工作模式双卡 + 服务密钥编辑行；业务逻辑与原实现一致。
+ */
 
 const settingsStore = useSettingsStore();
 const { settings, saving } = storeToRefs(settingsStore);
@@ -69,46 +74,40 @@ function openExa() {
 </script>
 
 <template>
-  <section class="flex h-full min-h-0 min-w-0 flex-col rounded-[0.6rem] border border-stone-200/70 bg-white/72">
-    <div class="flex items-center justify-between border-b border-stone-200/70 px-4 py-3">
-      <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
-        <Settings2 class="h-4 w-4 text-stone-500" />
-        <span>配置</span>
-      </div>
-      <span class="text-[11px] text-stone-500">可扩展全局设置</span>
-    </div>
-
-    <div class="flex min-h-0 flex-1 flex-col gap-6 px-4 py-4">
+  <div class="h-full min-h-0 overflow-y-auto px-1 py-1" data-testid="config-general-section">
+    <div class="flex min-h-full flex-col gap-6">
       <div class="space-y-2">
         <div class="text-[12px] font-medium text-stone-500">工作模式</div>
         <div class="grid grid-cols-2 gap-2 max-w-[680px]">
           <button
             type="button"
-            class="flex items-start gap-3 rounded-[0.5rem] border px-3 py-3 text-left transition"
+            class="flex items-start gap-3 rounded-[0.5rem] border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
             :class="isCoding ? 'border-stone-900 bg-stone-900 text-amber-50' : 'border-stone-200 bg-white text-stone-800 hover:border-stone-300 hover:bg-stone-50'"
             :disabled="saving"
+            data-testid="config-mode-coding"
             @click="chooseMode('coding')"
           >
             <Check v-if="isCoding" class="mt-0.5 h-4 w-4" />
             <ChevronRight v-else class="mt-0.5 h-4 w-4 text-stone-400" />
-            <div>
-              <div class="text-sm font-medium">Coding</div>
-              <div class="text-[12px] opacity-80">代码、调试、实现、测试</div>
-            </div>
+            <span>
+              <span class="block text-sm font-medium">Coding</span>
+              <span class="block text-[12px] opacity-80">代码、调试、实现、测试；含 Trace 遥测读面</span>
+            </span>
           </button>
           <button
             type="button"
-            class="flex items-start gap-3 rounded-[0.5rem] border px-3 py-3 text-left transition"
+            class="flex items-start gap-3 rounded-[0.5rem] border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
             :class="!isCoding ? 'border-stone-900 bg-stone-900 text-amber-50' : 'border-stone-200 bg-white text-stone-800 hover:border-stone-300 hover:bg-stone-50'"
             :disabled="saving"
+            data-testid="config-mode-work"
             @click="chooseMode('work')"
           >
             <Check v-if="!isCoding" class="mt-0.5 h-4 w-4" />
             <ChevronRight v-else class="mt-0.5 h-4 w-4 text-stone-400" />
-            <div>
-              <div class="text-sm font-medium">Work</div>
-              <div class="text-[12px] opacity-80">写作、分析、规划、文档</div>
-            </div>
+            <span>
+              <span class="block text-sm font-medium">Work</span>
+              <span class="block text-[12px] opacity-80">写作、分析、规划、文档；遥测仅保留指标</span>
+            </span>
           </button>
         </div>
       </div>
@@ -173,6 +172,9 @@ function openExa() {
           </button>
         </div>
       </div>
+
+      <p v-if="settingsStore.notice" class="text-[11px] leading-5 text-stone-400">{{ settingsStore.notice }}</p>
+      <p v-if="settingsStore.error" class="text-[11px] leading-5 text-rose-600">{{ settingsStore.error }}</p>
     </div>
-  </section>
+  </div>
 </template>

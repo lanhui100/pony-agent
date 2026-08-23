@@ -4,6 +4,7 @@ import { defineComponent, nextTick } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useSettingsStore } from "@/stores/settings";
 import type {
   ChatMessage,
   HistoryBranch,
@@ -86,7 +87,9 @@ function createHistoryBranch(partial: Partial<HistoryBranch> = {}): HistoryBranc
   };
 }
 
-function mountSidebar(currentPage: "home" | "providers" | "model-monitor" = "home") {
+function mountSidebar(
+  currentPage: "home" | "models" | "settings" | "telemetry" | null = "home"
+) {
   return mount(HomeSessionSidebar, {
     props: {
       currentPage
@@ -462,18 +465,18 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.get('[data-testid="session-delete-session-third"]').attributes("disabled")).toBeUndefined();
   });
 
-  it("keeps create actions above session list and model sections", async () => {
+  it("keeps create actions above workspace and session sections (workspace first, PA-096)", async () => {
     seedSidebarSessions();
 
     const wrapper = mountSidebar();
     await nextTick();
 
     const actions = wrapper.get('[data-testid="session-sidebar-actions"]').element;
+    const workspace = wrapper.get('[data-testid="session-sidebar-workspace-nav"]').element;
     const sessionList = wrapper.get('[data-testid="session-sidebar-session-list"]').element;
-    const model = wrapper.get('[data-testid="session-sidebar-model-nav"]').element;
 
-    expect(actions.compareDocumentPosition(sessionList) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(sessionList.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(actions.compareDocumentPosition(workspace) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(workspace.compareDocumentPosition(sessionList) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("navigates home before switching when a concrete session is opened from another page", async () => {
@@ -481,7 +484,7 @@ describe("HomeSessionSidebar", () => {
 
     const runtimeStore = useRuntimeStore();
     const switchSessionSpy = vi.spyOn(runtimeStore, "switchSession").mockResolvedValue();
-    const wrapper = mountSidebar("model-monitor");
+    const wrapper = mountSidebar("telemetry");
     await nextTick();
 
     await wrapper.get('[data-testid="session-switch-session-other"]').trigger("click");
@@ -504,15 +507,33 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.emitted("navigate")).toBeUndefined();
   });
 
-  it("renders provider config, model monitor, and settings inside model management", async () => {
+  it("renders telemetry, model config, and settings as first-level entries without the model group (PA-096)", async () => {
     seedSidebarSessions();
 
     const wrapper = mountSidebar();
     await nextTick();
 
-    expect(wrapper.get('[data-testid="session-sidebar-nav-providers"]').text()).toContain("配置");
-    expect(wrapper.get('[data-testid="session-sidebar-nav-model-monitor"]').text()).toContain("监控");
+    // coding 模式：遥测（双 tab）；work 模式：同一键位显示"指标"
+    expect(wrapper.get('[data-testid="session-sidebar-nav-telemetry"]').text()).toContain("遥测");
+    expect(wrapper.get('[data-testid="session-sidebar-nav-providers"]').text()).toContain("模型配置");
     expect(wrapper.get('[data-testid="session-sidebar-nav-settings"]').text()).toContain("设置");
+
+    // "模型管理"二级折叠组已移除
+    expect(wrapper.find('[data-testid="session-sidebar-model-toggle"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-model-monitor"]').exists()).toBe(false);
+  });
+
+  it("relabels the telemetry entry to metrics in work mode", async () => {
+    seedSidebarSessions();
+
+    const settingsStore = useSettingsStore();
+    settingsStore.$patch({ settings: { workspaceMode: "work" } });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="session-sidebar-nav-telemetry"]').text()).toContain("指标");
+    expect(wrapper.get('[data-testid="session-sidebar-nav-telemetry"]').text()).not.toContain("遥测");
   });
 
   it("keeps the top brand entry and no longer renders a separate home item", async () => {
@@ -528,7 +549,7 @@ describe("HomeSessionSidebar", () => {
   it("brand click routes back to the home workspace", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("providers");
+    const wrapper = mountSidebar("models");
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-brand"]').trigger("click");
@@ -538,25 +559,25 @@ describe("HomeSessionSidebar", () => {
   it("shares the same warm orange hover and selected guardrails across menu items", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("providers");
+    const wrapper = mountSidebar("models");
     await nextTick();
 
     const newChat = wrapper.get('[data-testid="session-sidebar-new-chat"]');
     const sessionItem = wrapper.get('[data-testid="session-switch-session-current"]').element.parentElement?.parentElement;
-    const modelToggle = wrapper.get('[data-testid="session-sidebar-model-toggle"]');
+    const telemetryItem = wrapper.get('[data-testid="session-sidebar-nav-telemetry"]');
     const providerItem = wrapper.get('[data-testid="session-sidebar-nav-providers"]');
 
     expect(newChat.classes()).toContain("hover:bg-[#f6dfb8]");
-    expect(modelToggle.classes()).toContain("bg-[#f3c98d]");
+    expect(telemetryItem.classes()).toContain("hover:bg-[#f6dfb8]");
     expect(providerItem.classes()).toContain("bg-[#f3c98d]");
     expect(providerItem.classes()).toContain("rounded-[0.2rem]");
     expect(sessionItem?.className).toContain("bg-[#f3c98d]");
   });
 
-  it("keeps only the four key entries in collapsed mode", async () => {
+  it("keeps the six key entries in collapsed mode (PA-096: telemetry replaces model-monitor)", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("model-monitor");
+    const wrapper = mountSidebar("telemetry");
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
@@ -565,9 +586,10 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.find('[data-testid="session-sidebar-brand"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="session-sidebar-new-chat-collapsed"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-sidebar-home-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-telemetry-collapsed"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-sidebar-nav-providers-collapsed"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-sidebar-nav-settings-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("主页");
   });
 
@@ -606,7 +628,7 @@ describe("HomeSessionSidebar", () => {
   it("collapsed home icon routes back to home workspace", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("model-monitor");
+    const wrapper = mountSidebar("telemetry");
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
@@ -617,7 +639,7 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.emitted("navigate")).toEqual([["home"]]);
   });
 
-  it("persists collapse state and exposes collapsed provider or monitor navigation", async () => {
+  it("persists collapse state and exposes collapsed telemetry, provider, and settings navigation", async () => {
     seedSidebarSessions();
 
     const wrapper = mountSidebar("home");
@@ -629,31 +651,10 @@ describe("HomeSessionSidebar", () => {
     expect(window.localStorage.getItem("pony-agent.session-sidebar-collapsed.v1")).toBe("1");
 
     await wrapper.get('[data-testid="session-sidebar-nav-providers-collapsed"]').trigger("click");
-    await wrapper.get('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').trigger("click");
+    await wrapper.get('[data-testid="session-sidebar-nav-telemetry-collapsed"]').trigger("click");
     await wrapper.get('[data-testid="session-sidebar-nav-settings-collapsed"]').trigger("click");
 
-    expect(wrapper.emitted("navigate")).toEqual([["providers"], ["model-monitor"], ["settings"]]);
-  });
-
-  it("toggles model management open state and persists it", async () => {
-    seedSidebarSessions();
-
-    const wrapper = mountSidebar("providers");
-    await nextTick();
-
-    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(true);
-
-    await wrapper.get('[data-testid="session-sidebar-model-toggle"]').trigger("click");
-    await nextTick();
-
-    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(false);
-    expect(window.localStorage.getItem("pony-agent.session-sidebar-model-open.v1")).toBe("0");
-
-    await wrapper.get('[data-testid="session-sidebar-model-toggle"]').trigger("click");
-    await nextTick();
-
-    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(true);
-    expect(window.localStorage.getItem("pony-agent.session-sidebar-model-open.v1")).toBe("1");
+    expect(wrapper.emitted("navigate")).toEqual([["models"], ["telemetry"], ["settings"]]);
   });
 
   it("forwards create and delete actions to the runtime store when enabled", async () => {
@@ -679,7 +680,7 @@ describe("HomeSessionSidebar", () => {
 
     const runtimeStore = useRuntimeStore();
     const createSessionSpy = vi.spyOn(runtimeStore, "createSession").mockResolvedValue();
-    const wrapper = mountSidebar("providers");
+    const wrapper = mountSidebar("models");
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-new-chat"]').trigger("click");

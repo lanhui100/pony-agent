@@ -54,3 +54,9 @@ sessions/
 
 __pycache__/
 nul
+
+# PA-096（review P2-1）：包管理缓存与 Windows NUL 设备泄漏的 Rust 编译产物
+.pnpm-store/
+NUL.*
+NUL*/
+tsconfig.tsbuildinfo

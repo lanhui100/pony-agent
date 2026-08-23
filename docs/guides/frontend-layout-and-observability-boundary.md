@@ -6,6 +6,12 @@
 
 这是增量开发约束文档，不是重做工作台的邀请。
 
+> **PA-096 修订（2026-08-22）**：本文部分边界已随工作台信息架构重构更新——
+> ① 右栏只承载对话过程面板（状态/计划/调试）；trace 与 metrics 迁入二级遥测页（`telemetry/TelemetryPage.vue`），工具目录迁入配置页；
+> ② 左栏冻结结构改为"品牌 / 新对话 / 工作区（第一优先）/ 对话树 / 底部一级导航（遥测|指标、模型配置、设置）"；
+> ③ "可观测性信息默认进右栏"的约定不再覆盖 trace/metrics。
+> 现行行为契约以 `openspec/specs/workspace-shell-navigation/spec.md` 为准，决策理由见 `docs/decisions/0009-workbench-ia-telemetry-page-and-config-tabs.md`。下文未修订段落中与上述冲突的表述以本注记为准。
+
 ## 首页三栏职责
 
 - 左侧边栏：菜单导航、会话入口、会话历史、模型管理。

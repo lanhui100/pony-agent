@@ -27,7 +27,7 @@
 
 ## 路由策略
 
-当前通过 `App.vue` 的 `currentPage` 条件渲染实现 4 个页面的切换（home / providers / model-monitor / settings），未引入 vue-router。
+当前通过 `App.vue` 的 `currentPage` 条件渲染实现 3 个页面的切换（home / config / telemetry），未引入 vue-router。配置页内部以受控 tab（通用/模型/工具）承载原独立设置面，遥测页以 tab（Trace/指标）承载 trace 与 metrics 读面。
 
 如果后续页面继续增长（workflow 设计器、附件中心独立页等），应重新评估引入 vue-router 的必要性。
 
@@ -42,16 +42,20 @@
 
 ### 左侧导航栏（HomeSessionSidebar.vue）
 
-- 品牌入口、新对话、对话历史
-- 模型管理入口（模型配置、模型监控）
+- 品牌入口、新对话
+- 工作区（第一优先：管理/新建/切换，头部显示激活工作区名）
+- 对话（按 workspace 分组的会话树）
+- 底部一级导航：遥测/指标、模型配置、设置
 
-### 右侧可观测性面板（HomeSidebar.vue）
+### 右侧对话过程面板（HomeSidebar.vue）
 
-- Status：当前阶段、provider、session 状态
-- Tools：工具调用记录
-- Trace：Turn 执行轨迹与 timeline
-- Retrieval：上下文取用事实
+只承载对话过程信息（PA-096 起）：
+
+- Status：会话轮次/token 聚合、上下文用量、运行状态摘要
+- Plan：计划列表与步骤控制
 - Diagnostics：诊断信息
+
+Trace 与 metrics 读面在遥测页（`telemetry/TelemetryPage.vue`），工具目录在配置页工具 tab。
 
 ## 当前 UI 风格约束
 

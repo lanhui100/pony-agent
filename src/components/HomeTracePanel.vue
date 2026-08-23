@@ -76,7 +76,22 @@ const props = defineProps<{
   canonicalKind: (kind: TraceTimelineEntry["kind"]) => TraceTimelineEntry["kind"];
   turnTimeline: (turn: TurnTraceRecord) => TraceTimelineEntry[];
   providerReturnedCacheHitInputTokens: (turn: TurnTraceRecord) => number | null;
+  /** PA-096：遥测页全高模式——去掉侧栏折叠装饰，body 填满宿主定高容器。 */
+  expanded?: boolean;
 }>();
+
+// 展开模式：外层改纯 flex column 填满父级；侧栏模式：保持 collapsible 动画与装饰。
+const shellClass = computed(() =>
+  props.expanded
+    ? "flex min-h-0 min-w-0 flex-1 flex-col"
+    : "collapsible-shell border-b border-stone-200/60 pb-4"
+);
+const bodyClass = computed(() =>
+  props.expanded ? "flex min-h-0 min-w-0 flex-1 flex-col" : "collapsible-body"
+);
+const bodyScrollClass = computed(() =>
+  props.expanded ? "min-h-0 w-full flex-1" : "trace-body-scroll max-h-[24rem] min-h-[3rem]"
+);
 
 const emit = defineEmits<{
   copy: [key: string, text: string];
@@ -1375,8 +1390,8 @@ function resolveBuildContextObservation(
 </script>
 
 <template>
-  <section class="collapsible-shell border-b border-stone-200/60 pb-4" :data-open="open">
-    <button class="flex w-full items-center justify-between gap-3 text-left" type="button" data-testid="trace-panel-toggle" @click="emit('toggle')">
+  <section :class="shellClass" :data-open="open">
+    <button class="flex w-full shrink-0 items-center justify-between gap-3 text-left" type="button" data-testid="trace-panel-toggle" @click="emit('toggle')">
       <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
         <Clock3 class="h-3.5 w-3.5" />
         <span>Trace</span>
@@ -1384,10 +1399,10 @@ function resolveBuildContextObservation(
       <ChevronRight class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200" :class="{ 'rotate-90': open }" />
     </button>
 
-    <div v-if="open" class="collapsible-body">
+    <div v-if="open" :class="bodyClass">
       <ScrollArea
         ref="traceBodyScrollRef"
-        class="trace-body-scroll max-h-[24rem] min-h-[3rem]"
+        :class="bodyScrollClass"
         viewport-class="trace-body-viewport"
         @vue:mounted="onTraceBodyMounted"
         @vue:unmounted="onTraceBodyUnmounted"
@@ -1430,7 +1445,7 @@ function resolveBuildContextObservation(
                 {{ turnDurationText(turn) }}
               </span>
               <button
-                class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                class="invisible group-hover:visible group-focus-within:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                 type="button"
                 @click.stop="emit('copy', turnCopyKey(turn.turnId), buildTurnCopyText(turn))"
               >
@@ -1501,7 +1516,7 @@ function resolveBuildContextObservation(
                     </span>
                     <button
                       v-if="!isCheckpointPersistEntry(entry)"
-                      class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                      class="invisible group-hover:visible group-focus-within:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                       type="button"
                       @click.stop="emit('copy', traceCopyKey(turn.turnId, entry.id), buildTimelineCopyText(turn, entry))"
                     >
@@ -1578,7 +1593,7 @@ function resolveBuildContextObservation(
                             {{ section.label }}
                           </div>
                           <button
-                            class="invisible group-hover:visible inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                            class="invisible group-hover:visible group-focus-within:visible inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                             type="button"
                             :data-testid="`trace-detail-button-${entry.id}-${section.id}`"
                             @click.stop="emit('copy', traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
@@ -1622,7 +1637,7 @@ function resolveBuildContextObservation(
                                 {{ section.durationText }}
                               </span>
                               <button
-                                class="invisible group-hover:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
+                                class="invisible group-hover:visible group-focus-within:visible inline-flex h-5 w-5 items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7f1e7] hover:text-stone-600"
                                 type="button"
                                 @click.stop="emit('copy', traceDetailKey(turn.turnId, entry.id, section.id), section.content)"
                               >

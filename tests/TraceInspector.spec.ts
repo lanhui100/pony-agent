@@ -1,0 +1,1765 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
+import { defineComponent, nextTick } from "vue";
+import { mount } from "@vue/test-utils";
+import TraceInspector from "@/components/TraceInspector.vue";
+import {
+  __resetFrontendFlightRecorderForTests,
+  injectFrontendDiagnosticStall
+} from "@/lib/frontend-flight-recorder";
+import { useProviderStore } from "@/stores/providers";
+import { useRuntimeStore } from "@/stores/runtime";
+import type { ProviderRegistry } from "@/types/provider";
+import type {
+  BuildContextObservation,
+  ProviderCallCacheRecord,
+  RetrievedContextState,
+  TraceStep,
+  TraceTimelineEntry,
+  TurnTraceRecord
+} from "@/types/runtime";
+
+const tauriMocks = vi.hoisted(() => ({
+  mockSafeInvoke: vi.fn(),
+  mockSafeListen: vi.fn(),
+  mockIsTauriAvailable: vi.fn()
+}));
+
+vi.mock("@/lib/tauri", () => ({
+  safeInvoke: tauriMocks.mockSafeInvoke,
+  safeListen: tauriMocks.mockSafeListen,
+  isTauriAvailable: tauriMocks.mockIsTauriAvailable
+}));
+
+vi.mock("@/lib/frontend-flight-recorder", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/frontend-flight-recorder")>(
+    "@/lib/frontend-flight-recorder"
+  );
+  return {
+    ...actual,
+    injectFrontendDiagnosticStall: vi.fn(() => 1800)
+  };
+});
+
+const ScrollAreaStub = defineComponent({
+  template: '<div class="scroll-area-stub"><slot /></div>'
+});
+
+const TooltipStub = defineComponent({
+  props: {
+    text: {
+      type: String,
+      default: ""
+    }
+  },
+  template: '<div class="tooltip-stub" :data-tooltip="text"><slot /></div>'
+});
+
+function createProviderRegistry(): ProviderRegistry {
+  return {
+    selectedProviderId: "provider-openai",
+    providers: [
+      {
+        id: "provider-openai",
+        name: "OpenAI",
+        protocol: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        apiKeyEnvVar: "OPENAI_API_KEY",
+        apiKeyValue: "",
+        apiKeyPresent: false,
+        selectedModelId: "model-gpt5",
+        models: [
+          {
+            id: "model-gpt5",
+            name: "GPT-5",
+            model: "gpt-5",
+            temperature: 0,
+            maxOutputTokens: 4096,
+            reasoningEffort: null,
+            reasoningBudgetTokens: null,
+            capabilityPreset: "open-ai-reasoning",
+            capabilities: {
+              contextWindowTokens: 128000,
+              supportsTools: true,
+              supportsStreaming: true,
+              supportsImageInput: false,
+              supportsReasoning: true
+            }
+          }
+        ]
+      }
+    ]
+  };
+}
+
+function createRetrievedContext(overrides: Partial<RetrievedContextState> = {}): RetrievedContextState {
+  return {
+    turnContext: {
+      userMessage: "继续推进 PA-025",
+      images: [],
+      referencesImage: false
+    },
+    sessionContext: {
+      conversationId: "graph-session",
+      title: "Graph session",
+      summary: "retrieval summary from host",
+      recentHistory: [
+        { role: "user", content: "继续推进 PA-025" },
+        { role: "assistant", content: "正在继续处理" }
+      ],
+      recentAttachmentAssets: [],
+      turnCount: 3,
+      lastReferencedFile: "src-tauri/src/agent/context.rs"
+    },
+    runState: {
+      runId: "run-alpha",
+      goal: "梳理 retrieval boundary 并推进上层接入",
+      phase: "running",
+      activeTurnId: "turn-1",
+      lastCompletedTurnId: null,
+      resumeCount: 0,
+      lastDecisionSummary: "继续推进 runtime 侧接口",
+      executionCheckpointStatus: "running",
+      executionCheckpointPhase: "calling_model"
+    },
+    longTermMemory: {
+      status: "available",
+      summary: "已有长期记忆",
+      entries: [
+        {
+          kind: "user_preference.response_language",
+          content: "Reply in Chinese.",
+          source: "explicit_user_message",
+          updatedAtMs: 1_715_000_000_000
+        },
+        {
+          kind: "project_focus.active_task",
+          content: "Current active task is PA-018.",
+          source: "explicit_user_message",
+          updatedAtMs: 1_715_000_000_001
+        }
+      ]
+    },
+    transcript: {
+      providerNativeMessages: []
+    },
+    ...overrides
+  };
+}
+
+function createBuildContextObservation(
+  overrides: Partial<BuildContextObservation> = {}
+): BuildContextObservation {
+  return {
+    requestFormat: overrides.requestFormat ?? "response_format=json_schema",
+    messageCount: overrides.messageCount ?? 3,
+    imageCount: overrides.imageCount ?? 1,
+    toolCount: overrides.toolCount ?? 2,
+    temperature: overrides.temperature ?? 0.2,
+    maxOutputTokens: overrides.maxOutputTokens ?? 4096,
+    stablePrefixText:
+      overrides.stablePrefixText ??
+      "system: stable system rule\ndeveloper: stable capability prefix",
+    semiStableContextText:
+      overrides.semiStableContextText ??
+      "developer: retrieval summary from host\nuser: recent history question",
+    volatileInputText:
+      overrides.volatileInputText ??
+      "user: continue PA-025 with the latest screenshot",
+    prefixMutationReasons: overrides.prefixMutationReasons ?? [],
+    contextRefreshReason: overrides.contextRefreshReason ?? "initial_build",
+    instructionScopeSources:
+      overrides.instructionScopeSources ?? ["thread://base-system", "workspace://src/App.vue"],
+    conversationCarryMode: overrides.conversationCarryMode ?? "full_replay",
+    requestMessagesText:
+      overrides.requestMessagesText ??
+      "[0] system\nsummarize retrieval state\n\n[1] user\ncontinue PA-025\n\n[2] assistant\nacknowledged",
+    toolDefinitionsText:
+      overrides.toolDefinitionsText ??
+      "workspace.read_file(path: string)\nworkspace.search(query: string)"
+  };
+}
+
+function createTraceSteps(): TraceStep[] {
+  return [
+    { id: "step-plan", label: "Receive input", state: "completed" },
+    { id: "step-context", label: "Build context", state: "completed" },
+    { id: "step-call-model", label: "Call model", state: "completed" },
+    { id: "step-call-tool", label: "Call tool", state: "pending" },
+    { id: "step-return", label: "Return result", state: "completed" }
+  ];
+}
+
+function createTraceTimeline(): TraceTimelineEntry[] {
+  return [
+    {
+      id: "input-1",
+      kind: "input",
+      label: "RECEIVE INPUT",
+      state: "completed",
+      sequence: 1,
+      text: "继续推进 PA-025，不要生成摘要"
+    },
+    { id: "context-2", kind: "context", label: "BUILD CONTEXT", state: "completed", sequence: 2 },
+    { id: "model-3", kind: "model", label: "CALL MODEL #1", state: "completed", sequence: 3, firstTokenLatencyMs: 321 },
+    {
+      id: "return-4",
+      kind: "return",
+      label: "RETURN RESULT",
+      state: "completed",
+      sequence: 4,
+      inputTokens: 120,
+      cacheHitInputTokens: 80,
+      reasoningTokens: 18,
+      outputTokens: 40,
+      totalTokens: 160,
+      firstTokenLatencyMs: 321,
+      turnDurationMs: 2800
+    }
+  ];
+}
+
+function createTraceRecord(overrides: Partial<TurnTraceRecord> = {}): TurnTraceRecord {
+  return {
+    turnId: overrides.turnId ?? "turn-1",
+    title: overrides.title ?? "测试轮次",
+    phase: overrides.phase ?? "ready",
+    traceSteps: overrides.traceSteps ?? createTraceSteps(),
+    traceTimeline: overrides.traceTimeline ?? createTraceTimeline(),
+    toolActivities: overrides.toolActivities ?? [],
+    providerRequestedName: overrides.providerRequestedName ?? null,
+    providerName: overrides.providerName ?? null,
+    providerProtocol: overrides.providerProtocol ?? null,
+    providerModel: overrides.providerModel ?? null,
+    providerSource: overrides.providerSource ?? null,
+    providerMode: overrides.providerMode ?? null,
+    buildContextObservation: overrides.buildContextObservation ?? null,
+    sessionSummary: overrides.sessionSummary ?? null,
+    fallbackReason: overrides.fallbackReason ?? null,
+    error: overrides.error ?? null,
+    inputTokens: overrides.inputTokens ?? null,
+    cacheHitInputTokens: overrides.cacheHitInputTokens ?? null,
+    reasoningTokens: overrides.reasoningTokens ?? null,
+    outputTokens: overrides.outputTokens ?? null,
+    totalTokens: overrides.totalTokens ?? null,
+    firstTokenLatencyMs: overrides.firstTokenLatencyMs ?? null,
+    turnDurationMs: overrides.turnDurationMs ?? null,
+    updatedAt: overrides.updatedAt ?? 1,
+    providerCallRecords: overrides.providerCallRecords ?? []
+  };
+}
+
+function createProviderCallRecord(overrides: Partial<ProviderCallCacheRecord> = {}): ProviderCallCacheRecord {
+  return {
+    requestKind: overrides.requestKind ?? "initial_request",
+    providerSource: overrides.providerSource ?? "provider_decision_stream",
+    providerMode: overrides.providerMode ?? "live",
+    inputTokens: overrides.inputTokens ?? null,
+    cacheHitInputTokens: overrides.cacheHitInputTokens ?? null,
+    cacheMissInputTokens: overrides.cacheMissInputTokens ?? null,
+    reasoningTokens: overrides.reasoningTokens ?? null,
+    outputTokens: overrides.outputTokens ?? null,
+    totalTokens: overrides.totalTokens ?? null,
+    firstTokenLatencyMs: overrides.firstTokenLatencyMs ?? null,
+    turnDurationMs: overrides.turnDurationMs ?? null,
+    latencyKind: overrides.latencyKind ?? "provider_stream",
+    prefixMutationReasons: overrides.prefixMutationReasons ?? []
+  };
+}
+
+async function flushAll() {
+  await Promise.resolve();
+  await nextTick();
+  await Promise.resolve();
+  await nextTick();
+}
+
+async function mountInspector(options: { expandTrace?: boolean } = {}) {
+  const providerStore = useProviderStore();
+  providerStore.$patch({
+    registry: createProviderRegistry(),
+    selectedReasoningEffort: null
+  });
+
+  const wrapper = mount(TraceInspector, {
+    global: {
+      stubs: {
+        ScrollArea: ScrollAreaStub,
+        Tooltip: TooltipStub
+      }
+    }
+  });
+  await flushAll();
+
+  // PA-096：挂载后下一 tick 自动展开；expandTrace: false 仅用于断言挂载瞬间的折叠态。
+  if (options.expandTrace !== false) {
+    const toggle = wrapper.get('[data-testid="trace-panel-toggle"]');
+    if (toggle.element.closest("section")?.getAttribute("data-open") !== "true") {
+      await toggle.trigger("click");
+      await flushAll();
+    }
+  }
+  return wrapper;
+}
+
+function countOccurrences(text: string, needle: string) {
+  return text.split(needle).length - 1;
+}
+
+describe("TraceInspector", () => {
+  // ── PA-096：自 HomeSidebar.spec 迁移的 trace 呈现语义（挂载目标改为 TraceInspector）──
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetFrontendFlightRecorderForTests();
+    window.localStorage.clear();
+    setActivePinia(createPinia());
+    tauriMocks.mockSafeListen.mockResolvedValue(() => {});
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockResolvedValue(null);
+    vi.spyOn(console, "info").mockImplementation(() => {});
+
+    if (!navigator.clipboard) {
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText: vi.fn() },
+        configurable: true
+      });
+    } else {
+      vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    }
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "graph-session",
+      sessionList: [],
+      sessionOperation: null,
+      isSubmitting: false,
+      messages: [],
+      phase: "ready"
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("挂载瞬间守卫生效，下一 tick 自动展开并渲染最新内容（首滚补偿语义）", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({ turnId: "turn-auto-expand", title: "auto expand", updatedAt: 1000 })
+      ]
+    });
+
+    const wrapper = await mountInspector({ expandTrace: false });
+    await flushAll();
+
+    // 自动展开后 body 已挂载、timeline 内容可见
+    expect(wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
+    expect(wrapper.find('[data-testid="trace-step-button-model-3"]').exists()).toBe(true);
+  }, 10000);
+
+  it("header 可折叠且折叠后 body 卸载；再次展开恢复内容", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({ turnId: "turn-collapse-1", title: "first turn", updatedAt: 1000 })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    await wrapper.get('[data-testid="trace-panel-toggle"]').trigger("click");
+    await flushAll();
+
+    expect(wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("false");
+    expect(wrapper.find('[data-testid="trace-step-button-model-3"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="trace-panel-toggle"]').trigger("click");
+    await flushAll();
+
+    expect(wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
+    expect(wrapper.find('[data-testid="trace-step-button-model-3"]').exists()).toBe(true);
+  }, 10000);
+
+  it("expanded 模式类契约：面板根无侧栏折叠装饰，body 不再限高 24rem（PA-096 review）", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({ turnId: "turn-expanded-contract", title: "expanded contract", updatedAt: 1000 })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const panelRoot = wrapper.get('[data-testid="trace-panel-toggle"]').element.parentElement!;
+    expect(panelRoot.classList.contains("collapsible-shell")).toBe(false);
+    expect(panelRoot.className).toContain("flex");
+
+    // 全页遥测视图不得出现侧栏时代的 24rem 高度上限
+    expect(wrapper.html()).not.toContain("max-h-[24rem]");
+  }, 10000);
+
+  it("冻结守卫回归（PA-086）：折叠期间活跃 turn 不并入 turns，展开后恢复并入", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      isSubmitting: true,
+      activeTurnId: "turn-live-guard",
+      traceTimeline: createTraceTimeline(),
+      turnTraceHistory: [
+        createTraceRecord({ turnId: "turn-settled", title: "settled turn", updatedAt: 500 })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const toggleSection = () => wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")!;
+
+    // 展开态：活跃 turn（"当前执行中"）并入列表
+    expect(toggleSection().textContent).toContain("当前执行中");
+
+    // 折叠态：liveTraceTurn 返回 null，活跃 turn 从列表消失（不与 store 共享可变引用）
+    await wrapper.get('[data-testid="trace-panel-toggle"]').trigger("click");
+    await flushAll();
+    expect(toggleSection().textContent).not.toContain("当前执行中");
+
+    runtimeStore.$patch({ isSubmitting: false, activeTurnId: null });
+  }, 10000);
+
+  it("默认展开最新一条 turn，而不是停留在旧 failed turn", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-old-failed",
+          title: "旧失败轮次",
+          phase: "failed",
+          error: "old failure",
+          updatedAt: 1000,
+          traceTimeline: [
+            {
+              id: "model-old",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "error",
+              sequence: 3,
+              error: "old failure"
+            }
+          ]
+        }),
+        createTraceRecord({
+          turnId: "turn-new-completed",
+          title: "新成功轮次",
+          phase: "completed",
+          updatedAt: 2000,
+          buildContextObservation: createBuildContextObservation(),
+          traceTimeline: [
+            {
+              id: "input-new",
+              kind: "input",
+              label: "RECEIVE INPUT",
+              state: "completed",
+              sequence: 1,
+              text: "src/agent中是怎么组织的？"
+            },
+            {
+              id: "context-new",
+              kind: "build_context",
+              label: "BUILD CONTEXT",
+              state: "completed",
+              sequence: 2,
+              buildContextObservation: createBuildContextObservation()
+            },
+            {
+              id: "model-new",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 3,
+              text: "这是最新成功轮次"
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const latestTurnButton = wrapper.findAll("button").find((button) => button.text().includes("新成功轮次"));
+    const oldTurnButton = wrapper.findAll("button").find((button) => button.text().includes("旧失败轮次"));
+
+    const latestTurnSection = latestTurnButton?.element.closest('section[data-open]');
+    const oldTurnSection = oldTurnButton?.element.closest('section[data-open]');
+
+    expect(latestTurnSection?.getAttribute("data-open")).toBe("true");
+    expect(oldTurnSection?.getAttribute("data-open")).not.toBe("true");
+    const latestModelButton = wrapper.get('[data-testid="trace-step-button-model-new"]');
+    await latestModelButton.trigger("click");
+    await nextTick();
+    expect(latestTurnSection?.textContent ?? "").toContain("这是最新成功轮次");
+    expect(latestTurnSection?.textContent ?? "").not.toContain("old failure");
+  });
+
+  it("工具条目优先展示中文短显示名，其次 canonical name", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-tool-display",
+          title: "工具展示",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "tool-step",
+              kind: "call_tool",
+              label: "CALL TOOL",
+              state: "completed",
+              sequence: 1,
+              toolActivities: [
+                {
+                  id: "tool-zh",
+                  name: "workspace_search_text",
+                  canonicalToolName: "Search",
+                  displayNameZh: "搜索",
+                  status: "done",
+                  summary: "搜索完成",
+                  argumentsText: "{\"query\":\"permission facts\"}",
+                  resultText: "命中 3 条",
+                  durationSeconds: 0.1,
+                  capabilityInvocation: {
+                    toolName: "workspace_search_text",
+                    capabilityId: "builtin:workspace_search_text",
+                    permissionFacts: {
+                      permissionScope: "workspace.read",
+                      approvalMode: "none",
+                      decisionSource: "runtime"
+                    }
+                  }
+                },
+                {
+                  id: "tool-canonical",
+                  name: "workspace_read_file",
+                  canonicalToolName: "Read",
+                  status: "done",
+                  summary: "读取完成",
+                  argumentsText: "{\"path\":\"src/stores/runtime.ts\"}",
+                  resultText: "ok",
+                  durationSeconds: 0.1
+                }
+              ]
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const text = wrapper.text();
+    expect(text).toContain("搜索");
+    expect(text).toContain("Read");
+    expect(text).not.toContain("workspace_search_text");
+    expect(text).toContain("权限: workspace.read");
+    expect(text).toContain("审批: none");
+    expect(text).toContain("来源: runtime");
+    wrapper.unmount();
+  });
+
+  it("工具失败详情展示中文失败分类与 failure layer，并在 approvalMode 缺失时回退", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-tool-failure",
+          title: "工具失败展示",
+          phase: "failed",
+          traceTimeline: [
+            {
+              id: "tool-failure",
+              kind: "call_tool",
+              label: "CALL TOOL",
+              state: "error",
+              sequence: 1,
+              toolActivities: [
+                {
+                  id: "tool-1",
+                  name: "workspace_read_file",
+                  canonicalToolName: "Read",
+                  displayNameZh: "读取",
+                  status: "error",
+                  summary: "tool failed",
+                  argumentsText: "{\"path\":\"../outside.txt\"}",
+                  resultText: "out_of_scope",
+                  durationSeconds: 0.2,
+                  capabilityInvocation: {
+                    toolName: "workspace_read_file",
+                    capabilityId: "builtin:workspace_read_file",
+                    sourceKind: "builtin",
+                    failureKind: "out_of_scope",
+                    failureLayer: "underlying_capability_execution",
+                    permissionFacts: {
+                      requiresApproval: true,
+                      permissionScope: "workspace.read",
+                      decisionSource: "runtime"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const toolButton = wrapper.get('[data-testid="trace-step-button-tool-failure"]');
+    await toolButton.trigger("click");
+    await nextTick();
+
+    const toolDetailButton = wrapper.get('[data-testid="trace-detail-button-tool-failure-tool-1"]');
+    await toolDetailButton.trigger("click");
+    await nextTick();
+
+    const text = wrapper.text();
+    expect(text).toContain("失败分类: 超出作用域 (out_of_scope)");
+    expect(text).toContain("失败层级: underlying_capability_execution");
+    expect(text).toContain("审批: required");
+    expect(text).toContain("来源: runtime");
+  });
+
+  it("turn 摘要使用整轮汇总或平均指标，并固定右侧总耗时不换行", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-summary",
+          title: "turn summary metrics",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              inputTokens: 110,
+              cacheHitInputTokens: 60,
+              outputTokens: 45,
+              firstTokenLatencyMs: 210,
+              turnDurationMs: 2400
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #2",
+              state: "completed",
+              sequence: 2,
+              inputTokens: 40,
+              cacheHitInputTokens: 10,
+              outputTokens: 15,
+              firstTokenLatencyMs: 90,
+              turnDurationMs: 800
+            }
+          ],
+          inputTokens: 150,
+          cacheHitInputTokens: 70,
+          outputTokens: 60,
+          firstTokenLatencyMs: 150,
+          turnDurationMs: 3500,
+          providerCallRecords: [
+            createProviderCallRecord({
+              inputTokens: 110,
+              cacheHitInputTokens: 60,
+              outputTokens: 45,
+              firstTokenLatencyMs: 210,
+              turnDurationMs: 2400
+            }),
+            createProviderCallRecord({
+              requestKind: "tool_followup",
+              inputTokens: 40,
+              cacheHitInputTokens: 10,
+              outputTokens: 15,
+              firstTokenLatencyMs: 90,
+              turnDurationMs: 800
+            })
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const turnButton = wrapper.findAll("button").find((button) => button.text().includes("turn summary metrics"));
+    expect(turnButton).toBeDefined();
+    const turnBtnText = turnButton!.text();
+    expect(turnBtnText).toContain("150");
+    expect(turnBtnText).toContain("70");
+    expect(turnBtnText).toContain("60");
+    expect(turnBtnText).toContain("20.7 t/s");
+    expect(turnBtnText).not.toContain("18.8 t/s");
+    expect(turnBtnText).toContain("150 ms");
+    expect(turnBtnText).not.toContain("思考链");
+    // Labels are now in tooltip attributes
+    const turnTooltips = turnButton!.element.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const turnTooltipTexts = Array.from(turnTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(turnTooltipTexts).toContain("输入");
+    expect(turnTooltipTexts).toContain("缓存读取");
+    expect(turnTooltipTexts).toContain("输出");
+    expect(turnTooltipTexts).toContain("首 token 延时");
+
+    const durationSpan = turnButton!.findAll("span").find((item) => item.text() === "3.5s");
+    expect(durationSpan).toBeDefined();
+    expect(durationSpan!.classes()).toContain("whitespace-nowrap");
+  });
+
+  it("trace turn 列表不显示轮次分割线", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({ turnId: "turn-divider-1", title: "first turn", updatedAt: 1000 }),
+        createTraceRecord({ turnId: "turn-divider-2", title: "second turn", updatedAt: 2000 })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const tracePanel = wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")!;
+    const turnSections = Array.from(tracePanel.querySelectorAll<HTMLElement>('section[data-open]')).filter((section) => {
+      return section.querySelector("button")?.textContent?.includes("turn") ?? false;
+    });
+
+    expect(turnSections).toHaveLength(2);
+    for (const section of turnSections) {
+      expect(section.className).not.toContain("border-b");
+      expect(section.className).not.toContain("border-stone-200/70");
+    }
+  });
+
+  it("RECEIVE INPUT 只保留一个输入，且不显示 PREPARE RETRIEVAL", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      messages: [
+        {
+          id: "user-turn-input",
+          turnId: "turn-input",
+          role: "user",
+          content: "继续推进 PA-025，不要生成摘要",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: null,
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        },
+        {
+          id: "assistant-turn-input",
+          turnId: "turn-input",
+          role: "assistant",
+          content: "本轮完成",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: null,
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        }
+      ],
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-input",
+          title: "dedupe input",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "context-1",
+              kind: "build_context",
+              label: "BUILD CONTEXT",
+              state: "completed",
+              sequence: 1,
+              text: "继续推进 PA-025，不要生成摘要",
+              buildContextObservation: {
+                requestFormat: "openai",
+                messageCount: 5,
+                imageCount: 0,
+                toolCount: 17,
+                temperature: 0.2,
+                maxOutputTokens: 8192,
+                stablePrefixText: "稳定前缀",
+                semiStableContextText: "半稳定上下文",
+                volatileInputText: "继续推进 PA-025，不要生成摘要",
+                requestMessagesText: "[0] user\n继续推进 PA-025，不要生成摘要",
+                toolDefinitionsText: "工具定义"
+              }
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 2,
+              text: "本轮完成"
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    expect(wrapper.find('[data-testid="trace-step-button-retrieval-2"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("PREPARE RETRIEVAL");
+
+    await wrapper.get('[data-testid="trace-step-button-context-1"]').trigger("click");
+    await nextTick();
+
+    const contextSectionText = wrapper.get('[data-testid="trace-step-button-context-1"]').element.closest("section")?.textContent ?? "";
+    expect(contextSectionText).toContain("继续推进 PA-025，不要生成摘要");
+  });
+
+  it("CALL MODEL 使用 provider/model 合并值，并展开后直接展示思考链与模型输出", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      messages: [
+        {
+          id: "user-turn-model",
+          turnId: "turn-model",
+          role: "user",
+          content: "读取 package.json",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: null,
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        },
+        {
+          id: "assistant-turn-model",
+          turnId: "turn-model",
+          role: "assistant",
+          content: "已读取 package.json，准备继续分析依赖。",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: "先看 package.json，再确定下一步。",
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        }
+      ],
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-model",
+          title: "call model detail",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "input-1",
+              kind: "input",
+              label: "RECEIVE INPUT",
+              state: "completed",
+              sequence: 1,
+              text: "读取 package.json"
+            },
+            {
+              id: "model-3",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 3,
+              providerName: "OpenAI",
+              providerModel: "gpt-5",
+              inputTokens: 120,
+              cacheHitInputTokens: 80,
+              outputTokens: 40,
+              firstTokenLatencyMs: 321,
+              turnDurationMs: 2800,
+              text: "已读取 package.json，准备继续分析依赖。",
+              reasoningContent: "先看 package.json，再确定下一步。"
+            }
+          ],
+          inputTokens: 300,
+          cacheHitInputTokens: 200,
+          outputTokens: 90,
+          firstTokenLatencyMs: 500,
+          turnDurationMs: 6000,
+          providerCallRecords: [
+            createProviderCallRecord({
+              inputTokens: 120,
+              cacheHitInputTokens: 80,
+              outputTokens: 40,
+              firstTokenLatencyMs: 321,
+              turnDurationMs: 2800
+            })
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
+    const modelBtnText = modelButton.text();
+    expect(modelBtnText).toContain("120");
+    expect(modelBtnText).toContain("80");
+    expect(modelBtnText).toContain("40");
+    expect(modelBtnText).toContain("16.1 t/s");
+    expect(modelBtnText).not.toContain("14.3 t/s");
+    expect(modelBtnText).toContain("321 ms");
+    expect(modelBtnText).toContain("2.80 s");
+    expect(modelBtnText).not.toContain("输入 300");
+    expect(modelBtnText).not.toContain("思考链");
+    expect(modelBtnText).not.toContain("已读取 package.json，准备继续分析依赖。");
+    // Labels are in tooltip attributes
+    const entryTooltips = modelButton.element.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const entryTooltipTexts = Array.from(entryTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(entryTooltipTexts).toContain("输入");
+    expect(entryTooltipTexts).toContain("缓存读取");
+    expect(entryTooltipTexts).toContain("输出");
+    expect(entryTooltipTexts).toContain("首 token 延时");
+
+    await modelButton.trigger("click");
+    await nextTick();
+
+    const modelSection = modelButton.element.closest("section")!;
+    const modelSectionText = modelSection.textContent ?? "";
+    expect(modelSectionText).not.toContain("摘要");
+    expect(modelSectionText).toContain("OpenAI/gpt-5");
+    expect(modelSectionText).toContain("2.80 s");
+    expect(modelSectionText).toContain("16.1 t/s");
+    expect(modelSectionText).not.toContain("Provider");
+    expect(modelSectionText).not.toContain("输出详情");
+    expect(modelSectionText).not.toContain("对应一次独立的模型调用，不与其他 hop 合并。");
+    // Detail row labels are now tooltips on icon rows
+    const detailTooltips = modelSection.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const detailTooltipTexts = Array.from(detailTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(detailTooltipTexts).toContain("输入");
+    expect(detailTooltipTexts).toContain("缓存读取");
+    expect(detailTooltipTexts).toContain("输出");
+    expect(detailTooltipTexts).toContain("首 token 延时");
+    expect(detailTooltipTexts).toContain("耗时");
+    expect(detailTooltipTexts).toContain("模型");
+    expect(modelSectionText).toContain("思考链");
+    expect(modelSectionText).toContain("先看 package.json，再确定下一步。");
+    expect(modelSectionText).toContain("模型输出");
+    expect(modelSectionText).toContain("已读取 package.json，准备继续分析依赖。");
+    expect(wrapper.get('[data-testid="trace-detail-button-model-3-reasoning"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="trace-detail-button-model-3-assistant-output"]').exists()).toBe(true);
+  });
+
+  it("buffered CALL MODEL 不伪造首 token 延时，展示整体速度", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-buffered-model",
+          title: "buffered model detail",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              providerName: "deepseek",
+              providerModel: "deepseek-v4-flash",
+              inputTokens: 3200,
+              cacheHitInputTokens: 2800,
+              outputTokens: 90,
+              firstTokenLatencyMs: 1700,
+              turnDurationMs: 1800,
+              text: "buffered response"
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "initial_request",
+              providerSource: "provider_decision",
+              providerMode: "live",
+              inputTokens: 3200,
+              cacheHitInputTokens: 2800,
+              outputTokens: 90,
+              totalTokens: 3290,
+              firstTokenLatencyMs: null,
+              turnDurationMs: 1800,
+              latencyKind: "buffered_response",
+              prefixMutationReasons: []
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
+    const btnText = modelButton.text();
+    expect(btnText).toContain("50.0 t/s");
+    expect(btnText).not.toContain("生成速度");
+    expect(btnText).toContain("1.80 s");
+    // "整体速度" label is now in tooltip
+    const tooltips = modelButton.element.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const ttTexts = Array.from(tooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(ttTexts).toContain("整体速度");
+
+    await modelButton.trigger("click");
+    await nextTick();
+
+    const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(modelSectionText).toContain("50.0 t/s");
+    expect(modelSectionText).toContain("1.80 s");
+    // "整体速度" in detail row is also a tooltip now
+    const sectionTooltips = modelButton.element.closest("section")!.querySelectorAll<HTMLElement>(".tooltip-stub[data-tooltip]");
+    const sectionTtTexts = Array.from(sectionTooltips).map((el) => el.getAttribute("data-tooltip"));
+    expect(sectionTtTexts).toContain("整体速度");
+  });
+
+  it("CALL MODEL 遇到异常首 token 延时大于耗时时不展示延时且不爆速", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-invalid-model-latency",
+          title: "invalid model latency",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              providerName: "deepseek",
+              providerModel: "deepseek-v4-flash",
+              outputTokens: 89,
+              firstTokenLatencyMs: 4510,
+              turnDurationMs: 1910,
+              text: "tool call"
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "initial_request",
+              providerSource: "provider_decision_stream",
+              providerMode: "live",
+              inputTokens: 1424,
+              cacheHitInputTokens: 0,
+              outputTokens: 89,
+              totalTokens: 1513,
+              firstTokenLatencyMs: 4510,
+              turnDurationMs: 1910,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
+    expect(modelButton.text()).toContain("46.6 t/s");
+    expect(modelButton.text()).not.toContain("89000.0 t/s");
+    expect(modelButton.text()).not.toContain("4510 ms");
+    expect(modelButton.text()).toContain("1.91 s");
+  });
+
+  it("CALL MODEL 首 token 延时接近耗时时按真实生成耗时计算速度", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-near-terminal-latency",
+          title: "near terminal latency",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              providerName: "deepseek",
+              providerModel: "deepseek-v4-flash",
+              outputTokens: 72,
+              firstTokenLatencyMs: 1946,
+              turnDurationMs: 1964,
+              text: "final answer"
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "tool_followup",
+              providerSource: "provider_followup_stream",
+              providerMode: "live",
+              inputTokens: 2116,
+              cacheHitInputTokens: 0,
+              reasoningTokens: 73,
+              outputTokens: 72,
+              totalTokens: 2188,
+              firstTokenLatencyMs: 1946,
+              turnDurationMs: 1964,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-1"]');
+    expect(modelButton.text()).toContain("4000.0 t/s");
+    expect(modelButton.text()).not.toContain("36.7 t/s");
+    expect(modelButton.text()).not.toContain("3960.");
+    expect(modelButton.text()).toContain("1.96 s");
+  });
+
+  it("多次 CALL MODEL 时最后一跳不使用整轮 token 兜底，避免混用整轮输出和单跳耗时", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-final-hop-no-token-fallback",
+          title: "src/agent下是怎么组织的？",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              outputTokens: 930,
+              turnDurationMs: 17868
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #2",
+              state: "completed",
+              sequence: 2,
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              text: "final answer"
+            },
+            {
+              id: "return-3",
+              kind: "return_result",
+              label: "RETURN RESULT",
+              state: "completed",
+              sequence: 3,
+              text: "final answer",
+              reasoningTokens: 152,
+              outputTokens: 998,
+              totalTokens: 1132,
+              firstTokenLatencyMs: 799,
+              turnDurationMs: 19567
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "initial_request",
+              providerSource: "provider_decision_stream",
+              providerMode: "live",
+              outputTokens: 930,
+              totalTokens: 930,
+              firstTokenLatencyMs: 799,
+              turnDurationMs: 17868,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            },
+            {
+              requestKind: "tool_followup",
+              providerSource: "provider_followup_stream",
+              providerMode: "live",
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ],
+          outputTokens: 998,
+          reasoningTokens: 152,
+          firstTokenLatencyMs: 799,
+          turnDurationMs: 19567
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+    expect(modelButton.text()).not.toContain("998");
+    expect(modelButton.text()).not.toContain("3960.");
+    expect(modelButton.text()).not.toContain("587.4 t/s");
+    expect(modelButton.text()).toContain("1447 ms");
+    expect(modelButton.text()).toContain("1.70 s");
+  });
+
+  it("最后一跳有 per-call 输出时按首 token 后的生成耗时计算生成速度", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-final-hop-per-call-speed",
+          title: "final hop per-call speed",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "model-1",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 1,
+              outputTokens: 930,
+              turnDurationMs: 17868
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #2",
+              state: "completed",
+              sequence: 2,
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              text: "final answer"
+            }
+          ],
+          providerCallRecords: [
+            {
+              requestKind: "initial_request",
+              providerSource: "provider_decision_stream",
+              providerMode: "live",
+              outputTokens: 930,
+              totalTokens: 930,
+              firstTokenLatencyMs: 799,
+              turnDurationMs: 17868,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            },
+            {
+              requestKind: "tool_followup",
+              providerSource: "provider_followup_stream",
+              providerMode: "live",
+              reasoningTokens: 18,
+              outputTokens: 68,
+              totalTokens: 86,
+              firstTokenLatencyMs: 1447,
+              turnDurationMs: 1699,
+              latencyKind: "provider_stream",
+              prefixMutationReasons: []
+            }
+          ],
+          outputTokens: 998,
+          reasoningTokens: 152,
+          firstTokenLatencyMs: 799,
+          turnDurationMs: 19567
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+    expect(modelButton.text()).toContain("68");
+    expect(modelButton.text()).toContain("269.8 t/s");
+    expect(modelButton.text()).not.toContain("40.0 t/s");
+    expect(modelButton.text()).not.toContain("587.4 t/s");
+    expect(modelButton.text()).toContain("1447 ms");
+    expect(modelButton.text()).toContain("1.70 s");
+  });
+
+  it("CALL TOOL 的折叠摘要只显示耗时，不显示内容详情", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-tool",
+          title: "tool duration only",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "input-1",
+              kind: "input",
+              label: "RECEIVE INPUT",
+              state: "completed",
+              sequence: 1,
+              text: "读取 package.json"
+            },
+            {
+              id: "tool-4",
+              kind: "call_tool",
+              label: "CALL TOOL #1 · workspace.read_file",
+              state: "completed",
+              sequence: 4,
+              toolActivities: [
+                {
+                  id: "tool-1",
+                  name: "workspace.read_file",
+                  status: "done",
+                  summary: "Tool call finished with status: ok",
+                  argumentsText: "{\"path\":\"package.json\"}",
+                  resultText: "{\"name\":\"pony-agent\"}",
+                  durationSeconds: 1.2
+                }
+              ]
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const toolButton = wrapper.get('[data-testid="trace-step-button-tool-4"]');
+    expect(toolButton.text()).toContain("1.20 s");
+    expect(toolButton.text()).not.toContain("Tool call finished with status: ok");
+    expect(toolButton.text()).not.toContain("package.json");
+    expect(toolButton.text()).not.toContain("pony-agent");
+
+    await toolButton.trigger("click");
+    await nextTick();
+    const toolDetailButton = wrapper.get('[data-testid="trace-detail-button-tool-4-tool-1"]');
+    expect(toolDetailButton.text()).toContain("workspace.read_file");
+    expect(toolDetailButton.text()).toContain("1.20 s");
+    expect(toolDetailButton.text()).not.toContain("Tool call finished with status: ok");
+
+    await toolDetailButton.trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("参数:");
+    expect(wrapper.text()).toContain("\"path\":\"package.json\"");
+    expect(wrapper.text()).toContain("结果:");
+    expect(wrapper.text()).toContain("\"name\":\"pony-agent\"");
+    expect(wrapper.text()).not.toContain("摘要:");
+  });
+
+  it("多 hop 时前一个 CALL MODEL 只展示该 hop 自身输出，不回退最终 assistant 回答", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      messages: [
+        {
+          id: "user-turn-tool-hop",
+          turnId: "turn-tool-hop",
+          role: "user",
+          content: "当前文件夹中有哪些文件？",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: null,
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        },
+        {
+          id: "assistant-turn-tool-hop",
+          turnId: "turn-tool-hop",
+          role: "assistant",
+          content: "当前文件夹下有这些内容：\\n- src/\\n- tests/",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: "工具结果足够，可以整理成最终回答。",
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        }
+      ],
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-tool-hop",
+          title: "tool hop model detail",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "input-1",
+              kind: "input",
+              label: "RECEIVE INPUT",
+              state: "completed",
+              sequence: 1,
+              text: "当前文件夹中有哪些文件？"
+            },
+            {
+              id: "model-3",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 3,
+              providerName: "ppx",
+              providerModel: "gpt-5.4"
+            },
+            {
+              id: "tool-4",
+              kind: "call_tool",
+              label: "CALL TOOL #1 · workspace_list_files",
+              state: "completed",
+              sequence: 4,
+              toolActivities: [
+                {
+                  id: "tool-1",
+                  name: "workspace_list_files",
+                  status: "done",
+                  summary: "列出当前目录文件",
+                  argumentsText: "{\"path\":\".\"}",
+                  resultText: "{\"entries\":[\"src\",\"tests\"]}",
+                  durationSeconds: 0.1
+                }
+              ]
+            },
+            {
+              id: "model-5",
+              kind: "call_model",
+              label: "CALL MODEL #2",
+              state: "completed",
+              sequence: 5,
+              providerName: "ppx",
+              providerModel: "gpt-5.4",
+              text: "当前文件夹下有这些内容：\n- src/\n- tests/",
+              reasoningContent: "工具结果足够，可以整理成最终回答。"
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const firstModelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
+    expect(firstModelButton.text()).not.toContain("workspace_list_files");
+    await firstModelButton.trigger("click");
+    await nextTick();
+
+    const firstModelSectionText = firstModelButton.element.closest("section")?.textContent ?? "";
+    expect(firstModelSectionText).toContain("workspace_list_files");
+    expect(firstModelSectionText).toContain("参数:");
+    expect(firstModelSectionText).toContain("\"path\":\".\"");
+    expect(firstModelSectionText).not.toContain("模型输出");
+    expect(firstModelSectionText).not.toContain("思考链");
+    expect(firstModelSectionText).not.toContain("当前文件夹下有这些内容");
+    expect(wrapper.find('[data-testid="trace-detail-button-model-3-tool-output-tool-4-tool-1"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="trace-detail-button-model-3-assistant-output"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="trace-detail-button-model-3-reasoning"]').exists()).toBe(false);
+
+    const secondModelButton = wrapper.get('[data-testid="trace-step-button-model-5"]');
+    await secondModelButton.trigger("click");
+    await nextTick();
+
+    const secondModelSectionText = secondModelButton.element.closest("section")?.textContent ?? "";
+    expect(secondModelSectionText).toContain("模型输出");
+    expect(secondModelSectionText).toContain("思考链");
+    expect(secondModelSectionText).toContain("当前文件夹下有这些内容");
+    expect(secondModelSectionText).toContain("工具结果足够，可以整理成最终回答。");
+    expect(wrapper.get('[data-testid="trace-detail-button-model-5-assistant-output"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="trace-detail-button-model-5-reasoning"]').exists()).toBe(true);
+  });
+
+  it("CALL MODEL 后续存在工具输出时，折叠态不展示模型输出", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-model-output-before-tool",
+          title: "model output before tool",
+          phase: "completed",
+          traceTimeline: [
+            {
+              id: "input-1",
+              kind: "input",
+              label: "RECEIVE INPUT",
+              state: "completed",
+              sequence: 1,
+              text: "先给出计划，再读取 package.json"
+            },
+            {
+              id: "model-2",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "completed",
+              sequence: 2,
+              text: "我会先检查 package.json，然后根据依赖判断下一步。",
+              reasoningContent: "需要先看项目依赖。"
+            },
+            {
+              id: "tool-3",
+              kind: "call_tool",
+              label: "CALL TOOL #1 · workspace_read_file",
+              state: "completed",
+              sequence: 3,
+              toolActivities: [
+                {
+                  id: "tool-1",
+                  name: "workspace_read_file",
+                  status: "done",
+                  summary: "读取 package.json",
+                  argumentsText: "{\"path\":\"package.json\"}",
+                  resultText: "{\"name\":\"pony-agent\"}",
+                  durationSeconds: 0.2
+                }
+              ]
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-2"]');
+    expect(modelButton.text()).not.toContain("我会先检查 package.json，然后根据依赖判断下一步。");
+    expect(modelButton.text()).not.toContain("需要先看项目依赖。");
+    expect(modelButton.text()).not.toContain("workspace_read_file");
+    expect(modelButton.text()).not.toContain("{\"name\":\"pony-agent\"}");
+
+    await modelButton.trigger("click");
+    await nextTick();
+
+    const modelSectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(modelSectionText).toContain("模型输出");
+    expect(modelSectionText).toContain("我会先检查 package.json，然后根据依赖判断下一步。");
+    expect(modelSectionText).toContain("workspace_read_file");
+    expect(modelSectionText).toContain("{\"name\":\"pony-agent\"}");
+  });
+
+  it("assistant 仍在输出时，trace 中不提前展示活跃思考和模型输出", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      messages: [
+        {
+          id: "user-turn-pending",
+          turnId: "turn-pending",
+          role: "user",
+          content: "继续输出",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: null,
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        },
+        {
+          id: "assistant-turn-pending",
+          turnId: "turn-pending",
+          role: "assistant",
+          content: "正在逐步输出",
+          attachments: [],
+          status: "pending",
+          tokenCount: null,
+          reasoningContent: "正在思考",
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        }
+      ],
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-pending",
+          title: "pending turn",
+          phase: "running",
+          traceTimeline: [
+            { id: "input-1", kind: "input", label: "RECEIVE INPUT", state: "completed", sequence: 1, text: "继续输出" },
+            {
+              id: "return-4",
+              kind: "return",
+              label: "RETURN RESULT",
+              state: "active",
+              sequence: 4,
+              reasoningContent: "正在思考",
+              text: "正在逐步输出"
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    expect(wrapper.find('[data-testid="trace-step-button-return-4"]').exists()).toBe(false);
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-4"]');
+    expect(modelButton.text()).not.toContain("正在思考");
+
+    await modelButton.trigger("click");
+    await nextTick();
+
+    const callModelSectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(callModelSectionText).not.toContain("思考链");
+    expect(callModelSectionText).not.toContain("模型输出");
+    expect(wrapper.find('[data-testid="trace-detail-button-model-4-assistant-output"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="trace-detail-button-model-4-reasoning"]').exists()).toBe(false);
+  });
+
+  it("CALL MODEL 在活跃阶段即使带有增量文本和思考，也不在 trace 中提前展示", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-active-call-model",
+          title: "active call model",
+          phase: "calling_model",
+          traceTimeline: [
+            {
+              id: "model-3",
+              kind: "call_model",
+              label: "CALL MODEL #1",
+              state: "active",
+              sequence: 3,
+              text: "这是一段流式增量正文",
+              reasoningContent: "先组织回答结构。"
+            }
+          ]
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    const modelButton = wrapper.get('[data-testid="trace-step-button-model-3"]');
+    expect(modelButton.text()).not.toContain("这是一段流式增量正文");
+    expect(modelButton.text()).not.toContain("先组织回答结构。");
+
+    await modelButton.trigger("click");
+    await nextTick();
+
+    const sectionText = modelButton.element.closest("section")?.textContent ?? "";
+    expect(sectionText).not.toContain("思考链");
+    expect(sectionText).not.toContain("模型输出");
+    expect(sectionText).not.toContain("这是一段流式增量正文");
+    expect(wrapper.find('[data-testid="trace-detail-button-model-3-assistant-output"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="trace-detail-button-model-3-reasoning"]').exists()).toBe(false);
+  });
+
+  it("trace build_context 展开后展示请求详情，不冗余暴露到状态面板", async () => {
+    const buildContextObservation = createBuildContextObservation();
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionSummary: "legacy summary should be shadowed",
+      retrievedContext: createRetrievedContext(),
+      messages: [
+        {
+          id: "user-turn-build-context",
+          turnId: "turn-build-context",
+          role: "user",
+          content: "继续推进 PA-025",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: null,
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        },
+        {
+          id: "assistant-turn-build-context",
+          turnId: "turn-build-context",
+          role: "assistant",
+          content: "已完成本轮返回",
+          attachments: [],
+          status: "done",
+          tokenCount: null,
+          reasoningContent: null,
+          modelName: null,
+          toolName: null,
+          detail: null,
+          durationSeconds: null
+        }
+      ],
+      turnTraceHistory: [
+        createTraceRecord({
+          turnId: "turn-build-context",
+          title: "show build context",
+          phase: "completed",
+          providerRequestedName: "openai/gpt-5",
+          providerName: "OpenAI",
+          providerProtocol: "responses",
+          providerModel: "gpt-5",
+          providerSource: "registry",
+          providerMode: "streaming",
+          buildContextObservation
+        })
+      ]
+    });
+
+    const wrapper = await mountInspector();
+    await flushAll();
+
+    // PA-096 拆分注：原用例的"状态面板负断言"半边迁至 tests/HomeSidebar.spec.ts
+    // （TraceInspector 树内无状态面板，负断言在此 vacuous）。
+    const tracePanelText = wrapper.get('[data-testid="trace-panel-toggle"]').element.closest("section")?.textContent ?? "";
+
+    expect(wrapper.find('[data-testid="turn-build-context"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="trace-step-button-context-2"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="trace-step-button-context-2"]').trigger("click");
+    await nextTick();
+
+    const contextStepText = wrapper.get('[data-testid="trace-step-button-context-2"]').element.closest("section")?.textContent ?? "";
+    expect(contextStepText).toContain("response_format=json_schema");
+    expect(contextStepText).toContain("这里展示的是本轮真正发给模型的请求，不是 retrieval state 的替身。");
+    expect(contextStepText).toContain("稳定前缀");
+    expect(contextStepText).toContain("[0] system");
+    expect(contextStepText).toContain("[1] user");
+    expect(contextStepText).toContain("工具定义");
+
+    await wrapper.get('[data-testid="trace-detail-button-context-2-stable"]').trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("stable capability prefix");
+
+    await wrapper.get('[data-testid="trace-detail-button-context-2-semi"]').trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("retrieval summary from host");
+
+    await wrapper.get('[data-testid="trace-detail-button-context-2-volatile"]').trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("latest screenshot");
+
+    await wrapper.get('[data-testid="trace-detail-button-context-2-msg-0"]').trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("summarize retrieval state");
+
+    await wrapper.get('[data-testid="trace-detail-button-context-2-msg-1"]').trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("continue PA-025");
+
+    await wrapper.get('[data-testid="trace-detail-button-context-2-tools"]').trigger("click");
+    await nextTick();
+    expect(wrapper.text()).toContain("workspace.read_file(path: string)");
+
+    expect(tracePanelText).not.toContain("Current retrieval state");
+  });
+});

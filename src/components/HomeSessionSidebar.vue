@@ -19,6 +19,8 @@ import {
 import PonyBrandIcon from "@/components/PonyBrandIcon.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import { useRuntimeStore } from "@/stores/runtime";
+import { useSettingsStore } from "@/stores/settings";
+import type { SidebarNavigationPage } from "@/types/config";
 import type { ChatMessage, SessionOverview } from "@/types/runtime";
 import {
   groupSessionsByWorkspace,
@@ -28,15 +30,12 @@ import {
 import { isTauriAvailable } from "@/lib/tauri";
 
 const SESSION_SIDEBAR_STORAGE_KEY = "pony-agent.session-sidebar-collapsed.v1";
-const MODEL_OPEN_STORAGE_KEY = "pony-agent.session-sidebar-model-open.v1";
 /** 组内会话预览上限（"显示全部"前）；不做 per-group 分页，全局一键解除。 */
 const GROUP_SESSION_PREVIEW_LIMIT = 5;
 
-type NavigationPage = "home" | "providers" | "model-monitor" | "settings";
-
 const props = withDefaults(
   defineProps<{
-    currentPage?: NavigationPage;
+    currentPage?: SidebarNavigationPage | null;
     forceCollapsed?: boolean;
   }>(),
   {
@@ -46,10 +45,14 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  (event: "navigate", page: NavigationPage): void;
+  (event: "navigate", page: SidebarNavigationPage): void;
 }>();
 
 const runtimeStore = useRuntimeStore();
+const settingsStore = useSettingsStore();
+const { workspaceMode } = storeToRefs(settingsStore);
+// PA-096：遥测入口按工作模式分档——coding 显"遥测"（Trace+指标），work 显"指标"。
+const isCoding = computed(() => workspaceMode.value === "coding");
 const {
   isSubmitting,
   messages,
@@ -61,7 +64,6 @@ const {
 } = storeToRefs(runtimeStore);
 
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
-const modelOpen = ref(loadStoredBoolean(MODEL_OPEN_STORAGE_KEY, true));
 const conversationOpen = ref(true);
 const pendingDeleteSessionId = ref<string | null>(null);
 // PA-081：折叠的组 key 集合（localStorage 持久化；读取忽略未知 key）。
@@ -316,11 +318,6 @@ function toggleCollapsed() {
   persistStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, collapsed.value);
 }
 
-function toggleModelSection() {
-  modelOpen.value = !modelOpen.value;
-  persistStoredBoolean(MODEL_OPEN_STORAGE_KEY, modelOpen.value);
-}
-
 function toggleConversationSection() {
   conversationOpen.value = !conversationOpen.value;
 }
@@ -335,7 +332,7 @@ onMounted(() => {
   void runtimeStore.loadWorkspaces();
 });
 
-function navigate(page: NavigationPage) {
+function navigate(page: SidebarNavigationPage) {
   emit("navigate", page);
 }
 
@@ -515,31 +512,33 @@ function clearPendingDeleteSession(session: SessionOverview) {
         <button
           class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
           :class="
-            props.currentPage === 'providers'
+            props.currentPage === 'telemetry'
               ? 'bg-[#f7e3bf] text-stone-900'
               : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
           "
           type="button"
-          title="模型配置"
-          data-testid="session-sidebar-nav-providers-collapsed"
-          @click="navigate('providers')"
+          :title="isCoding ? '遥测' : '指标'"
+          :aria-label="isCoding ? '打开遥测页' : '打开指标监控'"
+          data-testid="session-sidebar-nav-telemetry-collapsed"
+          @click="navigate('telemetry')"
         >
-          <Settings2 class="h-4 w-4" />
+          <Activity class="h-4 w-4" />
         </button>
 
         <button
           class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
           :class="
-            props.currentPage === 'model-monitor'
+            props.currentPage === 'models'
               ? 'bg-[#f7e3bf] text-stone-900'
               : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
           "
           type="button"
-          title="模型监控"
-          data-testid="session-sidebar-nav-model-monitor-collapsed"
-          @click="navigate('model-monitor')"
+          title="模型配置"
+          aria-label="打开模型配置"
+          data-testid="session-sidebar-nav-providers-collapsed"
+          @click="navigate('models')"
         >
-          <Activity class="h-4 w-4" />
+          <Settings2 class="h-4 w-4" />
         </button>
 
         <button
@@ -559,8 +558,8 @@ function clearPendingDeleteSession(session: SessionOverview) {
       </div>
 
       <template v-else>
-        <!-- PA-081 调优：新对话 + 激活 Workspace 徽章同行——"在哪个项目下工作"
-             一目了然；徽章点击直达工作区管理，消除三层概念堆叠。 -->
+        <!-- PA-096：操作行只保留"新对话"；激活工作区名并入工作区 section 头部，
+             消除相邻双开关（UX 审核 P2-2）。 -->
         <div class="mt-4 flex items-center gap-1.5" data-testid="session-sidebar-actions">
           <button
             class="flex h-8 min-w-0 flex-1 items-center gap-2 px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
@@ -574,24 +573,117 @@ function clearPendingDeleteSession(session: SessionOverview) {
             <Plus class="h-3.5 w-3.5" />
             <span>新对话</span>
           </button>
-          <button
-            class="inline-flex h-8 max-w-[9rem] shrink-0 items-center gap-1 rounded-[0.35rem] px-2 text-[11px] font-medium transition"
-            :class="
-              workspaceSectionOpen
-                ? 'bg-[#f3c98d] text-stone-900'
-                : 'bg-[#fbf4e8] text-stone-600 hover:bg-[#f7e3bf] hover:text-stone-900'
-            "
-            type="button"
-            :title="`当前工作区：${activeWorkspaceName}（点击管理工作区）`"
-            data-testid="session-sidebar-active-workspace"
-            @click="toggleWorkspaceSection"
-          >
-            <Folder class="h-3 w-3 shrink-0" />
-            <span class="truncate">{{ activeWorkspaceName }}</span>
-          </button>
         </div>
 
         <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="pr-1.5"><div class="flex flex-col gap-2">
+          <!-- PA-096：工作区第一优先（需求 #3）——先于会话列表；激活工作区名并入头部。 -->
+          <section class="rounded-[0.5rem]" data-testid="session-sidebar-workspace-nav">
+            <button
+              class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
+              :class="[menuInteractiveClass, 'text-stone-800']"
+              type="button"
+              data-testid="session-sidebar-workspace-toggle"
+              @click="toggleWorkspaceSection"
+            >
+              <div class="flex min-w-0 items-center gap-2 text-[12px] font-medium text-stone-800">
+                <Folder class="h-3.5 w-3.5 shrink-0" />
+                <span class="shrink-0">工作区</span>
+                <span v-if="!isTauriRuntime" class="shrink-0 text-[10px] font-normal text-stone-400">浏览器模式不可用</span>
+              </div>
+              <span class="flex min-w-0 shrink-0 items-center gap-1">
+                <span
+                  class="max-w-[7.5rem] truncate text-[10px] text-stone-400"
+                  :title="`当前工作区：${activeWorkspaceName}`"
+                  data-testid="session-sidebar-active-workspace-name"
+                >{{ activeWorkspaceName }}</span>
+                <ChevronDown
+                  class="h-4 w-4 shrink-0 text-stone-400 transition"
+                  :class="{ 'rotate-180': workspaceSectionOpen }"
+                />
+              </span>
+            </button>
+
+            <div v-if="workspaceSectionOpen" class="space-y-1 py-0.5">
+              <div
+                v-for="workspace in workspaceList"
+                :key="workspace.id"
+                class="flex items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1"
+                :class="workspace.id === activeWorkspaceId ? 'bg-[#f7e3bf]/60' : ''"
+                :data-testid="`workspace-row-${workspace.id}`"
+              >
+                <span class="min-w-0 truncate text-[11px] leading-4 text-stone-700" :title="workspace.rootPath">
+                  {{ workspace.name || workspace.id }}
+                  <span v-if="workspace.id === activeWorkspaceId" class="ml-1 text-[10px] text-amber-600">激活</span>
+                </span>
+                <button
+                  v-if="workspace.id !== activeWorkspaceId"
+                  class="h-5 shrink-0 rounded-[0.35rem] px-1.5 text-[10px] text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                  type="button"
+                  :data-testid="`workspace-activate-${workspace.id}`"
+                  @click="activateWorkspaceById(workspace.id)"
+                >
+                  切换
+                </button>
+              </div>
+
+              <template v-if="isTauriRuntime">
+                <button
+                  v-if="!workspaceFormOpen"
+                  class="flex w-full items-center justify-start gap-1.5 px-1.5 py-1 text-left text-[11px] text-stone-500 transition hover:text-stone-900"
+                  type="button"
+                  data-testid="workspace-new-open-form"
+                  @click="workspaceFormOpen = true"
+                >
+                  <Plus class="h-3 w-3" />
+                  <span>新建工作区</span>
+                </button>
+                <div v-else class="space-y-1 rounded-[0.35rem] bg-[#fbf4e8]/70 p-1.5">
+                  <input
+                    v-model="newWorkspaceName"
+                    class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
+                    placeholder="名称"
+                    data-testid="workspace-new-name"
+                  />
+                  <input
+                    v-model="newWorkspaceRootPath"
+                    class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
+                    placeholder="根路径（如 D:\\projects\\demo）"
+                    data-testid="workspace-new-path"
+                  />
+                  <div class="flex items-center gap-1.5">
+                    <button
+                      class="h-6 rounded-[0.3rem] bg-[#f3c98d] px-2 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
+                      type="button"
+                      :disabled="workspaceCreating || !newWorkspaceName.trim() || !newWorkspaceRootPath.trim()"
+                      data-testid="workspace-new-submit"
+                      @click="submitNewWorkspace"
+                    >
+                      {{ workspaceCreating ? "创建中…" : "创建并激活" }}
+                    </button>
+                    <button
+                      class="h-6 rounded-[0.3rem] px-2 text-[11px] text-stone-500 transition hover:text-stone-900"
+                      type="button"
+                      @click="workspaceFormOpen = false"
+                    >
+                      取消
+                    </button>
+                  </div>
+                  <!-- PA-081（实施后审核 P2）：新建失败的可见反馈。 -->
+                  <p
+                    v-if="workspaceError"
+                    class="px-0.5 pt-1 text-[10px] leading-4 text-rose-600"
+                    data-testid="workspace-new-error"
+                  >
+                    {{ workspaceError }}
+                  </p>
+                </div>
+              </template>
+              <p v-else class="px-1.5 py-1 text-[10px] leading-4 text-stone-400">
+                浏览器预览模式仅提供默认工作区；启动桌面端后可管理项目。
+              </p>
+            </div>
+          </section>
+
           <section class="rounded-[0.5rem]" data-testid="session-sidebar-session-list">
             <button
               class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
@@ -759,162 +851,42 @@ function clearPendingDeleteSession(session: SessionOverview) {
             </div>
           </section>
 
-          <section class="rounded-[0.5rem]" data-testid="session-sidebar-workspace-nav">
-            <button
-              class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
-              :class="[menuInteractiveClass, 'text-stone-800']"
-              type="button"
-              data-testid="session-sidebar-workspace-toggle"
-              @click="toggleWorkspaceSection"
-            >
-              <div class="flex items-center gap-2 text-[12px] font-medium text-stone-800">
-                <Folder class="h-3.5 w-3.5" />
-                <span>工作区</span>
-                <span v-if="!isTauriRuntime" class="shrink-0 text-[10px] text-stone-400">浏览器模式不可用</span>
-              </div>
-              <ChevronDown
-                class="h-4 w-4 text-stone-400 transition"
-                :class="{ 'rotate-180': workspaceSectionOpen }"
-              />
-            </button>
-
-            <div v-if="workspaceSectionOpen" class="space-y-1 py-0.5">
-              <div
-                v-for="workspace in workspaceList"
-                :key="workspace.id"
-                class="flex items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1"
-                :class="workspace.id === activeWorkspaceId ? 'bg-[#f7e3bf]/60' : ''"
-                :data-testid="`workspace-row-${workspace.id}`"
-              >
-                <span class="min-w-0 truncate text-[11px] leading-4 text-stone-700" :title="workspace.rootPath">
-                  {{ workspace.name || workspace.id }}
-                  <span v-if="workspace.id === activeWorkspaceId" class="ml-1 text-[10px] text-amber-600">激活</span>
-                </span>
-                <button
-                  v-if="workspace.id !== activeWorkspaceId"
-                  class="h-5 shrink-0 rounded-[0.35rem] px-1.5 text-[10px] text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900"
-                  type="button"
-                  :data-testid="`workspace-activate-${workspace.id}`"
-                  @click="activateWorkspaceById(workspace.id)"
-                >
-                  切换
-                </button>
-              </div>
-
-              <template v-if="isTauriRuntime">
-                <button
-                  v-if="!workspaceFormOpen"
-                  class="flex w-full items-center justify-start gap-1.5 px-1.5 py-1 text-left text-[11px] text-stone-500 transition hover:text-stone-900"
-                  type="button"
-                  data-testid="workspace-new-open-form"
-                  @click="workspaceFormOpen = true"
-                >
-                  <Plus class="h-3 w-3" />
-                  <span>新建工作区</span>
-                </button>
-                <div v-else class="space-y-1 rounded-[0.35rem] bg-[#fbf4e8]/70 p-1.5">
-                  <input
-                    v-model="newWorkspaceName"
-                    class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
-                    placeholder="名称"
-                    data-testid="workspace-new-name"
-                  />
-                  <input
-                    v-model="newWorkspaceRootPath"
-                    class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
-                    placeholder="根路径（如 D:\\projects\\demo）"
-                    data-testid="workspace-new-path"
-                  />
-                  <div class="flex items-center gap-1.5">
-                    <button
-                      class="h-6 rounded-[0.3rem] bg-[#f3c98d] px-2 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
-                      type="button"
-                      :disabled="workspaceCreating || !newWorkspaceName.trim() || !newWorkspaceRootPath.trim()"
-                      data-testid="workspace-new-submit"
-                      @click="submitNewWorkspace"
-                    >
-                      {{ workspaceCreating ? "创建中…" : "创建并激活" }}
-                    </button>
-                    <button
-                      class="h-6 rounded-[0.3rem] px-2 text-[11px] text-stone-500 transition hover:text-stone-900"
-                      type="button"
-                      @click="workspaceFormOpen = false"
-                    >
-                      取消
-                    </button>
-                  </div>
-                  <!-- PA-081（实施后审核 P2）：新建失败的可见反馈。 -->
-                  <p
-                    v-if="workspaceError"
-                    class="px-0.5 pt-1 text-[10px] leading-4 text-rose-600"
-                    data-testid="workspace-new-error"
-                  >
-                    {{ workspaceError }}
-                  </p>
-                </div>
-              </template>
-              <p v-else class="px-1.5 py-1 text-[10px] leading-4 text-stone-400">
-                浏览器预览模式仅提供默认工作区；启动桌面端后可管理项目。
-              </p>
-            </div>
-          </section>
-
-          <section class="rounded-[0.5rem]" data-testid="session-sidebar-model-nav">
-            <button
-              class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
-              :class="[
-                menuInteractiveClass,
-                props.currentPage === 'providers' || props.currentPage === 'model-monitor'
-                  ? menuSelectedClass
-                  : 'text-stone-800'
-              ]"
-              type="button"
-              data-testid="session-sidebar-model-toggle"
-              @click="toggleModelSection"
-            >
-              <div class="flex items-center gap-2 text-[12px] font-medium text-stone-800">
-                <Server class="h-3.5 w-3.5" />
-                <span>模型管理</span>
-              </div>
-              <ChevronDown class="h-4 w-4 text-stone-400 transition" :class="{ 'rotate-180': modelOpen }" />
-            </button>
-
-            <div v-if="modelOpen" class="space-y-0.5 py-1 pl-1">
-              <button
-                class="flex w-full items-center justify-start gap-1.5 px-1.5 py-1 text-left"
-                :class="
-                  props.currentPage === 'providers'
-                    ? menuSelectedClass
-                    : `${menuInteractiveClass} text-stone-500`
-                "
-                type="button"
-                data-testid="session-sidebar-nav-providers"
-                @click="navigate('providers')"
-              >
-                <Settings2 class="h-3 w-3" />
-                <span class="text-[12px] leading-4">模型配置</span>
-              </button>
-
-              <button
-                class="flex w-full items-center justify-start gap-1.5 px-1.5 py-1 text-left"
-                :class="
-                  props.currentPage === 'model-monitor'
-                    ? menuSelectedClass
-                    : `${menuInteractiveClass} text-stone-500`
-                "
-                type="button"
-                data-testid="session-sidebar-nav-model-monitor"
-                @click="navigate('model-monitor')"
-                >
-                <Activity class="h-3 w-3" />
-                <span class="text-[12px] leading-4">模型监控</span>
-              </button>
-
-            </div>
-          </section>
         </div></ScrollArea>
 
-          <div class="mt-auto pt-2">
+          <!-- PA-096：底部一级导航——遥测/指标、模型配置（一级菜单，需求 #3）、设置。 -->
+          <div class="mt-auto space-y-0.5 pt-2">
+            <button
+              class="flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
+              :class="
+                props.currentPage === 'telemetry'
+                  ? menuSelectedClass
+                  : `${menuInteractiveClass} text-stone-800`
+              "
+              type="button"
+              :title="isCoding ? 'Trace 与指标遥测读面' : '模型指标监控'"
+              data-testid="session-sidebar-nav-telemetry"
+              @click="navigate('telemetry')"
+            >
+              <Activity class="h-3.5 w-3.5" />
+              <span class="text-[12px] font-bold leading-4">{{ isCoding ? "遥测" : "指标" }}</span>
+            </button>
+
+            <button
+              class="flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
+              :class="
+                props.currentPage === 'models'
+                  ? menuSelectedClass
+                  : `${menuInteractiveClass} text-stone-800`
+              "
+              type="button"
+              title="提供商接入与模型挂载"
+              data-testid="session-sidebar-nav-providers"
+              @click="navigate('models')"
+            >
+              <Server class="h-3.5 w-3.5" />
+              <span class="text-[12px] font-bold leading-4">模型配置</span>
+            </button>
+
             <button
               class="flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
               :class="
