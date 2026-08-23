@@ -1,6 +1,6 @@
 # 0004 前端工作台先采用原生 TypeScript + Vite 壳层
 
-Status: superseded — 由 [ADR 0003](../0003-frontend-stack-vue-pinia-no-router.md) 接替（前端改用 Vue 3 + Pinia）
+Status: superseded by [0003](../0003-frontend-stack-vue-pinia-no-router.md)（前端改用 Vue 3 + Pinia）
 
 ## 背景
 

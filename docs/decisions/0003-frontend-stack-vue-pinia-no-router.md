@@ -42,3 +42,4 @@ Status: implemented
 - 前端将切换到 Vue 应用结构
 - 状态管理将以 Pinia 为中心
 - 如果后续出现多页面场景，再追加 router 相关 ADR
+- 本决策接替 [0004 原生 TypeScript + Vite 壳层方向](superseded/0004-frontend-shell-workbench-direction.md)

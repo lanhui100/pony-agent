@@ -85,7 +85,7 @@ Pony Agent 是一个基于 `Tauri + Rust + Vue + TypeScript` 重构的桌面智�
 
 - 项目事实写入 `AGENT.md`
 - 长文档进入 `docs/`
-- 重大架构决策要记录“为什么”
+- 非平凡变更须按六条触发判据在同一提交内配套 ADR（判据与规范见 `docs/decisions/README.md`；编写流程使用 `write-adr` skill）
 - 复杂开发任务默认先建立 OpenSpec 变更，再进入实现
 - 任务计划、进度、续作和归档不写入 `AGENT.md`
 - 学习问题、系统化梳理和内容素材沉淀写入 `docs/learning/`
