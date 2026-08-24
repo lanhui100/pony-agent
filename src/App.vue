@@ -240,19 +240,19 @@ watch(rightSidebarPreferredOpen, (value) => {
               <Tooltip text="观测" side="bottom">
                 <button
                   type="button"
-                  class="absolute top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
-                  :class="forceCloseRightSidebar ? 'right-3' : 'right-[3.25rem]'"
+                  class="absolute top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                  :class="forceCloseRightSidebar ? 'right-3' : 'right-11'"
                   aria-label="观测"
                   data-testid="workspace-observation-toggle"
                   @click="currentPage = 'telemetry'"
                 >
-                  <Activity class="h-4 w-4" />
+                  <Activity class="h-3 w-3" />
                 </button>
               </Tooltip>
               <button
                   v-if="!forceCloseRightSidebar"
                   type="button"
-                  class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
+                  class="absolute right-3 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"
                   :aria-label="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
                   :title="rightSidebarOpen ? '隐藏右侧边栏' : '显示右侧边栏'"
                   :data-open="rightSidebarOpen ? 'true' : 'false'"

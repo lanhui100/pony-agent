@@ -241,7 +241,7 @@ describe("App", () => {
 
     // 与折叠按钮同规格：尺寸/底色/圆角/hover 完全一致（ADR 0013 迭代）
     const toggle = wrapper.get('[data-testid="workspace-right-sidebar-toggle"]');
-    const sharedClasses = ["h-8", "w-8", "rounded-[0.5rem]", "bg-[#fbf4e8]", "hover:bg-[#f7e3bf]"];
+    const sharedClasses = ["h-6", "w-6", "rounded-[0.5rem]", "bg-[#fbf4e8]", "hover:bg-[#f7e3bf]"];
     for (const cls of sharedClasses) {
       expect(observation.classes()).toContain(cls);
       expect(toggle.classes()).toContain(cls);
@@ -320,7 +320,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="home-right-sidebar-shell"]').attributes("data-open")).toBe("true");
     expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-force-collapsed")).toBe("false");
     // 常规宽度：观测入口与折叠按钮并排（折叠按钮右侧，观测在其左）
-    expect(wrapper.get('[data-testid="workspace-observation-toggle"]').classes()).toContain("right-[3.25rem]");
+    expect(wrapper.get('[data-testid="workspace-observation-toggle"]').classes()).toContain("right-11");
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 960 });
     window.dispatchEvent(new Event("resize"));
