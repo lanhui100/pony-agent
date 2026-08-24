@@ -50,6 +50,7 @@
 - [0007 将缓存命中提升为一等产品指标，按阶段落地](0007-cache-hit-as-first-class-product-metric.md)
 - [0008 会话数据架构向事件溯源演进（分阶段落地）](0008-event-sourcing-evolution.md)
 - [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](0009-workbench-ia-telemetry-page-and-config-tabs.md)
+- [0010 CI rust-cache 对齐 target 槽位与最小令牌权限](0010-ci-rust-cache-slot-alignment-and-minimal-token.md)
 
 ### 已接替
 

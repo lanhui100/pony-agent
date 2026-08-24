@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# 最小令牌：CI 只读代码，不发布产物
+permissions:
+  contents: read
+
 jobs:
   verify:
     runs-on: windows-latest
@@ -18,7 +22,11 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      # 缓存必须对齐 AGENT.md 的 target 槽位约定：cargo 操作走
+      # cargo:check:shared → --target-dir target-check，而非默认 ./target
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target-check
 
       # L3 穷举层的第一块基石：以下检查不可被 --no-verify 绕过
       - name: 决策记录校验（L1 同款 + 穷举）
