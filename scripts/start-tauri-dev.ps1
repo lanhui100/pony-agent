@@ -22,7 +22,10 @@ if (Test-Path $pidFile) {
 }
 
 $launcherPids = @()
-$processRows = Get-CimInstance Win32_Process | Where-Object {
+# 残留进程扫描在受限环境（服务会话/沙箱，WMI root\cimv2 拒绝访问）下降级为
+# 跳过清理并继续启动——清理失败不应阻断 dev 启动；端口占用由下方端口清理兜底。
+try {
+  $processRows = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
   if ($_.ProcessId -eq $PID) {
     return $false
   }
@@ -50,6 +53,9 @@ $processRows = Get-CimInstance Win32_Process | Where-Object {
     $cmdLower.Contains("cargo.exe run") -or
     $cmdLower.Contains("pony-agent.exe")
   )
+}
+} catch {
+  Write-Warning "process scan skipped (Get-CimInstance unavailable in this context): $($_.Exception.Message)"
 }
 
 foreach ($process in $processRows) {

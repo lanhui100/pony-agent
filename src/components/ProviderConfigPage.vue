@@ -20,6 +20,7 @@ import Button from "@/components/ui/Button.vue";
 import ConfirmPopover from "@/components/ui/ConfirmPopover.vue";
 import Input from "@/components/ui/Input.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
+import Tooltip from "@/components/ui/Tooltip.vue";
 import {
   buildProviderModelConfig,
   createDefaultCapabilities,
@@ -86,7 +87,14 @@ const providerStore = useProviderStore();
 const { currentProvider, error, loading, notice, providers, saving } =
   storeToRefs(providerStore);
 
-const openProviderId = ref<string | null>(null);
+// ADR 0013：右侧双一级折叠区状态（组件内受控，不持久化——配置页 tab 切走即随
+// ConfigPage 的 v-if 卸载整体重置）。expandedModelId 为当前展开"模型配置详情"
+// 的模型行；modelCreateOpen 为列表顶部的新增模型表单卡。
+// 迭代三：两一级区改为手风琴——同时至多展开一个，默认展开提供商详情。
+const providerSectionOpen = ref(true);
+const modelSectionOpen = ref(false);
+const expandedModelId = ref<string | null>(null);
+const modelCreateOpen = ref(false);
 const hasInitializedEditor = ref(false);
 const modelSaveSucceeded = ref(false);
 let modelSaveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
@@ -187,6 +195,31 @@ const outputCapabilityOptions = [
 
 const endpointOrder: ProviderProtocol[] = ["openai", "anthropic"];
 
+// 行尾/头部弱化图标动作钮（ADR 0013 迭代二）：小尺寸、低对比，仅 hover 增强。
+const ICON_ACTION_CLASS =
+  "inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[0.35rem] bg-transparent text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 disabled:cursor-not-allowed disabled:text-stone-300 motion-reduce:transition-none";
+
+// ADR 0013 迭代：模型参数以 K/M 常用单位呈现（去"tokens"字样），并提供
+// 徽标式常规项一键填入（十进制口径：256K=256000，与既有默认值一致）。
+const CONTEXT_TOKEN_PRESETS = [32000, 64000, 128000, 256000, 512000, 1000000];
+const MAX_OUTPUT_TOKEN_PRESETS = [4000, 8000, 16000, 32000, 64000, 128000];
+
+function formatTokenUnit(value: number | null | undefined, fallback: string): string {
+  const tokens = value && value > 0 ? value : null;
+  if (!tokens) {
+    return fallback;
+  }
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return Number.isInteger(millions) ? `${millions}M` : `${millions.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) {
+    const thousands = tokens / 1_000;
+    return Number.isInteger(thousands) ? `${thousands}K` : `${thousands.toFixed(1)}K`;
+  }
+  return String(tokens);
+}
+
 const isProviderEntity = computed(() => editorState.entity === "provider");
 const isModelEntity = computed(() => editorState.entity === "model");
 const isCreateMode = computed(() => editorState.mode === "create");
@@ -228,16 +261,19 @@ const canDeleteProvider = computed(
     providers.value.length > 1 &&
     Boolean(detailProvider.value),
 );
-const canDeleteModel = computed(
-  () =>
-    isModelEntity.value &&
-    !isCreateMode.value &&
-    Boolean(detailProvider.value && detailModel.value),
+// ADR 0013 迭代二：模型行尾"编辑/删除"与列表头"新增模型"同源门控——当前提供商
+// 存在且无任何表单编辑/创建进行中（空闲态）即可用；编辑期间由行级禁用兜底。
+const modelActionsIdle = computed(
+  () => Boolean(detailProvider.value) && !isEditing.value && !modelCreateOpen.value,
 );
-const canCreateModel = computed(
-  () => isProviderEntity.value && !isEditing.value && Boolean(detailProvider.value),
+// 提供商详情 section 的"编辑"：仅 provider 视图态可发起。
+const canEditProvider = computed(
+  () => isProviderEntity.value && isViewMode.value && Boolean(detailProvider.value),
 );
-const canEditCurrent = computed(() => isViewMode.value && Boolean(detailProvider.value));
+const isEditingProvider = computed(() => isProviderEntity.value && isEditing.value);
+const isEditingModel = computed(() => isModelEntity.value && isEditing.value);
+const providerSectionLocked = computed(() => isEditingProvider.value);
+const modelSectionLocked = computed(() => isEditingModel.value || modelCreateOpen.value);
 const canSaveProvider = computed(
   () =>
     isProviderEntity.value &&
@@ -257,29 +293,18 @@ const canSaveModel = computed(
     Boolean(modelForm.name.trim() && modelForm.model.trim()),
 );
 
-const editorTitle = computed(() => {
-  if (isProviderEntity.value) {
-    if (isCreateMode.value) {
-      return "新增提供商";
-    }
-
-    return isEditing.value ? "编辑提供商" : "提供商详情";
+// ADR 0013：页头只承载"当前提供商"上下文；实体读写面标题由两个一级折叠区自持
+// （提供商详情 / 模型列表），消除旧 editorTitle 与 section 标题的同名重复。
+const headerTitle = computed(() => {
+  if (isProviderEntity.value && isCreateMode.value) {
+    return "新增提供商";
   }
 
-  if (isCreateMode.value) {
-    return "新增模型";
-  }
-
-  return isEditing.value ? "编辑模型" : "模型详情";
+  return detailProvider.value?.name?.trim() || "未命名提供商";
 });
 
-const editorDescription = computed(() => {
-  if (isProviderEntity.value) {
-    return "一个提供商可以同时接入多种协议，每种协议单独维护自己的 Base URL 与认证方式。";
-  }
-
-  return "模型只保留核心能力定义与常用参数，避免能力预设和低频参数干扰。";
-});
+const headerDescription =
+  "一个提供商可以同时接入多种协议，每种协议单独维护自己的 Base URL 与认证方式。";
 
 function createEndpointRecord(
   endpoints?: ProviderProtocolEndpoint[],
@@ -425,8 +450,40 @@ function fillModelForm(model: ProviderModelConfig) {
   modelForm.supportsAudioOutput = capabilities.supportsAudioOutput;
 }
 
-function toggleProvider(providerId: string) {
-  openProviderId.value = openProviderId.value === providerId ? null : providerId;
+// ADR 0013 迭代三：两一级区手风琴互斥——展开其一收起另一；表单编辑中锁定所在区
+// 折叠，避免"保存/取消指向不可见表单"的死状态。整行点击触发，动作区 @click.stop。
+function toggleProviderSection() {
+  if (providerSectionLocked.value) {
+    return;
+  }
+  providerSectionOpen.value = !providerSectionOpen.value;
+  if (providerSectionOpen.value) {
+    modelSectionOpen.value = false;
+  }
+}
+
+function toggleModelSection() {
+  if (modelSectionLocked.value) {
+    return;
+  }
+  modelSectionOpen.value = !modelSectionOpen.value;
+  if (modelSectionOpen.value) {
+    providerSectionOpen.value = false;
+  }
+}
+
+// ADR 0013：模型行点击语义——再次点击已展开行收起并回落提供商视图；否则展开
+// 显示"模型配置详情"。任一编辑态下整行点击被守卫拦截（行尾动作已随 v-if 移除），
+// 静默丢弃未保存输入的路径在列表内被阻断。
+function toggleModelRow(providerId: string, modelId: string) {
+  if (isEditingProvider.value || modelSectionLocked.value) {
+    return;
+  }
+  if (expandedModelId.value === modelId) {
+    beginViewProvider(providerId);
+    return;
+  }
+  beginViewModel(providerId, modelId);
 }
 
 function beginViewProvider(providerId: string) {
@@ -437,7 +494,8 @@ function beginViewProvider(providerId: string) {
 
   resetModelActionStates();
   providerStore.selectProvider(providerId);
-  openProviderId.value = providerId;
+  expandedModelId.value = null;
+  modelCreateOpen.value = false;
   editorState.entity = "provider";
   editorState.mode = "view";
   editorState.providerId = providerId;
@@ -453,7 +511,8 @@ function beginViewModel(providerId: string, modelId: string) {
 
   resetModelActionStates();
   providerStore.selectModel(providerId, modelId);
-  openProviderId.value = providerId;
+  expandedModelId.value = modelId;
+  modelCreateOpen.value = false;
   editorState.entity = "model";
   editorState.mode = "view";
   editorState.providerId = providerId;
@@ -463,6 +522,12 @@ function beginViewModel(providerId: string, modelId: string) {
 function beginCreateProvider() {
   resetModelActionStates();
   resetProviderForm();
+  // P1 修复（review A）：折叠态进入创建/编辑时自动展开，杜绝"表单不可见+折叠锁死"。
+  // 迭代三：手风琴互斥——提供商区展开时收起模型列表区。
+  providerSectionOpen.value = true;
+  modelSectionOpen.value = false;
+  expandedModelId.value = null;
+  modelCreateOpen.value = false;
   editorState.entity = "provider";
   editorState.mode = "create";
   editorState.providerId = null;
@@ -477,8 +542,11 @@ function beginEditProvider(providerId: string) {
 
   resetModelActionStates();
   providerStore.selectProvider(providerId);
-  openProviderId.value = providerId;
   fillProviderForm(provider);
+  providerSectionOpen.value = true;
+  modelSectionOpen.value = false;
+  expandedModelId.value = null;
+  modelCreateOpen.value = false;
   editorState.entity = "provider";
   editorState.mode = "edit";
   editorState.providerId = providerId;
@@ -493,8 +561,11 @@ function beginCreateModel(providerId: string) {
 
   resetModelActionStates();
   providerStore.selectProvider(providerId);
-  openProviderId.value = providerId;
   resetModelForm();
+  modelSectionOpen.value = true;
+  providerSectionOpen.value = false;
+  modelCreateOpen.value = true;
+  expandedModelId.value = null;
   editorState.entity = "model";
   editorState.mode = "create";
   editorState.providerId = providerId;
@@ -510,27 +581,15 @@ function beginEditModel(providerId: string, modelId: string) {
 
   resetModelActionStates();
   providerStore.selectModel(providerId, modelId);
-  openProviderId.value = providerId;
   fillModelForm(model);
+  modelSectionOpen.value = true;
+  providerSectionOpen.value = false;
+  modelCreateOpen.value = false;
+  expandedModelId.value = modelId;
   editorState.entity = "model";
   editorState.mode = "edit";
   editorState.providerId = providerId;
   editorState.modelId = modelId;
-}
-
-function beginEditCurrent() {
-  if (!detailProvider.value) {
-    return;
-  }
-
-  if (isProviderEntity.value) {
-    beginEditProvider(detailProvider.value.id);
-    return;
-  }
-
-  if (detailModel.value) {
-    beginEditModel(detailProvider.value.id, detailModel.value.id);
-  }
 }
 
 function cancelEditing() {
@@ -683,13 +742,15 @@ async function saveModelForm() {
   }
 }
 
-async function removeCurrentModel() {
-  if (!editorState.providerId || !detailModel.value) {
+// ADR 0013 迭代二：删除动作移至模型行尾，可对任意行直接触发（编辑锁期间行整体禁用）。
+async function removeModelById(providerId: string | null, modelId: string) {
+  const targetProviderId = providerId ?? editorState.providerId;
+  if (!targetProviderId || !findModel(targetProviderId, modelId)) {
     return;
   }
 
-  const providerId = editorState.providerId;
-  providerStore.removeModel(providerId, detailModel.value.id);
+  const wasActiveModel = isModelEntity.value && editorState.modelId === modelId;
+  providerStore.removeModel(targetProviderId, modelId);
   await providerStore.saveRegistry();
 
   if (providerStore.error) {
@@ -697,7 +758,9 @@ async function removeCurrentModel() {
   }
 
   providerStore.notice = "模型已删除。";
-  beginViewProvider(providerId);
+  if (wasActiveModel || expandedModelId.value === modelId) {
+    beginViewProvider(targetProviderId);
+  }
 }
 
 function authTypeLabel(value: ProviderAuthType) {
@@ -723,10 +786,6 @@ function protocolLabel(protocol: ProviderProtocol) {
   return protocol === "openai" ? "OpenAI 协议" : "Anthropic 协议";
 }
 
-function numberLabel(value: number | null | undefined, fallback: string) {
-  return value && value > 0 ? `${value.toLocaleString()} tokens` : fallback;
-}
-
 function toggleCapability(key: ModelCapabilityToggleKey) {
   modelForm[key] = !modelForm[key];
 }
@@ -741,7 +800,6 @@ watch(
     hasInitializedEditor.value = true;
     const initialProvider = currentProvider.value ?? providerList[0] ?? null;
     if (initialProvider) {
-      openProviderId.value = initialProvider.id;
       beginViewProvider(initialProvider.id);
       return;
     }
@@ -766,100 +824,45 @@ onBeforeUnmount(() => {
           <div class="text-sm font-semibold text-stone-900">提供商</div>
           <div class="text-[11px] text-stone-500">管理协议接入与模型挂载</div>
         </div>
-        <Button size="sm" variant="ghost" class="shrink-0" @click="beginCreateProvider()">
+        <Button size="sm" variant="ghost" class="shrink-0" data-testid="provider-create-open" @click="beginCreateProvider()">
           <Plus class="mr-1 h-3.5 w-3.5" />
           新增提供商
         </Button>
       </div>
 
+      <!-- ADR 0013：左列为纯选择列表（不可折叠）——点击即选中，右侧双折叠区跟随切换。 -->
       <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="h-full w-full pr-1">
         <div class="space-y-1.5">
-          <section
+          <button
             v-for="provider in providers"
             :key="provider.id"
-            class="overflow-hidden rounded-[0.45rem] bg-white/30"
+            type="button"
+            class="flex w-full items-center justify-between gap-2 rounded-[0.35rem] px-2.5 py-2 text-left transition hover:bg-white/74 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+            :class="
+              !isCreateMode && detailProvider?.id === provider.id
+                ? 'bg-white/78 ring-1 ring-stone-200/70'
+                : 'bg-white/30'
+            "
+            :data-testid="`provider-list-item-${provider.id}`"
+            @click="beginViewProvider(provider.id)"
           >
-            <button
-              type="button"
-              class="flex w-full items-start justify-between gap-2.5 rounded-[0.35rem] px-2.5 py-2 text-left transition hover:bg-white/74"
-              @click="
-                if (openProviderId !== provider.id) {
-                  openProviderId = provider.id;
-                } else {
-                  toggleProvider(provider.id);
-                }
-                beginViewProvider(provider.id);
-              "
-            >
-              <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                  <ChevronDown
-                    class="h-4 w-4 shrink-0 text-stone-400 transition-transform duration-200"
-                    :class="openProviderId === provider.id ? 'rotate-180' : ''"
-                  />
-                  <span class="truncate text-sm font-medium text-stone-950">
-                    {{ provider.name || "未命名提供商" }}
-                  </span>
-                </div>
-                <div class="mt-0.5 flex flex-wrap items-center gap-1 pl-6">
-                  <span
-                    v-for="protocol in provider.supportedProtocols"
-                    :key="protocol"
-                    class="rounded-[0.2rem] bg-white/40 px-1.5 py-[1px] text-[9px] leading-[1.4] text-stone-400/80"
-                  >
-                    {{ protocol === "openai" ? "OpenAI" : "Anthropic" }}
-                  </span>
-                  <span class="inline-flex items-center justify-center rounded-full bg-stone-200/60 px-1.5 text-[9px] font-medium leading-[1.4] text-stone-400">
-                    {{ provider.models.length }}
-                  </span>
-                </div>
-              </div>
-            </button>
-
-            <div v-if="openProviderId === provider.id" class="px-1.5 pb-1.5">
-              <button
-                type="button"
-                class="flex w-full rounded-[0.35rem] px-2 py-1.5 text-left transition hover:bg-white/74"
-                :class="
-                  editorState.entity === 'provider' && editorState.providerId === provider.id
-                    ? 'bg-white/78 text-stone-950'
-                    : 'bg-transparent'
-                "
-                @click="beginViewProvider(provider.id)"
+            <span class="min-w-0 truncate text-sm font-medium text-stone-950">
+              {{ provider.name || "未命名提供商" }}
+            </span>
+            <!-- 迭代四：协议与模型数徽标同行尾部显示，不再换行堆叠 -->
+            <span class="flex shrink-0 items-center gap-1">
+              <span
+                v-for="protocol in provider.supportedProtocols"
+                :key="protocol"
+                class="rounded-[0.2rem] bg-white/40 px-1.5 py-[1px] text-[9px] leading-[1.4] text-stone-400/80"
               >
-                <div class="min-w-0">
-                  <div class="text-[12px] font-medium text-stone-800">提供商详情</div>
-                  <div class="mt-0.5 truncate text-[11px] text-stone-500">
-                    {{ provider.supportedProtocols.length }} 个协议入口
-                  </div>
-                </div>
-              </button>
-
-              <div class="mt-0.5 space-y-0.5">
-                <button
-                  v-for="model in provider.models"
-                  :key="model.id"
-                  type="button"
-                  class="flex w-full items-start rounded-[0.35rem] px-2 py-1.5 text-left transition hover:bg-white/74"
-                  :class="
-                    editorState.entity === 'model' && editorState.modelId === model.id
-                      ? 'bg-white/78 text-stone-950'
-                      : 'bg-transparent'
-                  "
-                  @click="beginViewModel(provider.id, model.id)"
-                >
-                  <div class="min-w-0">
-                    <div class="truncate text-[12px] font-medium text-stone-800">
-                      {{ model.name || "未命名模型" }}
-                    </div>
-                    <div class="mt-0.5 truncate text-[11px] text-stone-500">
-                      {{ model.protocol || provider.protocol }} · {{ model.model || "未填写模型 ID" }}
-                    </div>
-                  </div>
-                </button>
-              </div>
-            </div>
-          </section>
+                {{ protocol === "openai" ? "OpenAI" : "Anthropic" }}
+              </span>
+              <span class="inline-flex items-center justify-center rounded-full bg-stone-200/60 px-1.5 text-[9px] font-medium leading-[1.4] text-stone-400">
+                {{ provider.models.length }}
+              </span>
+            </span>
+          </button>
         </div>
       </ScrollArea>
     </aside>
@@ -870,71 +873,104 @@ onBeforeUnmount(() => {
       </div>
 
       <template v-else>
-        <div class="flex flex-wrap items-start justify-between gap-2.5 pb-3">
-          <div>
-            <h2 class="text-lg font-semibold tracking-[-0.02em] text-stone-950">{{ editorTitle }}</h2>
-            <p class="mt-1 text-[12px] leading-5 text-stone-500">{{ editorDescription }}</p>
-          </div>
-
-          <div class="flex flex-wrap gap-1.5">
-            <Button v-if="canCreateModel && detailProvider" size="sm" variant="ghost" @click="beginCreateModel(detailProvider.id)">
-              <Plus class="mr-1 h-4 w-4" />
-              新增模型
-            </Button>
-            <Button v-if="canEditCurrent" size="sm" variant="ghost" @click="beginEditCurrent()">
-              <Pencil class="mr-1 h-4 w-4" />
-              编辑
-            </Button>
-            <Button v-if="isEditing" size="sm" variant="ghost" @click="cancelEditing()">取消</Button>
-            <ConfirmPopover
-              v-if="canDeleteProvider"
-              :title="`删除提供商「${detailProvider?.name || detailProvider?.id || '当前提供商'}」？`"
-              description="此操作不可撤销。"
-              side="bottom"
-              align="end"
-              @confirm="removeCurrentProvider()"
-            >
-              <Button size="sm" variant="ghost">
-                <Trash2 class="mr-1 h-4 w-4" />
-                删除
-              </Button>
-            </ConfirmPopover>
-            <ConfirmPopover
-              v-if="canDeleteModel"
-              :title="`删除模型「${detailModel?.name || detailModel?.model || '当前模型'}」？`"
-              description="此操作不可撤销。"
-              side="bottom"
-              align="end"
-              @confirm="removeCurrentModel()"
-            >
-              <Button size="sm" variant="ghost">
-                <Trash2 class="mr-1 h-4 w-4" />
-                删除
-              </Button>
-            </ConfirmPopover>
-            <Button v-if="canSaveProvider" size="sm" variant="secondary" @click="saveProviderForm()">
-              <Save class="mr-1 h-4 w-4" />
-              {{ saving ? "保存中..." : "保存" }}
-            </Button>
-            <Button v-if="canSaveModel" size="sm" variant="secondary" @click="saveModelForm()">
-              <Check v-if="modelSaveSucceeded && !saving" class="mr-1 h-4 w-4" />
-              <Save v-else class="mr-1 h-4 w-4" />
-              {{ saving ? "保存中..." : modelSaveSucceeded ? "已保存" : "保存" }}
-            </Button>
-          </div>
+        <div class="pb-2">
+          <h2 class="text-lg font-semibold tracking-[-0.02em] text-stone-950">{{ headerTitle }}</h2>
+          <p class="mt-1 text-[12px] leading-5 text-stone-500">{{ headerDescription }}</p>
         </div>
 
-        <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="h-full w-full pr-1">
-          <div class="space-y-3 pb-1">
-            <div v-if="isProviderEntity" class="config-form space-y-3">
-              <template v-if="isEditing">
-                <div class="grid gap-3">
-                  <label class="space-y-1 text-[11px] text-stone-500">
-                    <span>提供商名称</span>
-                    <Input :model-value="providerForm.name" placeholder="例如：OpenRouter" @update:model-value="providerForm.name = $event" />
-                  </label>
+        <ScrollArea class="min-h-0 flex-1" viewport-class="h-full w-full pr-1">
+          <div class="space-y-2 pb-1">
+            <!-- 保存结果反馈置于区块顶部：动作条在各 section 头部，反馈若沉底会滚出视口。 -->
+            <div v-if="notice" class="rounded-[0.45rem] bg-amber-50/85 px-3.5 py-3 text-sm text-amber-950">
+              {{ notice }}
+            </div>
+            <div v-if="error" class="rounded-[0.45rem] bg-rose-50/90 px-3.5 py-3 text-sm text-rose-800">
+              {{ error }}
+            </div>
 
-                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
+            <!-- ─── 一级折叠区 1/2：提供商详情（ADR 0013） ───────────────── -->
+            <section
+              class="rounded-[0.55rem] bg-white/72 px-3.5 py-2"
+              data-testid="provider-detail-section"
+            >
+              <!-- 迭代三：整行为折叠 trigger（含尾部动作区外的全部区域），hover 背景包裹整行；
+                   动作区 @click.stop 特殊处理。 -->
+              <div
+                class="-mx-1 flex min-h-[1.75rem] cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-1"
+                :title="isEditingProvider ? '提供商编辑中，暂不可折叠' : undefined"
+                data-testid="provider-detail-header"
+                @click="toggleProviderSection()"
+              >
+                <button
+                  type="button"
+                  class="flex min-w-0 flex-1 items-center gap-1 bg-transparent text-left outline-none"
+                  :aria-expanded="providerSectionOpen"
+                  aria-controls="provider-detail-body"
+                  :aria-label="providerSectionOpen ? '收起提供商详情' : '展开提供商详情'"
+                  data-testid="provider-detail-toggle"
+                >
+                  <ChevronDown
+                    class="h-3.5 w-3.5 shrink-0 text-stone-400 transition-transform duration-200 motion-reduce:transition-none"
+                    :class="providerSectionOpen ? 'rotate-180' : ''"
+                  />
+                  <span class="truncate text-sm font-semibold text-stone-950">提供商详情</span>
+                </button>
+
+                <!-- 动作区：阻断行点击冒泡；编辑/删除为弱化纯图标（自身 hover 增强）。 -->
+                <div class="flex shrink-0 items-center gap-0.5" @click.stop>
+                  <Tooltip v-if="canEditProvider && detailProvider" text="编辑" side="top">
+                    <button
+                      type="button"
+                      :class="ICON_ACTION_CLASS"
+                      aria-label="编辑提供商"
+                      data-testid="provider-edit-open"
+                      @click="beginEditProvider(detailProvider.id)"
+                    >
+                      <Pencil class="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
+                  <Button v-if="isEditingProvider" size="sm" variant="ghost" data-testid="provider-edit-cancel" @click="cancelEditing()">取消</Button>
+                  <ConfirmPopover
+                    v-if="canDeleteProvider"
+                    :title="`删除提供商「${detailProvider?.name || detailProvider?.id || '当前提供商'}」？`"
+                    description="此操作不可撤销。"
+                    side="bottom"
+                    align="end"
+                    @confirm="removeCurrentProvider()"
+                  >
+                    <Tooltip text="删除" side="top">
+                      <button type="button" :class="ICON_ACTION_CLASS" aria-label="删除提供商">
+                        <Trash2 class="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
+                  </ConfirmPopover>
+                  <Button v-if="canSaveProvider" size="sm" variant="secondary" data-testid="provider-save" @click="saveProviderForm()">
+                    <Save class="mr-1 h-4 w-4" />
+                    {{ saving ? "保存中..." : "保存" }}
+                  </Button>
+                </div>
+              </div>
+
+              <!-- 平滑折叠：grid-rows 0fr↔1fr 过渡。行高用内联 style 表达，避免依赖
+                   Tailwind 任意值类的生成时机；内容常挂载避免布局突跳。 -->
+              <div
+                id="provider-detail-body"
+                class="grid overflow-hidden transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none"
+                :style="{ gridTemplateRows: providerSectionOpen ? '1fr' : '0fr' }"
+                :aria-hidden="!providerSectionOpen"
+                :data-open="providerSectionOpen ? 'true' : 'false'"
+                data-testid="provider-detail-body"
+              >
+                <div class="min-h-0">
+                  <div class="pt-2">
+                    <div class="config-form space-y-2">
+                  <!-- P1 修复（review A）：守卫用 isEditingProvider 而非全局 isEditing，
+                       防止模型编辑/新增态把陈旧 providerForm 泄漏渲染进提供商区。 -->
+                  <template v-if="isEditingProvider">
+                <div class="grid gap-3">
+                  <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">提供商名称</span><Input :model-value="providerForm.name" placeholder="例如：OpenRouter" @update:model-value="providerForm.name = $event"  class="min-w-0 flex-1" /></label>
+
+                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
                     <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
                       协议入口
                       <InfoTip text="同一个提供商可以同时开启 OpenAI 和 Anthropic 协议；每种协议独立填写自己的 Base URL 和认证方式。" />
@@ -961,7 +997,7 @@ onBeforeUnmount(() => {
                           </button>
                         </div>
 
-                        <div class="mt-3 space-y-3">
+                        <div class="mt-1.5 grid gap-x-4 gap-y-1 sm:grid-cols-2">
                           <label class="space-y-1 text-[11px] text-stone-500">
                             <span>Base URL</span>
                             <Input
@@ -991,16 +1027,17 @@ onBeforeUnmount(() => {
                   </section>
                 </div>
 
-                <div class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
+                <div class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
                   <div class="flex items-center gap-1.5 text-[13px] font-medium text-stone-900">
                     API Key
                     <Shield class="h-3.5 w-3.5 text-stone-500" />
                     <InfoTip text="密钥仍按提供商维度保存到应用密钥存储；providers.json 不保存敏感明文。" />
                   </div>
-                  <div class="mt-2.5">
-                    <label class="space-y-1 text-[11px] text-stone-500">
-                      <span>当前密钥</span>
+                  <div class="mt-1.5">
+                    <label class="flex items-center gap-2 text-[11px] text-stone-500">
+                      <span class="shrink-0">当前密钥</span>
                       <Input
+                        class="min-w-0 flex-1"
                         :model-value="providerForm.apiKeyValue"
                         type="password"
                         placeholder="输入后保存即可"
@@ -1012,233 +1049,557 @@ onBeforeUnmount(() => {
               </template>
 
               <template v-else-if="detailProvider">
-                <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
-                    <div class="text-sm font-medium text-stone-900">基础信息</div>
-                    <div class="mt-2.5 space-y-2.5 text-[13px] leading-6 text-stone-600">
-                      <div>
-                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">名称</div>
-                        <div class="mt-1 text-stone-900">{{ detailProvider.name || "未命名提供商" }}</div>
-                      </div>
-                      <div>
-                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">已启用协议</div>
-                        <div class="mt-1 text-stone-900">{{ detailProvider.supportedProtocols.join(" / ") }}</div>
-                      </div>
+                <!-- 迭代四：字段名与值同行、按长度两栏排布、行距减半。 -->
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                  <div class="text-sm font-medium text-stone-900">基础信息</div>
+                  <dl class="mt-1.5 grid gap-x-4 gap-y-1 text-[13px] leading-5 sm:grid-cols-2">
+                    <div class="flex min-w-0 items-baseline gap-2">
+                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">名称</dt>
+                      <dd class="min-w-0 truncate text-stone-900">{{ detailProvider.name || "未命名提供商" }}</dd>
                     </div>
-                  </section>
+                    <div class="flex min-w-0 items-baseline gap-2">
+                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">已启用协议</dt>
+                      <dd class="min-w-0 truncate text-stone-900">{{ detailProvider.supportedProtocols.join(" / ") }}</dd>
+                    </div>
+                  </dl>
+                </section>
 
-                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
-                    <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
-                      密钥与环境
-                      <Shield class="h-3.5 w-3.5 text-stone-500" />
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                  <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
+                    密钥与环境
+                    <Shield class="h-3.5 w-3.5 text-stone-500" />
+                  </div>
+                  <dl class="mt-1.5 grid gap-x-4 gap-y-1 text-[13px] leading-5 sm:grid-cols-2">
+                    <div class="flex min-w-0 items-baseline gap-2">
+                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">环境变量名</dt>
+                      <dd class="min-w-0 truncate text-stone-900">{{ detailProvider.apiKeyEnvVar }}</dd>
                     </div>
-                    <div class="mt-2.5 space-y-2.5 text-[13px] leading-6 text-stone-600">
-                      <div>
-                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">环境变量名</div>
-                        <div class="mt-1 text-stone-900">{{ detailProvider.apiKeyEnvVar }}</div>
-                      </div>
-                      <div>
-                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">密钥状态</div>
-                        <div class="mt-1 text-stone-900">{{ providerApiKeySummary(detailProvider) }}</div>
-                      </div>
+                    <div class="flex min-w-0 items-baseline gap-2">
+                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">密钥状态</dt>
+                      <dd class="min-w-0 truncate text-stone-900">{{ providerApiKeySummary(detailProvider) }}</dd>
                     </div>
-                  </section>
-                </div>
+                  </dl>
+                </section>
 
-                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
                   <div class="text-sm font-medium text-stone-900">协议入口</div>
-                  <div class="mt-2.5 grid gap-2.5 xl:grid-cols-2">
+                  <div class="mt-1.5 space-y-1">
                     <div
                       v-for="endpoint in detailProvider.endpoints.filter((item) => item.enabled)"
                       :key="endpoint.protocol"
-                      class="rounded-[0.45rem] bg-stone-100/75 px-3 py-2.5"
+                      class="flex min-w-0 items-baseline justify-between gap-3 rounded-[0.35rem] bg-stone-100/75 px-2.5 py-1.5"
                     >
-                      <div class="text-[13px] font-medium text-stone-900">{{ protocolLabel(endpoint.protocol) }}</div>
-                      <div class="mt-1 break-words text-[12px] text-stone-500">{{ endpoint.baseUrl }}</div>
-                      <div class="mt-1 text-[11px] text-stone-500">{{ authTypeLabel(endpoint.authType) }}</div>
+                      <span class="flex shrink-0 items-baseline gap-2">
+                        <span class="text-[12px] font-medium text-stone-900">{{ protocolLabel(endpoint.protocol) }}</span>
+                        <span class="text-[11px] text-stone-500">{{ authTypeLabel(endpoint.authType) }}</span>
+                      </span>
+                      <span class="min-w-0 truncate text-[12px] text-stone-500">{{ endpoint.baseUrl }}</span>
                     </div>
                   </div>
                 </section>
               </template>
-            </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
 
-            <div v-else class="config-form space-y-3">
-              <template v-if="isEditing">
-                <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                  <label class="space-y-1 text-[11px] text-stone-500">
-                    <span>所属提供商</span>
-                    <Input :model-value="detailProvider?.name ?? ''" disabled />
-                  </label>
+            <!-- ─── 一级折叠区 2/2：模型列表（create-provider 模式下隐藏，ADR 0013） ─── -->
+            <section
+              v-if="!isCreateMode || !isProviderEntity"
+              class="rounded-[0.55rem] bg-white/72 px-3.5 py-2"
+              data-testid="model-list-section"
+            >
+              <div
+                class="-mx-1 flex min-h-[1.75rem] cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-1"
+                :title="modelSectionLocked ? '模型表单填写中，暂不可折叠' : undefined"
+                data-testid="model-list-header"
+                @click="toggleModelSection()"
+              >
+                <button
+                  type="button"
+                  class="flex min-w-0 flex-1 items-center gap-1 bg-transparent text-left outline-none"
+                  :aria-expanded="modelSectionOpen"
+                  aria-controls="model-list-body"
+                  :aria-label="modelSectionOpen ? '收起模型列表' : '展开模型列表'"
+                  data-testid="model-list-toggle"
+                >
+                  <ChevronDown
+                    class="h-3.5 w-3.5 shrink-0 text-stone-400 transition-transform duration-200 motion-reduce:transition-none"
+                    :class="modelSectionOpen ? 'rotate-180' : ''"
+                  />
+                  <span class="truncate text-sm font-semibold text-stone-950">模型列表</span>
+                </button>
 
-                  <label class="space-y-1 text-[11px] text-stone-500">
-                    <span>名称</span>
-                    <Input :model-value="modelForm.name" placeholder="例如：Claude Sonnet 4" @update:model-value="modelForm.name = $event" />
-                  </label>
+                <div class="flex shrink-0 items-center gap-0.5" @click.stop>
+                  <Tooltip v-if="modelActionsIdle && detailProvider" text="新增模型" side="top">
+                    <button
+                      type="button"
+                      :class="ICON_ACTION_CLASS"
+                      aria-label="新增模型"
+                      data-testid="model-create-open"
+                      @click="beginCreateModel(detailProvider.id)"
+                    >
+                      <Plus class="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
 
-                  <label class="space-y-1 text-[11px] text-stone-500">
-                    <span>模型 ID</span>
-                    <Input :model-value="modelForm.model" placeholder="例如：claude-sonnet-4-20250514" @update:model-value="modelForm.model = $event" />
-                  </label>
+              <div
+                id="model-list-body"
+                class="grid overflow-hidden transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none"
+                :style="{ gridTemplateRows: modelSectionOpen ? '1fr' : '0fr' }"
+                :aria-hidden="!modelSectionOpen"
+                :data-open="modelSectionOpen ? 'true' : 'false'"
+                data-testid="model-list-body"
+              >
+                <div class="min-h-0">
+                  <div class="pt-2">
+                <!-- 新增模型表单卡（编辑态复用同一份表单标记，仅渲染位置不同；两份需同步维护）。 -->
+                <div
+                  v-if="modelCreateOpen"
+                  class="mb-3 rounded-[0.45rem] bg-stone-100/70 px-3.5 py-3"
+                  data-testid="model-create-card"
+                >
+                  <div class="flex items-center justify-between gap-2 pb-1">
+                    <div class="text-sm font-medium text-stone-900">新增模型</div>
+                    <div class="flex gap-1.5">
+                      <Button size="sm" variant="ghost" data-testid="model-create-cancel" @click="cancelEditing()">取消</Button>
+                      <Button v-if="canSaveModel" size="sm" variant="secondary" data-testid="model-create-save" @click="saveModelForm()">
+                        <Save class="mr-1 h-4 w-4" />
+                        {{ saving ? "保存中..." : "保存" }}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div class="config-form space-y-2">
+                    <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                      <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">名称</span><Input :model-value="modelForm.name" placeholder="例如：Claude Sonnet 4" @update:model-value="modelForm.name = $event"  class="min-w-0 flex-1" /></label>
+
+                      <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">模型 ID</span><Input :model-value="modelForm.model" placeholder="例如：claude-sonnet-4-20250514" @update:model-value="modelForm.model = $event"  class="min-w-0 flex-1" /></label>
+                    </div>
+
+                    <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                      <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
+                        模型能力
+                        <InfoTip text="能力保持输入 / 输出两行；图标悬停可查看说明，明暗表示启用与未启用。" />
+                      </div>
+                      <div class="mt-1.5 grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                        <div>
+                          <div class="mb-1 text-[11px] uppercase tracking-[0.16em] text-stone-400">输入</div>
+                          <div class="flex flex-wrap gap-2">
+                            <Tooltip
+                              v-for="option in inputCapabilityOptions"
+                              :key="option.key"
+                              :text="option.label"
+                              side="top"
+                            >
+                              <button
+                                type="button"
+                                class="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[0.55rem] transition"
+                                :class="
+                                  modelForm[option.key]
+                                    ? 'bg-stone-900 text-stone-50'
+                                    : 'bg-stone-100/90 text-stone-500 hover:bg-stone-200/80'
+                                "
+                                :aria-label="option.label"
+                                :aria-pressed="modelForm[option.key]"
+                                @click="toggleCapability(option.key)"
+                              >
+                                <component :is="option.icon" class="h-4 w-4" />
+                              </button>
+                            </Tooltip>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div class="mb-1 text-[11px] uppercase tracking-[0.16em] text-stone-400">输出</div>
+                          <div class="flex flex-wrap gap-2">
+                            <Tooltip
+                              v-for="option in outputCapabilityOptions"
+                              :key="option.key"
+                              :text="option.label"
+                              side="top"
+                            >
+                              <button
+                                type="button"
+                                class="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[0.55rem] transition"
+                                :class="
+                                  modelForm[option.key]
+                                    ? 'bg-stone-900 text-stone-50'
+                                    : 'bg-stone-100/90 text-stone-500 hover:bg-stone-200/80'
+                                "
+                                :aria-label="option.label"
+                                :aria-pressed="modelForm[option.key]"
+                                @click="toggleCapability(option.key)"
+                              >
+                                <component :is="option.icon" class="h-4 w-4" />
+                              </button>
+                            </Tooltip>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                      <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
+                        模型参数
+                        <InfoTip text="上下文与最大输出以 K/M 显示；徽标为常规项，点选即填入。" />
+                      </div>
+                      <div class="mt-3 grid gap-3 xl:grid-cols-2">
+                        <div class="space-y-1 text-[11px] text-stone-500">
+                          <div class="flex items-center gap-2"><span class="shrink-0">上下文长度</span><Input :model-value="modelForm.contextWindowTokens" type="number" @update:model-value="modelForm.contextWindowTokens = $event"  class="min-w-0 flex-1" /></div>
+                          <div class="flex flex-wrap gap-1 pt-0.5">
+                            <button
+                              v-for="preset in CONTEXT_TOKEN_PRESETS"
+                              :key="preset"
+                              type="button"
+                              class="rounded-full bg-white/80 px-2 py-[2px] text-[10px] leading-[1.4] text-stone-500 ring-1 ring-stone-200/70 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                              :data-testid="`context-preset-${formatTokenUnit(preset, '')}`"
+                              @click="modelForm.contextWindowTokens = String(preset)"
+                            >
+                              {{ formatTokenUnit(preset, "") }}
+                            </button>
+                          </div>
+                        </div>
+                        <div class="space-y-1 text-[11px] text-stone-500">
+                          <div class="flex items-center gap-2"><span class="shrink-0">最大输出长度</span><Input :model-value="modelForm.maxOutputTokens" type="number" @update:model-value="modelForm.maxOutputTokens = $event"  class="min-w-0 flex-1" /></div>
+                          <div class="flex flex-wrap gap-1 pt-0.5">
+                            <button
+                              v-for="preset in MAX_OUTPUT_TOKEN_PRESETS"
+                              :key="preset"
+                              type="button"
+                              class="rounded-full bg-white/80 px-2 py-[2px] text-[10px] leading-[1.4] text-stone-500 ring-1 ring-stone-200/70 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                              :data-testid="`output-preset-${formatTokenUnit(preset, '')}`"
+                              @click="modelForm.maxOutputTokens = String(preset)"
+                            >
+                              {{ formatTokenUnit(preset, "") }}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
                 </div>
 
-                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
+                <p
+                  v-if="detailProvider && detailProvider.models.length === 0 && !modelCreateOpen"
+                  class="py-2 text-[12px] leading-5 text-stone-500"
+                  data-testid="model-list-empty"
+                >
+                  该提供商暂无模型；点击右上角"新增模型"开始接入。
+                </p>
+
+                <div class="space-y-1.5">
+                  <div
+                    v-for="model in detailProvider?.models ?? []"
+                    :key="model.id"
+                    class="overflow-hidden rounded-[0.45rem] bg-stone-100/50"
+                  >
+                    <!-- 迭代三：整行为折叠 trigger（hover 背景包裹含行尾动作的整行），
+                         行尾动作区 @click.stop 特殊处理；chevron 为纯指示器。 -->
+                    <div
+                      class="flex cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-2 py-1.5 transition-colors hover:bg-white/74 motion-reduce:transition-none"
+                      :data-testid="`model-list-item-${model.id}`"
+                      @click="toggleModelRow(detailProvider!.id, model.id)"
+                    >
+                      <button
+                        type="button"
+                        class="flex min-w-0 flex-1 items-center rounded-[0.35rem] px-1 py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                        :aria-expanded="expandedModelId === model.id"
+                        :aria-controls="`model-detail-${model.id}`"
+                      >
+                        <span class="min-w-0">
+                          <span class="block truncate text-[12px] font-medium text-stone-800">
+                            {{ model.name || "未命名模型" }}
+                          </span>
+                          <span class="mt-0.5 block truncate text-[11px] text-stone-500">
+                            {{ model.protocol || detailProvider?.protocol }} · {{ model.model || "未填写模型 ID" }}
+                          </span>
+                        </span>
+                      </button>
+
+                      <div class="flex shrink-0 items-center gap-0.5" @click.stop>
+                        <Tooltip v-if="modelActionsIdle" text="编辑" side="top">
+                          <button
+                            type="button"
+                            :class="ICON_ACTION_CLASS"
+                            aria-label="编辑模型"
+                            :data-testid="`model-row-edit-${model.id}`"
+                            @click="beginEditModel(detailProvider!.id, model.id)"
+                          >
+                            <Pencil class="h-3.5 w-3.5" />
+                          </button>
+                        </Tooltip>
+                        <ConfirmPopover
+                          v-if="modelActionsIdle"
+                          :title="`删除模型「${model.name || model.model || '未命名模型'}」？`"
+                          description="此操作不可撤销。"
+                          side="bottom"
+                          align="end"
+                          @confirm="removeModelById(detailProvider!.id, model.id)"
+                        >
+                          <Tooltip text="删除" side="top">
+                            <button
+                              type="button"
+                              :class="ICON_ACTION_CLASS"
+                              aria-label="删除模型"
+                              :data-testid="`model-row-delete-${model.id}`"
+                            >
+                              <Trash2 class="h-3.5 w-3.5" />
+                            </button>
+                          </Tooltip>
+                        </ConfirmPopover>
+                        <ChevronDown
+                          aria-hidden="true"
+                          class="h-3.5 w-3.5 shrink-0 text-stone-400 transition-transform duration-200 motion-reduce:transition-none"
+                          :class="expandedModelId === model.id ? 'rotate-180' : ''"
+                        />
+                      </div>
+                    </div>
+
+                    <div
+                      :id="`model-detail-${model.id}`"
+                      class="grid overflow-hidden transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none"
+                      :style="{ gridTemplateRows: expandedModelId === model.id ? '1fr' : '0fr' }"
+                      :aria-hidden="expandedModelId !== model.id"
+                      :data-open="expandedModelId === model.id ? 'true' : 'false'"
+                      :data-testid="`model-detail-${model.id}`"
+                    >
+                      <div class="min-h-0">
+                        <div
+                          class="px-3 pb-3 pt-3"
+                          :class="expandedModelId === model.id ? 'border-t border-stone-200/60' : ''"
+                        >
+                      <div
+                        v-if="isEditingModel && editorState.modelId === model.id"
+                        class="flex justify-end gap-1.5 pb-2"
+                      >
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          :data-testid="`model-edit-cancel-${model.id}`"
+                          @click="cancelEditing()"
+                        >取消</Button>
+                        <Button
+                          v-if="canSaveModel"
+                          size="sm"
+                          variant="secondary"
+                          :data-testid="`model-edit-save-${model.id}`"
+                          @click="saveModelForm()"
+                        >
+                          <Check v-if="modelSaveSucceeded && !saving" class="mr-1 h-4 w-4" />
+                          <Save v-else class="mr-1 h-4 w-4" />
+                          {{ saving ? "保存中..." : modelSaveSucceeded ? "已保存" : "保存" }}
+                        </Button>
+                      </div>
+
+                      <div class="config-form space-y-2">
+                        <template v-if="isEditingModel && editorState.modelId === model.id">
+                <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                  <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">名称</span><Input :model-value="modelForm.name" placeholder="例如：Claude Sonnet 4" @update:model-value="modelForm.name = $event"  class="min-w-0 flex-1" /></label>
+
+                  <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">模型 ID</span><Input :model-value="modelForm.model" placeholder="例如：claude-sonnet-4-20250514" @update:model-value="modelForm.model = $event"  class="min-w-0 flex-1" /></label>
+                </div>
+
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
                   <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
                     模型能力
                     <InfoTip text="能力保持输入 / 输出两行；图标悬停可查看说明，明暗表示启用与未启用。" />
                   </div>
-                  <div class="mt-3 grid gap-3">
+                  <div class="mt-1.5 grid gap-x-4 gap-y-1 sm:grid-cols-2">
                     <div>
                       <div class="mb-1 text-[11px] uppercase tracking-[0.16em] text-stone-400">输入</div>
                       <div class="flex flex-wrap gap-2">
-                        <button
+                        <Tooltip
                           v-for="option in inputCapabilityOptions"
                           :key="option.key"
-                          type="button"
-                          class="inline-flex cursor-pointer items-center gap-2 rounded-[0.65rem] px-3 py-2 text-[12px] transition"
-                          :class="
-                            modelForm[option.key]
-                              ? 'bg-stone-900 text-stone-50'
-                              : 'bg-stone-100/90 text-stone-500 hover:bg-stone-200/80'
-                          "
-                          @click="toggleCapability(option.key)"
+                          :text="option.label"
+                          side="top"
                         >
-                          <component :is="option.icon" class="h-4 w-4" />
-                          <span>{{ option.label }}</span>
-                        </button>
+                          <button
+                            type="button"
+                            class="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[0.55rem] transition"
+                            :class="
+                              modelForm[option.key]
+                                ? 'bg-stone-900 text-stone-50'
+                                : 'bg-stone-100/90 text-stone-500 hover:bg-stone-200/80'
+                            "
+                            :aria-label="option.label"
+                            :aria-pressed="modelForm[option.key]"
+                            @click="toggleCapability(option.key)"
+                          >
+                            <component :is="option.icon" class="h-4 w-4" />
+                          </button>
+                        </Tooltip>
                       </div>
                     </div>
 
                     <div>
                       <div class="mb-1 text-[11px] uppercase tracking-[0.16em] text-stone-400">输出</div>
                       <div class="flex flex-wrap gap-2">
-                        <button
+                        <Tooltip
                           v-for="option in outputCapabilityOptions"
                           :key="option.key"
-                          type="button"
-                          class="inline-flex cursor-pointer items-center gap-2 rounded-[0.65rem] px-3 py-2 text-[12px] transition"
-                          :class="
-                            modelForm[option.key]
-                              ? 'bg-stone-900 text-stone-50'
-                              : 'bg-stone-100/90 text-stone-500 hover:bg-stone-200/80'
-                          "
-                          @click="toggleCapability(option.key)"
+                          :text="option.label"
+                          side="top"
                         >
-                          <component :is="option.icon" class="h-4 w-4" />
-                          <span>{{ option.label }}</span>
+                          <button
+                            type="button"
+                            class="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[0.55rem] transition"
+                            :class="
+                              modelForm[option.key]
+                                ? 'bg-stone-900 text-stone-50'
+                                : 'bg-stone-100/90 text-stone-500 hover:bg-stone-200/80'
+                            "
+                            :aria-label="option.label"
+                            :aria-pressed="modelForm[option.key]"
+                            @click="toggleCapability(option.key)"
+                          >
+                            <component :is="option.icon" class="h-4 w-4" />
+                          </button>
+                        </Tooltip>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                  <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
+                    模型参数
+                    <InfoTip text="上下文与最大输出以 K/M 显示；徽标为常规项，点选即填入。" />
+                  </div>
+                  <div class="mt-3 grid gap-3 xl:grid-cols-2">
+                    <div class="space-y-1 text-[11px] text-stone-500">
+                      <div class="flex items-center gap-2"><span class="shrink-0">上下文长度</span><Input :model-value="modelForm.contextWindowTokens" type="number" @update:model-value="modelForm.contextWindowTokens = $event"  class="min-w-0 flex-1" /></div>
+                      <div class="flex flex-wrap gap-1 pt-0.5">
+                        <button
+                          v-for="preset in CONTEXT_TOKEN_PRESETS"
+                          :key="preset"
+                          type="button"
+                          class="rounded-full bg-white/80 px-2 py-[2px] text-[10px] leading-[1.4] text-stone-500 ring-1 ring-stone-200/70 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                          :data-testid="`context-preset-${formatTokenUnit(preset, '')}`"
+                          @click="modelForm.contextWindowTokens = String(preset)"
+                        >
+                          {{ formatTokenUnit(preset, "") }}
+                        </button>
+                      </div>
+                    </div>
+                    <div class="space-y-1 text-[11px] text-stone-500">
+                      <div class="flex items-center gap-2"><span class="shrink-0">最大输出长度</span><Input :model-value="modelForm.maxOutputTokens" type="number" @update:model-value="modelForm.maxOutputTokens = $event"  class="min-w-0 flex-1" /></div>
+                      <div class="flex flex-wrap gap-1 pt-0.5">
+                        <button
+                          v-for="preset in MAX_OUTPUT_TOKEN_PRESETS"
+                          :key="preset"
+                          type="button"
+                          class="rounded-full bg-white/80 px-2 py-[2px] text-[10px] leading-[1.4] text-stone-500 ring-1 ring-stone-200/70 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                          :data-testid="`output-preset-${formatTokenUnit(preset, '')}`"
+                          @click="modelForm.maxOutputTokens = String(preset)"
+                        >
+                          {{ formatTokenUnit(preset, "") }}
                         </button>
                       </div>
                     </div>
                   </div>
                 </section>
-
-                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
-                  <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
-                    模型参数
-                    <InfoTip text="仅保留上下文长度和最大输出长度，两项保持一行展示。" />
-                  </div>
-                  <div class="mt-3 grid gap-3 xl:grid-cols-2">
-                    <label class="space-y-1 text-[11px] text-stone-500">
-                      <span>上下文长度</span>
-                      <Input :model-value="modelForm.contextWindowTokens" type="number" @update:model-value="modelForm.contextWindowTokens = $event" />
-                    </label>
-                    <label class="space-y-1 text-[11px] text-stone-500">
-                      <span>最大输出长度</span>
-                      <Input :model-value="modelForm.maxOutputTokens" type="number" @update:model-value="modelForm.maxOutputTokens = $event" />
-                    </label>
-                  </div>
-                </section>
               </template>
 
-              <template v-else-if="detailModel">
-                <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
-                    <div class="text-sm font-medium text-stone-900">模型信息</div>
-                    <div class="mt-2.5 space-y-2.5 text-[13px] leading-6 text-stone-600">
-                      <div>
-                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">所属提供商</div>
-                        <div class="mt-1 text-stone-900">{{ detailProvider?.name || "未命名提供商" }}</div>
-                      </div>
-                      <div>
-                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">名称</div>
-                        <div class="mt-1 text-stone-900">{{ detailModel.name || "未命名模型" }}</div>
-                      </div>
-                      <div>
-                        <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">模型 ID</div>
-                        <div class="mt-1 break-words text-stone-900">{{ detailModel.model || "未填写模型 ID" }}</div>
-                      </div>
+                        <template v-else-if="!isEditingModel && editorState.modelId === model.id && detailModel">
+                <!-- 迭代四：字段名与值同行、两栏排布、行距减半。 -->
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                  <div class="text-sm font-medium text-stone-900">模型信息</div>
+                  <dl class="mt-1.5 grid gap-x-4 gap-y-1 text-[13px] leading-5 sm:grid-cols-2">
+                    <div class="flex min-w-0 items-baseline gap-2">
+                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">名称</dt>
+                      <dd class="min-w-0 truncate text-stone-900">{{ detailModel.name || "未命名模型" }}</dd>
                     </div>
-                  </section>
+                    <div class="flex min-w-0 items-baseline gap-2 sm:col-span-2">
+                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">模型 ID</dt>
+                      <dd class="min-w-0 break-words text-stone-900">{{ detailModel.model || "未填写模型 ID" }}</dd>
+                    </div>
+                  </dl>
+                </section>
 
-                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
+                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
                     <div class="text-sm font-medium text-stone-900">模型能力</div>
-                    <div class="mt-3 grid gap-3">
+                    <div class="mt-1.5 grid gap-x-4 gap-y-1 sm:grid-cols-2">
                       <div>
                         <div class="mb-1 text-[11px] uppercase tracking-[0.16em] text-stone-400">输入</div>
-                        <div class="flex flex-wrap gap-2">
-                          <div
+                        <div class="flex flex-wrap gap-1.5">
+                          <Tooltip
                             v-for="option in inputCapabilityOptions"
                             :key="option.key"
-                            class="inline-flex items-center gap-2 rounded-[0.65rem] px-3 py-2 text-[12px]"
-                            :class="
-                              ({ ...createDefaultCapabilities(), ...detailModel.capabilities })[option.key]
-                                ? 'bg-stone-900 text-stone-50'
-                                : 'bg-stone-100/90 text-stone-500'
-                            "
+                            :text="option.label"
+                            side="top"
                           >
-                            <component :is="option.icon" class="h-4 w-4" />
-                            <span>{{ option.label }}</span>
-                          </div>
+                            <div
+                              class="inline-flex h-7 w-7 cursor-default items-center justify-center rounded-[0.55rem]"
+                              :class="
+                                ({ ...createDefaultCapabilities(), ...detailModel.capabilities })[option.key]
+                                  ? 'bg-stone-900 text-stone-50'
+                                  : 'bg-stone-100/90 text-stone-500'
+                              "
+                            >
+                              <component :is="option.icon" class="h-4 w-4" />
+                            </div>
+                          </Tooltip>
                         </div>
                       </div>
 
                       <div>
                         <div class="mb-1 text-[11px] uppercase tracking-[0.16em] text-stone-400">输出</div>
-                        <div class="flex flex-wrap gap-2">
-                          <div
+                        <div class="flex flex-wrap gap-1.5">
+                          <Tooltip
                             v-for="option in outputCapabilityOptions"
                             :key="option.key"
-                            class="inline-flex items-center gap-2 rounded-[0.65rem] px-3 py-2 text-[12px]"
-                            :class="
-                              ({ ...createDefaultCapabilities(), ...detailModel.capabilities })[option.key]
-                                ? 'bg-stone-900 text-stone-50'
-                                : 'bg-stone-100/90 text-stone-500'
-                            "
+                            :text="option.label"
+                            side="top"
                           >
-                            <component :is="option.icon" class="h-4 w-4" />
-                            <span>{{ option.label }}</span>
-                          </div>
+                            <div
+                              class="inline-flex h-7 w-7 cursor-default items-center justify-center rounded-[0.55rem]"
+                              :class="
+                                ({ ...createDefaultCapabilities(), ...detailModel.capabilities })[option.key]
+                                  ? 'bg-stone-900 text-stone-50'
+                                  : 'bg-stone-100/90 text-stone-500'
+                              "
+                            >
+                              <component :is="option.icon" class="h-4 w-4" />
+                            </div>
+                          </Tooltip>
                         </div>
                       </div>
                     </div>
                   </section>
-                </div>
 
-                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
                   <div class="text-sm font-medium text-stone-900">模型参数</div>
                   <div class="mt-3 grid gap-3 xl:grid-cols-2">
                     <div>
                       <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">上下文长度</div>
                       <div class="mt-1 rounded-[0.45rem] bg-stone-100/75 px-3 py-2.5 text-[13px] text-stone-900">
-                        {{ numberLabel(detailModel.capabilities.contextWindowTokens, "256000 tokens") }}
+                        {{ formatTokenUnit(detailModel.capabilities.contextWindowTokens, "256K") }}
                       </div>
                     </div>
                     <div>
                       <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">最大输出长度</div>
                       <div class="mt-1 rounded-[0.45rem] bg-stone-100/75 px-3 py-2.5 text-[13px] text-stone-900">
-                        {{ numberLabel(detailModel.maxOutputTokens, "64000 tokens") }}
+                        {{ formatTokenUnit(detailModel.maxOutputTokens, "64K") }}
                       </div>
                     </div>
                   </div>
                 </section>
               </template>
-            </div>
-
-            <div v-if="notice" class="rounded-[0.45rem] bg-amber-50/85 px-3.5 py-3 text-sm text-amber-950">
-              {{ notice }}
-            </div>
-            <div v-if="error" class="rounded-[0.45rem] bg-rose-50/90 px-3.5 py-3 text-sm text-rose-800">
-              {{ error }}
-            </div>
+                      </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
         </ScrollArea>
       </template>

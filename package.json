@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --configLoader native",
     "dev:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-tauri-dev.ps1",
     "dev:tauri:full": "npm run dev:tauri",
     "dev:tauri:cool": "npm run dev:tauri",

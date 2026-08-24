@@ -1,6 +1,6 @@
 # 0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化
 
-Status: implemented
+Status: superseded by [0013](../0013-workbench-nav-observation-entry-and-provider-hierarchy.md)（观测入口移右栏浮动按钮、"模型配置"一级键删除；其余决定由 0013 承接重述）
 
 ## 背景
 

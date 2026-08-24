@@ -60,6 +60,8 @@ describe("TelemetryPage", () => {
   it("coding 模式默认 Trace tab，双 tab 可切换到指标", async () => {
     const wrapper = await mountTelemetry();
 
+    // ADR 0013：页头统一为"观测"（原"遥测"更名）
+    expect(wrapper.get('[data-testid="telemetry-heading"]').text()).toBe("观测");
     expect(wrapper.get('[data-testid="telemetry-panel-trace"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="trace-inspector-stub"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="telemetry-tab-trace"]').attributes("aria-selected")).toBe("true");
@@ -117,13 +119,14 @@ describe("TelemetryPage", () => {
     expect(wrapper.find('[data-testid="trace-inspector-stub"]').exists()).toBe(false);
   });
 
-  it("work 模式页头为指标文案且不出现 Trace 字样（PA-096 review B-P2-1）", async () => {
+  it("work 模式页头同为观测文案且不出现 coding 副标题（PA-096 review B-P2-1 回归意图保留）", async () => {
     const settingsStore = useSettingsStore();
     settingsStore.$patch({ settings: { workspaceMode: "work" } });
 
     const wrapper = await mountTelemetry();
 
-    expect(wrapper.get('[data-testid="telemetry-heading"]').text()).toBe("指标");
+    // ADR 0013：更名后两种模式页头一致；门禁差异体现在 tab 集合而非标题
+    expect(wrapper.get('[data-testid="telemetry-heading"]').text()).toBe("观测");
     expect(wrapper.text()).not.toContain("Trace 与指标的二级读面");
   });
 

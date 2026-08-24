@@ -15,7 +15,7 @@ import type {
 
 const loadingSummary = ref(false);
 
-// PA-096：遥测页嵌入模式——去掉整页卡片壳与大标题块（宿主 TelemetryPage 提供壳与页头），
+// PA-096：观测页嵌入模式——去掉整页卡片壳与大标题块（宿主 TelemetryPage 提供壳与页头），
 // 保留刷新按钮行；默认 false 时行为与旧版完全一致。
 const props = withDefaults(
   defineProps<{
@@ -451,7 +451,7 @@ onMounted(() => {
         </p>
       </div>
       <div v-else class="min-w-0 flex-1">
-        <div class="text-sm font-semibold text-stone-900">模型监控</div>
+        <div class="text-sm font-semibold text-stone-900">指标监控</div>
         <p class="mt-1 text-[12px] leading-5 text-stone-500">聚合请求量、延迟、缓存、检索参与度，支持按会话下钻。</p>
       </div>
 

@@ -49,10 +49,12 @@
 - [0006 API Key 存储从 env-first 演进到统一 SecretStore](0006-api-key-evolution-env-first.md)
 - [0007 将缓存命中提升为一等产品指标，按阶段落地](0007-cache-hit-as-first-class-product-metric.md)
 - [0008 会话数据架构向事件溯源演进（分阶段落地）](0008-event-sourcing-evolution.md)
-- [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](0009-workbench-ia-telemetry-page-and-config-tabs.md)
 - [0010 CI rust-cache 对齐 target 槽位与最小令牌权限](0010-ci-rust-cache-slot-alignment-and-minimal-token.md)
 - [0011 版本 bump 自动同步 Cargo.lock](0011-bump-version-syncs-cargo-lock.md)
+- [0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转](0012-app-update-check-via-github-releases.md)
+- [0013 工作台导航精简：观测右栏浮动入口、配置页收敛与提供商页层次折叠](0013-workbench-nav-observation-entry-and-provider-hierarchy.md)
 
 ### 已接替
 
 - [0004 前端工作台先采用原生 TypeScript + Vite 壳层](superseded/0004-frontend-shell-workbench-direction.md) —— 被 [0003](0003-frontend-stack-vue-pinia-no-router.md) 接替
+- [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](superseded/0009-workbench-ia-telemetry-page-and-config-tabs.md) —— 被 [0013](0013-workbench-nav-observation-entry-and-provider-hierarchy.md) 部分接替（入口决定修订，其余承接重述）

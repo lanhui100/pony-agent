@@ -7,10 +7,11 @@ import TraceInspector from "@/components/TraceInspector.vue";
 import { useSettingsStore } from "@/stores/settings";
 
 /**
- * PA-096：二级遥测页。
+ * PA-096：二级观测页（原"遥测"，ADR 0013 更名）。
  *
  * - coding 模式：[Trace, 指标] 双 tab，默认 Trace；
  *   work 模式：仅 [指标] 单 tab（原始 turn 调试明细不可达——用户决策 2026-08-22）。
+ * - 入口为对话页右栏右上角浮动图标按钮（ADR 0013），页内保留返回按钮回 home。
  * - tab 可用性收敛：启动竞态（默认 coding → 进入 Trace → loadSettings resolve 为
  *   work）时当前 tab 自动落到首个可用 tab，不弹回 home。
  * - APG tabs：roving tabindex + 方向键；进入页面聚焦标题（out-in 切换后焦点落点）。
@@ -126,10 +127,10 @@ onMounted(() => {
           tabindex="-1"
           data-testid="telemetry-heading"
         >
-          {{ isCoding ? "遥测" : "指标" }}
+          观测
         </h2>
         <span v-if="isCoding" class="hidden text-[11px] leading-5 text-stone-500 sm:inline">
-          Trace 与指标的二级读面，不随对话页常驻
+          Trace 与指标的二级读面
         </span>
         <span v-else class="hidden text-[11px] leading-5 text-stone-500 sm:inline">
           模型调用与延迟聚合读面
@@ -139,7 +140,7 @@ onMounted(() => {
       <div
         class="flex items-center gap-1 rounded-[0.5rem] bg-[#f6f0e8] p-1"
         role="tablist"
-        aria-label="遥测视图切换"
+        aria-label="观测视图切换"
         data-testid="telemetry-tablist"
         @keydown="handleTablistKeydown"
       >

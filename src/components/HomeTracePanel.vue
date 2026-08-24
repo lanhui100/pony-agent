@@ -76,7 +76,7 @@ const props = defineProps<{
   canonicalKind: (kind: TraceTimelineEntry["kind"]) => TraceTimelineEntry["kind"];
   turnTimeline: (turn: TurnTraceRecord) => TraceTimelineEntry[];
   providerReturnedCacheHitInputTokens: (turn: TurnTraceRecord) => number | null;
-  /** PA-096：遥测页全高模式——去掉侧栏折叠装饰，body 填满宿主定高容器。 */
+  /** PA-096：观测页全高模式——去掉侧栏折叠装饰，body 填满宿主定高容器。 */
   expanded?: boolean;
 }>();
 

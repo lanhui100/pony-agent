@@ -4,7 +4,7 @@ import { defineComponent, nextTick } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import { useRuntimeStore } from "@/stores/runtime";
-import { useSettingsStore } from "@/stores/settings";
+import { useUpdateStore } from "@/stores/update";
 import type {
   ChatMessage,
   HistoryBranch,
@@ -87,12 +87,11 @@ function createHistoryBranch(partial: Partial<HistoryBranch> = {}): HistoryBranc
   };
 }
 
-function mountSidebar(
-  currentPage: "home" | "models" | "settings" | "telemetry" | null = "home"
-) {
+function mountSidebar(currentPage: "home" | "settings" | null = "home", forceCollapsed = false) {
   return mount(HomeSessionSidebar, {
     props: {
-      currentPage
+      currentPage,
+      forceCollapsed
     },
     global: {
       stubs: {
@@ -484,7 +483,7 @@ describe("HomeSessionSidebar", () => {
 
     const runtimeStore = useRuntimeStore();
     const switchSessionSpy = vi.spyOn(runtimeStore, "switchSession").mockResolvedValue();
-    const wrapper = mountSidebar("telemetry");
+    const wrapper = mountSidebar("settings");
     await nextTick();
 
     await wrapper.get('[data-testid="session-switch-session-other"]').trigger("click");
@@ -507,33 +506,20 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.emitted("navigate")).toBeUndefined();
   });
 
-  it("renders telemetry, model config, and settings as first-level entries without the model group (PA-096)", async () => {
+  it("keeps settings as the only first-level nav entry after ADR 0013 slimming", async () => {
     seedSidebarSessions();
 
     const wrapper = mountSidebar();
     await nextTick();
 
-    // coding 模式：遥测（双 tab）；work 模式：同一键位显示"指标"
-    expect(wrapper.get('[data-testid="session-sidebar-nav-telemetry"]').text()).toContain("遥测");
-    expect(wrapper.get('[data-testid="session-sidebar-nav-providers"]').text()).toContain("模型配置");
+    // 底部一级导航只剩"设置"；观测/模型配置入口已分别移至右栏浮动按钮与配置页 tab
     expect(wrapper.get('[data-testid="session-sidebar-nav-settings"]').text()).toContain("设置");
+    expect(wrapper.find('[data-testid="session-sidebar-nav-telemetry"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(false);
 
     // "模型管理"二级折叠组已移除
     expect(wrapper.find('[data-testid="session-sidebar-model-toggle"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="session-sidebar-nav-model-monitor"]').exists()).toBe(false);
-  });
-
-  it("relabels the telemetry entry to metrics in work mode", async () => {
-    seedSidebarSessions();
-
-    const settingsStore = useSettingsStore();
-    settingsStore.$patch({ settings: { workspaceMode: "work" } });
-
-    const wrapper = mountSidebar();
-    await nextTick();
-
-    expect(wrapper.get('[data-testid="session-sidebar-nav-telemetry"]').text()).toContain("指标");
-    expect(wrapper.get('[data-testid="session-sidebar-nav-telemetry"]').text()).not.toContain("遥测");
   });
 
   it("keeps the top brand entry and no longer renders a separate home item", async () => {
@@ -549,7 +535,7 @@ describe("HomeSessionSidebar", () => {
   it("brand click routes back to the home workspace", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("models");
+    const wrapper = mountSidebar("settings");
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-brand"]').trigger("click");
@@ -559,25 +545,33 @@ describe("HomeSessionSidebar", () => {
   it("shares the same warm orange hover and selected guardrails across menu items", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("models");
+    // 未选中态：菜单项带暖橙 hover
+    const wrapper = mountSidebar("home");
     await nextTick();
 
     const newChat = wrapper.get('[data-testid="session-sidebar-new-chat"]');
+    const settingsItem = wrapper.get('[data-testid="session-sidebar-nav-settings"]');
     const sessionItem = wrapper.get('[data-testid="session-switch-session-current"]').element.parentElement?.parentElement;
-    const telemetryItem = wrapper.get('[data-testid="session-sidebar-nav-telemetry"]');
-    const providerItem = wrapper.get('[data-testid="session-sidebar-nav-providers"]');
 
     expect(newChat.classes()).toContain("hover:bg-[#f6dfb8]");
-    expect(telemetryItem.classes()).toContain("hover:bg-[#f6dfb8]");
-    expect(providerItem.classes()).toContain("bg-[#f3c98d]");
-    expect(providerItem.classes()).toContain("rounded-[0.2rem]");
+    expect(settingsItem.classes()).toContain("hover:bg-[#f6dfb8]");
+    // 当前会话行使用选中底色
     expect(sessionItem?.className).toContain("bg-[#f3c98d]");
+
+    // 选中态：设置项切换为实心底色（menuSelectedClass）
+    const selectedWrapper = mountSidebar("settings");
+    await nextTick();
+    const selectedSettings = selectedWrapper.get('[data-testid="session-sidebar-nav-settings"]');
+
+    expect(selectedSettings.classes()).not.toContain("hover:bg-[#f6dfb8]");
+    expect(selectedSettings.classes()).toContain("bg-[#f3c98d]");
+    expect(selectedSettings.classes()).toContain("rounded-[0.2rem]");
   });
 
-  it("keeps the six key entries in collapsed mode (PA-096: telemetry replaces model-monitor)", async () => {
+  it("keeps the four key entries in collapsed mode (ADR 0013: observation/providers entries removed)", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("telemetry");
+    const wrapper = mountSidebar();
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
@@ -586,8 +580,8 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.find('[data-testid="session-sidebar-brand"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="session-sidebar-new-chat-collapsed"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-sidebar-home-collapsed"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="session-sidebar-nav-telemetry-collapsed"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="session-sidebar-nav-providers-collapsed"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-telemetry-collapsed"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-providers-collapsed"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="session-sidebar-nav-settings-collapsed"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="session-sidebar-nav-model-monitor-collapsed"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("主页");
@@ -628,7 +622,7 @@ describe("HomeSessionSidebar", () => {
   it("collapsed home icon routes back to home workspace", async () => {
     seedSidebarSessions();
 
-    const wrapper = mountSidebar("telemetry");
+    const wrapper = mountSidebar("settings");
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-collapse"]').trigger("click");
@@ -639,7 +633,7 @@ describe("HomeSessionSidebar", () => {
     expect(wrapper.emitted("navigate")).toEqual([["home"]]);
   });
 
-  it("persists collapse state and exposes collapsed telemetry, provider, and settings navigation", async () => {
+  it("persists collapse state and exposes collapsed settings navigation", async () => {
     seedSidebarSessions();
 
     const wrapper = mountSidebar("home");
@@ -650,11 +644,9 @@ describe("HomeSessionSidebar", () => {
 
     expect(window.localStorage.getItem("pony-agent.session-sidebar-collapsed.v1")).toBe("1");
 
-    await wrapper.get('[data-testid="session-sidebar-nav-providers-collapsed"]').trigger("click");
-    await wrapper.get('[data-testid="session-sidebar-nav-telemetry-collapsed"]').trigger("click");
     await wrapper.get('[data-testid="session-sidebar-nav-settings-collapsed"]').trigger("click");
 
-    expect(wrapper.emitted("navigate")).toEqual([["models"], ["telemetry"], ["settings"]]);
+    expect(wrapper.emitted("navigate")).toEqual([["settings"]]);
   });
 
   it("forwards create and delete actions to the runtime store when enabled", async () => {
@@ -680,7 +672,7 @@ describe("HomeSessionSidebar", () => {
 
     const runtimeStore = useRuntimeStore();
     const createSessionSpy = vi.spyOn(runtimeStore, "createSession").mockResolvedValue();
-    const wrapper = mountSidebar("models");
+    const wrapper = mountSidebar("settings");
     await nextTick();
 
     await wrapper.get('[data-testid="session-sidebar-new-chat"]').trigger("click");
@@ -999,5 +991,76 @@ describe("HomeSessionSidebar", () => {
     expect(
       wrapper.get('[data-testid="session-sidebar-group-empty-ws-empty"]').text()
     ).toContain("该工作区暂无对话");
+  });
+});
+
+// ── PA-099：更新角标（仅"设置"入口，amber 静态点）─────────────────────
+describe("HomeSessionSidebar update badge", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    setActivePinia(createPinia());
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-07T15:00:00+08:00"));
+    tauriMocks.mockSafeListen.mockResolvedValue(() => {});
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function seedUpdateAvailable() {
+    const updateStore = useUpdateStore();
+    updateStore.$patch({
+      status: "available",
+      latest: { tagName: "v99.0.0", name: null, publishedAtMs: null }
+    });
+  }
+
+  it("有新版本时在设置两个入口显示角标（展开态）", async () => {
+    seedUpdateAvailable();
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.get('[data-testid="session-sidebar-nav-settings-update-badge"]').exists()).toBe(true);
+    // ADR 0013：模型配置入口已从左栏移除，角标只随"设置"存在
+    expect(wrapper.find('[data-testid="session-sidebar-nav-providers"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("模型配置");
+  });
+
+  it("有新版本时在折叠态设置图标显示角标", async () => {
+    seedUpdateAvailable();
+
+    const wrapper = mountSidebar("home", true);
+    await nextTick();
+
+    expect(
+      wrapper.get('[data-testid="session-sidebar-nav-settings-collapsed-update-badge"]').exists()
+    ).toBe(true);
+  });
+
+  it("无更新时任何入口都没有角标", async () => {
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-nav-settings-update-badge"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="session-sidebar-nav-settings-collapsed-update-badge"]').exists()).toBe(false);
+  });
+
+  it("缓存版本不高于当前版本时角标保持隐藏（现算 hasUpdate）", async () => {
+    const updateStore = useUpdateStore();
+    updateStore.$patch({
+      status: "up-to-date",
+      latest: { tagName: "v0.0.1", name: null, publishedAtMs: null }
+    });
+
+    const wrapper = mountSidebar();
+    await nextTick();
+
+    expect(wrapper.find('[data-testid="session-sidebar-nav-settings-update-badge"]').exists()).toBe(false);
   });
 });

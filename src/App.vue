@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { TooltipProvider } from "reka-ui";
-import { ChevronLeft, ChevronRight } from "lucide-vue-next";
+import { Activity, ChevronLeft, ChevronRight } from "lucide-vue-next";
 import HomeSidebar from "@/components/HomeSidebar.vue";
 import HomeSessionSidebar from "@/components/HomeSessionSidebar.vue";
 import HomeWorkspace from "@/components/HomeWorkspace.vue";
 import TitleBar from "@/components/TitleBar.vue";
 import TelemetryPage from "@/components/telemetry/TelemetryPage.vue";
 import ConfigPage from "@/components/config/ConfigPage.vue";
+import Tooltip from "@/components/ui/Tooltip.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useSettingsStore } from "@/stores/settings";
+import { useUpdateStore } from "@/stores/update";
 import type { ConfigTab, SidebarNavigationPage } from "@/types/config";
 
 type AppPage = "home" | "config" | "telemetry";
@@ -27,6 +29,8 @@ const windowWidth = ref(typeof window !== "undefined" ? window.innerWidth : Numb
 const providerStore = useProviderStore();
 const runtimeStore = useRuntimeStore();
 const settingsStore = useSettingsStore();
+// PA-099：更新检测 store（initialize 只水合缓存，网络检查在内部 void 后台化）。
+const updateStore = useUpdateStore();
 const isResizing = ref(false);
 let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 let onBeforeUnload: (() => void) | null = null;
@@ -38,33 +42,23 @@ const forceCloseRightSidebar = computed(() => windowWidth.value < AUTO_CLOSE_RIG
 const forceCollapseLeftSidebar = computed(() => windowWidth.value < AUTO_COLLAPSE_LEFT_SIDEBAR_WIDTH);
 const rightSidebarOpen = computed(() => rightSidebarPreferredOpen.value && !forceCloseRightSidebar.value);
 
-// PA-096：左栏一级键高亮跟随派生导航态；config+tools 无对应一级键 → 不点亮。
+// ADR 0013：左栏一级键高亮跟随派生导航态。观测页（telemetry）入口已移至右栏
+// 浮动按钮，不经左栏——派生高亮为空；config 页仅 general tab 对应"设置"键。
 const sessionSidebarActivePage = computed<SidebarNavigationPage | null>(() => {
   if (currentPage.value === "config") {
-    if (configTab.value === "models") {
-      return "models";
-    }
-    if (configTab.value === "general") {
-      return "settings";
-    }
-    return null;
+    return configTab.value === "general" ? "settings" : null;
   }
-  return currentPage.value;
+  return currentPage.value === "home" ? "home" : null;
 });
 
-// 左栏一级菜单请求映射：models/settings 打开配置页对应 tab，telemetry 直达遥测页。
+// 左栏一级菜单请求映射：settings 打开配置页通用 tab；模型 tab 由配置页内 tabs 直达。
 function handleSessionNavigate(page: SidebarNavigationPage) {
   if (page === "home") {
     currentPage.value = "home";
     return;
   }
 
-  if (page === "telemetry") {
-    currentPage.value = "telemetry";
-    return;
-  }
-
-  configTab.value = page === "models" ? "models" : "general";
+  configTab.value = "general";
   currentPage.value = "config";
 }
 
@@ -157,7 +151,9 @@ onMounted(async () => {
     runStartupTask("appSettings", () => settingsStore.loadSettings()),
     runStartupTask("health", () => runtimeStore.fetchHealth()),
     runStartupTask("availableTools", () => runtimeStore.fetchAvailableTools()),
-    runStartupTask("turnEvents", () => runtimeStore.initializeTurnEvents())
+    runStartupTask("turnEvents", () => runtimeStore.initializeTurnEvents()),
+    // PA-099：更新角标水合（缓存恢复零网络；过期时后台补查不阻塞本链）。
+    runStartupTask("updateCheck", () => updateStore.initialize())
   ]);
   await runStartupTask("sessions", () => runtimeStore.initializeSessions());
 });
@@ -237,7 +233,23 @@ watch(rightSidebarPreferredOpen, (value) => {
                   <HomeSidebar />
                 </div>
               </div>
+              <!-- ADR 0013：观测入口——右栏右上角折叠按钮左侧的纯图标浮动按钮。
+                   tooltip"观测"；<1000px 右栏强制关闭时折叠按钮消失，观测按钮
+                   落位 right-3 保持任何窗口宽度可达（吸收 0009 曾否决右栏入口
+                   的窄窗口零入口问题）。 -->
+              <Tooltip text="观测" side="bottom">
                 <button
+                  type="button"
+                  class="absolute top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                  :class="forceCloseRightSidebar ? 'right-3' : 'right-[3.25rem]'"
+                  aria-label="观测"
+                  data-testid="workspace-observation-toggle"
+                  @click="currentPage = 'telemetry'"
+                >
+                  <Activity class="h-4 w-4" />
+                </button>
+              </Tooltip>
+              <button
                   v-if="!forceCloseRightSidebar"
                   type="button"
                   class="absolute right-3 top-2 z-20 inline-flex h-8 w-8 items-center justify-center rounded-[0.5rem] bg-[#fbf4e8] text-stone-500 transition-[background-color,color] duration-300 ease-out hover:cursor-pointer hover:bg-[#f7e3bf] hover:text-stone-900"

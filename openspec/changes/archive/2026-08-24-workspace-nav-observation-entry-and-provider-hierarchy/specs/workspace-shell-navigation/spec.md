@@ -1,19 +1,6 @@
 # Workspace Shell Navigation
 
-## Requirements
-
-### Requirement: Conversation right sidebar SHALL host only conversation-process panels
-The home right sidebar SHALL render the session status panel, plan panel, and debug panel only; the tools catalog and the turn trace explorer SHALL NOT be rendered inside the conversation right sidebar.
-
-#### Scenario: User opens the conversation page in coding mode
-- **WHEN** the home page is rendered in coding mode
-- **THEN** the right sidebar contains the status, plan, and debug panels
-- **AND** no tools catalog section and no trace explorer section exist in the sidebar DOM
-
-#### Scenario: User opens the conversation page in work mode
-- **WHEN** the home page is rendered in work mode
-- **THEN** the right sidebar contains the status, plan, and debug panels
-- **AND** no trace entry point of any kind is rendered in the sidebar
+## MODIFIED Requirements
 
 ### Requirement: Trace and metrics SHALL live in a dedicated second-level observation page
 The system SHALL provide an observation page (原"遥测页"，更名"观测") that hosts the turn trace explorer and the model metrics dashboard as tabs; it SHALL be reachable only through an explicit navigation action from a floating icon-only entry at the top-right of the conversation page's right rail and SHALL NOT be part of the conversation working surface.
@@ -45,6 +32,25 @@ The observation entry SHALL be labeled "观测" in both workspace modes; the Tra
 - **THEN** the active tab SHALL converge to the first available tab (metrics)
 - **AND** the Trace tab SHALL disappear from the tab list
 
+### Requirement: The configuration page SHALL organize settings into tabs
+The configuration page SHALL provide tabs for general settings (workspace mode, service keys), model configuration, and the tools catalog; the active tab SHALL be a controlled in-session state driven by explicit destinations and unknown tab values SHALL fall back to the general tab.
+
+#### Scenario: User switches configuration tabs
+- **WHEN** the user activates each configuration tab in turn
+- **THEN** the corresponding tab panel renders and other panels stay unmounted
+
+#### Scenario: User opens configuration from the remaining first-level sidebar destination
+- **WHEN** the user activates "设置" in the left sidebar
+- **THEN** the general tab SHALL be active
+- **AND** model configuration SHALL be reached via the in-page models tab only
+
+## REMOVED Requirements
+
+### Requirement: Model configuration SHALL be a first-level sidebar destination
+**Reason**: 冗余入口——配置页已承载"模型"tab；左栏一级键与折叠态图标删除，目的地收敛为配置页内 tab（由 MODIFIED 的 configuration-tabs requirement 覆盖）。
+
+## ADDED Requirements
+
 ### Requirement: Provider management SHALL present a flat provider list with two hierarchical collapsible detail sections
 The provider management surface SHALL render providers as a flat selectable list without accordion collapsing; its detail pane SHALL contain exactly two first-level collapsible sections labeled 提供商详情 and 模型列表; expanding a model row within the list SHALL reveal that model's configuration details in place.
 
@@ -72,38 +78,3 @@ The provider management surface SHALL render providers as a flat selectable list
 - **WHEN** the user activates 新增模型 on the model list section header
 - **THEN** a create-model form card renders inside the list section
 - **AND** saving returns to the new model's expanded detail view
-
-### Requirement: The workspace section SHALL be the first priority section in the left sidebar
-The left sidebar SHALL place the workspace section above the conversation list, and the section header SHALL surface the active workspace name; the workspace badge in the action row SHALL be removed to avoid duplicated toggles.
-
-#### Scenario: User scans the left sidebar
-- **WHEN** the left sidebar is rendered in expanded mode
-- **THEN** the workspace section appears before the conversation section in DOM order
-- **AND** the workspace section header shows the active workspace name
-
-### Requirement: The configuration page SHALL organize settings into tabs
-The configuration page SHALL provide tabs for general settings (workspace mode, service keys), model configuration, and the tools catalog; the active tab SHALL be a controlled in-session state driven by explicit destinations and unknown tab values SHALL fall back to the general tab.
-
-#### Scenario: User switches configuration tabs
-- **WHEN** the user activates each configuration tab in turn
-- **THEN** the corresponding tab panel renders and other panels stay unmounted
-
-#### Scenario: User opens configuration from the remaining first-level sidebar destination
-- **WHEN** the user activates "设置" in the left sidebar
-- **THEN** the general tab SHALL be active
-- **AND** model configuration SHALL be reached via the in-page models tab only
-
-### Requirement: Tools catalog SHALL be presented in the configuration page
-The tools catalog (available tools with permission summaries) SHALL render as a static list in the configuration page tools tab, with Chinese display names preferred and an explicit empty state.
-
-#### Scenario: User inspects available tools
-- **WHEN** the tools tab is opened
-- **THEN** each available tool lists its display name (Chinese short name first), kind, description, and permission/approval/source summary
-- **AND** when no tools are available an explicit empty-state message renders
-
-### Requirement: Telemetry page tabs and configuration tabs SHALL meet APG tab accessibility
-Tab strips SHALL use role tablist/tab/tabpanel with aria-selected and aria-controls wiring, roving tabindex, and arrow-key navigation; page transitions SHALL move focus to the new page heading.
-
-#### Scenario: Keyboard user navigates a tab strip
-- **WHEN** a tab strip has focus and the user presses ArrowLeft/ArrowRight/Home/End
-- **THEN** selection moves according to WAI-ARIA APG tab semantics

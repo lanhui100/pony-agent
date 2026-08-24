@@ -12,7 +12,7 @@ import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProje
 /**
  * PA-096：右侧栏瘦身为纯对话过程面板（状态 / 计划 / 调试）。
  *
- * - Tools 目录移至配置页（ConfigToolsSection）；Trace 移至遥测页（TraceInspector）。
+ * - Tools 目录移至配置页（ConfigToolsSection）；Trace 移至观测页（TraceInspector）。
  * - 会话级聚合由共享管线 useTraceProjection 供给；liveTurnEnabled 恒 false——
  *   与原"trace 面板折叠时聚合不含进行中 turn"的行为逐位一致。
  */

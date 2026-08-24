@@ -6,6 +6,7 @@ import App from "@/App.vue";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useSettingsStore } from "@/stores/settings";
+import { useUpdateStore } from "@/stores/update";
 
 const HomeSidebarStub = defineComponent({
   template: '<div data-testid="home-sidebar-stub">home-sidebar</div>'
@@ -41,22 +42,6 @@ const HomeSessionSidebarStub = defineComponent({
         h(
           "button",
           {
-            "data-testid": "stub-nav-models",
-            onClick: () => emit("navigate", "models")
-          },
-          "go-models"
-        ),
-        h(
-          "button",
-          {
-            "data-testid": "stub-nav-telemetry",
-            onClick: () => emit("navigate", "telemetry")
-          },
-          "go-telemetry"
-        ),
-        h(
-          "button",
-          {
             "data-testid": "stub-nav-settings",
             onClick: () => emit("navigate", "settings")
           },
@@ -81,6 +66,14 @@ const ConfigPageStub = defineComponent({
   setup(props, { emit }) {
     return () =>
       h("div", { "data-testid": "config-page-stub", "data-tab": props.tab }, [
+        h(
+          "button",
+          {
+            "data-testid": "stub-config-select-models",
+            onClick: () => emit("update:tab", "models")
+          },
+          "select-models"
+        ),
         h(
           "button",
           {
@@ -114,6 +107,19 @@ const TooltipProviderStub = defineComponent({
   template: '<div data-testid="tooltip-provider-stub"><slot /></div>'
 });
 
+// ADR 0013：观测按钮经 ui/Tooltip 包裹；App.spec 将 setTimeout mock 成立即执行，
+// 与 reka-ui TooltipRoot 的延迟开启逻辑组合未经验证——按 HomeSidebar.spec 先例
+// 直接 stub 掉 Tooltip，仅保留 trigger 插槽渲染。
+const TooltipStub = defineComponent({
+  props: {
+    text: {
+      type: String,
+      default: ""
+    }
+  },
+  template: '<span data-testid="tooltip-stub" :data-text="text"><slot /></span>'
+});
+
 function mountApp() {
   return mount(App, {
     global: {
@@ -123,7 +129,8 @@ function mountApp() {
         HomeWorkspace: HomeWorkspaceStub,
         ConfigPage: ConfigPageStub,
         TelemetryPage: TelemetryPageStub,
-        TooltipProvider: TooltipProviderStub
+        TooltipProvider: TooltipProviderStub,
+        Tooltip: TooltipStub
       }
     }
   });
@@ -163,6 +170,14 @@ describe("App", () => {
     vi.spyOn(runtimeStore, "fetchAvailableTools").mockResolvedValue();
     vi.spyOn(runtimeStore, "initializeTurnEvents").mockResolvedValue();
     vi.spyOn(runtimeStore, "initializeSessions").mockResolvedValue();
+
+    // PA-099：更新检测默认整体拦截，保证本文件任何用例都不触网；
+    // 需要观察 initialize 的用例自行覆盖该 spy。
+    // 注意（守卫约定）：spy 依赖 mountApp() 不安装 pinia 插件——mount 内的
+    // useUpdateStore() 解析到上方 active pinia 的同一实例，拦截才生效；
+    // 若未来给 mountApp 增加 global.plugins=[pinia()]，此处将静默失效转为触网。
+    const updateStore = useUpdateStore();
+    vi.spyOn(updateStore, "initialize").mockResolvedValue();
   });
 
   afterEach(() => {
@@ -177,54 +192,70 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="tooltip-provider-stub"]').exists()).toBe(true);
   });
 
-  it("switches between home, config (models/general tabs), and telemetry from the sidebar", async () => {
+  it("switches between home and the config general tab from the sidebar", async () => {
     const wrapper = mountApp();
 
-    // 一级菜单"模型配置" → 配置页·模型 tab（provider 管理升为一级目的地）
-    await wrapper.get('[data-testid="stub-nav-models"]').trigger("click");
-    expect(wrapper.find('[data-testid="config-page-stub"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("models");
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
-    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("models");
-
-    await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
-    expect(wrapper.find('[data-testid="config-page-stub"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
-
-    // 遥测页：二级读面（coding 双 tab / work 仅指标，门禁由 TelemetryPage 自身负责）
-    await wrapper.get('[data-testid="stub-nav-telemetry"]').trigger("click");
-    expect(wrapper.find('[data-testid="telemetry-page-stub"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
-
-    await wrapper.get('[data-testid="stub-telemetry-back"]').trigger("click");
-    expect(wrapper.find('[data-testid="telemetry-page-stub"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
-
-    // 一级菜单"设置" → 配置页·通用 tab
+    // 左栏仅存的一级配置入口"设置" → 配置页·通用 tab
     await wrapper.get('[data-testid="stub-nav-settings"]').trigger("click");
+    expect(wrapper.find('[data-testid="config-page-stub"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("general");
     expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("settings");
 
     await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
     expect(wrapper.find('[data-testid="config-page-stub"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
   });
 
-  it("keeps the config page as a controlled tab surface and clears sidebar highlight on the tools tab", async () => {
+  it("keeps config page tabs as controlled surface with no first-level highlight on models/tools (ADR 0013)", async () => {
     const wrapper = mountApp();
 
     await wrapper.get('[data-testid="stub-nav-settings"]').trigger("click");
     expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("general");
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("settings");
 
-    // 配置页内部切到 tools：无对应左栏一级键 → 派生高亮为空
+    // 配置页内部切到 models tab："模型配置"一级键已移除 → 派生高亮为空
+    await wrapper.get('[data-testid="stub-config-select-models"]').trigger("click");
+    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("models");
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("");
+
+    // tools tab 同样无对应一级键
     await wrapper.get('[data-testid="stub-config-select-tools"]').trigger("click");
     expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("tools");
     expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("");
 
-    // 回到 home 再进模型配置 → 显式目的地覆盖为 models tab
+    // 回到 home 再进设置 → 显式目的地覆盖为 general tab
     await wrapper.get('[data-testid="stub-nav-home"]').trigger("click");
-    await wrapper.get('[data-testid="stub-nav-models"]').trigger("click");
-    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("models");
+    await wrapper.get('[data-testid="stub-nav-settings"]').trigger("click");
+    expect(wrapper.get('[data-testid="config-page-stub"]').attributes("data-tab")).toBe("general");
+  });
+
+  it("opens the observation page from the right-rail icon entry and returns home (ADR 0013)", async () => {
+    const wrapper = mountApp();
+
+    const observation = wrapper.get('[data-testid="workspace-observation-toggle"]');
+    expect(observation.attributes("aria-label")).toBe("观测");
+    // 纯图标按钮 + tooltip 包裹（文本经 Tooltip 组件渲染）
+    expect(observation.text()).toBe("");
+    expect(wrapper.get('[data-testid="tooltip-stub"]').attributes("data-text")).toBe("观测");
+
+    // 与折叠按钮同规格：尺寸/底色/圆角/hover 完全一致（ADR 0013 迭代）
+    const toggle = wrapper.get('[data-testid="workspace-right-sidebar-toggle"]');
+    const sharedClasses = ["h-8", "w-8", "rounded-[0.5rem]", "bg-[#fbf4e8]", "hover:bg-[#f7e3bf]"];
+    for (const cls of sharedClasses) {
+      expect(observation.classes()).toContain(cls);
+      expect(toggle.classes()).toContain(cls);
+    }
+
+    await observation.trigger("click");
+    expect(wrapper.find('[data-testid="telemetry-page-stub"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(false);
+    // 观测不经左栏：派生高亮为空
+    expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-current-page")).toBe("");
+
+    await wrapper.get('[data-testid="stub-telemetry-back"]').trigger("click");
+    expect(wrapper.find('[data-testid="telemetry-page-stub"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="home-workspace-stub"]').exists()).toBe(true);
   });
 
   it("lets the workspace toggle the right sidebar open state", async () => {
@@ -288,6 +319,8 @@ describe("App", () => {
 
     expect(wrapper.get('[data-testid="home-right-sidebar-shell"]').attributes("data-open")).toBe("true");
     expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-force-collapsed")).toBe("false");
+    // 常规宽度：观测入口与折叠按钮并排（折叠按钮右侧，观测在其左）
+    expect(wrapper.get('[data-testid="workspace-observation-toggle"]').classes()).toContain("right-[3.25rem]");
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 960 });
     window.dispatchEvent(new Event("resize"));
@@ -295,7 +328,14 @@ describe("App", () => {
 
     expect(wrapper.get('[data-testid="home-right-sidebar-shell"]').attributes("data-open")).toBe("false");
     expect(wrapper.find('[data-testid="workspace-right-sidebar-toggle"]').exists()).toBe(false);
+    // ADR 0013：右栏强制关闭后观测入口仍可达（落位 right-3），不重演窄窗口零入口
+    expect(wrapper.get('[data-testid="workspace-observation-toggle"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="workspace-observation-toggle"]').classes()).toContain("right-3");
     expect(wrapper.get('[data-testid="home-session-sidebar-stub"]').attributes("data-force-collapsed")).toBe("false");
+
+    // 窄窗口下仍可进入观测页
+    await wrapper.get('[data-testid="workspace-observation-toggle"]').trigger("click");
+    expect(wrapper.find('[data-testid="telemetry-page-stub"]').exists()).toBe(true);
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 780 });
     window.dispatchEvent(new Event("resize"));
@@ -371,6 +411,7 @@ describe("App", () => {
     const providerStore = useProviderStore();
     const settingsStore = useSettingsStore();
     const runtimeStore = useRuntimeStore();
+    const updateStore = useUpdateStore();
 
     vi.spyOn(runtimeStore, "fetchHealth").mockImplementation(async () => {
       callOrder.push("health");
@@ -390,10 +431,14 @@ describe("App", () => {
     vi.spyOn(runtimeStore, "initializeSessions").mockImplementation(async () => {
       callOrder.push("sessions");
     });
+    // PA-099：更新角标水合并入启动链（第 7 个任务）。
+    vi.spyOn(updateStore, "initialize").mockImplementation(async () => {
+      callOrder.push("updateCheck");
+    });
 
     mountApp();
     await vi.waitFor(() =>
-      expect(callOrder.length).toBe(6)
+      expect(callOrder.length).toBe(7)
     );
     expect(callOrder).toContain("turnEvents");
     expect(callOrder).toContain("health");

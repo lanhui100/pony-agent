@@ -2,7 +2,6 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
-  Activity,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -11,15 +10,13 @@ import {
   LoaderCircle,
   MessageSquareMore,
   Plus,
-  Server,
   Settings,
-  Settings2,
   Trash2
 } from "lucide-vue-next";
 import PonyBrandIcon from "@/components/PonyBrandIcon.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import { useRuntimeStore } from "@/stores/runtime";
-import { useSettingsStore } from "@/stores/settings";
+import { useUpdateStore } from "@/stores/update";
 import type { SidebarNavigationPage } from "@/types/config";
 import type { ChatMessage, SessionOverview } from "@/types/runtime";
 import {
@@ -49,10 +46,9 @@ const emit = defineEmits<{
 }>();
 
 const runtimeStore = useRuntimeStore();
-const settingsStore = useSettingsStore();
-const { workspaceMode } = storeToRefs(settingsStore);
-// PA-096：遥测入口按工作模式分档——coding 显"遥测"（Trace+指标），work 显"指标"。
-const isCoding = computed(() => workspaceMode.value === "coding");
+// PA-099：更新角标只挂"设置"入口（更新卡片所在 general tab 的目的地，左栏仅存的一级键）；
+// amber 与运行中指示灯同族，避开 rose（本侧栏语义=删除确认/任务失败）。
+const updateStore = useUpdateStore();
 const {
   isSubmitting,
   messages,
@@ -510,39 +506,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
         </button>
 
         <button
-          class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
-          :class="
-            props.currentPage === 'telemetry'
-              ? 'bg-[#f7e3bf] text-stone-900'
-              : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
-          "
-          type="button"
-          :title="isCoding ? '遥测' : '指标'"
-          :aria-label="isCoding ? '打开遥测页' : '打开指标监控'"
-          data-testid="session-sidebar-nav-telemetry-collapsed"
-          @click="navigate('telemetry')"
-        >
-          <Activity class="h-4 w-4" />
-        </button>
-
-        <button
-          class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
-          :class="
-            props.currentPage === 'models'
-              ? 'bg-[#f7e3bf] text-stone-900'
-              : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
-          "
-          type="button"
-          title="模型配置"
-          aria-label="打开模型配置"
-          data-testid="session-sidebar-nav-providers-collapsed"
-          @click="navigate('models')"
-        >
-          <Settings2 class="h-4 w-4" />
-        </button>
-
-        <button
-          class="mt-auto inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
+          class="relative mt-auto inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
           :class="
             props.currentPage === 'settings'
               ? 'bg-[#f7e3bf] text-stone-900'
@@ -554,6 +518,13 @@ function clearPendingDeleteSession(session: SessionOverview) {
           @click="navigate('settings')"
         >
           <Settings class="h-4 w-4" />
+          <!-- PA-099：GitHub 有新发版时的角标提醒（点击仍导航设置页）。 -->
+          <span
+            v-if="updateStore.hasUpdate"
+            class="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-500"
+            title="发现新版本"
+            data-testid="session-sidebar-nav-settings-collapsed-update-badge"
+          />
         </button>
       </div>
 
@@ -853,42 +824,11 @@ function clearPendingDeleteSession(session: SessionOverview) {
 
         </div></ScrollArea>
 
-          <!-- PA-096：底部一级导航——遥测/指标、模型配置（一级菜单，需求 #3）、设置。 -->
+          <!-- ADR 0013：底部一级导航仅剩"设置"——观测入口移至对话页右栏浮动按钮，
+               模型配置直达键并入配置页"模型" tab。 -->
           <div class="mt-auto space-y-0.5 pt-2">
             <button
-              class="flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
-              :class="
-                props.currentPage === 'telemetry'
-                  ? menuSelectedClass
-                  : `${menuInteractiveClass} text-stone-800`
-              "
-              type="button"
-              :title="isCoding ? 'Trace 与指标遥测读面' : '模型指标监控'"
-              data-testid="session-sidebar-nav-telemetry"
-              @click="navigate('telemetry')"
-            >
-              <Activity class="h-3.5 w-3.5" />
-              <span class="text-[12px] font-bold leading-4">{{ isCoding ? "遥测" : "指标" }}</span>
-            </button>
-
-            <button
-              class="flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
-              :class="
-                props.currentPage === 'models'
-                  ? menuSelectedClass
-                  : `${menuInteractiveClass} text-stone-800`
-              "
-              type="button"
-              title="提供商接入与模型挂载"
-              data-testid="session-sidebar-nav-providers"
-              @click="navigate('models')"
-            >
-              <Server class="h-3.5 w-3.5" />
-              <span class="text-[12px] font-bold leading-4">模型配置</span>
-            </button>
-
-            <button
-              class="flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
+              class="relative flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
               :class="
                 props.currentPage === 'settings'
                   ? menuSelectedClass
@@ -900,6 +840,13 @@ function clearPendingDeleteSession(session: SessionOverview) {
             >
               <Settings class="h-3.5 w-3.5" />
               <span class="text-[12px] font-bold leading-4">设置</span>
+              <!-- PA-099：GitHub 有新发版时的角标提醒（点击仍导航设置页）。 -->
+              <span
+                v-if="updateStore.hasUpdate"
+                class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-amber-500"
+                title="发现新版本"
+                data-testid="session-sidebar-nav-settings-update-badge"
+              />
             </button>
           </div>
       </template>

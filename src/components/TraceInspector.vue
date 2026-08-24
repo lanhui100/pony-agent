@@ -12,7 +12,7 @@ import {
 } from "@/lib/runtime/useTraceProjection";
 
 /**
- * PA-096：遥测页 Trace tab 的自包含宿主。
+ * PA-096：观测页 Trace tab 的自包含宿主。
  *
  * - open 初始 false、onMounted 后下一 tick 置 true：
  *   ①挂载瞬间冻结守卫生效（liveTurnEnabled=false，PA-086 语义保留）；
