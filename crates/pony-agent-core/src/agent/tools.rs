@@ -8818,7 +8818,7 @@ mod tests {
         fn send(
             &self,
             url: &str,
-            decision: &WebAccessDecision,
+            _decision: &WebAccessDecision,
             timeout_ms: u64,
         ) -> Result<PinnedHttpExchange, WebFetchTransportError> {
             self.calls
@@ -9253,7 +9253,7 @@ mod tests {
         let port = address.port();
         let hostname = format!("pinned-authority-test.local:{port}");
 
-        let hostname_clone = hostname.clone();
+        let _hostname_clone = hostname.clone();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept test request");
             let mut buffer = [0_u8; 4096];

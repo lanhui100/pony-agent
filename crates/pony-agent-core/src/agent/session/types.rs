@@ -1,23 +1,15 @@
 use super::backend::TraceMigrationState;
-use super::store::{commit_history_node_from_live_state, default_session_title};
+use super::store::default_session_title;
 use crate::agent::hooks::{
-    merge_patch_results, HistoryStateCommandKind, HistoryStateCursorSummary,
-    HistoryStateHookEnvelope, HistoryStateHookEvidence, HistoryStateHookExecutor,
-    HistoryStateHookPoint, HookPatchConflictPolicy, HookPatchOperationKind, HookPatchTarget,
-    HookResultKind, HookStructuredResult, HookTraceRecord, MemoryWriteHookEnvelope,
-    MemoryWriteHookExecutor, MemoryWriteHookPoint, MemoryWriteIntentRecord, MemoryWriteOperation,
-    MemoryWriteTarget, NoopHistoryStateHookExecutor, NoopMemoryWriteHookExecutor,
-    PersistedEffectEvidence,
+    HistoryStateHookEvidence, HookTraceRecord, PersistedEffectEvidence,
 };
-use crate::agent::input::TurnInputImage;
 use crate::agent::provider::BuildContextObservation;
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 pub(crate) const DEFAULT_SESSION_ID: &str = "local-dev-session";
 pub(super) const DEFAULT_SESSION_SUMMARY: &str = "Pony Agent 本地开发会话";

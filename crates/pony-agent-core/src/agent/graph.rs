@@ -1217,8 +1217,7 @@ mod tests {
     use crate::agent::planner::DefaultGraphPlanner;
     use crate::agent::runtime::TurnResult;
     use crate::agent::tool_runtime::{
-        FakeClock, InvocationOrigin, PendingControlRequestKind, PendingControlRequestState,
-        RuntimeClock, ToolDispatchRequest,
+        FakeClock, InvocationOrigin, PendingControlRequestKind, PendingControlRequestState, ToolDispatchRequest,
     };
     use crate::agent::tools::{
         ToolControlKind, ToolDescriptor, ToolDescriptorSource, ToolDisplayMetadata,

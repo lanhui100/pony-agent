@@ -98,7 +98,6 @@ pub use builder::{AgentRuntimeBuilder, DesktopRuntimePreset};
 pub use types::{PlannerGraphDecisionDispatchOutcome, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult, TurnStreamEvent};
 
 use blocked_records::*;
-use builder::*;
 use limits::*;
 use planner_patches::*;
 use stream_support::*;

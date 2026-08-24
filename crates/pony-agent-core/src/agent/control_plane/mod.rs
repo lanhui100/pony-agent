@@ -861,8 +861,11 @@ pub struct HostControlPlane {
     /// Session-owned revisioned plan store backing the Plan control surface (Decision 6).
     plan_store: PlanStore,
     /// PA-095 #3：本控制面的事件持久化通道句柄（会话绑定路由用）。
+    /// 生产路径经 turn_flow 全局注册表消费；字段本身仅由下方测试面 getter 读取。
+    #[cfg_attr(not(test), allow(dead_code))]
     event_persist_channel: Arc<crate::agent::turn_flow::EventPersistFn>,
     /// PA-095 #3：本控制面的缓冲 flush 请求通道句柄（会话绑定路由用）。
+    #[cfg_attr(not(test), allow(dead_code))]
     event_flush_channel: Arc<crate::agent::turn_flow::EventFlushFn>,
 }
 
@@ -957,9 +960,10 @@ impl HostControlPlaneBuilder {
         // 审核 P1：key 用 (session_id, turn_id) 而非仅 turn_id——同一 control plane
         // 可并发处理不同 session 的同名 turn_id，仅按 turn_id 索引会跨 session 串数据。
         // PA-095 #3：通道句柄提升到外层作用域挂到 HostControlPlane 上
-        // （会话绑定路由的测试面入口）。
-        let mut event_persist_channel: Option<Arc<crate::agent::turn_flow::EventPersistFn>> = None;
-        let mut event_flush_channel: Option<Arc<crate::agent::turn_flow::EventFlushFn>> = None;
+        // （会话绑定路由的测试面入口）。块内无条件唯一赋值，延迟初始化即可，
+        // 无需 Option 支架与不可达的 expect 失败路径。
+        let event_persist_channel: Arc<crate::agent::turn_flow::EventPersistFn>;
+        let event_flush_channel: Arc<crate::agent::turn_flow::EventFlushFn>;
         {
             let sessions = Arc::clone(&sessions_rwlock);
             let buffer: Arc<
@@ -1040,7 +1044,7 @@ impl HostControlPlaneBuilder {
             // PA-095 #3：通道句柄保留在本控制面上（会话绑定路由用）。
             let persist_channel: Arc<crate::agent::turn_flow::EventPersistFn> = Arc::new(persist);
             crate::agent::turn_flow::register_event_persist(Arc::clone(&persist_channel));
-            event_persist_channel = Some(persist_channel);
+            event_persist_channel = persist_channel;
             // PA-095 #2：会话级 flush 请求通道——append_turn 物化前确保该会话的
             // 缓冲事件已提交事件表。逐 key 提交成功才移除（commit 先于 clear）。
             // 用 try_write：append_turn 在生产路径于 sessions 写锁内被调用，
@@ -1083,7 +1087,7 @@ impl HostControlPlaneBuilder {
             let flush_channel: Arc<crate::agent::turn_flow::EventFlushFn> =
                 Arc::new(flush_requester);
             crate::agent::turn_flow::register_event_flush(Arc::clone(&flush_channel));
-            event_flush_channel = Some(flush_channel);
+            event_flush_channel = flush_channel;
         }
         // The graph run store and the governed ask dispatcher are shared with the runtime so the
         // Ask control surface (`ask_answer` / `graph_resume_ask`) hits the exact pending-request
@@ -1114,10 +1118,8 @@ impl HostControlPlaneBuilder {
             ask_dispatcher,
             plan_store: self.plan_store.unwrap_or_else(PlanStore::new),
             // PA-095 #3：块内必然赋值（通道注册无条件执行）。
-            event_persist_channel: event_persist_channel
-                .expect("event persist channel registered in build"),
-            event_flush_channel: event_flush_channel
-                .expect("event flush channel registered in build"),
+            event_persist_channel,
+            event_flush_channel,
         }
     }
 }
@@ -3483,7 +3485,7 @@ mod tests {
         );
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -3564,7 +3566,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("runtime-view")]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -3943,7 +3945,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("checkpoint lifecycle ready")]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -4004,7 +4006,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("retrieved")]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -5151,7 +5153,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("lifecycle boundary completed")]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -5205,7 +5207,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("我会记住这条信息。")]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -5281,7 +5283,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -5816,7 +5818,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -5946,7 +5948,7 @@ mod tests {
         );
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -6473,7 +6475,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -6524,7 +6526,7 @@ mod tests {
     use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
     use crate::agent::hooks::HookTraceRecord;
     use crate::agent::session::{
-        AttachmentAssetMap, PersistCommand, PersistCommandOutcome, PersistedStore,
+        AttachmentAssetMap, PersistCommand, PersistedStore,
         SessionAttachmentIndex, SessionBackend, SessionBackendMutationResult,
         SessionBackendTraceLoadResult, SessionState, SessionTraceMutation,
     };
@@ -7443,7 +7445,7 @@ mod tests {
         ]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");
@@ -8520,7 +8522,7 @@ mod tests {
             build_test_control_plane(vec![json_completion("下钻摘要")]);
 
         {
-            let mut runtime = control_plane
+            let runtime = control_plane
                 .runtime
                 .write()
                 .expect("runtime lock poisoned");

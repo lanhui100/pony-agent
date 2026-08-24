@@ -4,22 +4,10 @@ use super::types::{
     TurnHistoryMessage, TurnTraceRecord,
 };
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
-use crate::agent::hooks::{
-    merge_patch_results, HistoryStateCommandKind, HistoryStateCursorSummary,
-    HistoryStateHookEnvelope, HistoryStateHookEvidence, HistoryStateHookExecutor,
-    HistoryStateHookPoint, HookPatchConflictPolicy, HookPatchOperationKind, HookPatchTarget,
-    HookResultKind, HookStructuredResult, HookTraceRecord, MemoryWriteHookEnvelope,
-    MemoryWriteHookExecutor, MemoryWriteHookPoint, MemoryWriteIntentRecord, MemoryWriteOperation,
-    MemoryWriteTarget, NoopHistoryStateHookExecutor, NoopMemoryWriteHookExecutor,
-    PersistedEffectEvidence,
-};
-use crate::agent::input::TurnInputImage;
-use crate::agent::provider::BuildContextObservation;
+use crate::agent::hooks::HookTraceRecord;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

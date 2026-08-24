@@ -1,10 +1,7 @@
 use super::backend::SessionBackend;
 use super::store::{load_store_from_path, PersistedStore};
-use crate::agent::input::TurnInputImage;
-use crate::agent::provider::BuildContextObservation;
-use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct FileSessionBackend {
     pub(super) storage_path: PathBuf,

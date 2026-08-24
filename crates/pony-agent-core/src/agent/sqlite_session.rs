@@ -4767,7 +4767,9 @@ mod tests {
             .expect("counter");
         assert_eq!(counter, "3");
         // 释放连接锁后再写（Mutex 单连接，持锁调用 persist_command 会死锁）
-        drop(guard);
+        // guard 是 as_ref() 的引用句柄，drop 本就是 no-op；真正的锁由下方
+        // drop(conn) / 作用域结束释放。
+        let _ = guard;
         drop(conn);
 
         // 第二次 flush seq 衔接（3 起）
@@ -4855,7 +4857,9 @@ mod tests {
             .expect("counter count");
         assert_eq!(counter_exists, 0, "counter must roll back");
         // 释放连接锁后再写（Mutex 单连接，持锁调用 persist_command 会死锁）
-        drop(guard);
+        // guard 是 as_ref() 的引用句柄，drop 本就是 no-op；真正的锁由下方
+        // drop(conn) / 作用域结束释放。
+        let _ = guard;
         drop(conn);
 
         // 注入关闭后重试成功（seq 从 0 起，无空洞）
@@ -5018,7 +5022,9 @@ mod tests {
             guard
                 .execute("DELETE FROM turn_events WHERE session_id = 's2'", [])
                 .expect("delete s2 events");
-            drop(guard);
+            // guard 是 as_ref() 的引用句柄，drop 本就是 no-op；真正的锁由下方
+            // drop(conn) / 作用域结束释放。
+            let _ = guard;
             drop(conn);
         }
         TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
@@ -5051,7 +5057,9 @@ mod tests {
             )
             .expect("s2 count");
         assert_eq!(s2_events, 0, "s2 failed flush left no events (rollback)");
-        drop(guard);
+        // guard 是 as_ref() 的引用句柄，drop 本就是 no-op；真正的锁由下方
+        // drop(conn) / 作用域结束释放。
+        let _ = guard;
         drop(conn);
         // 注入关闭后重跑：s2 从断点续跑完成
         let count = backend.backfill_turn_events().expect("final backfill");
@@ -5072,7 +5080,7 @@ mod tests {
 
     #[test]
     fn backfill_derives_tool_and_provider_events_from_trace() {
-        use crate::agent::turn_event::TurnEvent;
+        
         let dir = unique_dir("backfill-trace");
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("backfill-trace.db");
@@ -5246,7 +5254,9 @@ mod tests {
             }
             _ => panic!("expected AssistantMessage"),
         }
-        drop(guard);
+        // guard 是 as_ref() 的引用句柄，drop 本就是 no-op；真正的锁由下方
+        // drop(conn) / 作用域结束释放。
+        let _ = guard;
         drop(conn);
 
         // 幂等：第二次回填跳过
@@ -5270,7 +5280,7 @@ mod tests {
     /// 回填）/ 不匹配 Err / 坏 payload fail loud（degraded 上抛，不静默跳过）。
     #[test]
     fn event_schema_version_contract_four_branches() {
-        use crate::agent::turn_event::TurnEvent;
+        
         let dir = unique_dir("schema-version");
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("schema-version.db");
@@ -5493,7 +5503,9 @@ mod tests {
             serde_json::to_string(&observation).expect("serialize original"),
             "load returns payload identical to original"
         );
-        drop(guard);
+        // guard 是 as_ref() 的引用句柄，drop 本就是 no-op；真正的锁由下方
+        // drop(conn) / 作用域结束释放。
+        let _ = guard;
         drop(conn);
 
         // host command 后端：按引用加载返回与原始一致。
@@ -5824,7 +5836,9 @@ mod tests {
             )
             .expect("watermark");
         assert_eq!(watermark, 4, "cache row carries fold watermark");
-        drop(guard);
+        // guard 是 as_ref() 的引用句柄，drop 本就是 no-op；真正的锁由下方
+        // drop(conn) / 作用域结束释放。
+        let _ = guard;
         drop(conn);
 
         // 清表重建：清空 trace 表 → 从事件全量重建 → 与事件折叠一致（事件权威）。

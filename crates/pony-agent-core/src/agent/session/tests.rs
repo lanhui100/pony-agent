@@ -4529,7 +4529,7 @@ fn restore_and_switch_history_branch_move_cursor_between_branch_heads() {
 fn session_state_for_backend_strips_node_traces_and_writes_refs() {
     // PA-088：WriteSeparate + Authoritative 时，持久化副本剥离节点 trace 并生成 refs；
     // 内存副本（原 session）不受影响。
-    let mut session = SessionState {
+    let session = SessionState {
         conversation_id: "s1".to_string(),
         title: "t".to_string(),
         summary: "s".to_string(),
@@ -4837,7 +4837,7 @@ fn pa093_commit_finalize_upgrades_node_to_referenced() {
         .expect("node");
     assert!(node.event_seq_range.is_none(), "pre-flush legacy");
     assert_eq!(node.history.len(), 2, "pre-flush keeps snapshot");
-    drop(s);
+    let _ = s;
     pa093_flush(
         &mut store,
         &sid,
@@ -4856,7 +4856,7 @@ fn pa093_commit_finalize_upgrades_node_to_referenced() {
     assert!(node.turn_trace_history.is_empty(), "trace cleared");
     assert_eq!(s.event_watermark, 4);
     assert_eq!(s.last_commit_watermark, 4);
-    drop(s);
+    let _ = s;
     store.append_turn(Some(&sid), "second", "reply2", None, Vec::new());
     pa093_flush(
         &mut store,
@@ -4872,7 +4872,7 @@ fn pa093_commit_finalize_upgrades_node_to_referenced() {
         Some((4, 7)),
         "contiguous range"
     );
-    drop(s);
+    let _ = s;
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -5138,7 +5138,7 @@ fn pa093_fold_10k_events_stays_under_budget() {
 /// 的 ProviderCallCacheRecord 挂载），消息与 trace 来自同一事件流。
 #[test]
 fn pa094_trace_and_message_views_same_source() {
-    use crate::agent::projection::MetricsProjectionState;
+    
     let events: Vec<(u64, String, TurnEvent)> = vec![
         (
             0,

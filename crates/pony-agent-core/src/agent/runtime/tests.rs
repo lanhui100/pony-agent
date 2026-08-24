@@ -17,7 +17,7 @@ use crate::agent::session::{
     FileSessionBackend, SessionSnapshot, SessionStore, TurnHistoryMessage,
 };
 use crate::agent::telemetry::DefaultTurnTelemetryBuilder;
-use crate::agent::dispatcher::{ControlRequestAuthorization, ControlRequestConsumed};
+use crate::agent::dispatcher::ControlRequestConsumed;
 use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
 use crate::agent::control_plane::HostControlPlaneBuilder;
 use crate::agent::tool_runtime::PendingControlRequestState;
@@ -1079,7 +1079,7 @@ fn runtime_hook_dispatch_records_degrade_failure_evidence_without_stopping_turn(
 #[test]
 fn run_turn_records_planner_trace_records_in_terminal_trace() {
     let server = MockHttpServer::start(vec![json_completion("planner trace answer")]);
-    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
     let result = runtime.run_turn(TurnInput {
         message: "请总结当前状态".to_string(),
@@ -3481,7 +3481,7 @@ fn runtime_default_tool_executor_fails_closed_for_run_without_sandbox() {
 #[test]
 fn start_turn_stream_can_emit_cancelled_when_stop_requested_before_plan() {
     let selection = test_provider_selection("http://127.0.0.1:1/v1".to_string());
-    let mut runtime = build_runtime_for_test(selection);
+    let runtime = build_runtime_for_test(selection);
     let sink = RecordingTurnEventSink::new();
     let control = ExecutionControlRegistry::new();
 
@@ -4103,7 +4103,7 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
     ]);
     let sessions = SessionStore::memory_only();
     let selection = test_provider_selection(server.base_url.clone());
-    let mut runtime = build_runtime_with_session_store(selection, sessions);
+    let runtime = build_runtime_with_session_store(selection, sessions);
 
     let _ = runtime.run_turn(TurnInput {
         message: "hello".to_string(),
@@ -4175,7 +4175,7 @@ fn run_turn_fails_when_attachment_persistence_fails() {
     let sessions = SessionStore::with_backend(Box::new(FileSessionBackend::new(storage_path)));
     let mut selection = test_provider_selection(server.base_url.clone());
     selection.capabilities.supports_image_input = true;
-    let mut runtime = build_runtime_with_session_store(selection, sessions);
+    let runtime = build_runtime_with_session_store(selection, sessions);
     let result = runtime.run_turn(TurnInput {
         message: "请看这张图".to_string(),
         display_message: None,
@@ -4352,7 +4352,7 @@ fn run_turn_records_first_token_latency_for_reasoning_decision() {
             }
         ]
     }))]);
-    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
     let result = runtime.run_turn(TurnInput {
         message: "请直接回答。".to_string(),
@@ -4456,7 +4456,7 @@ fn run_turn_completes_multi_hop_tool_followups_in_single_turn() {
             ]
         })),
     ]);
-    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
     let result = runtime.run_turn(TurnInput {
         message: "tauri.conf.json 第三行是什么？".to_string(),
@@ -4586,7 +4586,7 @@ fn run_turn_accumulates_token_usage_across_tool_followups() {
             }
         })),
     ]);
-    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
     let result = runtime.run_turn(TurnInput {
         message: "继续读取 tauri.conf.json 第三行".to_string(),
@@ -4654,7 +4654,7 @@ fn run_turn_repairs_blank_tool_name_before_execution() {
             ]
         })),
     ]);
-    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
     let result = runtime.run_turn(TurnInput {
         message: "继续查看 tauri.conf.json".to_string(),
@@ -4919,7 +4919,7 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
             json!({ "path": "missing-c.txt", "description": "再试一次" }),
         )),
     ]);
-    let mut runtime = build_runtime_for_test_with_tool_executor(
+    let runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),
         Box::new(AlwaysFailingExecutor),
     );
@@ -4982,7 +4982,7 @@ fn run_turn_resets_consecutive_failure_counter_on_success() {
             ]
         })),
     ]);
-    let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
+    let runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
     let result = runtime.run_turn(TurnInput {
         message: "读取文件并继续".to_string(),
@@ -8309,7 +8309,7 @@ fn governed_ask_suspends_turn_and_binds_waiting_user_without_provider_followup()
         let executor = build_governed_executor(Some(workspace.clone()), None);
         // One followup response (the assistant's final answer after the tool executes).
         let server = MockHttpServer::start(vec![json_completion("done listing files")]);
-        let mut runtime = AgentRuntime::with_dependencies(
+        let runtime = AgentRuntime::with_dependencies(
             SessionStore::memory_only(),
             Box::new(StaticResolver {
                 selection: test_chat_provider_selection(server.base_url.clone()),

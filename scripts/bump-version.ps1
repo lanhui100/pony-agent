@@ -291,6 +291,32 @@ if ($bumpTargets -contains "tauri") {
 }
 
 # ---------------------------------------------------------------------------
+# 4) Sync Cargo.lock with bumped workspace member versions
+# ---------------------------------------------------------------------------
+# 历史教训：曾出现只改 crates/*/Cargo.toml 而不同步根 Cargo.lock 的提交，
+# 仓库处于 manifest/lock 矛盾态，任何 --locked 构建直接失败。
+# `cargo metadata` 只刷新 workspace 本地成员的 lock 条目，不会升级第三方依赖。
+if ($changedFiles | Where-Object { $_ -like '*Cargo.toml' }) {
+  Push-Location $RepoRoot
+  try {
+    & cargo metadata --format-version 1 > $null
+    if ($LASTEXITCODE -eq 0) {
+      $changedFiles += (Join-Path $RepoRoot 'Cargo.lock')
+      Write-Host "[bump-version] Synced Cargo.lock (workspace member versions)" -ForegroundColor DarkGray
+    }
+    else {
+      Write-Warning "cargo metadata exited $LASTEXITCODE — Cargo.lock NOT synced; run it manually before committing."
+    }
+  }
+  catch {
+    Write-Warning "cargo metadata unavailable or failed: $($_.Exception.Message) — Cargo.lock NOT synced; run it manually before committing."
+  }
+  finally {
+    Pop-Location
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Stage version files (optional)
 # ---------------------------------------------------------------------------
 if ($Stage -and $changedFiles.Count -gt 0) {

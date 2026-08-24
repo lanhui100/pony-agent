@@ -89,6 +89,15 @@ if ($portPid) {
 $env:CARGO_TARGET_DIR = "$workspace\target"
 $env:PATH = "$HOME\.cargo\bin;$env:PATH"
 
+# ── npm 环境净化：剔除 pnpm 注入的未知 npm 配置 ──────────────────────
+# pnpm 启动的终端会向子进程注入 npm_config_manage_package_manager_versions
+# （pnpm 专属键，npm 不识别），导致 BeforeDevCommand 的 `npm run dev` 每次输出
+# "Unknown env config" 告警。在脚本作用域内移除，保证 tauri dev 全程无该噪音。
+# （外层 `npm run dev:tauri` 自身的同类告警发生在本脚本启动前，仓库侧无法消除，
+# 仅当宿主 shell 由 pnpm 注入环境时出现。）
+# 写 $null 等价于删除该环境变量，且不产生错误记录、不依赖 ErrorAction 偏好。
+$env:npm_config_manage_package_manager_versions = $null
+
 $npmBin = Join-Path $workspace 'node_modules\.bin'
 $tauriShim = Join-Path $npmBin 'tauri.cmd'
 if (-not (Test-Path $tauriShim)) {

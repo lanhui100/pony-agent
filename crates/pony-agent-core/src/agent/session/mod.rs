@@ -22,7 +22,11 @@ pub use types::{
     SessionSnapshot, SessionState, TraceTimelineEntry, TurnHistoryMessage, TurnTraceRecord,
     TurnTraceRef, WorkspaceRef, WorkspaceRefKind,
 };
-pub(crate) use types::{AttachmentAssetMap, SessionAttachmentIndex, DEFAULT_SESSION_ID};
+// 生产路径仅用 DEFAULT_SESSION_ID；两个附件类型仅 control_plane 测试模块经
+// 本模块命名空间引用（见下方测试供给区同款模式），故按测试构建条件导出。
+pub(crate) use types::DEFAULT_SESSION_ID;
+#[cfg(test)]
+pub(crate) use types::{AttachmentAssetMap, SessionAttachmentIndex};
 
 // 测试供给区：tests.rs 的 use super::*; 依赖本模块命名空间提供这些名字
 #[cfg(test)]

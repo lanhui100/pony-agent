@@ -60,3 +60,6 @@ nul
 NUL.*
 NUL*/
 tsconfig.tsbuildinfo
+
+# start-tauri-dev.ps1 的启动器 pid 记录（强杀/崩溃时 finally 清理不会执行）
+.tauri-dev.pid

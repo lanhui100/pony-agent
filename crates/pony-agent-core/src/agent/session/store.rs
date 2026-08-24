@@ -28,8 +28,6 @@ use crate::agent::hooks::{
     PersistedEffectEvidence,
 };
 use crate::agent::input::TurnInputImage;
-use crate::agent::provider::BuildContextObservation;
-use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -400,9 +398,12 @@ impl SessionStore {
             event_assistant.unwrap_or_else(|| (assistant_message.to_string(), None));
         let memory_write_hook_executor = Arc::clone(&self.memory_write_hook_executor);
         let history_len_before;
-        let mut appended_user: Option<TurnHistoryMessage> = None;
-        let mut appended_assistant: Option<TurnHistoryMessage> = None;
-        let mut meta_patch: Option<SessionMetaPatch> = None;
+        // 块内无条件唯一赋值（PA-095 #2 截断窗口取实际追加项），延迟初始化即可；
+        // appended_* 保留 mut：persist 分支经 take() 原地取空；meta_patch 单次
+        // move 消费，无需 mut。
+        let mut appended_user: Option<TurnHistoryMessage>;
+        let mut appended_assistant: Option<TurnHistoryMessage>;
+        let meta_patch: Option<SessionMetaPatch>;
         {
             let session = self.ensure_session(&session_key);
             ensure_history_graph(session);

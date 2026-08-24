@@ -127,9 +127,15 @@ fn dispatch_event_persist(
 /// "按 session 所有权路由的多通道模型"（任务卡登记的结构性改进）的落地：
 /// 并行测试中各场景把自身控制面的通道绑到自己的 session，全局默认槽被其他
 /// 测试构建覆盖不再影响本会话的事件落盘；生产路径无绑定时行为不变。
-fn resolve_event_persist(session_id: &str) -> Option<Arc<EventPersistFn>> {
+///
+/// TODO(PA-095 #3 后续任务)：session 绑定路由目前仅测试构建生效（见下方
+/// `#[cfg(test)]` 分支）；生产构建恒走全局默认单槽（last-build-wins）。
+/// 生产侧按 session 接线尚未实施，勿因本签名看似接收 session_id 而误以为已接线。
+///
+/// （参数仅测试构建使用，故带下划线前缀以通过非测试编译的 unused 检查。）
+fn resolve_event_persist(_session_id: &str) -> Option<Arc<EventPersistFn>> {
     #[cfg(test)]
-    if let Some(bound) = session_event_persist_binding(session_id) {
+    if let Some(bound) = session_event_persist_binding(_session_id) {
         return Some(bound);
     }
     current_event_persist()

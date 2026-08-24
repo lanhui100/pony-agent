@@ -51,6 +51,7 @@
 - [0008 会话数据架构向事件溯源演进（分阶段落地）](0008-event-sourcing-evolution.md)
 - [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](0009-workbench-ia-telemetry-page-and-config-tabs.md)
 - [0010 CI rust-cache 对齐 target 槽位与最小令牌权限](0010-ci-rust-cache-slot-alignment-and-minimal-token.md)
+- [0011 版本 bump 自动同步 Cargo.lock](0011-bump-version-syncs-cargo-lock.md)
 
 ### 已接替
 

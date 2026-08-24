@@ -238,6 +238,23 @@ core crate 的测试需要显式 `-p pony-agent-core`，并手动复用同一个
 cmd //c "scripts\run-rust-msvc.bat cargo test -p pony-agent-core --lib --target-dir target-test-exact-a agent::tools::"
 ```
 
+#### dev:tauri 告警基线与 pnpm 环境
+
+`npm run dev:tauri` 的健康基线是 **rustc 零警告**（lib 与 test 目标均已清零）：
+新出现的编译告警一律视为回归处理，不要容忍其重新累积。
+
+若终端由 pnpm 启动，pnpm 会向子进程注入 `npm_config_manage_package_manager_versions`
+等 npm 不识别的环境变量，外层 npm 打印一条 `Unknown env config` 告警——它发生在
+start-tauri-dev.ps1 接管之前，仓库侧无法消除；改用 `pnpm run dev:tauri` 启动则
+内外层均无此告警。脚本已在自身作用域内清除该变量，BeforeDevCommand 不受影响。
+
+#### 版本号变更必须连带 Cargo.lock
+
+workspace 成员（crates/pony-agent-core、src-tauri）的 `Cargo.toml` 版本变更后，
+根 `Cargo.lock` 必须同一提交内同步，否则 `--locked` 构建失败。`npm run version:*`
+（bump-version.ps1）已自动完成该同步（ADR 0011）；手工改版本号的场景需自行运行
+`cargo metadata` 刷新。
+
 ### 清理
 
 - `npm run clean:tauri:light` — 清理 check/test target
