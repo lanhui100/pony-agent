@@ -3,8 +3,8 @@ use crate::agent::config::{
 };
 use crate::agent::input::TurnInputImage;
 use crate::agent::retry::{
-    compute_delay, BackoffConfig, JitterKind, ProviderRetryPolicy, RetryBudget, RetryDecision,
-    StreamState,
+    compute_delay, is_rate_limit_error, BackoffConfig, JitterKind, ProviderRetryPolicy,
+    RetryBudget, RetryDecision, Sleeper, StdThreadSleeper, StreamState,
 };
 use crate::agent::runtime_helper::block_on;
 use crate::agent::tools::{builtin_tool_surface, ToolCall, ToolDefinition, ToolResult};
@@ -476,7 +476,7 @@ impl ProviderManager {
         let mut streamed_any_delta = false;
         let result = retry_provider_timeout("decision_stream", || {
             if streamed_any_delta {
-                return Err("stream already emitted delta; skip timeout retry".to_string());
+                return Err("stream already emitted delta; auto-retry forbidden".to_string());
             }
 
             match self.config.protocol {
@@ -542,7 +542,7 @@ impl ProviderManager {
         }
 
         match self.config.protocol {
-            ProviderProtocol::OpenAi => retry_provider_timeout("followup_sync", || {
+            ProviderProtocol::OpenAi => retry_provider_followup_timeout("followup_sync", || {
                 self.send_openai_tool_followup_request(
                     request,
                     tools,
@@ -625,25 +625,36 @@ impl ProviderManager {
 
         match self.config.protocol {
             ProviderProtocol::OpenAi => {
-                let mut streamed_any_delta = false;
-                let stream_result = retry_provider_timeout("followup_stream", || {
-                    if streamed_any_delta {
-                        return Err("stream already emitted delta; skip timeout retry".to_string());
-                    }
+                // PA-100（code-review B P1-2）：流已发出增量后任何重试都必然失败，
+                // 用共享 AtomicBool 让重试循环在 sleep 前放弃、并禁止 RL 长退避切换。
+                let streamed_any_delta = std::sync::atomic::AtomicBool::new(false);
+                let mark_streamed = || {
+                    streamed_any_delta.store(true, std::sync::atomic::Ordering::Relaxed)
+                };
+                let stream_result = retry_provider_followup_stream_timeout(
+                    "followup_stream",
+                    || {
+                        if streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(
+                                "stream already emitted delta; auto-retry forbidden".to_string()
+                            );
+                        }
 
-                    self.send_openai_tool_followup_stream_request(
-                        request,
-                        tools,
-                        accumulated_messages,
-                        assistant_message,
-                        tool_call,
-                        tool_result,
-                        &mut |chunk| {
-                            streamed_any_delta = true;
-                            on_delta(chunk);
-                        },
-                    )
-                });
+                        self.send_openai_tool_followup_stream_request(
+                            request,
+                            tools,
+                            accumulated_messages,
+                            assistant_message,
+                            tool_call,
+                            tool_result,
+                            &mut |chunk| {
+                                mark_streamed();
+                                on_delta(chunk);
+                            },
+                        )
+                    },
+                    &|| streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed),
+                );
                 match stream_result {
                     Ok(response) => Ok(response),
                     Err(stream_error) => {
@@ -651,7 +662,7 @@ impl ProviderManager {
                             "followup:stream-fallback protocol=openai provider={} model={} reason={}",
                             self.config.provider_name, request.model, stream_error
                         ));
-                        let response = match retry_provider_timeout(
+                        let response = match retry_provider_followup_timeout(
                             "followup_sync_fallback",
                             || {
                                 self.send_openai_tool_followup_request(
@@ -2832,50 +2843,186 @@ fn extract_provider_error_detail(err: &str) -> String {
     preview_text(err, 240)
 }
 
-fn retry_provider_timeout<T, F>(label: &str, mut operation: F) -> Result<T, String>
-where
-    F: FnMut() -> Result<T, String>,
-{
-    let config = BackoffConfig {
+/// PA-100：重试作用域。rate-limit 长退避只对 followup 生效——对话首跳
+/// （decision/decision_stream）保持短退避快败进既有 fallback，避免用户在看到
+/// 任何输出前先白等一分钟。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderRetryScope {
+    Decision,
+    Followup,
+}
+
+fn provider_timeout_backoff_config() -> BackoffConfig {
+    BackoffConfig {
         max_retries: PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS.saturating_sub(1),
         initial_delay_ms: 500,
         multiplier: 2.0,
         max_delay_ms: 8000,
         total_budget_ms: 30_000,
         jitter_kind: JitterKind::None,
-    };
-    let policy = ProviderRetryPolicy::new(config);
-    let mut budget = RetryBudget::new(config.max_retries, config.total_budget_ms);
+    }
+}
 
-    for attempt in 0..=config.max_retries {
-        let delay = compute_delay(attempt, &config, 0.5);
+/// rate-limit 专用调度（仅 Followup 作用域）：两次重试 sleep 20s→40s（budget 90s），
+/// 覆盖分钟级 TPM 窗口的大部分。切换到该配置时重建 RetryBudget 并结转 elapsed_ms，
+/// 指数基数以切换点为基准重置（见 retry_provider_scoped_with_sleeper）。
+/// 口径说明（PA-100 code-review A P2-1）：budget 只计 sleep 时间（record_attempt），
+/// 不含每次请求自身的执行耗时；最坏 wall-clock = 60s sleep + 各次 followup 的
+/// provider 超时耗时，且同步路径无取消通道（既有限制）。
+fn provider_rate_limit_backoff_config() -> BackoffConfig {
+    BackoffConfig {
+        max_retries: 2,
+        initial_delay_ms: 20_000,
+        multiplier: 2.0,
+        max_delay_ms: 40_000,
+        total_budget_ms: 90_000,
+        jitter_kind: JitterKind::None,
+    }
+}
+
+fn retry_provider_timeout<T, F>(label: &str, operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_provider_scoped_with_sleeper(
+        label,
+        ProviderRetryScope::Decision,
+        operation,
+        &StdThreadSleeper,
+        None,
+    )
+}
+
+/// followup 专用包装：允许 rate-limit 长退避。
+fn retry_provider_followup_timeout<T, F>(label: &str, operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_provider_scoped_with_sleeper(
+        label,
+        ProviderRetryScope::Followup,
+        operation,
+        &StdThreadSleeper,
+        None,
+    )
+}
+
+/// 流式 followup 专用包装（PA-100 code-review B P1-2）：`no_more_retries_hint`
+/// 返回 true 表示本次流已向调用方发出增量、任何后续重试都必然失败——循环在
+/// sleep 前立即放弃，且禁止切换 rate-limit 长退避。否则"增量已发出后撞限流"
+/// 会白睡 20s+40s，再经 sync fallback 又是 60s，单工具跳不可取消阻塞 >2 分钟。
+fn retry_provider_followup_stream_timeout<T, F>(
+    label: &str,
+    operation: F,
+    no_more_retries_hint: &dyn Fn() -> bool,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_provider_scoped_with_sleeper(
+        label,
+        ProviderRetryScope::Followup,
+        operation,
+        &StdThreadSleeper,
+        Some(no_more_retries_hint),
+    )
+}
+
+fn retry_provider_scoped_with_sleeper<T, F>(
+    label: &str,
+    scope: ProviderRetryScope,
+    mut operation: F,
+    sleeper: &dyn Sleeper,
+    no_retry_hint: Option<&dyn Fn() -> bool>,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    let base_config = provider_timeout_backoff_config();
+    let policy = ProviderRetryPolicy::new(base_config);
+    let mut budget = RetryBudget::new(base_config.max_retries, base_config.total_budget_ms);
+    let mut active_config = base_config;
+    let mut rl_active = false;
+    // attempt：当前配置下的尝试序号——驱动延迟曲线与预算门禁；配置切换时归零
+    // （指数基数以切换点为基准重置）。attempts_total 仅用于日志。
+    let mut attempt = 0_u32;
+    let mut attempts_total = 0_u32;
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let mut last_failure: Option<String> = None;
+
+    loop {
         if attempt > 0 {
-            std::thread::sleep(delay);
+            // 调用方提示"重试已无意义"（如流式增量已发出）→ 放弃最近一次错误。
+            if no_retry_hint.is_some_and(|hint| hint()) {
+                return Err(last_failure.unwrap_or_else(|| "retry aborted by caller".to_string()));
+            }
+            let delay = compute_delay(attempt, &active_config, 0.5);
+            sleeper
+                .sleep(delay, &cancelled)
+                .map_err(|_| format!("{label}: retry sleep cancelled"))?;
             budget.record_attempt(delay.as_millis() as u64);
         }
         match operation() {
             Ok(value) => return Ok(value),
             Err(err) => {
+                attempts_total += 1;
+                let hint_blocking = no_retry_hint.is_some_and(|hint| hint());
                 let last_error = extract_provider_error_detail(&err);
+                last_failure = Some(err.clone());
                 let failure = policy.classify(&err);
+                let use_rate_limit = scope == ProviderRetryScope::Followup
+                    && failure.is_retryable()
+                    && is_rate_limit_error(&err)
+                    && !hint_blocking;
+
+                if use_rate_limit && !rl_active {
+                    // 切换 RL 配置（一次性）：重建 budget 并结转 elapsed_ms（时间
+                    // 预算跨配置累计，不重置）；attempts_used 归零（不同配置的
+                    // 次数上限不可比）；attempt 归一——下一次尝试前先等
+                    // initial_delay_ms，形成 20s→重试→40s→重试 的调度。
+                    rl_active = true;
+                    active_config = provider_rate_limit_backoff_config();
+                    let mut carried =
+                        RetryBudget::new(active_config.max_retries, active_config.total_budget_ms);
+                    carried.elapsed_ms = budget.elapsed_ms;
+                    budget = carried;
+                    attempt = 1;
+                    let rl_policy = ProviderRetryPolicy::new(active_config);
+                    let decision =
+                        rl_policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
+                    provider_log(format!(
+                        "{label}:attempt={attempts_total} failed class={failure:?} \
+                         decision={decision:?} scope={scope:?} switch=rate_limit"
+                    ));
+                    match decision {
+                        RetryDecision::Retry { .. } => continue,
+                        _ => return Err(last_error),
+                    }
+                }
+
+                let active_policy = ProviderRetryPolicy::new(active_config);
                 let decision =
-                    policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
+                    active_policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
                 provider_log(format!(
-                    "{}:attempt={}/{} failed class={:?} decision={:?}",
+                    "{}:attempt={}/{} failed class={:?} decision={:?} scope={:?}",
                     label,
-                    attempt + 1,
-                    config.max_retries + 1,
+                    attempts_total,
+                    active_config.max_retries + 1,
                     failure,
-                    decision
+                    decision,
+                    scope
                 ));
-                if !matches!(decision, RetryDecision::Retry { .. }) {
-                    return Err(last_error);
+                match decision {
+                    RetryDecision::Retry { .. } => {
+                        attempt += 1;
+                    }
+                    _ => return Err(last_error),
                 }
             }
         }
     }
-    Err("retry exhausted".to_string())
 }
+
 
 fn openai_followup_tool_result_message(tool_call: &ToolCall, tool_result: &ToolResult) -> Value {
     json!({
@@ -5095,6 +5242,205 @@ mod tests {
         assert_eq!(result, "ok");
         assert_eq!(attempts.get(), 3);
     }
+    // ── PA-100：rate-limit 感知的 followup 长退避 ───────────────────────────────────────────
+
+    #[test]
+    fn is_rate_limit_error_matches_provider_wording() {
+        assert!(is_rate_limit_error(
+            "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
+        ));
+        assert!(is_rate_limit_error("HTTP 429 Too Many Requests"));
+        assert!(is_rate_limit_error("rate limit exceeded for org"));
+        assert!(is_rate_limit_error("monthly quota exhausted"));
+        assert!(!is_rate_limit_error("provider returned 500"));
+        assert!(!is_rate_limit_error("operation timed out"));
+    }
+
+    #[test]
+    fn followup_rate_limit_switches_to_long_backoff_schedule() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "followup_sync",
+            ProviderRetryScope::Followup,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(
+                    "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
+                        .to_string(),
+                )
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        // 切换后调度：sleep 20s → 重试 → sleep 40s → 重试 → 预算耗尽。
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            60_000
+        );
+    }
+
+    #[test]
+    fn decision_scope_keeps_short_backoff_for_rate_limit_errors() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "decision",
+            ProviderRetryScope::Decision,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err("HTTP 429 too many requests".to_string())
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        // 对话首跳不启用长退避：维持原短退避（≤7.5s sleep、5 次尝试）快败进 fallback。
+        assert_eq!(attempts.get(), 5);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            7_500
+        );
+    }
+
+    #[test]
+    fn followup_timeout_failures_do_not_switch_to_rate_limit_schedule() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "followup_sync",
+            ProviderRetryScope::Followup,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err("调用 provider 失败：operation timed out；type=timeout".to_string())
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 5);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            7_500
+        );
+    }
+
+    /// 裁决记录（PA-100 审核）：报文同时含 timeout 与 rate-limit 特征时按
+    /// rate-limit 处理——长退避对两类瞬时故障都安全，反向必然撞限流窗口。
+    #[test]
+    fn mixed_timeout_and_rate_limit_message_takes_rate_limit_schedule_in_followup() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "followup_stream",
+            ProviderRetryScope::Followup,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(
+                    "request to upstream timed out; upstream said: 429 inference tpm exhausted"
+                        .to_string(),
+                )
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            60_000
+        );
+    }
+
+    /// PA-100 审核 A 缺失测试①：RL 切换发生在 base 阶段已消耗部分时间预算之后，
+    /// 结转的 elapsed 必须计入 RL budget（时间口径跨配置累计）。
+    #[test]
+    fn followup_rate_limit_switch_carries_elapsed_budget_across_configs() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "followup_sync",
+            ProviderRetryScope::Followup,
+            || {
+                let next = attempts.get() + 1;
+                attempts.set(next);
+                if next <= 2 {
+                    Err("调用 provider 失败：operation timed out；type=timeout".to_string())
+                } else {
+                    Err(
+                        "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
+                            .to_string(),
+                    )
+                }
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        // 序列：t/o(无睡) → t/o(sleep0.5s) → 429 切换 → sleep20s → 429 → sleep40s → 429 耗尽。
+        assert_eq!(attempts.get(), 5);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            61_500
+        );
+    }
+
+    /// PA-100 code-review B P1-2：流式增量已发出后，重试必须在 sleep 前放弃，
+    /// 且不得切换 RL 长退避（否则白睡 60s 后仍必然失败）。
+    #[test]
+    fn followup_stream_hint_stops_retries_without_rate_limit_backoff() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let streamed = std::sync::atomic::AtomicBool::new(false);
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "followup_stream",
+            ProviderRetryScope::Followup,
+            || {
+                let next = attempts.get() + 1;
+                attempts.set(next);
+                if next == 1 {
+                    streamed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Err(
+                        "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
+                            .to_string(),
+                    )
+                } else {
+                    Err("stream already emitted delta; auto-retry forbidden".to_string())
+                }
+            },
+            &sleeper,
+            Some(&|| streamed.load(std::sync::atomic::Ordering::Relaxed)),
+        );
+
+        assert!(result.is_err());
+        // hint 阻断切换与 sleep：立即返回首跳错误进 sync fallback。
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+
 
     #[test]
     fn openai_sse_reader_handles_keepalive_and_comment_lines() {
@@ -5312,3 +5658,5 @@ mod tests {
         );
     }
 }
+
+

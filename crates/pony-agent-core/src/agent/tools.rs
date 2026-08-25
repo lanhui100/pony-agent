@@ -1660,12 +1660,19 @@ impl ToolRouter {
         let total_budget_ms = timeout_ms.max(WEB_FETCH_TOTAL_DEADLINE_MS);
         let mut structured_error: Option<PinnedFetchError> = None;
         let exchange = match retry_tool_timeout(TOOL_WEB_FETCH_URL, total_budget_ms, |deadline| {
-            pinned_web_fetch(&connector, url, timeout_ms, total_budget_ms, deadline, &sender)
-                .map_err(|error| {
-                    let message = pinned_fetch_error_message(&error);
-                    structured_error = Some(error);
-                    message
-                })
+            pinned_web_fetch(
+                &connector,
+                url,
+                timeout_ms,
+                total_budget_ms,
+                deadline,
+                &sender,
+            )
+            .map_err(|error| {
+                let message = pinned_fetch_error_message(&error);
+                structured_error = Some(error);
+                message
+            })
         }) {
             Ok(value) => value,
             Err(message) => {
@@ -2231,11 +2238,7 @@ impl ToolRouter {
             // using the same path-or-basename semantics as the engine.
             let relative = self.display_workspace_relative(&root_entry);
             let matched = glob_matches_path_or_basename(&relative, pattern);
-            let paths = if matched {
-                vec![relative]
-            } else {
-                Vec::new()
-            };
+            let paths = if matched { vec![relative] } else { Vec::new() };
             (paths, false, None)
         } else if root_entry.is_dir() {
             let engine = SearchEngine::new();
@@ -2669,6 +2672,8 @@ impl ToolRouter {
             .and_then(Value::as_u64)
             .map(|value| value.clamp(1, MAX_SEGMENT_LINES as u64) as usize)
             .unwrap_or(DEFAULT_SEGMENT_LINES);
+        // PA-100：显式 startLine 全模式生效；未提供时文件模式=1、搜索模式自动定位。
+        let explicit_start_line = explicit_gather_start_line(&call.arguments);
         let paths = call
             .arguments
             .get("paths")
@@ -2709,6 +2714,7 @@ impl ToolRouter {
                             "path": path,
                             "query": if query.is_empty() { Value::Null } else { Value::String(query.clone()) },
                             "limit": limit,
+                            "startLine": explicit_start_line.unwrap_or(1),
                             "lineCount": line_count,
                         }),
                         plan: None,
@@ -2724,6 +2730,7 @@ impl ToolRouter {
                     arguments: json!({
                         "paths": skipped_paths,
                         "limit": limit,
+                        "startLine": explicit_start_line.unwrap_or(1),
                         "lineCount": line_count,
                     }),
                     plan: None,
@@ -2749,7 +2756,13 @@ impl ToolRouter {
                     },
                 ));
             }
-            let plan = build_multi_path_gather_plan(&gathered_paths, &query, limit, line_count);
+            let plan = build_multi_path_gather_plan(
+                &gathered_paths,
+                &query,
+                limit,
+                explicit_start_line.unwrap_or(1),
+                line_count,
+            );
 
             return self.aggregate_nested_results(
                 TOOL_WORKSPACE_GATHER_CONTEXT,
@@ -2803,6 +2816,8 @@ impl ToolRouter {
 
         let nested = match mode {
             "file" => thread::scope(|scope| {
+                // PA-100：显式 startLine 生效；未提供时从第 1 行开始（原行为）。
+                let file_start_line = explicit_start_line.unwrap_or(1);
                 let path_info_call = ToolCall {
                     call_id: None,
                     name: TOOL_WORKSPACE_PATH_INFO.to_string(),
@@ -2814,7 +2829,7 @@ impl ToolRouter {
                     name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                     arguments: json!({
                         "path": display_path,
-                        "startLine": 1,
+                        "startLine": file_start_line,
                         "lineCount": line_count,
                     }),
                     plan: None,
@@ -2853,7 +2868,7 @@ impl ToolRouter {
                                 name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                                 arguments: json!({
                                     "path": display_path,
-                                    "startLine": 1,
+                                    "startLine": file_start_line,
                                     "lineCount": line_count,
                                 }),
                                 plan: None,
@@ -2979,8 +2994,11 @@ impl ToolRouter {
                         first_search_match_line(&search_result.output, &display_path);
                     collected.push((1usize, search_call, search_result));
 
-                    let start_line = segment_line
-                        .map(|line| line.saturating_sub(line_count / 2).max(1))
+                    // PA-100：显式 startLine 优先；未提供时才按搜索命中自动定位。
+                    let start_line = explicit_start_line
+                        .or_else(|| {
+                            segment_line.map(|line| line.saturating_sub(line_count / 2).max(1))
+                        })
                         .unwrap_or(1);
                     let segment_call = ToolCall {
                         call_id: None,
@@ -3039,7 +3057,11 @@ impl ToolRouter {
                             }),
                             plan: None,
                         };
-                        collected.push((2usize, list_call.clone(), self.list_files(&list_call, context)));
+                        collected.push((
+                            2usize,
+                            list_call.clone(),
+                            self.list_files(&list_call, context),
+                        ));
                     }
 
                     collected
@@ -3284,10 +3306,7 @@ impl ToolRouter {
         use crate::agent::path_permission::PathPurpose;
         let trimmed = raw_path.trim();
         if trimmed.is_empty() {
-            return Err((
-                "invalid_path".to_string(),
-                "文件路径不能为空。".to_string(),
-            ));
+            return Err(("invalid_path".to_string(), "文件路径不能为空。".to_string()));
         }
 
         // PA-080：写路径统一经 classify_path(Write)，workspace 外写返回
@@ -3379,14 +3398,12 @@ impl ToolRouter {
         } else {
             self.workspace_root.join(raw_path)
         };
-        let canonical = candidate
-            .canonicalize()
-            .map_err(|error| {
-                (
-                    "invalid_path".to_string(),
-                    format!("无法解析路径 {}：{}", raw_path, error),
-                )
-            })?;
+        let canonical = candidate.canonicalize().map_err(|error| {
+            (
+                "invalid_path".to_string(),
+                format!("无法解析路径 {}：{}", raw_path, error),
+            )
+        })?;
         let root = self.canonical_workspace_root();
 
         if !is_within_root(&root, &canonical) {
@@ -3399,10 +3416,7 @@ impl ToolRouter {
                     if code == "requires_authorization" {
                         (code, message)
                     } else {
-                        (
-                            code,
-                            format!("只允许访问当前工作区内的相对路径。{message}"),
-                        )
+                        (code, format!("只允许访问当前工作区内的相对路径。{message}"))
                     }
                 });
         }
@@ -3968,7 +3982,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_GATHER_CONTEXT,
-            description: "围绕一个路径自动收集最合适的上下文：文件会拿 path info 和首段内容，目录会拿 path info 和文件列表，带 query 时会连同搜索结果一起返回。",
+            description: "围绕一个路径自动收集最合适的上下文：文件会拿 path info 和首段内容，目录会拿 path info 和文件列表，带 query 时会连同搜索结果一起返回。大文件可用 startLine 分页续读。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
@@ -3986,6 +4000,10 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     "query": {
                         "type": "string",
                         "description": "可选搜索词；提供后会进入搜索模式"
+                    },
+                    "startLine": {
+                        "type": "integer",
+                        "description": "从第几行开始读取（最小 1）。显式提供时对所有模式生效，多路径下逐路径生效；未提供时文件模式从第 1 行、搜索模式自动定位命中附近片段"
                     },
                     "lineCount": {
                         "type": "integer",
@@ -4599,7 +4617,9 @@ fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
         }
         TOOL_PLAN_CONTROL => vec![TOOL_PLAN_CONTROL, "plan.control"],
         TOOL_VIEW_IMAGE => vec![TOOL_VIEW_IMAGE, "view.image"],
-        TOOL_WORKSPACE_READ_DOCUMENT => vec![TOOL_WORKSPACE_READ_DOCUMENT, "workspace.read_document"],
+        TOOL_WORKSPACE_READ_DOCUMENT => {
+            vec![TOOL_WORKSPACE_READ_DOCUMENT, "workspace.read_document"]
+        }
         _ => Vec::new(),
     }
 }
@@ -4629,7 +4649,8 @@ fn execution_policy_for_primitive(primitive: &str) -> ToolExecutionPolicy {
             policy.concurrent_safe = true;
             // Converted Markdown can reach the default 512 KiB output cap, so the result budget
             // must not truncate a valid bounded payload.
-            policy.result_budget_bytes = crate::agent::document_conversion::DEFAULT_MAX_OUTPUT_BYTES as usize;
+            policy.result_budget_bytes =
+                crate::agent::document_conversion::DEFAULT_MAX_OUTPUT_BYTES as usize;
         }
         TOOL_WORKSPACE_RUN_COMMAND => {
             policy.default_timeout_ms = DEFAULT_RUN_TIMEOUT_MS;
@@ -5100,9 +5121,14 @@ impl PinnedHttpExchange {
 enum WebFetchTransportError {
     ClientBuild(String),
     Request(String),
-    UnsupportedContentType { content_type: String },
+    UnsupportedContentType {
+        content_type: String,
+    },
     ReadBody(String),
-    PeerMismatch { expected: Vec<IpAddr>, actual: IpAddr },
+    PeerMismatch {
+        expected: Vec<IpAddr>,
+        actual: IpAddr,
+    },
     /// The whole-fetch chain deadline was exhausted before the fetch completed (design Decision 8
     /// / tasks 6.2-6.3). The fetch is cut structurally rather than letting per-hop timeouts
     /// accumulate across redirect hops and retries.
@@ -5317,7 +5343,9 @@ fn pinned_web_fetch(
             return Ok(exchange);
         }
         // `is_redirect()` guarantees a non-empty Location header.
-        let location = exchange.location().expect("redirect exchange carries a Location header");
+        let location = exchange
+            .location()
+            .expect("redirect exchange carries a Location header");
         let target = connector
             .resolve_redirect_target(&exchange.url, &location)
             .map_err(|detail| PinnedFetchError::Denied {
@@ -5452,11 +5480,7 @@ async fn read_bounded_body(
 ) -> Result<(Vec<u8>, bool), String> {
     let mut buf = Vec::with_capacity(cap.min(4096));
     let mut truncated = false;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| error.to_string())?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
         if buf.len().saturating_add(chunk.len()) > cap {
             let remaining = cap.saturating_sub(buf.len());
             buf.extend_from_slice(&chunk[..remaining]);
@@ -5471,7 +5495,12 @@ async fn read_bounded_body(
 /// Whether a declared `Content-Type` is text we may decode. Anything clearly binary (images,
 /// audio, video, archives, PDF, octet-stream) is refused before decoding (Decision 8).
 fn is_text_content_type(content_type: &str) -> bool {
-    let mime = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     mime.starts_with("text/")
         || matches!(
             mime.as_str(),
@@ -5569,14 +5598,23 @@ fn web_fetch_transport_error(error: &WebFetchTransportError) -> ToolResult {
         WebFetchTransportError::ClientBuild(_) => ("client_build_failed", None),
         WebFetchTransportError::Request(message) => {
             if is_tool_timeout_message(message) {
-                ("timeout", Some("请确认目标地址可访问，或稍后重试。".to_string()))
+                (
+                    "timeout",
+                    Some("请确认目标地址可访问，或稍后重试。".to_string()),
+                )
             } else {
-                ("request_failed", Some("请确认目标地址可访问，或稍后重试。".to_string()))
+                (
+                    "request_failed",
+                    Some("请确认目标地址可访问，或稍后重试。".to_string()),
+                )
             }
         }
         WebFetchTransportError::UnsupportedContentType { .. } => (
             "unsupported_content_type",
-            Some("请改用能返回 text/html、text/plain、application/json 等文本内容的地址。".to_string()),
+            Some(
+                "请改用能返回 text/html、text/plain、application/json 等文本内容的地址。"
+                    .to_string(),
+            ),
         ),
         WebFetchTransportError::ReadBody(_) => (
             "read_body_failed",
@@ -5588,7 +5626,10 @@ fn web_fetch_transport_error(error: &WebFetchTransportError) -> ToolResult {
         ),
         WebFetchTransportError::DeadlineExceeded { .. } => (
             "web_fetch_deadline_exceeded",
-            Some("目标服务器响应链过慢，已超过本次抓取的总时间预算。请稍后重试或缩小抓取范围。".to_string()),
+            Some(
+                "目标服务器响应链过慢，已超过本次抓取的总时间预算。请稍后重试或缩小抓取范围。"
+                    .to_string(),
+            ),
         ),
     };
     error_result(
@@ -5607,9 +5648,7 @@ fn web_access_deny_message(reason: &WebAccessDenyReason) -> String {
             format!("不支持的 URL 协议：`{scheme}`，仅允许 http/https。")
         }
         WebAccessDenyReason::MissingHost => "URL 缺少主机名。".to_string(),
-        WebAccessDenyReason::CredentialsNotAllowed => {
-            "URL 不允许携带用户名/密码凭据。".to_string()
-        }
+        WebAccessDenyReason::CredentialsNotAllowed => "URL 不允许携带用户名/密码凭据。".to_string(),
         WebAccessDenyReason::HostForbidden { host, detail } => {
             format!("主机 `{host}` 被策略禁止：{detail}。")
         }
@@ -5935,10 +5974,25 @@ fn build_batch_tool_plan(
     }
 }
 
+/// 解析模型显式提供的分页起始行（`workspace_gather_context` 语境，PA-100）。
+/// 返回 `None` 表示未提供或值无法按 u64 解析（浮点/负数等沿用 lineCount 的松散
+/// 解析契约：静默回退到调用方默认，而非报错）。返回值保证 ≥ 1。
+/// composite（dispatcher_composites）与 legacy（ToolRouter::gather_context）双实现
+/// 共用本函数，避免解析规则漂移。
+pub(crate) fn explicit_gather_start_line(arguments: &Value) -> Option<usize> {
+    arguments
+        .get("startLine")
+        .and_then(Value::as_u64)
+        .map(|value| value.max(1) as usize)
+}
+
+// PA-100（code-review A 建议3）：本函数与 dispatcher_composites.rs 中的同名拷贝
+// 为双实现镜像——修改签名/回显字段必须两处同步（task 8.1 移除 legacy 路径前有效）。
 fn build_multi_path_gather_plan(
     paths: &[String],
     query: &str,
     limit: usize,
+    start_line: usize,
     line_count: usize,
 ) -> ToolPlan {
     ToolPlan {
@@ -5963,6 +6017,7 @@ fn build_multi_path_gather_plan(
                     "path": path,
                     "query": if query.trim().is_empty() { Value::Null } else { Value::String(query.to_string()) },
                     "limit": limit,
+                    "startLine": start_line,
                     "lineCount": line_count,
                 }),
                 summary: format!("第 {} 个路径聚合：`{}`。", index + 1, path),
@@ -6344,6 +6399,124 @@ mod tests {
     }
 
     #[test]
+    fn gather_context_threads_explicit_start_line_in_file_mode() {
+        let workspace = temp_workspace();
+        let body = (1..=10)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(workspace.join("paged.rs"), body).expect("write paged.rs");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({ "path": "paged.rs", "startLine": 6, "lineCount": 3 }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload["meta"]["mode"], "file");
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .expect("results");
+        assert_eq!(results[1]["tool"], "workspace_read_file_segment");
+        // 嵌套回显真实 startLine（PA-100：事故根因即模型模仿回显里的 startLine）。
+        assert_eq!(results[1]["arguments"]["startLine"].as_u64(), Some(6));
+        let segment_text = results[1]["output"].as_str().expect("segment text output");
+        assert!(
+            segment_text.contains("第 6 行"),
+            "segment should start at line 6: {segment_text}"
+        );
+        assert!(segment_text.contains("line-6"));
+        assert!(!segment_text.contains("line-5"));
+        let steps = payload["plan"]["steps"].as_array().expect("plan steps");
+        let segment_step = steps
+            .iter()
+            .find(|step| step["name"] == "workspace_read_file_segment")
+            .expect("segment step");
+        assert_eq!(segment_step["arguments"]["startLine"].as_u64(), Some(6));
+    }
+
+    #[test]
+    fn gather_context_explicit_start_line_overrides_search_auto_position() {
+        let workspace = temp_workspace();
+        let mut lines: Vec<String> = (1..=8).map(|index| format!("filler-{index}")).collect();
+        lines[4] = "needle-line".to_string();
+        fs::write(workspace.join("searched.rs"), lines.join("\n")).expect("write searched.rs");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "path": "searched.rs",
+                "query": "needle",
+                "startLine": 2,
+                "lineCount": 3
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload["meta"]["mode"], "search");
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .expect("results");
+        // 显式 startLine 全模式生效：覆盖"命中行 5 - lineCount/2 → 4"的自动定位。
+        let segment_entry = results
+            .iter()
+            .find(|entry| entry["tool"] == "workspace_read_file_segment")
+            .expect("segment entry");
+        assert_eq!(segment_entry["arguments"]["startLine"].as_u64(), Some(2));
+        let segment_text = segment_entry["output"]
+            .as_str()
+            .expect("segment text output");
+        assert!(segment_text.contains("第 2 行"));
+    }
+
+    /// PA-100 审核 A 缺失测试⑤：legacy 侧多路径 startLine 回显（与 composite 侧
+    /// gather_context_multi_path_echoes_start_line_in_plan_and_skipped_entries 对称）。
+    #[test]
+    fn gather_context_multi_path_echoes_start_line_in_plan() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("one.rs"), "fn one() {}\n").expect("write one");
+        fs::write(workspace.join("two.rs"), "fn two() {}\n").expect("write two");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "paths": ["one.rs", "two.rs"],
+                "startLine": 9,
+                "lineCount": 20
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        let steps = payload["plan"]["steps"].as_array().expect("plan steps");
+        assert_eq!(steps.len(), 2);
+        for step in steps {
+            assert_eq!(step["arguments"]["startLine"].as_u64(), Some(9));
+        }
+        // 每条 per-path 结果的嵌套 arguments 同样回显。
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .expect("results");
+        for entry in results {
+            assert_eq!(entry["arguments"]["startLine"].as_u64(), Some(9));
+        }
+    }
+
+    #[test]
     fn gather_context_can_aggregate_multiple_paths() {
         let workspace = temp_workspace();
         fs::write(workspace.join("one.rs"), "fn one() {}\n").expect("write one");
@@ -6642,7 +6815,10 @@ mod tests {
         assert_eq!(result.status, "ok");
         let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
         assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(2));
-        assert_eq!(payload.get("truncated").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            payload.get("truncated").and_then(Value::as_bool),
+            Some(false)
+        );
 
         // A small `limit` budget truncates honestly instead of pretending full success.
         let result = router.execute(&ToolCall {
@@ -6658,7 +6834,10 @@ mod tests {
         assert_eq!(result.status, "ok");
         let payload = serde_json::from_str::<Value>(&result.output).expect("search output json");
         assert_eq!(payload.get("matchCount").and_then(Value::as_u64), Some(1));
-        assert_eq!(payload.get("truncated").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            payload.get("truncated").and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(payload
             .get("truncationReason")
             .and_then(Value::as_str)
@@ -6996,10 +7175,8 @@ mod tests {
         // PA-080 code-review P0 回归：edit_file 是写操作，即使外部路径有"只读授权"
         // 也必须拒绝（outside_workspace_write_denied），不得把只读授权升级为外部写。
         let workspace = temp_workspace();
-        let external_dir = std::env::temp_dir().join(format!(
-            "pa080-edit-external-{}",
-            std::process::id()
-        ));
+        let external_dir =
+            std::env::temp_dir().join(format!("pa080-edit-external-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&external_dir);
         std::fs::create_dir_all(&external_dir).expect("create external dir");
         let external_file = external_dir.join("secret.txt");
@@ -7019,7 +7196,10 @@ mod tests {
             arguments: json!({ "path": external_file.display().to_string() }),
             plan: None,
         });
-        assert_eq!(read_result.status, "ok", "read with authorization must succeed");
+        assert_eq!(
+            read_result.status, "ok",
+            "read with authorization must succeed"
+        );
 
         // 但 edit 必须拒绝：写判定不认授权清单
         let edit_result = router.execute(&ToolCall {
@@ -7045,7 +7225,10 @@ mod tests {
         );
         // 文件内容未被篡改
         let content = fs::read_to_string(&external_file).expect("read external file");
-        assert_eq!(content, "top secret\n", "external file must not be modified");
+        assert_eq!(
+            content, "top secret\n",
+            "external file must not be modified"
+        );
 
         let _ = std::fs::remove_dir_all(&external_dir);
         let _ = std::fs::remove_dir_all(&workspace);
@@ -7056,10 +7239,8 @@ mod tests {
         // PA-080 code-review P1-1 回归：Run 的 cwd 必须是 workspace 内或受控 tmp，
         // 授权的外部目录不得作为命令工作目录。
         let workspace = temp_workspace();
-        let external_dir = std::env::temp_dir().join(format!(
-            "pa080-run-cwd-external-{}",
-            std::process::id()
-        ));
+        let external_dir =
+            std::env::temp_dir().join(format!("pa080-run-cwd-external-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&external_dir);
         std::fs::create_dir_all(&external_dir).expect("create external dir");
 
@@ -8012,8 +8193,7 @@ mod tests {
         });
 
         assert_eq!(result.status, "error");
-        let payload =
-            serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
         assert_eq!(
             payload
                 .get("error")
@@ -8494,20 +8674,23 @@ mod tests {
         // attempt returns a timeout error, so the retry must NOT run — the budget is authoritative
         // instead of "each attempt gets its own fresh budget".
         let attempts = std::cell::Cell::new(0);
-        let result: Result<(), String> =
-            retry_tool_timeout(TOOL_WEB_FETCH_URL, 0, |_deadline| {
-                attempts.set(attempts.get() + 1);
-                Err("timeout: request timed out".to_string())
-            });
+        let result: Result<(), String> = retry_tool_timeout(TOOL_WEB_FETCH_URL, 0, |_deadline| {
+            attempts.set(attempts.get() + 1);
+            Err("timeout: request timed out".to_string())
+        });
         assert!(result.is_err());
-        assert_eq!(attempts.get(), 1, "no retry may run after the deadline is exhausted");
+        assert_eq!(
+            attempts.get(),
+            1,
+            "no retry may run after the deadline is exhausted"
+        );
     }
 
     // ─────── pinned web fetch tests (PA-076 item 2) ─────────────────────
 
+    use crate::agent::tool_runtime::FakeResolver;
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use crate::agent::tool_runtime::FakeResolver;
 
     /// Build one scripted [`PinnedHttpExchange`] for use in [`FakePinnedSender`] redirect-chain
     /// tests. `status` is the HTTP status code; `location` (when Some) sets the Location header;
@@ -8556,7 +8739,9 @@ mod tests {
     }
 
     impl FakePinnedSender {
-        fn with_script(entries: &[(&str, Result<PinnedHttpExchange, WebFetchTransportError>)]) -> Self {
+        fn with_script(
+            entries: &[(&str, Result<PinnedHttpExchange, WebFetchTransportError>)],
+        ) -> Self {
             Self {
                 responses: entries
                     .iter()
@@ -8582,14 +8767,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((url.to_string(), decision.clone()));
-            self.responses
-                .get(url)
-                .cloned()
-                .unwrap_or_else(|| {
-                    Err(WebFetchTransportError::Request(format!(
-                        "no scripted response for `{url}`"
-                    )))
-                })
+            self.responses.get(url).cloned().unwrap_or_else(|| {
+                Err(WebFetchTransportError::Request(format!(
+                    "no scripted response for `{url}`"
+                )))
+            })
         }
     }
 
@@ -8607,12 +8789,55 @@ mod tests {
         let policy = WebAccessPolicy::default();
         let connector = PinnedConnector::new(&policy, &resolver);
         let sender = FakePinnedSender::with_script(&[
-            ("http://hop0.example/", exchange("http://hop0.example/", 302, Some("http://hop1.example/"), "")),
-            ("http://hop1.example/", exchange("http://hop1.example/", 302, Some("http://hop2.example/"), "")),
-            ("http://hop2.example/", exchange("http://hop2.example/", 302, Some("http://hop3.example/"), "")),
-            ("http://hop3.example/", exchange("http://hop3.example/", 302, Some("http://hop4.example/"), "")),
-            ("http://hop4.example/", exchange("http://hop4.example/", 302, Some("http://hop5.example/"), "")),
-            ("http://hop5.example/", exchange("http://hop5.example/", 200, None, "final")),
+            (
+                "http://hop0.example/",
+                exchange(
+                    "http://hop0.example/",
+                    302,
+                    Some("http://hop1.example/"),
+                    "",
+                ),
+            ),
+            (
+                "http://hop1.example/",
+                exchange(
+                    "http://hop1.example/",
+                    302,
+                    Some("http://hop2.example/"),
+                    "",
+                ),
+            ),
+            (
+                "http://hop2.example/",
+                exchange(
+                    "http://hop2.example/",
+                    302,
+                    Some("http://hop3.example/"),
+                    "",
+                ),
+            ),
+            (
+                "http://hop3.example/",
+                exchange(
+                    "http://hop3.example/",
+                    302,
+                    Some("http://hop4.example/"),
+                    "",
+                ),
+            ),
+            (
+                "http://hop4.example/",
+                exchange(
+                    "http://hop4.example/",
+                    302,
+                    Some("http://hop5.example/"),
+                    "",
+                ),
+            ),
+            (
+                "http://hop5.example/",
+                exchange("http://hop5.example/", 200, None, "final"),
+            ),
         ]);
         let result = pinned_web_fetch(
             &connector,
@@ -8657,8 +8882,10 @@ mod tests {
                 (key, resp)
             })
             .collect();
-        let entries_ref: Vec<(&str, Result<PinnedHttpExchange, WebFetchTransportError>)> =
-            entries.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let entries_ref: Vec<(&str, Result<PinnedHttpExchange, WebFetchTransportError>)> = entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
         let sender = FakePinnedSender::with_script(&entries_ref);
         let result = pinned_web_fetch(
             &connector,
@@ -8692,7 +8919,12 @@ mod tests {
         let connector = PinnedConnector::new(&policy, &resolver);
         let sender = FakePinnedSender::with_script(&[(
             "http://hop0.example/",
-            exchange("http://hop0.example/", 302, Some("http://internal.example/"), ""),
+            exchange(
+                "http://hop0.example/",
+                302,
+                Some("http://internal.example/"),
+                "",
+            ),
         )]);
         let result = pinned_web_fetch(
             &connector,
@@ -8869,8 +9101,10 @@ mod tests {
                 exchange("http://hop5.example/", 200, None, "final"),
             )])
             .collect();
-        let entries_ref: Vec<(&str, Result<PinnedHttpExchange, WebFetchTransportError>)> =
-            entries.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let entries_ref: Vec<(&str, Result<PinnedHttpExchange, WebFetchTransportError>)> = entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
         let sender = DelayedPinnedSender::with_script(&entries_ref, 400, false);
 
         let budget_ms = 1050_u64;
@@ -9058,8 +9292,7 @@ mod tests {
             Err(PinnedFetchError::Denied {
                 decision:
                     WebAccessDecision::Deny {
-                        reason:
-                            WebAccessDenyReason::ForbiddenLiteralAddress { address, .. },
+                        reason: WebAccessDenyReason::ForbiddenLiteralAddress { address, .. },
                         hop: 1,
                     },
                 url,
@@ -9076,7 +9309,10 @@ mod tests {
     #[test]
     fn verify_pinned_peer_accepts_peer_in_resolved_set() {
         let decision = WebAccessDecision::Allow {
-            resolved_addrs: vec!["203.0.113.10".parse().unwrap(), "203.0.113.20".parse().unwrap()],
+            resolved_addrs: vec![
+                "203.0.113.10".parse().unwrap(),
+                "203.0.113.20".parse().unwrap(),
+            ],
             authority: "example.com:80".to_string(),
             sni_host: "example.com".to_string(),
             port: 80,
@@ -9119,7 +9355,10 @@ mod tests {
     #[test]
     fn build_pinned_web_client_pins_domain_with_resolve_override() {
         let decision = WebAccessDecision::Allow {
-            resolved_addrs: vec!["203.0.113.10".parse().unwrap(), "203.0.113.20".parse().unwrap()],
+            resolved_addrs: vec![
+                "203.0.113.10".parse().unwrap(),
+                "203.0.113.20".parse().unwrap(),
+            ],
             authority: "example.com:80".to_string(),
             sni_host: "example.com".to_string(),
             port: 80,
@@ -9187,8 +9426,7 @@ mod tests {
             plan: None,
         });
         assert_eq!(result.status, "error");
-        let payload =
-            serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
         assert_eq!(
             payload
                 .get("error")
@@ -9209,10 +9447,7 @@ mod tests {
         // re-resolve" weak mode. The public IP is not reachable hermetically, so the transport
         // fails, but with a transport error (not `web_access_denied`).
         let resolver = FakeResolver::default();
-        resolver.set_addresses(
-            "public.example",
-            vec!["203.0.113.10".parse().unwrap()],
-        );
+        resolver.set_addresses("public.example", vec!["203.0.113.10".parse().unwrap()]);
         let workspace = temp_workspace();
         let router = ToolRouter::with_workspace_root(workspace).with_web_resolver(resolver);
         let result = router.execute(&ToolCall {
@@ -9222,8 +9457,7 @@ mod tests {
             plan: None,
         });
         assert_eq!(result.status, "error");
-        let payload =
-            serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("web fetch output json");
         let code = payload
             .get("error")
             .and_then(|error| error.get("code"))
@@ -9262,7 +9496,13 @@ mod tests {
             let actual_host = request
                 .lines()
                 .find(|line| line.to_ascii_lowercase().starts_with("host:"))
-                .map(|line| line.trim().trim_start_matches("host:").trim_start_matches("Host:").trim().to_string())
+                .map(|line| {
+                    line.trim()
+                        .trim_start_matches("host:")
+                        .trim_start_matches("Host:")
+                        .trim()
+                        .to_string()
+                })
                 .unwrap_or_default();
             let body = format!("<html>host={actual_host}</html>");
             let response = format!(
@@ -9270,7 +9510,9 @@ mod tests {
                 body.len(),
                 body
             );
-            stream.write_all(response.as_bytes()).expect("write test response");
+            stream
+                .write_all(response.as_bytes())
+                .expect("write test response");
             stream.flush().expect("flush test response");
         });
 
@@ -9365,9 +9607,8 @@ mod tests {
                     "/hop1" => ("302 Found", Some("/hop2"), ""),
                     _ => ("200 OK", None, "final"),
                 };
-                let mut response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n"
-                );
+                let mut response =
+                    format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n");
                 if let Some(loc) = location {
                     response.push_str(&format!("Location: {loc}\r\n"));
                 }
@@ -9376,7 +9617,9 @@ mod tests {
                     body.len(),
                     body
                 ));
-                stream.write_all(response.as_bytes()).expect("write test response");
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write test response");
                 stream.flush().expect("flush test response");
             }
         });
@@ -9400,7 +9643,10 @@ mod tests {
             .expect("redirect hop 0 must succeed");
         assert_eq!(exchange0.status.as_u16(), 302);
         assert_eq!(exchange0.location().as_deref(), Some("/hop1"));
-        assert!(exchange0.body.is_empty(), "redirect hop bodies are never read");
+        assert!(
+            exchange0.body.is_empty(),
+            "redirect hop bodies are never read"
+        );
         assert_eq!(
             exchange0.peer_ip,
             Some("127.0.0.1".parse().unwrap()),

@@ -25,7 +25,6 @@ pub(super) fn validate_turn_images(images: &[TurnInputImage]) -> Result<(), Stri
     Ok(())
 }
 
-
 pub(super) fn should_recall_recent_images(retrieved: &RetrievedContextState) -> bool {
     let latest_user_message_has_attachments = retrieved
         .session_context
@@ -42,7 +41,6 @@ pub(super) fn should_recall_recent_images(retrieved: &RetrievedContextState) -> 
     retrieved.turn_context.references_image
 }
 
-
 pub(super) fn recalled_image_limit(user_message: &str) -> usize {
     if user_message.contains("这几张")
         || user_message.contains("那几张")
@@ -55,7 +53,6 @@ pub(super) fn recalled_image_limit(user_message: &str) -> usize {
         1
     }
 }
-
 
 pub(super) fn native_transcript_for_completed_turn(
     user_message: &str,
@@ -85,14 +82,14 @@ pub(super) fn native_transcript_for_completed_turn(
     ])
 }
 
-
-pub(super) fn top_level_tool_activities(tool_activities: &[TurnToolActivity]) -> Vec<&TurnToolActivity> {
+pub(super) fn top_level_tool_activities(
+    tool_activities: &[TurnToolActivity],
+) -> Vec<&TurnToolActivity> {
     tool_activities
         .iter()
         .filter(|activity| !activity.id.contains("-planned-") && !activity.id.contains("-child-"))
         .collect()
 }
-
 
 pub(super) fn tool_activities_for_parent(
     tool_activities: &[TurnToolActivity],
@@ -106,7 +103,6 @@ pub(super) fn tool_activities_for_parent(
         .collect()
 }
 
-
 pub(super) fn timeline_state_for_phase(phase: &str) -> String {
     match phase {
         "cancelled" => "cancelled".to_string(),
@@ -115,8 +111,69 @@ pub(super) fn timeline_state_for_phase(phase: &str) -> String {
     }
 }
 
+/// PA-100：从工具活动里提取真实错误文本，替代旧实现把 description 误写入
+/// timeline 条目 error 字段的行为（那会让「错误：」栏显示工具描述，掩盖真实原因）。
+///
+/// 兼容三种现存序列化形状：
+/// - ToolError 经 serde 的 `{kind, message, ...}`（telemetry 主路径）
+/// - DispatchError into_outcome 的 `{code, message, ...}`（dispatcher 校验失败）
+/// - projection 折叠路径的纯字符串 Value
+///
+/// 取不到结构化错误时返回 `None`——刻意不回退 description：同一 timeline 条目的
+/// text 字段已经承载描述文本，error 回退同一字符串只会复现「错误栏显示描述」的假象。
+pub(super) fn turn_tool_activity_error_text(activity: &TurnToolActivity) -> Option<String> {
+    if activity.status != "error" && activity.status != "aborted" {
+        return None;
+    }
+    let error = activity.error.as_ref()?;
+    let text = match error {
+        Value::String(value) => value.clone(),
+        Value::Object(map) => {
+            let kind = map
+                .get("kind")
+                .or_else(|| map.get("code"))
+                .and_then(Value::as_str);
+            let message = map.get("message").and_then(Value::as_str);
+            match (kind, message) {
+                (Some(kind), Some(message)) => format!("{kind}: {message}"),
+                (Some(kind), None) => kind.to_string(),
+                (None, Some(message)) => message.to_string(),
+                (None, None) => error.to_string(),
+            }
+        }
+        other => other.to_string(),
+    };
 
-pub(super) fn build_context_uses_retrieval(build_context_observation: &BuildContextObservation) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    /// 「错误」栏展示截断上限：invalid_arguments 类校验消息可能携带完整 JSON-Schema
+    /// 路径，整段透传会撑爆 UI 行高；300 字符足够定位问题。
+    const MAX_ERROR_TEXT_CHARS: usize = 300;
+    if trimmed.chars().count() <= MAX_ERROR_TEXT_CHARS {
+        Some(trimmed.to_string())
+    } else {
+        let head: String = trimmed.chars().take(MAX_ERROR_TEXT_CHARS).collect();
+        Some(format!("{head}…"))
+    }
+}
+
+/// 在 parent activity 及其分组子活动中定位 parent 自身的错误文本。
+pub(super) fn timeline_tool_error_text(
+    parent: &TurnToolActivity,
+    grouped: &[TurnToolActivity],
+) -> Option<String> {
+    grouped
+        .iter()
+        .find(|activity| activity.id == parent.id)
+        .and_then(turn_tool_activity_error_text)
+}
+
+pub(super) fn build_context_uses_retrieval(
+    build_context_observation: &BuildContextObservation,
+) -> bool {
     build_context_observation.message_count > 2
         || !build_context_observation.prefix_mutation_reasons.is_empty()
         || !build_context_observation
@@ -124,7 +181,6 @@ pub(super) fn build_context_uses_retrieval(build_context_observation: &BuildCont
             .trim()
             .is_empty()
 }
-
 
 pub(super) fn build_stream_started_trace_timeline(
     _user_message: &str,
@@ -228,8 +284,9 @@ pub(super) fn build_stream_started_trace_timeline(
     timeline
 }
 
-
-// 生产代码不再携带进度 timeline（低频事件 IPC 瘦身），此构建函数仅保留给测试模块使用。
+// PA-100 审核更正（A-P3-2 / B-P2-3）：本构建器并非测试专用——turn_stream.rs 仍在
+// 生产事件中调用它生成进度态 timeline；持久化终态走 build_persisted_trace_timeline。
+// 两个 builder 的字段语义（含 error 提取）必须保持一致。
 #[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_stream_progress_trace_timeline(
@@ -368,6 +425,13 @@ pub(super) fn build_stream_progress_trace_timeline(
 
         if let Some(parent_tool) = top_level_tools.get(model_index) {
             let grouped_tool_activities = tool_activities_for_parent(tool_activities, parent_tool);
+            // PA-100：先于 move 提取真实错误文本，供 call_tool / return_result 两个条目共用。
+            let parent_error_text =
+                if parent_tool.status == "error" || parent_tool.status == "aborted" {
+                    timeline_tool_error_text(parent_tool, &grouped_tool_activities)
+                } else {
+                    None
+                };
             let tool_state = if parent_tool.status == "running" {
                 "active"
             } else if parent_tool.status == "error" {
@@ -393,11 +457,9 @@ pub(super) fn build_stream_progress_trace_timeline(
                 text: Some(parent_tool.description.clone()),
                 reasoning_content: None,
                 fallback_reason: None,
-                error: if parent_tool.status == "error" {
-                    Some(parent_tool.description.clone())
-                } else {
-                    None
-                },
+                // PA-100：error 字段记录真实错误（kind/code + message），不再误写
+                // description；aborted 条目同样提取，state 判定维持原语义不变。
+                error: parent_error_text.clone(),
                 input_tokens: None,
                 cache_hit_input_tokens: None,
                 reasoning_tokens: None,
@@ -432,11 +494,8 @@ pub(super) fn build_stream_progress_trace_timeline(
                     text: parent_tool.result_text.clone(),
                     reasoning_content: None,
                     fallback_reason: None,
-                    error: if parent_tool.status == "error" {
-                        Some(parent_tool.description.clone())
-                    } else {
-                        None
-                    },
+                    // PA-100：同 call_tool 条目——error 记录真实错误，不回退 description。
+                    error: parent_error_text.clone(),
                     input_tokens: None,
                     cache_hit_input_tokens: None,
                     reasoning_tokens: None,
@@ -452,7 +511,6 @@ pub(super) fn build_stream_progress_trace_timeline(
 
     timeline
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_persisted_trace_timeline(
@@ -594,6 +652,13 @@ pub(super) fn build_persisted_trace_timeline(
 
         if let Some(parent_tool) = tool_hops.get(model_index) {
             let grouped_tool_activities = tool_activities_for_parent(tool_activities, parent_tool);
+            // PA-100：先于 move 提取真实错误文本，供 call_tool / return_result 两个条目共用。
+            let parent_error_text =
+                if parent_tool.status == "error" || parent_tool.status == "aborted" {
+                    timeline_tool_error_text(parent_tool, &grouped_tool_activities)
+                } else {
+                    None
+                };
             let tool_state = if parent_tool.status == "error" {
                 "error".to_string()
             } else {
@@ -617,11 +682,9 @@ pub(super) fn build_persisted_trace_timeline(
                 text: Some(parent_tool.description.clone()),
                 reasoning_content: None,
                 fallback_reason: None,
-                error: if parent_tool.status == "error" {
-                    Some(parent_tool.description.clone())
-                } else {
-                    None
-                },
+                // PA-100：error 字段记录真实错误（kind/code + message），不再误写
+                // description；aborted 条目同样提取，state 判定维持原语义不变。
+                error: parent_error_text.clone(),
                 input_tokens: None,
                 cache_hit_input_tokens: None,
                 reasoning_tokens: None,
@@ -651,11 +714,9 @@ pub(super) fn build_persisted_trace_timeline(
                 text: parent_tool.result_text.clone(),
                 reasoning_content: None,
                 fallback_reason: None,
-                error: if parent_tool.status == "error" {
-                    Some(parent_tool.description.clone())
-                } else {
-                    None
-                },
+                // PA-100：error 字段记录真实错误（kind/code + message），不再误写
+                // description；aborted 条目同样提取，state 判定维持原语义不变。
+                error: parent_error_text.clone(),
                 input_tokens: None,
                 cache_hit_input_tokens: None,
                 reasoning_tokens: None,
@@ -726,7 +787,6 @@ pub(super) fn build_persisted_trace_timeline(
 
     timeline
 }
-
 
 pub(super) fn build_turn_trace_title(message: &str) -> String {
     let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");

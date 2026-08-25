@@ -63,7 +63,6 @@ pub(super) fn normalize_tool_directive(
     })
 }
 
-
 pub(super) fn infer_tool_name_from_arguments(arguments: &Value) -> Option<String> {
     let object = arguments.as_object()?;
 
@@ -97,11 +96,15 @@ pub(super) fn infer_tool_name_from_arguments(arguments: &Value) -> Option<String
     }
 
     let path = path?;
-    if has_start_line {
-        return Some("workspace_read_file_segment".to_string());
-    }
+    // PA-100：gather 信号（query/lineCount）优先于 startLine 判定——F1 之后
+    // `{path, query, startLine}` 是合法的 gather 搜索+翻页组合；若仍先命中
+    // startLine→segment，segment 的 schema 无 query 且 additionalProperties:false，
+    // 会换一个门复现 invalid_arguments。纯 `{path, startLine}` 分页仍路由到 segment。
     if has_query || has_line_count {
         return Some("workspace_gather_context".to_string());
+    }
+    if has_start_line {
+        return Some("workspace_read_file_segment".to_string());
     }
     if has_limit {
         if looks_like_file_path(path) {
@@ -116,11 +119,9 @@ pub(super) fn infer_tool_name_from_arguments(arguments: &Value) -> Option<String
     Some("workspace_path_info".to_string())
 }
 
-
 pub(super) fn looks_like_file_path(path: &str) -> bool {
     Path::new(path).extension().is_some()
 }
-
 
 pub(super) fn non_empty_text(text: &str) -> Option<&str> {
     if text.trim().is_empty() {
@@ -129,7 +130,6 @@ pub(super) fn non_empty_text(text: &str) -> Option<&str> {
         Some(text)
     }
 }
-
 
 pub(super) fn emit_lightweight_delta(
     sink: &impl TurnEventSink,
@@ -168,7 +168,6 @@ pub(super) fn emit_lightweight_delta(
         session_id,
     );
 }
-
 
 pub(super) fn build_provider_call_cache_record(
     request_kind: ProviderRequestKind,
@@ -210,14 +209,12 @@ pub(super) fn build_provider_call_cache_record(
     }
 }
 
-
 pub(super) fn derive_cache_miss_input_tokens(token_usage: Option<&TokenUsage>) -> Option<u64> {
     let usage = token_usage?;
     let input_tokens = usage.input_tokens?;
     let cache_hit_input_tokens = usage.cache_hit_input_tokens?;
     Some(input_tokens.saturating_sub(cache_hit_input_tokens))
 }
-
 
 pub(super) fn merge_token_usage(
     existing: Option<TokenUsage>,
@@ -244,8 +241,10 @@ pub(super) fn merge_token_usage(
     }
 }
 
-
-pub(super) fn merge_cache_hit_source(left: Option<String>, right: Option<String>) -> Option<String> {
+pub(super) fn merge_cache_hit_source(
+    left: Option<String>,
+    right: Option<String>,
+) -> Option<String> {
     match (left, right) {
         (Some(left), Some(right)) if left == right => Some(left),
         (Some(left), Some(right)) => Some(format!("{}+{}", left, right)),
@@ -254,7 +253,6 @@ pub(super) fn merge_cache_hit_source(left: Option<String>, right: Option<String>
         (None, None) => None,
     }
 }
-
 
 pub(super) fn add_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
@@ -265,7 +263,6 @@ pub(super) fn add_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<
     }
 }
 
-
 pub(super) fn running_tool_activities_with_history(
     completed: &[TurnToolActivity],
     running: Vec<TurnToolActivity>,
@@ -275,12 +272,10 @@ pub(super) fn running_tool_activities_with_history(
     combined
 }
 
-
 #[derive(Default)]
 pub(super) struct StreamReasoningBatcher {
     pub(super) buffer: String,
 }
-
 
 pub(super) fn canonicalize_tool_argument_value(value: &Value) -> Value {
     match value {
@@ -311,7 +306,6 @@ pub(super) fn canonicalize_tool_argument_value(value: &Value) -> Value {
     }
 }
 
-
 pub(super) fn tool_call_signature(tool_call: &ToolCall) -> String {
     let normalized = canonicalize_tool_argument_value(&tool_call.arguments);
     format!(
@@ -320,7 +314,6 @@ pub(super) fn tool_call_signature(tool_call: &ToolCall) -> String {
         serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string())
     )
 }
-
 
 /// Detect a `control_outcome_pending` legacy tool result: the governed executor surfaces a
 /// pending control outcome as `status == "error"` with a structured `error.code ==
@@ -340,11 +333,13 @@ pub(super) fn tool_result_control_outcome_pending(tool_result: &ToolResult) -> b
         == Some("control_outcome_pending")
 }
 
-
 /// Extract the consecutive-failure signal for a tool result: `(tool name, error code)`.
 /// `ok`/`partial` results, aborted executions, and pending control outcomes (`Ask` waits) never
 /// count as failures, so they reset the consecutive counter.
-pub(super) fn tool_failure_signal(tool_call: &ToolCall, tool_result: &ToolResult) -> Option<(String, String)> {
+pub(super) fn tool_failure_signal(
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+) -> Option<(String, String)> {
     if tool_result.status != "error" || tool_result_control_outcome_pending(tool_result) {
         return None;
     }
@@ -359,7 +354,6 @@ pub(super) fn tool_failure_signal(tool_call: &ToolCall, tool_result: &ToolResult
     Some((tool_call.name.clone(), code.to_string()))
 }
 
-
 /// Tracks how many consecutive failures share the same `(tool name, error code)` signal.
 /// A success, an unclassifiable result, or a different signal resets the run.
 #[derive(Clone, Debug, Default)]
@@ -367,7 +361,6 @@ pub(super) struct ConsecutiveFailureTracker {
     pub(super) signal: Option<(String, String)>,
     pub(super) count: usize,
 }
-
 
 /// Match the dispatcher's persisted `PendingControlRequest` to the originating tool call. The
 /// request's `call_id` is the dispatch call id the executor persisted, which equals the original
@@ -378,10 +371,9 @@ pub(super) fn match_pending_control_request<'a>(
     tool_call: &ToolCall,
 ) -> Option<&'a PendingControlRequest> {
     if let Some(call_id) = tool_call.call_id.as_deref() {
-        if let Some(found) = requests
-            .iter()
-            .find(|request| request.state == PendingControlRequestState::Pending && request.call_id == call_id)
-        {
+        if let Some(found) = requests.iter().find(|request| {
+            request.state == PendingControlRequestState::Pending && request.call_id == call_id
+        }) {
             return Some(found);
         }
     }

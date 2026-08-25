@@ -27,8 +27,9 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
 use crate::agent::tools::{
-    canonical_tool_name, ToolCall, ToolControlKind, ToolExecutionStatus, ToolExecutor, ToolOutcome,
-    ToolPermissionScope, ToolPlan, ToolPlanStep, ToolRegistrySnapshot, ToolResult,
+    canonical_tool_name, explicit_gather_start_line, ToolCall, ToolControlKind,
+    ToolExecutionStatus, ToolExecutor, ToolOutcome, ToolPermissionScope, ToolPlan, ToolPlanStep,
+    ToolRegistrySnapshot, ToolResult,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -84,7 +85,10 @@ impl GovernedToolExecutor {
     /// Set the session/run/turn/workspace facts for the current invocation. Called by the runtime
     /// before each turn so a persisted `PendingControlRequest` is bound to the real session.
     pub fn set_context(&self, context: DispatchContext) {
-        *self.context.lock().expect("governed executor context poisoned") = context;
+        *self
+            .context
+            .lock()
+            .expect("governed executor context poisoned") = context;
     }
 
     /// Current invocation context.
@@ -189,10 +193,7 @@ impl CompositeToolHandler for BatchExecuteComposite {
                     index + 1
                 ));
             };
-            let mut child_arguments = item
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let mut child_arguments = item.get("arguments").cloned().unwrap_or_else(|| json!({}));
             // 子调用同样要求 `description`（with_description 必填）；模型遗漏时注入默认值，
             // 避免内部子调用被 schema 预检拦截（与 gather 内部子调用同一约束）。
             if let Some(object) = child_arguments.as_object_mut() {
@@ -213,7 +214,10 @@ impl CompositeToolHandler for BatchExecuteComposite {
         let plan = build_batch_tool_plan(&child_requests, parallel, continue_on_error);
         let entries = if parallel {
             let results = children.dispatch_many(child_requests)?;
-            results.into_iter().map(nested_from_many).collect::<Vec<_>>()
+            results
+                .into_iter()
+                .map(nested_from_many)
+                .collect::<Vec<_>>()
         } else {
             run_serial_batch(children, child_requests, continue_on_error)?
         };
@@ -267,6 +271,8 @@ impl CompositeToolHandler for GatherContextComposite {
             .and_then(Value::as_u64)
             .map(|value| value.clamp(1, MAX_SEGMENT_LINES as u64) as usize)
             .unwrap_or(DEFAULT_SEGMENT_LINES);
+        // PA-100：显式 startLine 全模式生效；未提供时文件模式=1、搜索模式自动定位。
+        let explicit_start_line = explicit_gather_start_line(arguments);
         let paths = arguments
             .get("paths")
             .and_then(Value::as_array)
@@ -290,7 +296,14 @@ impl CompositeToolHandler for GatherContextComposite {
 
             let mut entries = Vec::with_capacity(gathered_count + 1);
             for (index, path) in gathered_paths.iter().enumerate() {
-                let per_path = self.gather_single_path(path, &query, limit, line_count, children)?;
+                let per_path = self.gather_single_path(
+                    path,
+                    &query,
+                    limit,
+                    explicit_start_line,
+                    line_count,
+                    children,
+                )?;
                 entries.push(NestedEntry {
                     index,
                     tool: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
@@ -298,6 +311,7 @@ impl CompositeToolHandler for GatherContextComposite {
                         "path": path,
                         "query": null_or(&query),
                         "limit": limit,
+                        "startLine": explicit_start_line.unwrap_or(1),
                         "lineCount": line_count,
                     }),
                     outcome: ToolOutcome::from_legacy_result(per_path),
@@ -327,13 +341,20 @@ impl CompositeToolHandler for GatherContextComposite {
                     arguments: json!({
                         "paths": skipped_paths,
                         "limit": limit,
+                        "startLine": explicit_start_line.unwrap_or(1),
                         "lineCount": line_count,
                     }),
                     outcome: ToolOutcome::from_legacy_result(skipped_result),
                 });
             }
 
-            let plan = build_multi_path_gather_plan(&gathered_paths, &query, limit, line_count);
+            let plan = build_multi_path_gather_plan(
+                &gathered_paths,
+                &query,
+                limit,
+                explicit_start_line.unwrap_or(1),
+                line_count,
+            );
             let payload = aggregate_nested_entries(
                 TOOL_WORKSPACE_GATHER_CONTEXT,
                 json!({
@@ -358,7 +379,14 @@ impl CompositeToolHandler for GatherContextComposite {
             .unwrap_or(".")
             .trim();
         let path = if raw_path.is_empty() { "." } else { raw_path };
-        let per_path = self.gather_single_path(path, &query, limit, line_count, children)?;
+        let per_path = self.gather_single_path(
+            path,
+            &query,
+            limit,
+            explicit_start_line,
+            line_count,
+            children,
+        )?;
         if per_path.status == "ok" {
             Ok(parse_tool_output(&per_path.output))
         } else {
@@ -378,6 +406,7 @@ impl GatherContextComposite {
         path: &str,
         query: &str,
         limit: usize,
+        explicit_start_line: Option<usize>,
         line_count: usize,
         children: &ChildDispatch,
     ) -> Result<ToolResult, String> {
@@ -414,12 +443,14 @@ impl GatherContextComposite {
 
         match mode {
             "file" => {
+                // PA-100：显式 startLine 生效；未提供时从第 1 行开始（原行为）。
+                let file_start_line = explicit_start_line.unwrap_or(1);
                 let segment_call = ChildDispatchRequest {
                     descriptor_id: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                     call_id: "gather-segment".to_string(),
                     arguments: json!({
                         "path": display_path,
-                        "startLine": 1,
+                        "startLine": file_start_line,
                         "lineCount": line_count,
                         "description": GATHER_CHILD_DESCRIPTION,
                     }),
@@ -505,8 +536,12 @@ impl GatherContextComposite {
 
                 if is_file {
                     let search_payload = child_outcome_output(&search_outcome);
-                    let start_line = first_search_match_line(&search_payload, &display_path)
-                        .map(|line| line.saturating_sub(line_count / 2).max(1))
+                    // PA-100：显式 startLine 优先；未提供时才按搜索命中自动定位。
+                    let start_line = explicit_start_line
+                        .or_else(|| {
+                            first_search_match_line(&search_payload, &display_path)
+                                .map(|line| line.saturating_sub(line_count / 2).max(1))
+                        })
                         .unwrap_or(1);
                     let segment_call = ChildDispatchRequest {
                         descriptor_id: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
@@ -522,7 +557,8 @@ impl GatherContextComposite {
                     entries.push(nested_entry(2, &segment_call, segment_outcome));
                 } else {
                     let search_payload = child_outcome_output(&search_outcome);
-                    let should_add_listing = search_outcome.execution_status != ToolExecutionStatus::Ok
+                    let should_add_listing = search_outcome.execution_status
+                        != ToolExecutionStatus::Ok
                         || search_match_count(&search_payload) == 0;
                     if should_add_listing {
                         let list_call = ChildDispatchRequest {
@@ -812,7 +848,11 @@ fn infer_decision(outcome: &ToolOutcome) -> PermissionDecision {
 
 /// Legacy `build_nested_results_summary` shape: human text, first error, top matches, and the
 /// first listing's paths (only present when a child emitted a structured `entries` array).
-fn build_nested_results_summary(tool_name: &str, results: &[Value], aggregate_status: &str) -> Value {
+fn build_nested_results_summary(
+    tool_name: &str,
+    results: &[Value],
+    aggregate_status: &str,
+) -> Value {
     let first_error = results
         .iter()
         .find_map(extract_first_error_from_nested_result);
@@ -921,8 +961,16 @@ fn build_batch_tool_plan(
         summary: format!(
             "workspace_batch 计划执行 {} 个子调用{}{}。",
             requests.len(),
-            if parallel { "（并发）" } else { "（串行）" },
-            if continue_on_error { "，失败后继续" } else { "，失败后中止" }
+            if parallel {
+                "（并发）"
+            } else {
+                "（串行）"
+            },
+            if continue_on_error {
+                "，失败后继续"
+            } else {
+                "，失败后中止"
+            }
         ),
         parallel,
         continue_on_error,
@@ -940,10 +988,13 @@ fn build_batch_tool_plan(
     }
 }
 
+// PA-100（code-review A 建议3）：本函数与 tools.rs 中的同名拷贝为双实现镜像——
+// 修改签名/回显字段必须两处同步（task 8.1 移除 legacy 路径前有效）。
 fn build_multi_path_gather_plan(
     paths: &[String],
     query: &str,
     limit: usize,
+    start_line: usize,
     line_count: usize,
 ) -> ToolPlan {
     ToolPlan {
@@ -968,6 +1019,7 @@ fn build_multi_path_gather_plan(
                     "path": path,
                     "query": null_or(query),
                     "limit": limit,
+                    "startLine": start_line,
                     "lineCount": line_count,
                 }),
                 summary: format!("第 {} 个路径聚合：`{}`。", index + 1, path),
@@ -976,7 +1028,12 @@ fn build_multi_path_gather_plan(
     }
 }
 
-fn build_nested_gather_plan(mode: &str, display_path: &str, query: &str, entries: &[NestedEntry]) -> ToolPlan {
+fn build_nested_gather_plan(
+    mode: &str,
+    display_path: &str,
+    query: &str,
+    entries: &[NestedEntry],
+) -> ToolPlan {
     let steps = entries
         .iter()
         .enumerate()
@@ -1198,7 +1255,7 @@ mod tests {
     };
     use crate::agent::tools::{
         ToolDescriptor, ToolDescriptorSource, ToolDisplayMetadata, ToolExecutionPolicy,
-        ToolHandlerProvenance, ToolIdentity, ToolKind, ToolExposure, ToolPermissionDeclaration,
+        ToolExposure, ToolHandlerProvenance, ToolIdentity, ToolKind, ToolPermissionDeclaration,
         ToolRegistrySnapshot,
     };
     use serde_json::json;
@@ -1263,10 +1320,7 @@ mod tests {
         let id = format!("builtin:{primitive}");
         let mut descriptor =
             make_descriptor(&id, kind, exposure, schema, ToolDescriptorSource::Builtin);
-        descriptor.aliases = vec![
-            primitive.to_string(),
-            format!("workspace.{primitive}"),
-        ];
+        descriptor.aliases = vec![primitive.to_string(), format!("workspace.{primitive}")];
         descriptor
     }
 
@@ -1311,6 +1365,7 @@ mod tests {
                 "path": { "type": "string" },
                 "query": { "type": "string" },
                 "limit": { "type": "integer" },
+                "startLine": { "type": "integer" },
                 "lineCount": { "type": "integer" },
                 "paths": { "type": "array" },
             },
@@ -1402,14 +1457,8 @@ mod tests {
             "builtin:workspace_path_info",
             Arc::new(FakePathInfo { kind: "file" }),
         );
-        dispatcher.register_handler(
-            "builtin:workspace_read_file_segment",
-            echo_handler(),
-        );
-        dispatcher.register_handler(
-            "builtin:workspace_list_files",
-            echo_handler(),
-        );
+        dispatcher.register_handler("builtin:workspace_read_file_segment", echo_handler());
+        dispatcher.register_handler("builtin:workspace_list_files", echo_handler());
         dispatcher.register_handler(
             "builtin:workspace_search_text",
             Arc::new(FakeSearch {
@@ -1442,7 +1491,10 @@ mod tests {
 
     impl DispatchLifecycleObserver for RecordingObserver {
         fn record(&self, event: &DispatchLifecycleRecord) {
-            self.0.lock().expect("observer lock poisoned").push(event.clone());
+            self.0
+                .lock()
+                .expect("observer lock poisoned")
+                .push(event.clone());
         }
     }
 
@@ -1472,7 +1524,9 @@ mod tests {
         );
         dispatcher.register_handler("dynamic:leaf", echo_handler());
         let observer = Arc::new(RecordingObserver(Mutex::new(Vec::new())));
-        dispatcher.register_lifecycle_observer(Arc::clone(&observer) as Arc<dyn DispatchLifecycleObserver>);
+        dispatcher.register_lifecycle_observer(
+            Arc::clone(&observer) as Arc<dyn DispatchLifecycleObserver>
+        );
 
         let outcome = dispatch(
             &dispatcher,
@@ -1518,18 +1572,28 @@ mod tests {
         assert_eq!(payload["summary"]["firstError"], Value::Null);
 
         // The aggregate permission summary is present and reflects the allowed children.
-        assert_eq!(payload["permissionSummary"]["scopes"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            payload["permissionSummary"]["scopes"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
         assert_eq!(payload["permissionSummary"]["requiresApproval"], false);
         assert_eq!(payload["permissionSummary"]["hostMediated"], false);
         assert_eq!(
-            payload["permissionSummary"]["childDecisions"].as_array().map(Vec::len),
+            payload["permissionSummary"]["childDecisions"]
+                .as_array()
+                .map(Vec::len),
             Some(3)
         );
 
         // Exactly one lifecycle record per child, each at depth 1 with the parent call id.
         let records = observer.0.lock().expect("observer lock poisoned");
         assert_eq!(records.len(), 4, "one top-level + three children");
-        let top = records.iter().find(|record| record.depth == 0).expect("top-level record");
+        let top = records
+            .iter()
+            .find(|record| record.depth == 0)
+            .expect("top-level record");
         assert_eq!(top.descriptor_id, "dynamic:batch");
         assert_eq!(top.call_id, "batch-1");
         assert_eq!(top.parent_call_id, None);
@@ -1927,7 +1991,12 @@ mod tests {
         assert_eq!(results[1]["arguments"]["lineCount"].as_u64(), Some(20));
         assert_eq!(payload["plan"]["kind"], "workspace_gather_context");
         assert_eq!(payload["plan"]["parallel"], true);
-        assert_eq!(payload["permissionSummary"]["scopes"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            payload["permissionSummary"]["scopes"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
     }
 
     #[test]
@@ -2159,12 +2228,195 @@ mod tests {
         assert_eq!(payload["meta"]["requestedPathCount"].as_u64(), Some(7));
         assert_eq!(payload["meta"]["limitApplied"], true);
         assert_eq!(payload["meta"]["pathLimit"].as_u64(), Some(6));
-        assert_eq!(payload["meta"]["skippedPaths"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            payload["meta"]["skippedPaths"].as_array().map(Vec::len),
+            Some(1)
+        );
         assert_eq!(payload["status"], "partial");
         assert_eq!(payload["successCount"].as_u64(), Some(6));
         assert_eq!(payload["partialCount"].as_u64(), Some(1));
         let results = payload["results"].as_array().expect("results array");
         assert_eq!(results.len(), 7);
         assert_eq!(results[6]["output"]["reason"], "too_many_paths");
+    }
+
+    // ── PA-100：startLine 端到端透传 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn gather_context_threads_explicit_start_line_into_segment_and_plan() {
+        let registry = registry(vec![
+            dynamic_descriptor(
+                "dynamic:gather",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                gather_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_path_info",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_read_file_segment",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+        ]);
+        let dispatcher = dispatcher_for(registry);
+        register_gather(&dispatcher);
+
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "gather-start",
+            json!({ "path": "demo.rs", "startLine": 80, "lineCount": 40 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        assert_eq!(payload["meta"]["mode"], "file");
+        let results = payload["results"].as_array().expect("results array");
+        assert_eq!(results[1]["tool"], "workspace_read_file_segment");
+        // 嵌套回显真实 startLine——事故根因即模型模仿此处的 `"startLine": 1`。
+        assert_eq!(results[1]["arguments"]["startLine"].as_u64(), Some(80));
+        let plan_steps = payload["plan"]["steps"].as_array().expect("plan steps");
+        let segment_step = plan_steps
+            .iter()
+            .find(|step| step["name"] == "workspace_read_file_segment")
+            .expect("segment step");
+        assert_eq!(segment_step["arguments"]["startLine"].as_u64(), Some(80));
+    }
+
+    #[test]
+    fn gather_context_explicit_start_line_overrides_search_auto_position() {
+        let registry = registry(vec![
+            dynamic_descriptor(
+                "dynamic:gather",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                gather_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_path_info",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_read_file_segment",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_list_files",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_search_text",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+        ]);
+        let dispatcher = dispatcher_for(registry);
+        dispatcher.register_composite_handler_with_authority(
+            "dynamic:gather",
+            vec![
+                "builtin:workspace_path_info".to_string(),
+                "builtin:workspace_read_file_segment".to_string(),
+                "builtin:workspace_list_files".to_string(),
+                "builtin:workspace_search_text".to_string(),
+            ],
+            Arc::new(GatherContextComposite),
+        );
+        dispatcher.register_handler(
+            "builtin:workspace_path_info",
+            Arc::new(FakePathInfo { kind: "file" }),
+        );
+        dispatcher.register_handler("builtin:workspace_read_file_segment", echo_handler());
+        dispatcher.register_handler("builtin:workspace_list_files", echo_handler());
+        dispatcher.register_handler(
+            "builtin:workspace_search_text",
+            Arc::new(FakeSearch {
+                match_count: 1,
+                matches: vec![json!({ "path": "demo.rs", "line": 50, "preview": "needle" })],
+            }),
+        );
+
+        // 无显式 startLine：自动定位 = max(1, 50 - 40/2) = 30（既有行为）。
+        let auto = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "gather-auto",
+            json!({ "path": "demo.rs", "query": "needle", "lineCount": 40 }),
+        );
+        let auto_payload = parsed_output(&auto);
+        assert_eq!(
+            auto_payload["results"][2]["arguments"]["startLine"].as_u64(),
+            Some(30)
+        );
+
+        // 显式 startLine：全模式生效，覆盖自动定位。
+        let explicit = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "gather-explicit",
+            json!({ "path": "demo.rs", "query": "needle", "lineCount": 40, "startLine": 7 }),
+        );
+        assert_eq!(explicit.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&explicit);
+        assert_eq!(payload["meta"]["mode"], "search");
+        let results = payload["results"].as_array().expect("results array");
+        assert_eq!(results[2]["tool"], "workspace_read_file_segment");
+        assert_eq!(results[2]["arguments"]["startLine"].as_u64(), Some(7));
+    }
+
+    #[test]
+    fn gather_context_multi_path_echoes_start_line_in_plan_and_skipped_entries() {
+        let registry = registry(vec![
+            dynamic_descriptor(
+                "dynamic:gather",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                gather_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_path_info",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_read_file_segment",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+        ]);
+        let dispatcher = dispatcher_for(registry);
+        register_gather(&dispatcher);
+
+        let excess_paths = (0..=6)
+            .map(|index| Value::String(format!("demo-{index}.rs")))
+            .collect::<Vec<_>>();
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "gather-multipath-start",
+            json!({ "paths": excess_paths, "startLine": 9, "lineCount": 20 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        let plan_steps = payload["plan"]["steps"].as_array().expect("plan steps");
+        for step in plan_steps {
+            assert_eq!(step["arguments"]["startLine"].as_u64(), Some(9));
+        }
+        let results = payload["results"].as_array().expect("results array");
+        // 被跳过路径的兜底条目同样回显 startLine。
+        assert_eq!(results[6]["arguments"]["startLine"].as_u64(), Some(9));
     }
 }

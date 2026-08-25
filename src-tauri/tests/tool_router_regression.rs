@@ -65,7 +65,10 @@ fn search_text_respects_file_pattern_and_skips_gitignored_and_node_modules() {
         payload.get("skippedLargeFiles").and_then(Value::as_u64),
         Some(0)
     );
-    assert_eq!(payload.get("truncated").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        payload.get("truncated").and_then(Value::as_bool),
+        Some(false)
+    );
 
     let _ = fs::remove_dir_all(workspace);
 }
@@ -203,6 +206,100 @@ fn gather_context_with_query_on_file_returns_search_and_segment_results() {
         .and_then(Value::as_str)
         .expect("segment output should be plain text");
     assert!(segment_output.contains("needle = beta + gamma"));
+
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn gather_context_file_mode_honors_explicit_start_line() {
+    // PA-100：模型侧 Read(gather) 显式 startLine 分页——事故中该参数曾被
+    // schema 拒绝导致 invalid_arguments。
+    let workspace = temp_workspace();
+    let body = (1..=10)
+        .map(|index| format!("line-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(workspace.join("paged.rs"), body).expect("write paged.rs");
+    let router = ToolRouter::with_workspace_root(workspace.clone());
+
+    let result = router.execute(&ToolCall {
+        call_id: None,
+        name: "workspace_gather_context".to_string(),
+        arguments: json!({
+            "path": "paged.rs",
+            "startLine": 6,
+            "lineCount": 3
+        }),
+        plan: None,
+    });
+
+    assert_eq!(result.status, "ok");
+    let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+    assert_eq!(payload["meta"]["mode"], "file");
+    let segment_output = payload["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .find(|entry| entry["tool"] == "workspace_read_file_segment")
+        .and_then(|entry| entry["output"].as_str())
+        .expect("segment output")
+        .to_string();
+    assert!(segment_output.contains("第 6 行"), "{segment_output}");
+    assert!(segment_output.contains("line-6"));
+    assert!(!segment_output.contains("line-5"));
+
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn gather_context_reports_line_out_of_range_when_start_line_exceeds_eof() {
+    // PA-100 审核边界：startLine 超过文件总行数——子调用 line_out_of_range，
+    // 聚合结果不得伪装成完整成功。
+    let workspace = temp_workspace();
+    fs::write(workspace.join("short.rs"), "only\nthree\nlines\n").expect("write short.rs");
+    let router = ToolRouter::with_workspace_root(workspace.clone());
+
+    let result = router.execute(&ToolCall {
+        call_id: None,
+        name: "workspace_gather_context".to_string(),
+        arguments: json!({
+            "path": "short.rs",
+            "startLine": 99,
+            "lineCount": 5
+        }),
+        plan: None,
+    });
+
+    let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+    let segment_entry = payload["results"]
+        .as_array()
+        .and_then(|results| {
+            results
+                .iter()
+                .find(|entry| entry["tool"] == "workspace_read_file_segment")
+        })
+        .expect("segment entry");
+    assert_ne!(
+        segment_entry["status"].as_str(),
+        Some("ok"),
+        "out-of-range segment must not be ok"
+    );
+    // PA-100 审核裁决（P2-2）：子调用失败时父聚合保持 partial 而非整体 error——
+    // 失败细节经 errorCount 与 summary.firstError 承载；此处钉住该契约防回归。
+    assert_eq!(payload["status"].as_str(), Some("partial"));
+    assert_eq!(payload["errorCount"].as_u64(), Some(1));
+    let first_error = payload["summary"]["firstError"]
+        .as_object()
+        .expect("firstError evidence");
+    let error_code = first_error
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        error_code.contains("line_out_of_range"),
+        "firstError should identify the out-of-range child: {first_error:?}"
+    );
 
     let _ = fs::remove_dir_all(workspace);
 }

@@ -4,6 +4,9 @@ use crate::agent::config::{
     ThinkingParamPattern,
 };
 use crate::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
+use crate::agent::control_plane::HostControlPlaneBuilder;
+use crate::agent::dispatcher::ControlRequestConsumed;
+use crate::agent::graph::GraphRunPhase;
 use crate::agent::hooks::{
     hook_point_matches_canonical_boundary, AgentHookDescriptor, AgentHookExecutor,
     CapabilityMediationEnvelope, CapabilityMediationHookPoint, HookClass, HookFailurePolicy,
@@ -17,11 +20,8 @@ use crate::agent::session::{
     FileSessionBackend, SessionSnapshot, SessionStore, TurnHistoryMessage,
 };
 use crate::agent::telemetry::DefaultTurnTelemetryBuilder;
-use crate::agent::dispatcher::ControlRequestConsumed;
-use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
-use crate::agent::control_plane::HostControlPlaneBuilder;
 use crate::agent::tool_runtime::PendingControlRequestState;
-use crate::agent::graph::GraphRunPhase;
+use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
 use serde_json::json;
 use std::cell::RefCell;
 use std::fs;
@@ -326,7 +326,10 @@ impl TurnPlanner for AskOnceThenDeferPlanner {
         _history: &[TurnHistoryMessage],
         _available_skills: &[crate::agent::capability_bridge::SkillDescriptor],
     ) -> Option<ProviderDecision> {
-        if !self.ask_forced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if !self
+            .ask_forced
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             return Some(ProviderDecision {
                 output_text: String::new(),
                 tool_call: Some(ToolCall {
@@ -381,8 +384,7 @@ impl crate::agent::tools::ToolExecutor for StubToolExecutor {
                 if path.contains("Windows/System32") || path.contains("..") {
                     "{\"ok\":false,\"tool\":\"workspace_read_file\",\"error\":{\"code\":\"out_of_scope\",\"message\":\"只允许访问当前工作区内的相对路径。\"}}".to_string()
                 } else {
-                    "{\n  \"productName\": \"Pony Agent\",\n  \"version\": \"0.1.0\"\n}"
-                        .to_string()
+                    "{\n  \"productName\": \"Pony Agent\",\n  \"version\": \"0.1.0\"\n}".to_string()
                 }
             }
             other => format!("unsupported tool in test: {}", other),
@@ -928,8 +930,7 @@ fn transform_hook_descriptor(
 
 #[test]
 fn capability_bridge_resolves_dotted_builtin_tool_calls_before_execution() {
-    let runtime =
-        build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+    let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
     let execution = runtime.execute_capability_tool_call(&ToolCall {
         call_id: Some("call_time".to_string()),
         name: "time.now".to_string(),
@@ -1393,8 +1394,7 @@ fn skill_mediation_hooks_can_rewrite_arguments_before_skill_execution() {
                 source_id: "builtin-skills".to_string(),
                 source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
                 display_name: "Builtin Skills".to_string(),
-                availability:
-                    crate::agent::capability_bridge::CapabilityAvailability::Available,
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
                 transport_kind: "host".to_string(),
                 server_identity: "skills://builtin".to_string(),
                 updated_at_ms: 1,
@@ -1571,8 +1571,7 @@ fn start_turn_stream_does_not_dispatch_unstable_prepare_or_context_hooks() {
         );
     }
 
-    let snapshot =
-        runtime.load_session_snapshot(Some("session-unstable-boundary-not-dispatched"));
+    let snapshot = runtime.load_session_snapshot(Some("session-unstable-boundary-not-dispatched"));
     let trace = snapshot
         .turn_trace_history
         .last()
@@ -1748,9 +1747,8 @@ fn start_turn_stream_fail_turn_policy_on_tool_call_start_stops_before_tool_execu
     let tool_started = events
         .iter()
         .find_map(|(name, payload)| {
-            (name == "turn:tool"
-                && payload.event_type.as_deref() == Some("turn.tool_call_started"))
-            .then_some(payload.clone())
+            (name == "turn:tool" && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
         })
         .expect("tool started event");
     let failed = events
@@ -1883,8 +1881,7 @@ fn start_turn_stream_fail_turn_policy_on_tool_call_end_stops_before_followup_mod
 }
 
 #[test]
-fn start_turn_stream_fail_turn_policy_on_checkpoint_boundary_emits_failed_instead_of_completed()
-{
+fn start_turn_stream_fail_turn_policy_on_checkpoint_boundary_emits_failed_instead_of_completed() {
     let server = MockHttpServer::start(vec![sse_response(&[
         json!({
             "choices": [
@@ -2074,9 +2071,9 @@ fn start_turn_stream_fail_turn_policy_on_finalize_boundary_emits_failed_with_ter
     assert!(failed
         .hook_trace_records
         .as_ref()
-        .is_some_and(|records| records.iter().any(|record| {
-            record.hook_name == "observe.finalize-failturn" && record.blocked
-        })));
+        .is_some_and(|records| records
+            .iter()
+            .any(|record| { record.hook_name == "observe.finalize-failturn" && record.blocked })));
 
     let snapshot = runtime.load_session_snapshot(Some("session-finalize-failturn"));
     let trace = snapshot
@@ -2181,9 +2178,7 @@ fn run_turn_fail_turn_policy_on_tool_call_start_returns_failed_before_tool_execu
     assert!(result
         .hook_trace_records
         .iter()
-        .any(
-            |record| record.hook_name == "observe.sync-tool-start-failturn" && record.blocked
-        ));
+        .any(|record| record.hook_name == "observe.sync-tool-start-failturn" && record.blocked));
 }
 
 #[test]
@@ -2647,8 +2642,7 @@ fn start_turn_stream_persists_terminal_hook_traces_on_stable_boundaries() {
 
 #[test]
 fn capability_bridge_returns_normalized_not_found_failure_for_unknown_tools() {
-    let runtime =
-        build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+    let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
     let execution = runtime.execute_capability_tool_call(&ToolCall {
         call_id: Some("call_unknown".to_string()),
         name: "unknown_tool".to_string(),
@@ -2896,8 +2890,7 @@ fn capability_bridge_propagates_permission_denied_from_runtime_execution_path() 
 
 #[test]
 fn capability_bridge_propagates_out_of_scope_from_runtime_execution_path() {
-    let runtime =
-        build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+    let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
 
     let execution = runtime.execute_capability_tool_call(&ToolCall {
         call_id: Some("call_out_of_scope_read".to_string()),
@@ -2929,8 +2922,7 @@ fn capability_bridge_propagates_malformed_response_from_runtime_execution_path()
         kind: crate::agent::capability_bridge::CapabilityKind::Tool,
         label: "orphaned_tool".to_string(),
         description: "Orphaned tool".to_string(),
-        invocation_mode:
-            crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
+        invocation_mode: crate::agent::capability_bridge::CapabilityInvocationMode::DirectToolCall,
         input_schema_summary: "{}".to_string(),
         safety_class: "host_tool".to_string(),
         visibility: "default".to_string(),
@@ -2996,8 +2988,7 @@ fn skill_bridge_executes_tool_only_skill_without_second_scheduler() {
                 source_id: "host-skills".to_string(),
                 source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
                 display_name: "Host Skills".to_string(),
-                availability:
-                    crate::agent::capability_bridge::CapabilityAvailability::Available,
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
                 transport_kind: "host".to_string(),
                 server_identity: "skills://host".to_string(),
                 updated_at_ms: 2,
@@ -3060,8 +3051,7 @@ fn runtime_executes_registered_skill_by_tool_name() {
                 source_id: "builtin-skills".to_string(),
                 source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
                 display_name: "Builtin Skills".to_string(),
-                availability:
-                    crate::agent::capability_bridge::CapabilityAvailability::Available,
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
                 transport_kind: "host".to_string(),
                 server_identity: "skills://builtin".to_string(),
                 updated_at_ms: 1,
@@ -3117,9 +3107,7 @@ fn skill_bridge_rejects_non_tool_composed_skill_as_unsupported() {
             transport_kind: "stdio".to_string(),
             server_identity: "mcp://skills".to_string(),
             availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
-            declared_capabilities: vec![
-                crate::agent::capability_bridge::CapabilityKind::Resource,
-            ],
+            declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Resource],
             permission_profile: "host-mediated".to_string(),
             updated_at_ms: 1,
             last_ingress_observation: None,
@@ -3148,8 +3136,7 @@ fn skill_bridge_rejects_non_tool_composed_skill_as_unsupported() {
                 source_id: "host-skills".to_string(),
                 source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
                 display_name: "Host Skills".to_string(),
-                availability:
-                    crate::agent::capability_bridge::CapabilityAvailability::Available,
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
                 transport_kind: "host".to_string(),
                 server_identity: "skills://host".to_string(),
                 updated_at_ms: 2,
@@ -3202,8 +3189,7 @@ fn skill_bridge_propagates_underlying_capability_execution_failure() {
                 source_id: "builtin-skills".to_string(),
                 source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
                 display_name: "Builtin Skills".to_string(),
-                availability:
-                    crate::agent::capability_bridge::CapabilityAvailability::Available,
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
                 transport_kind: "host".to_string(),
                 server_identity: "skills://builtin".to_string(),
                 updated_at_ms: 1,
@@ -3281,8 +3267,7 @@ fn skill_bridge_propagates_partial_out_of_scope_from_underlying_capability() {
                 source_id: "builtin-skills".to_string(),
                 source_kind: crate::agent::capability_bridge::SkillSourceKind::Host,
                 display_name: "Builtin Skills".to_string(),
-                availability:
-                    crate::agent::capability_bridge::CapabilityAvailability::Available,
+                availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
                 transport_kind: "host".to_string(),
                 server_identity: "skills://builtin".to_string(),
                 updated_at_ms: 1,
@@ -3546,14 +3531,11 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
     // 守卫式注册：Drop 仅移除本 sink（并行测试互不清除对方注册）。
     let _sink_guard = crate::agent::turn_flow::register_event_persist_test_sink(Arc::new(
         move |session_id, turn_id, event, _terminal| {
-            persisted_for_channel
-                .lock()
-                .expect("persisted lock")
-                .push((
-                    session_id.to_string(),
-                    turn_id.to_string(),
-                    event.type_name().to_string(),
-                ));
+            persisted_for_channel.lock().expect("persisted lock").push((
+                session_id.to_string(),
+                turn_id.to_string(),
+                event.type_name().to_string(),
+            ));
         },
     ));
 
@@ -3747,16 +3729,16 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
     use crate::agent::turn_event::TurnEvent;
 
     // 事件收集：(session, turn, event)，发射序即日志序（合成 seq 用）。
-    let collected: Arc<Mutex<Vec<(String, String, TurnEvent)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let collected: Arc<Mutex<Vec<(String, String, TurnEvent)>>> = Arc::new(Mutex::new(Vec::new()));
     let collected_for_sink = Arc::clone(&collected);
     // 守卫式注册：Drop 仅移除本 sink（并行测试互不清除对方注册）。
     let _sink_guard = crate::agent::turn_flow::register_event_persist_test_sink(Arc::new(
         move |session_id, turn_id, event, _terminal| {
-            collected_for_sink
-                .lock()
-                .expect("collected lock")
-                .push((session_id.to_string(), turn_id.to_string(), event));
+            collected_for_sink.lock().expect("collected lock").push((
+                session_id.to_string(),
+                turn_id.to_string(),
+                event,
+            ));
         },
     ));
 
@@ -3807,8 +3789,7 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
 
     let records = collected.lock().expect("collected lock").clone();
     let stream_events = own(&records, "step-hop-stream");
-    let stream_types: Vec<&str> =
-        stream_events.iter().map(TurnEvent::type_name).collect();
+    let stream_types: Vec<&str> = stream_events.iter().map(TurnEvent::type_name).collect();
 
     // StepStart 序列：step 0（started）+ step 1/2（followup calling_model trace）。
     let step_starts: Vec<u32> = stream_events
@@ -3841,7 +3822,8 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
         })
         .collect();
     assert_eq!(
-        chunk_steps, vec![0, 1, 2],
+        chunk_steps,
+        vec![0, 1, 2],
         "non-empty chunks carry their hop step"
     );
 
@@ -3850,7 +3832,9 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
     for (index, event) in stream_events.iter().enumerate() {
         TraceProjectionState::apply(&mut state, index as u64 + 1, event);
     }
-    let rebuilt = state.trace_for_turn("turn-step-hops").expect("rebuilt trace");
+    let rebuilt = state
+        .trace_for_turn("turn-step-hops")
+        .expect("rebuilt trace");
     let call_models: Vec<&crate::agent::session::TraceTimelineEntry> = rebuilt
         .trace_timeline
         .iter()
@@ -3859,8 +3843,10 @@ fn multi_hop_turn_rebuilds_timeline_with_per_hop_call_model_entries() {
     assert_eq!(call_models.len(), 3, "call_model entries equal hop count");
 
     // chunk 文本归属正确 hop：hop2 条目含 followup 文本、hop3 含最终文本。
-    let hop_texts: Vec<Option<&String>> =
-        call_models.iter().map(|entry| entry.text.as_ref()).collect();
+    let hop_texts: Vec<Option<&String>> = call_models
+        .iter()
+        .map(|entry| entry.text.as_ref())
+        .collect();
     assert!(
         !hop_texts[0]
             .as_deref()
@@ -4098,8 +4084,12 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
     // 第二轮不同 id 不覆盖（幂等）。
     let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
     let server = MockHttpServer::start(vec![
-        json_response(json!({ "choices": [ { "message": { "role": "assistant", "content": "ok" } } ] })),
-        json_response(json!({ "choices": [ { "message": { "role": "assistant", "content": "ok2" } } ] })),
+        json_response(
+            json!({ "choices": [ { "message": { "role": "assistant", "content": "ok" } } ] }),
+        ),
+        json_response(
+            json!({ "choices": [ { "message": { "role": "assistant", "content": "ok2" } } ] }),
+        ),
     ]);
     let sessions = SessionStore::memory_only();
     let selection = test_provider_selection(server.base_url.clone());
@@ -4256,8 +4246,7 @@ fn recent_image_recall_requires_latest_user_turn_to_have_attachments() {
         memory_write_hook_trace_records: Vec::new(),
         history_state_evidence: Vec::new(),
         history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
-        run_control_audit_summary:
-            crate::agent::session::build_missing_run_control_audit_summary(),
+        run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
         turn_count: 2,
         last_referenced_file: None,
         updated_at_ms: 0,
@@ -4313,8 +4302,7 @@ fn recent_image_recall_uses_retrieved_context_when_latest_user_turn_has_attachme
         memory_write_hook_trace_records: Vec::new(),
         history_state_evidence: Vec::new(),
         history_state_audit_summary: crate::agent::session::HistoryStateAuditSummary::default(),
-        run_control_audit_summary:
-            crate::agent::session::build_missing_run_control_audit_summary(),
+        run_control_audit_summary: crate::agent::session::build_missing_run_control_audit_summary(),
         turn_count: 1,
         last_referenced_file: None,
         updated_at_ms: 0,
@@ -4327,14 +4315,8 @@ fn recent_image_recall_uses_retrieved_context_when_latest_user_turn_has_attachme
         workspace_id: None,
     };
 
-    let retrieved = builder.retrieve_context_state(
-        "继续看这张图里有什么？",
-        &[],
-        None,
-        &session,
-        None,
-        None,
-    );
+    let retrieved =
+        builder.retrieve_context_state("继续看这张图里有什么？", &[], None, &session, None, None);
 
     assert!(should_recall_recent_images(&retrieved));
 }
@@ -4788,7 +4770,10 @@ fn consecutive_failure_limit_rejects_invalid_env_values() {
 #[test]
 fn consecutive_failure_tracker_counts_same_signal_and_resets_otherwise() {
     let mut tracker = ConsecutiveFailureTracker::new();
-    let signal = Some(("workspace_read_file".to_string(), "invalid_path".to_string()));
+    let signal = Some((
+        "workspace_read_file".to_string(),
+        "invalid_path".to_string(),
+    ));
     assert_eq!(tracker.record(signal.clone()), 1);
     assert_eq!(tracker.record(signal.clone()), 2);
     assert_eq!(tracker.record(signal.clone()), 3);
@@ -4840,7 +4825,10 @@ fn tool_failure_signal_skips_success_and_pending_control() {
     };
     assert_eq!(
         tool_failure_signal(&call, &failing),
-        Some(("workspace_read_file".to_string(), "invalid_path".to_string()))
+        Some((
+            "workspace_read_file".to_string(),
+            "invalid_path".to_string()
+        ))
     );
     // control_outcome_pending（Ask 挂起）不计失败
     let pending = ToolResult {
@@ -4945,7 +4933,9 @@ fn run_turn_stops_followup_after_consecutive_identical_tool_failures() {
         result.assistant_message
     );
     assert!(result.assistant_message.contains("invalid_path"));
-    assert!(result.assistant_message.contains("目标路径不存在，请检查后重试。"));
+    assert!(result
+        .assistant_message
+        .contains("目标路径不存在，请检查后重试。"));
     // 第 3 次失败后止损：不再向 provider 发起第 4 次 follow-up。
     let requests = server.finish();
     assert_eq!(requests.len(), 3);
@@ -5226,9 +5216,8 @@ fn start_turn_stream_completes_after_multi_hop_followup_stream() {
     let tool_started = events
         .iter()
         .find_map(|(name, payload)| {
-            (name == "turn:tool"
-                && payload.event_type.as_deref() == Some("turn.tool_call_started"))
-            .then_some(payload.clone())
+            (name == "turn:tool" && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
         })
         .expect("tool started event");
     let model_started_events: Vec<TurnStreamEvent> = events
@@ -5319,8 +5308,7 @@ fn start_turn_stream_completes_after_multi_hop_followup_stream() {
             < checkpoint_persisted.sequence.unwrap_or_default()
     );
     assert!(
-        checkpoint_persisted.sequence.unwrap_or_default()
-            < completed.sequence.unwrap_or_default()
+        checkpoint_persisted.sequence.unwrap_or_default() < completed.sequence.unwrap_or_default()
     );
     assert_eq!(
         completed
@@ -5507,9 +5495,8 @@ fn start_turn_stream_cancels_with_canonical_finalize_boundary_when_stop_is_reque
     let tool_started = events
         .iter()
         .find_map(|(name, payload)| {
-            (name == "turn:tool"
-                && payload.event_type.as_deref() == Some("turn.tool_call_started"))
-            .then_some(payload.clone())
+            (name == "turn:tool" && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
         })
         .expect("tool started event");
 
@@ -5590,9 +5577,8 @@ fn start_turn_stream_preserves_tool_error_activity_when_tool_execution_errors() 
     let tool_started = events
         .iter()
         .find_map(|(name, payload)| {
-            (name == "turn:tool"
-                && payload.event_type.as_deref() == Some("turn.tool_call_started"))
-            .then_some(payload.clone())
+            (name == "turn:tool" && payload.event_type.as_deref() == Some("turn.tool_call_started"))
+                .then_some(payload.clone())
         })
         .expect("tool started event");
     let tool_completed = events
@@ -5755,8 +5741,7 @@ fn start_turn_stream_emits_first_token_latency_on_reasoning_delta() {
         "checkpointing",
     );
     assert!(
-        checkpoint_persisted.sequence.unwrap_or_default()
-            < completed.sequence.unwrap_or_default()
+        checkpoint_persisted.sequence.unwrap_or_default() < completed.sequence.unwrap_or_default()
     );
     assert_eq!(
         completed
@@ -5788,12 +5773,10 @@ fn start_turn_stream_emits_first_token_latency_on_reasoning_delta() {
     assert!(provider_call.first_token_latency_ms.is_some());
     assert!(provider_call.turn_duration_ms.is_some());
     assert!(
-        provider_call.first_token_latency_ms.unwrap()
-            <= provider_call.turn_duration_ms.unwrap()
+        provider_call.first_token_latency_ms.unwrap() <= provider_call.turn_duration_ms.unwrap()
     );
     assert!(
-        completed.first_token_latency_ms.unwrap()
-            > provider_call.first_token_latency_ms.unwrap()
+        completed.first_token_latency_ms.unwrap() > provider_call.first_token_latency_ms.unwrap()
     );
 }
 
@@ -6048,8 +6031,7 @@ fn start_turn_stream_uses_live_stream_for_deepseek_tool_followup() {
             }),
         ]),
     ]);
-    let mut runtime =
-        build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+    let mut runtime = build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
     let sink = RecordingTurnEventSink::new();
 
     runtime.start_turn_stream(
@@ -6560,8 +6542,7 @@ fn start_turn_stream_repairs_blank_tool_name_in_followup_stream() {
 
 #[test]
 fn runtime_can_rebuild_session_snapshot_and_retrieved_context_from_history_node() {
-    let server =
-        MockHttpServer::start(vec![json_completion("第一答"), json_completion("第二答")]);
+    let server = MockHttpServer::start(vec![json_completion("第一答"), json_completion("第二答")]);
     let mut runtime = build_runtime_for_test(test_provider_selection(server.base_url.clone()));
 
     let first = runtime.run_turn(TurnInput {
@@ -6729,6 +6710,330 @@ fn persisted_trace_timeline_uses_canonical_monitor_semantics() {
     );
 }
 
+// ── PA-100：timeline 失败工具条目必须记录真实错误，而不是工具描述 ─────────────────────────
+
+fn pa100_failed_activity(
+    id: &str,
+    name: &str,
+    status: &str,
+    error: Option<Value>,
+) -> crate::agent::telemetry::TurnToolActivity {
+    crate::agent::telemetry::TurnToolActivity {
+        id: id.to_string(),
+        name: name.to_string(),
+        canonical_tool_name: Some("Read".to_string()),
+        display_name_zh: Some("读取".to_string()),
+        status: status.to_string(),
+        description: format!("{name} 的中文描述文本"),
+        arguments_text: Some("{\"path\":\"src/tauri_adapter.rs\",\"startLine\":80}".to_string()),
+        result_text: Some(
+            "{\"error\":{\"code\":\"invalid_arguments\",\"message\":\"unexpected argument \
+             `startLine`\"},\"ok\":false}"
+                .to_string(),
+        ),
+        duration_seconds: Some(0.0),
+        parent_activity_id: None,
+        artifacts: None,
+        error,
+        capability_invocation: None,
+    }
+}
+
+fn pa100_build_timeline(
+    activities: Vec<crate::agent::telemetry::TurnToolActivity>,
+) -> Vec<crate::agent::session::TraceTimelineEntry> {
+    let provider_meta = ProviderEventMeta {
+        requested_name: "商汤Token Plan".to_string(),
+        provider_name: "商汤Token Plan".to_string(),
+        protocol: "openai-completions".to_string(),
+        model: "deepseek-v4-flash".to_string(),
+    };
+    let observation = BuildContextObservation {
+        request_format: "openai-completions".to_string(),
+        message_count: 9,
+        image_count: 0,
+        tool_count: 20,
+        temperature: 0.0,
+        max_output_tokens: 65536,
+        stable_prefix_text: String::new(),
+        semi_stable_context_text: String::new(),
+        volatile_input_text: "user: tauri_adapter.rs是什么？".to_string(),
+        prefix_mutation_reasons: Vec::new(),
+        context_refresh_reason: None,
+        instruction_scope_sources: Vec::new(),
+        conversation_carry_mode: None,
+        request_messages_text: "user: tauri_adapter.rs是什么？".to_string(),
+        tool_definitions_text: "Read(path)".to_string(),
+    };
+    build_persisted_trace_timeline(
+        "tauri_adapter.rs是什么？",
+        "completed",
+        Some(&provider_meta),
+        Some("primary"),
+        Some("fallback"),
+        Some(&observation),
+        &activities,
+        &[ModelHopTraceContent {
+            text: "let me read".to_string(),
+            reasoning_content: Some("read file".to_string()),
+        }],
+        Some("canned fallback"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[test]
+fn persisted_timeline_records_real_kind_shaped_error_instead_of_description() {
+    // 真实主路径形状：telemetry 写入 ToolError 序列化 {kind, message}。
+    let activity = pa100_failed_activity(
+        "tool-read",
+        "workspace_read_file_segment",
+        "error",
+        Some(json!({
+            "kind": "invalid_arguments",
+            "message": "unexpected argument `startLine` at `$`"
+        })),
+    );
+    let timeline = pa100_build_timeline(vec![activity]);
+
+    let call_tool = &timeline[3];
+    assert_eq!(call_tool.kind, "call_tool");
+    assert_eq!(call_tool.state, "error");
+    // 描述文本仍留在 text 字段；error 字段必须是真实错误。
+    assert_eq!(
+        call_tool.text.as_deref(),
+        Some("workspace_read_file_segment 的中文描述文本")
+    );
+    let error_text = call_tool.error.as_deref().expect("structured error");
+    assert!(error_text.contains("invalid_arguments"), "{error_text}");
+    assert!(error_text.contains("startLine"), "{error_text}");
+    assert_ne!(error_text, call_tool.text.as_deref().unwrap_or_default());
+
+    let return_result = &timeline[4];
+    assert_eq!(return_result.kind, "return_result");
+    assert_eq!(return_result.state, "error");
+    assert_eq!(return_result.error.as_deref(), call_tool.error.as_deref());
+}
+
+#[test]
+fn persisted_timeline_error_extracts_code_and_string_shapes() {
+    // DispatchError into_outcome 形状：{code, message}。
+    let code_shape = pa100_failed_activity(
+        "tool-read-code",
+        "workspace_gather_context",
+        "error",
+        Some(json!({
+            "code": "invalid_arguments",
+            "message": "schema forbids additional properties"
+        })),
+    );
+    // projection 折叠形状：纯字符串。
+    let string_shape = pa100_failed_activity(
+        "tool-read-string",
+        "workspace_search_text",
+        "error",
+        Some(Value::String("upstream provider exploded".to_string())),
+    );
+
+    let timeline = pa100_build_timeline(vec![code_shape, string_shape]);
+    // 两个失败活动各占一组 model+tool+return 条目。
+    assert_eq!(
+        timeline[3].error.as_deref(),
+        Some("invalid_arguments: schema forbids additional properties")
+    );
+    assert_eq!(
+        timeline[6].error.as_deref(),
+        Some("upstream provider exploded")
+    );
+}
+
+#[test]
+fn persisted_timeline_populates_error_for_aborted_without_flipping_state() {
+    let activity = pa100_failed_activity(
+        "tool-read-aborted",
+        "workspace_read_file_segment",
+        "aborted",
+        Some(json!({
+            "kind": "batch_aborted",
+            "message": "sibling failure aborted this child"
+        })),
+    );
+    let timeline = pa100_build_timeline(vec![activity]);
+
+    let call_tool = &timeline[3];
+    // state 判定维持原语义（仅 error 翻转），但 aborted 的错误信息不再丢失。
+    assert_eq!(call_tool.state, "completed");
+    assert_eq!(
+        call_tool.error.as_deref(),
+        Some("batch_aborted: sibling failure aborted this child")
+    );
+}
+
+#[test]
+fn persisted_timeline_leaves_error_none_when_no_structured_error_present() {
+    // 无结构化错误时回退 None——刻意不回退 description，
+    // 避免「错误」栏重复展示描述文本的假象（PA-100 审核裁决）。
+    let activity = pa100_failed_activity("tool-read-bare", "workspace_read_file", "error", None);
+    let timeline = pa100_build_timeline(vec![activity]);
+
+    assert_eq!(timeline[3].state, "error");
+    assert_eq!(timeline[3].error, None);
+}
+
+/// PA-100 审核 A 缺失测试②：错误文本 300 字符截断边界（含多字节字符按字符计）。
+#[test]
+fn activity_error_text_truncates_at_300_chars_by_char_count() {
+    use crate::agent::runtime::trace_timeline::turn_tool_activity_error_text;
+
+    // 仅 message、无 kind/code：返回文本即 message 本身，便于精确对齐边界。
+    let exactly_300 = "错".repeat(300);
+    let ok_activity = pa100_failed_activity(
+        "t-ok",
+        "workspace_read_file",
+        "error",
+        Some(json!({ "message": exactly_300 })),
+    );
+    let ok_text = turn_tool_activity_error_text(&ok_activity).expect("within limit");
+    assert_eq!(ok_text.chars().count(), 300);
+    assert!(!ok_text.ends_with('…'));
+
+    let over_activity = pa100_failed_activity(
+        "t-over",
+        "workspace_read_file",
+        "error",
+        Some(json!({ "code": "invalid_arguments", "message": "y".repeat(400) })),
+    );
+    let over_text = turn_tool_activity_error_text(&over_activity).expect("over limit");
+    // "{code}: {message}" 组合后截断到 300 字符 + 省略号。
+    assert!(over_text.starts_with("invalid_arguments: "));
+    assert_eq!(over_text.chars().count(), 301);
+    assert!(over_text.ends_with('…'));
+}
+
+// ── PA-100：参数推断门——query+startLine 组合必须路由到 gather，而不是 segment ────────────
+
+#[test]
+fn tool_name_inference_routes_gather_signals_before_start_line() {
+    use crate::agent::runtime::stream_support::infer_tool_name_from_arguments;
+
+    // F1 之后 {path, query, startLine} 是合法的 gather 搜索+翻页组合；
+    // 若先命中 startLine→segment（schema 无 query），会换门复现 invalid_arguments。
+    assert_eq!(
+        infer_tool_name_from_arguments(&json!({
+            "path": "src/lib.rs",
+            "query": "TokenManager",
+            "startLine": 80
+        }))
+        .as_deref(),
+        Some("workspace_gather_context")
+    );
+
+    // 纯分页仍归 segment。
+    assert_eq!(
+        infer_tool_name_from_arguments(&json!({ "path": "src/lib.rs", "startLine": 80 }))
+            .as_deref(),
+        Some("workspace_read_file_segment")
+    );
+
+    // 既有行为回归：lineCount 单独出现时仍指向 gather。
+    assert_eq!(
+        infer_tool_name_from_arguments(&json!({ "path": "src/lib.rs", "lineCount": 40 }))
+            .as_deref(),
+        Some("workspace_gather_context")
+    );
+
+    // PA-100 审核 A 缺失测试④：{startLine,lineCount} 组合在门序调整后路由 gather
+    // （旧行为 segment）——钉住防止未来回调时无声翻转。
+    assert_eq!(
+        infer_tool_name_from_arguments(&json!({
+            "path": "src/lib.rs",
+            "startLine": 80,
+            "lineCount": 40
+        }))
+        .as_deref(),
+        Some("workspace_gather_context")
+    );
+}
+
+/// PA-100 审核 A 缺失测试③：progress builder 与 persisted builder 的错误提取
+/// 必须同构（turn_stream 生产路径仍在使用前者）。
+#[test]
+fn progress_timeline_records_real_tool_error_like_persisted_builder() {
+    let provider_meta = ProviderEventMeta {
+        requested_name: "商汤Token Plan".to_string(),
+        provider_name: "商汤Token Plan".to_string(),
+        protocol: "openai-completions".to_string(),
+        model: "deepseek-v4-flash".to_string(),
+    };
+    let observation = BuildContextObservation {
+        request_format: "openai-completions".to_string(),
+        message_count: 9,
+        image_count: 0,
+        tool_count: 20,
+        temperature: 0.0,
+        max_output_tokens: 65536,
+        stable_prefix_text: String::new(),
+        semi_stable_context_text: String::new(),
+        volatile_input_text: "user: q".to_string(),
+        prefix_mutation_reasons: Vec::new(),
+        context_refresh_reason: None,
+        instruction_scope_sources: Vec::new(),
+        conversation_carry_mode: None,
+        request_messages_text: "user: q".to_string(),
+        tool_definitions_text: "Read(path)".to_string(),
+    };
+    let activity = pa100_failed_activity(
+        "tool-read-progress",
+        "workspace_read_file_segment",
+        "error",
+        Some(json!({
+            "kind": "invalid_arguments",
+            "message": "unexpected argument `startLine`"
+        })),
+    );
+
+    let timeline = build_stream_progress_trace_timeline(
+        "tauri_adapter.rs是什么？",
+        &provider_meta,
+        None,
+        None,
+        &observation,
+        std::slice::from_ref(&activity),
+        &[ModelHopTraceContent {
+            text: "hop".to_string(),
+            reasoning_content: None,
+        }],
+        None,
+        None,
+        None,
+        "calling_tool",
+    );
+
+    let tool_entry = timeline
+        .iter()
+        .find(|entry| entry.kind == "call_tool")
+        .expect("progress call_tool entry");
+    assert_eq!(tool_entry.state, "error");
+    assert_eq!(
+        tool_entry.error.as_deref(),
+        Some("invalid_arguments: unexpected argument `startLine`")
+    );
+    let return_entry = timeline
+        .iter()
+        .find(|entry| entry.kind == "return_result")
+        .expect("progress return_result entry");
+    assert_eq!(return_entry.error.as_deref(), tool_entry.error.as_deref());
+}
+
 #[test]
 fn stream_trace_keeps_each_model_hop_before_its_tool() {
     let provider_meta = ProviderEventMeta {
@@ -6863,8 +7168,7 @@ fn deepseek_tool_followup_uses_live_stream() {
             }),
         ]),
     ]);
-    let mut runtime =
-        build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+    let mut runtime = build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
     let sink = RecordingTurnEventSink::new();
 
     runtime.start_turn_stream(
@@ -7000,8 +7304,7 @@ fn deepseek_followup_replays_full_reasoning_from_fragmented_sse() {
             }),
         ]),
     ]);
-    let mut runtime =
-        build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+    let mut runtime = build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
     let sink = RecordingTurnEventSink::new();
 
     runtime.start_turn_stream(
@@ -7152,8 +7455,7 @@ fn deepseek_multi_hop_followup_preserves_structured_reasoning_content() {
             }),
         ]),
     ]);
-    let mut runtime =
-        build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
+    let mut runtime = build_runtime_for_test(deepseek_provider_selection(server.base_url.clone()));
     let sink = RecordingTurnEventSink::new();
 
     runtime.start_turn_stream(
@@ -7236,9 +7538,7 @@ fn registry_resource_tool_returns_structured_resource_result() {
             availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
             transport_kind: "stdio".to_string(),
             server_identity: "mcp://resource".to_string(),
-            declared_capabilities: vec![
-                crate::agent::capability_bridge::CapabilityKind::Resource,
-            ],
+            declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Resource],
             permission_profile: "host-mediated".to_string(),
             updated_at_ms: 1,
             last_ingress_observation: None,
@@ -7321,9 +7621,7 @@ fn registry_resource_tool_accepts_canonical_and_dotted_aliases() {
             availability: crate::agent::capability_bridge::CapabilityAvailability::Available,
             transport_kind: "stdio".to_string(),
             server_identity: "mcp://resource".to_string(),
-            declared_capabilities: vec![
-                crate::agent::capability_bridge::CapabilityKind::Resource,
-            ],
+            declared_capabilities: vec![crate::agent::capability_bridge::CapabilityKind::Resource],
             permission_profile: "host-mediated".to_string(),
             updated_at_ms: 1,
             last_ingress_observation: None,
@@ -7348,16 +7646,15 @@ fn registry_resource_tool_accepts_canonical_and_dotted_aliases() {
     });
 
     for tool_name in ["mcp_resource_read", "mcp.resource_read"] {
-        let (tool_result, invocation_record, _) =
-            runtime.execute_registered_tool_call(&ToolCall {
-                call_id: None,
-                name: tool_name.to_string(),
-                arguments: json!({
-                    "capabilityId": "mcp:resource:repo-index",
-                    "arguments": { "path": "src" }
-                }),
-                plan: None,
-            });
+        let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
+            call_id: None,
+            name: tool_name.to_string(),
+            arguments: json!({
+                "capabilityId": "mcp:resource:repo-index",
+                "arguments": { "path": "src" }
+            }),
+            plan: None,
+        });
 
         assert_eq!(tool_result.status, "error");
         assert_eq!(
@@ -7373,8 +7670,7 @@ fn registry_resource_tool_accepts_canonical_and_dotted_aliases() {
 
 #[test]
 fn registry_resource_tool_requires_capability_id() {
-    let runtime =
-        build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+    let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
 
     let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
         call_id: None,
@@ -7401,8 +7697,7 @@ fn registry_resource_tool_requires_capability_id() {
 
 #[test]
 fn registry_resource_tool_returns_not_found_error_for_unknown_capability() {
-    let runtime =
-        build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
+    let runtime = build_runtime_for_test(test_provider_selection("http://localhost".to_string()));
 
     let (tool_result, invocation_record, _) = runtime.execute_registered_tool_call(&ToolCall {
         call_id: None,
@@ -7414,8 +7709,8 @@ fn registry_resource_tool_returns_not_found_error_for_unknown_capability() {
     });
 
     assert_eq!(tool_result.status, "error");
-    let payload = serde_json::from_str::<Value>(&tool_result.output)
-        .expect("resource missing output json");
+    let payload =
+        serde_json::from_str::<Value>(&tool_result.output).expect("resource missing output json");
     assert_eq!(
         payload.get("requestedCapabilityId").and_then(Value::as_str),
         Some("mcp:resource:missing")
@@ -7581,8 +7876,8 @@ fn tool_search_returns_empty_candidates_when_no_match_or_filtered_out() {
     });
 
     assert_eq!(tool_result.status, "ok");
-    let payload = serde_json::from_str::<Value>(&tool_result.output)
-        .expect("tool search empty output json");
+    let payload =
+        serde_json::from_str::<Value>(&tool_result.output).expect("tool search empty output json");
     assert_eq!(
         payload.get("candidateCount").and_then(Value::as_u64),
         Some(0)
@@ -7709,8 +8004,8 @@ fn tool_search_accepts_canonical_and_dotted_aliases() {
         });
 
         assert_eq!(tool_result.status, "ok");
-        let payload = serde_json::from_str::<Value>(&tool_result.output)
-            .expect("tool search output json");
+        let payload =
+            serde_json::from_str::<Value>(&tool_result.output).expect("tool search output json");
         assert_eq!(
             payload.get("candidateCount").and_then(Value::as_u64),
             Some(1)
@@ -7722,1667 +8017,1260 @@ fn tool_search_accepts_canonical_and_dotted_aliases() {
 
 #[test]
 fn governed_ask_suspends_turn_and_binds_waiting_user_without_provider_followup() {
-        let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
-        let workspace = temp_workspace_dir("ask-suspend-loop");
-        let executor = build_governed_executor(Some(workspace.clone()), None);
-        let mut store = GraphRunStore::new();
-        GraphRunner::new().start_run(
+    let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let workspace = temp_workspace_dir("ask-suspend-loop");
+    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let mut store = GraphRunStore::new();
+    GraphRunner::new().start_run(
+        &mut store,
+        GraphEngine::new("state-machine-v1").start_run(
+            "run-ask-loop",
+            "ask flow",
+            Some("session-ask-loop"),
+        ),
+    );
+    let store_arc = Arc::new(Mutex::new(store));
+    // A fake provider that would panic if `provider_followup` is called after Ask — the
+    // MockHttpServer with empty responses causes any follow-up connection to fail, which
+    // would produce a failed (not suspended) TurnResult.
+    let server = MockHttpServer::start(Vec::new());
+    let mut runtime = AgentRuntime::with_dependencies(
+        SessionStore::memory_only(),
+        Box::new(StaticResolver {
+            selection: test_chat_provider_selection(server.base_url.clone()),
+        }),
+        Box::new(executor),
+        Box::new(ForcedToolPlanner {
+            tool_name: "Ask".to_string(),
+            // `text` becomes the prompt surfaced in the persisted request (P2-9).
+            arguments: json!({ "text": "继续吗？", "description": "test" }),
+        }),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+    runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+    let result = runtime.run_turn_with_facts(
+        TurnInput {
+            message: "hi".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-ask-loop".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+        RunTurnFacts {
+            run_id: Some("run-ask-loop".to_string()),
+            turn_id: Some("turn-ask-1".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+        },
+    );
+
+    // 1. The turn is suspended, not failed or completed.
+    assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
+    assert!(result
+        .fallback_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("control_outcome_pending")));
+
+    // 2. The pending request is persisted against the real session/run/turn.
+    let dispatcher = runtime
+        .governed_dispatcher()
+        .expect("governed dispatcher must be present");
+    let pending = dispatcher.pending_requests();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].request_kind,
+        PendingControlRequestKind::Interaction
+    );
+    assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-loop"));
+    assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-loop"));
+    assert_eq!(pending[0].turn_id, "turn-ask-1");
+    assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
+
+    // 3. The graph run is WaitingUser with a bound ask wait.
+    let store = store_arc.lock().unwrap();
+    let run = store.load_run("run-ask-loop").expect("run must exist");
+    assert_eq!(run.phase, GraphRunPhase::WaitingUser);
+    let waits = GraphRunner::new().list_ask_waits(&store, "run-ask-loop");
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].request_id, pending[0].request_id);
+    assert_eq!(waits[0].expected_version, pending[0].version);
+    drop(store);
+
+    // 4. The provider was never contacted — no follow-up request after Ask suspension.
+    let requests = server.finish();
+    assert!(
+        requests.is_empty(),
+        "provider should not have been called: {requests:?}"
+    );
+}
+
+#[test]
+fn governed_ask_host_answer_resumes_injects_unique_terminal_result_with_original_call_id() {
+    let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let workspace = temp_workspace_dir("ask-resume-loop");
+    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let mut store = GraphRunStore::new();
+    GraphRunner::new().start_run(
+        &mut store,
+        GraphEngine::new("state-machine-v1").start_run(
+            "run-ask-resume",
+            "ask resume flow",
+            Some("session-ask-resume"),
+        ),
+    );
+    let store_arc = Arc::new(Mutex::new(store));
+    let server = MockHttpServer::start(Vec::new());
+    let mut runtime = AgentRuntime::with_dependencies(
+        SessionStore::memory_only(),
+        Box::new(StaticResolver {
+            selection: test_chat_provider_selection(server.base_url.clone()),
+        }),
+        Box::new(executor),
+        Box::new(ForcedToolPlanner {
+            tool_name: "Ask".to_string(),
+            arguments: json!({ "text": "确认？", "description": "test" }),
+        }),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+    runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+    let result = runtime.run_turn_with_facts(
+        TurnInput {
+            message: "ask resume test".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-ask-resume".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+        RunTurnFacts {
+            run_id: Some("run-ask-resume".to_string()),
+            turn_id: Some("turn-ask-resume-1".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+        },
+    );
+    assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
+
+    let dispatcher = runtime
+        .governed_dispatcher()
+        .expect("governed dispatcher must be present");
+    let pending = dispatcher.pending_requests();
+    assert_eq!(pending.len(), 1);
+    let request_id = pending[0].request_id.clone();
+    let expected_version = pending[0].version;
+
+    // Host answers the Ask via the shared dispatcher.
+    let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+        &pending[0],
+        Some(json!("确认继续")),
+    );
+    let consumed = dispatcher
+        .answer_control_request(&request_id, &authorization)
+        .expect("answer must succeed on shared dispatcher");
+    assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
+    assert_eq!(
+        consumed.answer.as_ref().and_then(Value::as_str),
+        Some("确认继续")
+    );
+
+    // Graph resume injects exactly one terminal result for the original call_id.
+    let mut store = store_arc.lock().unwrap();
+    let outcome = GraphRunner::new()
+        .resume_ask_wait(
             &mut store,
-            GraphEngine::new("state-machine-v1")
-                .start_run("run-ask-loop", "ask flow", Some("session-ask-loop")),
-        );
-        let store_arc = Arc::new(Mutex::new(store));
-        // A fake provider that would panic if `provider_followup` is called after Ask — the
-        // MockHttpServer with empty responses causes any follow-up connection to fail, which
-        // would produce a failed (not suspended) TurnResult.
-        let server = MockHttpServer::start(Vec::new());
-        let mut runtime = AgentRuntime::with_dependencies(
-            SessionStore::memory_only(),
-            Box::new(StaticResolver {
-                selection: test_chat_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(executor),
-            Box::new(ForcedToolPlanner {
-                tool_name: "Ask".to_string(),
-                // `text` becomes the prompt surfaced in the persisted request (P2-9).
-                arguments: json!({ "text": "继续吗？", "description": "test" }),
-            }),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        runtime.set_graph_run_store(Arc::clone(&store_arc));
+            "run-ask-resume",
+            &request_id,
+            expected_version,
+            json!("确认继续"),
+        )
+        .expect("graph resume must succeed");
+    assert_eq!(outcome.call_id, pending[0].call_id);
+    assert_eq!(
+        outcome.terminal_result["output"]["answer"].as_str(),
+        Some("确认继续")
+    );
+    assert_eq!(
+        outcome.terminal_result["toolCallId"].as_str(),
+        Some(pending[0].call_id.as_str())
+    );
+    assert!(GraphRunner::new()
+        .list_ask_waits(&store, "run-ask-resume")
+        .is_empty());
+    drop(store);
 
-        let result = runtime.run_turn_with_facts(
-            TurnInput {
-                message: "hi".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("session-ask-loop".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-            RunTurnFacts {
-                run_id: Some("run-ask-loop".to_string()),
-                turn_id: Some("turn-ask-1".to_string()),
-                workspace_root: Some(workspace.display().to_string()),
-            },
-        );
+    // The provider was never called (no follow-up after suspension).
+    let requests = server.finish();
+    assert!(
+        requests.is_empty(),
+        "provider should not have been called: {requests:?}"
+    );
+}
 
-        // 1. The turn is suspended, not failed or completed.
-        assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
-        assert!(result
-            .fallback_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("control_outcome_pending")));
+#[test]
+fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context() {
+    // PA-076 phase-4 P0: after the host answers a bound Ask and the graph resumes
+    // (run -> Ready), the NEXT turn's provider request must carry the original assistant
+    // tool-call + the terminal tool result (the answer) — injected as a completed tool
+    // round, not a fresh user turn. The injection is one-shot.
+    let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let workspace = temp_workspace_dir("ask-resume-inject-provider");
+    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let mut store = GraphRunStore::new();
+    GraphRunner::new().start_run(
+        &mut store,
+        GraphEngine::new("state-machine-v1").start_run(
+            "run-ask-inject",
+            "ask inject flow",
+            Some("session-ask-inject"),
+        ),
+    );
+    let store_arc = Arc::new(Mutex::new(store));
+    // The resumed turn reaches the provider exactly once and receives a text completion.
+    let server = MockHttpServer::start(vec![json_completion("好的，我已经看到你的回答，继续。")]);
+    let mut runtime = AgentRuntime::with_dependencies(
+        SessionStore::memory_only(),
+        Box::new(StaticResolver {
+            selection: test_chat_provider_selection(server.base_url.clone()),
+        }),
+        Box::new(executor),
+        Box::new(AskOnceThenDeferPlanner {
+            tool_name: "Ask".to_string(),
+            arguments: json!({ "text": "继续吗？", "description": "test" }),
+            ask_forced: std::sync::atomic::AtomicBool::new(false),
+        }),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+    runtime.set_graph_run_store(Arc::clone(&store_arc));
 
-        // 2. The pending request is persisted against the real session/run/turn.
-        let dispatcher = runtime
-            .governed_dispatcher()
-            .expect("governed dispatcher must be present");
-        let pending = dispatcher.pending_requests();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].request_kind, PendingControlRequestKind::Interaction);
-        assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-loop"));
-        assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-loop"));
-        assert_eq!(pending[0].turn_id, "turn-ask-1");
-        assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
+    // Turn 1: the planner forces the Ask tool -> dispatcher persists -> turn suspends and
+    // the run is bound to WaitingUser. The provider is never called.
+    let suspended = runtime.run_turn_with_facts(
+        TurnInput {
+            message: "start the ask flow".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-ask-inject".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+        RunTurnFacts {
+            run_id: Some("run-ask-inject".to_string()),
+            turn_id: Some("turn-ask-inject-1".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+        },
+    );
+    assert_eq!(suspended.phase, SUSPENDED_TURN_PHASE);
 
-        // 3. The graph run is WaitingUser with a bound ask wait.
-        let store = store_arc.lock().unwrap();
-        let run = store.load_run("run-ask-loop").expect("run must exist");
-        assert_eq!(run.phase, GraphRunPhase::WaitingUser);
-        let waits = GraphRunner::new().list_ask_waits(&store, "run-ask-loop");
-        assert_eq!(waits.len(), 1);
-        assert_eq!(waits[0].request_id, pending[0].request_id);
-        assert_eq!(waits[0].expected_version, pending[0].version);
-        drop(store);
+    // Host answers through the shared dispatcher (CAS consumes the pending request).
+    let dispatcher = runtime
+        .governed_dispatcher()
+        .expect("governed dispatcher must be present");
+    let pending = dispatcher.pending_requests();
+    assert_eq!(pending.len(), 1);
+    let request_id = pending[0].request_id.clone();
+    let expected_version = pending[0].version;
+    let original_call_id = pending[0].call_id.clone();
+    let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+        &pending[0],
+        Some(json!("继续执行")),
+    );
+    dispatcher
+        .answer_control_request(&request_id, &authorization)
+        .expect("answer must succeed on shared dispatcher");
 
-        // 4. The provider was never contacted — no follow-up request after Ask suspension.
-        let requests = server.finish();
-        assert!(requests.is_empty(), "provider should not have been called: {requests:?}");
-    }
-
-    #[test]
-    fn governed_ask_host_answer_resumes_injects_unique_terminal_result_with_original_call_id()
+    // Graph resume: run -> Ready and exactly one injection is persisted for the original
+    // call id (the next turn consumes it).
     {
-        let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
-        let workspace = temp_workspace_dir("ask-resume-loop");
-        let executor = build_governed_executor(Some(workspace.clone()), None);
-        let mut store = GraphRunStore::new();
-        GraphRunner::new().start_run(
-            &mut store,
-            GraphEngine::new("state-machine-v1")
-                .start_run("run-ask-resume", "ask resume flow", Some("session-ask-resume")),
-        );
-        let store_arc = Arc::new(Mutex::new(store));
-        let server = MockHttpServer::start(Vec::new());
-        let mut runtime = AgentRuntime::with_dependencies(
-            SessionStore::memory_only(),
-            Box::new(StaticResolver {
-                selection: test_chat_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(executor),
-            Box::new(ForcedToolPlanner {
-                tool_name: "Ask".to_string(),
-                arguments: json!({ "text": "确认？", "description": "test" }),
-            }),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        runtime.set_graph_run_store(Arc::clone(&store_arc));
-
-        let result = runtime.run_turn_with_facts(
-            TurnInput {
-                message: "ask resume test".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("session-ask-resume".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-            RunTurnFacts {
-                run_id: Some("run-ask-resume".to_string()),
-                turn_id: Some("turn-ask-resume-1".to_string()),
-                workspace_root: Some(workspace.display().to_string()),
-            },
-        );
-        assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
-
-        let dispatcher = runtime
-            .governed_dispatcher()
-            .expect("governed dispatcher must be present");
-        let pending = dispatcher.pending_requests();
-        assert_eq!(pending.len(), 1);
-        let request_id = pending[0].request_id.clone();
-        let expected_version = pending[0].version;
-
-        // Host answers the Ask via the shared dispatcher.
-        let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
-            &pending[0],
-            Some(json!("确认继续")),
-        );
-        let consumed = dispatcher
-            .answer_control_request(&request_id, &authorization)
-            .expect("answer must succeed on shared dispatcher");
-        assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
-        assert_eq!(
-            consumed.answer.as_ref().and_then(Value::as_str),
-            Some("确认继续")
-        );
-
-        // Graph resume injects exactly one terminal result for the original call_id.
         let mut store = store_arc.lock().unwrap();
         let outcome = GraphRunner::new()
             .resume_ask_wait(
                 &mut store,
-                "run-ask-resume",
-                &request_id,
-                expected_version,
-                json!("确认继续"),
-            )
-            .expect("graph resume must succeed");
-        assert_eq!(outcome.call_id, pending[0].call_id);
-        assert_eq!(
-            outcome.terminal_result["output"]["answer"].as_str(),
-            Some("确认继续")
-        );
-        assert_eq!(
-            outcome.terminal_result["toolCallId"].as_str(),
-            Some(pending[0].call_id.as_str())
-        );
-        assert!(GraphRunner::new()
-            .list_ask_waits(&store, "run-ask-resume")
-            .is_empty());
-        drop(store);
-
-        // The provider was never called (no follow-up after suspension).
-        let requests = server.finish();
-        assert!(
-            requests.is_empty(),
-            "provider should not have been called: {requests:?}"
-        );
-    }
-
-    #[test]
-    fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context() {
-        // PA-076 phase-4 P0: after the host answers a bound Ask and the graph resumes
-        // (run -> Ready), the NEXT turn's provider request must carry the original assistant
-        // tool-call + the terminal tool result (the answer) — injected as a completed tool
-        // round, not a fresh user turn. The injection is one-shot.
-        let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
-        let workspace = temp_workspace_dir("ask-resume-inject-provider");
-        let executor = build_governed_executor(Some(workspace.clone()), None);
-        let mut store = GraphRunStore::new();
-        GraphRunner::new().start_run(
-            &mut store,
-            GraphEngine::new("state-machine-v1").start_run(
                 "run-ask-inject",
-                "ask inject flow",
-                Some("session-ask-inject"),
-            ),
-        );
-        let store_arc = Arc::new(Mutex::new(store));
-        // The resumed turn reaches the provider exactly once and receives a text completion.
-        let server =
-            MockHttpServer::start(vec![json_completion("好的，我已经看到你的回答，继续。")]);
-        let mut runtime = AgentRuntime::with_dependencies(
-            SessionStore::memory_only(),
-            Box::new(StaticResolver {
-                selection: test_chat_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(executor),
-            Box::new(AskOnceThenDeferPlanner {
-                tool_name: "Ask".to_string(),
-                arguments: json!({ "text": "继续吗？", "description": "test" }),
-                ask_forced: std::sync::atomic::AtomicBool::new(false),
-            }),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        runtime.set_graph_run_store(Arc::clone(&store_arc));
-
-        // Turn 1: the planner forces the Ask tool -> dispatcher persists -> turn suspends and
-        // the run is bound to WaitingUser. The provider is never called.
-        let suspended = runtime.run_turn_with_facts(
-            TurnInput {
-                message: "start the ask flow".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("session-ask-inject".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-            RunTurnFacts {
-                run_id: Some("run-ask-inject".to_string()),
-                turn_id: Some("turn-ask-inject-1".to_string()),
-                workspace_root: Some(workspace.display().to_string()),
-            },
-        );
-        assert_eq!(suspended.phase, SUSPENDED_TURN_PHASE);
-
-        // Host answers through the shared dispatcher (CAS consumes the pending request).
-        let dispatcher = runtime
-            .governed_dispatcher()
-            .expect("governed dispatcher must be present");
-        let pending = dispatcher.pending_requests();
-        assert_eq!(pending.len(), 1);
-        let request_id = pending[0].request_id.clone();
-        let expected_version = pending[0].version;
-        let original_call_id = pending[0].call_id.clone();
-        let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
-            &pending[0],
-            Some(json!("继续执行")),
-        );
-        dispatcher
-            .answer_control_request(&request_id, &authorization)
-            .expect("answer must succeed on shared dispatcher");
-
-        // Graph resume: run -> Ready and exactly one injection is persisted for the original
-        // call id (the next turn consumes it).
-        {
-            let mut store = store_arc.lock().unwrap();
-            let outcome = GraphRunner::new()
-                .resume_ask_wait(
-                    &mut store,
-                    "run-ask-inject",
-                    &request_id,
-                    expected_version,
-                    json!("继续执行"),
-                )
-                .expect("graph resume must succeed");
-            assert_eq!(outcome.call_id, original_call_id);
-            assert_eq!(
-                outcome.terminal_result["output"]["answer"].as_str(),
-                Some("继续执行")
-            );
-            let run = store.load_run("run-ask-inject").expect("run present");
-            assert_eq!(run.phase, GraphRunPhase::Ready);
-            assert!(
-                store.peek_ask_injection("run-ask-inject").is_some(),
-                "the resume must persist the one-shot injection"
-            );
-        }
-
-        // Turn 2: the resumed run consumes the one-shot injection. The provider request must
-        // contain the original assistant tool-call + the terminal tool result (the answer).
-        let resumed = runtime.run_turn_with_facts(
-            TurnInput {
-                message: "continue after the answer".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("session-ask-inject".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-            RunTurnFacts {
-                run_id: Some("run-ask-inject".to_string()),
-                turn_id: Some("turn-ask-inject-2".to_string()),
-                workspace_root: Some(workspace.display().to_string()),
-            },
-        );
-        assert_ne!(
-            resumed.phase, SUSPENDED_TURN_PHASE,
-            "the resumed turn must not suspend again"
-        );
-
-        // The injection is one-shot: consumed (gone) after the resumed turn.
-        assert!(
-            store_arc
-                .lock()
-                .unwrap()
-                .peek_ask_injection("run-ask-inject")
-                .is_none(),
-            "the injection must be consumed exactly once"
-        );
-
-        // The single provider request carries the injected pair.
-        let requests = server.finish();
-        assert_eq!(
-            requests.len(),
-            1,
-            "provider should be called exactly once for the resumed turn: {requests:?}"
-        );
-        let body: Value = serde_json::from_str(&requests[0]).expect("request body json");
-        let messages = body["messages"].as_array().expect("messages array");
-        let assistant_index = messages
-            .iter()
-            .position(|message| {
-                message.get("role").and_then(Value::as_str) == Some("assistant")
-                    && message
-                        .get("tool_calls")
-                        .and_then(Value::as_array)
-                        .is_some_and(|calls| {
-                            calls.iter().any(|call| {
-                                call.get("id").and_then(Value::as_str)
-                                    == Some(original_call_id.as_str())
-                            })
-                        })
-            })
-            .expect("the original assistant tool-call must be injected into the request");
-        let tool_result_index = messages
-            .iter()
-            .position(|message| {
-                message.get("role").and_then(Value::as_str) == Some("tool")
-                    && message
-                        .get("tool_call_id")
-                        .and_then(Value::as_str)
-                        == Some(original_call_id.as_str())
-                    && message
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|content| content.contains("继续执行"))
-            })
-            .expect("the terminal tool result with the answer must be injected into the request");
-        assert!(
-            tool_result_index > assistant_index,
-            "the tool result must follow the assistant tool-call"
-        );
-    }
-
-    #[test]
-    fn governed_ask_host_and_runtime_share_same_dispatcher() {
-        // PA-076 P1-1: HostControlPlane built via `with_runtime` must share the runtime's
-        // governed dispatcher so host `ask_answer` hits the pending request the runtime
-        // persisted. This also exercises the `build()` auto-wiring: no explicit
-        // `ask_dispatcher` is passed.
-        let workspace = temp_workspace_dir("ask-shared-dispatch");
-        let executor = build_governed_executor(Some(workspace.clone()), None);
-        let runtime = AgentRuntime::with_dependencies(
-            SessionStore::memory_only(),
-            Box::new(ProviderRegistryStore::new()),
-            Box::new(executor),
-            Box::new(LocalTurnPlanner),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-
-        let runtime_dispatcher = runtime
-            .governed_dispatcher()
-            .expect("runtime must have a governed dispatcher");
-
-        // Control plane built with this runtime shares its dispatcher (no explicit
-        // ask_dispatcher → auto-wired via build()).
-        let control_plane =
-            HostControlPlaneBuilder::new().runtime(runtime).build();
-
-        // Same Arc pointer → host answer hits the runtime's store.
-        assert!(Arc::ptr_eq(
-            &control_plane.ask_dispatcher,
-            &runtime_dispatcher
-        ));
-
-        // Dispatch an Ask through the shared dispatcher.
-        let outcome = control_plane.ask_dispatcher.dispatch_governed(
-            ToolDispatchRequest {
-                origin: InvocationOrigin::Model,
-                descriptor_id: "Ask".to_string(),
-                call_id: "call-shared".to_string(),
-                arguments: json!({ "text": "共享测试", "description": "test" }),
-            },
-            &DispatchContext {
-                session_id: Some("session-shared".to_string()),
-                run_id: Some("run-shared".to_string()),
-                turn_id: Some("turn-shared".to_string()),
-                ..Default::default()
-            },
-        );
-        assert!(
-            outcome.control_outcome.is_some(),
-            "expected pending control outcome, got: {:?} / result={:?}",
-            outcome.control_outcome,
-            outcome.result
-        );
-        let request_id = outcome.control_outcome.unwrap().request_id;
-
-        // Host answers through the control-plane surface — same dispatcher → CAS succeeds.
-        let consumed = control_plane
-            .answer_ask(&request_id, 1, json!("是的"))
-            .expect("answer must hit the same pending request");
-        let consumed_request =
-            serde_json::from_value::<ControlRequestConsumed>(
-                consumed,
-            )
-            .expect("consumed request projection");
-        assert_eq!(
-            consumed_request.request.state,
-            PendingControlRequestState::Consumed
-        );
-    }
-
-    #[test]
-    fn governed_ask_stream_suspends_turn_and_binds_waiting_user_without_provider_followup() {
-        // PA-076 P1-1: the stream path (`start_turn_stream_with_control_and_facts` →
-        // `handle_stream_tool_turn`) must pause on a `control_outcome_pending` result exactly
-        // like the sync path: bind the Ask wait to the graph run (→ `WaitingUser`), persist
-        // the pending request against the real run/turn facts, emit the terminal
-        // `turn:suspended` event, and never feed the marker back to the provider.
-        let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
-        let workspace = temp_workspace_dir("ask-stream-suspend-loop");
-        let executor = build_governed_executor(Some(workspace.clone()), None);
-        let mut store = GraphRunStore::new();
-        GraphRunner::new().start_run(
-            &mut store,
-            GraphEngine::new("state-machine-v1").start_run(
-                "run-ask-stream",
-                "ask stream flow",
-                Some("session-ask-stream"),
-            ),
-        );
-        let store_arc = Arc::new(Mutex::new(store));
-        // A fake provider that would panic if `provider_followup_stream` is called after Ask —
-        // with zero queued responses the mock server's listener exits immediately, so any
-        // follow-up connection is refused and the turn would fail instead of suspending.
-        let server = MockHttpServer::start(Vec::new());
-        let mut runtime = AgentRuntime::with_dependencies(
-            SessionStore::memory_only(),
-            Box::new(StaticResolver {
-                selection: test_chat_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(executor),
-            Box::new(ForcedToolPlanner {
-                tool_name: "Ask".to_string(),
-                arguments: json!({ "text": "继续吗？", "description": "test" }),
-            }),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        runtime.set_graph_run_store(Arc::clone(&store_arc));
-
-        let sink = RecordingTurnEventSink::new();
-        let control = ExecutionControlRegistry::new();
-        control.register_turn(
-            "turn-ask-stream-1",
-            Some("session-ask-stream"),
-            Some("run-ask-stream"),
-        );
-        runtime.start_turn_stream_with_control_and_facts(
-            &sink,
-            &control,
-            "turn-ask-stream-1".to_string(),
-            TurnInput {
-                message: "hi".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("session-ask-stream".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-            RunTurnFacts {
-                run_id: Some("run-ask-stream".to_string()),
-                turn_id: Some("turn-ask-stream-1".to_string()),
-                workspace_root: Some(workspace.display().to_string()),
-            },
-        );
-
-        // 1. The stream emitted a terminal `turn:suspended` event (never a completed/failed
-        //    terminal) carrying the suspended phase.
-        let events = sink.events.borrow();
-        let event_names = || {
-            events
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>()
-        };
-        assert!(
-            events.iter().any(|(name, payload)| {
-                name == "turn:suspended"
-                    && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
-            }),
-            "stream should emit turn:suspended, got: {:?}",
-            event_names()
-        );
-        assert!(
-            !events.iter().any(|(name, _)| name == "turn:completed"),
-            "stream must not emit turn:completed after Ask suspension: {:?}",
-            event_names()
-        );
-        assert!(
-            !events.iter().any(|(name, _)| name == "turn:failed"),
-            "stream must not emit turn:failed after Ask suspension: {:?}",
-            event_names()
-        );
-        drop(events);
-
-        // 2. The pending request is persisted against the real session/run/turn.
-        let dispatcher = runtime
-            .governed_dispatcher()
-            .expect("governed dispatcher must be present");
-        let pending = dispatcher.pending_requests();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].request_kind, PendingControlRequestKind::Interaction);
-        assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-stream"));
-        assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-stream"));
-        assert_eq!(pending[0].turn_id, "turn-ask-stream-1");
-        assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
-
-        // 3. The graph run is WaitingUser with a bound ask wait.
-        let store = store_arc.lock().unwrap();
-        let run = store.load_run("run-ask-stream").expect("run must exist");
-        assert_eq!(run.phase, GraphRunPhase::WaitingUser);
-        let waits = GraphRunner::new().list_ask_waits(&store, "run-ask-stream");
-        assert_eq!(waits.len(), 1);
-        assert_eq!(waits[0].request_id, pending[0].request_id);
-        assert_eq!(waits[0].expected_version, pending[0].version);
-        drop(store);
-
-        // 4. The provider was never contacted — no follow-up request after Ask suspension.
-        let requests = server.finish();
-        assert!(
-            requests.is_empty(),
-            "provider should not have been called: {requests:?}"
-        );
-    }
-
-    #[test]
-    fn governed_stream_normal_glob_tool_turn_completes() {
-        // Regression: a normal (non-Ask) workspace tool
-        // turn through the app's stream path must complete, not hang.
-        let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
-        let workspace = temp_workspace_dir("repro-glob-stream");
-        std::fs::write(workspace.join("a.txt"), "hello").expect("write file");
-        std::fs::write(workspace.join("b.md"), "world").expect("write file");
-        let executor = build_governed_executor(Some(workspace.clone()), None);
-        // One followup response (the assistant's final answer after the tool executes).
-        let server = MockHttpServer::start(vec![json_completion("done listing files")]);
-        let runtime = AgentRuntime::with_dependencies(
-            SessionStore::memory_only(),
-            Box::new(StaticResolver {
-                selection: test_chat_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(executor),
-            Box::new(ForcedToolPlanner {
-                tool_name: "workspace_glob_files".to_string(),
-                arguments: json!({ "pattern": "**/*" }),
-            }),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        let sink = RecordingTurnEventSink::new();
-        let control = ExecutionControlRegistry::new();
-        control.register_turn(
-            "turn-repro-glob-1",
-            Some("session-repro-glob"),
-            Some("run-repro-glob"),
-        );
-        runtime.start_turn_stream_with_control_and_facts(
-            &sink,
-            &control,
-            "turn-repro-glob-1".to_string(),
-            TurnInput {
-                message: "list files".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("session-repro-glob".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-            RunTurnFacts {
-                run_id: Some("run-repro-glob".to_string()),
-                turn_id: Some("turn-repro-glob-1".to_string()),
-                workspace_root: Some(workspace.display().to_string()),
-            },
-        );
-        let events = sink.events.borrow();
-        let names = || {
-            events
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>()
-        };
-        assert!(
-            events.iter().any(|(name, _)| name == "turn:completed"),
-            "stream should complete a normal tool turn; got: {:?}",
-            names()
-        );
-    }
-
-    #[test]
-    fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_original_call_id()
-    {
-        // PA-076 P1-1 end-to-end stream resume: the host answers the persisted Ask through the
-        // shared dispatcher, then `resume_ask_wait` injects exactly one terminal result keyed
-        // to the original assistant tool-call id.
-        let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
-        let workspace = temp_workspace_dir("ask-stream-resume-loop");
-        let executor = build_governed_executor(Some(workspace.clone()), None);
-        let mut store = GraphRunStore::new();
-        GraphRunner::new().start_run(
-            &mut store,
-            GraphEngine::new("state-machine-v1").start_run(
-                "run-ask-stream-resume",
-                "ask stream resume flow",
-                Some("session-ask-stream-resume"),
-            ),
-        );
-        let store_arc = Arc::new(Mutex::new(store));
-        let server = MockHttpServer::start(Vec::new());
-        let mut runtime = AgentRuntime::with_dependencies(
-            SessionStore::memory_only(),
-            Box::new(StaticResolver {
-                selection: test_chat_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(executor),
-            Box::new(ForcedToolPlanner {
-                tool_name: "Ask".to_string(),
-                arguments: json!({ "text": "确认？", "description": "test" }),
-            }),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        runtime.set_graph_run_store(Arc::clone(&store_arc));
-
-        let sink = RecordingTurnEventSink::new();
-        let control = ExecutionControlRegistry::new();
-        control.register_turn(
-            "turn-ask-stream-resume-1",
-            Some("session-ask-stream-resume"),
-            Some("run-ask-stream-resume"),
-        );
-        runtime.start_turn_stream_with_control_and_facts(
-            &sink,
-            &control,
-            "turn-ask-stream-resume-1".to_string(),
-            TurnInput {
-                message: "ask stream resume test".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("session-ask-stream-resume".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-            RunTurnFacts {
-                run_id: Some("run-ask-stream-resume".to_string()),
-                turn_id: Some("turn-ask-stream-resume-1".to_string()),
-                workspace_root: Some(workspace.display().to_string()),
-            },
-        );
-        assert!(
-            sink.events.borrow().iter().any(|(name, payload)| {
-                name == "turn:suspended"
-                    && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
-            }),
-            "stream should emit turn:suspended"
-        );
-
-        let dispatcher = runtime
-            .governed_dispatcher()
-            .expect("governed dispatcher must be present");
-        let pending = dispatcher.pending_requests();
-        assert_eq!(pending.len(), 1);
-        let request_id = pending[0].request_id.clone();
-        let expected_version = pending[0].version;
-        let original_call_id = pending[0].call_id.clone();
-
-        // Host answers the Ask via the shared dispatcher.
-        let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
-            &pending[0],
-            Some(json!("确认继续")),
-        );
-        let consumed = dispatcher
-            .answer_control_request(&request_id, &authorization)
-            .expect("answer must succeed on shared dispatcher");
-        assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
-        assert_eq!(
-            consumed.answer.as_ref().and_then(Value::as_str),
-            Some("确认继续")
-        );
-
-        // Graph resume injects exactly one terminal result for the original call_id.
-        let mut store = store_arc.lock().unwrap();
-        let outcome = GraphRunner::new()
-            .resume_ask_wait(
-                &mut store,
-                "run-ask-stream-resume",
                 &request_id,
                 expected_version,
-                json!("确认继续"),
+                json!("继续执行"),
             )
             .expect("graph resume must succeed");
         assert_eq!(outcome.call_id, original_call_id);
         assert_eq!(
-            outcome.terminal_result["toolCallId"].as_str(),
-            Some(original_call_id.as_str())
-        );
-        assert_eq!(
             outcome.terminal_result["output"]["answer"].as_str(),
-            Some("确认继续")
+            Some("继续执行")
         );
-        assert!(GraphRunner::new()
-            .list_ask_waits(&store, "run-ask-stream-resume")
-            .is_empty());
-        drop(store);
-
-        // The provider was never called (no follow-up after suspension).
-        let requests = server.finish();
+        let run = store.load_run("run-ask-inject").expect("run present");
+        assert_eq!(run.phase, GraphRunPhase::Ready);
         assert!(
-            requests.is_empty(),
-            "provider should not have been called: {requests:?}"
+            store.peek_ask_injection("run-ask-inject").is_some(),
+            "the resume must persist the one-shot injection"
         );
     }
 
-    fn temp_workspace_dir(name: &str) -> PathBuf {
-        let root = std::env::temp_dir()
-            .join(format!("pony-ask-runtime-test-{}-{}", name, std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("create temp workspace for ask test");
-        root
-    }
+    // Turn 2: the resumed run consumes the one-shot injection. The provider request must
+    // contain the original assistant tool-call + the terminal tool result (the answer).
+    let resumed = runtime.run_turn_with_facts(
+        TurnInput {
+            message: "continue after the answer".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-ask-inject".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+        RunTurnFacts {
+            run_id: Some("run-ask-inject".to_string()),
+            turn_id: Some("turn-ask-inject-2".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+        },
+    );
+    assert_ne!(
+        resumed.phase, SUSPENDED_TURN_PHASE,
+        "the resumed turn must not suspend again"
+    );
+
+    // The injection is one-shot: consumed (gone) after the resumed turn.
+    assert!(
+        store_arc
+            .lock()
+            .unwrap()
+            .peek_ask_injection("run-ask-inject")
+            .is_none(),
+        "the injection must be consumed exactly once"
+    );
+
+    // The single provider request carries the injected pair.
+    let requests = server.finish();
+    assert_eq!(
+        requests.len(),
+        1,
+        "provider should be called exactly once for the resumed turn: {requests:?}"
+    );
+    let body: Value = serde_json::from_str(&requests[0]).expect("request body json");
+    let messages = body["messages"].as_array().expect("messages array");
+    let assistant_index = messages
+        .iter()
+        .position(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+                && message
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            call.get("id").and_then(Value::as_str)
+                                == Some(original_call_id.as_str())
+                        })
+                    })
+        })
+        .expect("the original assistant tool-call must be injected into the request");
+    let tool_result_index = messages
+        .iter()
+        .position(|message| {
+            message.get("role").and_then(Value::as_str) == Some("tool")
+                && message.get("tool_call_id").and_then(Value::as_str)
+                    == Some(original_call_id.as_str())
+                && message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| content.contains("继续执行"))
+        })
+        .expect("the terminal tool result with the answer must be injected into the request");
+    assert!(
+        tool_result_index > assistant_index,
+        "the tool result must follow the assistant tool-call"
+    );
+}
+
+#[test]
+fn governed_ask_host_and_runtime_share_same_dispatcher() {
+    // PA-076 P1-1: HostControlPlane built via `with_runtime` must share the runtime's
+    // governed dispatcher so host `ask_answer` hits the pending request the runtime
+    // persisted. This also exercises the `build()` auto-wiring: no explicit
+    // `ask_dispatcher` is passed.
+    let workspace = temp_workspace_dir("ask-shared-dispatch");
+    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let runtime = AgentRuntime::with_dependencies(
+        SessionStore::memory_only(),
+        Box::new(ProviderRegistryStore::new()),
+        Box::new(executor),
+        Box::new(LocalTurnPlanner),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+
+    let runtime_dispatcher = runtime
+        .governed_dispatcher()
+        .expect("runtime must have a governed dispatcher");
+
+    // Control plane built with this runtime shares its dispatcher (no explicit
+    // ask_dispatcher → auto-wired via build()).
+    let control_plane = HostControlPlaneBuilder::new().runtime(runtime).build();
+
+    // Same Arc pointer → host answer hits the runtime's store.
+    assert!(Arc::ptr_eq(
+        &control_plane.ask_dispatcher,
+        &runtime_dispatcher
+    ));
+
+    // Dispatch an Ask through the shared dispatcher.
+    let outcome = control_plane.ask_dispatcher.dispatch_governed(
+        ToolDispatchRequest {
+            origin: InvocationOrigin::Model,
+            descriptor_id: "Ask".to_string(),
+            call_id: "call-shared".to_string(),
+            arguments: json!({ "text": "共享测试", "description": "test" }),
+        },
+        &DispatchContext {
+            session_id: Some("session-shared".to_string()),
+            run_id: Some("run-shared".to_string()),
+            turn_id: Some("turn-shared".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        outcome.control_outcome.is_some(),
+        "expected pending control outcome, got: {:?} / result={:?}",
+        outcome.control_outcome,
+        outcome.result
+    );
+    let request_id = outcome.control_outcome.unwrap().request_id;
+
+    // Host answers through the control-plane surface — same dispatcher → CAS succeeds.
+    let consumed = control_plane
+        .answer_ask(&request_id, 1, json!("是的"))
+        .expect("answer must hit the same pending request");
+    let consumed_request = serde_json::from_value::<ControlRequestConsumed>(consumed)
+        .expect("consumed request projection");
+    assert_eq!(
+        consumed_request.request.state,
+        PendingControlRequestState::Consumed
+    );
+}
+
+#[test]
+fn governed_ask_stream_suspends_turn_and_binds_waiting_user_without_provider_followup() {
+    // PA-076 P1-1: the stream path (`start_turn_stream_with_control_and_facts` →
+    // `handle_stream_tool_turn`) must pause on a `control_outcome_pending` result exactly
+    // like the sync path: bind the Ask wait to the graph run (→ `WaitingUser`), persist
+    // the pending request against the real run/turn facts, emit the terminal
+    // `turn:suspended` event, and never feed the marker back to the provider.
+    let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let workspace = temp_workspace_dir("ask-stream-suspend-loop");
+    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let mut store = GraphRunStore::new();
+    GraphRunner::new().start_run(
+        &mut store,
+        GraphEngine::new("state-machine-v1").start_run(
+            "run-ask-stream",
+            "ask stream flow",
+            Some("session-ask-stream"),
+        ),
+    );
+    let store_arc = Arc::new(Mutex::new(store));
+    // A fake provider that would panic if `provider_followup_stream` is called after Ask —
+    // with zero queued responses the mock server's listener exits immediately, so any
+    // follow-up connection is refused and the turn would fail instead of suspending.
+    let server = MockHttpServer::start(Vec::new());
+    let mut runtime = AgentRuntime::with_dependencies(
+        SessionStore::memory_only(),
+        Box::new(StaticResolver {
+            selection: test_chat_provider_selection(server.base_url.clone()),
+        }),
+        Box::new(executor),
+        Box::new(ForcedToolPlanner {
+            tool_name: "Ask".to_string(),
+            arguments: json!({ "text": "继续吗？", "description": "test" }),
+        }),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+    runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+    let sink = RecordingTurnEventSink::new();
+    let control = ExecutionControlRegistry::new();
+    control.register_turn(
+        "turn-ask-stream-1",
+        Some("session-ask-stream"),
+        Some("run-ask-stream"),
+    );
+    runtime.start_turn_stream_with_control_and_facts(
+        &sink,
+        &control,
+        "turn-ask-stream-1".to_string(),
+        TurnInput {
+            message: "hi".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-ask-stream".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+        RunTurnFacts {
+            run_id: Some("run-ask-stream".to_string()),
+            turn_id: Some("turn-ask-stream-1".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+        },
+    );
+
+    // 1. The stream emitted a terminal `turn:suspended` event (never a completed/failed
+    //    terminal) carrying the suspended phase.
+    let events = sink.events.borrow();
+    let event_names = || {
+        events
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        events.iter().any(|(name, payload)| {
+            name == "turn:suspended" && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
+        }),
+        "stream should emit turn:suspended, got: {:?}",
+        event_names()
+    );
+    assert!(
+        !events.iter().any(|(name, _)| name == "turn:completed"),
+        "stream must not emit turn:completed after Ask suspension: {:?}",
+        event_names()
+    );
+    assert!(
+        !events.iter().any(|(name, _)| name == "turn:failed"),
+        "stream must not emit turn:failed after Ask suspension: {:?}",
+        event_names()
+    );
+    drop(events);
+
+    // 2. The pending request is persisted against the real session/run/turn.
+    let dispatcher = runtime
+        .governed_dispatcher()
+        .expect("governed dispatcher must be present");
+    let pending = dispatcher.pending_requests();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].request_kind,
+        PendingControlRequestKind::Interaction
+    );
+    assert_eq!(pending[0].session_id.as_deref(), Some("session-ask-stream"));
+    assert_eq!(pending[0].run_id.as_deref(), Some("run-ask-stream"));
+    assert_eq!(pending[0].turn_id, "turn-ask-stream-1");
+    assert_eq!(pending[0].prompt.as_deref(), Some("继续吗？"));
+
+    // 3. The graph run is WaitingUser with a bound ask wait.
+    let store = store_arc.lock().unwrap();
+    let run = store.load_run("run-ask-stream").expect("run must exist");
+    assert_eq!(run.phase, GraphRunPhase::WaitingUser);
+    let waits = GraphRunner::new().list_ask_waits(&store, "run-ask-stream");
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].request_id, pending[0].request_id);
+    assert_eq!(waits[0].expected_version, pending[0].version);
+    drop(store);
+
+    // 4. The provider was never contacted — no follow-up request after Ask suspension.
+    let requests = server.finish();
+    assert!(
+        requests.is_empty(),
+        "provider should not have been called: {requests:?}"
+    );
+}
+
+#[test]
+fn governed_stream_normal_glob_tool_turn_completes() {
+    // Regression: a normal (non-Ask) workspace tool
+    // turn through the app's stream path must complete, not hang.
+    let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let workspace = temp_workspace_dir("repro-glob-stream");
+    std::fs::write(workspace.join("a.txt"), "hello").expect("write file");
+    std::fs::write(workspace.join("b.md"), "world").expect("write file");
+    let executor = build_governed_executor(Some(workspace.clone()), None);
+    // One followup response (the assistant's final answer after the tool executes).
+    let server = MockHttpServer::start(vec![json_completion("done listing files")]);
+    let runtime = AgentRuntime::with_dependencies(
+        SessionStore::memory_only(),
+        Box::new(StaticResolver {
+            selection: test_chat_provider_selection(server.base_url.clone()),
+        }),
+        Box::new(executor),
+        Box::new(ForcedToolPlanner {
+            tool_name: "workspace_glob_files".to_string(),
+            arguments: json!({ "pattern": "**/*" }),
+        }),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+    let sink = RecordingTurnEventSink::new();
+    let control = ExecutionControlRegistry::new();
+    control.register_turn(
+        "turn-repro-glob-1",
+        Some("session-repro-glob"),
+        Some("run-repro-glob"),
+    );
+    runtime.start_turn_stream_with_control_and_facts(
+        &sink,
+        &control,
+        "turn-repro-glob-1".to_string(),
+        TurnInput {
+            message: "list files".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-repro-glob".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+        RunTurnFacts {
+            run_id: Some("run-repro-glob".to_string()),
+            turn_id: Some("turn-repro-glob-1".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+        },
+    );
+    let events = sink.events.borrow();
+    let names = || {
+        events
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        events.iter().any(|(name, _)| name == "turn:completed"),
+        "stream should complete a normal tool turn; got: {:?}",
+        names()
+    );
+}
+
+#[test]
+fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_original_call_id() {
+    // PA-076 P1-1 end-to-end stream resume: the host answers the persisted Ask through the
+    // shared dispatcher, then `resume_ask_wait` injects exactly one terminal result keyed
+    // to the original assistant tool-call id.
+    let _guard = crate::agent::runtime_helper::TestRuntimeGuard::leak();
+    let workspace = temp_workspace_dir("ask-stream-resume-loop");
+    let executor = build_governed_executor(Some(workspace.clone()), None);
+    let mut store = GraphRunStore::new();
+    GraphRunner::new().start_run(
+        &mut store,
+        GraphEngine::new("state-machine-v1").start_run(
+            "run-ask-stream-resume",
+            "ask stream resume flow",
+            Some("session-ask-stream-resume"),
+        ),
+    );
+    let store_arc = Arc::new(Mutex::new(store));
+    let server = MockHttpServer::start(Vec::new());
+    let mut runtime = AgentRuntime::with_dependencies(
+        SessionStore::memory_only(),
+        Box::new(StaticResolver {
+            selection: test_chat_provider_selection(server.base_url.clone()),
+        }),
+        Box::new(executor),
+        Box::new(ForcedToolPlanner {
+            tool_name: "Ask".to_string(),
+            arguments: json!({ "text": "确认？", "description": "test" }),
+        }),
+        Box::new(DefaultTurnContextBuilder),
+        Box::new(DefaultTurnTelemetryBuilder),
+    );
+    runtime.set_graph_run_store(Arc::clone(&store_arc));
+
+    let sink = RecordingTurnEventSink::new();
+    let control = ExecutionControlRegistry::new();
+    control.register_turn(
+        "turn-ask-stream-resume-1",
+        Some("session-ask-stream-resume"),
+        Some("run-ask-stream-resume"),
+    );
+    runtime.start_turn_stream_with_control_and_facts(
+        &sink,
+        &control,
+        "turn-ask-stream-resume-1".to_string(),
+        TurnInput {
+            message: "ask stream resume test".to_string(),
+            display_message: None,
+            provider_id: None,
+            model_id: None,
+            reasoning_effort: None,
+            workspace_mode: None,
+            session_id: Some("session-ask-stream-resume".to_string()),
+            node_id: None,
+            history: Vec::new(),
+            images: Vec::new(),
+            workspace_id: None,
+        },
+        RunTurnFacts {
+            run_id: Some("run-ask-stream-resume".to_string()),
+            turn_id: Some("turn-ask-stream-resume-1".to_string()),
+            workspace_root: Some(workspace.display().to_string()),
+        },
+    );
+    assert!(
+        sink.events.borrow().iter().any(|(name, payload)| {
+            name == "turn:suspended" && payload.phase.as_deref() == Some(SUSPENDED_TURN_PHASE)
+        }),
+        "stream should emit turn:suspended"
+    );
+
+    let dispatcher = runtime
+        .governed_dispatcher()
+        .expect("governed dispatcher must be present");
+    let pending = dispatcher.pending_requests();
+    assert_eq!(pending.len(), 1);
+    let request_id = pending[0].request_id.clone();
+    let expected_version = pending[0].version;
+    let original_call_id = pending[0].call_id.clone();
+
+    // Host answers the Ask via the shared dispatcher.
+    let authorization = crate::agent::dispatcher::ControlRequestAuthorization::for_request(
+        &pending[0],
+        Some(json!("确认继续")),
+    );
+    let consumed = dispatcher
+        .answer_control_request(&request_id, &authorization)
+        .expect("answer must succeed on shared dispatcher");
+    assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
+    assert_eq!(
+        consumed.answer.as_ref().and_then(Value::as_str),
+        Some("确认继续")
+    );
+
+    // Graph resume injects exactly one terminal result for the original call_id.
+    let mut store = store_arc.lock().unwrap();
+    let outcome = GraphRunner::new()
+        .resume_ask_wait(
+            &mut store,
+            "run-ask-stream-resume",
+            &request_id,
+            expected_version,
+            json!("确认继续"),
+        )
+        .expect("graph resume must succeed");
+    assert_eq!(outcome.call_id, original_call_id);
+    assert_eq!(
+        outcome.terminal_result["toolCallId"].as_str(),
+        Some(original_call_id.as_str())
+    );
+    assert_eq!(
+        outcome.terminal_result["output"]["answer"].as_str(),
+        Some("确认继续")
+    );
+    assert!(GraphRunner::new()
+        .list_ask_waits(&store, "run-ask-stream-resume")
+        .is_empty());
+    drop(store);
+
+    // The provider was never called (no follow-up after suspension).
+    let requests = server.finish();
+    assert!(
+        requests.is_empty(),
+        "provider should not have been called: {requests:?}"
+    );
+}
+
+fn temp_workspace_dir(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "pony-ask-runtime-test-{}-{}",
+        name,
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create temp workspace for ask test");
+    root
+}
 
 /// PA-095 #3：对拍测试——事件折叠重建 vs 存储快照在约定字段集上逐项一致；
 /// 豁免清单外零容忍；每项豁免有反向探针（断言差异当前确实存在，防豁免腐化）。
 /// 场景统一走生产形态：control plane + SQLite store，事件从表读回
 /// （observation ref / 终态注记均为落盘形态），重试吸收并行通道抢占噪声。
 mod parity {
-use super::*;
-use crate::agent::control_plane::{
-    ForkFromHistoryNodeCommand, HistoryGraphQuery, HostControlPlane, RunTurnCommand,
-    StartTurnStreamCommand, SwitchHistoryBranchCommand,
-};
-use crate::agent::projection::parity::{
-    AGREED_TIMELINE_ENTRY_FIELDS, AGREED_TRACE_FIELDS, EXEMPT_TIMELINE_KINDS,
-};
-use crate::agent::projection::{
-    timeline_entry_field, trace_field, Projection, TraceProjectionState,
-};
-use crate::agent::session::TraceTimelineEntry;
+    use super::*;
+    use crate::agent::control_plane::{
+        ForkFromHistoryNodeCommand, HistoryGraphQuery, HostControlPlane, RunTurnCommand,
+        StartTurnStreamCommand, SwitchHistoryBranchCommand,
+    };
+    use crate::agent::projection::parity::{
+        AGREED_TIMELINE_ENTRY_FIELDS, AGREED_TRACE_FIELDS, EXEMPT_TIMELINE_KINDS,
+    };
+    use crate::agent::projection::{
+        timeline_entry_field, trace_field, Projection, TraceProjectionState,
+    };
+    use crate::agent::session::TraceTimelineEntry;
 
-/// 生产形态场景脚手架：构建 control plane + SQLite store，执行 `run` 闭包，
-/// 读回表内事件与会话 trace。终态事件在表才算成功（重试吸收通道抢占）。
-fn scenario(
-    name: &str,
-    responses: Vec<MockHttpResponse>,
-    expected_terminal: &str,
-    customize: &dyn Fn(&mut AgentRuntime),
-    run: &dyn Fn(&HostControlPlane),
-) -> (Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord, String) {
-    let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("pony-parity-{name}-{stamp}"));
-    fs::create_dir_all(&dir).expect("mkdir");
+    /// 生产形态场景脚手架：构建 control plane + SQLite store，执行 `run` 闭包，
+    /// 读回表内事件与会话 trace。终态事件在表才算成功（重试吸收通道抢占）。
+    fn scenario(
+        name: &str,
+        responses: Vec<MockHttpResponse>,
+        expected_terminal: &str,
+        customize: &dyn Fn(&mut AgentRuntime),
+        run: &dyn Fn(&HostControlPlane),
+    ) -> (
+        Vec<crate::agent::turn_event::TurnEvent>,
+        TurnTraceRecord,
+        String,
+    ) {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-{name}-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
 
-    let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> =
-        None;
-    for attempt in 0..8 {
-        let sessions = SessionStore::with_backend(Box::new(
-            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
-                dir.join(format!("sessions-{attempt}.db")),
-                crate::agent::session::SeparateTraceTableMode::WriteSeparate,
-            ),
-        ));
-        let server = MockHttpServer::start(responses.clone());
-        let mut runtime = AgentRuntime::with_dependencies(
-            sessions,
-            Box::new(StaticResolver {
-                selection: test_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(crate::agent::tools::ToolRouter::new()),
-            Box::new(LocalTurnPlanner),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        customize(&mut runtime);
-        let control_plane = HostControlPlane::with_runtime(runtime);
-        // PA-095 #3：会话绑定路由——把本控制面的事件/flush 通道绑到本场景
-        // session 上，全局默认单槽被并行测试构建覆盖不再影响事件落盘
-        // （守卫在 attempt 结束时解绑）。
-        let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
-            name,
-            control_plane.event_persist_channel(),
-        );
-        let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
-            name,
-            control_plane.event_flush_channel(),
-        );
-        run(&control_plane);
-        drop(_persist_guard);
-        drop(_flush_guard);
-        server.finish();
+        let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> = None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(responses.clone());
+            let mut runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            customize(&mut runtime);
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            // PA-095 #3：会话绑定路由——把本控制面的事件/flush 通道绑到本场景
+            // session 上，全局默认单槽被并行测试构建覆盖不再影响事件落盘
+            // （守卫在 attempt 结束时解绑）。
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                name,
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                name,
+                control_plane.event_flush_channel(),
+            );
+            run(&control_plane);
+            drop(_persist_guard);
+            drop(_flush_guard);
+            server.finish();
 
-        let store = control_plane
-            .load_turn_events_checked(name, None)
-            .expect("event table readable");
-        let terminal_reached = store
-            .last()
-            .map(|(_, _, event)| event.type_name() == expected_terminal)
-            .unwrap_or(false);
-        if !terminal_reached {
-            continue;
+            let store = control_plane
+                .load_turn_events_checked(name, None)
+                .expect("event table readable");
+            let terminal_reached = store
+                .last()
+                .map(|(_, _, event)| event.type_name() == expected_terminal)
+                .unwrap_or(false);
+            if !terminal_reached {
+                continue;
+            }
+            let turn_id = store
+                .iter()
+                .rev()
+                .find_map(|(_, _, event)| event.turn_id().map(str::to_string))
+                .expect("turn-scoped event");
+            let trace = control_plane
+                .load_session_traces(name)
+                .into_iter()
+                .find(|trace| trace.turn_id == turn_id)
+                .unwrap_or_else(|| panic!("stored trace missing for {turn_id}"));
+            let events = store.into_iter().map(|(_, _, event)| event).collect();
+            outcome = Some((events, trace));
+            break;
         }
-        let turn_id = store
+        let _ = fs::remove_dir_all(&dir);
+        let (events, trace) =
+            outcome.unwrap_or_else(|| panic!("scenario {name} never reached terminal"));
+        let turn_id = events
             .iter()
             .rev()
-            .find_map(|(_, _, event)| event.turn_id().map(str::to_string))
-            .expect("turn-scoped event");
-        let trace = control_plane
-            .load_session_traces(name)
-            .into_iter()
-            .find(|trace| trace.turn_id == turn_id)
-            .unwrap_or_else(|| panic!("stored trace missing for {turn_id}"));
-        let events = store.into_iter().map(|(_, _, event)| event).collect();
-        outcome = Some((events, trace));
-        break;
+            .find_map(|event| event.turn_id().map(str::to_string))
+            .expect("turn id");
+        (events, trace, turn_id)
     }
-    let _ = fs::remove_dir_all(&dir);
-    let (events, trace) =
-        outcome.unwrap_or_else(|| panic!("scenario {name} never reached terminal"));
-    let turn_id = events
-        .iter()
-        .rev()
-        .find_map(|event| event.turn_id().map(str::to_string))
-        .expect("turn id");
-    (events, trace, turn_id)
-}
 
-fn rebuilt_trace(
-    events: &[crate::agent::turn_event::TurnEvent],
-    turn_id: &str,
-) -> TurnTraceRecord {
-    let mut state = TraceProjectionState::init();
-    for (index, event) in events.iter().enumerate() {
-        TraceProjectionState::apply(&mut state, index as u64 + 1, event);
-    }
-    state
-        .trace_for_turn(turn_id)
-        .unwrap_or_else(|| panic!("rebuilt trace missing for turn {turn_id}"))
-}
-
-/// 对拍断言：约定字段集逐项一致 + 过滤豁免 kind 后保序。
-/// `expect_text=false` 消费 sync_call_model_text 豁免（同步入口无 chunk 流）。
-fn assert_parity(stored: &TurnTraceRecord, rebuilt: &TurnTraceRecord, expect_text: bool) {
-    // 豁免消费：terminal_no_usage_turn_provider_metadata——failed/cancelled
-    // turn 无 provider/usage 事件（无已完成模型调用），provider 元数据不可重建
-    // （EXEMPTIONS 登记项；反向探针在 failed/cancelled 场景单独断言其存在）。
-    let skip_provider = matches!(stored.phase.as_str(), "failed" | "cancelled")
-        && rebuilt.provider_name.is_none();
-    for field in AGREED_TRACE_FIELDS {
-        if skip_provider && (*field == "provider_name" || *field == "provider_model") {
-            continue;
-        }
-        assert_eq!(
-            trace_field(stored, field),
-            trace_field(rebuilt, field),
-            "trace field `{field}` diverges (stored vs rebuilt)"
-        );
-    }
-    let filter_exempt = |timeline: &[TraceTimelineEntry]| -> Vec<TraceTimelineEntry> {
-        timeline
-            .iter()
-            .filter(|entry| !EXEMPT_TIMELINE_KINDS.contains(&entry.kind.as_str()))
-            .cloned()
-            .collect()
-    };
-    let stored_timeline = filter_exempt(&stored.trace_timeline);
-    let rebuilt_timeline = filter_exempt(&rebuilt.trace_timeline);
-    assert_eq!(
-        stored_timeline
-            .iter()
-            .map(|entry| entry.kind.clone())
-            .collect::<Vec<_>>(),
-        rebuilt_timeline
-            .iter()
-            .map(|entry| entry.kind.clone())
-            .collect::<Vec<_>>(),
-        "timeline kind order diverges"
-    );
-    for (stored_entry, rebuilt_entry) in stored_timeline.iter().zip(rebuilt_timeline.iter()) {
-        for field in AGREED_TIMELINE_ENTRY_FIELDS {
-            if !expect_text && *field == "text" {
-                continue;
-            }
-            // 豁免消费：timeline.call_tool_text——text 语义分叉（EXEMPTIONS 登记项）。
-            if *field == "text" && stored_entry.kind == "call_tool" {
-                continue;
-            }
-            // 豁免消费：timeline.failed_last_hop_state——failed turn 末 hop
-            // state 差异（EXEMPTIONS 登记项；反向探针单独断言其存在）。
-            if *field == "state"
-                && stored.phase == "failed"
-                && stored_entry.kind == "call_model"
-                && stored_entry.sequence == stored_timeline.last().map(|e| e.sequence).unwrap_or(0)
-            {
-                continue;
-            }
-            assert_eq!(
-                timeline_entry_field(stored_entry, field),
-                timeline_entry_field(rebuilt_entry, field),
-                "timeline field `{field}` diverges on kind {}",
-                stored_entry.kind
-            );
-        }
-    }
-    // 豁免消费：turn_duration_ms_clock_drift——毫秒级漂移容差（≤250ms）。
-    match (stored.turn_duration_ms, rebuilt.turn_duration_ms) {
-        (Some(stored_ms), Some(rebuilt_ms)) => {
-            let drift = stored_ms.abs_diff(rebuilt_ms);
-            assert!(
-                drift <= 250,
-                "turn_duration_ms drift {drift}ms exceeds clock tolerance"
-            );
-        }
-        _ => {}
-    }
-}
-
-/// 场景：无工具同步 turn——约定字段集对拍 + 时钟/title/checkpoint 装饰
-/// 反向探针。
-#[test]
-fn parity_no_tool_sync_turn() {
-    let (events, stored, turn_id) = scenario(
-        "parity-no-tool",
-        vec![json_response(json!({
-            "choices": [{"message": {"role": "assistant", "content": "无工具对拍答案。"}}],
-            "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
-        }))],
-        "turn/end",
-        &|_runtime| {},
-        &|control_plane| {
-            let _ = control_plane.run_turn(RunTurnCommand {
-                input: TurnInput {
-                    message: "无工具对拍问题".to_string(),
-                    display_message: None,
-                    provider_id: None,
-                    model_id: None,
-                    reasoning_effort: None,
-                    workspace_mode: None,
-                    session_id: Some("parity-no-tool".to_string()),
-                    node_id: None,
-                    history: Vec::new(),
-                    images: Vec::new(),
-                    workspace_id: None,
-                },
-            });
-        },
-    );
-    let rebuilt = rebuilt_trace(&events, &turn_id);
-    assert_parity(&stored, &rebuilt, false);
-
-    // 反向探针：时钟字段豁免差异当前确实存在。
-    assert_ne!(stored.updated_at, 0, "probe(clock): stored carries updated_at");
-    assert_eq!(rebuilt.updated_at, 0, "probe(clock): rebuilt lacks updated_at");
-    // 反向探针：checkpoint_persist 运行时装饰条目豁免。
-    assert!(
-        stored
-            .trace_timeline
-            .iter()
-            .any(|entry| entry.kind == "checkpoint_persist"),
-        "probe(checkpoint_persist): stored carries decoration entry"
-    );
-    assert!(
-        !rebuilt
-            .trace_timeline
-            .iter()
-            .any(|entry| entry.kind == "checkpoint_persist"),
-        "probe(checkpoint_persist): rebuild lacks it (exemption live)"
-    );
-    // 反向探针：timeline.build_context_provider_metadata——差异当前确实存在
-    //（存储侧 build_context 条目携带 provider 元数据，事件无承载——豁免防腐化）。
-    let stored_context_entry = stored
-        .trace_timeline
-        .iter()
-        .find(|entry| entry.kind == "build_context")
-        .expect("probe(bctx-meta): stored build_context entry");
-    let rebuilt_context_entry = rebuilt
-        .trace_timeline
-        .iter()
-        .find(|entry| entry.kind == "build_context")
-        .expect("probe(bctx-meta): rebuilt build_context entry");
-    assert!(
-        stored_context_entry.provider_name.is_some(),
-        "probe(bctx-meta): stored build_context carries provider metadata"
-    );
-    assert!(
-        rebuilt_context_entry.provider_name.is_none(),
-        "probe(bctx-meta): rebuild cannot recover provider metadata (exemption live)"
-    );
-}
-
-/// 场景：单工具流式 turn——chunk 文本归属与 tool 条目对拍。
-#[test]
-fn parity_single_tool_stream_turn() {
-    let final_text = "单工具对拍最终答案。";
-    let (events, stored, turn_id) = scenario(
-        "parity-tool",
-        vec![
-            sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
-            sse_response(&[
-                json!({"choices": [{"delta": {"content": final_text}}]}),
-                json!({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}),
-            ]),
-        ],
-        "turn/end",
-        &|_runtime| {},
-        &|control_plane| {
-            let sink = RecordingTurnEventSink::new();
-            control_plane.start_turn_stream(
-                &sink,
-                StartTurnStreamCommand {
-                    turn_id: "parity-tool-turn".to_string(),
-                    input: TurnInput {
-                        message: "单工具对拍问题".to_string(),
-                        display_message: None,
-                        provider_id: None,
-                        model_id: None,
-                        reasoning_effort: None,
-                        workspace_mode: None,
-                        session_id: Some("parity-tool".to_string()),
-                        node_id: None,
-                        history: Vec::new(),
-                        images: Vec::new(),
-                        workspace_id: None,
-                    },
-                },
-            );
-        },
-    );
-    let rebuilt = rebuilt_trace(&events, &turn_id);
-    {
+    fn rebuilt_trace(
+        events: &[crate::agent::turn_event::TurnEvent],
+        turn_id: &str,
+    ) -> TurnTraceRecord {
         let mut state = TraceProjectionState::init();
         for (index, event) in events.iter().enumerate() {
             TraceProjectionState::apply(&mut state, index as u64 + 1, event);
-            let kinds: Vec<String> = state
-                .trace_for_turn(turn_id.as_str())
-                .map(|trace| {
-                    trace
-                        .trace_timeline
-                        .iter()
-                        .map(|entry| entry.kind.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            eprintln!("[probe] after {} -> {:?}", event.type_name(), kinds);
         }
+        state
+            .trace_for_turn(turn_id)
+            .unwrap_or_else(|| panic!("rebuilt trace missing for turn {turn_id}"))
     }
-    eprintln!(
-        "[probe] table events: {:?}",
-        events.iter().map(|event| event.type_name()).collect::<Vec<_>>()
-    );
-    assert_parity(&stored, &rebuilt, true);
 
-    // 反向探针：流式场景 text 在约定字段集内且非空（chunk 折叠生效）。
-    let rebuilt_model_text = rebuilt
-        .trace_timeline
-        .iter()
-        .filter(|entry| entry.kind == "call_model")
-        .filter_map(|entry| entry.text.clone())
-        .any(|text| text.contains(final_text));
-    assert!(
-        rebuilt_model_text,
-        "probe(text): streaming chunks aggregate into rebuilt call_model"
-    );
-}
-
-/// 场景：failed 同步 turn（checkpoint hook fail-turn——该路径有存储 trace）；
-/// 反向探针断言 failed 末 hop state 豁免差异当前确实存在
-/// （stored=error vs rebuilt=completed）。
-#[test]
-fn parity_failed_sync_turn_and_last_hop_probe() {
-    let (events, stored, turn_id) = scenario(
-        "parity-failed",
-        vec![json_completion("失败对拍答案")],
-        "turn/end",
-        &|runtime| {
-            runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
-            let mut descriptor = observe_hook_descriptor(
-                "observe.parity-checkpoint-failturn",
-                10,
-                TurnHookPoint::CheckpointPersistEnd,
-            );
-            descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
-            descriptor.allowed_failure_policies =
-                vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
-            runtime
-                .register_hook_descriptor(descriptor)
-                .expect("register parity checkpoint failturn hook");
-        },
-        &|control_plane| {
-            let _ = control_plane.run_turn(RunTurnCommand {
-                input: TurnInput {
-                    message: "失败对拍问题".to_string(),
-                display_message: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_mode: None,
-                session_id: Some("parity-failed".to_string()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                workspace_id: None,
-            },
-        });
-    },
-);
-    let rebuilt = rebuilt_trace(&events, &turn_id);
-    assert_parity(&stored, &rebuilt, false);
-
-    // 反向探针：failed 末 hop state 豁免差异当前确实存在。
-    let last_state = |trace: &TurnTraceRecord| {
-        trace
-            .trace_timeline
-            .iter()
-            .filter(|entry| entry.kind == "call_model")
-            .last()
-            .map(|entry| entry.state.clone())
-    };
-    assert_eq!(
-        last_state(&stored).as_deref(),
-        Some("error"),
-        "probe(failed_last_hop): stored marks error"
-    );
-    assert_eq!(
-        last_state(&rebuilt).as_deref(),
-        Some("completed"),
-        "probe(failed_last_hop): rebuild still yields completed (exemption live)"
-    );
-}
-
-/// 场景：多 turn 同步会话——事件按 turn 分组折叠，逐 turn 独立对拍。
-#[test]
-fn parity_multi_turn_sync_session() {
-    let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("pony-parity-multiturn-{stamp}"));
-    fs::create_dir_all(&dir).expect("mkdir");
-
-    let mut pairs: Option<Vec<(String, TurnTraceRecord, TurnTraceRecord)>> = None;
-    for attempt in 0..8 {
-        let sessions = SessionStore::with_backend(Box::new(
-            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
-                dir.join(format!("sessions-{attempt}.db")),
-                crate::agent::session::SeparateTraceTableMode::WriteSeparate,
-            ),
-        ));
-        let server = MockHttpServer::start(vec![
-            json_response(json!({
-                "choices": [{"message": {"role": "assistant", "content": "第一轮答案。"}}],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
-            })),
-            json_response(json!({
-                "choices": [{"message": {"role": "assistant", "content": "第二轮答案。"}}],
-                "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8}
-            })),
-        ]);
-        let runtime = AgentRuntime::with_dependencies(
-            sessions,
-            Box::new(StaticResolver {
-                selection: test_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(crate::agent::tools::ToolRouter::new()),
-            Box::new(LocalTurnPlanner),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        let control_plane = HostControlPlane::with_runtime(runtime);
-        for message in ["第一轮问题", "第二轮问题"] {
-            let _ = control_plane.run_turn(RunTurnCommand {
-                input: TurnInput {
-                    message: message.to_string(),
-                    display_message: None,
-                    provider_id: None,
-                    model_id: None,
-                    reasoning_effort: None,
-                    workspace_mode: None,
-                    session_id: Some("parity-multi-turn".to_string()),
-                    node_id: None,
-                    history: Vec::new(),
-                    images: Vec::new(),
-                    workspace_id: None,
-                },
-            });
-        }
-        server.finish();
-
-        let events = control_plane
-            .load_turn_events_checked("parity-multi-turn", None)
-            .expect("event table readable");
-        let ends = events
-            .iter()
-            .filter(|(_, _, event)| event.type_name() == "turn/end")
-            .count();
-        if ends < 2 {
-            continue;
-        }
-        // 全事件一次折叠（seq 升序），逐 turn 取重建产物。
-        let mut state = TraceProjectionState::init();
-        for (index, (_, _, event)) in events.iter().enumerate() {
-            TraceProjectionState::apply(&mut state, index as u64 + 1, event);
-        }
-        let traces = control_plane.load_session_traces("parity-multi-turn");
-        let mut collected: Vec<(String, TurnTraceRecord, TurnTraceRecord)> = Vec::new();
-        let mut seen: Vec<String> = Vec::new();
-        for (_, _, event) in &events {
-            let Some(turn_id) = event.turn_id() else {
-                continue;
-            };
-            if seen.iter().any(|id| id == turn_id) {
+    /// 对拍断言：约定字段集逐项一致 + 过滤豁免 kind 后保序。
+    /// `expect_text=false` 消费 sync_call_model_text 豁免（同步入口无 chunk 流）。
+    fn assert_parity(stored: &TurnTraceRecord, rebuilt: &TurnTraceRecord, expect_text: bool) {
+        // 豁免消费：terminal_no_usage_turn_provider_metadata——failed/cancelled
+        // turn 无 provider/usage 事件（无已完成模型调用），provider 元数据不可重建
+        // （EXEMPTIONS 登记项；反向探针在 failed/cancelled 场景单独断言其存在）。
+        let skip_provider = matches!(stored.phase.as_str(), "failed" | "cancelled")
+            && rebuilt.provider_name.is_none();
+        for field in AGREED_TRACE_FIELDS {
+            if skip_provider && (*field == "provider_name" || *field == "provider_model") {
                 continue;
             }
-            seen.push(turn_id.to_string());
-            let Some(stored) = traces.iter().find(|trace| trace.turn_id == turn_id) else {
-                continue;
-            };
-            let Some(rebuilt) = state.trace_for_turn(turn_id) else {
-                continue;
-            };
-            collected.push((turn_id.to_string(), stored.clone(), rebuilt));
+            assert_eq!(
+                trace_field(stored, field),
+                trace_field(rebuilt, field),
+                "trace field `{field}` diverges (stored vs rebuilt)"
+            );
         }
-        if collected.len() == 2 {
-            pairs = Some(collected);
-            break;
+        let filter_exempt = |timeline: &[TraceTimelineEntry]| -> Vec<TraceTimelineEntry> {
+            timeline
+                .iter()
+                .filter(|entry| !EXEMPT_TIMELINE_KINDS.contains(&entry.kind.as_str()))
+                .cloned()
+                .collect()
+        };
+        let stored_timeline = filter_exempt(&stored.trace_timeline);
+        let rebuilt_timeline = filter_exempt(&rebuilt.trace_timeline);
+        assert_eq!(
+            stored_timeline
+                .iter()
+                .map(|entry| entry.kind.clone())
+                .collect::<Vec<_>>(),
+            rebuilt_timeline
+                .iter()
+                .map(|entry| entry.kind.clone())
+                .collect::<Vec<_>>(),
+            "timeline kind order diverges"
+        );
+        for (stored_entry, rebuilt_entry) in stored_timeline.iter().zip(rebuilt_timeline.iter()) {
+            for field in AGREED_TIMELINE_ENTRY_FIELDS {
+                if !expect_text && *field == "text" {
+                    continue;
+                }
+                // 豁免消费：timeline.call_tool_text——text 语义分叉（EXEMPTIONS 登记项）。
+                if *field == "text" && stored_entry.kind == "call_tool" {
+                    continue;
+                }
+                // 豁免消费：timeline.failed_last_hop_state——failed turn 末 hop
+                // state 差异（EXEMPTIONS 登记项；反向探针单独断言其存在）。
+                if *field == "state"
+                    && stored.phase == "failed"
+                    && stored_entry.kind == "call_model"
+                    && stored_entry.sequence
+                        == stored_timeline.last().map(|e| e.sequence).unwrap_or(0)
+                {
+                    continue;
+                }
+                assert_eq!(
+                    timeline_entry_field(stored_entry, field),
+                    timeline_entry_field(rebuilt_entry, field),
+                    "timeline field `{field}` diverges on kind {}",
+                    stored_entry.kind
+                );
+            }
+        }
+        // 豁免消费：turn_duration_ms_clock_drift——毫秒级漂移容差（≤250ms）。
+        match (stored.turn_duration_ms, rebuilt.turn_duration_ms) {
+            (Some(stored_ms), Some(rebuilt_ms)) => {
+                let drift = stored_ms.abs_diff(rebuilt_ms);
+                assert!(
+                    drift <= 250,
+                    "turn_duration_ms drift {drift}ms exceeds clock tolerance"
+                );
+            }
+            _ => {}
         }
     }
-    let _ = fs::remove_dir_all(&dir);
-    let pairs = pairs.expect("multi-turn scenario never completed both turns");
-    assert_eq!(pairs.len(), 2, "two turns paired");
-    for (turn_id, stored, rebuilt) in &pairs {
-        assert_parity(stored, rebuilt, false);
-        assert_eq!(stored.phase, "completed", "turn {turn_id} phase");
-    }
-}
 
-/// 场景：多 hop 流式 turn（3 次 provider call + 2 次工具）——多 hop
-/// timeline 对拍（call_model 条目数 = hop 数，含 return_result）。
-#[test]
-fn parity_multi_hop_stream_turn() {
-    let (events, stored, turn_id) = scenario(
-        "parity-multi-hop",
-        vec![
-            sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
-            sse_response(&[
-                json!({"choices": [{"delta": {"content": "找到了，继续读取。"}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [
-                    {"index": 0, "id": "call_read_file", "type": "function",
-                     "function": {"name": "workspace_read_file", "arguments": "{\"path\":\"tauri.conf.json\"}"}}
-                ]}}]}),
-            ]),
-            sse_response(&[
-                json!({"choices": [{"delta": {"content": "多 hop 对拍最终答案。"}}]}),
-                json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
-            ]),
-        ],
-        "turn/end",
-        &|_runtime| {},
-        &|control_plane| {
-            let sink = RecordingTurnEventSink::new();
-            control_plane.start_turn_stream(
-                &sink,
-                StartTurnStreamCommand {
-                    turn_id: "parity-multi-hop-turn".to_string(),
+    /// 场景：无工具同步 turn——约定字段集对拍 + 时钟/title/checkpoint 装饰
+    /// 反向探针。
+    #[test]
+    fn parity_no_tool_sync_turn() {
+        let (events, stored, turn_id) = scenario(
+            "parity-no-tool",
+            vec![json_response(json!({
+                "choices": [{"message": {"role": "assistant", "content": "无工具对拍答案。"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+            }))],
+            "turn/end",
+            &|_runtime| {},
+            &|control_plane| {
+                let _ = control_plane.run_turn(RunTurnCommand {
                     input: TurnInput {
-                        message: "多 hop 对拍问题".to_string(),
+                        message: "无工具对拍问题".to_string(),
                         display_message: None,
                         provider_id: None,
                         model_id: None,
                         reasoning_effort: None,
                         workspace_mode: None,
-                        session_id: Some("parity-multi-hop".to_string()),
+                        session_id: Some("parity-no-tool".to_string()),
                         node_id: None,
                         history: Vec::new(),
                         images: Vec::new(),
                         workspace_id: None,
                     },
-                },
-            );
-        },
-    );
-    let rebuilt = rebuilt_trace(&events, &turn_id);
-    assert_parity(&stored, &rebuilt, true);
-
-    // 反向探针：多 hop 重建 call_model 条目数 = provider call 数。
-    let rebuilt_hops = rebuilt
-        .trace_timeline
-        .iter()
-        .filter(|entry| entry.kind == "call_model")
-        .count();
-    assert_eq!(rebuilt_hops, 3, "rebuilt call_model entries equal hop count");
-}
-
-/// 冒烟回归探针：多 hop 工具流式 turn 落库后的会话历史——assistant 条目
-/// content 只能是最终模型文本；工具调用参数 JSON / 结果文本 / 描述不得进入
-/// 对话正文（否则前端恢复会话时会把工具内容当对话消息渲染）。
-#[test]
-fn history_after_multi_hop_tool_turn_keeps_tool_content_out_of_assistant_text() {
-    let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("pony-history-tool-leak-{stamp}"));
-    fs::create_dir_all(&dir).expect("mkdir");
-
-    const SESSION: &str = "history-tool-leak";
-    let mut outcome: Option<Vec<crate::agent::session::TurnHistoryMessage>> = None;
-    for attempt in 0..8 {
-        let sessions = SessionStore::with_backend(Box::new(
-            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
-                dir.join(format!("sessions-{attempt}.db")),
-                crate::agent::session::SeparateTraceTableMode::WriteSeparate,
-            ),
-        ));
-        let server = MockHttpServer::start(vec![
-            sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
-            sse_response(&[
-                json!({"choices": [{"delta": {"content": "找到了，继续读取。"}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [
-                    {"index": 0, "id": "call_read_file", "type": "function",
-                     "function": {"name": "workspace_read_file", "arguments": "{\"path\":\"tauri.conf.json\"}"}}
-                ]}}]}),
-            ]),
-            sse_response(&[
-                json!({"choices": [{"delta": {"content": "历史泄漏探针最终答案。"}}]}),
-                json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
-            ]),
-        ]);
-        let runtime = AgentRuntime::with_dependencies(
-            sessions,
-            Box::new(StaticResolver {
-                selection: test_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(crate::agent::tools::ToolRouter::new()),
-            Box::new(LocalTurnPlanner),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        let control_plane = HostControlPlane::with_runtime(runtime);
-        let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
-            SESSION,
-            control_plane.event_persist_channel(),
-        );
-        let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
-            SESSION,
-            control_plane.event_flush_channel(),
-        );
-        control_plane.start_turn_stream(
-            &RecordingTurnEventSink::new(),
-            StartTurnStreamCommand {
-                turn_id: "history-tool-leak-turn".to_string(),
-                input: TurnInput {
-                    message: "历史泄漏探针问题".to_string(),
-                    display_message: None,
-                    provider_id: None,
-                    model_id: None,
-                    reasoning_effort: None,
-                    workspace_mode: None,
-                    session_id: Some(SESSION.to_string()),
-                    node_id: None,
-                    history: Vec::new(),
-                    images: Vec::new(),
-                    workspace_id: None,
-                },
+                });
             },
         );
-        drop(_persist_guard);
-        drop(_flush_guard);
-        server.finish();
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        assert_parity(&stored, &rebuilt, false);
 
-        let events = control_plane
-            .load_turn_events_checked(SESSION, None)
-            .expect("event table readable");
-        let terminal_reached = events
-            .last()
-            .map(|(_, _, event)| event.type_name() == "turn/end")
-            .unwrap_or(false);
-        if !terminal_reached {
-            continue;
-        }
-        let snapshot = control_plane.load_session_snapshot(
-            crate::agent::control_plane::SessionSnapshotQuery {
-                session_id: Some(SESSION.to_string()),
-            },
+        // 反向探针：时钟字段豁免差异当前确实存在。
+        assert_ne!(
+            stored.updated_at, 0,
+            "probe(clock): stored carries updated_at"
         );
-        outcome = Some(snapshot.history);
-        break;
-    }
-    let _ = fs::remove_dir_all(&dir);
-    let history =
-        outcome.expect("multi-hop tool turn scenario never reached terminal");
-
-    let assistants: Vec<&crate::agent::session::TurnHistoryMessage> = history
-        .iter()
-        .filter(|message| message.role == "assistant")
-        .collect();
-    assert_eq!(assistants.len(), 1, "one assistant history entry");
-    let assistant_content = assistants[0].content.as_str();
-    assert_eq!(
-        assistant_content, "历史泄漏探针最终答案。",
-        "assistant history content must be the final model text only"
-    );
-    for leak_marker in [
-        "workspace_list_files",
-        "workspace_read_file",
-        "\"path\"",
-        "先调用",
-        "找到了，继续读取",
-        "tauri.conf.json",
-    ] {
-        assert!(
-            !assistant_content.contains(leak_marker),
-            "assistant history content must not contain tool-call info ({leak_marker}): {assistant_content:?}"
-        );
-    }
-}
-
-/// 场景：plan 前 cancelled 流式 turn——phase=cancelled 对拍；重建不虚构
-/// 未发生的模型调用（settle 兜底收窄）。
-#[test]
-fn parity_cancelled_stream_turn() {
-    let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("pony-parity-cancel-{stamp}"));
-    fs::create_dir_all(&dir).expect("mkdir");
-
-    let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> =
-        None;
-    for attempt in 0..8 {
-        let control = ExecutionControlRegistry::new();
-        let sessions = SessionStore::with_backend(Box::new(
-            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
-                dir.join(format!("sessions-{attempt}.db")),
-                crate::agent::session::SeparateTraceTableMode::WriteSeparate,
-            ),
-        ));
-        let server = MockHttpServer::start(vec![json_completion("不应被消费的响应")]);
-        let runtime = AgentRuntime::with_dependencies(
-            sessions,
-            Box::new(StaticResolver {
-                selection: test_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(crate::agent::tools::ToolRouter::new()),
-            Box::new(LocalTurnPlanner),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
-        );
-        let control_plane = HostControlPlaneBuilder::new()
-            .runtime(runtime)
-            .execution_control(control.clone())
-            .build();
-        // PA-095 #3：会话绑定路由（同 scenario()——抗全局单槽抢占）。
-        let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
-            "parity-cancel",
-            control_plane.event_persist_channel(),
-        );
-        let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
-            "parity-cancel",
-            control_plane.event_flush_channel(),
-        );
-        control.register_turn("parity-cancel-turn", Some("parity-cancel"), None);
-        assert!(control.request_stop("parity-cancel-turn").accepted);
-        control_plane.start_turn_stream(
-            &crate::agent::turn_flow::NoopTurnEventSink,
-            StartTurnStreamCommand {
-                turn_id: "parity-cancel-turn".to_string(),
-                input: TurnInput {
-                    message: "取消对拍问题".to_string(),
-                    display_message: None,
-                    provider_id: None,
-                    model_id: None,
-                    reasoning_effort: None,
-                    workspace_mode: None,
-                    session_id: Some("parity-cancel".to_string()),
-                    node_id: None,
-                    history: Vec::new(),
-                    images: Vec::new(),
-                    workspace_id: None,
-                },
-            },
-        );
-        // PA-095 #3：cancelled-before-plan 不发起 provider HTTP 请求，
-        // MockHttpServer::finish 会 join 永远阻塞在 accept 的线程——挂死。
-        // 直接 drop（JoinHandle 释放，阻塞线程随进程退出回收）。
-        drop(server);
-
-        let events = control_plane
-            .load_turn_events_checked("parity-cancel", None)
-            .expect("event table readable");
-        let terminal_reached = events
-            .last()
-            .map(|(_, _, event)| event.type_name() == "turn/end")
-            .unwrap_or(false);
-        if !terminal_reached {
-            continue;
-        }
-        let trace = control_plane
-            .load_session_traces("parity-cancel")
-            .into_iter()
-            .find(|trace| trace.turn_id == "parity-cancel-turn")
-            .expect("stored cancelled trace");
-        outcome = Some((events.into_iter().map(|(_, _, e)| e).collect(), trace));
-        break;
-    }
-    let _ = fs::remove_dir_all(&dir);
-    let (events, stored) = outcome.expect("cancelled scenario never reached terminal");
-    let rebuilt = rebuilt_trace(&events, "parity-cancel-turn");
-    assert_parity(&stored, &rebuilt, false);
-
-    // 反向探针：plan 前 cancelled——settle 兜底不虚构模型调用（timeline 的
-    // call_model 条目来自 step/start 事件本身，非结算补建），且中断调用
-    // 不得显示为 completed（PA-095 #3 收敛修复的防腐探针）。
-    assert_eq!(stored.phase, "cancelled", "probe(cancelled): stored phase");
-    for entry in rebuilt
-        .trace_timeline
-        .iter()
-        .filter(|entry| entry.kind == "call_model")
-    {
         assert_eq!(
-            entry.state, "cancelled",
-            "probe(cancelled): interrupted model call must not be marked completed"
+            rebuilt.updated_at, 0,
+            "probe(clock): rebuilt lacks updated_at"
+        );
+        // 反向探针：checkpoint_persist 运行时装饰条目豁免。
+        assert!(
+            stored
+                .trace_timeline
+                .iter()
+                .any(|entry| entry.kind == "checkpoint_persist"),
+            "probe(checkpoint_persist): stored carries decoration entry"
+        );
+        assert!(
+            !rebuilt
+                .trace_timeline
+                .iter()
+                .any(|entry| entry.kind == "checkpoint_persist"),
+            "probe(checkpoint_persist): rebuild lacks it (exemption live)"
+        );
+        // 反向探针：timeline.build_context_provider_metadata——差异当前确实存在
+        //（存储侧 build_context 条目携带 provider 元数据，事件无承载——豁免防腐化）。
+        let stored_context_entry = stored
+            .trace_timeline
+            .iter()
+            .find(|entry| entry.kind == "build_context")
+            .expect("probe(bctx-meta): stored build_context entry");
+        let rebuilt_context_entry = rebuilt
+            .trace_timeline
+            .iter()
+            .find(|entry| entry.kind == "build_context")
+            .expect("probe(bctx-meta): rebuilt build_context entry");
+        assert!(
+            stored_context_entry.provider_name.is_some(),
+            "probe(bctx-meta): stored build_context carries provider metadata"
+        );
+        assert!(
+            rebuilt_context_entry.provider_name.is_none(),
+            "probe(bctx-meta): rebuild cannot recover provider metadata (exemption live)"
         );
     }
-    // 反向探针：terminal_no_usage_turn_provider_metadata——差异当前确实存在
-    // （存储侧携带 provider 元数据，事件流无 usage 不可重建；豁免防腐化）。
-    assert!(
-        stored.provider_name.is_some(),
-        "probe(provider-meta): stored cancelled trace carries provider metadata"
-    );
-    assert!(
-        rebuilt.provider_name.is_none(),
-        "probe(provider-meta): rebuild cannot recover provider metadata (exemption live)"
-    );
-}
 
-/// 场景：fork-checkout 跨分支——分支命令发射 history-control 事件且日志水位
-/// 严格递增（#6 无 ABA 的端到端证明），分支后各分支上的 turn 事件折叠与
-/// 存储 trace 对拍一致（分支可见性不影响 per-turn 事实折叠）。
-#[test]
-fn parity_fork_checkout_branch_turns() {
-    let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("pony-parity-branch-{stamp}"));
-    fs::create_dir_all(&dir).expect("mkdir");
+    /// 场景：单工具流式 turn——chunk 文本归属与 tool 条目对拍。
+    #[test]
+    fn parity_single_tool_stream_turn() {
+        let final_text = "单工具对拍最终答案。";
+        let (events, stored, turn_id) = scenario(
+            "parity-tool",
+            vec![
+                sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": final_text}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}),
+                ]),
+            ],
+            "turn/end",
+            &|_runtime| {},
+            &|control_plane| {
+                let sink = RecordingTurnEventSink::new();
+                control_plane.start_turn_stream(
+                    &sink,
+                    StartTurnStreamCommand {
+                        turn_id: "parity-tool-turn".to_string(),
+                        input: TurnInput {
+                            message: "单工具对拍问题".to_string(),
+                            display_message: None,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            workspace_mode: None,
+                            session_id: Some("parity-tool".to_string()),
+                            node_id: None,
+                            history: Vec::new(),
+                            images: Vec::new(),
+                            workspace_id: None,
+                        },
+                    },
+                );
+            },
+        );
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        {
+            let mut state = TraceProjectionState::init();
+            for (index, event) in events.iter().enumerate() {
+                TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+                let kinds: Vec<String> = state
+                    .trace_for_turn(turn_id.as_str())
+                    .map(|trace| {
+                        trace
+                            .trace_timeline
+                            .iter()
+                            .map(|entry| entry.kind.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                eprintln!("[probe] after {} -> {:?}", event.type_name(), kinds);
+            }
+        }
+        eprintln!(
+            "[probe] table events: {:?}",
+            events
+                .iter()
+                .map(|event| event.type_name())
+                .collect::<Vec<_>>()
+        );
+        assert_parity(&stored, &rebuilt, true);
 
-    struct BranchOutcome {
-        events: Vec<(u64, String, crate::agent::turn_event::TurnEvent)>,
-        traces: Vec<TurnTraceRecord>,
-        fork_cursor_version: u64,
-        switch_cursor_version: u64,
+        // 反向探针：流式场景 text 在约定字段集内且非空（chunk 折叠生效）。
+        let rebuilt_model_text = rebuilt
+            .trace_timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+            .filter_map(|entry| entry.text.clone())
+            .any(|text| text.contains(final_text));
+        assert!(
+            rebuilt_model_text,
+            "probe(text): streaming chunks aggregate into rebuilt call_model"
+        );
     }
-    let mut outcome: Option<BranchOutcome> = None;
-    for attempt in 0..8 {
-        let sessions = SessionStore::with_backend(Box::new(
-            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
-                dir.join(format!("sessions-{attempt}.db")),
-                crate::agent::session::SeparateTraceTableMode::WriteSeparate,
-            ),
-        ));
-        let server = MockHttpServer::start(vec![
-            json_response(json!({
-                "choices": [{"message": {"role": "assistant", "content": "主干答案。"}}],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
-            })),
-            json_response(json!({
-                "choices": [{"message": {"role": "assistant", "content": "分支答案。"}}],
-                "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8}
-            })),
-        ]);
-        let runtime = AgentRuntime::with_dependencies(
-            sessions,
-            Box::new(StaticResolver {
-                selection: test_provider_selection(server.base_url.clone()),
-            }),
-            Box::new(crate::agent::tools::ToolRouter::new()),
-            Box::new(LocalTurnPlanner),
-            Box::new(DefaultTurnContextBuilder),
-            Box::new(DefaultTurnTelemetryBuilder),
+
+    /// 场景：failed 同步 turn（checkpoint hook fail-turn——该路径有存储 trace）；
+    /// 反向探针断言 failed 末 hop state 豁免差异当前确实存在
+    /// （stored=error vs rebuilt=completed）。
+    #[test]
+    fn parity_failed_sync_turn_and_last_hop_probe() {
+        let (events, stored, turn_id) = scenario(
+            "parity-failed",
+            vec![json_completion("失败对拍答案")],
+            "turn/end",
+            &|runtime| {
+                runtime.set_hook_executor_for_test(Box::new(FailingHookExecutor));
+                let mut descriptor = observe_hook_descriptor(
+                    "observe.parity-checkpoint-failturn",
+                    10,
+                    TurnHookPoint::CheckpointPersistEnd,
+                );
+                descriptor.default_failure_policy = HookFailurePolicy::FailTurn;
+                descriptor.allowed_failure_policies =
+                    vec![HookFailurePolicy::Degrade, HookFailurePolicy::FailTurn];
+                runtime
+                    .register_hook_descriptor(descriptor)
+                    .expect("register parity checkpoint failturn hook");
+            },
+            &|control_plane| {
+                let _ = control_plane.run_turn(RunTurnCommand {
+                    input: TurnInput {
+                        message: "失败对拍问题".to_string(),
+                        display_message: None,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        workspace_mode: None,
+                        session_id: Some("parity-failed".to_string()),
+                        node_id: None,
+                        history: Vec::new(),
+                        images: Vec::new(),
+                        workspace_id: None,
+                    },
+                });
+            },
         );
-        let control_plane = HostControlPlane::with_runtime(runtime);
-        let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
-            "parity-branch",
-            control_plane.event_persist_channel(),
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        assert_parity(&stored, &rebuilt, false);
+
+        // 反向探针：failed 末 hop state 豁免差异当前确实存在。
+        let last_state = |trace: &TurnTraceRecord| {
+            trace
+                .trace_timeline
+                .iter()
+                .filter(|entry| entry.kind == "call_model")
+                .last()
+                .map(|entry| entry.state.clone())
+        };
+        assert_eq!(
+            last_state(&stored).as_deref(),
+            Some("error"),
+            "probe(failed_last_hop): stored marks error"
         );
-        let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
-            "parity-branch",
-            control_plane.event_flush_channel(),
+        assert_eq!(
+            last_state(&rebuilt).as_deref(),
+            Some("completed"),
+            "probe(failed_last_hop): rebuild still yields completed (exemption live)"
         );
-        let run = |control_plane: &HostControlPlane, message: &str| {
-            control_plane
-                .run_turn(RunTurnCommand {
+    }
+
+    /// 场景：多 turn 同步会话——事件按 turn 分组折叠，逐 turn 独立对拍。
+    #[test]
+    fn parity_multi_turn_sync_session() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-multiturn-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        let mut pairs: Option<Vec<(String, TurnTraceRecord, TurnTraceRecord)>> = None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "第一轮答案。"}}],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+                })),
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "第二轮答案。"}}],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8}
+                })),
+            ]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            for message in ["第一轮问题", "第二轮问题"] {
+                let _ = control_plane.run_turn(RunTurnCommand {
                     input: TurnInput {
                         message: message.to_string(),
                         display_message: None,
@@ -9390,134 +9278,560 @@ fn parity_fork_checkout_branch_turns() {
                         model_id: None,
                         reasoning_effort: None,
                         workspace_mode: None,
-                        session_id: Some("parity-branch".to_string()),
+                        session_id: Some("parity-multi-turn".to_string()),
                         node_id: None,
                         history: Vec::new(),
                         images: Vec::new(),
                         workspace_id: None,
                     },
-                })
-                .phase
-        };
-        if run(&control_plane, "第一问") != "ready" {
-            continue;
-        }
+                });
+            }
+            server.finish();
 
-        // 从最近节点 fork 出新分支；立即用 fork 响应的版本回切主干（#6 乐观锁
-        // round-trip：响应版本即下次通行版本，中间不得有 turn 使其过期）；
-        // 再二次 fork 出工作分支跑分支 turn。
-        let graph = control_plane.load_history_graph(HistoryGraphQuery {
-            session_id: Some("parity-branch".to_string()),
-        });
-        let Some(head_node) = graph.nodes.last() else {
-            continue;
-        };
-        let fork = control_plane
-            .fork_from_history_node(ForkFromHistoryNodeCommand {
-                session_id: Some("parity-branch".to_string()),
-                node_id: head_node.node_id.clone(),
-                expected_cursor_version: None,
-            })
-            .expect("fork succeeds");
-        let fork_expected_version = fork.cursor.cursor_version.unwrap_or(0);
-        control_plane
-            .switch_history_branch(SwitchHistoryBranchCommand {
-                session_id: Some("parity-branch".to_string()),
-                branch_id: "branch-main".to_string(),
-                expected_cursor_version: Some(fork_expected_version),
-            })
-            .expect("switch with fork-returned cursor version (round-trip)");
-        let fork_work = control_plane
-            .fork_from_history_node(ForkFromHistoryNodeCommand {
-                session_id: Some("parity-branch".to_string()),
-                node_id: head_node.node_id.clone(),
-                expected_cursor_version: None,
-            })
-            .expect("work branch fork succeeds");
-        if run(&control_plane, "第二问（分支）") != "ready" {
-            continue;
+            let events = control_plane
+                .load_turn_events_checked("parity-multi-turn", None)
+                .expect("event table readable");
+            let ends = events
+                .iter()
+                .filter(|(_, _, event)| event.type_name() == "turn/end")
+                .count();
+            if ends < 2 {
+                continue;
+            }
+            // 全事件一次折叠（seq 升序），逐 turn 取重建产物。
+            let mut state = TraceProjectionState::init();
+            for (index, (_, _, event)) in events.iter().enumerate() {
+                TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+            }
+            let traces = control_plane.load_session_traces("parity-multi-turn");
+            let mut collected: Vec<(String, TurnTraceRecord, TurnTraceRecord)> = Vec::new();
+            let mut seen: Vec<String> = Vec::new();
+            for (_, _, event) in &events {
+                let Some(turn_id) = event.turn_id() else {
+                    continue;
+                };
+                if seen.iter().any(|id| id == turn_id) {
+                    continue;
+                }
+                seen.push(turn_id.to_string());
+                let Some(stored) = traces.iter().find(|trace| trace.turn_id == turn_id) else {
+                    continue;
+                };
+                let Some(rebuilt) = state.trace_for_turn(turn_id) else {
+                    continue;
+                };
+                collected.push((turn_id.to_string(), stored.clone(), rebuilt));
+            }
+            if collected.len() == 2 {
+                pairs = Some(collected);
+                break;
+            }
         }
-        server.finish();
+        let _ = fs::remove_dir_all(&dir);
+        let pairs = pairs.expect("multi-turn scenario never completed both turns");
+        assert_eq!(pairs.len(), 2, "two turns paired");
+        for (turn_id, stored, rebuilt) in &pairs {
+            assert_parity(stored, rebuilt, false);
+            assert_eq!(stored.phase, "completed", "turn {turn_id} phase");
+        }
+    }
 
-        let events = control_plane
-            .load_turn_events_checked("parity-branch", None)
-            .expect("event table readable");
-        let ends = events
-            .iter()
-            .filter(|(_, _, event)| event.type_name() == "turn/end")
-            .count();
-        let has_fork_event = events.iter().any(|(_, _, e)| e.type_name() == "fork/created");
-        let has_checkout_event = events
-            .iter()
-            .any(|(_, _, e)| e.type_name() == "checkpoint/checkout");
-        if ends < 2 || !has_fork_event || !has_checkout_event {
-            continue;
-        }
-        // 水位单调性探针：history-control 事件 seq 落在其触发的 turn 事件之后
-        // （日志只增不减，命令事实与 turn 事实同一条单调日志）。
-        let first_end_seq = events
-            .iter()
-            .find(|(_, _, e)| e.type_name() == "turn/end")
-            .map(|(seq, _, _)| *seq)
-            .expect("first turn/end");
-        let fork_seq = events
-            .iter()
-            .find(|(_, _, e)| e.type_name() == "fork/created")
-            .map(|(seq, _, _)| *seq)
-            .expect("fork/created seq");
-        assert!(
-            fork_seq > first_end_seq,
-            "probe(monotonic): fork/created lands after prior turn facts"
+    /// 场景：多 hop 流式 turn（3 次 provider call + 2 次工具）——多 hop
+    /// timeline 对拍（call_model 条目数 = hop 数，含 return_result）。
+    #[test]
+    fn parity_multi_hop_stream_turn() {
+        let (events, stored, turn_id) = scenario(
+            "parity-multi-hop",
+            vec![
+                sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "找到了，继续读取。"}}]}),
+                    json!({"choices": [{"delta": {"tool_calls": [
+                        {"index": 0, "id": "call_read_file", "type": "function",
+                         "function": {"name": "workspace_read_file", "arguments": "{\"path\":\"tauri.conf.json\"}"}}
+                    ]}}]}),
+                ]),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "多 hop 对拍最终答案。"}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
+                ]),
+            ],
+            "turn/end",
+            &|_runtime| {},
+            &|control_plane| {
+                let sink = RecordingTurnEventSink::new();
+                control_plane.start_turn_stream(
+                    &sink,
+                    StartTurnStreamCommand {
+                        turn_id: "parity-multi-hop-turn".to_string(),
+                        input: TurnInput {
+                            message: "多 hop 对拍问题".to_string(),
+                            display_message: None,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            workspace_mode: None,
+                            session_id: Some("parity-multi-hop".to_string()),
+                            node_id: None,
+                            history: Vec::new(),
+                            images: Vec::new(),
+                            workspace_id: None,
+                        },
+                    },
+                );
+            },
         );
-        let traces = control_plane.load_session_traces("parity-branch");
-        outcome = Some(BranchOutcome {
-            events,
-            traces,
-            fork_cursor_version: fork.cursor.cursor_version.unwrap_or(0),
-            switch_cursor_version: fork_work.cursor.cursor_version.unwrap_or(0),
-        });
-        break;
-    }
-    drop(_rt_guard);
-    let _ = fs::remove_dir_all(&dir);
-    let outcome = outcome.expect("branch scenario never completed");
+        let rebuilt = rebuilt_trace(&events, &turn_id);
+        assert_parity(&stored, &rebuilt, true);
 
-    // #6 无 ABA 端到端：后续命令版本严格大于先前命令版本（命令事件推进日志水位；
-    // switch 的 round-trip 通过本身已验证"响应版本即下次通行版本"）。
-    assert!(
-        outcome.switch_cursor_version > outcome.fork_cursor_version,
-        "probe(no-aba): cursor version strictly increases across history commands ({} -> {})",
-        outcome.fork_cursor_version,
-        outcome.switch_cursor_version
-    );
-
-    // 全事件一次折叠，逐 turn 对拍（跨分支 turn 各自独立成立）。
-    let mut state = TraceProjectionState::init();
-    for (index, (_, _, event)) in outcome.events.iter().enumerate() {
-        TraceProjectionState::apply(&mut state, index as u64 + 1, event);
-    }
-    let mut seen: Vec<String> = Vec::new();
-    for (_, _, event) in &outcome.events {
-        let Some(turn_id) = event.turn_id() else {
-            continue;
-        };
-        if seen.iter().any(|id| id == turn_id) {
-            continue;
-        }
-        seen.push(turn_id.to_string());
-        let Some(stored) = outcome
-            .traces
+        // 反向探针：多 hop 重建 call_model 条目数 = provider call 数。
+        let rebuilt_hops = rebuilt
+            .trace_timeline
             .iter()
-            .find(|trace| trace.turn_id == turn_id)
-        else {
-            continue;
-        };
-        let Some(rebuilt) = state.trace_for_turn(turn_id) else {
-            continue;
-        };
-        assert_parity(stored, &rebuilt, false);
-        assert_eq!(stored.phase, "completed", "turn {turn_id} phase");
+            .filter(|entry| entry.kind == "call_model")
+            .count();
+        assert_eq!(
+            rebuilt_hops, 3,
+            "rebuilt call_model entries equal hop count"
+        );
     }
-    assert_eq!(seen.len(), 2, "two turns across branches paired");
-}
+
+    /// 冒烟回归探针：多 hop 工具流式 turn 落库后的会话历史——assistant 条目
+    /// content 只能是最终模型文本；工具调用参数 JSON / 结果文本 / 描述不得进入
+    /// 对话正文（否则前端恢复会话时会把工具内容当对话消息渲染）。
+    #[test]
+    fn history_after_multi_hop_tool_turn_keeps_tool_content_out_of_assistant_text() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-history-tool-leak-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        const SESSION: &str = "history-tool-leak";
+        let mut outcome: Option<Vec<crate::agent::session::TurnHistoryMessage>> = None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![
+                sse_decision_tool_call("workspace_list_files", json!({"path": "."})),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "找到了，继续读取。"}}]}),
+                    json!({"choices": [{"delta": {"tool_calls": [
+                        {"index": 0, "id": "call_read_file", "type": "function",
+                         "function": {"name": "workspace_read_file", "arguments": "{\"path\":\"tauri.conf.json\"}"}}
+                    ]}}]}),
+                ]),
+                sse_response(&[
+                    json!({"choices": [{"delta": {"content": "历史泄漏探针最终答案。"}}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
+                ]),
+            ]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                SESSION,
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                SESSION,
+                control_plane.event_flush_channel(),
+            );
+            control_plane.start_turn_stream(
+                &RecordingTurnEventSink::new(),
+                StartTurnStreamCommand {
+                    turn_id: "history-tool-leak-turn".to_string(),
+                    input: TurnInput {
+                        message: "历史泄漏探针问题".to_string(),
+                        display_message: None,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        workspace_mode: None,
+                        session_id: Some(SESSION.to_string()),
+                        node_id: None,
+                        history: Vec::new(),
+                        images: Vec::new(),
+                        workspace_id: None,
+                    },
+                },
+            );
+            drop(_persist_guard);
+            drop(_flush_guard);
+            server.finish();
+
+            let events = control_plane
+                .load_turn_events_checked(SESSION, None)
+                .expect("event table readable");
+            let terminal_reached = events
+                .last()
+                .map(|(_, _, event)| event.type_name() == "turn/end")
+                .unwrap_or(false);
+            if !terminal_reached {
+                continue;
+            }
+            let snapshot = control_plane.load_session_snapshot(
+                crate::agent::control_plane::SessionSnapshotQuery {
+                    session_id: Some(SESSION.to_string()),
+                },
+            );
+            outcome = Some(snapshot.history);
+            break;
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let history = outcome.expect("multi-hop tool turn scenario never reached terminal");
+
+        let assistants: Vec<&crate::agent::session::TurnHistoryMessage> = history
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 1, "one assistant history entry");
+        let assistant_content = assistants[0].content.as_str();
+        assert_eq!(
+            assistant_content, "历史泄漏探针最终答案。",
+            "assistant history content must be the final model text only"
+        );
+        for leak_marker in [
+            "workspace_list_files",
+            "workspace_read_file",
+            "\"path\"",
+            "先调用",
+            "找到了，继续读取",
+            "tauri.conf.json",
+        ] {
+            assert!(
+            !assistant_content.contains(leak_marker),
+            "assistant history content must not contain tool-call info ({leak_marker}): {assistant_content:?}"
+        );
+        }
+    }
+
+    /// 场景：plan 前 cancelled 流式 turn——phase=cancelled 对拍；重建不虚构
+    /// 未发生的模型调用（settle 兜底收窄）。
+    #[test]
+    fn parity_cancelled_stream_turn() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-cancel-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> = None;
+        for attempt in 0..8 {
+            let control = ExecutionControlRegistry::new();
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![json_completion("不应被消费的响应")]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlaneBuilder::new()
+                .runtime(runtime)
+                .execution_control(control.clone())
+                .build();
+            // PA-095 #3：会话绑定路由（同 scenario()——抗全局单槽抢占）。
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                "parity-cancel",
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                "parity-cancel",
+                control_plane.event_flush_channel(),
+            );
+            control.register_turn("parity-cancel-turn", Some("parity-cancel"), None);
+            assert!(control.request_stop("parity-cancel-turn").accepted);
+            control_plane.start_turn_stream(
+                &crate::agent::turn_flow::NoopTurnEventSink,
+                StartTurnStreamCommand {
+                    turn_id: "parity-cancel-turn".to_string(),
+                    input: TurnInput {
+                        message: "取消对拍问题".to_string(),
+                        display_message: None,
+                        provider_id: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        workspace_mode: None,
+                        session_id: Some("parity-cancel".to_string()),
+                        node_id: None,
+                        history: Vec::new(),
+                        images: Vec::new(),
+                        workspace_id: None,
+                    },
+                },
+            );
+            // PA-095 #3：cancelled-before-plan 不发起 provider HTTP 请求，
+            // MockHttpServer::finish 会 join 永远阻塞在 accept 的线程——挂死。
+            // 直接 drop（JoinHandle 释放，阻塞线程随进程退出回收）。
+            drop(server);
+
+            let events = control_plane
+                .load_turn_events_checked("parity-cancel", None)
+                .expect("event table readable");
+            let terminal_reached = events
+                .last()
+                .map(|(_, _, event)| event.type_name() == "turn/end")
+                .unwrap_or(false);
+            if !terminal_reached {
+                continue;
+            }
+            let trace = control_plane
+                .load_session_traces("parity-cancel")
+                .into_iter()
+                .find(|trace| trace.turn_id == "parity-cancel-turn")
+                .expect("stored cancelled trace");
+            outcome = Some((events.into_iter().map(|(_, _, e)| e).collect(), trace));
+            break;
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let (events, stored) = outcome.expect("cancelled scenario never reached terminal");
+        let rebuilt = rebuilt_trace(&events, "parity-cancel-turn");
+        assert_parity(&stored, &rebuilt, false);
+
+        // 反向探针：plan 前 cancelled——settle 兜底不虚构模型调用（timeline 的
+        // call_model 条目来自 step/start 事件本身，非结算补建），且中断调用
+        // 不得显示为 completed（PA-095 #3 收敛修复的防腐探针）。
+        assert_eq!(stored.phase, "cancelled", "probe(cancelled): stored phase");
+        for entry in rebuilt
+            .trace_timeline
+            .iter()
+            .filter(|entry| entry.kind == "call_model")
+        {
+            assert_eq!(
+                entry.state, "cancelled",
+                "probe(cancelled): interrupted model call must not be marked completed"
+            );
+        }
+        // 反向探针：terminal_no_usage_turn_provider_metadata——差异当前确实存在
+        // （存储侧携带 provider 元数据，事件流无 usage 不可重建；豁免防腐化）。
+        assert!(
+            stored.provider_name.is_some(),
+            "probe(provider-meta): stored cancelled trace carries provider metadata"
+        );
+        assert!(
+            rebuilt.provider_name.is_none(),
+            "probe(provider-meta): rebuild cannot recover provider metadata (exemption live)"
+        );
+    }
+
+    /// 场景：fork-checkout 跨分支——分支命令发射 history-control 事件且日志水位
+    /// 严格递增（#6 无 ABA 的端到端证明），分支后各分支上的 turn 事件折叠与
+    /// 存储 trace 对拍一致（分支可见性不影响 per-turn 事实折叠）。
+    #[test]
+    fn parity_fork_checkout_branch_turns() {
+        let _rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pony-parity-branch-{stamp}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+
+        struct BranchOutcome {
+            events: Vec<(u64, String, crate::agent::turn_event::TurnEvent)>,
+            traces: Vec<TurnTraceRecord>,
+            fork_cursor_version: u64,
+            switch_cursor_version: u64,
+        }
+        let mut outcome: Option<BranchOutcome> = None;
+        for attempt in 0..8 {
+            let sessions = SessionStore::with_backend(Box::new(
+                crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                    dir.join(format!("sessions-{attempt}.db")),
+                    crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+                ),
+            ));
+            let server = MockHttpServer::start(vec![
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "主干答案。"}}],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+                })),
+                json_response(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "分支答案。"}}],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8}
+                })),
+            ]);
+            let runtime = AgentRuntime::with_dependencies(
+                sessions,
+                Box::new(StaticResolver {
+                    selection: test_provider_selection(server.base_url.clone()),
+                }),
+                Box::new(crate::agent::tools::ToolRouter::new()),
+                Box::new(LocalTurnPlanner),
+                Box::new(DefaultTurnContextBuilder),
+                Box::new(DefaultTurnTelemetryBuilder),
+            );
+            let control_plane = HostControlPlane::with_runtime(runtime);
+            let _persist_guard = crate::agent::turn_flow::bind_event_persist_session(
+                "parity-branch",
+                control_plane.event_persist_channel(),
+            );
+            let _flush_guard = crate::agent::turn_flow::bind_event_flush_session(
+                "parity-branch",
+                control_plane.event_flush_channel(),
+            );
+            let run = |control_plane: &HostControlPlane, message: &str| {
+                control_plane
+                    .run_turn(RunTurnCommand {
+                        input: TurnInput {
+                            message: message.to_string(),
+                            display_message: None,
+                            provider_id: None,
+                            model_id: None,
+                            reasoning_effort: None,
+                            workspace_mode: None,
+                            session_id: Some("parity-branch".to_string()),
+                            node_id: None,
+                            history: Vec::new(),
+                            images: Vec::new(),
+                            workspace_id: None,
+                        },
+                    })
+                    .phase
+            };
+            if run(&control_plane, "第一问") != "ready" {
+                continue;
+            }
+
+            // 从最近节点 fork 出新分支；立即用 fork 响应的版本回切主干（#6 乐观锁
+            // round-trip：响应版本即下次通行版本，中间不得有 turn 使其过期）；
+            // 再二次 fork 出工作分支跑分支 turn。
+            let graph = control_plane.load_history_graph(HistoryGraphQuery {
+                session_id: Some("parity-branch".to_string()),
+            });
+            let Some(head_node) = graph.nodes.last() else {
+                continue;
+            };
+            let fork = control_plane
+                .fork_from_history_node(ForkFromHistoryNodeCommand {
+                    session_id: Some("parity-branch".to_string()),
+                    node_id: head_node.node_id.clone(),
+                    expected_cursor_version: None,
+                })
+                .expect("fork succeeds");
+            let fork_expected_version = fork.cursor.cursor_version.unwrap_or(0);
+            control_plane
+                .switch_history_branch(SwitchHistoryBranchCommand {
+                    session_id: Some("parity-branch".to_string()),
+                    branch_id: "branch-main".to_string(),
+                    expected_cursor_version: Some(fork_expected_version),
+                })
+                .expect("switch with fork-returned cursor version (round-trip)");
+            let fork_work = control_plane
+                .fork_from_history_node(ForkFromHistoryNodeCommand {
+                    session_id: Some("parity-branch".to_string()),
+                    node_id: head_node.node_id.clone(),
+                    expected_cursor_version: None,
+                })
+                .expect("work branch fork succeeds");
+            if run(&control_plane, "第二问（分支）") != "ready" {
+                continue;
+            }
+            server.finish();
+
+            let events = control_plane
+                .load_turn_events_checked("parity-branch", None)
+                .expect("event table readable");
+            let ends = events
+                .iter()
+                .filter(|(_, _, event)| event.type_name() == "turn/end")
+                .count();
+            let has_fork_event = events
+                .iter()
+                .any(|(_, _, e)| e.type_name() == "fork/created");
+            let has_checkout_event = events
+                .iter()
+                .any(|(_, _, e)| e.type_name() == "checkpoint/checkout");
+            if ends < 2 || !has_fork_event || !has_checkout_event {
+                continue;
+            }
+            // 水位单调性探针：history-control 事件 seq 落在其触发的 turn 事件之后
+            // （日志只增不减，命令事实与 turn 事实同一条单调日志）。
+            let first_end_seq = events
+                .iter()
+                .find(|(_, _, e)| e.type_name() == "turn/end")
+                .map(|(seq, _, _)| *seq)
+                .expect("first turn/end");
+            let fork_seq = events
+                .iter()
+                .find(|(_, _, e)| e.type_name() == "fork/created")
+                .map(|(seq, _, _)| *seq)
+                .expect("fork/created seq");
+            assert!(
+                fork_seq > first_end_seq,
+                "probe(monotonic): fork/created lands after prior turn facts"
+            );
+            let traces = control_plane.load_session_traces("parity-branch");
+            outcome = Some(BranchOutcome {
+                events,
+                traces,
+                fork_cursor_version: fork.cursor.cursor_version.unwrap_or(0),
+                switch_cursor_version: fork_work.cursor.cursor_version.unwrap_or(0),
+            });
+            break;
+        }
+        drop(_rt_guard);
+        let _ = fs::remove_dir_all(&dir);
+        let outcome = outcome.expect("branch scenario never completed");
+
+        // #6 无 ABA 端到端：后续命令版本严格大于先前命令版本（命令事件推进日志水位；
+        // switch 的 round-trip 通过本身已验证"响应版本即下次通行版本"）。
+        assert!(
+            outcome.switch_cursor_version > outcome.fork_cursor_version,
+            "probe(no-aba): cursor version strictly increases across history commands ({} -> {})",
+            outcome.fork_cursor_version,
+            outcome.switch_cursor_version
+        );
+
+        // 全事件一次折叠，逐 turn 对拍（跨分支 turn 各自独立成立）。
+        let mut state = TraceProjectionState::init();
+        for (index, (_, _, event)) in outcome.events.iter().enumerate() {
+            TraceProjectionState::apply(&mut state, index as u64 + 1, event);
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for (_, _, event) in &outcome.events {
+            let Some(turn_id) = event.turn_id() else {
+                continue;
+            };
+            if seen.iter().any(|id| id == turn_id) {
+                continue;
+            }
+            seen.push(turn_id.to_string());
+            let Some(stored) = outcome.traces.iter().find(|trace| trace.turn_id == turn_id) else {
+                continue;
+            };
+            let Some(rebuilt) = state.trace_for_turn(turn_id) else {
+                continue;
+            };
+            assert_parity(stored, &rebuilt, false);
+            assert_eq!(stored.phase, "completed", "turn {turn_id} phase");
+        }
+        assert_eq!(seen.len(), 2, "two turns across branches paired");
+    }
 }

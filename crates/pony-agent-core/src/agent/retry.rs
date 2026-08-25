@@ -431,6 +431,29 @@ impl FailureKind {
     }
 }
 
+/// PA-100：rate-limit 特征判定（单一来源）。`classify` 仍把这类错误统一归为
+/// `TransientRetryable`（可重试）；本函数供重试调度方进一步区分"应使用长退避
+/// 覆盖分钟级限流窗口"的子类，避免在调用侧各自维护关键词列表造成漂移。
+///
+/// 消费前提（PA-100 code-review A P2-2）：仅当 `classify` 先判为可重试时本判定
+/// 才会被调度方消费——"tpm"/"quota"/"too many requests"/"ratelimit" 等措辞若
+/// 单独出现（报文不含 "429"/"rate limit"/timeout 特征），classify 会落默认
+/// NonRetryable 分支直接 Abort，长退避不会触发。方向安全：不在永久配额耗尽上烧退避。
+///
+/// 判定优先于措辞细节：报文同时含 timeout 与 rate-limit 特征时（如网关把上游
+/// 429 包装成超时文案），按 rate-limit 处理——长退避对两类瞬时故障都安全，
+/// 反向（短退避撞限流窗口）则必然失败。
+pub fn is_rate_limit_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("ratelimit")
+        || lower.contains("too many requests")
+        || lower.contains("tpm")
+        || lower.contains("quota")
+}
+
 /// Convenience function: run a full retry loop with the given policy.
 /// Returns `Ok(result)` on success, or the last `RetryDecision` on exhaustion.
 pub fn retry_with_policy<T, F>(

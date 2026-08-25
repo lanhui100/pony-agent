@@ -99,6 +99,13 @@ export const defaultAvailableTools: AvailableTool[] = [
           type: "integer",
           description: "最多聚合多少个路径，默认使用运行时内置上限"
         },
+        // PA-100：与 crates/pony-agent-core tools.rs 的 gather schema 保持同步——
+        // 本文件是浏览器兜底模式的真实模型可见工具定义，漏加会让该模式下的模型
+        // 复现"模仿嵌套回显传 startLine → invalid_arguments"的事故。
+        startLine: {
+          type: "integer",
+          description: "从第几行开始读取（最小 1）；未提供时文件模式从第 1 行、搜索模式自动定位命中附近片段"
+        },
         lineCount: {
           type: "integer",
           description: "读取文件片段时的目标行数"

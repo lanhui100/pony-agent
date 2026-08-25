@@ -51,6 +51,52 @@ export function canonicalizeTraceTimelineKind(kind: TraceTimelineEntry["kind"]):
   }
 }
 
+// ── PA-100：工具活动错误文本提取（与 Rust turn_tool_activity_error_text 同语义）────────
+// 三级形状兼容：{kind,message} / {code,message} / 字符串；300 字符截断；
+// 取不到结构化错误时返回 null——绝不回退 description（text 字段已承载描述）。
+const ACTIVITY_ERROR_TEXT_MAX_CHARS = 300;
+
+export function extractActivityErrorText(
+  activity: Pick<ToolActivity, "status" | "error">
+): string | null {
+  if (activity.status !== "error") {
+    return null;
+  }
+  const error = activity.error as Record<string, unknown> | string | null | undefined;
+  if (!error) {
+    return null;
+  }
+
+  let text: string | null = null;
+  if (typeof error === "string") {
+    text = error;
+  } else {
+    const kind = typeof error.kind === "string"
+      ? error.kind
+      : typeof error.code === "string"
+        ? error.code
+        : null;
+    const message = typeof error.message === "string" ? error.message : null;
+    if (kind && message) {
+      text = `${kind}: ${message}`;
+    } else if (kind) {
+      text = kind;
+    } else if (message) {
+      text = message;
+    }
+  }
+
+  const trimmed = text?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const chars = Array.from(trimmed);
+  if (chars.length <= ACTIVITY_ERROR_TEXT_MAX_CHARS) {
+    return trimmed;
+  }
+  return `${chars.slice(0, ACTIVITY_ERROR_TEXT_MAX_CHARS).join("")}…`;
+}
+
 export function cloneTraceTimeline(traceTimeline?: TraceTimelineEntry[] | null): TraceTimelineEntry[] {
   const normalized = (traceTimeline ?? []).map((entry): TraceTimelineEntry => ({
     ...entry,
@@ -342,7 +388,8 @@ export function buildFallbackRuntimeTraceTimeline(options: {
         state: toolState,
         toolActivities: toolActivitiesForHop(normalizedToolActivities, parentTool.id),
         text: parentTool.description ?? null,
-        error: parentTool.status === "error" ? parentTool.description : null
+        // PA-100：真实结构化错误，不再用 description 冒充（后端同语义修复的镜像）。
+        error: extractActivityErrorText(parentTool)
       }));
       sequence += 1;
     }
