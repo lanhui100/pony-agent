@@ -1979,11 +1979,23 @@
           "component": "core"
         }
       ]
+    },
+    {
+      "timestamp": "2026-08-26T15:29:31+08:00",
+      "commit": "087c77b",
+      "bumps": [
+        {
+          "from": "0.1.88",
+          "segment": "patch",
+          "component": "tauri",
+          "to": "0.1.89"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-08-26T12:30:06+08:00",
+  "lastBump": "2026-08-26T15:29:31+08:00",
   "tauri": {
-    "patch": 88,
+    "patch": 89,
     "minor": 1,
     "major": 0
   },

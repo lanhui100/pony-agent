@@ -15,12 +15,12 @@
 - [x] B5 control_plane 方法 + lib.rs 注册 `workspace_rename` / `workspace_delete` / `session_rename` / `session_archive`（camelCase 参数、rwlock poison-recovery 包装与 workspace_commands.rs 一致）
 - [x] B6 cargo 测试矩阵：override 六类消费点位回归（含 **T1 checkout 改名前节点 snapshot.title==override + 节点冻结保留**、**T2 hydrate 两处回灌无害化钉住**、**T3 SQLite 后端 rename/delete 跨重启往返**）；两种持久化模式往返（DualWrite/WriteSeparate）；旧 blob 无新字段解析兼容；无 override 派生标题钉住；archive 幂等与重启保持；delete 后 resolve 成功；stamp 未注册 id 归一；遗留孤儿库启动渲染契约；sync_latest_history_node 在 override 下局部重算冻结标题
 
-## Phase 2——前端基础件（与 Phase 1 并行）
+## Phase 2——前端基础件（与 Phase 1 并行）✅
 
-- [ ] F1 tauri-plugin-dialog 四件套接线（Rust dep + `.plugin()` 注册 + capability `dialog:allow-open` 最小权限 + npm 包）；capability JSON 变更冒烟断言
-- [ ] F2 `ui/DropdownMenu.vue`（reka-ui DropdownMenu 系列）
-- [ ] F3 `ui/ConfirmPopover.vue` 升级：受控 open（defineModel）+ loading + 错误槽；confirm 不再立即关闭；**保持非受控用法向后兼容**（ProviderConfigPage 存量消费方零破坏）
-- [ ] F4 `workspace-api.ts` 四封装 + 目录选择封装；`types/runtime.ts` SessionOverview.`archived?`
+- [x] F1 tauri-plugin-dialog 四件套接线（Rust dep + `.plugin()` 注册 + capability `dialog:allow-open` 最小权限 + npm 包）；capability JSON 变更冒烟断言
+- [x] F2 `ui/DropdownMenu.vue`（reka-ui DropdownMenu 系列）
+- [x] F3 `ui/ConfirmPopover.vue` 升级：受控 open（defineModel）+ loading + 错误槽；confirm 不再立即关闭；**保持非受控用法向后兼容**（ProviderConfigPage 存量消费方零破坏）
+- [x] F4 `workspace-api.ts` 四封装 + 目录选择封装；`types/runtime.ts` SessionOverview.`archived?`
 
 ## Phase 3——侧边栏重建（依赖 Phase 1+2）
 

@@ -12,6 +12,7 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:app:default",
-    "core:resources:default"
+    "core:resources:default",
+    "dialog:allow-open"
   ]
 }

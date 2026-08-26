@@ -821,6 +821,8 @@ export type SessionOverview = {
   updatedAtMs: number;
   /** Workspace 归属（PA-079）：None → 默认 workspace */
   workspaceId?: string | null;
+  /** 归档标记（侧边栏三级树）：后端恒投影；本地构造可不带（optional 兼容）。 */
+  archived?: boolean;
 };
 
 export type SessionSnapshot = {

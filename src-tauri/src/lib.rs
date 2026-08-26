@@ -960,6 +960,7 @@ async fn export_frontend_trace_chrome_trace(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(HostControlPlane::new())
         .manage(StreamDebugMetricsState {
             latest: Mutex::new(json!({})),

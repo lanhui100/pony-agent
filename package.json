@@ -1,6 +1,6 @@
 {
   "name": "pony-agent",
-  "version": "0.1.88",
+  "version": "0.1.89",
   "private": true,
   "type": "module",
   "scripts": {
@@ -63,6 +63,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-vue-next": "^1.0.0",
