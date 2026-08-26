@@ -5655,3 +5655,50 @@ fn workspace_rename_delete_survive_sqlite_restart() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn workspace_rename_delete_survive_sqlite_restart_write_separate() {
+    // T3 生产模式变体：SessionStore::new 默认 WriteSeparate——同一生命周期
+    // 在该模式下复跑，钉住 blob 剥离语义与注册表/归属重写的组合行为。
+    let dir = std::env::temp_dir().join(format!("pa-tree-t3-ws-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("store.db");
+    let ws_root = dir.join("ws-root");
+    std::fs::create_dir_all(&ws_root).unwrap();
+
+    {
+        let mut store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+            ),
+        ));
+        let w1 = store.create_workspace("One", &ws_root.display().to_string()).unwrap();
+        store.append_turn(Some("member"), "hello", "reply", None, Vec::new());
+        store.stamp_workspace_id("member", &w1.id);
+        store.rename_workspace(&w1.id, "Renamed").unwrap();
+        store.delete_workspace(&w1.id).unwrap();
+    }
+
+    {
+        let store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+            ),
+        ));
+        assert!(!store.list_workspaces().iter().any(|w| w.name == "Renamed"));
+        assert_eq!(
+            store
+                .list_sessions()
+                .iter()
+                .find(|s| s.conversation_id == "member")
+                .unwrap()
+                .workspace_id
+                .as_deref(),
+            Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}

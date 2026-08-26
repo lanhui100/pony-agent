@@ -196,13 +196,13 @@ async function submitNewWorkspace() {
   workspaceError.value = "";
   workspaceCreating.value = true;
   try {
-    const record = await runtimeStore.createNewWorkspace(name, rootPath);
-    if (record) {
+    const result = await runtimeStore.createNewWorkspace(name, rootPath);
+    if (result.ok) {
       newWorkspaceName.value = "";
       newWorkspaceRootPath.value = "";
       workspaceFormOpen.value = false;
     } else {
-      workspaceError.value = "创建失败：请检查根路径是否有效（可能已存在或重名）。";
+      workspaceError.value = result.error ?? "创建失败：请检查根路径是否有效。";
     }
   } catch (error) {
     workspaceError.value = `创建失败：${String(error)}`;

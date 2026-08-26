@@ -1925,8 +1925,14 @@ impl SessionStore {
         {
             workspace_id.to_string()
         } else {
+            // L-C（ADR 0015）：id 来自外部输入——压平换行并截断，防日志伪造。
+            let safe_echo: String = workspace_id
+                .chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .take(80)
+                .collect();
             eprintln!(
-                "[pony-agent] stamp_workspace_id: 未注册的 workspace '{workspace_id}'，归一为 default"
+                "[pony-agent] stamp_workspace_id: 未注册的 workspace '{safe_echo}'，归一为 default"
             );
             crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string()
         };

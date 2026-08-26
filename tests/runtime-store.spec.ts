@@ -20,6 +20,7 @@ import type {
   TurnTraceRecord
 } from "@/types/runtime";
 import { __resetFrontendFlightRecorderForTests, getFrontendRecorderCapabilitySnapshot as getFrontendRecorderCapability, getFrontendRecorderStats } from "@/lib/frontend-flight-recorder";
+import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useSettingsStore } from "@/stores/settings";
@@ -8899,5 +8900,48 @@ describe("runtime session resilience", () => {
     expect(store.sessionId).toBe("session-error");
     expect(store.sessionError).toContain("host read failed");
     expect(store.sessionHydrating).toBe(false);
+  });
+});
+
+// ── 三级树：deleteWorkspace 归一链路（C1 补强，S13/S19 store 级）──────────
+describe("workspace delete normalization (three-level tree)", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    window.localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  it("删除激活工作区后：注册表过滤、激活态回退 default、目录刷新被触发", async () => {
+    const store = useRuntimeStore();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockResolvedValue([]);
+
+    store.$patch({
+      workspaceList: [
+        { id: DEFAULT_WORKSPACE_ID, name: "默认工作区", rootPath: "C:\\ws" },
+        { id: "ws-doomed", name: "Doomed", rootPath: "D:\\doomed" }
+      ],
+      workspaceListLoaded: true,
+      activeWorkspaceId: "ws-doomed",
+      sessionWorkspaceId: "ws-doomed"
+    });
+    // ACTIVE_WORKSPACE_STORAGE_KEY 残留模拟
+    window.localStorage.setItem("pony-agent.active-workspace.v1", "ws-doomed");
+
+    const catalogSpy = vi.spyOn(store, "loadSessionCatalog").mockResolvedValue(undefined);
+    const normalizeSpy = vi.spyOn(store, "normalizeActiveWorkspace");
+
+    await store.deleteWorkspace("ws-doomed");
+
+    expect(
+      store.workspaceList.some((workspace) => workspace.id === "ws-doomed")
+    ).toBe(false);
+    expect(store.activeWorkspaceId).toBe(DEFAULT_WORKSPACE_ID);
+    expect(window.localStorage.getItem("pony-agent.active-workspace.v1")).toBeNull();
+    expect(normalizeSpy).toHaveBeenCalled();
+    expect(catalogSpy).toHaveBeenCalled();
+
+    catalogSpy.mockRestore();
+    normalizeSpy.mockRestore();
   });
 });

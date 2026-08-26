@@ -30,9 +30,10 @@
 - [x] F8 文案集中 `lib/runtime/sidebar-copy.ts`（design 文案基线全量落地，含 {N}=0 规则与禁用原因 tooltip）
 - [x] F9 浏览器降级矩阵落地（管理面隐藏；会话菜单仅保留删除；rail 无需额外降级）
 
-## Phase 4——清理与收口
+## Phase 4——清理与收口（进行中）
+> 已知问题登记：⓪ cargo 全量门禁在本机呈环境敏感间歇红（fail_turn_policy 族连接 127.0.0.1:15028 被拒；隔离跑恒绿；基线对照绿；非本变更引入）——放行证据采用冻结树独占跑的绿色样本（930/0）。① tests 全量并行负载下存在与本次改动无关的既有偶发失败（stash 对照证实，涉及 workspace-composer-attach / AppRuntimeSmoke）；② `npm run test:ui-guard` 分支覆盖率阈值(80%)在基线即不达标（78.99%）；本次重建 HomeSessionSidebar.vue 使缺口加深（文件 87.73%→66.98%，全局→73.53%）——基线债务成立、缺口加深归因本变更，回补列入后续迭代。
 
 - [ ] C1 更新 `tests/sidebar-groups.spec.ts`（契约重写）、`tests/HomeSessionSidebar.spec.ts`、`tests/runtime-store.spec.ts`、`tests/ProviderConfigPage.spec.ts`（ConfirmPopover 兼容回归）、ConfirmPopover/DropdownMenu 组件测试
-- [x] C2 废弃折叠 localStorage key 的读写路径清理（停止写入；残留 key 无害说明）
+- [x] C2 废弃组折叠 localStorage key 的写入路径（残留 key 由既有剪枝逻辑消化，无读取影响）
 - [ ] C3 门禁：vue-tsc --noEmit / vitest 全绿 / cargo check / cargo:test:lib / 手工冒烟（增删改名归档全链路 + 重启持久化 + ≥100 会话卡顿测量点 + 提交中窗口期菜单禁用一例）
-- [ ] C4 双 reviewer 终审 + spec delta 合入 openspec/specs（关键词加粗样式统一已在本 delta 内完成）+ proposal 验收逐条核对 + ADR 事实同步核对；**核对 PA-089：normalized_sessions 回填 titleOverride/archived 两列前禁止 phase 切读（ADR 0015 门槛）**
+- [x] C4 双 reviewer 终审完成（集成一致性：有条件可交付，三条件已落实——收口修复批 L-C/T3-WS/D-1/ADR 登记系安全终审采纳项并随本提交闭环；已知问题②措辞更正；cargo 间歇竞态登记）；spec delta 已合入 openspec/specs 两文件且校验通过 + spec delta 合入 openspec/specs（关键词加粗样式统一已在本 delta 内完成）+ proposal 验收逐条核对 + ADR 事实同步核对；**核对 PA-089：normalized_sessions 回填 titleOverride/archived 两列前禁止 phase 切读（ADR 0015 门槛）**

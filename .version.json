@@ -1991,16 +1991,28 @@
           "to": "0.1.89"
         }
       ]
+    },
+    {
+      "bumps": [
+        {
+          "segment": "patch",
+          "component": "core",
+          "from": "0.1.86",
+          "to": "0.1.87"
+        }
+      ],
+      "timestamp": "2026-08-26T18:41:26+08:00",
+      "commit": "b283302"
     }
   ],
-  "lastBump": "2026-08-26T15:29:31+08:00",
+  "lastBump": "2026-08-26T18:41:26+08:00",
   "tauri": {
     "patch": 89,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 86,
+    "patch": 87,
     "minor": 1,
     "major": 0
   }
