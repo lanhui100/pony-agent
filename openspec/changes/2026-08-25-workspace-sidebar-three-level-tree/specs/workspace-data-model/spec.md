@@ -38,7 +38,14 @@ The workspace registry SHALL support renaming a registered workspace and deletin
 
 ### Requirement: Session display-title override
 
-A session SHALL support a durable display-title override that takes precedence over the first-user-message-derived title at every projection point.
+A session SHALL support a durable display-title override that takes precedence over the first-user-message-derived title at every projection point. The precedence applies to top-level title fields (session list rows, snapshot headers); historical node listings MAY retain the titles captured at their commit time.
+
+#### Scenario: No override keeps derived title
+
+- **GIVEN** a fresh session without an override
+- **WHEN** its first user message persists
+- **THEN** the effective title derives from that first user message (first non-blank line, whitespace-collapsed, truncated at 28 characters with an ellipsis)
+- **AND** an empty history falls back to the default session title
 
 #### Scenario: Override survives turn persistence
 
@@ -49,8 +56,16 @@ A session SHALL support a durable display-title override that takes precedence o
 #### Scenario: Override survives history checkout
 
 - GIVEN a renamed session
-- WHEN the user checks out a history node or switches branches
-- THEN the sidebar and main view SHALL both show the override title
+- WHEN the user checks out a history node committed before the rename
+- THEN the snapshot's top-level title field SHALL equal the override
+- AND the sidebar SHALL show the override title
+- AND historical node list entries SHALL keep their commit-time titles
+
+#### Scenario: Session rename validates input
+
+- WHEN a session rename requests a blank/whitespace-only title or exceeds 64 characters
+- THEN the operation SHALL fail with a descriptive error and the stored override SHALL be unchanged
+- AND renaming to the identical current title SHALL succeed as a no-op
 
 #### Scenario: Legacy blobs parse unchanged
 
@@ -61,20 +76,21 @@ A session SHALL support a durable display-title override that takes precedence o
 
 ### Requirement: Session archive flag
 
-A session SHALL carry a durable archived flag that grouping surfaces honor by hiding the session everywhere while its log and data remain on disk.
+A session SHALL carry a durable archived flag that grouping surfaces honor by hiding the session everywhere while its log and data remain on disk. Clearing the flag later suffices to surface the session again under its then-current ownership (ownership rewrites performed by workspace deletion are not reversed; restore UI itself is out of scope for this change).
 
 #### Scenario: Archive projects into overview
 
 - WHEN an archive persists for a session
 - THEN the session overview projection SHALL report `archived = true`
 
+#### Scenario: Archive is idempotent
+
+- GIVEN an already-archived session
+- WHEN archive is requested again
+- THEN the operation SHALL succeed as a no-op
+
 #### Scenario: Hidden across restarts
 
 - GIVEN an archived session
 - WHEN the app restarts and reloads the session catalog
 - THEN the session SHALL still be reported archived
-
-#### Scenario: Unarchive-ready design
-
-- WHEN a future restore feature needs the data
-- THEN clearing the flag SHALL be sufficient to surface the session again in its prior workspace account
