@@ -101,6 +101,15 @@ describe("deriveSidebarTree", () => {
     expect(tree.flatZone[0].conversationId).toBe("t3");
   });
 
+  it("瞬态 target 为空白字符串 → 平铺区顶（trim 兜底）", () => {
+    const tree = deriveSidebarTree(
+      [session("old")],
+      registry,
+      { target: "   ", overview: session("t") }
+    );
+    expect(tree.flatZone[0].conversationId).toBe("t");
+  });
+
   it("零计数工作区保留空组（空态提示面）", () => {
     const tree = deriveSidebarTree([], registry.filter((w) => w.id !== DEFAULT_WORKSPACE_ID));
     expect(tree.workspaces).toHaveLength(2);

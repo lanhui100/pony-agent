@@ -5,6 +5,7 @@ import { computed, ref } from "vue";
 import { Ellipsis } from "lucide-vue-next";
 import DropdownMenu from "@/components/ui/DropdownMenu.vue";
 import type { DropdownMenuItemSpec } from "@/components/ui/DropdownMenu.vue";
+import { SIDEBAR_COPY, formatSidebarCopy } from "@/lib/runtime/sidebar-copy";
 import type { SessionOverview } from "@/types/runtime";
 
 defineOptions({ name: "SessionRow" });
@@ -31,6 +32,10 @@ const emit = defineEmits<{
 
 const headline = computed(() =>
   props.session.title?.trim() || props.session.summary?.trim() || props.session.conversationId
+);
+
+const menuAriaLabel = computed(() =>
+  formatSidebarCopy(SIDEBAR_COPY.conversationActionsAria, { name: headline.value })
 );
 
 const timeLabel = ref("");
@@ -96,7 +101,7 @@ function onRenameInput(event: Event) {
       <button
         class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[0.2rem] text-stone-400 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-[#f7e3bf] hover:text-stone-900"
         type="button"
-        aria-label="会话操作"
+        :aria-label="menuAriaLabel"
         :data-testid="`session-menu-${session.conversationId}`"
       >
         <Ellipsis class="h-3 w-3" />

@@ -2952,8 +2952,8 @@ describe("runtime session resilience", () => {
         turnCount: 0,
         lastReferencedFile: null,
         updatedAtMs: 0,
-        // PA-081：瞬态条目携带激活 Workspace（未选择 → default）。
-        workspaceId: "default"
+        // 三级树：显式目标=default 时投影 null（未盖章语义；分组按缺省⇒default）。
+        workspaceId: null
       },
       {
         conversationId: "browser-current",

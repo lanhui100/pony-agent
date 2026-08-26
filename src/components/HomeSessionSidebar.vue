@@ -8,6 +8,7 @@ import {
   Archive,
   ChevronLeft,
   ChevronRight,
+  Ellipsis,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -27,7 +28,7 @@ import { TooltipProvider } from "reka-ui";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useUpdateStore } from "@/stores/update";
 import { deriveSidebarTree, isVisibleSession } from "@/lib/runtime/sidebar-groups";
-import { SIDEBAR_COPY } from "@/lib/runtime/sidebar-copy";
+import { SIDEBAR_COPY, formatSidebarCopy } from "@/lib/runtime/sidebar-copy";
 import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
 import { isTauriAvailable } from "@/lib/tauri";
 import type { SidebarNavigationPage } from "@/types/config";
@@ -81,9 +82,13 @@ interface ConfirmTarget {
 }
 const confirmTarget = ref<ConfirmTarget | null>(null);
 const confirmState = reactive({ loading: false, error: "" });
-const confirmOpen = computed(() => confirmTarget.value !== null);
+/** 契约③：飞行中取消后到达的失败，经行内一次性提示呈现（6s 自动清除）。 */
+const rowNotice = ref<{ key: string; message: string } | null>(null);
+let rowNoticeTimer: number | undefined;
 
 function openConfirm(target: ConfirmTarget) {
+  // 飞行中禁止叠开其他确认（防跨目标状态污染）。
+  if (confirmState.loading) return;
   confirmTarget.value = target;
   confirmState.loading = false;
   confirmState.error = "";
@@ -164,6 +169,10 @@ async function openAddWorkspaceFlow() {
     newWorkspaceName.value = base;
     workspaceError.value = "";
   } catch (error) {
+    // 选择目录失败也要可见：展开表单承载错误信息（否则 p 在 v-if 内不可见）。
+    workspaceFormOpen.value = true;
+    newWorkspaceRootPath.value = "";
+    newWorkspaceName.value = "";
     workspaceError.value = `选择目录失败：${String(error)}`;
   }
 }
@@ -209,6 +218,22 @@ const hasVisibleCurrentSession = computed(() =>
 );
 
 const transientEntry = computed<SessionOverview | null>(() => {
+  // 主路径：createSession 会把瞬态条目注入 sessionList（updatedAtMs=0）——
+  // 识别为"未落盘的当前行"，从 sessions 输入中摘出、改走钉顶参数，
+  // 否则排序会把它沉底（P1-2 回归）。
+  const provisional = provisionalRow.value;
+  if (provisional) return provisional;
+  return hasVisibleCurrentSession.value ? null : synthesizedTransient();
+});
+
+const provisionalRow = computed<SessionOverview | null>(() => {
+  const row = sessionList.value.find(
+    (session) => session.conversationId === sessionId.value
+  );
+  return row && row.updatedAtMs === 0 && row.turnCount === 0 ? row : null;
+});
+
+function synthesizedTransient(): SessionOverview | null {
   if (hasVisibleCurrentSession.value) return null;
   return {
     conversationId: sessionId.value,
@@ -219,11 +244,13 @@ const transientEntry = computed<SessionOverview | null>(() => {
     updatedAtMs: 0,
     workspaceId: sessionWorkspaceId.value === DEFAULT_WORKSPACE_ID ? null : sessionWorkspaceId.value
   };
-});
+}
 
 const tree = computed(() =>
   deriveSidebarTree(
-    sessionList.value.filter(isVisibleSession),
+    sessionList.value.filter(
+      (session) => isVisibleSession(session) && session !== provisionalRow.value
+    ),
     workspaceList.value,
     transientEntry.value
       ? { target: sessionWorkspaceId.value, overview: transientEntry.value }
@@ -272,9 +299,12 @@ function guardTitle(session: SessionOverview): string | undefined {
       return SIDEBAR_COPY.disabledSubmittingTooltip;
     }
     if (isRunning(session)) return SIDEBAR_COPY.disabledRunningTooltip;
-    return SIDEBAR_COPY.disabledSubmittingTooltip;
+    return "当前操作进行中，请稍候";
   }
   return undefined;
+}
+function rowNoticeFor(prefix: string): string | undefined {
+  return rowNotice.value?.key.startsWith(prefix) ? rowNotice.value.message : undefined;
 }
 function canMutateSession(session: SessionOverview): boolean {
   if (isTransientSession(session)) return false;
@@ -371,6 +401,9 @@ function onWorkspaceMenuSelect(workspaceId: string, name: string, itemId: string
 
 // ── 确认处理器（受控确认标准模板：inflight→await→成功关/失败停留） ────────
 async function runConfirm(kind: ConfirmKind, target: ConfirmTarget) {
+  // 契约①③：捕获结算归属——飞行中被取消时，失败降级为行内一次性提示，
+  // 成功不误关他人弹层；弹层仍开着且属于本目标 → 错误槽停留可重试。
+  const targetKey = target.key;
   confirmState.loading = true;
   confirmState.error = "";
   let outcome: { ok: boolean; error?: string };
@@ -387,15 +420,26 @@ async function runConfirm(kind: ConfirmKind, target: ConfirmTarget) {
         outcome = { ok: false, error: String(error) };
       }
     }
-    if (!outcome.ok && confirmOpen.value) {
-      confirmState.error = `${SIDEBAR_COPY.confirmFailurePrefix}${outcome.error ?? "未知错误"}`;
-      confirmState.loading = false;
-      return;
-    }
-    closeConfirm();
   } finally {
     confirmState.loading = false;
   }
+  const mine = confirmTarget.value?.key === targetKey;
+  if (!outcome.ok && mine) {
+    confirmState.error = `${SIDEBAR_COPY.confirmFailurePrefix}${outcome.error ?? "未知错误"}`;
+    return;
+  }
+  if (!outcome.ok) {
+    rowNotice.value = {
+      key: targetKey,
+      message: `${SIDEBAR_COPY.confirmFailurePrefix}${outcome.error ?? "未知错误"}`
+    };
+    if (rowNoticeTimer !== undefined) window.clearTimeout(rowNoticeTimer);
+    rowNoticeTimer = window.setTimeout(() => {
+      rowNotice.value = null;
+    }, 6000);
+    return;
+  }
+  if (mine) closeConfirm();
 }
 
 // ── 其余 UI 状态 ──────────────────────────────────────────────────────────
@@ -696,6 +740,13 @@ function confirmPopoverProps(
                     <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
                   </ConfirmPopover>
                 </template>
+                <p
+                  v-if="rowNoticeFor(`s:${session.conversationId}:`)"
+                  class="px-1.5 pb-0.5 text-[10px] leading-3.5 text-rose-600"
+                  data-testid="row-notice"
+                >
+                  {{ rowNoticeFor(`s:${session.conversationId}:`) }}
+                </p>
               </div>
             </div>
 
@@ -725,9 +776,10 @@ function confirmPopoverProps(
                 <span v-if="renamingKey !== `ws:${group.key}`" class="flex shrink-0 items-center gap-0.5">
                   <button
                     v-if="isTauriRuntime"
-                    class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                    class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-40"
                     type="button"
-                    :title="SIDEBAR_COPY.newConversationHere"
+                    :disabled="!canCreateSession"
+                    :title="canCreateSession ? SIDEBAR_COPY.newConversationHere : createSessionTitle"
                     :data-testid="`workspace-row-new-${group.key}`"
                     @click="createSessionInWorkspace(group.key)"
                   >
@@ -741,7 +793,7 @@ function confirmPopoverProps(
                     <button
                       class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900"
                       type="button"
-                      :aria-label="`${group.name} 的操作`"
+                      :aria-label="formatSidebarCopy(SIDEBAR_COPY.workspaceActionsAria, { name: group.name })"
                       :data-testid="`workspace-row-menu-${group.key}`"
                     >
                       <Ellipsis class="h-3 w-3" />
@@ -761,6 +813,13 @@ function confirmPopoverProps(
                   {{ renameError }}
                 </p>
 
+                <p
+                  v-if="rowNotice?.key === `ws:${group.key}`"
+                  class="px-1.5 pb-0.5 text-[10px] leading-3.5 text-rose-600"
+                  data-testid="workspace-row-notice"
+                >
+                  {{ rowNotice.message }}
+                </p>
                 <ConfirmPopover
                   v-if="confirmTarget?.key === `ws:${group.key}`"
                   :title="SIDEBAR_COPY.deleteWorkspaceTitle"
@@ -773,7 +832,7 @@ function confirmPopoverProps(
                   @confirm="runConfirm('workspace-delete', confirmTarget)"
                   @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
                 >
-                  <span class="pointer-events-none absolute inset-y-0 left-0 w-0" aria-hidden="true" />
+                  <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
                 </ConfirmPopover>
               </div>
 
@@ -832,6 +891,13 @@ function confirmPopoverProps(
                       <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
                     </ConfirmPopover>
                   </template>
+                  <p
+                    v-if="rowNoticeFor(`s:${session.conversationId}:`)"
+                    class="px-1.5 pb-0.5 text-[10px] leading-3.5 text-rose-600"
+                    data-testid="row-notice"
+                  >
+                    {{ rowNoticeFor(`s:${session.conversationId}:`) }}
+                  </p>
                 </div>
               </div>
             </div>

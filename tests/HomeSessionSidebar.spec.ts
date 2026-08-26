@@ -30,10 +30,6 @@ const ScrollAreaStub = defineComponent({
   template: '<div class="scroll-area-stub"><slot /></div>'
 });
 
-function createMessage(partial: Partial<Parameters<typeof Object>[0]> = {}): never {
-  throw new Error("unused shim");
-}
-void createMessage;
 
 function createSession(partial: Partial<SessionOverview> = {}): SessionOverview {
   return {
@@ -258,7 +254,7 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
   it("瞬态新对话按显式目标钉顶：顶层入口落平铺区顶；组内入口落该组顶", async () => {
     seedTree({
       currentId: "fresh",
-      messages: [],
+      messages: [{ content: "seed" }],
       sessions: [
         createSession({ conversationId: "old-flat", title: "旧平铺", updatedAtMs: 9000 }),
         createSession({ conversationId: "old-b", title: "旧B", workspaceId: "ws-b", updatedAtMs: 9000 })
@@ -293,6 +289,30 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     wrapper.unmount();
   });
 
+  it("注入式瞬态行（createSession 主路径）同样钉顶", async () => {
+    // 回归钉板：store 注入的瞬态（updatedAtMs=0）若参与排序将沉底（P1-2）。
+    seedTree({
+      currentId: "fresh",
+      messages: [{ content: "seed" }],
+      sessions: [
+        createSession({
+          conversationId: "fresh",
+          title: "新对话",
+          summary: "",
+          turnCount: 0,
+          updatedAtMs: 0,
+          workspaceId: null
+        }),
+        createSession({ conversationId: "old-flat", title: "旧平铺", updatedAtMs: 9000 })
+      ]
+    });
+    seedWorkspaces();
+    const wrapper = mountSidebar();
+    await flushUI();
+    const firstFlat = wrapper.findAll('[data-testid="flat-zone-session-row"]')[0];
+    expect(firstFlat.text()).toContain("新对话");
+    wrapper.unmount();
+  });
   it("顶层「新对话」恒定落默认工作区并先行导航 home", async () => {
     seedTree({ currentId: "fresh", messages: [{ content: "seed" }], sessions: [] });
     seedWorkspaces();
@@ -537,6 +557,53 @@ describe("HomeSessionSidebar（管理操作·Tauri 模式）", () => {
     // 7 条种子 + 瞬态"新对话"（钉顶）
     expect(wrapper.findAll('[data-testid="flat-zone-session-row"]').length).toBe(8);
     expect(wrapper.findAll('[data-testid^="workspace-session-row-ws-a-"]').length).toBe(6);
+    wrapper.unmount();
+  });
+
+  it("确认失败：error 槽展示、弹层停留可重试", async () => {
+    const runtimeStore = seedStandard();
+    vi.spyOn(runtimeStore, "archiveSession").mockResolvedValue({ ok: false, error: "boom" });
+    const wrapper = mountSidebar();
+    await flushUI();
+    rowVm(wrapper, "s-idle").vm.$emit("menu-select", "archive");
+    await flushUI();
+    openConfirmOf(wrapper).vm.$emit("confirm");
+    await flushPromises();
+    await flushUI();
+    // 断言组件契约面（error 经 props 下发；portal 渲染由基件 spec 覆盖）
+    const failed = openConfirmOf(wrapper);
+    expect(String(failed.props("error"))).toContain("boom");
+    // 弹层停留：再次 confirm 可重试（组件实例仍在，portal 渲染由基件 spec 覆盖）
+    failed.vm.$emit("confirm");
+    await flushPromises();
+    await flushUI();
+    expect(runtimeStore.archiveSession).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("飞行中取消后的失败经行内提示呈现一次（契约③）", async () => {
+    const runtimeStore = seedStandard();
+    let settle!: (result: { ok: boolean; error?: string }) => void;
+    vi.spyOn(runtimeStore, "archiveSession").mockImplementation(
+      () => new Promise((resolve) => { settle = resolve; })
+    );
+    const wrapper = mountSidebar();
+    await flushUI();
+    rowVm(wrapper, "s-idle").vm.$emit("menu-select", "archive");
+    await flushUI();
+    const started = openConfirmOf(wrapper);
+    started.vm.$emit("confirm"); // 请求进入飞行中（挂起 promise）
+    await flushUI();
+    started.vm.$emit("update:open", false); // 飞行中取消（Esc/外点等价通道）
+    await flushUI();
+    settle({ ok: false, error: "late boom" });
+    await flushPromises();
+    await flushUI();
+    // 弹层不得重开；失败经行内一次性提示呈现（rowNotice → 行容器 p 标签）
+    expect(
+      wrapper.findAllComponents(ConfirmPopover).filter((c) => c.props("open") === true).length
+    ).toBe(0);
+    expect(wrapper.text()).toContain("操作失败：late boom");
     wrapper.unmount();
   });
 });

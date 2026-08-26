@@ -159,7 +159,7 @@ Each conversation row SHALL expose a three-dot menu containing 重命名, 归档
 #### Scenario: Menu anatomy and guards
 
 - **WHEN** a persisted conversation renders
-- **THEN** its menu contains exactly 重命名 / 归档 / 删除对话
+- **THEN** its menu contains exactly 重命名对话 / 归档对话 / 删除对话
 - **AND** running or submitting conversations disable the entries with reason tooltips (「对话运行中，暂不能执行该操作」 / 「正在提交，请稍候」)
 - **AND** the transient blank entry exposes no menu
 

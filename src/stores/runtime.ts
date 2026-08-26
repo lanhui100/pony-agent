@@ -1837,11 +1837,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       }
       this.activeWorkspaceId = DEFAULT_WORKSPACE_ID;
     },
-    async createNewWorkspace(name: string, rootPath: string): Promise<WorkspaceRecord | null> {
+    async createNewWorkspace(name: string, rootPath: string): Promise<{ ok: boolean; record?: WorkspaceRecord; error?: string }> {
       const trimmedName = name.trim();
       const trimmedPath = rootPath.trim();
       if (!trimmedName || !trimmedPath) {
-        return null;
+        return { ok: false, error: "名称与根路径不能为空" };
       }
       try {
         const record = await invokeCreateWorkspace(trimmedName, trimmedPath);
@@ -1849,12 +1849,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           ...this.workspaceList.filter((workspace) => workspace.id !== record.id),
           record
         ];
-        // 成功即自动激活（PA-081 契约：createWorkspace 成功自动激活）。
-        this.activateWorkspace(record.id);
-        return record;
+        // 三级树裁决①：创建不再自动激活——激活态仅在注册表变更时归一清洗。
+        return { ok: true, record };
       } catch (error) {
         debugLog("workspace:create:failed", { error: String(error) });
-        return null;
+        return { ok: false, error: String(error) };
       }
     },
 
@@ -1950,12 +1949,16 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
 
     async archiveSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
       const key = `s-archive:${sessionId}`;
-      if (
-        this.sidebarOpInflightSet[key]
-        || this.isSubmitting
-        || this.deletingSessionSet[sessionId]
-      ) {
+      if (this.sidebarOpInflightSet[key] || this.deletingSessionSet[sessionId]) {
         return { ok: false };
+      }
+      // 三级树纵深：当前会话提交期禁归档；后台运行中的会话同样拒绝
+      // （菜单禁用是第一道防线，此处为 store 前哨）。
+      if (this.isSubmitting && sessionId === this.sessionId) {
+        return { ok: false, error: "当前对话正在提交，请稍候后再试" };
+      }
+      if (this.runningSessionMap[sessionId]) {
+        return { ok: false, error: "对话运行中，暂不能归档" };
       }
       if (!this.sessionList.some((session) => session.conversationId === sessionId)) {
         return { ok: false, error: "会话不存在" };
@@ -1963,23 +1966,24 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.sidebarOpInflightSet[key] = true;
       try {
         await invokeArchiveSession(sessionId);
+        delete this.completedSessionSet[sessionId];
+        delete this.failedSessionSet[sessionId];
         await this.loadSessionCatalog();
         if (sessionId === this.sessionId) {
-          // 归档当前激活会话：fallback 选择（与 delete 同语义的精简版）。
-          const fallbackSessionId =
-            this.sessionList.find((session) => session.conversationId !== sessionId)
-              ?.conversationId ?? DEFAULT_SESSION_ID;
-          this.resetSessionRuntimeState();
-          this.sessionId = fallbackSessionId;
-          this.phase = "connecting";
-          try {
-            await this.loadSessionState(fallbackSessionId, { refreshCatalog: false });
-          } catch (error) {
+          const remaining = this.sessionList.filter(
+            (session) => session.conversationId !== sessionId
+          );
+          if (remaining.length === 0) {
+            // 空列表特判（对齐 deleteSession）：直接回默认空白，不经 connecting。
             this.resetSessionRuntimeState();
-            this.sessionId = fallbackSessionId;
+            this.sessionId = DEFAULT_SESSION_ID;
             this.phase = "idle";
-            this.sessionError = `归档后切换对话失败：${String(error)}`;
+            return { ok: true };
           }
+          const fallbackSessionId =
+            remaining[0]?.conversationId ?? DEFAULT_SESSION_ID;
+          // 走 switchSession：复用后台 turn 重挂/录制绑定/切换令牌三件事。
+          await this.switchSession(fallbackSessionId);
         }
         return { ok: true };
       } catch (error) {
@@ -2053,9 +2057,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         to: nextSessionId
       });
     },
-    async deleteSession(targetSessionId: string) {
+    async deleteSession(targetSessionId: string): Promise<{ ok: boolean; error?: string }> {
       if (this.isSubmitting || this.deletingSessionSet[targetSessionId]) {
-        return;
+        return { ok: false, error: "当前对话正在提交，请稍候后再试" };
       }
 
       const deletingActiveEmptySession =
@@ -2065,7 +2069,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         targetSessionId === this.sessionId ||
         !this.sessionList.some((session) => session.conversationId === this.sessionId);
       if (requiresGlobalSessionOperation && this.sessionOperation) {
-        return;
+        return { ok: false, error: "当前操作进行中，请稍候" };
       }
       const previousSnapshot = createSessionRuntimeSnapshot(this);
       const persistedStateToRestore = loadPersistedRuntimeState(targetSessionId);
@@ -2108,7 +2112,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           debugLog("session:delete", {
             targetSessionId
           });
-          return;
+          return { ok: true };
         }
 
         this.resetSessionRuntimeState();
@@ -2121,7 +2125,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             debugLog("session:delete:empty-fallback", {
               targetSessionId
             });
-            return;
+            return { ok: true };
           }
 
           await this.loadSessionState(fallbackSessionId, { refreshCatalog: false });
@@ -2156,6 +2160,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           this.sessionOperation = null;
         }
       }
+      return { ok: true };
     },
     async initializeSessions() {
       if (this.sessionOperation) {
