@@ -18,8 +18,36 @@ import type {
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 
+// 协议家族（能力目录匹配用）：openai 族 = completions + responses 两值。
+type ProviderProtocolFamily = "openai" | "anthropic";
+
+export function protocolFamilyOf(protocol: ProviderProtocol): ProviderProtocolFamily {
+  return protocol === "anthropic-messages" ? "anthropic" : "openai";
+}
+
+export function isAnthropicProtocol(protocol: ProviderProtocol): boolean {
+  return protocolFamilyOf(protocol) === "anthropic";
+}
+
+// D1：旧值规范化单点。旧 providers.json/旧 trace 的 openai/anthropic 映射到规范名，
+// 未知值一律回落 openai-completions，杜绝未知名继续在内存态扩散。
+export function normalizeLegacyProtocol(value: unknown): ProviderProtocol {
+  switch (value) {
+    case "openai-responses":
+    case "openai-completions":
+    case "anthropic-messages":
+      return value;
+    case "anthropic":
+      return "anthropic-messages";
+    default:
+      // 含旧值 "openai" 与一切未知值。
+      return "openai-completions";
+  }
+}
+
 type CapabilityFactCatalogEntry = {
-  protocol?: ProviderProtocol;
+  /** 家族标签（非 wire 值）：openai 族两值均可命中 openai 条目。 */
+  protocol?: ProviderProtocolFamily;
   patterns: string[];
   preset: Exclude<ProviderCapabilityPresetId, "auto" | "custom">;
 };
@@ -52,14 +80,22 @@ const CAPABILITY_CATALOG: CapabilityFactCatalogEntry[] = [
   },
 ];
 
+export const ALL_PROVIDER_PROTOCOLS: ProviderProtocol[] = [
+  "openai-responses",
+  "openai-completions",
+  "anthropic-messages",
+];
+
 export function defaultBaseUrlFor(protocol: ProviderProtocol) {
-  return protocol === "anthropic"
+  return isAnthropicProtocol(protocol)
     ? "https://api.anthropic.com/v1"
     : "https://api.openai.com/v1";
 }
 
-function defaultAuthTypeFor(protocol: ProviderProtocol): ProviderAuthType {
-  return protocol === "anthropic" ? "x-api-key" : "bearer";
+// D1：UI 不再暴露认证方式选择；新建 endpoint 一律写 auto，由后端按家族解析；
+// 既有非 auto 值在 normalizeEndpoints 中保留、不被静默改写。
+function defaultAuthTypeFor(_protocol: ProviderProtocol): ProviderAuthType {
+  return "auto";
 }
 
 function createDefaultEndpoint(
@@ -77,8 +113,9 @@ function createDefaultEndpoint(
 
 function getDefaultEndpoints(): ProviderProtocolEndpoint[] {
   return [
-    createDefaultEndpoint("openai", { enabled: true, authType: "auto" }),
-    createDefaultEndpoint("anthropic"),
+    createDefaultEndpoint("openai-completions", { enabled: true, authType: "auto" }),
+    createDefaultEndpoint("openai-responses"),
+    createDefaultEndpoint("anthropic-messages"),
   ];
 }
 
@@ -145,16 +182,18 @@ function inferCapabilityPreset(
 ): Exclude<ProviderCapabilityPresetId, "custom"> {
   const lower = modelIdValue.toLowerCase();
 
+  // 家族匹配：openai-completions 与 openai-responses 均可命中 "openai" 条目。
+  const family = protocolFamilyOf(protocol);
   const matched = CAPABILITY_CATALOG.find(
     (entry) =>
-      (!entry.protocol || entry.protocol === protocol) &&
+      (!entry.protocol || entry.protocol === family) &&
       entry.patterns.some((pattern) => lower.includes(pattern)),
   );
   if (matched) {
     return matched.preset;
   }
 
-  if (protocol === "anthropic") {
+  if (isAnthropicProtocol(protocol)) {
     return "anthropic-thinking";
   }
 
@@ -275,16 +314,15 @@ function normalizeProtocolArray(
   endpoints: ProviderProtocolEndpoint[],
   legacyProtocol: ProviderProtocol,
 ) {
-  const fromList = (supportedProtocols ?? []).filter(
-    (value, index, list) =>
-      (value === "openai" || value === "anthropic") &&
-      list.indexOf(value) === index,
-  );
+  // 入口统一过 normalizeLegacyProtocol：旧值/未知值先折叠为规范名再去重。
+  const fromList = (supportedProtocols ?? [])
+    .map((value) => normalizeLegacyProtocol(value))
+    .filter((value, index, list) => list.indexOf(value) === index);
   const fromEndpoints = endpoints
     .filter((item) => item.enabled)
     .map((item) => item.protocol);
   const merged = [...new Set([...fromList, ...fromEndpoints])];
-  return merged.length ? merged : [legacyProtocol];
+  return merged.length ? merged : [normalizeLegacyProtocol(legacyProtocol)];
 }
 
 function normalizeEndpoints(
@@ -295,10 +333,19 @@ function normalizeEndpoints(
     Partial<Pick<ProviderConfig, "endpoints" | "supportedProtocols">>,
 ): ProviderProtocolEndpoint[] {
   const defaults = getDefaultEndpoints();
+  const providerProtocol = normalizeLegacyProtocol(provider.protocol);
+  // 旧文件 endpoint 可能携带 legacy 协议名：先映射到规范名再合并（首个优先），
+  // 防止 openai/openai-completions 双条目在规范化后重复出现。
+  const existingByProtocol = new Map<ProviderProtocol, ProviderProtocolEndpoint>();
+  for (const item of provider.endpoints ?? []) {
+    const canonical = normalizeLegacyProtocol(item?.protocol);
+    if (!existingByProtocol.has(canonical)) {
+      existingByProtocol.set(canonical, { ...item, protocol: canonical });
+    }
+  }
+
   const entries = defaults.map((defaultEntry) => {
-    const existing = provider.endpoints?.find(
-      (item) => item.protocol === defaultEntry.protocol,
-    );
+    const existing = existingByProtocol.get(defaultEntry.protocol);
     if (existing) {
       return {
         protocol: defaultEntry.protocol,
@@ -309,14 +356,15 @@ function normalizeEndpoints(
     }
 
     const enabled =
-      provider.supportedProtocols?.includes(defaultEntry.protocol) ??
-      provider.protocol === defaultEntry.protocol;
+      (provider.supportedProtocols ?? []).some(
+        (value) => normalizeLegacyProtocol(value) === defaultEntry.protocol,
+      ) || providerProtocol === defaultEntry.protocol;
     const baseUrl =
-      provider.protocol === defaultEntry.protocol && provider.baseUrl?.trim()
+      providerProtocol === defaultEntry.protocol && provider.baseUrl?.trim()
         ? provider.baseUrl.trim()
         : defaultEntry.baseUrl;
     const authType =
-      provider.protocol === defaultEntry.protocol
+      providerProtocol === defaultEntry.protocol
         ? provider.authType ?? defaultEntry.authType
         : defaultEntry.authType;
 
@@ -440,9 +488,14 @@ export function buildProviderModelConfig(
   declaration: ProviderModelCapabilityDeclaration,
   userPolicy: ProviderModelUserPolicy,
 ): ProviderModelConfig {
+  // baseUrl 单点清洗：空白折叠为 null（= 继承），其余 trim 后透传。
+  const rawBaseUrl = identity.baseUrl;
+  const baseUrl =
+    typeof rawBaseUrl === "string" ? rawBaseUrl.trim() || null : (rawBaseUrl ?? null);
   return {
     ...identity,
     protocol: identity.protocol ?? null,
+    baseUrl,
     ...declaration,
     ...userPolicy,
   };
@@ -454,7 +507,8 @@ function createEmptyModel(): ProviderModelConfig {
       id: createId("model"),
       name: "",
       model: "",
-      protocol: "openai",
+      protocol: "openai-completions",
+      baseUrl: null,
     },
     {
       capabilityPreset: "custom",
@@ -472,10 +526,10 @@ function createEmptyProvider(): ProviderConfig {
   return {
     id: createId("provider"),
     name,
-    protocol: "openai",
-    baseUrl: endpoints[0]?.baseUrl ?? defaultBaseUrlFor("openai"),
+    protocol: "openai-completions",
+    baseUrl: endpoints[0]?.baseUrl ?? defaultBaseUrlFor("openai-completions"),
     authType: "auto",
-    supportedProtocols: ["openai"],
+    supportedProtocols: ["openai-completions"],
     endpoints,
     apiKeyEnvVar: deriveEnvVarName(name),
     apiKeyValue: "",
@@ -546,9 +600,14 @@ function createDeepseekV4ProModel(): ProviderModelConfig {
       id: createId("model"),
       name: "DeepSeek V4 Pro",
       model: "deepseek-v4-pro",
-      protocol: "openai",
+      protocol: "openai-completions",
     },
-    resolveCapabilityDeclaration("openai", "deepseek-v4-pro", "deepseek-reasoner", null),
+    resolveCapabilityDeclaration(
+      "openai-completions",
+      "deepseek-v4-pro",
+      "deepseek-reasoner",
+      null,
+    ),
     {
       ...createDefaultModelUserPolicy(),
       temperature: 0.2,
@@ -613,6 +672,7 @@ function normalizeModel(
       name: model.name,
       model: model.model,
       protocol,
+      baseUrl: model.baseUrl ?? null,
     },
     declaration,
     userPolicy,
@@ -620,18 +680,24 @@ function normalizeModel(
 }
 
 function normalizeProvider(provider: ProviderConfig): ProviderConfig {
-  const endpoints = normalizeEndpoints(provider);
+  // D1 单点收敛：provider.protocol 先过 legacy 规范化，endpoints/supportedProtocols
+  // 的映射在各自入口完成，models 在 normalizeModel 内收敛。
+  const normalized: ProviderConfig = {
+    ...provider,
+    protocol: normalizeLegacyProtocol(provider.protocol),
+  };
+  const endpoints = normalizeEndpoints(normalized);
   const supportedProtocols = normalizeProtocolArray(
-    provider.supportedProtocols,
+    normalized.supportedProtocols,
     endpoints,
-    provider.protocol,
+    normalized.protocol,
   );
-  const primaryProtocol = supportedProtocols[0] ?? provider.protocol;
+  const primaryProtocol = supportedProtocols[0] ?? normalized.protocol;
   const primaryEndpoint =
     endpoints.find((item) => item.protocol === primaryProtocol) ?? endpoints[0];
 
   const baseProvider: ProviderConfig = {
-    ...provider,
+    ...normalized,
     protocol: primaryProtocol,
     baseUrl: primaryEndpoint?.baseUrl ?? defaultBaseUrlFor(primaryProtocol),
     authType: primaryEndpoint?.authType ?? "auto",
@@ -660,7 +726,7 @@ function createBrowserRegistry(): ProviderRegistry {
   const ppx = createPresetProvider(
     "provider-ppx",
     "ppx",
-    "openai",
+    "openai-completions",
     "https://api.psydo.top/v1",
     "GPT 5.4",
     "gpt-5.4",
@@ -668,7 +734,7 @@ function createBrowserRegistry(): ProviderRegistry {
   const openrouter = createPresetProvider(
     "provider-openrouter",
     "openrouter",
-    "openai",
+    "openai-completions",
     "https://openrouter.ai/api/v1",
     "OpenAI GPT-4.1 Mini",
     "openai/gpt-4.1-mini",
@@ -676,7 +742,7 @@ function createBrowserRegistry(): ProviderRegistry {
   const deepseek = createPresetProvider(
     "provider-deepseek",
     "deepseek",
-    "openai",
+    "openai-completions",
     "https://api.deepseek.com/v1",
     "DeepSeek V4 Flash",
     "deepseek-v4-flash",
@@ -689,6 +755,20 @@ function createBrowserRegistry(): ProviderRegistry {
   };
 }
 
+export type FetchModelCatalogInput = {
+  providerId?: string | null;
+  protocol: ProviderProtocol;
+  /** 拉取用 Base URL：空/空白时按空串传给后端（后端按协议默认值解析）。 */
+  baseUrl?: string | null;
+  /** 表单中未保存的 API Key；缺省时由后端按 providerId 解析已存密钥。 */
+  apiKey?: string | null;
+};
+
+export type AddModelsFromCatalogOptions = {
+  protocol: ProviderProtocol;
+  baseUrl?: string | null;
+};
+
 type ProviderState = {
   registry: ProviderRegistry | null;
   selectedReasoningEffort: ProviderReasoningEffort | null;
@@ -696,6 +776,9 @@ type ProviderState = {
   saving: boolean;
   error: string | null;
   notice: string | null;
+  loadingModels: boolean;
+  catalogError: string | null;
+  catalogModels: string[];
 };
 
 export const useProviderStore = defineStore("providers", {
@@ -706,6 +789,9 @@ export const useProviderStore = defineStore("providers", {
     saving: false,
     error: null,
     notice: null,
+    loadingModels: false,
+    catalogError: null,
+    catalogModels: [],
   }),
   getters: {
     providers(state): ProviderConfig[] {
@@ -982,6 +1068,108 @@ export const useProviderStore = defineStore("providers", {
         provider.models = [model];
         provider.selectedModelId = model.id;
       }
+    },
+    clearModelCatalog() {
+      this.catalogModels = [];
+      this.catalogError = null;
+    },
+    // D3/D6：模型目录拉取。浏览器预览模式由 isTauriAvailable 守卫直接提示、不触网；
+    // Tauri 环境走 fetch_provider_models 命令，失败进 catalogError（不占用全局 error 横幅）。
+    async fetchModelCatalog(input: FetchModelCatalogInput): Promise<string[]> {
+      if (!isTauriAvailable()) {
+        this.catalogModels = [];
+        this.catalogError = null;
+        this.notice = "预览模式不可用拉取模型列表；请在桌面应用内使用获取列表。";
+        return [];
+      }
+
+      this.loadingModels = true;
+      this.catalogError = null;
+      try {
+        const models = await safeInvoke<string[]>("fetch_provider_models", {
+          providerId: input.providerId ?? null,
+          protocol: input.protocol,
+          baseUrl: input.baseUrl?.trim() || "",
+          apiKey: input.apiKey?.trim() ? input.apiKey.trim() : null,
+        });
+        const list = Array.isArray(models)
+          ? [...new Set(models.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()))]
+          : [];
+        this.catalogModels = list;
+        return list;
+      } catch (error) {
+        this.catalogModels = [];
+        this.catalogError = `拉取模型列表失败：${String(error)}`;
+        return [];
+      } finally {
+        this.loadingModels = false;
+      }
+    },
+    // D6：目录批量添加专用通道——预去重后批量 upsert，返回 {added, skipped}，
+    // 不复用 upsertModel 的 this.error 错误通道（避免全局红色横幅误报）。
+    addModelsFromCatalog(
+      providerId: string,
+      modelIds: string[],
+      options: AddModelsFromCatalogOptions,
+    ): { added: number; skipped: number; lastAddedModelId: string | null } {
+      const provider = this.registry?.providers.find(
+        (item) => item.id === providerId,
+      );
+      if (!provider) {
+        return { added: 0, skipped: modelIds.length, lastAddedModelId: null };
+      }
+
+      const existingKeys = new Set(
+        provider.models.map((model) => modelUniquenessKey(model.model)),
+      );
+      const batchKeys = new Set<string>();
+      let added = 0;
+      let skipped = 0;
+      let lastAddedModelId: string | null = null;
+
+      for (const rawId of modelIds) {
+        const modelIdValue = String(rawId ?? "").trim();
+        if (!modelIdValue) {
+          skipped += 1;
+          continue;
+        }
+        const key = modelUniquenessKey(modelIdValue);
+        // 同 ID 按别名折叠：与既有模型冲突或批次内重复都计为跳过。
+        if (existingKeys.has(key) || batchKeys.has(key)) {
+          skipped += 1;
+          continue;
+        }
+
+        batchKeys.add(key);
+        const model = normalizeModel(
+          provider,
+          buildProviderModelConfig(
+            {
+              id: createId("model"),
+              name: modelIdValue,
+              model: modelIdValue,
+              protocol: options.protocol,
+              baseUrl: options.baseUrl ?? null,
+            },
+            {
+              capabilityPreset: "custom",
+              capabilities: createDefaultCapabilities(),
+            },
+            createDefaultModelUserPolicy(),
+          ),
+        );
+        provider.models.push(model);
+        existingKeys.add(key);
+        added += 1;
+        lastAddedModelId = model.id;
+      }
+
+      if (!provider.selectedModelId) {
+        provider.selectedModelId =
+          provider.models[provider.models.length - 1]?.id ?? null;
+      }
+
+      return { added, skipped, lastAddedModelId };
     },
   },
 });

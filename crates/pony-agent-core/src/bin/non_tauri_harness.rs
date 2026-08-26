@@ -28,7 +28,7 @@ impl ProviderSelectionResolver for StaticResolver {
         ResolvedProviderSelection {
             requested_name: "non-tauri-mock".to_string(),
             provider_name: "non-tauri-mock".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "http://127.0.0.1:1/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "NON_TAURI_MOCK_API_KEY".to_string(),

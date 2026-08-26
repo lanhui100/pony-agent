@@ -12,7 +12,7 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
 ) -> RecoveredToolFollowup {
     let recovery_request = build_tool_followup_recovery_request(
         planning_request,
-        provider.protocol_label(),
+        provider.protocol(),
         user_message,
         hop_records,
     );
@@ -97,7 +97,7 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
 ) -> RecoveredToolFollowup {
     let recovery_request = build_tool_followup_recovery_request(
         planning_request,
-        provider.protocol_label(),
+        provider.protocol(),
         user_message,
         hop_records,
     );
@@ -314,28 +314,28 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
 
 pub(super) fn build_tool_followup_recovery_request(
     planning_request: &ProviderRequest,
-    protocol_label: &str,
+    protocol: &crate::agent::provider::ProviderProtocol,
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
 ) -> ProviderRequest {
     let mut request = planning_request.clone();
     request.native_messages =
-        tool_turn_native_transcript_prefix(protocol_label, user_message, hop_records);
+        tool_turn_native_transcript_prefix(protocol, user_message, hop_records);
     request.observation = Default::default();
     request
 }
 
 
 pub(super) fn tool_turn_native_transcript_prefix(
-    protocol_label: &str,
+    protocol: &crate::agent::provider::ProviderProtocol,
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
 ) -> Vec<Value> {
     let mut transcript = vec![provider_native_user_message(user_message)];
     for hop in hop_records {
-        transcript.push(tool_request_assistant_message(protocol_label, hop));
+        transcript.push(tool_request_assistant_message(protocol, hop));
         transcript.push(provider_native_tool_result_message_for_protocol(
-            protocol_label,
+            protocol,
             &hop.tool_call,
             &hop.tool_result,
         ));
@@ -505,16 +505,16 @@ pub(super) fn local_tool_result_summary(tool_result: &crate::agent::tools::ToolR
 
 
 pub(super) fn native_transcript_for_tool_turn(
-    protocol_label: &str,
+    protocol: &crate::agent::provider::ProviderProtocol,
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
     final_response: &ProviderResponse,
 ) -> Option<Vec<Value>> {
     let mut transcript = vec![provider_native_user_message(user_message)];
     for hop in hop_records {
-        transcript.push(tool_request_assistant_message(protocol_label, hop));
+        transcript.push(tool_request_assistant_message(protocol, hop));
         transcript.push(provider_native_tool_result_message_for_protocol(
-            protocol_label,
+            protocol,
             &hop.tool_call,
             &hop.tool_result,
         ));
@@ -524,8 +524,11 @@ pub(super) fn native_transcript_for_tool_turn(
 }
 
 
-pub(super) fn tool_request_assistant_message(protocol_label: &str, hop: &ToolTurnHopRecord) -> Value {
-    if protocol_label == "anthropic" {
+pub(super) fn tool_request_assistant_message(
+    protocol: &crate::agent::provider::ProviderProtocol,
+    hop: &ToolTurnHopRecord,
+) -> Value {
+    if protocol.is_anthropic() {
         if let Some(message) = hop.assistant_message.as_ref() {
             if message.get("role").and_then(Value::as_str) == Some("assistant")
                 && message.get("content").and_then(Value::as_array).is_some()
@@ -541,7 +544,7 @@ pub(super) fn tool_request_assistant_message(protocol_label: &str, hop: &ToolTur
             .map(|reasoning| Value::String(reasoning.clone()))
     });
     provider_native_assistant_tool_call_message_for_protocol(
-        protocol_label,
+        protocol,
         text_if_present(&hop.assistant_output_text),
         reasoning_value.as_ref(),
         &hop.tool_call,

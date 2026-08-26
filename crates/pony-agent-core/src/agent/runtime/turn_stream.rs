@@ -937,7 +937,7 @@ impl AgentRuntime {
                 &completed_mode,
                 accumulated_token_usage.as_ref(),
                 native_transcript_for_tool_turn(
-                    provider.protocol_label(),
+                    provider.protocol(),
                     user_message,
                     &hop_records,
                     &response,

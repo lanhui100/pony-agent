@@ -184,77 +184,46 @@ where
     F: FnMut(ProviderStreamChunk),
 {
     let response_preview = endpoint;
-    let mut accumulator = OpenAiSseAccumulator::default();
-    let mut line_buf: Vec<u8> = Vec::new();
-    let mut total_bytes: usize = 0;
+    // 帧循环复用公共 sse_data_line_reader（架构裁决 R5：拒绝第二份帧骨架）。
+    // finish() 按 self 消费，这里用 Option 承载累积器。
+    let mut accumulator = Some(OpenAiSseAccumulator::default());
+    let mut finished: Option<Result<OpenAiStreamMessage, String>> = None;
 
-    let mut stream = response.bytes_stream();
-
-    loop {
-        match block_on(stream.next()) {
-            Some(Ok(bytes)) => {
-                let chunk_len = bytes.len();
-                for &byte in bytes.iter() {
-                    if byte == b'\n' {
-                        if !line_buf.is_empty() {
-                            let line_str = String::from_utf8_lossy(&line_buf);
-                            let trimmed = line_str.trim();
-                            if let Some(data) = trimmed.strip_prefix("data:") {
-                                if accumulator.push_payload(data.trim(), on_delta)? {
-                                    return accumulator.finish(response_preview).map_err(|error| {
-                                        format!(
-                                            "解析 provider SSE 流失败: {}; elapsed={}ms; endpoint={}",
-                                            error,
-                                            started_at.elapsed().as_millis(),
-                                            endpoint,
-                                        )
-                                    });
-                                }
-                            }
-                        }
-                        line_buf.clear();
-                    } else {
-                        if line_buf.len() >= 1 << 20 {
-                            return Err(format!(
-                                "provider SSE 行缓冲超过 1MB 上限; elapsed={}ms; endpoint={}",
-                                started_at.elapsed().as_millis(),
-                                endpoint,
-                            ));
-                        }
-                        line_buf.push(byte);
-                    }
-                }
-                total_bytes += chunk_len;
+    let read_result =
+        super::responses_api::sse_data_line_reader(response, started_at, endpoint, |data| {
+            let acc = accumulator
+                .as_mut()
+                .expect("accumulator present until [DONE] finish");
+            if acc.push_payload(data, on_delta)? {
+                let acc = accumulator.take().expect("accumulator taken once");
+                finished = Some(acc.finish(response_preview).map_err(|error| {
+                    format!(
+                        "解析 provider SSE 流失败: {}; elapsed={}ms; endpoint={}",
+                        error,
+                        started_at.elapsed().as_millis(),
+                        endpoint,
+                    )
+                }));
+                return Ok(true);
             }
-            Some(Err(error)) => {
-                return Err(format!(
-                    "读取 provider SSE 流失败: {}; elapsed={}ms; parsed_bytes={}; endpoint={}",
+            Ok(false)
+        });
+
+    match finished {
+        Some(result) => result,
+        None => {
+            read_result?;
+            let acc = accumulator.expect("accumulator still present at end of stream");
+            acc.finish(response_preview).map_err(|error| {
+                format!(
+                    "解析 provider SSE 流失败: {}; elapsed={}ms; endpoint={}",
                     error,
                     started_at.elapsed().as_millis(),
-                    total_bytes,
                     endpoint,
-                ));
-            }
-            None => break,
-        };
-    }
-
-    if !line_buf.is_empty() {
-        let line_str = String::from_utf8_lossy(&line_buf);
-        let trimmed = line_str.trim();
-        if let Some(data) = trimmed.strip_prefix("data:") {
-            accumulator.push_payload(data.trim(), on_delta)?;
+                )
+            })
         }
     }
-
-    accumulator.finish(response_preview).map_err(|error| {
-        format!(
-            "解析 provider SSE 流失败: {}; elapsed={}ms; endpoint={}",
-            error,
-            started_at.elapsed().as_millis(),
-            endpoint,
-        )
-    })
 }
 
 #[cfg(test)]

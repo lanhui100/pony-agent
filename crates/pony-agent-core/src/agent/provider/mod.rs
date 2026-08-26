@@ -23,15 +23,41 @@ mod openai_sse;
 use self::openai_sse::collect_openai_sse_message_from_response;
 #[cfg(test)]
 use self::openai_sse::{collect_openai_sse_message, collect_openai_sse_message_from_reader};
+mod responses_api;
+use self::responses_api::{
+    build_responses_request_body, collect_responses_sse_message_from_response,
+    parse_responses_output,
+};
+pub mod model_catalog;
+pub use self::model_catalog::fetch_model_ids;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum ProviderProtocol {
-    OpenAi,
-    Anthropic,
+    #[serde(rename = "openai-completions", alias = "openai")]
+    OpenAiCompletions,
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
+    #[serde(rename = "anthropic-messages", alias = "anthropic")]
+    AnthropicMessages,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl ProviderProtocol {
+    /// Anthropic Messages 家族判断（行为分叉位点统一入口）。
+    pub fn is_anthropic(&self) -> bool {
+        matches!(self, ProviderProtocol::AnthropicMessages)
+    }
+
+    /// OpenAI 家族判断：completions 与 responses 同待遇
+    /// （真流式、native tool flow、Bearer 默认鉴权等门控共用）。
+    pub fn is_openai_family(&self) -> bool {
+        matches!(
+            self,
+            ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderAuthType {
     Auto,
@@ -295,6 +321,8 @@ pub trait ProviderClient {
     fn name(&self) -> &str;
     fn model(&self) -> &str;
     fn protocol_label(&self) -> &'static str;
+    /// 当前生效协议枚举（行为分叉位点统一传枚举）。
+    fn protocol(&self) -> &ProviderProtocol;
     fn temperature(&self) -> f32;
     fn max_output_tokens(&self) -> u32;
     fn decide_with_tools(
@@ -354,11 +382,18 @@ impl ProviderManager {
         &self.config.model
     }
 
+    /// 规范协议名（wire 值）。仅用于遥测/trace 落盘字符串；历史 trace 旧名不迁移。
     pub fn protocol_label(&self) -> &'static str {
         match self.config.protocol {
-            ProviderProtocol::OpenAi => "openai",
-            ProviderProtocol::Anthropic => "anthropic",
+            ProviderProtocol::OpenAiCompletions => "openai-completions",
+            ProviderProtocol::OpenAiResponses => "openai-responses",
+            ProviderProtocol::AnthropicMessages => "anthropic-messages",
         }
+    }
+
+    /// 当前生效协议（行为分叉位点统一传枚举，禁止裸字符串比较）。
+    pub fn protocol(&self) -> &ProviderProtocol {
+        &self.config.protocol
     }
 
     pub fn temperature(&self) -> f32 {
@@ -374,12 +409,12 @@ impl ProviderManager {
             return false;
         }
 
-        matches!(self.config.protocol, ProviderProtocol::OpenAi)
+        // responses 与 completions 同为真流式（openai 家族判断）。
+        self.config.protocol.is_openai_family()
     }
 
     pub fn supports_true_streaming_decision(&self) -> bool {
-        self.config.capabilities.supports_streaming
-            && matches!(self.config.protocol, ProviderProtocol::OpenAi)
+        self.config.capabilities.supports_streaming && self.config.protocol.is_openai_family()
     }
 
     pub fn context_window_tokens(&self) -> Option<u32> {
@@ -391,8 +426,8 @@ impl ProviderManager {
     }
 
     pub fn requires_provider_native_tool_flow(&self) -> bool {
-        matches!(self.config.protocol, ProviderProtocol::OpenAi)
-            && self.config.capabilities.supports_reasoning
+        // responses 与 completions 共用 native tool flow（openai 家族判断）。
+        self.config.protocol.is_openai_family() && self.config.capabilities.supports_reasoning
     }
 
     pub fn decide_with_tools(
@@ -419,8 +454,13 @@ impl ProviderManager {
         }
 
         let result = retry_provider_timeout("decision", || match self.config.protocol {
-            ProviderProtocol::OpenAi => self.send_openai_tool_decision_request(request, tools),
-            ProviderProtocol::Anthropic => {
+            ProviderProtocol::OpenAiCompletions => {
+                self.send_openai_tool_decision_request(request, tools)
+            }
+            ProviderProtocol::OpenAiResponses => {
+                self.send_responses_tool_decision_request(request, tools)
+            }
+            ProviderProtocol::AnthropicMessages => {
                 self.send_anthropic_tool_decision_request(request, tools)
             }
         });
@@ -476,17 +516,23 @@ impl ProviderManager {
         let mut streamed_any_delta = false;
         let result = retry_provider_timeout("decision_stream", || {
             if streamed_any_delta {
+                // PA-100：措辞刻意不含 timeout/rate-limit 特征——classify 判不可重试，
+                // 退避循环立即 Abort，不再为必然失败的哨兵白睡（原 ≤7.5s 浪费归零）。
                 return Err("stream already emitted delta; auto-retry forbidden".to_string());
             }
 
             match self.config.protocol {
-                ProviderProtocol::OpenAi => {
-                    self.send_openai_tool_decision_stream_request(request, tools, &mut |chunk| {
+                ProviderProtocol::OpenAiCompletions => self
+                    .send_openai_tool_decision_stream_request(request, tools, &mut |chunk| {
                         streamed_any_delta = true;
                         on_delta(chunk);
-                    })
-                }
-                ProviderProtocol::Anthropic => {
+                    }),
+                ProviderProtocol::OpenAiResponses => self
+                    .send_responses_tool_decision_stream_request(request, tools, &mut |chunk| {
+                        streamed_any_delta = true;
+                        on_delta(chunk);
+                    }),
+                ProviderProtocol::AnthropicMessages => {
                     self.send_anthropic_tool_decision_request(request, tools)
                 }
             }
@@ -542,29 +588,56 @@ impl ProviderManager {
         }
 
         match self.config.protocol {
-            ProviderProtocol::OpenAi => retry_provider_followup_timeout("followup_sync", || {
-                self.send_openai_tool_followup_request(
-                    request,
-                    tools,
-                    accumulated_messages,
-                    assistant_message,
-                    tool_call,
-                    tool_result,
-                )
-            })
-            .or_else(|error| {
-                provider_log(format!(
-                    "followup:local-fallback protocol=openai provider={} model={} reason={}",
-                    self.config.provider_name, request.model, error
-                ));
-                Ok(local_tool_followup_fallback_response(
-                    request,
-                    tool_call,
-                    tool_result,
-                    error,
-                ))
-            }),
-            ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_request(
+            ProviderProtocol::OpenAiCompletions => {
+                retry_provider_followup_timeout("followup_sync", || {
+                    self.send_openai_tool_followup_request(
+                        request,
+                        tools,
+                        accumulated_messages,
+                        assistant_message,
+                        tool_call,
+                        tool_result,
+                    )
+                })
+                .or_else(|error| {
+                    provider_log(format!(
+                        "followup:local-fallback protocol=openai provider={} model={} reason={}",
+                        self.config.provider_name, request.model, error
+                    ));
+                    Ok(local_tool_followup_fallback_response(
+                        request,
+                        tool_call,
+                        tool_result,
+                        error,
+                    ))
+                })
+            }
+            ProviderProtocol::OpenAiResponses => {
+                // sync 失败本地 fallback 语义与 completions 分支对齐。
+                retry_provider_followup_timeout("followup_sync", || {
+                    self.send_responses_tool_followup_request(
+                        request,
+                        tools,
+                        accumulated_messages,
+                        assistant_message,
+                        tool_call,
+                        tool_result,
+                    )
+                })
+                .or_else(|error| {
+                    provider_log(format!(
+                        "followup:local-fallback protocol=openai-responses provider={} model={} reason={}",
+                        self.config.provider_name, request.model, error
+                    ));
+                    Ok(local_tool_followup_fallback_response(
+                        request,
+                        tool_call,
+                        tool_result,
+                        error,
+                    ))
+                })
+            }
+            ProviderProtocol::AnthropicMessages => self.send_anthropic_tool_followup_request(
                 request,
                 tools,
                 accumulated_messages,
@@ -624,34 +697,55 @@ impl ProviderManager {
         }
 
         match self.config.protocol {
-            ProviderProtocol::OpenAi => {
+            ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
+                let protocol_label = match self.config.protocol {
+                    ProviderProtocol::OpenAiResponses => "openai-responses",
+                    _ => "openai-completions",
+                };
                 // PA-100（code-review B P1-2）：流已发出增量后任何重试都必然失败，
                 // 用共享 AtomicBool 让重试循环在 sleep 前放弃、并禁止 RL 长退避切换。
                 let streamed_any_delta = std::sync::atomic::AtomicBool::new(false);
-                let mark_streamed = || {
-                    streamed_any_delta.store(true, std::sync::atomic::Ordering::Relaxed)
-                };
+                let mark_streamed =
+                    || streamed_any_delta.store(true, std::sync::atomic::Ordering::Relaxed);
                 let stream_result = retry_provider_followup_stream_timeout(
                     "followup_stream",
                     || {
                         if streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed) {
+                            // 措辞刻意不含 timeout/rate-limit 特征：classify 应判为
+                            // 不可重试，避免被退避循环消费。
                             return Err(
                                 "stream already emitted delta; auto-retry forbidden".to_string()
                             );
                         }
 
-                        self.send_openai_tool_followup_stream_request(
-                            request,
-                            tools,
-                            accumulated_messages,
-                            assistant_message,
-                            tool_call,
-                            tool_result,
-                            &mut |chunk| {
-                                mark_streamed();
-                                on_delta(chunk);
-                            },
-                        )
+                        let stream_fn_result = match self.config.protocol {
+                            ProviderProtocol::OpenAiResponses => self
+                                .send_responses_tool_followup_stream_request(
+                                    request,
+                                    tools,
+                                    accumulated_messages,
+                                    assistant_message,
+                                    tool_call,
+                                    tool_result,
+                                    &mut |chunk| {
+                                        mark_streamed();
+                                        on_delta(chunk);
+                                    },
+                                ),
+                            _ => self.send_openai_tool_followup_stream_request(
+                                request,
+                                tools,
+                                accumulated_messages,
+                                assistant_message,
+                                tool_call,
+                                tool_result,
+                                &mut |chunk| {
+                                    mark_streamed();
+                                    on_delta(chunk);
+                                },
+                            ),
+                        };
+                        stream_fn_result
                     },
                     &|| streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed),
                 );
@@ -659,28 +753,38 @@ impl ProviderManager {
                     Ok(response) => Ok(response),
                     Err(stream_error) => {
                         provider_log(format!(
-                            "followup:stream-fallback protocol=openai provider={} model={} reason={}",
-                            self.config.provider_name, request.model, stream_error
+                            "followup:stream-fallback protocol={} provider={} model={} reason={}",
+                            protocol_label, self.config.provider_name, request.model, stream_error
                         ));
+                        // stream→sync 回退与本地 fallback 语义对齐 completions 分支。
                         let response = match retry_provider_followup_timeout(
                             "followup_sync_fallback",
-                            || {
-                                self.send_openai_tool_followup_request(
+                            || match self.config.protocol {
+                                ProviderProtocol::OpenAiResponses => self
+                                    .send_responses_tool_followup_request(
+                                        request,
+                                        tools,
+                                        accumulated_messages,
+                                        assistant_message,
+                                        tool_call,
+                                        tool_result,
+                                    ),
+                                _ => self.send_openai_tool_followup_request(
                                     request,
                                     tools,
                                     accumulated_messages,
                                     assistant_message,
                                     tool_call,
                                     tool_result,
-                                )
+                                ),
                             },
                         ) {
                             Ok(response) => Ok(response),
                             Err(sync_error) => {
                                 provider_log(format!(
-                                        "followup:stream-error protocol=openai provider={} model={} reason={}",
-                                        self.config.provider_name, request.model, sync_error
-                                    ));
+                                    "followup:stream-error protocol={} provider={} model={} reason={}",
+                                    protocol_label, self.config.provider_name, request.model, sync_error
+                                ));
                                 Ok(local_tool_followup_fallback_response(
                                     request,
                                     tool_call,
@@ -693,15 +797,16 @@ impl ProviderManager {
                     }
                 }
             }
-            ProviderProtocol::Anthropic => self.send_anthropic_tool_followup_stream_request(
-                request,
-                tools,
-                accumulated_messages,
-                assistant_message,
-                tool_call,
-                tool_result,
-                &mut on_delta,
-            ),
+            ProviderProtocol::AnthropicMessages => self
+                .send_anthropic_tool_followup_stream_request(
+                    request,
+                    tools,
+                    accumulated_messages,
+                    assistant_message,
+                    tool_call,
+                    tool_result,
+                    &mut on_delta,
+                ),
         }
     }
 
@@ -963,6 +1068,247 @@ impl ProviderManager {
         self.stream_anthropic_request(&endpoint, &body, request, on_delta)
     }
 
+    // ------------------------------------------------------------------
+    // Responses API（protocol = openai-responses）四路分发实现。
+    // assistant_message 统一产出 chat 形态（架构裁决 R1）；请求边界做
+    // chat→responses 转换；鉴权沿用 Bearer（post_openai_*）。
+    // ------------------------------------------------------------------
+
+    fn responses_endpoint(&self) -> String {
+        format!("{}/responses", self.config.base_url.trim_end_matches('/'))
+    }
+
+    fn send_responses_tool_decision_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderDecision, String> {
+        let endpoint = self.responses_endpoint();
+        provider_log(format!(
+            "request:responses decision endpoint={} model={}",
+            endpoint, request.model
+        ));
+        let body = build_responses_request_body(request, tools, &self.config, false);
+        provider_log(format!(
+            "request:responses decision body_preview={}",
+            preview_json(&body, 1200)
+        ));
+        let payload = self.post_openai_json(&endpoint, &body)?;
+        let parsed = parse_responses_output(&payload)?;
+        if parsed.dropped_function_calls > 0 {
+            provider_log(format!(
+                "decision:responses dropped_function_calls={}",
+                parsed.dropped_function_calls
+            ));
+        }
+        let token_usage = parsed
+            .token_usage
+            .clone()
+            .unwrap_or_else(|| estimate_token_usage(request, &parsed.output_text));
+        provider_log_token_usage("responses decision", &token_usage);
+
+        Ok(ProviderDecision {
+            output_text: parsed.output_text.clone(),
+            tool_call: parsed.tool_call.clone(),
+            reasoning_content: parsed.reasoning_content.clone(),
+            reasoning_content_value: parsed.reasoning_content_value.clone(),
+            assistant_message: Some(responses_chat_assistant_message(&parsed)),
+            provider_source: "provider_decision".to_string(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(token_usage),
+        })
+    }
+
+    fn send_responses_tool_decision_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        on_delta: &mut F,
+    ) -> Result<ProviderDecision, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        let endpoint = self.responses_endpoint();
+        provider_log(format!(
+            "request:responses decision-stream endpoint={} model={}",
+            endpoint, request.model
+        ));
+        let body = build_responses_request_body(request, tools, &self.config, true);
+        provider_log(format!(
+            "request:responses decision-stream body_preview={}",
+            preview_json(&body, 1200)
+        ));
+
+        let response = self.post_openai_stream_response(&endpoint, &body)?;
+        let message = collect_responses_sse_message_from_response(
+            response,
+            Instant::now(),
+            &endpoint,
+            on_delta,
+        )?;
+        finalize_responses_stream_message(message, "decision", request).map(
+            |(output_text, tool_call, reasoning_content, reasoning_content_value, token_usage)| {
+                let assistant_message = match tool_call.as_ref() {
+                    Some(call) => provider_native_assistant_tool_call_message_with_reasoning_value(
+                        text_if_present(&output_text),
+                        reasoning_content_value.as_ref(),
+                        call,
+                    ),
+                    None => provider_native_assistant_message_with_reasoning_value(
+                        &output_text,
+                        reasoning_content_value.as_ref(),
+                    ),
+                };
+                ProviderDecision {
+                    output_text: output_text.clone(),
+                    tool_call,
+                    reasoning_content: reasoning_content.clone(),
+                    reasoning_content_value: reasoning_content_value.clone(),
+                    assistant_message: Some(assistant_message),
+                    provider_source: "provider_decision_stream".to_string(),
+                    provider_mode: "live".to_string(),
+                    fallback_reason: None,
+                    token_usage: Some(token_usage),
+                }
+            },
+        )
+    }
+
+    fn send_responses_tool_followup_request(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+    ) -> Result<ProviderResponse, String> {
+        let endpoint = self.responses_endpoint();
+        provider_log(format!(
+            "request:responses followup-sync endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        // 与 completions 相同的 chat 形态中枢：累积转录 + assistant + tool result，
+        // 转换到 Responses input 只发生在请求边界（build_responses_request_body）。
+        let messages = openai_messages_with_tool_result(
+            request,
+            accumulated_messages,
+            assistant_message,
+            tool_call,
+            tool_result,
+        );
+        {
+            let call_id = tool_call
+                .call_id
+                .clone()
+                .unwrap_or_else(|| "tool_call_local".to_string());
+            provider_log(format!(
+                "request:responses followup-sync tool_call_id={} messages={}",
+                call_id,
+                messages.len(),
+            ));
+        }
+        let mut conversion_request = request.clone();
+        conversion_request.native_messages = messages;
+        let body = build_responses_request_body(&conversion_request, tools, &self.config, false);
+        provider_log(format!(
+            "request:responses followup-sync body_preview={}",
+            preview_json(&body, 1600)
+        ));
+        let payload = self.post_openai_json(&endpoint, &body)?;
+        let parsed = parse_responses_output(&payload)?;
+        if parsed.dropped_function_calls > 0 {
+            provider_log(format!(
+                "followup:responses dropped_function_calls={}",
+                parsed.dropped_function_calls
+            ));
+        }
+        let token_usage = parsed
+            .token_usage
+            .clone()
+            .unwrap_or_else(|| estimate_token_usage(request, &parsed.output_text));
+        provider_log_token_usage("responses followup-sync", &token_usage);
+
+        let assistant_message = responses_chat_assistant_message(&parsed);
+
+        Ok(ProviderResponse {
+            output_text: parsed.output_text.clone(),
+            tool_call: parsed.tool_call,
+            reasoning_content: parsed.reasoning_content.clone(),
+            reasoning_content_value: parsed.reasoning_content_value.clone(),
+            assistant_message: Some(assistant_message),
+            provider_source: "provider_followup_sync".to_string(),
+            provider_mode: "live".to_string(),
+            fallback_reason: None,
+            token_usage: Some(token_usage),
+        })
+    }
+
+    fn send_responses_tool_followup_stream_request<F>(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        tool_call: &ToolCall,
+        tool_result: &ToolResult,
+        on_delta: &mut F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        let endpoint = self.responses_endpoint();
+        provider_log(format!(
+            "request:responses followup-stream endpoint={} model={} tool={}",
+            endpoint, request.model, tool_call.name
+        ));
+        let messages = openai_messages_with_tool_result(
+            request,
+            accumulated_messages,
+            assistant_message,
+            tool_call,
+            tool_result,
+        );
+        let mut conversion_request = request.clone();
+        conversion_request.native_messages = messages;
+        let body = build_responses_request_body(&conversion_request, tools, &self.config, true);
+
+        let response = self.post_openai_stream_response(&endpoint, &body)?;
+        let message = collect_responses_sse_message_from_response(
+            response,
+            Instant::now(),
+            &endpoint,
+            on_delta,
+        )?;
+        finalize_responses_stream_message(message, "followup", request).map(
+            |(output_text, tool_call, reasoning_content, reasoning_content_value, token_usage)| {
+                let assistant_message = match tool_call.as_ref() {
+                    Some(call) => provider_native_assistant_tool_call_message_with_reasoning_value(
+                        text_if_present(&output_text),
+                        reasoning_content_value.as_ref(),
+                        call,
+                    ),
+                    None => provider_native_assistant_message_with_reasoning_value(
+                        &output_text,
+                        reasoning_content_value.as_ref(),
+                    ),
+                };
+                ProviderResponse {
+                    output_text,
+                    tool_call,
+                    reasoning_content,
+                    reasoning_content_value,
+                    assistant_message: Some(assistant_message),
+                    provider_source: "provider_followup_stream".to_string(),
+                    provider_mode: "live".to_string(),
+                    fallback_reason: None,
+                    token_usage: Some(token_usage),
+                }
+            },
+        )
+    }
+
     fn stream_openai_request<F>(
         &self,
         endpoint: &str,
@@ -1131,7 +1477,7 @@ impl ProviderManager {
 
         let assistant_message = match tool_call.as_ref() {
             Some(tool_call) => Some(provider_native_assistant_tool_call_message_for_protocol(
-                "anthropic",
+                &ProviderProtocol::AnthropicMessages,
                 text_if_present(&output_text),
                 reasoning_content_value.as_ref(),
                 tool_call,
@@ -1497,6 +1843,76 @@ impl ProviderManager {
     }
 }
 
+/// Responses 决策/跟进结果 → chat 形态 assistant 消息（R1：存储中枢统一 chat 形态）。
+fn responses_chat_assistant_message(parsed: &responses_api::ResponsesSyncOutput) -> Value {
+    match parsed.tool_call.as_ref() {
+        Some(tool_call) => provider_native_assistant_tool_call_message_with_reasoning_value(
+            text_if_present(&parsed.output_text),
+            parsed.reasoning_content_value.as_ref(),
+            tool_call,
+        ),
+        None => provider_native_assistant_message_with_reasoning_value(
+            &parsed.output_text,
+            parsed.reasoning_content_value.as_ref(),
+        ),
+    }
+}
+
+type FinalizedResponsesStream = (
+    String,
+    Option<ToolCall>,
+    Option<String>,
+    Option<Value>,
+    TokenUsage,
+);
+
+/// 流式消息收口：终态校验（无文本且无 tool_call 报错）、usage 兜底估算。
+fn finalize_responses_stream_message(
+    message: responses_api::ResponsesStreamMessage,
+    label: &str,
+    request: &ProviderRequest,
+) -> Result<FinalizedResponsesStream, String> {
+    let responses_api::ResponsesStreamMessage {
+        output_text,
+        tool_call,
+        reasoning_content,
+        reasoning_content_value,
+        token_usage,
+        dropped_function_calls,
+    } = message;
+
+    if let Some(call) = tool_call.as_ref() {
+        provider_log(format!(
+            "{}:responses-stream-tool-call name={} call_id={}",
+            label,
+            call.name,
+            call.call_id.as_deref().unwrap_or("(none)")
+        ));
+    }
+    if dropped_function_calls > 0 {
+        provider_log(format!(
+            "{}:responses-stream dropped_function_calls={}",
+            label, dropped_function_calls
+        ));
+    }
+    if output_text.trim().is_empty() && tool_call.is_none() {
+        return Err(format!(
+            "responses streamed {} missing text or tool call",
+            label
+        ));
+    }
+    let token_usage = token_usage.unwrap_or_else(|| estimate_token_usage(request, &output_text));
+    provider_log_token_usage("responses stream", &token_usage);
+
+    Ok((
+        output_text,
+        tool_call,
+        reasoning_content,
+        reasoning_content_value,
+        token_usage,
+    ))
+}
+
 impl ProviderClient for ProviderManager {
     fn requested_name(&self) -> &str {
         self.requested_name()
@@ -1512,6 +1928,10 @@ impl ProviderClient for ProviderManager {
 
     fn protocol_label(&self) -> &'static str {
         self.protocol_label()
+    }
+
+    fn protocol(&self) -> &ProviderProtocol {
+        self.protocol()
     }
 
     fn temperature(&self) -> f32 {
@@ -2007,10 +2427,13 @@ fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelecti
 /// endpoint but require `Authorization: Bearer` instead of `x-api-key`.
 fn resolve_anthropic_auth_type(config: &ResolvedProviderSelection) -> ProviderAuthType {
     match &config.auth_type {
-        ProviderAuthType::Auto => match config.protocol {
-            ProviderProtocol::Anthropic => ProviderAuthType::XApiKey,
-            ProviderProtocol::OpenAi => ProviderAuthType::Bearer,
-        },
+        ProviderAuthType::Auto => {
+            if config.protocol.is_anthropic() {
+                ProviderAuthType::XApiKey
+            } else {
+                ProviderAuthType::Bearer
+            }
+        }
         ProviderAuthType::Bearer => ProviderAuthType::Bearer,
         ProviderAuthType::XApiKey => ProviderAuthType::XApiKey,
     }
@@ -2729,12 +3152,12 @@ pub fn provider_native_assistant_tool_call_message_with_reasoning_value(
 }
 
 pub fn provider_native_assistant_tool_call_message_for_protocol(
-    protocol_label: &str,
+    protocol: &ProviderProtocol,
     content: Option<&str>,
     reasoning_content: Option<&Value>,
     tool_call: &ToolCall,
 ) -> Value {
-    if protocol_label != "anthropic" {
+    if !protocol.is_anthropic() {
         return provider_native_assistant_tool_call_message_with_reasoning_value(
             content,
             reasoning_content,
@@ -2775,11 +3198,11 @@ pub fn provider_native_tool_result_message(
 }
 
 pub fn provider_native_tool_result_message_for_protocol(
-    protocol_label: &str,
+    protocol: &ProviderProtocol,
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Value {
-    if protocol_label != "anthropic" {
+    if !protocol.is_anthropic() {
         return provider_native_tool_result_message(tool_call, tool_result);
     }
 
@@ -3022,7 +3445,6 @@ where
         }
     }
 }
-
 
 fn openai_followup_tool_result_message(tool_call: &ToolCall, tool_result: &ToolResult) -> Value {
     json!({
@@ -4043,13 +4465,16 @@ mod tests {
         }]);
 
         let assistant = provider_native_assistant_tool_call_message_for_protocol(
-            "anthropic",
+            &ProviderProtocol::AnthropicMessages,
             Some("我先列出目录。"),
             Some(&thinking),
             &tool_call,
         );
-        let result =
-            provider_native_tool_result_message_for_protocol("anthropic", &tool_call, &tool_result);
+        let result = provider_native_tool_result_message_for_protocol(
+            &ProviderProtocol::AnthropicMessages,
+            &tool_call,
+            &tool_result,
+        );
         let request = ProviderRequest {
             model: "claude-sonnet-5".to_string(),
             input: vec![ProviderMessage::user("当前文件夹下有哪些文件？")],
@@ -4269,7 +4694,7 @@ mod tests {
         let config = ResolvedProviderSelection {
             requested_name: "openai".to_string(),
             provider_name: "openai".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "https://api.openai.com/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "OPENAI_API_KEY".to_string(),
@@ -4312,7 +4737,7 @@ mod tests {
         let config = ResolvedProviderSelection {
             requested_name: "deepseek".to_string(),
             provider_name: "deepseek".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "https://api.deepseek.com/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
@@ -4355,7 +4780,7 @@ mod tests {
         let config = ResolvedProviderSelection {
             requested_name: "anthropic".to_string(),
             provider_name: "anthropic".to_string(),
-            protocol: ProviderProtocol::Anthropic,
+            protocol: ProviderProtocol::AnthropicMessages,
             base_url: "https://api.anthropic.com/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
@@ -4722,7 +5147,7 @@ mod tests {
         let config = ResolvedProviderSelection {
             requested_name: "anthropic-test".to_string(),
             provider_name: "anthropic-test".to_string(),
-            protocol: ProviderProtocol::Anthropic,
+            protocol: ProviderProtocol::AnthropicMessages,
             base_url: format!("http://{}", address),
             auth_type: ProviderAuthType::XApiKey,
             api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
@@ -5134,7 +5559,7 @@ mod tests {
         let config = ResolvedProviderSelection {
             requested_name: "ppx".to_string(),
             provider_name: "ppx".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "http://127.0.0.1:1/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "PPX_API_KEY".to_string(),
@@ -5242,6 +5667,7 @@ mod tests {
         assert_eq!(result, "ok");
         assert_eq!(attempts.get(), 3);
     }
+
     // ── PA-100：rate-limit 感知的 followup 长退避 ───────────────────────────────────────────
 
     #[test]
@@ -5439,8 +5865,6 @@ mod tests {
             0
         );
     }
-
-
 
     #[test]
     fn openai_sse_reader_handles_keepalive_and_comment_lines() {
@@ -5658,5 +6082,3 @@ mod tests {
         );
     }
 }
-
-

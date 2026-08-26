@@ -53,6 +53,7 @@
 - [0011 版本 bump 自动同步 Cargo.lock](0011-bump-version-syncs-cargo-lock.md)
 - [0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转](0012-app-update-check-via-github-releases.md)
 - [0013 工作台导航精简：观测右栏浮动入口、配置页收敛与提供商页层次折叠](0013-workbench-nav-observation-entry-and-provider-hierarchy.md)
+- [0014 提供商协议三值化与模型目录：Responses 适配、模型级覆盖与收起取消编辑](0014-provider-protocol-tri-value-and-model-catalog.md)
 
 ### 已接替
 

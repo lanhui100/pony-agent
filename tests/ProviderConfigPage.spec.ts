@@ -46,7 +46,7 @@ const ConfirmPopoverStub = defineComponent({
 
 function createModel(partial: Partial<ProviderModelConfig> & Pick<ProviderModelConfig, "id" | "name" | "model">): ProviderModelConfig {
   return {
-    protocol: "openai",
+    protocol: "openai-completions",
     capabilityPreset: "custom",
     capabilities: { ...createDefaultCapabilities() },
     temperature: 0,
@@ -59,12 +59,12 @@ function createModel(partial: Partial<ProviderModelConfig> & Pick<ProviderModelC
 
 function createProviderFixture(partial: Partial<ProviderConfig> & Pick<ProviderConfig, "id" | "name">): ProviderConfig {
   return {
-    protocol: "openai",
+    protocol: "openai-completions",
     baseUrl: "https://example.invalid/v1",
     authType: "auto",
-    supportedProtocols: ["openai"],
+    supportedProtocols: ["openai-completions"],
     endpoints: [
-      { protocol: "openai", enabled: true, baseUrl: "https://example.invalid/v1", authType: "auto" }
+      { protocol: "openai-completions", enabled: true, baseUrl: "https://example.invalid/v1", authType: "auto" }
     ],
     apiKeyEnvVar: "EXAMPLE_API_KEY",
     apiKeyValue: "",
@@ -288,25 +288,80 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     expect(wrapper.get('[data-testid="provider-detail-body"]').attributes("data-open")).toBe("true");
   });
 
-  it("locks folding and row triggers while the create card is open", async () => {
+  it("collapses away the create card and discards the draft instead of locking (D8)", async () => {
     seedRegistry();
     const wrapper = await mountProviderPage();
 
     await wrapper.get('[data-testid="model-create-open"]').trigger("click");
     expect(wrapper.get('[data-testid="model-create-card"]').exists()).toBe(true);
 
-    // 锁定期间点击模型列表头：手风琴状态不变（守卫拦截）
+    // D8：创建卡打开时收起模型列表区 = 放弃草稿，直接折叠
     await wrapper.get('[data-testid="model-list-toggle"]').trigger("click");
-    expect(wrapper.get('[data-testid="model-list-body"]').attributes("data-open")).toBe("true");
+    expect(wrapper.get('[data-testid="model-list-body"]').attributes("data-open")).toBe("false");
+    expect(wrapper.find('[data-testid="model-create-card"]').exists()).toBe(false);
+
+    // 手风琴连带：展开提供商区同样取消创建卡
+    await wrapper.get('[data-testid="model-list-toggle"]').trigger("click");
+    await wrapper.get('[data-testid="model-create-open"]').trigger("click");
+    expect(wrapper.get('[data-testid="model-create-card"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="provider-detail-toggle"]').trigger("click");
+    expect(wrapper.get('[data-testid="provider-detail-body"]').attributes("data-open")).toBe("true");
+    expect(wrapper.get('[data-testid="model-list-body"]').attributes("data-open")).toBe("false");
+    expect(wrapper.find('[data-testid="model-create-card"]').exists()).toBe(false);
+  });
+
+  it("keeps idle tail actions hover-revealed and trigger rows pointer-cursored (D9)", async () => {
+    seedRegistry();
+    const wrapper = await mountProviderPage();
+
+    // 一级区头与行内 trigger 均显式 cursor-pointer（原生按钮默认光标会覆盖容器）
+    expect(wrapper.get('[data-testid="provider-detail-toggle"]').classes().join(" ")).toContain("cursor-pointer");
+    expect(wrapper.get('[data-testid="model-list-toggle"]').classes().join(" ")).toContain("cursor-pointer");
+    const row = wrapper.get('[data-testid="model-list-item-model-a1"]');
+    expect(row.classes().join(" ")).toContain("group");
+    expect(row.find("button").classes().join(" ")).toContain("cursor-pointer");
+
+    // 空闲态动作簇默认隐藏、hover/focus-within 显现
+    const rowActions = row.get(".group > div");
+    const actionClasses = rowActions.classes().join(" ");
+    expect(actionClasses).toContain("opacity-0");
+    expect(actionClasses).toContain("invisible");
+    expect(actionClasses).toContain("group-hover:opacity-100");
+    expect(actionClasses).toContain("focus-within:visible");
+  });
+
+  it("cross-collapse cancels the model edit when the provider section opens (D8)", async () => {
+    seedRegistry();
+    const wrapper = await mountProviderPage();
+
+    // 进入模型 a1 的编辑态
+    await wrapper.get('[data-testid="model-row-edit-model-a1"]').trigger("click");
+    const detail = wrapper.get('[data-testid="model-detail-model-a1"]');
+    expect(detail.attributes("data-open")).toBe("true");
+    expect(detail.text()).toContain("模型 ID");
+
+    // 手风琴连带收起模型区 → 先取消编辑（回视图态），不再有隐藏表单
+    await wrapper.get('[data-testid="provider-detail-toggle"]').trigger("click");
+    expect(wrapper.get('[data-testid="provider-detail-body"]').attributes("data-open")).toBe("true");
+    expect(wrapper.get('[data-testid="model-list-body"]').attributes("data-open")).toBe("false");
+    expect(wrapper.find('[data-testid="model-edit-save-model-a1"]').exists()).toBe(false);
+  });
+
+  it("collapsing a create-provider form discards and resets the draft (D8)", async () => {
+    seedRegistry();
+    const wrapper = await mountProviderPage();
+
+    await wrapper.get('[data-testid="provider-create-open"]').trigger("click");
+    await wrapper.get('input[placeholder="例如：OpenRouter"]').setValue("Draft Provider");
+
+    // 收起 = 放弃草稿
+    await wrapper.get('[data-testid="provider-detail-toggle"]').trigger("click");
     expect(wrapper.get('[data-testid="provider-detail-body"]').attributes("data-open")).toBe("false");
 
-    // 行触发被守卫拦截：不展开、不回落
-    await wrapper.get('[data-testid="model-list-item-model-a1"]').trigger("click");
-    expect(wrapper.get('[data-testid="model-detail-model-a1"]').attributes("data-open")).toBe("false");
-
-    // 行尾动作在非空闲态整体移除（比禁用更强的锁定）
-    expect(wrapper.find('[data-testid="model-row-edit-model-a1"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="model-row-delete-model-a1"]').exists()).toBe(false);
+    // 重新进入创建态为空白表单
+    await wrapper.get('[data-testid="provider-create-open"]').trigger("click");
+    const nameInput = wrapper.get('input[placeholder="例如：OpenRouter"]');
+    expect((nameInput.element as HTMLInputElement).value).toBe("");
   });
 
   it("renders header and row actions as weakened icon-only buttons with tooltips", async () => {
@@ -367,7 +422,7 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
 
     const card = wrapper.get('[data-testid="model-create-card"]');
     await card.get('input[placeholder="例如：Claude Sonnet 4"]').setValue("New Model");
-    await card.get('input[placeholder="例如：claude-sonnet-4-20250514"]').setValue("new-model-id");
+    await card.get('input[placeholder="手动填入，或点刷新从目录选择"]').setValue("new-model-id");
 
     await card.get('[data-testid="model-create-save"]').trigger("click");
     await Promise.resolve();
@@ -392,7 +447,7 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     ).toBe(true);
   });
 
-  it("edits the provider inline in its own section, locks folding, and cancels back to view", async () => {
+  it("edits the provider inline; collapsing the section cancels the edit back to view (D8)", async () => {
     seedRegistry();
     const wrapper = await mountProviderPage();
 
@@ -401,20 +456,161 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     const body = wrapper.get('[data-testid="provider-detail-body"]');
     const nameInput = body.get('input[placeholder="例如：OpenRouter"]');
     expect((nameInput.element as HTMLInputElement).value).toBe("Alpha");
+    await nameInput.setValue("Changed");
 
-    // 编辑态锁定折叠：点击行 trigger 守卫拦截，表单保持可见
-    await wrapper.get('[data-testid="provider-detail-toggle"]').trigger("click");
-    expect(wrapper.get('[data-testid="provider-detail-body"]').attributes("data-open")).toBe("true");
-    expect(
-      wrapper.get('[data-testid="provider-detail-body"]').find('input[placeholder="例如：OpenRouter"]').exists()
-    ).toBe(true);
-
-    await wrapper.get('[data-testid="provider-edit-cancel"]').trigger("click");
-
-    // 取消回到视图块（基础信息），折叠恢复可用
-    expect(wrapper.get('[data-testid="provider-detail-body"]').text()).toContain("基础信息");
+    // D8：编辑态收起 = 放弃未保存修改并回落视图
     await wrapper.get('[data-testid="provider-detail-toggle"]').trigger("click");
     expect(wrapper.get('[data-testid="provider-detail-body"]').attributes("data-open")).toBe("false");
+    expect(wrapper.get('[data-testid="provider-detail-body"]').text()).toContain("基础信息");
+
+    // 原始数据未被污染
+    await wrapper.get('[data-testid="provider-detail-toggle"]').trigger("click");
+    expect(wrapper.get('[data-testid="provider-detail-body"]').text()).toContain("Alpha");
+    expect(
+      wrapper.get('[data-testid="provider-detail-body"]').find('input[placeholder="例如：OpenRouter"]').exists()
+    ).toBe(false);
+  });
+
+  it("renders protocol badges on one row with name and API key, and saves canonical endpoints (D5)", async () => {
+    seedRegistry();
+    const wrapper = await mountProviderPage();
+
+    await wrapper.get('[data-testid="provider-edit-open"]').trigger("click");
+    const body = wrapper.get('[data-testid="provider-detail-body"]');
+
+    // 三徽章默认态：仅 openai-completions 启用（fixture 的旧值已规范化）
+    for (const protocol of ["openai-responses", "openai-completions", "anthropic-messages"]) {
+      const badge = body.get(`[data-testid="provider-protocol-badge-${protocol}"]`);
+      expect(badge.attributes("aria-pressed")).toBe(protocol === "openai-completions" ? "true" : "false");
+      expect(badge.text().trim()).toBe(protocol);
+    }
+
+    // 关闭唯一启用的 completions 被拒绝（至少保留一个）
+    await body.get('[data-testid="provider-protocol-badge-openai-completions"]').trigger("click");
+    expect(body.get('[data-testid="provider-protocol-badge-openai-completions"]').attributes("aria-pressed")).toBe("true");
+
+    // 开启 anthropic-messages 后可关闭 completions → 出现模型引用警示（Alpha 两模型都在 completions 上）
+    await body.get('[data-testid="provider-protocol-badge-anthropic-messages"]').trigger("click");
+    await body.get('[data-testid="provider-advanced-toggle"]').trigger("click");
+    expect(body.get('[data-testid="provider-baseurl-anthropic-messages"]').exists()).toBe(true);
+    await body.get('[data-testid="provider-protocol-badge-openai-completions"]').trigger("click");
+    expect(body.get('[data-testid="provider-badge-off-warning"]').text()).toContain("2 个模型");
+
+    // 保存按钮位于区头动作簇（编辑态常显），不在 body 内
+    await wrapper.get('[data-testid="provider-save"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const store = useProviderStore();
+    const alpha = store.registry?.providers.find((provider) => provider.id === "provider-alpha");
+    expect(alpha?.supportedProtocols).toContain("anthropic-messages");
+    expect(alpha?.endpoints.find((endpoint) => endpoint.protocol === "anthropic-messages")?.enabled).toBe(true);
+  });
+
+  it("adds models in batch from the fetched catalog and reports skipped duplicates (D6)", async () => {
+    seedRegistry();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "fetch_provider_models") {
+        return ["m1", "m2", "m1"];
+      }
+      if (command === "save_provider_registry") {
+        return (args?.registry as unknown) ?? null;
+      }
+      return null;
+    });
+
+    const wrapper = await mountProviderPage();
+    await wrapper.get('[data-testid="model-create-open"]').trigger("click");
+    const card = wrapper.get('[data-testid="model-create-card"]');
+
+    await card.get('[data-testid="model-catalog-fetch"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const panel = card.get('[data-testid="model-catalog-panel"]');
+    await panel.get('[data-testid="model-catalog-option-m1"]').setValue(true);
+    await panel.get('[data-testid="model-catalog-option-m2"]').setValue(true);
+
+    await panel.get('[data-testid="model-catalog-add-selected"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const store = useProviderStore();
+    expect(store.notice).toBe("已添加 2 个模型。");
+    const modelValues = store.registry?.providers[0].models.map((model) => model.model) ?? [];
+    expect(modelValues).toContain("m1");
+    expect(modelValues).toContain("m2");
+    // 批量添加使用高级设置默认协议 openai-completions
+    const added = store.registry?.providers[0].models.find((model) => model.model === "m1");
+    expect(added?.protocol).toBe("openai-completions");
+  });
+
+  it("shows info tooltip on the selector and swaps to failure semantics when fetch errors (迭代五)", async () => {
+    seedRegistry();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    const wrapper = await mountProviderPage();
+
+    await wrapper.get('[data-testid="model-create-open"]').trigger("click");
+    const card = wrapper.get('[data-testid="model-create-card"]');
+
+    // 初始：info 图标 + 说明 tooltip（提示右端刷新按钮与批量用法）
+    const info = card.get('[data-testid="model-catalog-info"]');
+    expect((info.element.closest(".tooltip-stub") as HTMLElement).getAttribute("data-text")).toContain(
+      "刷新按钮"
+    );
+
+    // 成功：面板自动展开，info 保持说明语义
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) =>
+      command === "fetch_provider_models" ? ["m1", "m2"] : null,
+    );
+    await card.get('[data-testid="model-catalog-fetch"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(card.get('[data-testid="model-catalog-panel"]').exists()).toBe(true);
+    expect(card.get('[data-testid="model-catalog-info"]').exists()).toBe(true);
+
+    // 失败：info 换为失败语义图标，tooltip 变为错误信息，面板收起
+    tauriMocks.mockSafeInvoke.mockRejectedValueOnce(new Error("401 unauthorized"));
+    await card.get('[data-testid="model-catalog-fetch"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const failureInfo = card.get('[data-testid="model-catalog-info-error"]');
+    expect(failureInfo.classes().join(" ")).toContain("text-rose-500");
+    expect(
+      (failureInfo.element.closest(".tooltip-stub") as HTMLElement).getAttribute("data-text")
+    ).toContain("拉取模型列表失败");
+    expect(card.find('[data-testid="model-catalog-panel"]').exists()).toBe(false);
+  });
+
+  it("limits advanced protocol options to enabled provider protocols and binds base-url override (D6/P0-1)", async () => {
+    seedRegistry();
+    const wrapper = await mountProviderPage();
+
+    await wrapper.get('[data-testid="model-create-open"]').trigger("click");
+    const card = wrapper.get('[data-testid="model-create-card"]');
+
+    await card.get('[data-testid="model-advanced-toggle-create"]').trigger("click");
+    const select = card.get('[data-testid="model-advanced-protocol-create"]');
+    const options = select.findAll("option");
+    // fixture Alpha 仅启用 openai（规范化为 openai-completions）→ 下拉只含该值
+    expect(options.map((option) => option.element.value)).toEqual(["openai-completions"]);
+
+    const override = card.get('[data-testid="model-advanced-baseurl-create"]');
+    expect((override.element as HTMLInputElement).placeholder).toBe("https://example.invalid/v1");
+    await override.setValue("https://mirror.example.invalid/v1");
+
+    await card.get('input[placeholder="手动填入，或点刷新从目录选择"]').setValue("override-model");
+    await card.get('input[placeholder="例如：Claude Sonnet 4"]').setValue("Override Model");
+    await card.get('[data-testid="model-create-save"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const store = useProviderStore();
+    const created = store.registry?.providers[0].models.find((model) => model.model === "override-model");
+    expect(created?.baseUrl).toBe("https://mirror.example.invalid/v1");
   });
 
   it("fills token params from K/M preset badges inside the model form", async () => {

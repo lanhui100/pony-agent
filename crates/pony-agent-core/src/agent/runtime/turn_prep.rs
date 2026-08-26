@@ -689,11 +689,11 @@ fn inject_ask_resume_into_planning_request(
         output: injection.terminal_result.to_string(),
         duration_ms: 0,
     };
-    let protocol_label = provider.protocol_label();
+    let protocol = provider.protocol();
     let assistant_message =
-        provider_native_assistant_tool_call_message_for_protocol(protocol_label, None, None, &tool_call);
+        provider_native_assistant_tool_call_message_for_protocol(protocol, None, None, &tool_call);
     let tool_result_message =
-        provider_native_tool_result_message_for_protocol(protocol_label, &tool_call, &tool_result);
+        provider_native_tool_result_message_for_protocol(protocol, &tool_call, &tool_result);
 
     let insert_at = request
         .native_messages

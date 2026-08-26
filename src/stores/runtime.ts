@@ -3974,7 +3974,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         turnId: requestId
       });
       this.providerName = previewProviderName;
-      this.providerProtocol = provider?.protocol ?? "openai";
+      this.providerProtocol = provider?.protocol ?? "openai-completions";
       this.providerModel = previewModelName;
       this.providerSource = "browser_preview";
       this.providerMode = "browser_preview";

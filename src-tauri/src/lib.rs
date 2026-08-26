@@ -366,6 +366,36 @@ fn save_provider_registry_without_env_sync(
     ProviderRegistryStore::new().save_view_without_env_sync(registry)
 }
 
+/// /models 目录拉取（design D3）：key 解析顺序为显式入参 → registry store 已存密钥
+/// → 报错"缺少 API Key"；鉴权头尊重该协议 endpoint 的显式 auth_type（Auto 才按家族
+/// 推导）；key 不入任何日志。
+#[tauri::command]
+fn fetch_provider_models(
+    provider_id: Option<String>,
+    protocol: agent::provider::ProviderProtocol,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<Vec<String>, String> {
+    let explicit_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let store = ProviderRegistryStore::new();
+    let api_key = match explicit_key {
+        Some(key) => key,
+        None => store
+            .provider_api_key(provider_id.as_deref())
+            .ok_or_else(|| "缺少 API Key".to_string())?,
+    };
+    let auth_hint = store.provider_endpoint_auth(provider_id.as_deref(), &protocol);
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return Err("缺少 Base URL；请先在提供商高级设置中填写该协议的 Base URL。".to_string());
+    }
+    agent::provider::fetch_model_ids(&protocol, base_url, &auth_hint, &api_key)
+}
+
 #[tauri::command]
 fn load_app_settings() -> AppSettings {
     AppSettingsStore::new().load_view()
@@ -968,6 +998,7 @@ pub fn run() {
             save_app_settings,
             save_provider_registry,
             save_provider_registry_without_env_sync,
+            fetch_provider_models,
             get_service_api_key,
             set_service_api_key,
             open_url

@@ -3296,7 +3296,7 @@ describe("runtime session resilience", () => {
           {
             id: "provider-openai",
             name: "OpenAI",
-            protocol: "openai",
+            protocol: "openai-completions",
             baseUrl: "https://api.openai.com/v1",
             apiKeyEnvVar: "OPENAI_API_KEY",
             apiKeyValue: "",
@@ -3325,7 +3325,7 @@ describe("runtime session resilience", () => {
           {
             id: "provider-anthropic",
             name: "Anthropic",
-            protocol: "anthropic",
+            protocol: "anthropic-messages",
             baseUrl: "https://api.anthropic.com/v1",
             apiKeyEnvVar: "ANTHROPIC_API_KEY",
             apiKeyValue: "",
@@ -3377,7 +3377,7 @@ describe("runtime session resilience", () => {
       draftMessage: "use the newly selected model",
       phase: "ready",
       providerName: "OpenAI",
-      providerProtocol: "openai",
+      providerProtocol: "openai-completions",
       providerModel: "gpt-5",
       messages: []
     });
@@ -3386,7 +3386,7 @@ describe("runtime session resilience", () => {
 
     expect(started).toBe(true);
     expect(store.providerName).toBe("Anthropic");
-    expect(store.providerProtocol).toBe("anthropic");
+    expect(store.providerProtocol).toBe("anthropic-messages");
     expect(store.providerModel).toBe("claude-4");
     expect(store.turnTraceHistory[0]?.providerName).toBe("Anthropic");
     expect(store.turnTraceHistory[0]?.providerModel).toBe("claude-4");

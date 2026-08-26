@@ -77,7 +77,7 @@ fn anthropic_tool_turn_transcript_uses_native_tool_blocks() {
     };
 
     let transcript = native_transcript_for_tool_turn(
-        "anthropic",
+        &crate::agent::provider::ProviderProtocol::AnthropicMessages,
         "当前文件夹下有哪些文件？",
         &[hop],
         &response,
@@ -743,7 +743,7 @@ fn test_provider_selection(base_url: String) -> ResolvedProviderSelection {
     ResolvedProviderSelection {
         requested_name: "test-openai".to_string(),
         provider_name: "test-openai".to_string(),
-        protocol: crate::agent::provider::ProviderProtocol::OpenAi,
+        protocol: crate::agent::provider::ProviderProtocol::OpenAiCompletions,
         base_url,
         auth_type: crate::agent::provider::ProviderAuthType::Auto,
         api_key_env_var: "TEST_API_KEY".to_string(),
@@ -771,7 +771,7 @@ fn test_chat_provider_selection(base_url: String) -> ResolvedProviderSelection {
     ResolvedProviderSelection {
         requested_name: "test-openai-chat".to_string(),
         provider_name: "test-openai-chat".to_string(),
-        protocol: crate::agent::provider::ProviderProtocol::OpenAi,
+        protocol: crate::agent::provider::ProviderProtocol::OpenAiCompletions,
         base_url,
         auth_type: crate::agent::provider::ProviderAuthType::Auto,
         api_key_env_var: "TEST_API_KEY".to_string(),
@@ -797,7 +797,7 @@ fn deepseek_provider_selection(base_url: String) -> ResolvedProviderSelection {
     ResolvedProviderSelection {
         requested_name: "deepseek".to_string(),
         provider_name: "deepseek".to_string(),
-        protocol: crate::agent::provider::ProviderProtocol::OpenAi,
+        protocol: crate::agent::provider::ProviderProtocol::OpenAiCompletions,
         base_url,
         auth_type: crate::agent::provider::ProviderAuthType::Auto,
         api_key_env_var: "DEEPSEEK_API_KEY".to_string(),

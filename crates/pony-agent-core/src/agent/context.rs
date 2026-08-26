@@ -1467,7 +1467,7 @@ mod tests {
         ProviderManager::new(ResolvedProviderSelection {
             requested_name: "test-provider".to_string(),
             provider_name: "test-provider".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "https://example.com/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "TEST_PROVIDER_API_KEY".to_string(),

@@ -3255,7 +3255,7 @@ mod tests {
         ResolvedProviderSelection {
             requested_name: "test-openai".to_string(),
             provider_name: "test-openai".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url,
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "TEST_API_KEY".to_string(),
@@ -3283,7 +3283,7 @@ mod tests {
         ResolvedProviderSelection {
             requested_name: "test-openai-chat".to_string(),
             provider_name: "test-openai-chat".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url,
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "TEST_API_KEY".to_string(),

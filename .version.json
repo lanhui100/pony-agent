@@ -1913,16 +1913,52 @@
           "component": "tauri"
         }
       ]
+    },
+    {
+      "bumps": [
+        {
+          "component": "core",
+          "to": "0.1.83",
+          "segment": "patch",
+          "from": "0.1.82"
+        },
+        {
+          "component": "tauri",
+          "to": "0.1.86",
+          "segment": "patch",
+          "from": "0.1.85"
+        }
+      ],
+      "commit": "7c41d73",
+      "timestamp": "2026-08-26T09:38:07+08:00"
+    },
+    {
+      "timestamp": "2026-08-26T09:41:10+08:00",
+      "commit": "7c41d73",
+      "bumps": [
+        {
+          "to": "0.1.84",
+          "from": "0.1.83",
+          "component": "core",
+          "segment": "patch"
+        },
+        {
+          "to": "0.1.87",
+          "from": "0.1.86",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-08-25T22:20:33+08:00",
+  "lastBump": "2026-08-26T09:41:10+08:00",
   "tauri": {
-    "patch": 85,
+    "patch": 87,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 82,
+    "patch": 84,
     "minor": 1,
     "major": 0
   }

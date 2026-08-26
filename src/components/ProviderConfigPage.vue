@@ -2,18 +2,23 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
+  AlertTriangle,
   Brain,
   Check,
   ChevronDown,
   Image as ImageIcon,
+  Info,
   Mic,
   Pencil,
   Plus,
+  RefreshCw,
   Save,
+  Search,
   Shield,
   Trash2,
   Type,
   Video,
+  X,
 } from "lucide-vue-next";
 import InfoTip from "@/components/InfoTip.vue";
 import Button from "@/components/ui/Button.vue";
@@ -41,6 +46,7 @@ import type {
 type ProviderEndpointFormState = {
   enabled: boolean;
   baseUrl: string;
+  /** UI 不再暴露认证方式选择；保留既有值避免静默改写显式覆盖（如网关强制 Bearer）。 */
   authType: ProviderAuthType;
 };
 
@@ -64,6 +70,10 @@ type ModelFormState = {
   supportsImageOutput: boolean;
   supportsVideoOutput: boolean;
   supportsAudioOutput: boolean;
+  /** 高级设置：模型级协议（仅限提供商已启用集合），默认 openai-completions。 */
+  protocol: ProviderProtocol;
+  /** 高级设置：模型级 Base URL 覆盖；空串 = 继承提供商该协议 endpoint。 */
+  baseUrlOverride: string;
 };
 
 type EditorState = {
@@ -109,19 +119,32 @@ const editorState = reactive<EditorState>({
 const providerForm = reactive<ProviderFormState>({
   name: "",
   endpoints: {
-    openai: {
-      enabled: true,
-      baseUrl: defaultBaseUrlFor("openai"),
+    "openai-responses": {
+      enabled: false,
+      baseUrl: defaultBaseUrlFor("openai-responses"),
       authType: "auto",
     },
-    anthropic: {
+    "openai-completions": {
+      enabled: true,
+      baseUrl: defaultBaseUrlFor("openai-completions"),
+      authType: "auto",
+    },
+    "anthropic-messages": {
       enabled: false,
-      baseUrl: defaultBaseUrlFor("anthropic"),
-      authType: "x-api-key",
+      baseUrl: defaultBaseUrlFor("anthropic-messages"),
+      authType: "auto",
     },
   },
   apiKeyValue: "",
 });
+
+// D6：模型目录（/models 拉取）状态——列表/加载/错误复用 store 状态，选中与搜索为组件本地。
+const catalogSearch = ref("");
+const selectedCatalogIds = ref<string[]>([]);
+const catalogPanelOpen = ref(false);
+const catalogLoading = computed(() => providerStore.loadingModels);
+const catalogError = computed(() => providerStore.catalogError);
+const catalogIds = computed(() => providerStore.catalogModels);
 
 const modelForm = reactive<ModelFormState>({
   id: null,
@@ -137,6 +160,8 @@ const modelForm = reactive<ModelFormState>({
   supportsImageOutput: false,
   supportsVideoOutput: false,
   supportsAudioOutput: false,
+  protocol: "openai-completions",
+  baseUrlOverride: "",
 });
 
 const inputCapabilityOptions = [
@@ -193,11 +218,28 @@ const outputCapabilityOptions = [
   icon: typeof Brain;
 }>;
 
-const endpointOrder: ProviderProtocol[] = ["openai", "anthropic"];
+// D1：协议徽章顺序即展示顺序；选择即代表启用该协议。
+const endpointOrder: ProviderProtocol[] = ["openai-responses", "openai-completions", "anthropic-messages"];
+
+/** 规范名 → 左列/视图徽标短标签（title 保留完整规范名）。 */
+function protocolBadgeLabel(protocol: ProviderProtocol) {
+  switch (protocol) {
+    case "openai-responses":
+      return "responses";
+    case "anthropic-messages":
+      return "anthropic";
+    default:
+      return "completions";
+  }
+}
 
 // 行尾/头部弱化图标动作钮（ADR 0013 迭代二）：小尺寸、低对比，仅 hover 增强。
 const ICON_ACTION_CLASS =
   "inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[0.35rem] bg-transparent text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 disabled:cursor-not-allowed disabled:text-stone-300 motion-reduce:transition-none";
+
+// D9：空闲态行尾动作簇——默认隐藏，行 hover 或键盘 focus-within 时显现。
+const HOVER_ACTIONS_CLASS =
+  "flex shrink-0 items-center gap-0.5 opacity-0 invisible transition group-hover:opacity-100 group-hover:visible focus-within:opacity-100 focus-within:visible motion-reduce:transition-none";
 
 // ADR 0013 迭代：模型参数以 K/M 常用单位呈现（去"tokens"字样），并提供
 // 徽标式常规项一键填入（十进制口径：256K=256000，与既有默认值一致）。
@@ -254,6 +296,61 @@ const providerEnabledProtocols = computed(() =>
   endpointOrder.filter((protocol) => providerForm.endpoints[protocol].enabled),
 );
 
+// D5：关闭徽章时若有模型引用该协议，就地警示（不阻断）。
+const modelsReferencingDisabledProtocols = computed(() => {
+  if (!isEditingProvider.value || !detailProvider.value) {
+    return 0;
+  }
+  return detailProvider.value.models.filter((model) => {
+    if (!model.protocol) {
+      return false;
+    }
+    return !providerForm.endpoints[model.protocol]?.enabled;
+  }).length;
+});
+
+// D6：高级设置协议下拉仅列提供商已启用协议（含当前值兜底，防回落矛盾态）。
+const modelProtocolOptions = computed<ProviderProtocol[]>(() => {
+  const enabled = endpointOrder.filter(
+    (protocol) =>
+      detailProvider.value?.endpoints.some(
+        (endpoint) => endpoint.protocol === protocol && endpoint.enabled,
+      ),
+  );
+  if (modelForm.protocol && !enabled.includes(modelForm.protocol)) {
+    return [...enabled, modelForm.protocol];
+  }
+  return enabled;
+});
+
+// 高级设置 Base URL 覆盖的解析结果（placeholder 展示继承目标）。
+const resolvedModelBaseUrl = computed(() => {
+  const override = modelForm.baseUrlOverride.trim();
+  if (override) {
+    return override;
+  }
+  const endpoint = detailProvider.value?.endpoints.find(
+    (item) => item.protocol === modelForm.protocol && item.enabled,
+  );
+  return endpoint?.baseUrl ?? defaultBaseUrlFor(modelForm.protocol);
+});
+
+const filteredCatalogIds = computed(() => {
+  const keyword = catalogSearch.value.trim().toLowerCase();
+  if (!keyword) {
+    return catalogIds.value;
+  }
+  return catalogIds.value.filter((id) => id.toLowerCase().includes(keyword));
+});
+
+const canAddSelectedCatalogModels = computed(
+  () =>
+    Boolean(detailProvider.value) &&
+    modelCreateOpen.value &&
+    selectedCatalogIds.value.length > 0 &&
+    !catalogLoading.value,
+);
+
 const canDeleteProvider = computed(
   () =>
     isProviderEntity.value &&
@@ -272,8 +369,7 @@ const canEditProvider = computed(
 );
 const isEditingProvider = computed(() => isProviderEntity.value && isEditing.value);
 const isEditingModel = computed(() => isModelEntity.value && isEditing.value);
-const providerSectionLocked = computed(() => isEditingProvider.value);
-const modelSectionLocked = computed(() => isEditingModel.value || modelCreateOpen.value);
+// D8：折叠不再被编辑态锁定——收起即取消编辑（见 toggle* 与 dismiss* 家族）。
 const canSaveProvider = computed(
   () =>
     isProviderEntity.value &&
@@ -304,21 +400,26 @@ const headerTitle = computed(() => {
 });
 
 const headerDescription =
-  "一个提供商可以同时接入多种协议，每种协议单独维护自己的 Base URL 与认证方式。";
+  "一个提供商可以同时接入多种协议；选择协议徽章即代表开启，Base URL 在高级设置中维护。";
 
 function createEndpointRecord(
   endpoints?: ProviderProtocolEndpoint[],
 ): ProviderFormState["endpoints"] {
   const record: ProviderFormState["endpoints"] = {
-    openai: {
+    "openai-responses": {
       enabled: false,
-      baseUrl: defaultBaseUrlFor("openai"),
+      baseUrl: defaultBaseUrlFor("openai-responses"),
       authType: "auto",
     },
-    anthropic: {
+    "openai-completions": {
       enabled: false,
-      baseUrl: defaultBaseUrlFor("anthropic"),
-      authType: "x-api-key",
+      baseUrl: defaultBaseUrlFor("openai-completions"),
+      authType: "auto",
+    },
+    "anthropic-messages": {
+      enabled: false,
+      baseUrl: defaultBaseUrlFor("anthropic-messages"),
+      authType: "auto",
     },
   };
 
@@ -326,7 +427,8 @@ function createEndpointRecord(
     record[endpoint.protocol] = {
       enabled: endpoint.enabled,
       baseUrl: endpoint.baseUrl,
-      authType: endpoint.authType,
+      // 保留既有非 auto 显式覆盖（如网关强制 Bearer），UI 不再提供切换入口。
+      authType: endpoint.authType ?? "auto",
     };
   }
 
@@ -365,28 +467,36 @@ function setModelSaveSuccess() {
 }
 
 function resetProviderForm() {
-  providerForm.name = "";
-  providerForm.endpoints = createEndpointRecord([
+  providerForm.name = "";  providerForm.endpoints = createEndpointRecord([
     {
-      protocol: "openai",
+      protocol: "openai-completions",
       enabled: true,
-      baseUrl: defaultBaseUrlFor("openai"),
+      baseUrl: defaultBaseUrlFor("openai-completions"),
       authType: "auto",
     },
     {
-      protocol: "anthropic",
+      protocol: "openai-responses",
       enabled: false,
-      baseUrl: defaultBaseUrlFor("anthropic"),
-      authType: "x-api-key",
+      baseUrl: defaultBaseUrlFor("openai-responses"),
+      authType: "auto",
+    },
+    {
+      protocol: "anthropic-messages",
+      enabled: false,
+      baseUrl: defaultBaseUrlFor("anthropic-messages"),
+      authType: "auto",
     },
   ]);
   providerForm.apiKeyValue = "";
+  providerFormContextId.value = null;
 }
 
 function fillProviderForm(provider: ProviderConfig) {
   providerForm.name = provider.name;
   providerForm.endpoints = createEndpointRecord(provider.endpoints);
   providerForm.apiKeyValue = provider.apiKeyValue;
+  // 记录表单密钥归属，目录拉取仅在该提供商上下文回传未保存 key（防跨提供商误用）。
+  providerFormContextId.value = provider.id;
 }
 
 function resetModelForm() {
@@ -403,6 +513,17 @@ function resetModelForm() {
   modelForm.supportsImageOutput = false;
   modelForm.supportsVideoOutput = false;
   modelForm.supportsAudioOutput = false;
+  // 高级设置默认值：协议默认 openai-completions；Base URL 覆盖清空（=继承）。
+  const enabledProtocols = endpointOrder.filter((protocol) =>
+    detailProvider.value?.endpoints.some(
+      (endpoint) => endpoint.protocol === protocol && endpoint.enabled,
+    ),
+  );
+  modelForm.protocol = enabledProtocols.includes("openai-completions")
+    ? "openai-completions"
+    : enabledProtocols[0] ?? "openai-completions";
+  modelForm.baseUrlOverride = "";
+  resetCatalogState();
 }
 
 function toPositiveIntegerString(value: number | null | undefined) {
@@ -448,40 +569,194 @@ function fillModelForm(model: ProviderModelConfig) {
   modelForm.supportsImageOutput = capabilities.supportsImageOutput;
   modelForm.supportsVideoOutput = capabilities.supportsVideoOutput;
   modelForm.supportsAudioOutput = capabilities.supportsAudioOutput;
+  modelForm.protocol = normalizeProtocolValue(model.protocol ?? modelForm.protocol);
+  modelForm.baseUrlOverride = model.baseUrl?.trim() ?? "";
+  resetCatalogState();
 }
 
-// ADR 0013 迭代三：两一级区手风琴互斥——展开其一收起另一；表单编辑中锁定所在区
-// 折叠，避免"保存/取消指向不可见表单"的死状态。整行点击触发，动作区 @click.stop。
-function toggleProviderSection() {
-  if (providerSectionLocked.value) {
+function normalizeProtocolValue(value: unknown): ProviderProtocol {
+  switch (value) {
+    case "openai-responses":
+    case "openai-completions":
+    case "anthropic-messages":
+      return value;
+    default:
+      return "openai-completions";
+  }
+}
+
+// D5：徽章选择即启用；至少保留一个启用协议（最后一个不可关闭）。
+const providerAdvancedOpen = ref(false);
+const modelAdvancedOpen = ref(false);
+// 表单密钥的归属提供商（fillProviderForm 时登记）：目录拉取仅在该上下文回传未保存 key。
+const providerFormContextId = ref<string | null>(null);
+
+function toggleProviderProtocol(protocol: ProviderProtocol) {
+  const state = providerForm.endpoints[protocol];
+  if (!state.enabled) {
+    state.enabled = true;
     return;
   }
-  providerSectionOpen.value = !providerSectionOpen.value;
-  if (providerSectionOpen.value) {
-    modelSectionOpen.value = false;
+  if (providerEnabledProtocols.value.length <= 1) {
+    return;
   }
+  state.enabled = false;
+}
+
+function resetCatalogState() {
+  catalogSearch.value = "";
+  selectedCatalogIds.value = [];
+  catalogPanelOpen.value = false;
+  providerStore.clearModelCatalog();
+}
+
+// D6（迭代五）：刷新图标按钮拉取 /models 目录；成功后自动展开下拉面板，
+// 失败保持收起——失败语义经选择器旁的 info 图标 + tooltip 呈现。
+async function fetchModelCatalog() {
+  if (!detailProvider.value || catalogLoading.value) {
+    return;
+  }
+
+  selectedCatalogIds.value = [];
+  // D6（code-review B/P1-1）：表单中已输入但未保存的密钥仅在归属同一提供商时回传，
+  // 避免把 A 的草稿密钥发往 B 的 base_url。
+  const unsavedApiKey =
+    providerFormContextId.value === detailProvider.value.id
+      ? providerForm.apiKeyValue.trim()
+      : "";
+  const models = await providerStore.fetchModelCatalog({
+    providerId: detailProvider.value.id,
+    protocol: modelForm.protocol,
+    baseUrl: resolvedModelBaseUrl.value,
+    apiKey: unsavedApiKey || undefined,
+  });
+  catalogPanelOpen.value = models.length > 0 && !providerStore.catalogError;
+}
+
+function toggleCatalogPanel() {
+  if (catalogIds.value.length === 0) {
+    return;
+  }
+  catalogPanelOpen.value = !catalogPanelOpen.value;
+}
+
+function toggleCatalogSelection(modelId: string) {
+  const index = selectedCatalogIds.value.indexOf(modelId);
+  if (index >= 0) {
+    selectedCatalogIds.value.splice(index, 1);
+    return;
+  }
+  selectedCatalogIds.value.push(modelId);
+}
+
+// D6：批量添加走专用 action，预去重并返回 {added, skipped}，不复用 this.error 通道。
+async function addSelectedCatalogModels() {
+  const provider = detailProvider.value;
+  if (!provider || selectedCatalogIds.value.length === 0) {
+    return;
+  }
+
+  const result = providerStore.addModelsFromCatalog(provider.id, [...selectedCatalogIds.value], {
+    protocol: modelForm.protocol,
+    baseUrl: modelForm.baseUrlOverride.trim() || null,
+  });
+
+  if (result.added > 0) {
+    await providerStore.saveRegistry();
+  }
+
+  if (!providerStore.error) {
+    const suffix =
+      result.skipped > 0
+        ? `，跳过 ${result.skipped} 个已存在（同 ID 按别名折叠）`
+        : "";
+    providerStore.notice = `已添加 ${result.added} 个模型${suffix}。`;
+    selectedCatalogIds.value = [];
+    if (result.added > 0 && result.lastAddedModelId) {
+      beginViewModel(provider.id, result.lastAddedModelId);
+    }
+  }
+}
+
+// D8：收起即取消——任何使承载活动编辑/创建的区（或展开行）收起的翻转，
+// 都先取消该区编辑再折叠，含手风琴从另一区触发的连带收起。create 态收起 = 放弃并复位。
+
+function dismissModelEditing() {
+  if (modelCreateOpen.value) {
+    modelCreateOpen.value = false;
+    resetModelForm();
+    editorState.entity = "provider";
+    editorState.mode = "view";
+    editorState.modelId = null;
+    return;
+  }
+  const pid = editorState.providerId;
+  const mid = editorState.modelId;
+  if (pid && mid && findModel(pid, mid)) {
+    beginViewModel(pid, mid);
+    return;
+  }
+  if (pid) {
+    beginViewProvider(pid);
+  }
+}
+
+function dismissProviderEditing() {
+  resetProviderForm();
+  if (currentProvider.value) {
+    beginViewProvider(currentProvider.value.id);
+    return;
+  }
+  // 无任何提供商：保留 create 态但允许整体收起；重新展开为空白新建表单。
+}
+
+function toggleProviderSection() {
+  if (providerSectionOpen.value) {
+    if (isEditingProvider.value) {
+      dismissProviderEditing();
+    }
+    providerSectionOpen.value = false;
+    return;
+  }
+  // 展开提供商区 → 手风琴连带收起模型区：先取消模型区活动编辑。
+  if (modelSectionOpen.value && (isEditingModel.value || modelCreateOpen.value)) {
+    dismissModelEditing();
+  }
+  providerSectionOpen.value = true;
+  modelSectionOpen.value = false;
 }
 
 function toggleModelSection() {
-  if (modelSectionLocked.value) {
+  if (modelSectionOpen.value) {
+    if (isEditingModel.value || modelCreateOpen.value) {
+      dismissModelEditing();
+    }
+    modelSectionOpen.value = false;
     return;
   }
-  modelSectionOpen.value = !modelSectionOpen.value;
-  if (modelSectionOpen.value) {
-    providerSectionOpen.value = false;
+  // 展开模型列表区 → 手风琴连带收起提供商区：先取消提供商区活动编辑。
+  if (providerSectionOpen.value && isEditingProvider.value) {
+    dismissProviderEditing();
   }
+  modelSectionOpen.value = true;
+  providerSectionOpen.value = false;
 }
 
-// ADR 0013：模型行点击语义——再次点击已展开行收起并回落提供商视图；否则展开
-// 显示"模型配置详情"。任一编辑态下整行点击被守卫拦截（行尾动作已随 v-if 移除），
-// 静默丢弃未保存输入的路径在列表内被阻断。
+// D8：模型行点击——编辑中再次点击该行 → 先取消编辑再收起回落提供商视图；
+// 点击其他行先取消当前编辑/创建卡再展开目标；空闲态行为不变。
 function toggleModelRow(providerId: string, modelId: string) {
-  if (isEditingProvider.value || modelSectionLocked.value) {
+  if (isEditingProvider.value) {
     return;
   }
   if (expandedModelId.value === modelId) {
+    if ((isEditingModel.value && editorState.modelId === modelId) || modelCreateOpen.value) {
+      dismissModelEditing();
+    }
     beginViewProvider(providerId);
     return;
+  }
+  if (isEditingModel.value || modelCreateOpen.value) {
+    dismissModelEditing();
   }
   beginViewModel(providerId, modelId);
 }
@@ -634,14 +909,30 @@ async function saveProviderForm() {
   let providerId = editorState.providerId;
   if (editorState.mode === "create") {
     providerId = providerStore.addProvider() ?? null;
+    // P1-2 防护：create 首次落地后切换为 edit，失败重试复用同一 providerId，
+    // 不再二次 addProvider 产生孤儿半配置提供商。
+    if (providerId) {
+      editorState.mode = "edit";
+      editorState.providerId = providerId;
+    }
   }
   if (!providerId) {
     return;
   }
 
   const endpoints = buildProviderEndpoints();
-  const supportedProtocols = endpoints.filter((item) => item.enabled).map((item) => item.protocol);
-  const primaryProtocol = supportedProtocols[0] ?? "openai";
+  // D5（code-review A/P2-1）：既有主协议仍启用时保持其首位，避免勾选新徽章
+  // （如 openai-responses）静默翻转提供商主协议/base_url 与新模型的默认协议。
+  const enabledProtocols = endpoints.filter((item) => item.enabled).map((item) => item.protocol);
+  const previousPrimary = findProvider(providerId)?.protocol;
+  const supportedProtocols =
+    previousPrimary && enabledProtocols.includes(previousPrimary)
+      ? [
+          previousPrimary,
+          ...enabledProtocols.filter((protocol) => protocol !== previousPrimary),
+        ]
+      : enabledProtocols;
+  const primaryProtocol = supportedProtocols[0] ?? "openai-completions";
   const primaryEndpoint = endpoints.find((item) => item.protocol === primaryProtocol);
 
   providerStore.updateProviderField(providerId, "name", name);
@@ -717,10 +1008,12 @@ async function saveModelForm() {
         id: payloadId,
         name,
         model: modelIdValue,
-        protocol: detailProvider.value?.supportedProtocols?.[0] ?? "openai",
+        // D6 高级设置：模型级协议（默认 openai-completions）+ Base URL 覆盖。
+        protocol: modelForm.protocol,
+        baseUrl: modelForm.baseUrlOverride.trim() || null,
       },
       resolveCapabilityDeclaration(
-        detailProvider.value?.supportedProtocols?.[0] ?? "openai",
+        modelForm.protocol,
         modelIdValue,
         "custom",
         capabilities,
@@ -763,27 +1056,12 @@ async function removeModelById(providerId: string | null, modelId: string) {
   }
 }
 
-function authTypeLabel(value: ProviderAuthType) {
-  switch (value) {
-    case "bearer":
-      return "Bearer Token";
-    case "x-api-key":
-      return "x-api-key";
-    default:
-      return "自动";
-  }
-}
-
 function providerApiKeySummary(provider: ProviderConfig) {
   if (provider.apiKeyValue?.trim()) {
     return "已填写待保存的新密钥";
   }
 
   return provider.apiKeyPresent ? "已有已保存密钥" : "未配置";
-}
-
-function protocolLabel(protocol: ProviderProtocol) {
-  return protocol === "openai" ? "OpenAI 协议" : "Anthropic 协议";
 }
 
 function toggleCapability(key: ModelCapabilityToggleKey) {
@@ -849,14 +1127,15 @@ onBeforeUnmount(() => {
             <span class="min-w-0 truncate text-sm font-medium text-stone-950">
               {{ provider.name || "未命名提供商" }}
             </span>
-            <!-- 迭代四：协议与模型数徽标同行尾部显示，不再换行堆叠 -->
+            <!-- 迭代四：协议与模型数徽标同行尾部显示，不再换行堆叠；D1 徽标直显规范名短标签 -->
             <span class="flex shrink-0 items-center gap-1">
               <span
                 v-for="protocol in provider.supportedProtocols"
                 :key="protocol"
-                class="rounded-[0.2rem] bg-white/40 px-1.5 py-[1px] text-[9px] leading-[1.4] text-stone-400/80"
+                class="rounded-[0.2rem] bg-white/40 px-1.5 py-[1px] font-mono text-[9px] leading-[1.4] text-stone-400/80"
+                :title="protocol"
               >
-                {{ protocol === "openai" ? "OpenAI" : "Anthropic" }}
+                {{ protocolBadgeLabel(protocol) }}
               </span>
               <span class="inline-flex items-center justify-center rounded-full bg-stone-200/60 px-1.5 text-[9px] font-medium leading-[1.4] text-stone-400">
                 {{ provider.models.length }}
@@ -893,17 +1172,17 @@ onBeforeUnmount(() => {
               class="rounded-[0.55rem] bg-white/72 px-3.5 py-2"
               data-testid="provider-detail-section"
             >
-              <!-- 迭代三：整行为折叠 trigger（含尾部动作区外的全部区域），hover 背景包裹整行；
-                   动作区 @click.stop 特殊处理。 -->
+              <!-- D8：整行为折叠 trigger，编辑态不再锁定——收起即取消编辑；
+                   D9：空闲态动作簇 hover/focus-within 显隐（容器需 group 供 group-hover 生效）。 -->
               <div
-                class="-mx-1 flex min-h-[1.75rem] cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-1"
-                :title="isEditingProvider ? '提供商编辑中，暂不可折叠' : undefined"
+                class="group -mx-1 flex min-h-[1.75rem] cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-1"
+                :title="isEditingProvider ? '收起将放弃未保存的修改' : undefined"
                 data-testid="provider-detail-header"
                 @click="toggleProviderSection()"
               >
                 <button
                   type="button"
-                  class="flex min-w-0 flex-1 items-center gap-1 bg-transparent text-left outline-none"
+                  class="flex min-w-0 cursor-pointer flex-1 items-center gap-1 bg-transparent text-left outline-none"
                   :aria-expanded="providerSectionOpen"
                   aria-controls="provider-detail-body"
                   :aria-label="providerSectionOpen ? '收起提供商详情' : '展开提供商详情'"
@@ -916,8 +1195,8 @@ onBeforeUnmount(() => {
                   <span class="truncate text-sm font-semibold text-stone-950">提供商详情</span>
                 </button>
 
-                <!-- 动作区：阻断行点击冒泡；编辑/删除为弱化纯图标（自身 hover 增强）。 -->
-                <div class="flex shrink-0 items-center gap-0.5" @click.stop>
+                <!-- 空闲动作簇：hover 显隐；编辑动作簇：常显（保存不可见即死状态）。 -->
+                <div v-if="!isEditingProvider" :class="HOVER_ACTIONS_CLASS" @click.stop>
                   <Tooltip v-if="canEditProvider && detailProvider" text="编辑" side="top">
                     <button
                       type="button"
@@ -929,7 +1208,6 @@ onBeforeUnmount(() => {
                       <Pencil class="h-3.5 w-3.5" />
                     </button>
                   </Tooltip>
-                  <Button v-if="isEditingProvider" size="sm" variant="ghost" data-testid="provider-edit-cancel" @click="cancelEditing()">取消</Button>
                   <ConfirmPopover
                     v-if="canDeleteProvider"
                     :title="`删除提供商「${detailProvider?.name || detailProvider?.id || '当前提供商'}」？`"
@@ -944,6 +1222,9 @@ onBeforeUnmount(() => {
                       </button>
                     </Tooltip>
                   </ConfirmPopover>
+                </div>
+                <div v-else class="flex shrink-0 items-center gap-0.5" @click.stop>
+                  <Button size="sm" variant="ghost" data-testid="provider-edit-cancel" @click="cancelEditing()">取消</Button>
                   <Button v-if="canSaveProvider" size="sm" variant="secondary" data-testid="provider-save" @click="saveProviderForm()">
                     <Save class="mr-1 h-4 w-4" />
                     {{ saving ? "保存中..." : "保存" }}
@@ -967,83 +1248,93 @@ onBeforeUnmount(() => {
                   <!-- P1 修复（review A）：守卫用 isEditingProvider 而非全局 isEditing，
                        防止模型编辑/新增态把陈旧 providerForm 泄漏渲染进提供商区。 -->
                   <template v-if="isEditingProvider">
-                <div class="grid gap-3">
-                  <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">提供商名称</span><Input :model-value="providerForm.name" placeholder="例如：OpenRouter" @update:model-value="providerForm.name = $event"  class="min-w-0 flex-1" /></label>
+                <div class="rounded-[0.45rem] bg-white/72 px-3.5 py-3">
+                  <!-- D5（迭代五·排版修订）：统一「标签列 | 控件列」网格——左标签定宽右对齐，
+                       控件列同起点等宽，既不拥挤也不散排；与全页"字段名+值同行"语言一致。 -->
+                  <div class="grid grid-cols-[minmax(56px,auto)_minmax(0,1fr)] items-center gap-x-4 gap-y-2.5">
+                    <label class="contents">
+                      <span class="text-[11px] text-stone-500">名称</span>
+                      <Input :model-value="providerForm.name" placeholder="例如：OpenRouter" @update:model-value="providerForm.name = $event" />
+                    </label>
 
-                  <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
-                    <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
-                      协议入口
-                      <InfoTip text="同一个提供商可以同时开启 OpenAI 和 Anthropic 协议；每种协议独立填写自己的 Base URL 和认证方式。" />
-                    </div>
-
-                    <div class="mt-3 grid gap-3 xl:grid-cols-2">
-                      <div
-                        v-for="protocol in endpointOrder"
-                        :key="protocol"
-                        class="rounded-[0.45rem] bg-stone-100/75 px-3 py-3"
-                      >
-                        <div class="flex items-center justify-between gap-3">
-                          <div>
-                            <div class="text-[13px] font-medium text-stone-900">{{ protocolLabel(protocol) }}</div>
-                            <div class="text-[11px] text-stone-500">单独配置 endpoint</div>
-                          </div>
-                          <button
-                            type="button"
-                            class="rounded-full px-2.5 py-1 text-[11px] transition"
-                            :class="providerForm.endpoints[protocol].enabled ? 'bg-stone-900 text-white' : 'bg-white text-stone-600'"
-                            @click="providerForm.endpoints[protocol].enabled = !providerForm.endpoints[protocol].enabled"
-                          >
-                            {{ providerForm.endpoints[protocol].enabled ? "已启用" : "未启用" }}
-                          </button>
-                        </div>
-
-                        <div class="mt-1.5 grid gap-x-4 gap-y-1 sm:grid-cols-2">
-                          <label class="space-y-1 text-[11px] text-stone-500">
-                            <span>Base URL</span>
-                            <Input
-                              :model-value="providerForm.endpoints[protocol].baseUrl"
-                              :disabled="!providerForm.endpoints[protocol].enabled"
-                              :placeholder="defaultBaseUrlFor(protocol)"
-                              @update:model-value="providerForm.endpoints[protocol].baseUrl = $event"
-                            />
-                          </label>
-
-                          <label class="space-y-1 text-[11px] text-stone-500">
-                            <span>认证方式</span>
-                            <select
-                              :value="providerForm.endpoints[protocol].authType"
-                              class="config-select"
-                              :disabled="!providerForm.endpoints[protocol].enabled"
-                              @change="providerForm.endpoints[protocol].authType = ($event.target as HTMLSelectElement).value as ProviderAuthType"
-                            >
-                              <option value="auto">自动</option>
-                              <option value="bearer">Bearer Token</option>
-                              <option value="x-api-key">x-api-key</option>
-                            </select>
-                          </label>
-                        </div>
+                    <div class="contents">
+                      <span class="self-center text-[11px] text-stone-500">协议</span>
+                      <div class="flex min-w-0 flex-wrap items-center gap-1.5" role="group" aria-label="协议">
+                        <button
+                          v-for="protocol in endpointOrder"
+                          :key="protocol"
+                          type="button"
+                          class="cursor-pointer rounded-full px-2.5 py-1 font-mono text-[11px] leading-[1.4] transition"
+                          :class="
+                            providerForm.endpoints[protocol].enabled
+                              ? 'bg-stone-900 text-white'
+                              : 'bg-white/85 text-stone-500 ring-1 ring-stone-200/80 hover:bg-[#f7e3bf] hover:text-stone-900'
+                          "
+                          :aria-pressed="providerForm.endpoints[protocol].enabled"
+                          :data-testid="`provider-protocol-badge-${protocol}`"
+                          :title="providerForm.endpoints[protocol].enabled ? '已启用，点击关闭' : '点击启用'"
+                          @click="toggleProviderProtocol(protocol)"
+                        >
+                          {{ protocol }}
+                        </button>
+                        <InfoTip text="选择即代表开启该协议；各协议 Base URL 在下方高级设置中维护，认证方式由协议自动推导。" />
                       </div>
                     </div>
-                  </section>
-                </div>
 
-                <div class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
-                  <div class="flex items-center gap-1.5 text-[13px] font-medium text-stone-900">
-                    API Key
-                    <Shield class="h-3.5 w-3.5 text-stone-500" />
-                    <InfoTip text="密钥仍按提供商维度保存到应用密钥存储；providers.json 不保存敏感明文。" />
-                  </div>
-                  <div class="mt-1.5">
-                    <label class="flex items-center gap-2 text-[11px] text-stone-500">
-                      <span class="shrink-0">当前密钥</span>
+                    <label class="contents">
+                      <span class="text-[11px] text-stone-500">密钥</span>
                       <Input
-                        class="min-w-0 flex-1"
                         :model-value="providerForm.apiKeyValue"
                         type="password"
-                        placeholder="输入后保存即可"
+                        placeholder="API Key，输入后保存即可"
                         @update:model-value="providerForm.apiKeyValue = $event"
                       />
                     </label>
+
+                    <!-- 关徽警示：对齐到控件列 -->
+                    <p
+                      v-if="modelsReferencingDisabledProtocols > 0"
+                      class="col-start-2 rounded-[0.35rem] bg-amber-50/90 px-2.5 py-1.5 text-[11px] leading-4 text-amber-900"
+                      data-testid="provider-badge-off-warning"
+                    >
+                      {{ modelsReferencingDisabledProtocols }} 个模型正在使用被关闭的协议，保存后将回落主协议。
+                    </p>
+                  </div>
+
+                  <!-- 高级设置独立分区：分隔线 + 折叠头 + 同构网格的 Base URL 行 -->
+                  <div class="mt-2 border-t border-stone-200/60 pt-2">
+                    <button
+                      type="button"
+                      class="inline-flex cursor-pointer items-center gap-1 rounded text-[11px] text-stone-500 transition hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                      data-testid="provider-advanced-toggle"
+                      :aria-expanded="providerAdvancedOpen"
+                      @click="providerAdvancedOpen = !providerAdvancedOpen"
+                    >
+                      <ChevronDown
+                        class="h-3 w-3 shrink-0 transition-transform duration-200 motion-reduce:transition-none"
+                        :class="providerAdvancedOpen ? 'rotate-180' : ''"
+                      />
+                      高级设置 · 各协议 Base URL
+                    </button>
+                    <div
+                      v-show="providerAdvancedOpen"
+                      class="mt-2 grid grid-cols-[minmax(56px,auto)_minmax(0,1fr)] items-center gap-x-4 gap-y-2"
+                      data-testid="provider-advanced-body"
+                    >
+                      <label
+                        v-for="protocol in providerEnabledProtocols"
+                        :key="protocol"
+                        class="contents"
+                      >
+                        <span class="truncate font-mono text-[10px] leading-tight text-stone-400" :title="protocol">{{ protocolBadgeLabel(protocol) }}</span>
+                        <Input
+                          :model-value="providerForm.endpoints[protocol].baseUrl"
+                          :placeholder="defaultBaseUrlFor(protocol)"
+                          :data-testid="`provider-baseurl-${protocol}`"
+                          @update:model-value="providerForm.endpoints[protocol].baseUrl = $event"
+                        />
+                      </label>
+                    </div>
                   </div>
                 </div>
               </template>
@@ -1082,17 +1373,14 @@ onBeforeUnmount(() => {
                 </section>
 
                 <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
-                  <div class="text-sm font-medium text-stone-900">协议入口</div>
+                  <div class="text-sm font-medium text-stone-900">协议</div>
                   <div class="mt-1.5 space-y-1">
                     <div
                       v-for="endpoint in detailProvider.endpoints.filter((item) => item.enabled)"
                       :key="endpoint.protocol"
                       class="flex min-w-0 items-baseline justify-between gap-3 rounded-[0.35rem] bg-stone-100/75 px-2.5 py-1.5"
                     >
-                      <span class="flex shrink-0 items-baseline gap-2">
-                        <span class="text-[12px] font-medium text-stone-900">{{ protocolLabel(endpoint.protocol) }}</span>
-                        <span class="text-[11px] text-stone-500">{{ authTypeLabel(endpoint.authType) }}</span>
-                      </span>
+                      <span class="shrink-0 font-mono text-[11px] text-stone-900" :title="endpoint.protocol">{{ endpoint.protocol }}</span>
                       <span class="min-w-0 truncate text-[12px] text-stone-500">{{ endpoint.baseUrl }}</span>
                     </div>
                   </div>
@@ -1111,14 +1399,14 @@ onBeforeUnmount(() => {
               data-testid="model-list-section"
             >
               <div
-                class="-mx-1 flex min-h-[1.75rem] cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-1"
-                :title="modelSectionLocked ? '模型表单填写中，暂不可折叠' : undefined"
+                class="group -mx-1 flex min-h-[1.75rem] cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-1"
+                :title="isEditingModel || modelCreateOpen ? '收起将放弃未保存的修改' : undefined"
                 data-testid="model-list-header"
                 @click="toggleModelSection()"
               >
                 <button
                   type="button"
-                  class="flex min-w-0 flex-1 items-center gap-1 bg-transparent text-left outline-none"
+                  class="flex min-w-0 cursor-pointer flex-1 items-center gap-1 bg-transparent text-left outline-none"
                   :aria-expanded="modelSectionOpen"
                   aria-controls="model-list-body"
                   :aria-label="modelSectionOpen ? '收起模型列表' : '展开模型列表'"
@@ -1131,8 +1419,8 @@ onBeforeUnmount(() => {
                   <span class="truncate text-sm font-semibold text-stone-950">模型列表</span>
                 </button>
 
-                <div class="flex shrink-0 items-center gap-0.5" @click.stop>
-                  <Tooltip v-if="modelActionsIdle && detailProvider" text="新增模型" side="top">
+                <div v-if="modelActionsIdle" :class="HOVER_ACTIONS_CLASS" @click.stop>
+                  <Tooltip v-if="detailProvider" text="新增模型" side="top">
                     <button
                       type="button"
                       :class="ICON_ACTION_CLASS"
@@ -1177,7 +1465,126 @@ onBeforeUnmount(() => {
                     <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                       <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">名称</span><Input :model-value="modelForm.name" placeholder="例如：Claude Sonnet 4" @update:model-value="modelForm.name = $event"  class="min-w-0 flex-1" /></label>
 
-                      <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">模型 ID</span><Input :model-value="modelForm.model" placeholder="例如：claude-sonnet-4-20250514" @update:model-value="modelForm.model = $event"  class="min-w-0 flex-1" /></label>
+                      <!-- D6（迭代五）：模型 ID 选择器——刷新图标在选择器右端，info 图标在外侧；
+                           成功自动展开目录下拉，失败经 info 图标 + tooltip 呈现。 -->
+                      <div class="space-y-1 text-[11px] text-stone-500">
+                        <div class="flex items-center gap-2">
+                          <span class="shrink-0">模型 ID</span>
+                          <div class="relative min-w-0 flex-1">
+                            <Input
+                              :model-value="modelForm.model"
+                              placeholder="手动填入，或点刷新从目录选择"
+                              class="pr-16"
+                              data-testid="model-id-input"
+                              @update:model-value="modelForm.model = $event"
+                            />
+                            <div class="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                              <button
+                                type="button"
+                                class="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 disabled:cursor-not-allowed disabled:text-stone-300"
+                                :disabled="catalogLoading && catalogIds.length === 0"
+                                aria-label="从 /models 刷新模型列表"
+                                data-testid="model-catalog-fetch"
+                                @click.stop="fetchModelCatalog()"
+                              >
+                                <RefreshCw class="h-3.5 w-3.5" :class="catalogLoading ? 'animate-spin' : ''" />
+                              </button>
+                              <button
+                                v-if="catalogIds.length > 0"
+                                type="button"
+                                class="inline-flex h-7 w-5 cursor-pointer items-center justify-center rounded text-stone-400 transition hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                                :aria-expanded="catalogPanelOpen"
+                                aria-label="展开或收起模型目录"
+                                data-testid="model-catalog-toggle"
+                                @click.stop="toggleCatalogPanel()"
+                              >
+                                <ChevronDown
+                                  class="h-3.5 w-3.5 transition-transform duration-200 motion-reduce:transition-none"
+                                  :class="catalogPanelOpen ? 'rotate-180' : ''"
+                                />
+                              </button>
+                            </div>
+                          </div>
+
+                          <!-- info / 失败语义图标：选择器外侧 -->
+                          <Tooltip
+                            :text="
+                              catalogError
+                                ? catalogError
+                                : '点击右端刷新按钮，从该协议的 /models 接口获取可选模型 ID；在下拉列表中勾选后可批量添加'
+                            "
+                            side="top"
+                          >
+                            <span
+                              class="inline-flex shrink-0 cursor-help items-center justify-center"
+                              :class="catalogError ? 'text-rose-500' : 'text-stone-400'"
+                              :data-testid="catalogError ? 'model-catalog-info-error' : 'model-catalog-info'"
+                            >
+                              <AlertTriangle v-if="catalogError" class="h-4 w-4" />
+                              <Info v-else class="h-4 w-4" />
+                            </span>
+                          </Tooltip>
+                        </div>
+
+                        <div v-if="selectedCatalogIds.length > 0" class="flex flex-wrap gap-1 pt-0.5">
+                          <span
+                            v-for="id in selectedCatalogIds"
+                            :key="id"
+                            class="inline-flex max-w-full items-center gap-1 rounded-full bg-stone-900/85 py-[2px] pl-2 pr-1 font-mono text-[10px] leading-[1.4] text-stone-50"
+                            :data-testid="`model-catalog-chip-${id}`"
+                          >
+                            <span class="truncate">{{ id }}</span>
+                            <button type="button" class="cursor-pointer rounded-full p-0.5 hover:bg-white/20" :aria-label="`移除 ${id}`" @click="toggleCatalogSelection(id)">
+                              <X class="h-3 w-3" />
+                            </button>
+                          </span>
+                        </div>
+
+                        <div
+                          v-if="catalogIds.length > 0 && catalogPanelOpen"
+                          class="rounded-[0.35rem] bg-white p-2 ring-1 ring-stone-200/70"
+                          data-testid="model-catalog-panel"
+                        >
+                          <div class="flex items-center gap-2 pb-1.5">
+                            <Search class="h-3.5 w-3.5 shrink-0 text-stone-400" />
+                            <input
+                              :value="catalogSearch"
+                              placeholder="搜索模型..."
+                              class="h-7 w-full min-w-0 rounded-[0.3rem] bg-stone-100/80 px-2 text-[12px] text-stone-900 outline-none transition focus:bg-white"
+                              data-testid="model-catalog-search"
+                              @input="catalogSearch = ($event.target as HTMLInputElement).value"
+                            />
+                            <span class="shrink-0 text-[10px] text-stone-400">{{ selectedCatalogIds.length }}/{{ catalogIds.length }}</span>
+                          </div>
+                          <div class="max-h-40 space-y-0.5 overflow-y-auto">
+                            <label
+                              v-for="id in filteredCatalogIds"
+                              :key="id"
+                              class="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 font-mono text-[11px] text-stone-800 transition hover:bg-[#f7e3bf]/60"
+                            >
+                              <input
+                                type="checkbox"
+                                class="accent-stone-900"
+                                :checked="selectedCatalogIds.includes(id)"
+                                :data-testid="`model-catalog-option-${id}`"
+                                @change="toggleCatalogSelection(id)"
+                              />
+                              <span class="truncate">{{ id }}</span>
+                            </label>
+                          </div>
+                          <Button
+                            v-if="canAddSelectedCatalogModels"
+                            size="sm"
+                            variant="secondary"
+                            class="mt-1.5 w-full justify-center"
+                            data-testid="model-catalog-add-selected"
+                            @click="addSelectedCatalogModels()"
+                          >
+                            <Plus class="mr-1 h-3.5 w-3.5" />
+                            添加选中的 {{ selectedCatalogIds.length }} 个模型
+                          </Button>
+                        </div>
+                      </div>
                     </div>
 
                     <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
@@ -1280,6 +1687,48 @@ onBeforeUnmount(() => {
                         </div>
                       </div>
                     </section>
+                    <!-- D6：高级设置——协议（默认 openai-completions）与 Base URL 覆盖。 -->
+                    <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                      <button
+                        type="button"
+                        class="inline-flex cursor-pointer items-center gap-1 text-[13px] font-medium text-stone-900 transition hover:text-stone-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                        data-testid="model-advanced-toggle-create"
+                        :aria-expanded="modelAdvancedOpen"
+                        @click="modelAdvancedOpen = !modelAdvancedOpen"
+                      >
+                        <ChevronDown
+                          class="h-3.5 w-3.5 shrink-0 text-stone-400 transition-transform duration-200 motion-reduce:transition-none"
+                          :class="modelAdvancedOpen ? 'rotate-180' : ''"
+                        />
+                        高级设置
+                        <InfoTip text="模型可改用提供商已开启的其他协议，并可覆盖 Base URL；默认 openai-completions、继承提供商地址。" />
+                      </button>
+                      <div
+                        v-show="modelAdvancedOpen"
+                        class="mt-2 grid gap-2.5 xl:grid-cols-2"
+                        data-testid="model-advanced-body-create"
+                      >
+                        <label class="space-y-1 text-[11px] text-stone-500">
+                          <span>协议</span>
+                          <select
+                            v-model="modelForm.protocol"
+                            class="config-select cursor-pointer"
+                            data-testid="model-advanced-protocol-create"
+                          >
+                            <option v-for="protocol in modelProtocolOptions" :key="protocol" :value="protocol">{{ protocol }}</option>
+                          </select>
+                        </label>
+                        <label class="space-y-1 text-[11px] text-stone-500">
+                          <span>Base URL 覆盖</span>
+                          <Input
+                            :model-value="modelForm.baseUrlOverride"
+                            :placeholder="resolvedModelBaseUrl"
+                            data-testid="model-advanced-baseurl-create"
+                            @update:model-value="modelForm.baseUrlOverride = $event"
+                          />
+                        </label>
+                      </div>
+                    </section>
                   </div>
                 </div>
 
@@ -1297,16 +1746,16 @@ onBeforeUnmount(() => {
                     :key="model.id"
                     class="overflow-hidden rounded-[0.45rem] bg-stone-100/50"
                   >
-                    <!-- 迭代三：整行为折叠 trigger（hover 背景包裹含行尾动作的整行），
-                         行尾动作区 @click.stop 特殊处理；chevron 为纯指示器。 -->
+                    <!-- D8/D9：整行为折叠 trigger（编辑中收起即取消）；行容器 group，
+                         行尾 编辑/删除 悬停显隐，chevron 恒显为纯指示器。 -->
                     <div
-                      class="flex cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-2 py-1.5 transition-colors hover:bg-white/74 motion-reduce:transition-none"
+                      class="group flex cursor-pointer items-center justify-between gap-2 rounded-[0.35rem] px-2 py-1.5 transition-colors hover:bg-white/74 motion-reduce:transition-none"
                       :data-testid="`model-list-item-${model.id}`"
                       @click="toggleModelRow(detailProvider!.id, model.id)"
                     >
                       <button
                         type="button"
-                        class="flex min-w-0 flex-1 items-center rounded-[0.35rem] px-1 py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                        class="flex min-w-0 cursor-pointer flex-1 items-center rounded-[0.35rem] px-1 py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
                         :aria-expanded="expandedModelId === model.id"
                         :aria-controls="`model-detail-${model.id}`"
                       >
@@ -1314,13 +1763,13 @@ onBeforeUnmount(() => {
                           <span class="block truncate text-[12px] font-medium text-stone-800">
                             {{ model.name || "未命名模型" }}
                           </span>
-                          <span class="mt-0.5 block truncate text-[11px] text-stone-500">
+                          <span class="mt-0.5 block truncate font-mono text-[11px] text-stone-500">
                             {{ model.protocol || detailProvider?.protocol }} · {{ model.model || "未填写模型 ID" }}
                           </span>
                         </span>
                       </button>
 
-                      <div class="flex shrink-0 items-center gap-0.5" @click.stop>
+                      <div :class="HOVER_ACTIONS_CLASS" @click.stop>
                         <Tooltip v-if="modelActionsIdle" text="编辑" side="top">
                           <button
                             type="button"
@@ -1400,7 +1849,82 @@ onBeforeUnmount(() => {
                 <div class="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                   <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">名称</span><Input :model-value="modelForm.name" placeholder="例如：Claude Sonnet 4" @update:model-value="modelForm.name = $event"  class="min-w-0 flex-1" /></label>
 
-                  <label class="flex items-center gap-2 text-[11px] text-stone-500"><span class="shrink-0">模型 ID</span><Input :model-value="modelForm.model" placeholder="例如：claude-sonnet-4-20250514" @update:model-value="modelForm.model = $event"  class="min-w-0 flex-1" /></label>
+                  <!-- D6（迭代五）：编辑态同款选择器——刷新图标在输入框右端、info 在外侧；
+                       目录下拉单击即填充（单选，无批量）。 -->
+                  <div class="space-y-1 text-[11px] text-stone-500">
+                    <div class="flex items-center gap-2">
+                      <span class="shrink-0">模型 ID</span>
+                      <div class="relative min-w-0 flex-1">
+                        <Input
+                          :model-value="modelForm.model"
+                          placeholder="例如：claude-sonnet-4-20250514"
+                          class="pr-16"
+                          @update:model-value="modelForm.model = $event"
+                        />
+                        <div class="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                          <button
+                            type="button"
+                            class="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[0.35rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 disabled:cursor-not-allowed disabled:text-stone-300"
+                            :disabled="catalogLoading && catalogIds.length === 0"
+                            aria-label="从 /models 刷新模型列表"
+                            data-testid="model-catalog-fetch-edit"
+                            @click.stop="fetchModelCatalog()"
+                          >
+                            <RefreshCw class="h-3.5 w-3.5" :class="catalogLoading ? 'animate-spin' : ''" />
+                          </button>
+                          <button
+                            v-if="filteredCatalogIds.length > 0"
+                            type="button"
+                            class="inline-flex h-7 w-5 cursor-pointer items-center justify-center rounded text-stone-400 transition hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                            :aria-expanded="catalogPanelOpen"
+                            aria-label="展开或收起模型目录"
+                            data-testid="model-catalog-toggle-edit"
+                            @click.stop="toggleCatalogPanel()"
+                          >
+                            <ChevronDown
+                              class="h-3.5 w-3.5 transition-transform duration-200 motion-reduce:transition-none"
+                              :class="catalogPanelOpen ? 'rotate-180' : ''"
+                            />
+                          </button>
+                        </div>
+                      </div>
+
+                      <Tooltip
+                        :text="
+                          catalogError
+                            ? catalogError
+                            : '点击右端刷新按钮，从该协议的 /models 接口获取可选模型 ID；在下拉列表中单击即填充'
+                        "
+                        side="top"
+                      >
+                        <span
+                          class="inline-flex shrink-0 cursor-help items-center justify-center"
+                          :class="catalogError ? 'text-rose-500' : 'text-stone-400'"
+                          :data-testid="catalogError ? 'model-catalog-info-error-edit' : 'model-catalog-info-edit'"
+                        >
+                          <AlertTriangle v-if="catalogError" class="h-4 w-4" />
+                          <Info v-else class="h-4 w-4" />
+                        </span>
+                      </Tooltip>
+                    </div>
+
+                    <div
+                      v-if="filteredCatalogIds.length > 0 && catalogPanelOpen"
+                      class="max-h-24 space-y-0.5 overflow-y-auto rounded-[0.35rem] bg-white p-1.5 ring-1 ring-stone-200/70"
+                      data-testid="model-catalog-panel-edit"
+                    >
+                      <button
+                        v-for="id in filteredCatalogIds"
+                        :key="id"
+                        type="button"
+                        class="block w-full cursor-pointer truncate rounded px-2 py-1 text-left font-mono text-[11px] text-stone-700 transition hover:bg-[#f7e3bf]/60 hover:text-stone-900"
+                        :data-testid="`model-catalog-suggest-${id}`"
+                        @click="modelForm.model = id; catalogPanelOpen = false"
+                      >
+                        {{ id }}
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
@@ -1501,6 +2025,49 @@ onBeforeUnmount(() => {
                         </button>
                       </div>
                     </div>
+                  </div>
+                </section>
+
+                <!-- D6：高级设置——编辑态同款（协议/Base URL 覆盖），与创建卡同步维护。 -->
+                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
+                  <button
+                    type="button"
+                    class="inline-flex cursor-pointer items-center gap-1 text-[13px] font-medium text-stone-900 transition hover:text-stone-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                    data-testid="model-advanced-toggle-edit"
+                    :aria-expanded="modelAdvancedOpen"
+                    @click="modelAdvancedOpen = !modelAdvancedOpen"
+                  >
+                    <ChevronDown
+                      class="h-3.5 w-3.5 shrink-0 text-stone-400 transition-transform duration-200 motion-reduce:transition-none"
+                      :class="modelAdvancedOpen ? 'rotate-180' : ''"
+                    />
+                    高级设置
+                    <InfoTip text="模型可改用提供商已开启的其他协议，并可覆盖 Base URL。" />
+                  </button>
+                  <div
+                    v-show="modelAdvancedOpen"
+                    class="mt-2 grid gap-2.5 xl:grid-cols-2"
+                    data-testid="model-advanced-body-edit"
+                  >
+                    <label class="space-y-1 text-[11px] text-stone-500">
+                      <span>协议</span>
+                      <select
+                        v-model="modelForm.protocol"
+                        class="config-select cursor-pointer"
+                        data-testid="model-advanced-protocol-edit"
+                      >
+                        <option v-for="protocol in modelProtocolOptions" :key="protocol" :value="protocol">{{ protocol }}</option>
+                      </select>
+                    </label>
+                    <label class="space-y-1 text-[11px] text-stone-500">
+                      <span>Base URL 覆盖</span>
+                      <Input
+                        :model-value="modelForm.baseUrlOverride"
+                        :placeholder="resolvedModelBaseUrl"
+                        data-testid="model-advanced-baseurl-edit"
+                        @update:model-value="modelForm.baseUrlOverride = $event"
+                      />
+                    </label>
                   </div>
                 </section>
               </template>
@@ -1617,9 +2184,29 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-.config-form :deep(input:focus-visible) {
+/* D7：输入面统一与卡片底色区分的白底（含 select/textarea 与目录搜索框）。 */
+.config-form :deep(input:focus-visible),
+.model-catalog-search:focus,
+.catalog-search-input:focus {
   background: rgb(255 255 255 / 0.98);
   outline: none;
+}
+
+.config-form :deep(select),
+.config-form :deep(textarea) {
+  border-radius: 0.45rem;
+  border: none;
+  background: rgb(255 255 255 / 0.82);
+  padding-inline: 0.75rem;
+  font-size: 0.875rem;
+  color: rgb(28 25 23);
+  outline: none;
+  transition: background-color 160ms ease;
+}
+
+.config-form :deep(select:focus),
+.config-form :deep(textarea:focus) {
+  background: rgb(255 255 255 / 0.98);
 }
 
 .config-select {

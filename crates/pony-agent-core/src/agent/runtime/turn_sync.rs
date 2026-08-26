@@ -315,7 +315,7 @@ impl AgentRuntime {
                 assistant_message: response.output_text.clone(),
                 assistant_reasoning_content: response.reasoning_content.clone(),
                 provider_native_transcript: native_transcript_for_tool_turn(
-                    provider.protocol_label(),
+                    provider.protocol(),
                     &user_message,
                     &hop_records,
                     &response,

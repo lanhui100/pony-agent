@@ -254,3 +254,165 @@ describe("provider capability layering", () => {
     expect(store.error).toContain("同一提供商下已存在模型");
   });
 });
+
+describe("provider protocol tri-value layer (D1/D3/D6)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
+  });
+
+  it("maps legacy protocol values to canonical names and passes canonical values through", async () => {
+    const { normalizeLegacyProtocol } = await import("@/stores/providers");
+    expect(normalizeLegacyProtocol("openai")).toBe("openai-completions");
+    expect(normalizeLegacyProtocol("anthropic")).toBe("anthropic-messages");
+    expect(normalizeLegacyProtocol("openai-responses")).toBe("openai-responses");
+    expect(normalizeLegacyProtocol("openai-completions")).toBe("openai-completions");
+    expect(normalizeLegacyProtocol("anthropic-messages")).toBe("anthropic-messages");
+    expect(normalizeLegacyProtocol("unknown-protocol")).toBe("openai-completions");
+
+    // normalizeProvider 单点收敛：registry 载入路径上的旧值全部折叠为规范名
+    const store = useProviderStore();
+    store.$patch({
+      registry: {
+        selectedProviderId: "p1",
+        providers: [
+          {
+            id: "p1",
+            name: "legacy",
+            protocol: "openai",
+            baseUrl: "https://example.invalid/v1",
+            authType: "auto",
+            supportedProtocols: ["openai", "anthropic"],
+            endpoints: [
+              { protocol: "openai", enabled: true, baseUrl: "https://example.invalid/v1", authType: "auto" },
+              { protocol: "anthropic", enabled: false, baseUrl: "https://api.anthropic.com/v1", authType: "x-api-key" },
+            ],
+            apiKeyEnvVar: "LEGACY_API_KEY",
+            apiKeyValue: "",
+            apiKeyPresent: false,
+            models: [],
+            selectedModelId: null,
+          },
+        ] as never,
+      },
+    });
+
+    const provider = store.registry?.providers[0]!;
+    // 生产链路经 loadRegistry/saveRegistry 的 normalizeProvider 单点收敛；
+    // 浏览器分支的 saveRegistry 在触网检查前完成归一化，正好可作无网络验证。
+    await store.saveRegistry();
+
+    const normalized = store.registry?.providers[0]!;
+    expect(normalized.protocol).toBe("openai-completions");
+    expect(normalized.supportedProtocols).toEqual(["openai-completions", "anthropic-messages"]);
+    expect(
+      normalized.endpoints.map((endpoint) => endpoint.protocol),
+    ).toEqual(["openai-completions", "openai-responses", "anthropic-messages"]);
+    void provider;
+  });
+
+  it("guards model catalog fetch in browser preview without touching the network", async () => {
+    const store = useProviderStore();
+    const models = await store.fetchModelCatalog({
+      providerId: "p1",
+      protocol: "openai-completions",
+      baseUrl: "https://example.invalid/v1",
+    });
+
+    expect(models).toEqual([]);
+    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalled();
+    expect(store.notice).toContain("预览模式不可用拉取模型列表");
+    expect(store.catalogModels).toEqual([]);
+  });
+
+  it("forwards explicit args to fetch_provider_models and surfaces failures via catalogError", async () => {
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+
+    const store = useProviderStore();
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      expect(command).toBe("fetch_provider_models");
+      // D6：apiKey 显式入参透传（未提供时为 null），baseUrl 原样传递。
+      expect(args).toEqual({
+        providerId: "p1",
+        protocol: "anthropic-messages",
+        baseUrl: "https://gateway.example.invalid/v1",
+        apiKey: "sk-draft-key",
+      });
+      return ["m-a", "m-b"];
+    });
+
+    const models = await store.fetchModelCatalog({
+      providerId: "p1",
+      protocol: "anthropic-messages",
+      baseUrl: "https://gateway.example.invalid/v1",
+      apiKey: "sk-draft-key",
+    });
+    expect(models).toEqual(["m-a", "m-b"]);
+    expect(store.catalogModels).toEqual(["m-a", "m-b"]);
+    expect(store.catalogError).toBeNull();
+
+    tauriMocks.mockSafeInvoke.mockRejectedValueOnce(new Error("401 unauthorized"));
+    const failed = await store.fetchModelCatalog({
+      providerId: "p1",
+      protocol: "anthropic-messages",
+      baseUrl: "https://gateway.example.invalid/v1",
+    });
+    expect(failed).toEqual([]);
+    expect(store.catalogError).toContain("拉取模型列表失败");
+    expect(store.error).toBeNull();
+  });
+
+  it("batch-adds catalog models with dedupe report and alias folding (D6)", async () => {
+    const store = useProviderStore();
+    seedSingleProvider(store, "https://example.invalid/v1");
+
+    const result = store.addModelsFromCatalog(
+      "provider-x",
+      ["m1", " m2 ", "m2", "deepseek-v4-pro", "DEEPSEEK-V4-PRO"],
+      { protocol: "openai-completions", baseUrl: "  https://mirror.example.invalid/v1  " },
+    );
+
+    const provider = store.registry?.providers.find((item) => item.id === "provider-x")!;
+    const addedValues = provider.models.map((model) => model.model);
+
+    // 批内重复与 deepseek 别名折叠均计入 skipped；空白项跳过。
+    expect(result).toMatchObject({ added: 3, skipped: 2 });
+    expect(addedValues).toContain("m1");
+    expect(addedValues).toContain("m2");
+    expect(result.lastAddedModelId).toBe(provider.models[provider.models.length - 1]?.id);
+
+    const mirror = provider.models.find((model) => model.model === "m1");
+    expect(mirror?.baseUrl).toBe("https://mirror.example.invalid/v1");
+    expect(mirror?.protocol).toBe("openai-completions");
+
+    // 不复用 upsertModel 的 error 通道。
+    expect(store.error).toBeNull();
+  });
+});
+
+function seedSingleProvider(store: ReturnType<typeof useProviderStore>, baseUrl: string) {
+  store.$patch({
+    registry: {
+      selectedProviderId: "provider-x",
+      providers: [
+        {
+          id: "provider-x",
+          name: "X",
+          protocol: "openai-completions",
+          baseUrl,
+          authType: "auto",
+          supportedProtocols: ["openai-completions"],
+          endpoints: [
+            { protocol: "openai-completions", enabled: true, baseUrl, authType: "auto" },
+          ],
+          apiKeyEnvVar: "X_API_KEY",
+          apiKeyValue: "",
+          apiKeyPresent: false,
+          models: [],
+          selectedModelId: null,
+        },
+      ] as never,
+    },
+  });
+}

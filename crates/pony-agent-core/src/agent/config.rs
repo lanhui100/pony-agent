@@ -139,6 +139,9 @@ pub struct ProviderModelConfig {
     pub reasoning_budget_tokens: Option<u32>,
     #[serde(default)]
     pub protocol: Option<ProviderProtocol>,
+    /// 模型级 base_url 覆盖（D4）：非空 trim 值优先于 provider endpoint / 默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     #[serde(default)]
     pub capabilities: ProviderModelCapabilities,
 }
@@ -288,6 +291,40 @@ impl ProviderRegistryStore {
         self.secret_store.get(&secret_ref).ok().flatten()
     }
 
+    /// 按 id 精确解析已存 API Key，供 /models 目录拉取等显式入参缺省时的 key 解析链。
+    /// 安全约束（code-review B/P1-2）：id 未命中一律返回 None——禁止静默回退到
+    /// 选中/首个提供商的密钥，杜绝「A 的密钥发往为 B 填写的 URL」的凭证错配通路。
+    pub fn provider_api_key(&self, provider_id: Option<&str>) -> Option<String> {
+        let storage = self.load_storage();
+        let provider = storage
+            .providers
+            .iter()
+            .find(|item| Some(item.id.as_str()) == provider_id)?;
+        resolve_provider_api_key(provider, self.secret_store.as_ref())
+    }
+
+    /// 解析指定提供商在指定协议上的显式 auth 覆盖（如网关要求强制 Bearer），
+    /// 无匹配时回落 Auto（按家族推导）。code-review A-P3-7/B-P3-4：使 /models
+    /// 目录拉取与 chat 通路一样尊重 endpoint 显式 auth_type。
+    pub fn provider_endpoint_auth(
+        &self,
+        provider_id: Option<&str>,
+        protocol: &ProviderProtocol,
+    ) -> ProviderAuthType {
+        self.load_storage()
+            .providers
+            .iter()
+            .find(|item| Some(item.id.as_str()) == provider_id)
+            .and_then(|provider| {
+                provider
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| &endpoint.protocol == protocol)
+            })
+            .map(|endpoint| endpoint.auth_type.clone())
+            .unwrap_or(ProviderAuthType::Auto)
+    }
+
     pub fn set_service_api_key(&self, service: &str, key: &str) -> Result<(), String> {
         let secret_ref = format!("service-{service}");
         if key.is_empty() {
@@ -358,12 +395,55 @@ impl ProviderRegistryStore {
             .or_else(|| provider.models.first())
             .expect("provider should always contain at least one model");
 
+        // D4 解析序：
+        // 1. effective protocol：model.protocol ∈ supported_protocols 时用之，否则主协议；
+        let effective_protocol = model
+            .protocol
+            .as_ref()
+            .filter(|candidate| {
+                provider
+                    .supported_protocols
+                    .iter()
+                    .any(|value| value == *candidate)
+            })
+            .cloned()
+            .unwrap_or_else(|| provider.protocol.clone());
+
+        // 2. base_url 链：model.base_url（非空 trim）> 该协议 enabled endpoint >
+        //    provider.base_url（协议一致时）> 协议默认值；
+        let model_base_url = model
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let endpoint = provider
+            .endpoints
+            .iter()
+            .find(|entry| entry.enabled && entry.protocol == effective_protocol);
+        let base_url = if let Some(url) = model_base_url {
+            url.to_string()
+        } else if let Some(endpoint) =
+            endpoint.filter(|entry| !entry.base_url.trim().is_empty())
+        {
+            endpoint.base_url.clone()
+        } else if provider.protocol == effective_protocol && !provider.base_url.trim().is_empty() {
+            provider.base_url.clone()
+        } else {
+            default_base_url(&effective_protocol).to_string()
+        };
+
+        // 3. auth_type：定位到的 endpoint 显式非 Auto 则尊重，Auto 留给请求期按家族推导。
+        let auth_type = match endpoint {
+            Some(entry) if entry.auth_type != ProviderAuthType::Auto => entry.auth_type.clone(),
+            _ => ProviderAuthType::Auto,
+        };
+
         ResolvedProviderSelection {
             requested_name: provider.name.clone(),
             provider_name: provider.name.clone(),
-            protocol: provider.protocol.clone(),
-            base_url: provider.base_url.clone(),
-            auth_type: provider.auth_type.clone(),
+            protocol: effective_protocol.clone(),
+            base_url,
+            auth_type,
             api_key_env_var: provider.api_key_env_var.clone(),
             api_key: resolve_provider_api_key(provider, self.secret_store.as_ref()),
             model: model.model.clone(),
@@ -374,7 +454,7 @@ impl ProviderRegistryStore {
             capabilities: model.capabilities.clone(),
             thinking_param_pattern: resolve_thinking_param_pattern(
                 &model.capability_preset,
-                &provider.protocol,
+                &effective_protocol,
                 &model.model,
             ),
         }
@@ -399,8 +479,9 @@ impl ProviderRegistryStore {
 
     fn load_storage(&self) -> ProviderRegistryStorage {
         if let Ok(content) = fs::read_to_string(&self.path) {
-            if let Ok(storage) = serde_json::from_str::<ProviderRegistryStorage>(&content) {
-                return normalize_storage(storage);
+            match serde_json::from_str::<ProviderRegistryStorage>(&content) {
+                Ok(storage) => return normalize_storage(storage),
+                Err(_) => backup_invalid_registry_file(&self.path),
             }
         }
 
@@ -464,6 +545,41 @@ fn secret_file_path(registry_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("secrets.json")
+}
+
+/// R6 缓解：registry 反序列化失败时，先把原文件 best-effort 拷贝为同目录
+/// `providers.json.invalid-<unix_ts>` 再回落默认注册表，避免后续保存以出厂
+/// 模板覆写用户配置且无任何恢复线索。拷贝失败不 panic（只丢备份，不丢行为）。
+/// 同一损坏文件的重复加载只保留首个备份（code-review A-P3-8：防跨秒累积），
+/// 后续修复后用户可自行删除 invalid-* 文件。
+fn backup_invalid_registry_file(registry_path: &Path) {
+    let Some(file_name) = registry_path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Some(parent) = registry_path.parent() else {
+        return;
+    };
+    if let Ok(entries) = fs::read_dir(parent) {
+        let prefix = format!("{file_name}.invalid-");
+        if entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        {
+            return;
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let backup_path = registry_path.with_file_name(format!("{file_name}.invalid-{stamp}"));
+    if let Err(error) = fs::copy(registry_path, &backup_path) {
+        eprintln!(
+            "[pony-agent] backup invalid provider registry failed: {} (target: {})",
+            error,
+            backup_path.display()
+        );
+    }
 }
 
 fn default_secret_ref(provider_id: &str) -> String {
@@ -608,9 +724,10 @@ fn default_protocol_endpoint(protocol: &ProviderProtocol) -> ProviderProtocolEnd
         protocol: protocol.clone(),
         enabled: false,
         base_url: default_base_url(protocol).to_string(),
-        auth_type: match protocol {
-            ProviderProtocol::Anthropic => ProviderAuthType::XApiKey,
-            ProviderProtocol::OpenAi => ProviderAuthType::Auto,
+        auth_type: if protocol.is_anthropic() {
+            ProviderAuthType::XApiKey
+        } else {
+            ProviderAuthType::Auto
         },
     }
 }
@@ -622,9 +739,12 @@ fn normalize_provider_endpoints(
     supported_protocols: &[ProviderProtocol],
     endpoints: &[ProviderProtocolEndpoint],
 ) -> Vec<ProviderProtocolEndpoint> {
+    // 三协议各占一个 endpoint 槽位（openai-completions / openai-responses /
+    // anthropic-messages）；既有配置按 protocol 匹配回填，未命中的保持默认。
     let mut normalized = vec![
-        default_protocol_endpoint(&ProviderProtocol::OpenAi),
-        default_protocol_endpoint(&ProviderProtocol::Anthropic),
+        default_protocol_endpoint(&ProviderProtocol::OpenAiCompletions),
+        default_protocol_endpoint(&ProviderProtocol::OpenAiResponses),
+        default_protocol_endpoint(&ProviderProtocol::AnthropicMessages),
     ];
 
     for entry in &mut normalized {
@@ -763,6 +883,7 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
                 protocol: Some(provider.protocol.clone()),
+                base_url: None,
                 capabilities: default_model_capabilities(
                     &provider.protocol,
                     default_model(&provider.protocol),
@@ -779,6 +900,13 @@ fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistrySt
             if model.model.trim().is_empty() {
                 model.model = default_model(&provider.protocol).to_string();
             }
+            // 模型级 base_url 覆盖清洗：trim 后为空则置 None（回落解析链）。
+            model.base_url = model
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             let model_protocol = resolve_model_protocol(
                 &provider.protocol,
                 &provider.supported_protocols,
@@ -887,8 +1015,9 @@ fn default_deepseek_v4_pro_model() -> ProviderModelConfig {
         capability_preset: ProviderCapabilityPreset::DeepseekReasoner,
         reasoning_effort: Some(ProviderReasoningEffort::Medium),
         reasoning_budget_tokens: None,
-        protocol: Some(ProviderProtocol::OpenAi),
-        capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "deepseek-v4-pro"),
+        protocol: Some(ProviderProtocol::OpenAiCompletions),
+        base_url: None,
+        capabilities: default_model_capabilities(&ProviderProtocol::OpenAiCompletions, "deepseek-v4-pro"),
     }
 }
 
@@ -910,7 +1039,7 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
         ProviderConfigStorage {
             id: "provider-ppx".to_string(),
             name: "ppx".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "https://api.psydo.top/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "PPX_API_KEY".to_string(),
@@ -926,24 +1055,25 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
-                protocol: Some(ProviderProtocol::OpenAi),
-                capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "gpt-5.4"),
+                protocol: Some(ProviderProtocol::OpenAiCompletions),
+                base_url: None,
+                capabilities: default_model_capabilities(&ProviderProtocol::OpenAiCompletions, "gpt-5.4"),
             }],
-            supported_protocols: vec![ProviderProtocol::OpenAi],
+            supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
             endpoints: vec![
                 ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAi,
+                    protocol: ProviderProtocol::OpenAiCompletions,
                     enabled: true,
                     base_url: "https://api.psydo.top/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
                 },
-                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+                default_protocol_endpoint(&ProviderProtocol::AnthropicMessages),
             ],
         },
         ProviderConfigStorage {
             id: "provider-openai".to_string(),
             name: "openai".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "https://api.openai.com/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "OPENAI_API_KEY".to_string(),
@@ -959,24 +1089,25 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::OpenAiChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
-                protocol: Some(ProviderProtocol::OpenAi),
-                capabilities: default_model_capabilities(&ProviderProtocol::OpenAi, "gpt-4.1-mini"),
+                protocol: Some(ProviderProtocol::OpenAiCompletions),
+                base_url: None,
+                capabilities: default_model_capabilities(&ProviderProtocol::OpenAiCompletions, "gpt-4.1-mini"),
             }],
-            supported_protocols: vec![ProviderProtocol::OpenAi],
+            supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
             endpoints: vec![
                 ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAi,
+                    protocol: ProviderProtocol::OpenAiCompletions,
                     enabled: true,
                     base_url: "https://api.openai.com/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
                 },
-                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+                default_protocol_endpoint(&ProviderProtocol::AnthropicMessages),
             ],
         },
         ProviderConfigStorage {
             id: "provider-openrouter".to_string(),
             name: "openrouter".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "https://openrouter.ai/api/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "OPENROUTER_API_KEY".to_string(),
@@ -992,27 +1123,28 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::OpenAiChat,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
-                protocol: Some(ProviderProtocol::OpenAi),
+                protocol: Some(ProviderProtocol::OpenAiCompletions),
+                base_url: None,
                 capabilities: default_model_capabilities(
-                    &ProviderProtocol::OpenAi,
+                    &ProviderProtocol::OpenAiCompletions,
                     "openai/gpt-4.1-mini",
                 ),
             }],
-            supported_protocols: vec![ProviderProtocol::OpenAi],
+            supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
             endpoints: vec![
                 ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAi,
+                    protocol: ProviderProtocol::OpenAiCompletions,
                     enabled: true,
                     base_url: "https://openrouter.ai/api/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
                 },
-                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+                default_protocol_endpoint(&ProviderProtocol::AnthropicMessages),
             ],
         },
         ProviderConfigStorage {
             id: "provider-deepseek".to_string(),
             name: "deepseek".to_string(),
-            protocol: ProviderProtocol::OpenAi,
+            protocol: ProviderProtocol::OpenAiCompletions,
             base_url: "https://api.deepseek.com/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
@@ -1029,29 +1161,30 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                     capability_preset: ProviderCapabilityPreset::DeepseekChat,
                     reasoning_effort: None,
                     reasoning_budget_tokens: None,
-                    protocol: Some(ProviderProtocol::OpenAi),
+                    protocol: Some(ProviderProtocol::OpenAiCompletions),
+                    base_url: None,
                     capabilities: default_model_capabilities(
-                        &ProviderProtocol::OpenAi,
+                        &ProviderProtocol::OpenAiCompletions,
                         "deepseek-v4-flash",
                     ),
                 },
                 default_deepseek_v4_pro_model(),
             ],
-            supported_protocols: vec![ProviderProtocol::OpenAi],
+            supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
             endpoints: vec![
                 ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAi,
+                    protocol: ProviderProtocol::OpenAiCompletions,
                     enabled: true,
                     base_url: "https://api.deepseek.com/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
                 },
-                default_protocol_endpoint(&ProviderProtocol::Anthropic),
+                default_protocol_endpoint(&ProviderProtocol::AnthropicMessages),
             ],
         },
         ProviderConfigStorage {
             id: "provider-anthropic".to_string(),
             name: "anthropic".to_string(),
-            protocol: ProviderProtocol::Anthropic,
+            protocol: ProviderProtocol::AnthropicMessages,
             base_url: "https://api.anthropic.com/v1".to_string(),
             auth_type: ProviderAuthType::Auto,
             api_key_env_var: "ANTHROPIC_API_KEY".to_string(),
@@ -1067,17 +1200,18 @@ fn default_provider_templates() -> Vec<ProviderConfigStorage> {
                 capability_preset: ProviderCapabilityPreset::AnthropicThinking,
                 reasoning_effort: None,
                 reasoning_budget_tokens: None,
-                protocol: Some(ProviderProtocol::Anthropic),
+                protocol: Some(ProviderProtocol::AnthropicMessages),
+                base_url: None,
                 capabilities: default_model_capabilities(
-                    &ProviderProtocol::Anthropic,
+                    &ProviderProtocol::AnthropicMessages,
                     "claude-3-7-sonnet-latest",
                 ),
             }],
-            supported_protocols: vec![ProviderProtocol::Anthropic],
+            supported_protocols: vec![ProviderProtocol::AnthropicMessages],
             endpoints: vec![
-                default_protocol_endpoint(&ProviderProtocol::OpenAi),
+                default_protocol_endpoint(&ProviderProtocol::OpenAiCompletions),
                 ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::Anthropic,
+                    protocol: ProviderProtocol::AnthropicMessages,
                     enabled: true,
                     base_url: "https://api.anthropic.com/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
@@ -1111,7 +1245,7 @@ fn infer_capability_preset(
         return entry.preset.clone();
     }
 
-    if matches!(protocol, ProviderProtocol::Anthropic) {
+    if protocol.is_anthropic() {
         return ProviderCapabilityPreset::AnthropicThinking;
     }
 
@@ -1143,7 +1277,7 @@ fn resolve_thinking_param_pattern(
         ProviderCapabilityPreset::Auto | ProviderCapabilityPreset::Custom => {
             let lower = model_name.to_ascii_lowercase();
             if !lower.contains("deepseek") {
-                if matches!(protocol, ProviderProtocol::Anthropic) {
+                if protocol.is_anthropic() {
                     ThinkingParamPattern::AnthropicThinking
                 } else if preset == &ProviderCapabilityPreset::Auto {
                     ThinkingParamPattern::None
@@ -1261,11 +1395,13 @@ fn default_true() -> bool {
     true
 }
 
+/// CAPABILITY_CATALOG 的 protocol 字符串按家族匹配：
+/// catalog 条目 "openai" 命中 openai-completions 与 openai-responses 两个协议。
 fn catalog_matches_protocol(protocol: &ProviderProtocol, expected: Option<&str>) -> bool {
     match expected {
         None => true,
-        Some("openai") => matches!(protocol, ProviderProtocol::OpenAi),
-        Some("anthropic") => matches!(protocol, ProviderProtocol::Anthropic),
+        Some("openai") => protocol.is_openai_family(),
+        Some("anthropic") => protocol.is_anthropic(),
         Some(_) => false,
     }
 }
@@ -1428,16 +1564,20 @@ fn derive_env_var_name(provider_name: &str) -> String {
 }
 
 fn default_base_url(protocol: &ProviderProtocol) -> &'static str {
+    // responses 复用 api.openai.com/v1（同一 API 根，endpoint 为 {base}/responses）。
     match protocol {
-        ProviderProtocol::OpenAi => "https://api.openai.com/v1",
-        ProviderProtocol::Anthropic => "https://api.anthropic.com/v1",
+        ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
+            "https://api.openai.com/v1"
+        }
+        ProviderProtocol::AnthropicMessages => "https://api.anthropic.com/v1",
     }
 }
 
 fn default_model(protocol: &ProviderProtocol) -> &'static str {
     match protocol {
-        ProviderProtocol::OpenAi => "gpt-4.1-mini",
-        ProviderProtocol::Anthropic => "claude-3-7-sonnet-latest",
+        // responses 默认模型沿用 gpt-4.1-mini。
+        ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => "gpt-4.1-mini",
+        ProviderProtocol::AnthropicMessages => "claude-3-7-sonnet-latest",
     }
 }
 
@@ -1706,7 +1846,7 @@ mod tests {
             providers: vec![ProviderConfigStorage {
                 id: "provider-deepseek".to_string(),
                 name: "deepseek".to_string(),
-                protocol: ProviderProtocol::OpenAi,
+                protocol: ProviderProtocol::OpenAiCompletions,
                 base_url: "https://api.deepseek.com/v1".to_string(),
                 auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
@@ -1722,12 +1862,13 @@ mod tests {
                     capability_preset: ProviderCapabilityPreset::DeepseekChat,
                     reasoning_effort: None,
                     reasoning_budget_tokens: None,
-                    protocol: Some(ProviderProtocol::OpenAi),
+                    protocol: Some(ProviderProtocol::OpenAiCompletions),
+                    base_url: None,
                     capabilities: ProviderModelCapabilities::default(),
                 }],
-                supported_protocols: vec![ProviderProtocol::OpenAi],
+                supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
                 endpoints: vec![ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAi,
+                    protocol: ProviderProtocol::OpenAiCompletions,
                     enabled: true,
                     base_url: "https://api.deepseek.com/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
@@ -1750,7 +1891,7 @@ mod tests {
             providers: vec![ProviderConfigStorage {
                 id: "provider-deepseek".to_string(),
                 name: "deepseek".to_string(),
-                protocol: ProviderProtocol::OpenAi,
+                protocol: ProviderProtocol::OpenAiCompletions,
                 base_url: "https://api.deepseek.com/v1".to_string(),
                 auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
@@ -1767,7 +1908,8 @@ mod tests {
                         capability_preset: ProviderCapabilityPreset::DeepseekChat,
                         reasoning_effort: None,
                         reasoning_budget_tokens: None,
-                        protocol: Some(ProviderProtocol::OpenAi),
+                        protocol: Some(ProviderProtocol::OpenAiCompletions),
+                        base_url: None,
                         capabilities: ProviderModelCapabilities::default(),
                     },
                     ProviderModelConfig {
@@ -1779,13 +1921,14 @@ mod tests {
                         capability_preset: ProviderCapabilityPreset::DeepseekReasoner,
                         reasoning_effort: Some(ProviderReasoningEffort::Medium),
                         reasoning_budget_tokens: None,
-                        protocol: Some(ProviderProtocol::OpenAi),
+                        protocol: Some(ProviderProtocol::OpenAiCompletions),
+                        base_url: None,
                         capabilities: ProviderModelCapabilities::default(),
                     },
                 ],
-                supported_protocols: vec![ProviderProtocol::OpenAi],
+                supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
                 endpoints: vec![ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAi,
+                    protocol: ProviderProtocol::OpenAiCompletions,
                     enabled: true,
                     base_url: "https://api.deepseek.com/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
@@ -1815,7 +1958,7 @@ mod tests {
             providers: vec![ProviderConfigStorage {
                 id: "provider-openai".to_string(),
                 name: "openai".to_string(),
-                protocol: ProviderProtocol::OpenAi,
+                protocol: ProviderProtocol::OpenAiCompletions,
                 base_url: "https://api.openai.com/v1".to_string(),
                 auth_type: ProviderAuthType::Auto,
                 api_key_env_var: "OPENAI_API_KEY".to_string(),
@@ -1832,7 +1975,8 @@ mod tests {
                         capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
                         reasoning_effort: Some(ProviderReasoningEffort::Medium),
                         reasoning_budget_tokens: None,
-                        protocol: Some(ProviderProtocol::OpenAi),
+                        protocol: Some(ProviderProtocol::OpenAiCompletions),
+                        base_url: None,
                         capabilities: ProviderModelCapabilities::default(),
                     },
                     ProviderModelConfig {
@@ -1844,13 +1988,14 @@ mod tests {
                         capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
                         reasoning_effort: Some(ProviderReasoningEffort::Medium),
                         reasoning_budget_tokens: None,
-                        protocol: Some(ProviderProtocol::OpenAi),
+                        protocol: Some(ProviderProtocol::OpenAiCompletions),
+                        base_url: None,
                         capabilities: ProviderModelCapabilities::default(),
                     },
                 ],
-                supported_protocols: vec![ProviderProtocol::OpenAi],
+                supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
                 endpoints: vec![ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAi,
+                    protocol: ProviderProtocol::OpenAiCompletions,
                     enabled: true,
                     base_url: "https://api.openai.com/v1".to_string(),
                     auth_type: ProviderAuthType::Auto,
@@ -1863,5 +2008,380 @@ mod tests {
         assert_eq!(provider.models.len(), 1);
         assert_eq!(provider.models[0].id, "model-gpt-5");
         assert_eq!(provider.selected_model_id.as_deref(), Some("model-gpt-5"));
+    }
+
+    fn temp_registry_root(label: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pony-agent-config-{label}-{stamp}"));
+        fs::create_dir_all(&root).expect("create temp registry root");
+        root
+    }
+
+    /// B6 别名四位置往返：provider.protocol / supportedProtocols[] /
+    /// endpoints[].protocol / models[].protocol 含旧值 → 读 → 存 → 全规范名。
+    #[test]
+    fn legacy_protocol_aliases_roundtrip_to_canonical_names_in_four_positions() {
+        let root = temp_registry_root("alias-roundtrip");
+        let path = root.join("providers.json");
+        fs::write(
+            &path,
+            r#"
+            {
+              "providers": [
+                {
+                  "id": "legacy-provider",
+                  "name": "legacy",
+                  "protocol": "openai",
+                  "base_url": "https://legacy.example/v1",
+                  "api_key_env_var": "LEGACY_API_KEY",
+                  "supported_protocols": ["anthropic"],
+                  "endpoints": [
+                    { "protocol": "openai", "enabled": true, "baseUrl": "https://legacy.example/v1", "authType": "auto" },
+                    { "protocol": "anthropic", "enabled": true, "baseUrl": "https://legacy.example/v1", "authType": "x-api-key" }
+                  ],
+                  "models": [
+                    {
+                      "id": "model-legacy",
+                      "name": "Legacy Model",
+                      "model": "claude-3-7-sonnet-latest",
+                      "temperature": 0.2,
+                      "maxOutputTokens": 8192,
+                      "capabilityPreset": "anthropic-thinking",
+                      "protocol": "anthropic"
+                    }
+                  ],
+                  "selected_model_id": "model-legacy"
+                }
+              ],
+              "selected_provider_id": "legacy-provider"
+            }
+            "#,
+        )
+        .expect("write legacy registry");
+
+        let store = ProviderRegistryStore::with_path(&path);
+        // 反序列化接受旧值（serde alias）。
+        let view = store.load_view();
+        assert_eq!(view.providers.len(), 1);
+        assert!(matches!(
+            view.providers[0].models[0].protocol,
+            Some(ProviderProtocol::AnthropicMessages)
+        ));
+
+        // 保存后只写规范名（View 与落盘文件两层校验）。
+        let saved = store
+            .save_view_without_env_sync(view)
+            .expect("save normalized registry");
+        assert_eq!(
+            saved.providers[0].supported_protocols,
+            vec![
+                ProviderProtocol::AnthropicMessages,
+                ProviderProtocol::OpenAiCompletions
+            ]
+        );
+        for endpoint in &saved.providers[0].endpoints {
+            assert!(matches!(
+                endpoint.protocol,
+                ProviderProtocol::OpenAiCompletions
+                    | ProviderProtocol::OpenAiResponses
+                    | ProviderProtocol::AnthropicMessages
+            ));
+        }
+        assert_eq!(
+            saved.providers[0].models[0].protocol,
+            Some(ProviderProtocol::AnthropicMessages)
+        );
+
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read persisted registry"))
+                .expect("persisted registry should be JSON");
+        let provider_json = &persisted["providers"][0];
+        assert_eq!(provider_json["protocol"], "anthropic-messages");
+        // ProviderConfigStorage（落盘层）provider 级字段为 snake_case。
+        assert_eq!(
+            provider_json["supported_protocols"][0],
+            "anthropic-messages"
+        );
+        // 三协议槽位各一个 endpoint；所有协议字段只允许规范名。
+        let endpoint_protocols: Vec<String> = provider_json["endpoints"]
+            .as_array()
+            .expect("endpoints array")
+            .iter()
+            .map(|entry| entry["protocol"].as_str().expect("endpoint protocol").to_string())
+            .collect();
+        assert_eq!(
+            endpoint_protocols,
+            vec![
+                "openai-completions".to_string(),
+                "openai-responses".to_string(),
+                "anthropic-messages".to_string(),
+            ]
+        );
+        assert_eq!(
+            provider_json["models"][0]["protocol"],
+            "anthropic-messages"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// B6 resolve_selection 解析序：模型覆盖 > enabled endpoint > 主协议 base_url /
+    /// 默认值；endpoint 显式 auth 尊重、Auto 按家族推导（请求期）。
+    #[test]
+    fn resolve_selection_prefers_model_overrides_then_endpoint_chain() {
+        let root = temp_registry_root("resolve-selection");
+        let path = root.join("providers.json");
+        let storage = ProviderRegistryStorage {
+            providers: vec![ProviderConfigStorage {
+                id: "multi-protocol".to_string(),
+                name: "multi".to_string(),
+                protocol: ProviderProtocol::OpenAiCompletions,
+                // 与 completions endpoint 一致（normalize 会把主协议 endpoint URL
+                // 同步为 provider.base_url，两者必须同值才能测出链路而非同步效应）。
+                base_url: "https://chat.example/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
+                api_key_env_var: "MULTI_API_KEY".to_string(),
+                secret_ref: default_secret_ref("multi-protocol"),
+                api_key_value: String::new(),
+                selected_model_id: Some("model-inherit".to_string()),
+                models: vec![
+                    ProviderModelConfig {
+                        id: "model-inherit".to_string(),
+                        name: "Inherit".to_string(),
+                        model: "gpt-4.1-mini".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::OpenAiChat,
+                        reasoning_effort: None,
+                        reasoning_budget_tokens: None,
+                        protocol: None,
+                        base_url: None,
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                    ProviderModelConfig {
+                        id: "model-anthropic-override".to_string(),
+                        name: "Anthropic Override".to_string(),
+                        model: "claude-3-7-sonnet-latest".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::AnthropicThinking,
+                        reasoning_effort: None,
+                        reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::AnthropicMessages),
+                        base_url: Some("  https://override.example/  ".to_string()),
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                    ProviderModelConfig {
+                        id: "model-responses-endpoint".to_string(),
+                        name: "Responses Endpoint".to_string(),
+                        model: "gpt-5.4".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
+                        reasoning_effort: None,
+                        reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::OpenAiResponses),
+                        base_url: None,
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                    ProviderModelConfig {
+                        id: "model-explicit-auth".to_string(),
+                        name: "Explicit Auth".to_string(),
+                        model: "gpt-4.1-mini".to_string(),
+                        temperature: 0.2,
+                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                        capability_preset: ProviderCapabilityPreset::OpenAiChat,
+                        reasoning_effort: None,
+                        reasoning_budget_tokens: None,
+                        protocol: Some(ProviderProtocol::OpenAiCompletions),
+                        base_url: None,
+                        capabilities: ProviderModelCapabilities::default(),
+                    },
+                ],
+                supported_protocols: vec![
+                    ProviderProtocol::OpenAiCompletions,
+                    ProviderProtocol::OpenAiResponses,
+                    ProviderProtocol::AnthropicMessages,
+                ],
+                endpoints: vec![
+                    ProviderProtocolEndpoint {
+                        protocol: ProviderProtocol::OpenAiCompletions,
+                        enabled: true,
+                        base_url: "https://chat.example/v1".to_string(),
+                        auth_type: ProviderAuthType::Auto,
+                    },
+                    ProviderProtocolEndpoint {
+                        protocol: ProviderProtocol::OpenAiResponses,
+                        enabled: true,
+                        base_url: "https://responses.example/v1".to_string(),
+                        auth_type: ProviderAuthType::Bearer,
+                    },
+                    ProviderProtocolEndpoint {
+                        protocol: ProviderProtocol::AnthropicMessages,
+                        enabled: false,
+                        base_url: default_base_url(&ProviderProtocol::AnthropicMessages)
+                            .to_string(),
+                        auth_type: ProviderAuthType::XApiKey,
+                    },
+                ],
+            }],
+            selected_provider_id: Some("multi-protocol".to_string()),
+        };
+        fs::write(&path, serde_json::to_string(&storage).expect("serialize storage"))
+            .expect("write storage");
+        let store = ProviderRegistryStore::with_path(&path);
+
+        // 无覆盖：走 completions enabled endpoint 的 URL，Auto 保持 Auto。
+        let inherited = store.resolve_selection(Some("multi-protocol"), Some("model-inherit"));
+        assert_eq!(inherited.base_url, "https://chat.example/v1");
+        assert_eq!(inherited.auth_type, ProviderAuthType::Auto);
+
+        // 模型级协议 + base_url 覆盖：trim 后生效，thinking pattern 按 anthropic 家族解析。
+        let overridden =
+            store.resolve_selection(Some("multi-protocol"), Some("model-anthropic-override"));
+        assert_eq!(overridden.protocol, ProviderProtocol::AnthropicMessages);
+        assert_eq!(overridden.base_url, "https://override.example/");
+        assert_eq!(
+            overridden.thinking_param_pattern,
+            ThinkingParamPattern::AnthropicThinking
+        );
+
+        // 模型协议无覆盖：该协议 enabled endpoint 提供URL + 显式 Bearer 尊重。
+        let responses = store.resolve_selection(Some("multi-protocol"), Some("model-responses-endpoint"));
+        assert_eq!(responses.protocol, ProviderProtocol::OpenAiResponses);
+        assert_eq!(responses.base_url, "https://responses.example/v1");
+        assert_eq!(responses.auth_type, ProviderAuthType::Bearer);
+
+        // anthropic endpoint 未启用：回落主协议 base_url？协议不一致 → 协议默认值；
+        // 但显式 x-api-key auth 来自未启用 endpoint 不应生效 → Auto。
+        // （本用例中 anthropic 走的是模型覆盖路径；这里补一个无覆盖且 endpoint 关闭的路径。）
+        let disabled_endpoint_storage = ProviderRegistryStorage {
+            providers: vec![ProviderConfigStorage {
+                id: "closed-shop".to_string(),
+                name: "closed".to_string(),
+                protocol: ProviderProtocol::OpenAiCompletions,
+                base_url: "https://main.example/v1".to_string(),
+                auth_type: ProviderAuthType::Auto,
+                api_key_env_var: "CLOSED_API_KEY".to_string(),
+                secret_ref: default_secret_ref("closed-shop"),
+                api_key_value: String::new(),
+                selected_model_id: Some("model-anthropic".to_string()),
+                models: vec![ProviderModelConfig {
+                    id: "model-anthropic".to_string(),
+                    name: "Anthropic No Endpoint".to_string(),
+                    model: "claude-3-7-sonnet-latest".to_string(),
+                    temperature: 0.2,
+                    max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                    capability_preset: ProviderCapabilityPreset::AnthropicThinking,
+                    reasoning_effort: None,
+                    reasoning_budget_tokens: None,
+                    protocol: Some(ProviderProtocol::AnthropicMessages),
+                    base_url: None,
+                    capabilities: ProviderModelCapabilities::default(),
+                }],
+                supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
+                endpoints: vec![ProviderProtocolEndpoint {
+                    protocol: ProviderProtocol::OpenAiCompletions,
+                    enabled: true,
+                    base_url: "https://chat.example/v1".to_string(),
+                    auth_type: ProviderAuthType::Auto,
+                }],
+            }],
+            selected_provider_id: Some("closed-shop".to_string()),
+        };
+        let closed_path = root.join("closed-providers.json");
+        fs::write(
+            &closed_path,
+            serde_json::to_string(&disabled_endpoint_storage).expect("serialize storage"),
+        )
+        .expect("write storage");
+        let closed_store = ProviderRegistryStore::with_path(&closed_path);
+        let resolved = closed_store.resolve_selection(Some("closed-shop"), Some("model-anthropic"));
+        // anthropic 模型协议 ∉ supported（仅 completions）→ 回落主协议 openai-completions，
+        // base_url 走其 enabled endpoint（normalize 已将其与 provider.base_url 同步为
+        // main.example，此处验证回落链而非覆盖链）。
+        assert_eq!(resolved.protocol, ProviderProtocol::OpenAiCompletions);
+        assert_eq!(resolved.base_url, "https://main.example/v1");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// R6：registry 文件反序列化失败时先备份 `*.invalid-<ts>` 再回落默认注册表。
+    #[test]
+    fn load_storage_backs_up_unparseable_registry_before_default_fallback() {
+        let root = temp_registry_root("invalid-backup");
+        let path = root.join("providers.json");
+        fs::write(&path, "{ this is definitely not valid json !!").expect("write broken registry");
+
+        let store = ProviderRegistryStore::with_path(&path);
+        let view = store.load_view();
+
+        // 回落默认注册表。
+        assert!(view
+            .providers
+            .iter()
+            .any(|provider| provider.id == "provider-ppx"));
+
+        // 同目录存在 invalid 备份，内容即原文件。
+        let backup = fs::read_dir(&root)
+            .expect("list registry dir")
+            .filter_map(|entry| entry.ok())
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("providers.json.invalid-")
+            })
+            .expect("invalid registry backup should exist");
+        let backed_up = fs::read_to_string(backup.path()).expect("read backup");
+        assert!(backed_up.contains("definitely not valid json"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_api_key_resolves_exact_id_only_and_never_falls_back() {
+        // code-review B/P1-2：id 未命中必须返回 None，禁止回退选中/首个提供商，
+        // 否则构成「A 的密钥发往为 B 填写的 URL」的凭证错配通路。
+        let root = temp_registry_root("api-key-chain");
+        let path = root.join("providers.json");
+        fs::create_dir_all(&root).expect("mkdir");
+        // 单一自定义提供商、无 secret_ref/无存储密钥；避免默认注册表与本机环境变量干扰。
+        fs::write(
+            &path,
+            r#"{"providers":[{"id":"p-a","name":"a","protocol":"openai-completions","base_url":"https://a.example.invalid/v1","api_key_env_var":"PONY_TEST_UNSET_KEY","models":[]}],"selectedProviderId":"p-a"}"#,
+        )
+        .expect("write registry");
+
+        let store = ProviderRegistryStore::with_path(&path);
+        assert_eq!(store.provider_api_key(Some("p-a")), None);
+        assert_eq!(store.provider_api_key(Some("provider-not-exists")), None);
+        assert_eq!(store.provider_api_key(None), None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_endpoint_auth_prefers_explicit_override_and_defaults_to_auto() {
+        // 缺省 registry → 默认模板无显式 auth 覆盖：Auto；未知提供商/协议同样 Auto。
+        let root = temp_registry_root("endpoint-auth");
+        let store = ProviderRegistryStore::with_path(root.join("providers.json"));
+        let view = store.load_view();
+        let provider = &view.providers[0];
+        let protocol = provider.protocol.clone();
+
+        assert!(matches!(
+            store.provider_endpoint_auth(Some(&provider.id), &protocol),
+            ProviderAuthType::Auto
+        ));
+        assert!(matches!(
+            store.provider_endpoint_auth(Some("provider-not-exists"), &protocol),
+            ProviderAuthType::Auto
+        ));
+
+        let _ = fs::remove_dir_all(root);
     }
 }
