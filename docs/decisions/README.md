@@ -54,6 +54,7 @@
 - [0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转](0012-app-update-check-via-github-releases.md)
 - [0013 工作台导航精简：观测右栏浮动入口、配置页收敛与提供商页层次折叠](0013-workbench-nav-observation-entry-and-provider-hierarchy.md)
 - [0014 提供商协议三值化与模型目录：Responses 适配、模型级覆盖与收起取消编辑](0014-provider-protocol-tri-value-and-model-catalog.md)
+- [0015 侧边栏三级树的持久化字段、删除归属重写与 dialog 插件依赖](0015-workspace-sidebar-persistence-and-dialog-plugin.md)
 
 ### 已接替
 
