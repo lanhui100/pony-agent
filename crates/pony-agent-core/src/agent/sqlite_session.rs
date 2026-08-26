@@ -1824,6 +1824,8 @@ impl SqliteSessionBackend {
                 history_branches: Vec::new(),
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
+                title_override: None,
+                archived: false,
                 event_watermark: 0,
                 last_commit_watermark: 0,
             };
@@ -2008,6 +2010,11 @@ impl SqliteSessionBackend {
                 event_watermark: 0,
                 last_commit_watermark: 0,
                 workspace_id,
+                // PA-089 规范化表尚无 titleOverride/archived 列（回填前该路径不承载
+                // 数据）；回填阶段必须同步投影这两列，否则归档/改名在规范化路径丢失
+                // （ADR 0015）。
+                title_override: None,
+                archived: false,
             };
             // 记忆四件套（memory_json）
             if let Some(raw) = memory_json {
@@ -3423,6 +3430,39 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn title_override_and_archived_roundtrip_through_sqlite_blob() {
+        // 侧边栏三级树（ADR 0015）：override/archived 随会话 blob 走既有序列化，
+        // LegacyBlob 与 WriteSeparate 两模式同路径——重启后改名/归档不得丢失。
+        let dir = unique_dir("title-archived");
+        fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+
+        for mode in [
+            SeparateTraceTableMode::DualWrite,
+            SeparateTraceTableMode::WriteSeparate,
+        ] {
+            let backend = SqliteSessionBackend::new_with_trace_mode(db_path.clone(), mode);
+            let mut store = PersistedStore::default();
+            let mut session = minimal_session("s1", "derived-title", 100);
+            session.title_override = Some("用户命名".to_string());
+            session.archived = true;
+            store.sessions.insert("s1".to_string(), session);
+            backend.save_store(&store);
+
+            let loaded = backend.load_store().unwrap();
+            let restored = loaded.sessions.get("s1").expect("session blob");
+            assert_eq!(
+                restored.title_override.as_deref(),
+                Some("用户命名"),
+                "mode={mode:?}"
+            );
+            assert!(restored.archived, "mode={mode:?}");
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     fn minimal_session(id: &str, title: &str, updated_at_ms: u64) -> SessionState {
         SessionState {
             conversation_id: id.to_string(),
@@ -3444,6 +3484,8 @@ mod tests {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         }
@@ -4161,6 +4203,8 @@ mod tests {
             history_branches: Vec::new(),
             history_cursor: Default::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         };

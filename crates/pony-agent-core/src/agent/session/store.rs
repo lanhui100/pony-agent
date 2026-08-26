@@ -1555,12 +1555,13 @@ impl SessionStore {
             .filter(|session| session_is_persistable(session))
             .map(|session| SessionOverview {
                 conversation_id: session.conversation_id.clone(),
-                title: session.title.clone(),
+                title: session.effective_title().to_string(),
                 summary: session.summary.clone(),
                 turn_count: session.turn_count,
                 last_referenced_file: session.last_referenced_file.clone(),
                 updated_at_ms: session.updated_at_ms,
                 workspace_id: session.workspace_id.clone(),
+                archived: session.archived,
             })
             .collect::<Vec<_>>();
 
@@ -1829,6 +1830,8 @@ impl SessionStore {
                 event_watermark: 0,
                 last_commit_watermark: 0,
                 workspace_id: None,
+                title_override: None,
+                archived: false,
             })
     }
 
@@ -1846,6 +1849,63 @@ impl SessionStore {
             crate::agent::workspace::create_workspace_entry(&mut self.workspaces, name, root_path)?;
         self.save_to_backend();
         Ok(record)
+    }
+
+    /// 重命名工作区（侧边栏三级树）：校验与 id/root 不变性由 workspace 域负责，
+    /// 成功即全量落盘。未知 id 返回错误。
+    pub fn rename_workspace(
+        &mut self,
+        workspace_id: &str,
+        name: &str,
+    ) -> Result<crate::agent::workspace::WorkspaceRecord, String> {
+        let record = crate::agent::workspace::rename_workspace_entry(&mut self.workspaces, workspace_id, name)?;
+        self.save_to_backend();
+        Ok(record)
+    }
+
+    /// 删除工作区注册（仅注册表语义）：default 与未知 id 拒绝；名下会话的
+    /// workspace_id 在同一次落盘内批量重写为 default——附件导入与工具根两条
+    /// 运行时路径随之收敛到默认工作区，不再出现"硬失败 vs 静默换根"分叉。
+    pub fn delete_workspace(&mut self, workspace_id: &str) -> Result<(), String> {
+        crate::agent::workspace::delete_workspace_entry(&mut self.workspaces, workspace_id)?;
+        for session in self.sessions.values_mut() {
+            if session.workspace_id.as_deref() == Some(workspace_id) {
+                session.workspace_id = Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string());
+            }
+        }
+        self.save_to_backend();
+        Ok(())
+    }
+
+    /// 会话重命名：写入独立 override 字段（每轮派生刷新不再冲掉）。
+    /// 校验：trim 后非空、≤64 字符；会话必须已存在（不隐式创建）；同值重命名
+    /// 视为成功 no-op。
+    pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<(), String> {
+        let trimmed = crate::agent::workspace::validate_display_name(title)
+            .map_err(|error| format!("会话重命名非法：{error}"))?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("会话不存在：{session_id}"))?;
+        if session.title_override.as_deref() != Some(trimmed.as_str()) {
+            session.title_override = Some(trimmed);
+            self.save_to_backend();
+        }
+        Ok(())
+    }
+
+    /// 归档会话：置 archived 标记并落盘；幂等（重复归档为 no-op 成功）。
+    /// 日志、数据与工作区账户位不动。
+    pub fn archive_session(&mut self, session_id: &str) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("会话不存在：{session_id}"))?;
+        if !session.archived {
+            session.archived = true;
+            self.save_to_backend();
+        }
+        Ok(())
     }
 
     pub fn resolve_workspace_root(&self, workspace_id: Option<&str>) -> Result<String, String> {
@@ -2550,6 +2610,8 @@ fn default_snapshot_for_session(session_key: &str, node_id: Option<&str>) -> Ses
         event_watermark: 0,
         last_commit_watermark: 0,
         workspace_id: None,
+        title_override: None,
+        archived: false,
     };
     snapshot_from_state(&session, Vec::new(), node_id)
 }
@@ -2611,7 +2673,9 @@ fn snapshot_from_state(
         enrich_history_from_traces(&mut enriched_history, &selected_node.turn_trace_history);
         return SessionSnapshot {
             conversation_id: session.conversation_id.clone(),
-            title: selected_node.title.clone(),
+            // 顶层标题走单一投影点：override 优先于节点冻结的派生标题
+            // （历史节点列表本身仍保留提交时刻标题，见 project_lightweight_nodes）。
+            title: session.effective_title().to_string(),
             summary: selected_node.summary.clone(),
             history: enriched_history,
             attachment_assets,
@@ -2645,7 +2709,7 @@ fn snapshot_from_state(
     enrich_history_from_traces(&mut enriched_history, &session.turn_trace_history);
     SessionSnapshot {
         conversation_id: session.conversation_id.clone(),
-        title: session.title.clone(),
+        title: session.effective_title().to_string(),
         summary: session.summary.clone(),
         history: enriched_history,
         attachment_assets,
@@ -2851,6 +2915,8 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 event_watermark: 0,
                 last_commit_watermark: 0,
                 workspace_id: session.workspace_id.clone(),
+                title_override: None,
+                archived: false,
             };
             refresh_session_metadata(&mut materialized, false);
             session.history_nodes.push(HistoryNode {
@@ -3738,7 +3804,9 @@ fn new_history_branch_id(session: &SessionState, ordinal: usize) -> String {
     format!("{}-branch-{}", session.conversation_id, ordinal)
 }
 
-fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) {
+/// 会话投影元数据刷新（标题/摘要/计数等）。pub(in session) 仅为让兄弟测试模块
+/// 直接驱动两个派生分支；生产调用方均在 store 内部。
+pub(in crate::agent::session) fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) {
     normalize_trace_timeline_entries(&mut session.turn_trace_history);
     session.turn_count = session
         .history
@@ -3750,9 +3818,14 @@ fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) 
         .iter()
         .rev()
         .find_map(|message| extract_explicit_file_name(&message.content));
+    // 用户显式标题（override）存在时，两个派生分支都不得覆盖 title 字段的
+    // 投影来源；派生值照常计算但仅存于 session.title，effective_title() 恒取 override。
+    let title_overridden = session.title_override.is_some();
     if session.history.is_empty() && !session.turn_trace_history.is_empty() {
         if let Some(trace) = session.turn_trace_history.last() {
-            session.title = trace.title.clone();
+            if !title_overridden {
+                session.title = trace.title.clone();
+            }
             session.summary = trace
                 .session_summary
                 .clone()
@@ -3761,7 +3834,9 @@ fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) 
                 .unwrap_or_else(|| DEFAULT_SESSION_SUMMARY.to_string());
         }
     } else {
-        session.title = build_title(&session.history);
+        if !title_overridden {
+            session.title = build_title(&session.history);
+        }
         session.summary =
             build_summary(session.turn_count, session.last_referenced_file.as_deref());
     }
@@ -4793,6 +4868,8 @@ fn default_sessions() -> SessionMap {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },

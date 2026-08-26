@@ -352,6 +352,27 @@ pub struct SessionState {
     /// Workspace 归属（PA-079）：None → 投影为默认 workspace。serde default 兼容旧数据。
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// 用户显式标题（侧边栏三级树）：存在时在所有投影点位优先于派生标题；
+    /// 派生链路（build_title / trace.title / hydrate 回灌）照常维护 `title` 字段，
+    /// 本字段独立使其不受覆盖。serde default 兼容旧数据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_override: Option<String>,
+    /// 归档标记（注册表级隐藏语义随会话持久化）：分组面据此全量隐藏，日志与
+    /// 数据不动；清标志即可恢复原账户位（恢复 UI 另立迭代）。serde default 兼容旧数据。
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl SessionState {
+    /// 单一标题投影点：override 存在时优先，否则回退派生标题。
+    /// 所有面向用户的顶层标题字段（list_sessions 行、snapshot 头部——含
+    /// 选中历史节点分支）必须经此取值，禁止直读 `.title` 或 `node.title`。
+    pub fn effective_title(&self) -> &str {
+        match self.title_override.as_deref() {
+            Some(overridden) => overridden,
+            None => self.title.as_str(),
+        }
+    }
 }
 /// Runtime environment information captured at session snapshot build time.
 /// Injected into the model context so the agent understands its execution environment.
@@ -555,6 +576,9 @@ pub struct SessionOverview {
     pub updated_at_ms: u64,
     /// Workspace 归属投影（PA-079）：None → 默认 workspace。
     pub workspace_id: Option<String>,
+    /// 归档标记投影（侧边栏三级树）：分组面前端据此过滤；后端不过滤，
+    /// 为后续恢复入口保留数据面。
+    pub archived: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

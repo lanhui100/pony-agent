@@ -151,6 +151,8 @@ fn snapshot_enriched_history_metadata() {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -261,6 +263,8 @@ fn pa095_seed_single_node_session(store: &mut SessionStore, session_id: &str) {
                 ..Default::default()
             },
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -507,6 +511,8 @@ fn checkout_history_node_metadata() {
                 ..Default::default()
             },
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -623,6 +629,8 @@ fn ensure_history_graph_inserts_initial_root_node_for_legacy_sessions() {
                 ..Default::default()
             },
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -2866,6 +2874,8 @@ fn snapshot_clears_legacy_native_transcript_without_reasoning_content() {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -2934,6 +2944,8 @@ fn snapshot_clears_tool_turn_transcript_when_final_assistant_lacks_reasoning() {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -3022,6 +3034,8 @@ fn snapshot_clears_incomplete_native_tool_roundtrip() {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -3095,6 +3109,8 @@ fn snapshot_keeps_structured_reasoning_content_in_native_transcript() {
             history_branches: Vec::new(),
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
+            title_override: None,
+            archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
         },
@@ -4587,6 +4603,8 @@ fn session_state_for_backend_strips_node_traces_and_writes_refs() {
         history_branches: Vec::new(),
         history_cursor: HistoryCursor::default(),
         workspace_id: None,
+        title_override: None,
+        archived: false,
         event_watermark: 0,
         last_commit_watermark: 0,
     };
@@ -4639,6 +4657,8 @@ fn session_state_for_backend_keeps_legacy_blob_intact_under_write_separate() {
         history_branches: Vec::new(),
         history_cursor: HistoryCursor::default(),
         workspace_id: None,
+        title_override: None,
+        archived: false,
         event_watermark: 0,
         last_commit_watermark: 0,
     };
@@ -4740,6 +4760,8 @@ fn collect_trace_union_merges_top_level_and_node_traces() {
         history_branches: Vec::new(),
         history_cursor: HistoryCursor::default(),
         workspace_id: None,
+        title_override: None,
+        archived: false,
         event_watermark: 0,
         last_commit_watermark: 0,
     };
@@ -5281,4 +5303,196 @@ fn pa094_trace_and_message_views_same_source() {
         Some("hi"),
         "message and trace share the same event-derived text"
     );
+}
+
+// ── 侧边栏三级树：标题 override / 归档 / 删除归属重写 ─────────────────────────
+
+fn find_overview<'a>(
+    sessions: &'a [crate::agent::session::SessionOverview],
+    conversation_id: &str,
+) -> &'a crate::agent::session::SessionOverview {
+    sessions
+        .iter()
+        .find(|session| session.conversation_id == conversation_id)
+        .unwrap_or_else(|| panic!("overview missing: {conversation_id}"))
+}
+
+#[test]
+fn session_rename_writes_override_and_survives_refresh_branches() {
+    let mut store = SessionStore::memory_only();
+    store.append_turn(
+        Some("preview"),
+        "Please inspect runtime.rs session switching behavior.",
+        "I will check it.",
+        None,
+        Vec::new(),
+    );
+    // 派生标题先确认生效（首条用户消息预览）。
+    assert_eq!(
+        find_overview(&store.list_sessions(), "preview").title,
+        "Please inspect runtime.rs se..."
+    );
+
+    store.rename_session("preview", "我的自定义标题").unwrap();
+    // list_sessions 投影走 override。
+    assert_eq!(
+        find_overview(&store.list_sessions(), "preview").title,
+        "我的自定义标题"
+    );
+    // snapshot（主视图）投影走 override。
+    let snapshot = store.snapshot(Some("preview"), &[]);
+    assert_eq!(snapshot.title, "我的自定义标题");
+
+    // 再来一轮：history 分支的 build_title 不得覆盖 override。
+    store.append_turn(Some("preview"), "second turn message", "ok", None, Vec::new());
+    assert_eq!(
+        find_overview(&store.list_sessions(), "preview").title,
+        "我的自定义标题"
+    );
+    // 同值重命名 = 成功 no-op。
+    store.rename_session("preview", "我的自定义标题").unwrap();
+    assert_eq!(
+        find_overview(&store.list_sessions(), "preview").title,
+        "我的自定义标题"
+    );
+}
+
+#[test]
+fn rename_session_validates_input_and_missing_session() {
+    let mut store = SessionStore::memory_only();
+    store.append_turn(Some("s1"), "first", "reply", None, Vec::new());
+
+    assert!(store.rename_session("s1", "   ").is_err());
+    assert!(store
+        .rename_session("s1", &"长".repeat(65))
+        .unwrap_err()
+        .contains("64"));
+    assert!(store.rename_session("missing-session", "任意").is_err());
+
+    // 校验失败不产生副作用。
+    assert!(store.sessions["s1"].title_override.is_none());
+}
+
+#[test]
+fn override_beats_both_refresh_branches() {
+    // 分支一：history 为空但 trace 存在 → trace.title 派生分支。
+    // 分支二：history 非空 → build_title 派生分支。
+    // 两分支在 override 存在时都必须跳过 title 赋值：effective_title 恒取
+    // override，且底层 title 字段不被派生值污染。
+    let mut store = SessionStore::memory_only();
+
+    store.ensure_session("trace-only");
+    {
+        let session = store.sessions.get_mut("trace-only").unwrap();
+        session.turn_trace_history.push(TurnTraceRecord {
+            title: "trace 派生标题".to_string(),
+            ..Default::default()
+        });
+        session.title_override = Some("用户命名".to_string());
+    }
+    {
+        let session = store.sessions.get_mut("trace-only").unwrap();
+        super::store::refresh_session_metadata(session, false);
+        assert_eq!(session.effective_title(), "用户命名");
+        assert_ne!(
+            session.title, "trace 派生标题",
+            "override 存在时 trace 分支不得改写 title 字段"
+        );
+    }
+
+    store.ensure_session("history-full");
+    {
+        let session = store.sessions.get_mut("history-full").unwrap();
+        session.history.push(TurnHistoryMessage {
+            role: "user".to_string(),
+            content: "please derive a title from this".to_string(),
+            attachments: Vec::new(),
+            ..Default::default()
+        });
+        session.title_override = Some("另一命名".to_string());
+    }
+    {
+        let session = store.sessions.get_mut("history-full").unwrap();
+        super::store::refresh_session_metadata(session, false);
+        assert_eq!(session.effective_title(), "另一命名");
+        assert_ne!(
+            session.title, "please derive a title fro...",
+            "override 存在时 build_title 分支不得改写 title 字段"
+        );
+    }
+}
+
+#[test]
+fn archive_is_idempotent_and_projects_flag() {
+    let mut store = SessionStore::memory_only();
+    store.append_turn(Some("arch"), "first message", "reply", None, Vec::new());
+
+    store.archive_session("arch").unwrap();
+    assert!(
+        find_overview(&store.list_sessions(), "arch").archived,
+        "归档后 overview 投影 archived=true"
+    );
+    // 幂等：重复归档成功且仍为 true。
+    store.archive_session("arch").unwrap();
+    assert!(find_overview(&store.list_sessions(), "arch").archived);
+    // 未归档会话恒为 false。
+    store.append_turn(Some("live"), "another", "reply", None, Vec::new());
+    assert!(!find_overview(&store.list_sessions(), "live").archived);
+    assert!(store.archive_session("missing").is_err());
+}
+
+#[test]
+fn workspace_delete_rewrites_member_sessions_to_default() {
+    let root = std::env::temp_dir().join(format!("pa-tree-del-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut store = SessionStore::memory_only();
+    let record = store.create_workspace("Doomed", &root.display().to_string()).unwrap();
+
+    store.append_turn(Some("member"), "hello workspace", "reply", None, Vec::new());
+    store.stamp_workspace_id("member", &record.id);
+    assert_eq!(
+        find_overview(&store.list_sessions(), "member")
+            .workspace_id
+            .as_deref(),
+        Some(record.id.as_str())
+    );
+
+    store.delete_workspace(&record.id).unwrap();
+    // 注册表已无该 id；resolve 失败（注册层面）。
+    assert!(!store.list_workspaces().iter().any(|w| w.id == record.id));
+    // 名下会话归属被重写为 default；默认根解析可用（附件导入路径恢复）。
+    assert_eq!(
+        find_overview(&store.list_sessions(), "member")
+            .workspace_id
+            .as_deref(),
+        Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
+    );
+    assert!(store.resolve_workspace_root(None).is_ok());
+    // default 拒删。
+    assert!(store
+        .delete_workspace(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
+        .is_err());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn session_state_new_fields_roundtrip_and_default_for_legacy_blobs() {
+    let mut store = SessionStore::memory_only();
+    store.append_turn(Some("rt"), "round trip", "reply", None, Vec::new());
+    store.rename_session("rt", "改名后").unwrap();
+    store.archive_session("rt").unwrap();
+
+    let serialized = serde_json::to_value(&store.sessions["rt"]).unwrap();
+    assert_eq!(serialized["titleOverride"], "改名后");
+    assert_eq!(serialized["archived"], true);
+
+    // 旧 blob（两键皆无）→ serde default 还原为 None/false。
+    let mut legacy = serialized.clone();
+    legacy.as_object_mut().unwrap().remove("titleOverride");
+    legacy.as_object_mut().unwrap().remove("archived");
+    let restored: crate::agent::session::types::SessionState =
+        serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.title_override, None);
+    assert!(!restored.archived);
 }

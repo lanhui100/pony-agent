@@ -102,22 +102,38 @@ pub fn find_workspace_by_root(records: &[WorkspaceRecord], canonical_root: &str)
         .cloned()
 }
 
+/// 显示名长度上限（create/rename 共用）。
+pub const MAX_DISPLAY_NAME_CHARS: usize = 64;
+
+/// 显示名校验（工作区/会话共用）：trim 后非空、≤64 字符；返回 trim 结果。
+/// create 与 rename 共用同一规则，避免同一注册表两条写入路径不变量分叉。
+pub fn validate_display_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("名称不能为空".into());
+    }
+    if trimmed.chars().count() > MAX_DISPLAY_NAME_CHARS {
+        return Err(format!("名称不能超过 {} 个字符", MAX_DISPLAY_NAME_CHARS));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// 创建 workspace 条目并推入注册表（调用方负责持久化）。id 由 `ws-<slug>-<ts>` 生成。
 pub fn create_workspace_entry(
     records: &mut Vec<WorkspaceRecord>,
     name: &str,
     root_path: &str,
 ) -> Result<WorkspaceRecord, String> {
-    let trimmed_name = name.trim();
-    if trimmed_name.is_empty() {
-        return Err("workspace 名称不能为空".into());
-    }
+    let trimmed_name = validate_display_name(name).map_err(|error| format!("workspace {error}"))?;
     let canonical = normalize_workspace_root(root_path)?;
     if records.iter().any(|record| roots_match(&record.root_path, &canonical)) {
         return Err("workspace root 已存在（重复 root 拒绝）".into());
     }
+    if records.iter().any(|record| record.name == trimmed_name) {
+        return Err("已存在同名工作区".into());
+    }
 
-    let slug = slugify(trimmed_name);
+    let slug = slugify(&trimmed_name);
     let id = if slug.is_empty() {
         format!("ws-{}", now_ms())
     } else {
@@ -125,11 +141,58 @@ pub fn create_workspace_entry(
     };
     let record = WorkspaceRecord {
         id,
-        name: trimmed_name.to_string(),
+        name: trimmed_name,
         root_path: canonical,
     };
     records.push(record.clone());
     Ok(record)
+}
+
+/// 重命名工作区：仅改显示名；id 与 root 不变。校验规则与 create 一致，
+/// 重名判定排除自身（改名回当前名为 no-op 成功）。未知 id 报错。
+pub fn rename_workspace_entry(
+    records: &mut Vec<WorkspaceRecord>,
+    workspace_id: &str,
+    name: &str,
+) -> Result<WorkspaceRecord, String> {
+    let trimmed_name = validate_display_name(name).map_err(|error| format!("workspace {error}"))?;
+    // 先做只读校验（重名判定排除自身），再取可变借用，避免借用重叠。
+    if records
+        .iter()
+        .filter(|other| other.id != workspace_id)
+        .any(|other| other.name == trimmed_name)
+    {
+        return Err("已存在同名工作区".into());
+    }
+    let record = records
+        .iter_mut()
+        .find(|record| record.id == workspace_id)
+        .ok_or_else(|| format!("workspace 不存在：{workspace_id}"))?;
+    record.name = trimmed_name.clone();
+    Ok(WorkspaceRecord {
+        id: record.id.clone(),
+        name: trimmed_name,
+        root_path: record.root_path.clone(),
+    })
+}
+
+/// 删除工作区注册：default 保留字拒绝；未知 id 报错。只移除注册表记录——
+/// 目录、会话日志与会话数据均归调用方/其他机制所有，本函数不触碰。
+/// 调用方（SessionStore::delete_workspace）负责把名下会话归属重写为 default。
+pub fn delete_workspace_entry(
+    records: &mut Vec<WorkspaceRecord>,
+    workspace_id: &str,
+) -> Result<(), String> {
+    if workspace_id == DEFAULT_WORKSPACE_ID {
+        return Err("默认工作区不可删除".into());
+    }
+    match records.iter().position(|record| record.id == workspace_id) {
+        Some(index) => {
+            records.remove(index);
+            Ok(())
+        }
+        None => Err(format!("workspace 不存在：{workspace_id}")),
+    }
 }
 
 /// 解析 workspace id → root；id 为 None/缺省 → 默认 workspace root；找不到 → 错误。
@@ -253,5 +316,103 @@ mod tests {
         assert_eq!(normalize_win_prefix(r"\\?\C:\ws"), r"C:\ws");
         assert_eq!(normalize_win_prefix(r"\\?\UNC\server\share"), r"\\server\share");
         assert_eq!(normalize_win_prefix(r"C:\ws"), r"C:\ws");
+    }
+
+    // ── 侧边栏三级树（rename/delete/命名校验对称）─────────────────────────
+
+    #[test]
+    fn rename_updates_name_and_keeps_id_root() {
+        let root = unique_root("rename");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut records = Vec::new();
+        let created = create_workspace_entry(&mut records, "My Project", &root).unwrap();
+
+        let renamed = rename_workspace_entry(&mut records, &created.id, "Renamed Project").unwrap();
+        assert_eq!(renamed.name, "Renamed Project");
+        assert_eq!(renamed.id, created.id);
+        assert_eq!(renamed.root_path, created.root_path);
+        assert_eq!(records[0].name, "Renamed Project");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rename_validates_blank_overlong_unknown() {
+        let mut records = Vec::new();
+        let err_blank = rename_workspace_entry(&mut records, "ws-x", "   ");
+        assert!(err_blank.unwrap_err().contains("名称不能为空"));
+
+        let overlong = "长".repeat(65);
+        let err_long = rename_workspace_entry(&mut records, "ws-x", &overlong);
+        assert!(err_long.unwrap_err().contains("64"));
+
+        let err_unknown = rename_workspace_entry(&mut records, "ws-missing", "Any");
+        assert!(err_unknown.unwrap_err().contains("workspace 不存在"));
+    }
+
+    #[test]
+    fn rename_rejects_duplicate_but_allows_self_name() {
+        let root_a = unique_root("dupname-a");
+        let root_b = unique_root("dupname-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let mut records = Vec::new();
+        create_workspace_entry(&mut records, "Alpha", &root_a).unwrap();
+        let b = create_workspace_entry(&mut records, "Beta", &root_b).unwrap();
+
+        let err = rename_workspace_entry(&mut records, &b.id, "Alpha").unwrap_err();
+        assert!(err.contains("已存在同名工作区"));
+
+        // 改名回自身当前名：排除自身后无冲突 → 成功 no-op。
+        let same = rename_workspace_entry(&mut records, &b.id, "Beta").unwrap();
+        assert_eq!(same.name, "Beta");
+
+        let _ = std::fs::remove_dir_all(&root_a);
+        let _ = std::fs::remove_dir_all(&root_b);
+    }
+
+    #[test]
+    fn create_rejects_duplicate_name_and_overlong() {
+        let root_a = unique_root("createdup-a");
+        let root_b = unique_root("createdup-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let mut records = Vec::new();
+        create_workspace_entry(&mut records, "Same", &root_a).unwrap();
+        let err = create_workspace_entry(&mut records, "  Same  ", &root_b).unwrap_err();
+        assert!(err.contains("已存在同名工作区"));
+
+        let overlong = "x".repeat(65);
+        let err_long = create_workspace_entry(&mut records, &overlong, &root_b).unwrap_err();
+        assert!(err_long.contains("64"));
+
+        let _ = std::fs::remove_dir_all(&root_a);
+        let _ = std::fs::remove_dir_all(&root_b);
+    }
+
+    #[test]
+    fn delete_rejects_default_and_unknown_then_removes_target() {
+        let root = unique_root("delete");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut records = Vec::new();
+        records.push(WorkspaceRecord {
+            id: DEFAULT_WORKSPACE_ID.to_string(),
+            name: "默认工作区".to_string(),
+            root_path: "C:\\ws".to_string(),
+        });
+        let target = create_workspace_entry(&mut records, "Gone", &root).unwrap();
+
+        assert!(delete_workspace_entry(&mut records, DEFAULT_WORKSPACE_ID)
+            .unwrap_err()
+            .contains("不可删除"));
+        assert!(delete_workspace_entry(&mut records, "ws-nope")
+            .unwrap_err()
+            .contains("不存在"));
+
+        delete_workspace_entry(&mut records, &target.id).unwrap();
+        assert!(!records.iter().any(|record| record.id == target.id));
+        assert!(resolve_workspace_root(&records, Some(&target.id)).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

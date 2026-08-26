@@ -499,6 +499,51 @@ fn workspace_create(
         })
 }
 
+/// 重命名工作区（侧边栏三级树）：仅改显示名，id/root 不变；校验失败返回错误文案。
+#[tauri::command]
+fn workspace_rename(
+    control_plane: State<'_, HostControlPlane>,
+    workspace_id: String,
+    name: String,
+) -> Result<WorkspaceRecordView, String> {
+    control_plane
+        .rename_workspace(&workspace_id, &name)
+        .map(|workspace| WorkspaceRecordView {
+            id: workspace.id,
+            name: workspace.name,
+            root_path: workspace.root_path,
+        })
+}
+
+/// 删除工作区注册：目录与会话数据不动；名下会话归属重写为 default。
+/// default 与未知 id 拒绝。
+#[tauri::command]
+fn workspace_delete(
+    control_plane: State<'_, HostControlPlane>,
+    workspace_id: String,
+) -> Result<(), String> {
+    control_plane.delete_workspace(&workspace_id)
+}
+
+/// 会话重命名：写入持久化 override，后续每轮派生刷新不再覆盖。
+#[tauri::command]
+fn session_rename(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    control_plane.rename_session(&session_id, &title)
+}
+
+/// 归档会话：分组面全量隐藏（幂等）；日志与数据不动。
+#[tauri::command]
+fn session_archive(
+    control_plane: State<'_, HostControlPlane>,
+    session_id: String,
+) -> Result<(), String> {
+    control_plane.archive_session(&session_id)
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthorizedPathEntryView {
@@ -935,6 +980,10 @@ pub fn run() {
             import_attachment,
             workspace_list,
             workspace_create,
+            workspace_rename,
+            workspace_delete,
+            session_rename,
+            session_archive,
             authorize_path,
             revoke_authorization,
             list_authorizations,

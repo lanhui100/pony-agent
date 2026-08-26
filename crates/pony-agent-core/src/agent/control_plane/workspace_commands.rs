@@ -26,4 +26,48 @@ impl HostControlPlane {
             })
             .create_workspace(name, root_path)
     }
+
+    pub fn rename_workspace(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> Result<crate::agent::workspace::WorkspaceRecord, String> {
+        self.sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .rename_workspace(workspace_id, name)
+    }
+
+    pub fn delete_workspace(&self, workspace_id: &str) -> Result<(), String> {
+        self.sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .delete_workspace(workspace_id)
+    }
+
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<(), String> {
+        self.sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .rename_session(session_id, title)
+    }
+
+    pub fn archive_session(&self, session_id: &str) -> Result<(), String> {
+        self.sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .archive_session(session_id)
+    }
 }

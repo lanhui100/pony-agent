@@ -6,14 +6,14 @@
 - [x] P0-2 ADR 0015（持久化字段 ×2、dialog 插件、附件 resolve 分叉记录）+ decisions README 索引
 - [x] P0-3 Phase 0 对抗审核（双 reviewer）与采纳调优（P0×3：L2614 投影点、激活语义退役、default 行反向表述；P1/P2 全部采纳）
 
-## Phase 1——后端（types → workspace/store → 命令接线 → 测试）
+## Phase 1——后端（types → workspace/store → 命令接线 → 测试）✅
 
-- [ ] B1 `types.rs`：`SessionState.titleOverride` / `SessionState.archived`（serde default + skip_serializing_if）+ `effective_title()` + `SessionOverview.archived` 投影位
-- [ ] B2 `store.rs`：`list_sessions`/`snapshot` live 分支改用 effective_title；**`snapshot_at`/`snapshot_at_readonly` 选中节点分支（L2614）替换为 effective_title(session)**；`refresh_session_metadata` 在 override 存在时跳过两分支的 title 赋值（trace 分支 + build_title 分支）；hydrate 两处无害化回归验证
-- [ ] B3 `workspace.rs`：`rename_workspace_entry` / `delete_workspace_entry`；**create_workspace_entry 同步采纳命名校验（trim 非空 + ≤64 + 对其他工作区重名拒绝）**；单测矩阵（空白/超长/重名/未知id/default 拒删/id-root 不变/create 新规则）
-- [ ] B4 `store.rs`：`rename_session`（同值 no-op）/ `archive_session`（幂等）/ `rename_workspace` / `delete_workspace`（名下会话归属批量重写为 default 后 save_to_backend）
-- [ ] B5 control_plane 方法 + lib.rs 注册 `workspace_rename` / `workspace_delete` / `session_rename` / `session_archive`（camelCase 参数、rwlock poison-recovery 包装与 workspace_commands.rs 一致）
-- [ ] B6 cargo 测试矩阵：override 六类消费点位回归（含 rename→续轮→checkout 改名前节点→snapshot.title == override）；两种持久化模式往返（LegacyBlob/WriteSeparate）；旧 blob 无新字段解析兼容；无 override 派生标题钉住（首条用户消息 28 字符省略号）；archive 幂等与重启保持；delete 后 resolve 成功；遗留孤儿库启动渲染契约
+- [x] B1 `types.rs`：`SessionState.titleOverride` / `SessionState.archived`（serde default + skip_serializing_if）+ `effective_title()` + `SessionOverview.archived` 投影位
+- [x] B2 `store.rs`：`list_sessions`/`snapshot` live 分支改用 effective_title；**`snapshot_at`/`snapshot_at_readonly` 选中节点分支（L2614）替换为 effective_title(session)**；`refresh_session_metadata` 在 override 存在时跳过两分支的 title 赋值（trace 分支 + build_title 分支）；hydrate 两处无害化回归验证
+- [x] B3 `workspace.rs`：`rename_workspace_entry` / `delete_workspace_entry`；**create_workspace_entry 同步采纳命名校验（trim 非空 + ≤64 + 对其他工作区重名拒绝）**；单测矩阵（空白/超长/重名/未知id/default 拒删/id-root 不变/create 新规则）
+- [x] B4 `store.rs`：`rename_session`（同值 no-op）/ `archive_session`（幂等）/ `rename_workspace` / `delete_workspace`（名下会话归属批量重写为 default 后 save_to_backend）
+- [x] B5 control_plane 方法 + lib.rs 注册 `workspace_rename` / `workspace_delete` / `session_rename` / `session_archive`（camelCase 参数、rwlock poison-recovery 包装与 workspace_commands.rs 一致）
+- [x] B6 cargo 测试矩阵：override 六类消费点位回归（含 rename→续轮→checkout 改名前节点→snapshot.title == override）；两种持久化模式往返（LegacyBlob/WriteSeparate）；旧 blob 无新字段解析兼容；无 override 派生标题钉住（首条用户消息 28 字符省略号）；archive 幂等与重启保持；delete 后 resolve 成功；遗留孤儿库启动渲染契约
 
 ## Phase 2——前端基础件（与 Phase 1 并行）
 
