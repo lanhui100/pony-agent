@@ -3,6 +3,7 @@
 - Task ID: PA-100
 - 标题: Read/gather 暴露 startLine 分页参数；timeline 记录真实工具错误；429 感知退避
 - 状态: Done（2026-08-25，双轮 spec 审核 + 双 code review 通过，必须修复项全部落实）
+- 提交: 7c41d73（main）——与在途任务（provider 三值协议/模型目录）同文件区域交错，提交树经 HEAD+staged 补丁独立编译验证（core 888 passed / 回归 15 passed）；其 WIP 经 stash 舞步完整还原为未暂存状态
 - 复杂度: B（跨模块：tools.rs / dispatcher_composites.rs / trace_timeline.rs / provider::mod.rs / trace.ts / browser-preview.ts）
 - 负责人: orchestrator + implementation（本会话）；审核：spec reviewer×2、code reviewer×2（独立 subagent）
 - 创建时间: 2026-08-25
