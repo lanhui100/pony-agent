@@ -11,9 +11,9 @@
 - [x] B1 `types.rs`：`SessionState.titleOverride` / `SessionState.archived`（serde default + skip_serializing_if）+ `effective_title()` + `SessionOverview.archived` 投影位
 - [x] B2 `store.rs`：`list_sessions`/`snapshot` live 分支改用 effective_title；**`snapshot_at`/`snapshot_at_readonly` 选中节点分支（L2614）替换为 effective_title(session)**；`refresh_session_metadata` 在 override 存在时跳过两分支的 title 赋值（trace 分支 + build_title 分支）；hydrate 两处无害化回归验证
 - [x] B3 `workspace.rs`：`rename_workspace_entry` / `delete_workspace_entry`；**create_workspace_entry 同步采纳命名校验（trim 非空 + ≤64 + 对其他工作区重名拒绝）**；单测矩阵（空白/超长/重名/未知id/default 拒删/id-root 不变/create 新规则）
-- [x] B4 `store.rs`：`rename_session`（同值 no-op）/ `archive_session`（幂等）/ `rename_workspace` / `delete_workspace`（名下会话归属批量重写为 default 后 save_to_backend）
+- [x] B4 `store.rs`：`rename_session`（同值 no-op）/ `archive_session`（幂等）/ `rename_workspace` / `delete_workspace`（名下会话归属批量重写为 default 后 save_to_backend）；`stamp_workspace_id` 纵深防御（未注册 id 归一 default）
 - [x] B5 control_plane 方法 + lib.rs 注册 `workspace_rename` / `workspace_delete` / `session_rename` / `session_archive`（camelCase 参数、rwlock poison-recovery 包装与 workspace_commands.rs 一致）
-- [x] B6 cargo 测试矩阵：override 六类消费点位回归（含 rename→续轮→checkout 改名前节点→snapshot.title == override）；两种持久化模式往返（LegacyBlob/WriteSeparate）；旧 blob 无新字段解析兼容；无 override 派生标题钉住（首条用户消息 28 字符省略号）；archive 幂等与重启保持；delete 后 resolve 成功；遗留孤儿库启动渲染契约
+- [x] B6 cargo 测试矩阵：override 六类消费点位回归（含 **T1 checkout 改名前节点 snapshot.title==override + 节点冻结保留**、**T2 hydrate 两处回灌无害化钉住**、**T3 SQLite 后端 rename/delete 跨重启往返**）；两种持久化模式往返（DualWrite/WriteSeparate）；旧 blob 无新字段解析兼容；无 override 派生标题钉住；archive 幂等与重启保持；delete 后 resolve 成功；stamp 未注册 id 归一；遗留孤儿库启动渲染契约；sync_latest_history_node 在 override 下局部重算冻结标题
 
 ## Phase 2——前端基础件（与 Phase 1 并行）
 
@@ -35,4 +35,4 @@
 - [ ] C1 更新 `tests/sidebar-groups.spec.ts`（契约重写）、`tests/HomeSessionSidebar.spec.ts`、`tests/runtime-store.spec.ts`、`tests/ProviderConfigPage.spec.ts`（ConfirmPopover 兼容回归）、ConfirmPopover/DropdownMenu 组件测试
 - [ ] C2 废弃折叠 localStorage key 的读写路径清理（停止写入；残留 key 无害说明）
 - [ ] C3 门禁：vue-tsc --noEmit / vitest 全绿 / cargo check / cargo:test:lib / 手工冒烟（增删改名归档全链路 + 重启持久化 + ≥100 会话卡顿测量点 + 提交中窗口期菜单禁用一例）
-- [ ] C4 双 reviewer 终审 + spec delta 合入 openspec/specs（关键词加粗样式统一已在本 delta 内完成）+ proposal 验收逐条核对 + ADR 事实同步核对
+- [ ] C4 双 reviewer 终审 + spec delta 合入 openspec/specs（关键词加粗样式统一已在本 delta 内完成）+ proposal 验收逐条核对 + ADR 事实同步核对；**核对 PA-089：normalized_sessions 回填 titleOverride/archived 两列前禁止 phase 切读（ADR 0015 门槛）**

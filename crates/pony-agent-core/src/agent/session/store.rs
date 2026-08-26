@@ -1917,10 +1917,23 @@ impl SessionStore {
     /// **先 `ensure_session` 再盖章**：turn 提交时全新会话尚未被 `prepare_turn` 创建，
     /// 若只对已存在会话盖章，首轮 workspace_id 会丢失。
     pub fn stamp_workspace_id(&mut self, session_id: &str, workspace_id: &str) {
+        // 纵深防御（三级树裁决②）：非 default 且未注册的 id 一律归一为
+        // default——工作区删除后，携带死 id 的陈旧/竞态提交不得把会话重新
+        // 盖成孤儿（附件导入硬失败 vs 工具根软回退的分叉随之不可达）。
+        let normalized = if workspace_id == crate::agent::workspace::DEFAULT_WORKSPACE_ID
+            || self.workspaces.iter().any(|record| record.id == workspace_id)
+        {
+            workspace_id.to_string()
+        } else {
+            eprintln!(
+                "[pony-agent] stamp_workspace_id: 未注册的 workspace '{workspace_id}'，归一为 default"
+            );
+            crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string()
+        };
         let changed = {
             let session = self.ensure_session(session_id);
             if session.workspace_id.is_none() {
-                session.workspace_id = Some(workspace_id.to_string());
+                session.workspace_id = Some(normalized);
                 true
             } else {
                 false
@@ -3228,7 +3241,14 @@ fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) 
         return;
     };
     let summary = session.summary.clone();
-    let title = session.title.clone();
+    // override 存在时 session.title 已冻结于改名时点（refresh 跳过赋值）；
+    // 节点冻结标题必须表达"本次提交时刻的派生值"，故局部重算而非直取
+    // session.title——否则改名后所有新节点都冻结同一陈旧标题。
+    let title = if session.title_override.is_some() {
+        build_title(&session.history)
+    } else {
+        session.title.clone()
+    };
     let history = session.history.clone();
     let provider_native_transcript = session.provider_native_transcript.clone();
     let turn_trace_history = session.turn_trace_history.clone();
@@ -3297,7 +3317,7 @@ fn bind_unanchored_memory_write_evidence_to_history_node(
     node.memory_write_evidence = evidence;
 }
 
-fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
+pub(in crate::agent::session) fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
     session.title = node.title.clone();
     session.summary = node.summary.clone();
     session.history = node.history.clone();
@@ -3313,7 +3333,7 @@ fn hydrate_session_from_node(session: &mut SessionState, node: &HistoryNode) {
 /// PA-093：引用化节点 → 会话内存态（history/transcript/trace 由事件折叠提供，
 /// memory/摘要等节点元数据仍从节点拷贝；transcript 事件流不覆盖 → 引用化后为空，
 /// 前端 transcript 视图依赖 trace 数据，文档已声明降级）。
-fn hydrate_session_from_projection(
+pub(in crate::agent::session) fn hydrate_session_from_projection(
     session: &mut SessionState,
     node: &HistoryNode,
     history: Vec<TurnHistoryMessage>,
@@ -3818,8 +3838,9 @@ pub(in crate::agent::session) fn refresh_session_metadata(session: &mut SessionS
         .iter()
         .rev()
         .find_map(|message| extract_explicit_file_name(&message.content));
-    // 用户显式标题（override）存在时，两个派生分支都不得覆盖 title 字段的
-    // 投影来源；派生值照常计算但仅存于 session.title，effective_title() 恒取 override。
+    // 用户显式标题（override）存在时，两个派生分支都跳过 title 赋值：
+    // session.title 字段就此冻结在改名时点的派生值上，投影一律走
+    // effective_title()。派生链路的其他产物（summary 等）不受影响。
     let title_overridden = session.title_override.is_some();
     if session.history.is_empty() && !session.turn_trace_history.is_empty() {
         if let Some(trace) = session.turn_trace_history.last() {

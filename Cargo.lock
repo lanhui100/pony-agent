@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "pony-agent-core"
-version = "0.1.85"
+version = "0.1.86"
 dependencies = [
  "anydoc",
  "base64 0.22.1",

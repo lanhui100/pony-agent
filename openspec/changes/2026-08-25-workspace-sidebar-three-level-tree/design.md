@@ -37,8 +37,10 @@ rename 引入 trim 非空、≤64 字符、对**其他**工作区重名拒绝；
 4. **SessionOverview.archived 前端类型必须 optional**：本地构造 overview 的位置（sessions.ts 多处 + 测试 helper）不带该字段，required 化击穿 vue-tsc 与既有测试。
 5. **排序禁止发明新规则**：全局 list_sessions 序 = updatedAtMs desc、tie conversationId asc；平铺区/组内均为其过滤投影，纯函数契约写入 doc-comment 与测试；计数徽标排除归档会话。
 6. **plugin-dialog 四件套缺一不可**：Cargo 依赖、`.plugin(tauri_plugin_dialog::init())` 注册、capability `dialog:allow-open`（最小化）、npm 包；F1 附 capability JSON 变更冒烟断言。
-7. **同步命令主线程 IO 维持现状模式**（与 workspace_create/stamp 同款 rwlock 包装）；≥100 会话时 rename/delete 需手工卡顿测量点，超预期再立异步化任务。
+7. **同步命令主线程 IO 维持现状模式**（与 workspace_create/stamp 同款 rwlock 包装）；≥100 会话时 rename/delete 需手工卡顿测量点，超预期再立异步化任务。落盘失败的"成功回执、重启回退"语义登记 ADR 0015 已知限制。
 8. **截断叠加契约**：三级行单行 CSS truncate；hover 出完整存储标题（原生 tooltip，逐字原样，可能自带后端省略号）；与后端 build_title 28 字符截断叠加共存。
+9. **raw `.title` 三类消费的语义定案**（Phase 1 审核澄清）：override 存在时 refresh 跳过 title 赋值，字段冻结于改名时点——(a) 历史节点冻结处（sync_latest_history_node）改为局部 `build_title(&session.history)` 重算，保证新节点标题表达提交时刻派生值；(b) 模型上下文注入（SessionContext.title）维持读底层字段并登记 ADR 已知限制（改送 override 属模型可见变更，另行评审）；(c) normalized 表 title 列写入陈旧值在切读回填门槛内一并解决。
+10. **stamp 纵深防御**：`stamp_workspace_id` 对非 default 且未注册的 id 归一为 default 并告警——后端不再依赖 Phase 3 F7 的前端时序来阻止孤儿复活。
 
 ## 文案基线（集中 sidebar-copy.ts，快照断言依据）
 

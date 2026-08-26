@@ -31,9 +31,12 @@ Status: implemented
 ## 已知限制
 
 - 归档运行中会话的竞态由前端禁用 + store inflight 守卫兜底，后端不做运行态判断（运行态主要是客户端事实）。
+- **normalized 回填门槛**：`load_store_normalized` 在 phase∈{observing,retired} 整体切读规范化表，而该表尚无 titleOverride/archived 两列（硬编码 None/false）。**切读启用前必须完成两列回填并在 PA-089 阶段 5 入口核对**，否则改名/归档重启即批量静默丢失。
+- 四命令落盘沿用 `save_to_backend()` 吞错惯例（与 workspace_create/stamp 同款）：磁盘失败时本次运行内存一致、UI 收到成功回执，重启后回退到上次成功落盘状态。write_full_store 单事务保证磁盘不半写。
+- 会话模型上下文标题（SessionContext 注入）读取底层 `title` 字段：改名后保持改名时点的派生值而非 override；是否改为送 override 属模型可见行为变更，留待后续迭代单独评审。
 - 删除工作区时已在进行中的 turn 按其启动时捕获的 workspace root 完成，不随归属重写切换；确认文案以"后续的文件操作"限定承诺范围。
 - 本期归档无恢复入口；字段设计使恢复仅需新增 unarchive 命令 + 清标志。
-- `import_attachment` 对失效 `workspace_id` 硬失败 vs 工具链路软回退的根因分叉仍在；本功能路径通过归属重写消除了触发面，但语义分叉留待后续统一。
+- `import_attachment` 对失效 `workspace_id` 硬失败 vs 工具链路软回退的根因分叉仍在；本功能路径通过归属重写 + stamp 归一消除了触发面，但语义分叉留待后续统一。
 - 多窗口场景未处理（现仅 main 窗口）。
 
 ## 影响

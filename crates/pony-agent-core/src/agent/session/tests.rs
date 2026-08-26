@@ -2431,20 +2431,39 @@ fn session_store_workspace_registry_default_and_crud() {
 #[test]
 fn session_store_stamps_workspace_id_only_once() {
     // PA-079：TurnInput.workspace_id 首次盖章；后续轮 no-op。
+    let root = std::env::temp_dir().join(format!("pa-stamp-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
     let mut store = SessionStore::memory_only();
+    let registered = store.create_workspace("Proj", &root.display().to_string()).unwrap();
     store.ensure_session("ws-session");
     assert!(store.sessions["ws-session"].workspace_id.is_none());
 
-    store.stamp_workspace_id("ws-session", "ws-proj-1");
+    store.stamp_workspace_id("ws-session", &registered.id);
     assert_eq!(
         store.sessions["ws-session"].workspace_id.as_deref(),
-        Some("ws-proj-1")
+        Some(registered.id.as_str())
     );
 
-    store.stamp_workspace_id("ws-session", "ws-proj-2");
+    // 已盖章 → 后续（哪怕不同 id）no-op。
+    store.stamp_workspace_id("ws-session", "default");
     assert_eq!(
         store.sessions["ws-session"].workspace_id.as_deref(),
-        Some("ws-proj-1")
+        Some(registered.id.as_str())
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn stamp_normalizes_unregistered_workspace_to_default() {
+    // 三级树纵深防御（裁决②）：已注销/未知 id 盖章一律归一 default——
+    // 陈旧提交不得把会话重新盖成死 id（附件硬失败 vs 工具根软回退的分叉）。
+    let mut store = SessionStore::memory_only();
+    store.ensure_session("stale");
+    store.stamp_workspace_id("stale", "ws-deleted-long-ago");
+    assert_eq!(
+        store.sessions["stale"].workspace_id.as_deref(),
+        Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
     );
 }
 
@@ -5495,4 +5514,144 @@ fn session_state_new_fields_roundtrip_and_default_for_legacy_blobs() {
         serde_json::from_value(legacy).unwrap();
     assert_eq!(restored.title_override, None);
     assert!(!restored.archived);
+}
+
+#[test]
+fn checkout_of_pre_rename_node_shows_override_title_and_keeps_frozen_nodes() {
+    // B6-T1（P1 级回归钉）：选中历史节点分支（snapshot_from_state 的
+    // selected_node 分支）必须走 effective_title——改名前提交的节点冻结了
+    // 旧派生标题，直取 node.title 会在此处复活旧标题。
+    let mut store = SessionStore::memory_only();
+    store.append_turn(Some("ck"), "first message text here", "reply", None, Vec::new());
+    {
+        let session = store.sessions.get_mut("ck").unwrap();
+        session.history_nodes.push(HistoryNode {
+            node_id: "node-old".to_string(),
+            session_id: "ck".to_string(),
+            branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+            title: "first message text here".to_string(),
+            summary: String::new(),
+            ..Default::default()
+        });
+        session.history_cursor.visible_node_id = Some("node-old".to_string());
+    }
+    store.rename_session("ck", "用户命名").unwrap();
+
+    let snapshot = store.snapshot_for_session_at("ck", Some("node-old"));
+    assert_eq!(
+        snapshot.title, "用户命名",
+        "checkout 改名前节点时顶层标题必须是 override"
+    );
+    // 半边契约：会话的历史节点列表保留提交时刻的派生标题。
+    assert_eq!(
+        store.sessions["ck"].history_nodes[0].title,
+        "first message text here"
+    );
+}
+
+#[test]
+fn hydrate_backfill_is_neutralized_by_override() {
+    // B6-T2：hydrate 两处把 node.title 回灌 session.title——override 字段
+    // 独立使其无害化；本测试钉住"回灌后投影仍取 override"。
+    let mut store = SessionStore::memory_only();
+    store.append_turn(Some("hy"), "derive me please", "reply", None, Vec::new());
+    {
+        let session = store.sessions.get_mut("hy").unwrap();
+        session.history_nodes.push(HistoryNode {
+            node_id: "n1".to_string(),
+            session_id: "hy".to_string(),
+            branch_id: DEFAULT_HISTORY_BRANCH_ID.to_string(),
+            title: "derive me please".to_string(),
+            summary: String::new(),
+            ..Default::default()
+        });
+        session.title_override = Some("用户命名".to_string());
+    }
+    let node = store.sessions["hy"].history_nodes[0].clone();
+
+    {
+        let session = store.sessions.get_mut("hy").unwrap();
+        super::store::hydrate_session_from_node(session, &node);
+        assert_eq!(session.effective_title(), "用户命名");
+        assert_eq!(
+            session.title, "derive me please",
+            "回灌照常覆盖底层 title 字段（无害化的前提）"
+        );
+    }
+    {
+        let session = store.sessions.get_mut("hy").unwrap();
+        super::store::hydrate_session_from_projection(session, &node, Vec::new(), Vec::new());
+        assert_eq!(session.effective_title(), "用户命名");
+    }
+}
+
+#[test]
+fn workspace_rename_delete_survive_sqlite_restart() {
+    // B6-T3：rename/delete 经真实 SQLite 后端跨重启持久（此前仅 memory_only 覆盖）。
+    let dir = std::env::temp_dir().join(format!("pa-tree-t3-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("store.db");
+    let ws_root = dir.join("ws-root");
+    std::fs::create_dir_all(&ws_root).unwrap();
+
+    // 阶段一：创建 W1/W2 → rename W1 → 成员盖章 W1 → 删除 W2。
+    {
+        let mut store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                crate::agent::session::SeparateTraceTableMode::DualWrite,
+            ),
+        ));
+        let w1 = store.create_workspace("One", &ws_root.display().to_string()).unwrap();
+        std::fs::create_dir_all(&dir.join("two")).unwrap();
+        let w2 = store.create_workspace("Two", &dir.join("two").display().to_string()).unwrap();
+        store.append_turn(Some("member"), "hello", "reply", None, Vec::new());
+        store.stamp_workspace_id("member", &w1.id);
+        store.rename_workspace(&w1.id, "Renamed").unwrap();
+        store.delete_workspace(&w2.id).unwrap();
+    }
+
+    // 阶段二：重启断言——新名在册、W2 消失、成员归属保持 W1。
+    {
+        let mut store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                db_path.clone(),
+                crate::agent::session::SeparateTraceTableMode::DualWrite,
+            ),
+        ));
+        let registry = store.list_workspaces();
+        assert!(registry.iter().any(|w| w.name == "Renamed"));
+        assert!(!registry.iter().any(|w| w.name == "Two"));
+        let member_id = store
+            .list_sessions()
+            .iter()
+            .find(|s| s.conversation_id == "member")
+            .unwrap()
+            .workspace_id
+            .clone()
+            .unwrap();
+        assert_eq!(registry.iter().find(|w| w.id == member_id).unwrap().name, "Renamed");
+
+        // 阶段三：删除成员所在工作区 → 归属重写 default → 再次重启仍保持。
+        store.delete_workspace(&member_id).unwrap();
+        drop(store);
+        let store = SessionStore::with_backend(Box::new(
+            crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+                db_path,
+                crate::agent::session::SeparateTraceTableMode::DualWrite,
+            ),
+        ));
+        assert_eq!(
+            store
+                .list_sessions()
+                .iter()
+                .find(|s| s.conversation_id == "member")
+                .unwrap()
+                .workspace_id
+                .as_deref(),
+            Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
 }

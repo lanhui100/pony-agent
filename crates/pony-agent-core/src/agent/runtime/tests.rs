@@ -4091,7 +4091,13 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
             json!({ "choices": [ { "message": { "role": "assistant", "content": "ok2" } } ] }),
         ),
     ]);
-    let sessions = SessionStore::memory_only();
+    // 三级树 stamp 纵深防御：先注册工作区，携带注册 id 的首轮才按原样盖章。
+    let ws_root = std::env::temp_dir().join(format!("pa-rt-stamp-{}", std::process::id()));
+    std::fs::create_dir_all(&ws_root).unwrap();
+    let mut sessions = SessionStore::memory_only();
+    let registered = sessions
+        .create_workspace("Proj", &ws_root.display().to_string())
+        .unwrap();
     let selection = test_provider_selection(server.base_url.clone());
     let runtime = build_runtime_with_session_store(selection, sessions);
 
@@ -4106,13 +4112,13 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
         node_id: None,
         history: Vec::new(),
         images: Vec::new(),
-        workspace_id: Some("ws-proj-1".to_string()),
+        workspace_id: Some(registered.id.clone()),
     });
 
     let snapshot = runtime.load_session_snapshot(Some("ws-session"));
     assert_eq!(
         snapshot.workspace_id.as_deref(),
-        Some("ws-proj-1"),
+        Some(registered.id.as_str()),
         "首轮 workspace_id 应盖章到会话"
     );
     let overviews = runtime.sessions_handle().read().unwrap().list_sessions();
@@ -4120,7 +4126,7 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
         .iter()
         .find(|session| session.conversation_id == "ws-session")
         .expect("session overview exists");
-    assert_eq!(overview.workspace_id.as_deref(), Some("ws-proj-1"));
+    assert_eq!(overview.workspace_id.as_deref(), Some(registered.id.as_str()));
 
     // 第二轮不同 id → 幂等，不覆盖
     let _ = runtime.run_turn(TurnInput {
@@ -4139,10 +4145,11 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
     let snapshot2 = runtime.load_session_snapshot(Some("ws-session"));
     assert_eq!(
         snapshot2.workspace_id.as_deref(),
-        Some("ws-proj-1"),
+        Some(registered.id.as_str()),
         "已盖章会话的后续轮不得覆盖"
     );
 
+    std::fs::remove_dir_all(&ws_root).ok();
     let _ = server.finish();
 }
 

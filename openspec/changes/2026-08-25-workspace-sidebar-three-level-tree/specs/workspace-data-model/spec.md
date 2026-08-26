@@ -67,6 +67,11 @@ A session SHALL support a durable display-title override that takes precedence o
 - THEN the operation SHALL fail with a descriptive error and the stored override SHALL be unchanged
 - AND renaming to the identical current title SHALL succeed as a no-op
 
+#### Scenario: Operations on unknown sessions fail closed
+
+- WHEN a rename or archive command names a session absent from the store
+- THEN the operation SHALL fail without creating any session record
+
 #### Scenario: Legacy blobs parse unchanged
 
 - GIVEN persisted session records written before the field existed

@@ -352,9 +352,9 @@ pub struct SessionState {
     /// Workspace 归属（PA-079）：None → 投影为默认 workspace。serde default 兼容旧数据。
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// 用户显式标题（侧边栏三级树）：存在时在所有投影点位优先于派生标题；
-    /// 派生链路（build_title / trace.title / hydrate 回灌）照常维护 `title` 字段，
-    /// 本字段独立使其不受覆盖。serde default 兼容旧数据。
+    /// 用户显式标题（侧边栏三级树）：存在时所有投影点位经 `effective_title()`
+    /// 取本字段；refresh 的两个派生分支随之跳过 title 赋值——`title` 字段就此
+    /// 冻结于改名时点的派生值（节点冻结处会局部重算派生值，见 sync_latest_history_node）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_override: Option<String>,
     /// 归档标记（注册表级隐藏语义随会话持久化）：分组面据此全量隐藏，日志与
