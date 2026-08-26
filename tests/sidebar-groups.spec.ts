@@ -1,15 +1,20 @@
-// PA-081：侧边栏分组纯函数单元测试（无组件挂载，直接验证契约）。
+// PA-三级树：deriveSidebarTree 纯函数契约单元测试（无组件挂载）。
+// 排序单一规则：updatedAtMs desc、tie conversationId asc；瞬态钉顶不参与排序；
+// 归档过滤（缺省 ⇒ 存活）；default 不产出组行；孤儿并入平铺区。
 import { describe, expect, it } from "vitest";
-import {
-  UNGROUPED_GROUP_KEY,
-  groupSessionsByWorkspace,
-  loadStoredWorkspaceGroupKeys,
-  persistCollapsedWorkspaceGroups
-} from "@/lib/runtime/sidebar-groups";
 import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
+import {
+  deriveSidebarTree,
+  isVisibleSession,
+  type SidebarWorkspaceInput
+} from "@/lib/runtime/sidebar-groups";
 import type { SessionOverview } from "@/types/runtime";
 
-function session(id: string, workspaceId?: string | null): SessionOverview {
+function session(
+  id: string,
+  workspaceId?: string | null,
+  overrides: Partial<SessionOverview> = {}
+): SessionOverview {
   return {
     conversationId: id,
     title: id,
@@ -17,100 +22,88 @@ function session(id: string, workspaceId?: string | null): SessionOverview {
     turnCount: 1,
     lastReferencedFile: null,
     updatedAtMs: 1000,
-    workspaceId: workspaceId ?? null
+    workspaceId: workspaceId ?? null,
+    ...overrides
   };
 }
 
-describe("groupSessionsByWorkspace", () => {
-  it("routes null workspaceId sessions to the default group", () => {
-    const groups = groupSessionsByWorkspace(
-      [session("a"), session("b", "ws-x")],
-      [
-        { id: DEFAULT_WORKSPACE_ID, name: "默认工作区" },
-        { id: "ws-x", name: "X" }
-      ]);
-    const byKey = new Map(groups.map((group) => [group.key, group]));
-    expect(byKey.get(DEFAULT_WORKSPACE_ID)?.sessions.map((s) => s.conversationId)).toEqual(["a"]);
-    expect(byKey.get("ws-x")?.sessions.map((s) => s.conversationId)).toEqual(["b"]);
-  });
+const registry: SidebarWorkspaceInput[] = [
+  { id: DEFAULT_WORKSPACE_ID, name: "默认工作区" },
+  { id: "ws-a", name: "A" },
+  { id: "ws-b", name: "B" }
+];
 
-  it("creates a synthetic default group when the registry omits it", () => {
-    const groups = groupSessionsByWorkspace(
-      [session("a")],
-      [{ id: "ws-only", name: "Only" }]);
-    expect(groups[0]?.key).toBe(DEFAULT_WORKSPACE_ID);
-    expect(groups[0]?.name).toBe("默认工作区");
-  });
-
-  it("collects unknown workspaceIds into a trailing ungrouped group", () => {
-    const groups = groupSessionsByWorkspace(
-      [session("known", "ws-a"), session("orphan", "ws-gone"), session("plain")],
-      [{ id: DEFAULT_WORKSPACE_ID, name: "默认" }, { id: "ws-a", name: "A" }]);
-    const keys = groups.map((group) => group.key);
-    expect(keys[keys.length - 1]).toBe(UNGROUPED_GROUP_KEY);
-    const ungrouped = groups.find((group) => group.key === UNGROUPED_GROUP_KEY);
-    expect(ungrouped?.workspaceId).toBeNull();
-    expect(ungrouped?.name).toBe("未分组");
-    expect(ungrouped?.sessions.map((s) => s.conversationId)).toEqual(["orphan"]);
-  });
-
-  it("keeps empty workspaces as zero-count groups (empty-state surface)", () => {
-    const groups = groupSessionsByWorkspace(
-      [session("a")],
-      [
-        { id: DEFAULT_WORKSPACE_ID, name: "默认" },
-        { id: "ws-empty", name: "空项目" }
-      ]);
-    const emptyGroup = groups.find((group) => group.key === "ws-empty");
-    expect(emptyGroup?.sessions.length ?? -1).toBe(0);
-  });
-
-  it("places transient entries (active workspace id) into the active group", () => {
-    const groups = groupSessionsByWorkspace(
-      [session("transient", "ws-active")],
-      [
-        { id: DEFAULT_WORKSPACE_ID, name: "默认" },
-        { id: "ws-active", name: "激活项目" }
-      ]
+describe("deriveSidebarTree", () => {
+  it("default 工作区不渲染组行；其会话进入平铺区", () => {
+    const tree = deriveSidebarTree(
+      [session("d1"), session("a1", "ws-a")],
+      registry
     );
-    const active = groups.find((group) => group.key === "ws-active");
-    expect(active?.sessions.map((s) => s.conversationId)).toEqual(["transient"]);
-  });
-});
-
-describe("workspace group collapse persistence", () => {
-  const storageStub = () => {
-    const backing = new Map<string, string>();
-    return {
-      getItem: (key: string) => backing.get(key) ?? null,
-      setItem: (key: string, value: string) => void backing.set(key, value)
-    };
-  };
-
-  it("round-trips collapsed keys and prunes invalid ones on write", () => {
-    const storage = storageStub();
-    persistCollapsedWorkspaceGroups(["default", "ws-x"], new Set(["default"]), storage);
-    expect(storage.getItem("pony-agent.session-sidebar-workspace-groups.v1")).toBe(
-      JSON.stringify(["default"])
-    );
-
-    // 原始读取保留全部 key（合法组过滤由渲染/写回时进行）。
-    storage.setItem(
-      "pony-agent.session-sidebar-workspace-groups.v1",
-      JSON.stringify(["default", "stale-key"])
-    );
-    const rawKeys = loadStoredWorkspaceGroupKeys(storage);
-    expect(rawKeys.has("default")).toBe(true);
-    expect(rawKeys.has("stale-key")).toBe(true);
+    expect(tree.workspaces.map((g) => g.key)).toEqual(["ws-a", "ws-b"]);
+    expect(tree.flatZone.map((s) => s.conversationId)).toEqual(["d1"]);
   });
 
-  it("tolerates corrupted payloads and missing storage", () => {
-    const storage = storageStub();
-    storage.setItem("pony-agent.session-sidebar-workspace-groups.v1", "{not-json");
-    expect(loadStoredWorkspaceGroupKeys(storage).size).toBe(0);
-    expect(loadStoredWorkspaceGroupKeys(undefined).size).toBe(0);
-    expect(() =>
-      persistCollapsedWorkspaceGroups(["default"], new Set(["default"]), undefined)
-    ).not.toThrow();
+  it("孤儿与无归属会话并入平铺区并按 updatedAtMs desc、tie conversationId asc 排序", () => {
+    const tree = deriveSidebarTree(
+      [
+        session("orphan", "ws-gone", { updatedAtMs: 3000 }),
+        session("plain", null, { updatedAtMs: 3000 }),
+        session("old", null, { updatedAtMs: 1000 })
+      ],
+      registry
+    );
+    expect(tree.flatZone.map((s) => s.conversationId)).toEqual(["orphan", "plain", "old"]);
+  });
+
+  it("组内同用全局排序规则（updatedAtMs desc, tie id asc）", () => {
+    const tree = deriveSidebarTree(
+      [
+        session("a2", "ws-a", { updatedAtMs: 2000 }),
+        session("a1", "ws-a", { updatedAtMs: 2000 }),
+        session("a3", "ws-a", { updatedAtMs: 5000 })
+      ],
+      registry
+    );
+    expect(tree.workspaces[0].sessions.map((s) => s.conversationId)).toEqual(["a3", "a1", "a2"]);
+  });
+
+  it("归档会话从分区、计数与排序中完全消失；缺省字段视为存活", () => {
+    const tree = deriveSidebarTree(
+      [
+        session("live", "ws-a"),
+        session("hidden", "ws-a", { archived: true }),
+        session("no-field")
+      ],
+      registry
+    );
+    expect(tree.workspaces[0].count).toBe(1);
+    expect(tree.workspaces[0].sessions.map((s) => s.conversationId)).toEqual(["live"]);
+    expect(tree.flatZone.some((s) => s.conversationId === "no-field")).toBe(true);
+    expect(isVisibleSession({ ...session("x"), archived: undefined })).toBe(true);
+  });
+
+  it("瞬态条目按 target 钉顶：default 目标 → 平铺区顶", () => {
+    const transient = { overview: session("transient", null, { title: "新对话" }), target: DEFAULT_WORKSPACE_ID };
+    const tree = deriveSidebarTree([session("old")], registry, transient);
+    expect(tree.flatZone[0].conversationId).toBe("transient");
+  });
+
+  it("瞬态条目目标为显式工作区 → 该组钉顶", () => {
+    const transient = { overview: session("t2", "ws-b"), target: "ws-b" };
+    const tree = deriveSidebarTree([], registry, transient);
+    expect(tree.workspaces.find((g) => g.key === "ws-b").sessions[0].conversationId).toBe("t2");
+  });
+
+  it("删除工作区后残留创建目标指向已注销 id：瞬态回退平铺区顶（后端已归一，双保险）", () => {
+    const transient = { overview: session("t3", "ws-gone"), target: "ws-gone" };
+    const tree = deriveSidebarTree([], [{ id: DEFAULT_WORKSPACE_ID, name: "默认工作区" }], transient);
+    expect(tree.workspaces).toHaveLength(0);
+    expect(tree.flatZone[0].conversationId).toBe("t3");
+  });
+
+  it("零计数工作区保留空组（空态提示面）", () => {
+    const tree = deriveSidebarTree([], registry.filter((w) => w.id !== DEFAULT_WORKSPACE_ID));
+    expect(tree.workspaces).toHaveLength(2);
+    expect(tree.workspaces.every((g) => g.count === 0)).toBe(true);
   });
 });

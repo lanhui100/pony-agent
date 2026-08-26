@@ -22,17 +22,17 @@
 - [x] F3 `ui/ConfirmPopover.vue` 升级：受控 open（defineModel）+ loading + 错误槽；confirm 不再立即关闭；**保持非受控用法向后兼容**（ProviderConfigPage 存量消费方零破坏）
 - [x] F4 `workspace-api.ts` 四封装 + 目录选择封装；`types/runtime.ts` SessionOverview.`archived?`
 
-## Phase 3——侧边栏重建（依赖 Phase 1+2）
+## Phase 3——侧边栏重建（依赖 Phase 1+2）✅
 
-- [ ] F5 `sidebar-groups.ts` → `deriveSidebarTree()`（平铺区三分成员契约 + 组序 + 瞬态钉顶 + 计数排除归档 + 零计数组）；UNGROUPED_GROUP_KEY deprecated
-- [ ] F6 HomeSessionSidebar 单一树重构（一级标题行/FolderPlus 按钮/Tooltip「添加工作区」、二级行解剖、三级行截断 + hover 全文、三点菜单、预览上限分区各自 5 条 + 全局显示全部、旧双 section 与激活徽标清除）；截断/hover/图标/tooltip 断言进组件测试
-- [ ] F7 store actions：createSession 显式 target 参数（顶层= default，组内= 该组）+ **删除工作区时归一存活创建目标与瞬态条目**；renameWorkspace/deleteWorkspace（成功后激活态归一）/archiveSession（当前激活会话复用 deleteSession fallback 选段）/renameSession + inflight 守卫 set
-- [ ] F8 文案集中 `lib/runtime/sidebar-copy.ts`（design 文案基线全量落地，含 {N}=0 规则与禁用原因 tooltip）
-- [ ] F9 浏览器降级矩阵落地（管理面隐藏；会话菜单仅保留删除；rail 无需额外降级）
+- [x] F5 `sidebar-groups.ts` → `deriveSidebarTree()`（平铺区三分成员契约 + 组序 + 瞬态钉顶 + 计数排除归档 + 零计数组）；UNGROUPED_GROUP_KEY deprecated
+- [x] F6 HomeSessionSidebar 单一树重构（一级标题行/FolderPlus 按钮/Tooltip「添加工作区」、二级行解剖、三级行截断 + hover 全文、三点菜单、预览上限分区各自 5 条 + 全局显示全部、旧双 section 与激活徽标清除）；截断/hover/图标/tooltip 断言进组件测试
+- [x] F7 store actions：createSession 显式 target 参数（顶层= default，组内= 该组）+ **删除工作区时归一存活创建目标与瞬态条目**；renameWorkspace/deleteWorkspace（成功后激活态归一）/archiveSession（当前激活会话复用 deleteSession fallback 选段）/renameSession + inflight 守卫 set
+- [x] F8 文案集中 `lib/runtime/sidebar-copy.ts`（design 文案基线全量落地，含 {N}=0 规则与禁用原因 tooltip）
+- [x] F9 浏览器降级矩阵落地（管理面隐藏；会话菜单仅保留删除；rail 无需额外降级）
 
 ## Phase 4——清理与收口
 
 - [ ] C1 更新 `tests/sidebar-groups.spec.ts`（契约重写）、`tests/HomeSessionSidebar.spec.ts`、`tests/runtime-store.spec.ts`、`tests/ProviderConfigPage.spec.ts`（ConfirmPopover 兼容回归）、ConfirmPopover/DropdownMenu 组件测试
-- [ ] C2 废弃折叠 localStorage key 的读写路径清理（停止写入；残留 key 无害说明）
+- [x] C2 废弃折叠 localStorage key 的读写路径清理（停止写入；残留 key 无害说明）
 - [ ] C3 门禁：vue-tsc --noEmit / vitest 全绿 / cargo check / cargo:test:lib / 手工冒烟（增删改名归档全链路 + 重启持久化 + ≥100 会话卡顿测量点 + 提交中窗口期菜单禁用一例）
 - [ ] C4 双 reviewer 终审 + spec delta 合入 openspec/specs（关键词加粗样式统一已在本 delta 内完成）+ proposal 验收逐条核对 + ADR 事实同步核对；**核对 PA-089：normalized_sessions 回填 titleOverride/archived 两列前禁止 phase 切读（ADR 0015 门槛）**

@@ -50,8 +50,12 @@ import {
   DEFAULT_WORKSPACE_ID
 } from "@/lib/runtime/workspace-constants";
 import {
+  archiveSession as invokeArchiveSession,
   createWorkspace as invokeCreateWorkspace,
+  deleteWorkspace as invokeDeleteWorkspace,
   fetchWorkspaces,
+  renameSession as invokeRenameSession,
+  renameWorkspace as invokeRenameWorkspace,
   type WorkspaceRecord
 } from "@/lib/runtime/workspace-api";
 import {
@@ -244,6 +248,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         // PA-081：Workspace 树导航状态（注册表 + 激活项 localStorage 单一真相源）。
         workspaceList: [] as WorkspaceRecord[],
         workspaceListLoaded: false,
+        /** 三级树：工作区/会话操作 inflight 守卫（key=workspaceId|sessionId:op）。 */
+        sidebarOpInflightSet: {} as Record<string, true>,
         activeWorkspaceId: resolveInitialActiveWorkspaceId(),
         sessionWorkspaceId:
           persisted?.sessionWorkspaceId?.trim() || DEFAULT_WORKSPACE_ID,
@@ -880,10 +886,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     },
     async loadSessionCatalog() {
       if (isTauriAvailable()) {
-        this.sessionList = filterDeletingSessions(
-          await measureHostRead("list_sessions", {
+        const catalog = await measureHostRead("list_sessions", {
             deletingCount: Object.keys(this.deletingSessionSet).length
-          }, () => safeInvoke<SessionOverview[]>("list_sessions")),
+          }, () => safeInvoke<SessionOverview[]>("list_sessions"));
+        // 三级树：归档会话由前端过滤（后端恒投影 archived 标志；恢复入口后续迭代）。
+        this.sessionList = filterDeletingSessions(
+          catalog.filter((session) => !Boolean(session.archived)),
           this.deletingSessionSet
         );
         return;
@@ -1849,6 +1857,139 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         return null;
       }
     },
+
+    // ── 侧边栏三级树操作（design「调用方契约」模板的 store 侧落地）────────
+    isSidebarOpInflight(key: string) {
+      return Boolean(this.sidebarOpInflightSet[key]);
+    },
+
+    async renameWorkspace(workspaceId: string, name: string): Promise<{ ok: boolean; error?: string }> {
+      const key = `ws-rename:${workspaceId}`;
+      if (this.sidebarOpInflightSet[key]) {
+        return { ok: false };
+      }
+      const trimmed = name.trim();
+      if (!trimmed) {
+        return { ok: false, error: "名称不能为空" };
+      }
+      if ([...trimmed].length > 64) {
+        return { ok: false, error: "名称不能超过 64 个字符" };
+      }
+      this.sidebarOpInflightSet[key] = true;
+      try {
+        const record = await invokeRenameWorkspace(workspaceId, trimmed);
+        this.workspaceList = [
+          ...this.workspaceList.filter((workspace) => workspace.id !== record.id),
+          record
+        ];
+        return { ok: true };
+      } catch (error) {
+        debugLog("workspace:rename:failed", { error: String(error) });
+        return { ok: false, error: String(error) };
+      } finally {
+        delete this.sidebarOpInflightSet[key];
+      }
+    },
+
+    async deleteWorkspace(workspaceId: string): Promise<{ ok: boolean; error?: string }> {
+      const key = `ws-delete:${workspaceId}`;
+      if (this.sidebarOpInflightSet[key]) {
+        return { ok: false };
+      }
+      if (workspaceId === DEFAULT_WORKSPACE_ID) {
+        return { ok: false, error: "默认工作区不可删除" };
+      }
+      this.sidebarOpInflightSet[key] = true;
+      try {
+        await invokeDeleteWorkspace(workspaceId);
+        this.workspaceList = this.workspaceList.filter((workspace) => workspace.id !== workspaceId);
+        // 归属/创建目标归一：后端已重写持久化侧；本地瞬态与激活态同步
+        // （spec 场景 Creation target outlives deleted workspace）。
+        if (this.sessionWorkspaceId === workspaceId) {
+          this.sessionWorkspaceId = DEFAULT_WORKSPACE_ID;
+        }
+        this.normalizeActiveWorkspace();
+        // 目录刷新拉回归属重写后的会话投影。
+        await this.loadSessionCatalog();
+        return { ok: true };
+      } catch (error) {
+        debugLog("workspace:delete:failed", { error: String(error) });
+        return { ok: false, error: String(error) };
+      } finally {
+        delete this.sidebarOpInflightSet[key];
+      }
+    },
+
+    async renameSession(sessionId: string, title: string): Promise<{ ok: boolean; error?: string }> {
+      const key = `s-rename:${sessionId}`;
+      if (this.sidebarOpInflightSet[key]) {
+        return { ok: false };
+      }
+      const trimmed = title.trim();
+      if (!trimmed) {
+        return { ok: false, error: "名称不能为空" };
+      }
+      if ([...trimmed].length > 64) {
+        return { ok: false, error: "名称不能超过 64 个字符" };
+      }
+      if (!this.sessionList.some((session) => session.conversationId === sessionId)) {
+        return { ok: false, error: "会话不存在" };
+      }
+      this.sidebarOpInflightSet[key] = true;
+      try {
+        await invokeRenameSession(sessionId, trimmed);
+        await this.loadSessionCatalog();
+        return { ok: true };
+      } catch (error) {
+        debugLog("session:rename:failed", { error: String(error) });
+        return { ok: false, error: String(error) };
+      } finally {
+        delete this.sidebarOpInflightSet[key];
+      }
+    },
+
+    async archiveSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+      const key = `s-archive:${sessionId}`;
+      if (
+        this.sidebarOpInflightSet[key]
+        || this.isSubmitting
+        || this.deletingSessionSet[sessionId]
+      ) {
+        return { ok: false };
+      }
+      if (!this.sessionList.some((session) => session.conversationId === sessionId)) {
+        return { ok: false, error: "会话不存在" };
+      }
+      this.sidebarOpInflightSet[key] = true;
+      try {
+        await invokeArchiveSession(sessionId);
+        await this.loadSessionCatalog();
+        if (sessionId === this.sessionId) {
+          // 归档当前激活会话：fallback 选择（与 delete 同语义的精简版）。
+          const fallbackSessionId =
+            this.sessionList.find((session) => session.conversationId !== sessionId)
+              ?.conversationId ?? DEFAULT_SESSION_ID;
+          this.resetSessionRuntimeState();
+          this.sessionId = fallbackSessionId;
+          this.phase = "connecting";
+          try {
+            await this.loadSessionState(fallbackSessionId, { refreshCatalog: false });
+          } catch (error) {
+            this.resetSessionRuntimeState();
+            this.sessionId = fallbackSessionId;
+            this.phase = "idle";
+            this.sessionError = `归档后切换对话失败：${String(error)}`;
+          }
+        }
+        return { ok: true };
+      } catch (error) {
+        debugLog("session:archive:failed", { error: String(error) });
+        return { ok: false, error: String(error) };
+      } finally {
+        delete this.sidebarOpInflightSet[key];
+      }
+    },
+
     activateWorkspace(workspaceId: string) {
       // 仅切换"新会话创建目标"，不隐藏其他组（AC2）；localStorage 单一真相源。
       this.activeWorkspaceId = workspaceId;
@@ -1860,7 +2001,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         }
       }
     },
-    async createSession() {
+    async createSession(targetWorkspaceId?: string) {
       // 新建会话意图即清空待发送附件（即使空消息 no-op 也清，避免残留携带）
       this.clearPendingAttachments();
       if (this.sessionOperation || !hasPersistableMessages(this.messages)) {
@@ -1891,12 +2032,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       this.phase = "idle";
       this.sessionError = null;
       const dedupedCurrentSessionList = this.sessionList.filter((session) => session.conversationId !== nextSessionId);
-      // PA-081：新会话归属创建时的激活 Workspace（冻结；submitTurn 以会话归属优先）。
-      this.sessionWorkspaceId = this.activeWorkspaceId || DEFAULT_WORKSPACE_ID;
+      // 三级树（裁决①）：创建目标显式化——顶层入口落默认工作区，组内＋传该组 id；
+      // 不再读取激活态。目标冻结到会话（submitTurn 以会话归属优先）。
+      const targetWorkspace = targetWorkspaceId?.trim() || DEFAULT_WORKSPACE_ID;
+      this.sessionWorkspaceId = targetWorkspace;
       const transientOverview = {
         ...createTransientSessionOverview(nextSessionId),
-        // PA-081：瞬态"新对话"归属当前激活 Workspace（空 → default）。
-        workspaceId: this.sessionWorkspaceId
+        workspaceId: targetWorkspace === DEFAULT_WORKSPACE_ID ? null : targetWorkspace
       };
       this.sessionList = ensureUniqueSessionList([
         transientOverview,

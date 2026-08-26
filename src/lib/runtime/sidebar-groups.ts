@@ -1,123 +1,108 @@
-// PA-081：侧边栏两级树（Workspace → 会话）的纯函数分组与折叠持久化。
+// PA-三级树：侧边栏单一树派生（Workspace 一级标题行 → 工作区二级 → 会话三级）。
+// 取代 PA-081 的 groupSessionsByWorkspace 两级分组 + 折叠持久化（该契约已废弃：
+// 组不可折叠、default 不渲染组头、孤儿并入平铺区）。
 // 单一事实源规则：
-// - session.workspaceId 为空 → 归 DEFAULT_WORKSPACE_ID 组；
-// - workspaceId 命中注册表 → 对应 Workspace 组（组名取注册表名称）；
-// - workspaceId 非空但不在注册表 → "未分组"孤儿组（会话仍可切换/删除）；
-// - 瞬态"新对话"条目由 store 侧携带 activeWorkspaceId，自然归入激活组。
+// - 归档会话（Boolean(session.archived) === true）不进入任何分区、计数或排序；
+// - 平铺区 = 默认工作区名下 ∪ 无 workspaceId ∪ 指向未注册 id 的孤儿，
+//   无组头直接列于「工作区」标题行之下；
+// - 工作区行仅渲染注册表中的**非 default** 记录（default 恒不渲染二级行）；
+// - 排序禁止发明新规则：全局 list_sessions 序 = updatedAtMs desc、
+//   tie conversationId asc；平铺区与各组分区内均为其过滤投影；
+// - 瞬态"新对话"条目按其显式 target 钉顶归属，不参与排序。
+// 缺省 ⇒ 存活：archived 字段缺省（undefined，本地构造）一律视为未归档。
 import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
 import type { SessionOverview } from "@/types/runtime";
-
-/** 孤儿组的保留 key（workspaceId 不在注册表中的会话）。 */
-export const UNGROUPED_GROUP_KEY = "__ungrouped__";
 
 export interface SidebarWorkspaceInput {
   id: string;
   name: string;
 }
 
-export interface SidebarSessionGroup {
-  /** 折叠持久化 key：workspace id 或 UNGROUPED_GROUP_KEY。 */
+/** 单一树的两个分区：无组头平铺区 + 各显式工作区组。 */
+export interface SidebarTree {
+  flatZone: SessionOverview[];
+  workspaces: SidebarWorkspaceGroup[];
+}
+
+export interface SidebarWorkspaceGroup {
+  /** 注册表中的工作区 id（不含 default）。 */
   key: string;
-  /** 关联的 workspace id；孤儿组为 null。 */
-  workspaceId: string | null;
   name: string;
+  /** 可见（非归档）会话计数徽标口径。 */
+  count: number;
   sessions: SessionOverview[];
 }
 
-/**
- * 按 Workspace 分组会话。组顺序 = 注册表顺序（default 缺席时补默认组），
- * 孤儿"未分组"恒排最后；空组保留（渲染层显示空态提示）。
- */
-export function groupSessionsByWorkspace(
-  sessions: SessionOverview[],
-  workspaces: SidebarWorkspaceInput[]
-): SidebarSessionGroup[] {
-  const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
-  const ordered: SidebarSessionGroup[] = [];
-  const groupByKey = new Map<string, SidebarSessionGroup>();
-
-  const ensureGroup = (key: string, workspaceId: string | null, name: string) => {
-    const existing = groupByKey.get(key);
-    if (existing) {
-      return existing;
-    }
-    const group: SidebarSessionGroup = { key, workspaceId, name, sessions: [] };
-    groupByKey.set(key, group);
-    ordered.push(group);
-    return group;
-  };
-
-  // 注册表顺序决定组顺序；default 未注册时补默认组（保持首位语义）。
-  const defaultEntry = workspaceById.get(DEFAULT_WORKSPACE_ID);
-  if (!defaultEntry) {
-    ensureGroup(DEFAULT_WORKSPACE_ID, DEFAULT_WORKSPACE_ID, "默认工作区");
+function byRecencyThenId(left: SessionOverview, right: SessionOverview): number {
+  if (right.updatedAtMs !== left.updatedAtMs) {
+    return right.updatedAtMs - left.updatedAtMs;
   }
+  return left.conversationId < right.conversationId ? -1 : 1;
+}
+
+/** 存活判定：归档过滤的唯一入口（缺省 undefined ⇒ 存活）。 */
+export function isVisibleSession(session: SessionOverview): boolean {
+  return !session.archived;
+}
+
+/**
+ * 派生侧边栏单一树。sessions 期望已是全局 recency 序（list_sessions 投影），
+ * 函数内部仍按契约重排以保证纯函数自洽。
+ * @param sessions 全量可见候选（含归档，由本函数过滤）
+ * @param workspaces 工作区注册表（含 default；default 不产出组行）
+ * @param transient 瞬态"新对话"条目（未保存）；target 为其显式创建目标
+ */
+export function deriveSidebarTree(
+  sessions: SessionOverview[],
+  workspaces: SidebarWorkspaceInput[],
+  transient?: { target: string | null; overview: SessionOverview }
+): SidebarTree {
+  const registryIds = new Set(workspaces.map((workspace) => workspace.id));
+
+  const flatZone: SessionOverview[] = [];
+  const grouped = new Map<string, SessionOverview[]>();
   for (const workspace of workspaces) {
-    ensureGroup(workspace.id, workspace.id, workspace.name || workspace.id);
+    if (workspace.id === DEFAULT_WORKSPACE_ID || !registryIds.has(workspace.id)) continue;
+    grouped.set(workspace.id, []);
   }
 
   for (const session of sessions) {
-    const rawId = session.workspaceId?.trim() ?? "";
-    if (rawId === "") {
-      ensureGroup(DEFAULT_WORKSPACE_ID, DEFAULT_WORKSPACE_ID, defaultEntry?.name ?? "默认工作区").sessions.push(
-        session
-      );
-      continue;
+    if (!isVisibleSession(session)) continue;
+    const owner = session.workspaceId?.trim() ?? "";
+    if (owner === "" || owner === DEFAULT_WORKSPACE_ID || !registryIds.has(owner)) {
+      // default / 无归属 / 孤儿 → 平铺区
+      flatZone.push(session);
+    } else {
+      grouped.get(owner)?.push(session);
     }
-    const known = workspaceById.get(rawId);
-    if (known) {
-      ensureGroup(known.id, known.id, known.name || known.id).sessions.push(session);
-      continue;
-    }
-    ensureGroup(UNGROUPED_GROUP_KEY, null, "未分组").sessions.push(session);
   }
 
-  return ordered;
-}
+  flatZone.sort(byRecencyThenId);
 
-/** 折叠状态持久化 key（PA-081 v1）。 */
-export const SIDEBAR_WORKSPACE_GROUPS_STORAGE_KEY = "pony-agent.session-sidebar-workspace-groups.v1";
-
-/**
- * 读取折叠组 key 集合（原始形态：不按合法组过滤——挂载时组集合尚未就绪，
- * 过滤由调用方在渲染/写回时进行）。损坏 JSON / 非字符串元素防御性忽略。
- */
-export function loadStoredWorkspaceGroupKeys(
-  storage: Pick<Storage, "getItem"> | undefined
-): Set<string> {
-  if (!storage) {
-    return new Set();
+  const workspaceGroups: SidebarWorkspaceGroup[] = [];
+  for (const workspace of workspaces) {
+    const members = grouped.get(workspace.id);
+    if (members === undefined) continue;
+    members.sort(byRecencyThenId);
+    workspaceGroups.push({
+      key: workspace.id,
+      name: workspace.name || workspace.id,
+      count: members.length,
+      sessions: members
+    });
   }
-  try {
-    const raw = storage.getItem(SIDEBAR_WORKSPACE_GROUPS_STORAGE_KEY);
-    if (!raw) {
-      return new Set();
+
+  // 瞬态条目：排序完成后钉在所属分区顶部，不参与排序。
+  if (transient && isVisibleSession(transient.overview)) {
+    const target = transient.target?.trim() ?? "";
+    if (target !== "" && target !== DEFAULT_WORKSPACE_ID && grouped.has(target)) {
+      grouped.get(target)?.unshift(transient.overview);
+    } else {
+      flatZone.unshift(transient.overview);
     }
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return new Set();
-    }
-    return new Set(parsed.filter((key): key is string => typeof key === "string"));
-  } catch {
-    return new Set();
   }
-}
 
-/** 持久化折叠的组 key 集合（仅当前合法 key，避免无限增长；存储不可写时静默降级）。 */
-export function persistCollapsedWorkspaceGroups(
-  collapsedKeys: Iterable<string>,
-  validKeys: ReadonlySet<string>,
-  storage: Pick<Storage, "setItem"> | undefined
-): void {
-  if (!storage) {
-    return;
-  }
-  const filtered = [...collapsedKeys].filter((key) => validKeys.has(key));
-  try {
-    storage.setItem(SIDEBAR_WORKSPACE_GROUPS_STORAGE_KEY, JSON.stringify(filtered));
-  } catch {
-    // 存储不可写（隐私模式等）：折叠态退化为会话级内存态。
-  }
+  return { flatZone, workspaces: workspaceGroups };
 }
 
 /** 激活 Workspace 的 localStorage 单一真相源 key（常量单源在 workspace-constants）。 */

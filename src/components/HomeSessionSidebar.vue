@@ -1,34 +1,41 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+// PA-三级树：侧边栏单一树（「工作区」一级标题行不可折叠 → 工作区二级 → 会话三级；
+// 默认/无归属会话无组头平铺置顶；瞬态"新对话"按显式创建目标钉顶归属）。
+// 规格：openspec workspace-sidebar-tree delta；裁决与文案见 design/sidebar-copy。
+import { computed, reactive, ref } from "vue";
 import { storeToRefs } from "pinia";
 import {
-  ChevronDown,
+  Archive,
   ChevronLeft,
   ChevronRight,
   Folder,
   FolderOpen,
-  LoaderCircle,
-  MessageSquareMore,
+  FolderPlus,
+  Pencil,
   Plus,
   Settings,
   Trash2
 } from "lucide-vue-next";
 import PonyBrandIcon from "@/components/PonyBrandIcon.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
+import DropdownMenu from "@/components/ui/DropdownMenu.vue";
+import type { DropdownMenuItemSpec } from "@/components/ui/DropdownMenu.vue";
+import ConfirmPopover from "@/components/ui/ConfirmPopover.vue";
+import Tooltip from "@/components/ui/Tooltip.vue";
+import SessionRow from "@/components/HomeSessionSidebarRow.vue";
+import { TooltipProvider } from "reka-ui";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useUpdateStore } from "@/stores/update";
+import { deriveSidebarTree, isVisibleSession } from "@/lib/runtime/sidebar-groups";
+import { SIDEBAR_COPY } from "@/lib/runtime/sidebar-copy";
+import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
+import { isTauriAvailable } from "@/lib/tauri";
 import type { SidebarNavigationPage } from "@/types/config";
 import type { ChatMessage, SessionOverview } from "@/types/runtime";
-import {
-  groupSessionsByWorkspace,
-  loadStoredWorkspaceGroupKeys,
-  persistCollapsedWorkspaceGroups
-} from "@/lib/runtime/sidebar-groups";
-import { isTauriAvailable } from "@/lib/tauri";
 
 const SESSION_SIDEBAR_STORAGE_KEY = "pony-agent.session-sidebar-collapsed.v1";
-/** 组内会话预览上限（"显示全部"前）；不做 per-group 分页，全局一键解除。 */
-const GROUP_SESSION_PREVIEW_LIMIT = 5;
+/** 分区预览上限（平铺区与每个工作区组各自生效；全局"显示全部"解除）。 */
+const PARTITION_PREVIEW_LIMIT = 5;
 
 const props = withDefaults(
   defineProps<{
@@ -46,8 +53,6 @@ const emit = defineEmits<{
 }>();
 
 const runtimeStore = useRuntimeStore();
-// PA-099：更新角标只挂"设置"入口（更新卡片所在 general tab 的目的地，左栏仅存的一级键）；
-// amber 与运行中指示灯同族，避开 rose（本侧栏语义=删除确认/任务失败）。
 const updateStore = useUpdateStore();
 const {
   isSubmitting,
@@ -55,252 +60,140 @@ const {
   sessionId,
   sessionList,
   sessionOperation,
-  workspaceList,
-  activeWorkspaceId
+  sessionWorkspaceId,
+  workspaceList
 } = storeToRefs(runtimeStore);
 
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
-const conversationOpen = ref(true);
-const pendingDeleteSessionId = ref<string | null>(null);
-// PA-081：折叠的组 key 集合（localStorage 持久化；读取忽略未知 key）。
-const collapsedGroupKeys = ref<Set<string>>(
-  loadStoredWorkspaceGroupKeys(typeof window !== "undefined" ? window.localStorage : undefined)
-);
-// 本 boot 内用户显式折叠过的组——自动展开逻辑不得覆盖其选择（spec 语义）。
-const bootToggledGroupKeys = new Set<string>();
-// PA-081：浏览器预览模式禁用 Workspace 管理（Tauri 后端不可用）。
 const isTauriRuntime = isTauriAvailable();
-// PA-081：Workspace 管理入口展开态 + 新建表单。
-const workspaceSectionOpen = ref(false);
+
+// ── 受控确认（单例状态，per-target 弹层实例锚定行容器） ───────────────────
+type ConfirmKind = "workspace-delete" | "session-archive" | "session-delete";
+interface ConfirmTarget {
+  key: string;
+  kind: ConfirmKind;
+  title: string;
+  count?: number;
+  /** 归档/删除会话的目标 id（行匹配用，避免同名标题歧义）。 */
+  sessionId?: string;
+  /** 删除工作区的目标 id。 */
+  workspaceId?: string;
+}
+const confirmTarget = ref<ConfirmTarget | null>(null);
+const confirmState = reactive({ loading: false, error: "" });
+const confirmOpen = computed(() => confirmTarget.value !== null);
+
+function openConfirm(target: ConfirmTarget) {
+  confirmTarget.value = target;
+  confirmState.loading = false;
+  confirmState.error = "";
+}
+function closeConfirm() {
+  confirmTarget.value = null;
+  confirmState.error = "";
+}
+
+// ── 行内重命名 ────────────────────────────────────────────────────────────
+const renamingKey = ref<string | null>(null);
+const renameDraft = ref("");
+const renameError = ref("");
+const renamingBusy = ref(false);
+
+function startRename(key: string, currentName: string) {
+  renamingKey.value = key;
+  renameDraft.value = currentName;
+  renameError.value = "";
+}
+function cancelRename() {
+  renamingKey.value = null;
+  renameError.value = "";
+}
+
+async function submitRename() {
+  if (!renamingKey.value || renamingBusy.value) return;
+  const draft = renameDraft.value.trim();
+  if (!draft) {
+    renameError.value = SIDEBAR_COPY.renameEmptyError;
+    return;
+  }
+  if ([...draft].length > 64) {
+    renameError.value = SIDEBAR_COPY.renameTooLongError;
+    return;
+  }
+  renamingBusy.value = true;
+  try {
+    if (renamingKey.value.startsWith("ws:")) {
+      const id = renamingKey.value.slice(3);
+      if (workspaceList.value.some((w) => w.id !== id && w.name === draft)) {
+        renameError.value = SIDEBAR_COPY.renameDuplicateWorkspaceError;
+        return;
+      }
+      const result = await runtimeStore.renameWorkspace(id, draft);
+      if (!result.ok) {
+        renameError.value = result.error ?? "重命名失败";
+        return;
+      }
+    } else {
+      const result = await runtimeStore.renameSession(renamingKey.value.slice(2), draft);
+      if (!result.ok) {
+        renameError.value = result.error ?? "重命名失败";
+        return;
+      }
+    }
+    cancelRename();
+  } finally {
+    renamingBusy.value = false;
+  }
+}
+
+// ── 添加工作区（目录选择 → 名称预填 basename） ───────────────────────────
 const workspaceFormOpen = ref(false);
 const newWorkspaceName = ref("");
 const newWorkspaceRootPath = ref("");
 const workspaceCreating = ref(false);
-// PA-081（实施后审核 P2）：新建失败的可见反馈（后端错误如"root 已存在"）。
-const workspaceError = ref<string | null>(null);
-const menuInteractiveClass =
-  "rounded-[0.2rem] transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900";
-const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
+const workspaceError = ref("");
 
-const hasPersistableCurrentSession = computed(() => hasPersistableMessages(messages.value));
-const hasVisibleCurrentSession = computed(() =>
-  sessionList.value.some((session) => session.conversationId === sessionId.value)
-);
-const canCreateSession = computed(
-  () => !sessionOperation.value && hasPersistableCurrentSession.value
-);
-const createSessionTitle = computed(() => {
-  if (isSubmitting.value) {
-    return "当前对话正在运行；新建空白对话后，运行会转入后台继续。";
+async function openAddWorkspaceFlow() {
+  const { pickExistingDirectory } = await import("@/lib/runtime/workspace-api");
+  try {
+    const picked = await pickExistingDirectory();
+    if (!picked) return;
+    const base = picked.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? "";
+    workspaceFormOpen.value = true;
+    newWorkspaceRootPath.value = picked;
+    newWorkspaceName.value = base;
+    workspaceError.value = "";
+  } catch (error) {
+    workspaceError.value = `选择目录失败：${String(error)}`;
   }
-
-  return hasPersistableCurrentSession.value
-    ? "新建一个空白对话，并保留当前已存在的历史会话。"
-    : "当前已经是空白新对话，发送首条消息后才会保存到历史。";
-});
-
-const visibleSessions = computed<SessionOverview[]>(() => {
-  if (hasVisibleCurrentSession.value) {
-    return sessionList.value;
-  }
-
-  return [
-    {
-      conversationId: sessionId.value,
-      title: "新对话",
-      summary: "发送第一条消息后保存到历史",
-      turnCount: 0,
-      lastReferencedFile: null,
-      updatedAtMs: 0,
-      // PA-081：瞬态条目归属当前激活 Workspace（空 → default 组）。
-      workspaceId: activeWorkspaceId.value || null
-    },
-    ...sessionList.value.filter((session) => session.conversationId !== sessionId.value)
-  ];
-});
-
-// PA-081：两级树分组（Workspace → 会话；孤儿 → 未分组）。
-const sessionGroups = computed(() =>
-  groupSessionsByWorkspace(visibleSessions.value, workspaceList.value)
-);
-const totalVisibleSessions = computed(() =>
-  sessionGroups.value.reduce((total, group) => total + group.sessions.length, 0)
-);
-// "显示全部"解除所有组的预览上限（组计数徽标恒按全量计算）。
-const showAllGroupSessions = ref(false);
-
-interface SidebarGroupRow {
-  kind: "group";
-  key: string;
-  name: string;
-  count: number;
-  collapsed: boolean;
-  /** 关联 workspace id；孤儿组为 null（无快捷新建入口）。 */
-  workspaceId: string | null;
-}
-interface SidebarSessionRow {
-  kind: "session";
-  groupKey: string;
-  session: SessionOverview;
-}
-type SidebarRow = SidebarGroupRow | SidebarSessionRow | { kind: "group-empty"; key: string };
-
-const sidebarRows = computed<SidebarRow[]>(() => {
-  const rows: SidebarRow[] = [];
-  for (const group of sessionGroups.value) {
-    const collapsedGroup = collapsedGroupKeys.value.has(group.key);
-    rows.push({
-      kind: "group",
-      key: group.key,
-      name: group.name,
-      count: group.sessions.length,
-      collapsed: collapsedGroup,
-      workspaceId: group.workspaceId
-    });
-    if (collapsedGroup) {
-      continue;
-    }
-    const preview =
-      showAllGroupSessions.value || !hasAnyHiddenSessions.value
-        ? group.sessions
-        : group.sessions.slice(0, GROUP_SESSION_PREVIEW_LIMIT);
-    for (const session of preview) {
-      rows.push({ kind: "session", groupKey: group.key, session });
-    }
-    if (group.sessions.length === 0) {
-      rows.push({ kind: "group-empty", key: group.key });
-    }
-  }
-  return rows;
-});
-
-// PA-081 调优：激活 Workspace 显示名（注册表名优先；浏览器模式降级文案）。
-const activeWorkspaceName = computed(() => {
-  const active = workspaceList.value.find((workspace) => workspace.id === activeWorkspaceId.value);
-  if (active?.name) {
-    return active.name;
-  }
-  return isTauriRuntime ? "默认工作区" : "默认";
-});
-
-const hasAnyHiddenSessions = computed(() =>
-  sessionGroups.value.some((group) => group.sessions.length > GROUP_SESSION_PREVIEW_LIMIT)
-);
-// PA-081（实施后审核 P1）：当前会话所在组若处于持久化折叠态则自动展开；
-// 本 boot 内用户显式折叠过的组不覆盖（显式选择优先）。
-watch(
-  () => sessionId.value,
-  (currentId) => {
-    if (!currentId) {
-      return;
-    }
-    const owningGroup = sessionGroups.value.find((group) =>
-      group.sessions.some((session) => session.conversationId === currentId)
-    );
-    if (
-      owningGroup &&
-      collapsedGroupKeys.value.has(owningGroup.key) &&
-      !bootToggledGroupKeys.has(owningGroup.key)
-    ) {
-      const next = new Set(collapsedGroupKeys.value);
-      next.delete(owningGroup.key);
-      collapsedGroupKeys.value = next;
-    }
-  }
-);
-// 稳定行 key：避免索引 key 在组增删/折叠切换时的 DOM 复用错位。
-function sidebarRowKey(row: SidebarRow): string {
-  if (row.kind === "group") {
-    return `group-${row.key}`;
-  }
-  if (row.kind === "group-empty") {
-    return `empty-${row.key}`;
-  }
-  return `session-${row.session.conversationId}`;
-}
-const canShowMoreConversations = computed(
-  () => totalVisibleSessions.value > 0 && !showAllGroupSessions.value && hasAnyHiddenSessions.value
-);
-
-const sidebarCollapsed = computed(() => collapsed.value || props.forceCollapsed);
-
-const asideClass = computed(() =>
-  sidebarCollapsed.value
-    ? "w-[3.4rem] shrink-0"
-    : "w-[17.5rem] shrink-0 xl:w-[18.5rem]"
-);
-
-function loadStoredBoolean(key: string, fallback: boolean) {
-  if (typeof window === "undefined") {
-    return fallback;
-  }
-
-  const value = window.localStorage.getItem(key);
-  if (value == null) {
-    return fallback;
-  }
-
-  return value === "1";
-}
-
-function persistStoredBoolean(key: string, value: boolean) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.setItem(key, value ? "1" : "0");
-}
-
-function toggleWorkspaceGroup(groupKey: string) {
-  const next = new Set(collapsedGroupKeys.value);
-  if (next.has(groupKey)) {
-    next.delete(groupKey);
-  } else {
-    next.add(groupKey);
-    // 本 boot 显式折叠：自动展开逻辑不得覆盖。
-    bootToggledGroupKeys.add(groupKey);
-  }
-  collapsedGroupKeys.value = next;
-  // 持久化时仅保留当前仍存在的组 key（未知 key 忽略，防止无限增长）。
-  const validKeys = new Set(sessionGroups.value.map((group) => group.key));
-  persistCollapsedWorkspaceGroups(next, validKeys, typeof window !== "undefined" ? window.localStorage : undefined);
-}
-
-function toggleWorkspaceSection() {
-  workspaceSectionOpen.value = !workspaceSectionOpen.value;
-}
-
-function activateWorkspaceById(workspaceId: string) {
-  runtimeStore.activateWorkspace(workspaceId);
-}
-
-// design §2：组头快捷入口——在该组 Workspace 下新建对话（激活目标随组切换）。
-function createSessionInWorkspace(workspaceId: string) {
-  pendingDeleteSessionId.value = null;
-  if (props.currentPage !== "home") {
-    navigate("home");
-  }
-  runtimeStore.activateWorkspace(workspaceId);
-  void runtimeStore.createSession();
 }
 
 async function submitNewWorkspace() {
-  if (workspaceCreating.value) {
+  if (workspaceCreating.value) return;
+  const name = newWorkspaceName.value.trim();
+  const rootPath = newWorkspaceRootPath.value.trim();
+  if (!name) {
+    workspaceError.value = SIDEBAR_COPY.renameEmptyError;
     return;
   }
-  workspaceError.value = null;
+  if ([...name].length > 64) {
+    workspaceError.value = SIDEBAR_COPY.renameTooLongError;
+    return;
+  }
+  if (workspaceList.value.some((w) => w.name === name)) {
+    workspaceError.value = SIDEBAR_COPY.renameDuplicateWorkspaceError;
+    return;
+  }
+  workspaceError.value = "";
   workspaceCreating.value = true;
   try {
-    const record = await runtimeStore.createNewWorkspace(
-      newWorkspaceName.value,
-      newWorkspaceRootPath.value
-    );
+    const record = await runtimeStore.createNewWorkspace(name, rootPath);
     if (record) {
       newWorkspaceName.value = "";
       newWorkspaceRootPath.value = "";
       workspaceFormOpen.value = false;
     } else {
-      workspaceError.value = "创建失败：请检查名称与根路径是否有效（根路径可能已存在）。";
+      workspaceError.value = "创建失败：请检查根路径是否有效（可能已存在或重名）。";
     }
   } catch (error) {
     workspaceError.value = `创建失败：${String(error)}`;
@@ -309,121 +202,272 @@ async function submitNewWorkspace() {
   }
 }
 
-function toggleCollapsed() {
-  collapsed.value = !collapsed.value;
-  persistStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, collapsed.value);
-}
+// ── 树派生 ───────────────────────────────────────────────────────────────
+const hasPersistableCurrentSession = computed(() => hasPersistableMessages(messages.value));
+const hasVisibleCurrentSession = computed(() =>
+  sessionList.value.some((session) => session.conversationId === sessionId.value)
+);
 
-function toggleConversationSection() {
-  conversationOpen.value = !conversationOpen.value;
-}
-
-// PA-081："显示全部"解除所有组的会话数上限（组计数徽标恒按全量）。
-function showMoreConversations() {
-  showAllGroupSessions.value = true;
-}
-
-onMounted(() => {
-  // Workspace 注册表加载（浏览器模式 contained：空列表 + 仅默认组）。
-  void runtimeStore.loadWorkspaces();
+const transientEntry = computed<SessionOverview | null>(() => {
+  if (hasVisibleCurrentSession.value) return null;
+  return {
+    conversationId: sessionId.value,
+    title: "新对话",
+    summary: "发送第一条消息后保存到历史",
+    turnCount: 0,
+    lastReferencedFile: null,
+    updatedAtMs: 0,
+    workspaceId: sessionWorkspaceId.value === DEFAULT_WORKSPACE_ID ? null : sessionWorkspaceId.value
+  };
 });
 
-function navigate(page: SidebarNavigationPage) {
-  emit("navigate", page);
-}
+const tree = computed(() =>
+  deriveSidebarTree(
+    sessionList.value.filter(isVisibleSession),
+    workspaceList.value,
+    transientEntry.value
+      ? { target: sessionWorkspaceId.value, overview: transientEntry.value }
+      : undefined
+  )
+);
 
-function createNewSession() {
-  pendingDeleteSessionId.value = null;
-  if (props.currentPage !== "home") {
-    navigate("home");
-  }
-
-  void runtimeStore.createSession();
-}
-
-function openSessionHistory(conversationId: string) {
-  pendingDeleteSessionId.value = null;
-  if (props.currentPage !== "home") {
-    navigate("home");
-  }
-
-  runtimeStore.switchSession(conversationId);
+const totalVisibleSessions = computed(
+  () => tree.value.flatZone.length + tree.value.workspaces.reduce((sum, g) => sum + g.count, 0)
+);
+const showAllPartitions = ref(false);
+const hasHiddenSessions = computed(
+  () =>
+    tree.value.flatZone.length > PARTITION_PREVIEW_LIMIT
+    || tree.value.workspaces.some((g) => g.sessions.length > PARTITION_PREVIEW_LIMIT)
+);
+function partitionPreview(sessions: readonly SessionOverview[]): readonly SessionOverview[] {
+  return showAllPartitions.value ? sessions : sessions.slice(0, PARTITION_PREVIEW_LIMIT);
 }
 
 function sessionHeadline(session: SessionOverview) {
   return session.title?.trim() || session.summary?.trim() || session.conversationId;
 }
 
-function formatSessionTime(updatedAtMs?: number) {
-  if (!updatedAtMs) {
-    return "未保存";
-  }
-
-  const now = new Date();
-  const updatedAt = new Date(updatedAtMs);
-  const isSameDay =
-    now.getFullYear() === updatedAt.getFullYear() &&
-    now.getMonth() === updatedAt.getMonth() &&
-    now.getDate() === updatedAt.getDate();
-
-  if (isSameDay) {
-    return new Intl.DateTimeFormat("zh-CN", {
-      hour: "2-digit",
-      minute: "2-digit"
-    }).format(updatedAt);
-  }
-
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfUpdatedDay = new Date(
-    updatedAt.getFullYear(),
-    updatedAt.getMonth(),
-    updatedAt.getDate()
-  ).getTime();
-  const elapsedDays = Math.max(1, Math.floor((startOfToday - startOfUpdatedDay) / 86_400_000));
-  return `${elapsedDays}天前`;
+// ── 建会话入口（裁决①：显式目标） ────────────────────────────────────────
+function createNewSession() {
+  if (props.currentPage !== "home") navigate("home");
+  void runtimeStore.createSession(DEFAULT_WORKSPACE_ID);
+}
+function createSessionInWorkspace(workspaceId: string) {
+  if (props.currentPage !== "home") navigate("home");
+  void runtimeStore.createSession(workspaceId);
 }
 
-function hasPersistableMessages(sessionMessages: ChatMessage[]) {
-  return sessionMessages.some(
-    (message) =>
-      (message.role === "user" || message.role === "assistant") && message.content.trim().length > 0
-  );
-}
-
+// ── 会话守卫与菜单 ────────────────────────────────────────────────────────
 function isTransientSession(session: SessionOverview) {
   return session.conversationId === sessionId.value && !hasVisibleCurrentSession.value;
 }
-
-function canDeleteSession(session: SessionOverview) {
-  if (isSubmitting.value || isTransientSession(session) || runtimeStore.isSessionDeleting(session.conversationId)) {
-    return false;
+function isRunning(session: SessionOverview) {
+  return runtimeStore.isSessionRunning(session.conversationId)
+    || (isSubmitting.value && session.conversationId === sessionId.value);
+}
+function guardTitle(session: SessionOverview): string | undefined {
+  if (!canMutateSession(session)) {
+    if (runtimeStore.isSubmitting && session.conversationId === sessionId.value) {
+      return SIDEBAR_COPY.disabledSubmittingTooltip;
+    }
+    if (isRunning(session)) return SIDEBAR_COPY.disabledRunningTooltip;
+    return SIDEBAR_COPY.disabledSubmittingTooltip;
   }
-
-  return !sessionOperation.value;
+  return undefined;
+}
+function canMutateSession(session: SessionOverview): boolean {
+  if (isTransientSession(session)) return false;
+  if (isRunning(session)) return false;
+  if (sessionOperation.value) return false;
+  return !runtimeStore.isSessionDeleting(session.conversationId);
+}
+function canDeleteViaMenu(session: SessionOverview): boolean {
+  return canMutateSession(session);
 }
 
-function isDeletingSession(session: SessionOverview) {
-  return runtimeStore.isSessionDeleting(session.conversationId);
+// 菜单项数组必须保持引用稳定（reka 内部 watcher 对不稳定 props 会循环更新并
+// 卸载内容）：按会话/工作区 id 缓存，仅在相关响应式输入变化时重建。
+const sessionMenuItemsCache = computed(() => {
+  const map = new Map<string, DropdownMenuItemSpec[]>();
+  const build = (session: SessionOverview) => {
+    const guard = guardTitle(session);
+    const mutable = canMutateSession(session);
+    if (!isTauriRuntime) {
+      map.set(session.conversationId, [
+        { id: "delete", label: SIDEBAR_COPY.menuDeleteConversation, icon: Trash2, danger: true }
+      ]);
+      return;
+    }
+    map.set(session.conversationId, [
+      { id: "rename", label: SIDEBAR_COPY.menuRenameConversation, icon: Pencil, disabled: !mutable, disabledTitle: guard },
+      { id: "archive", label: SIDEBAR_COPY.menuArchiveConversation, icon: Archive, disabled: !mutable, disabledTitle: guard },
+      { id: "delete", label: SIDEBAR_COPY.menuDeleteConversation, icon: Trash2, danger: true, disabled: !canDeleteViaMenu(session), disabledTitle: guard }
+    ]);
+  };
+  for (const session of tree.value.flatZone) build(session);
+  for (const group of tree.value.workspaces) for (const s of group.sessions) build(s);
+  return map;
+});
+
+function sessionMenuItems(session: SessionOverview): DropdownMenuItemSpec[] {
+  return (
+    sessionMenuItemsCache.value.get(session.conversationId) ?? [
+      { id: "delete", label: SIDEBAR_COPY.menuDeleteConversation, danger: true }
+    ]
+  );
 }
 
-async function handleDeleteSession(session: SessionOverview) {
-  if (!canDeleteSession(session)) {
-    return;
+const workspaceMenuItemsCache = computed(() => {
+  const map = new Map<string, DropdownMenuItemSpec[]>();
+  for (const workspace of workspaceList.value) {
+    if (workspace.id === DEFAULT_WORKSPACE_ID) continue;
+    map.set(workspace.id, [
+      { id: "rename", label: SIDEBAR_COPY.menuRenameWorkspace, icon: Pencil },
+      { id: "delete", label: SIDEBAR_COPY.menuDeleteWorkspace, icon: Trash2, danger: true }
+    ]);
   }
+  return map;
+});
 
-  if (pendingDeleteSessionId.value !== session.conversationId) {
-    pendingDeleteSessionId.value = session.conversationId;
-    return;
-  }
-
-  pendingDeleteSessionId.value = null;
-  await runtimeStore.deleteSession(session.conversationId);
+function workspaceMenuItems(workspaceId: string): DropdownMenuItemSpec[] {
+  return workspaceMenuItemsCache.value.get(workspaceId) ?? [];
 }
 
-function clearPendingDeleteSession(session: SessionOverview) {
-  if (pendingDeleteSessionId.value === session.conversationId) {
-    pendingDeleteSessionId.value = null;
+function onSessionMenuSelect(session: SessionOverview, itemId: string) {
+  const headline = sessionHeadline(session);
+  if (itemId === "rename") startRename(`s:${session.conversationId}`, headline);
+  if (itemId === "archive") {
+    openConfirm({
+      key: `s:${session.conversationId}:archive`,
+      kind: "session-archive",
+      title: headline,
+      sessionId: session.conversationId
+    });
   }
+  if (itemId === "delete") {
+    openConfirm({
+      key: `s:${session.conversationId}:delete`,
+      kind: "session-delete",
+      title: headline,
+      sessionId: session.conversationId
+    });
+  }
+}
+
+function onWorkspaceMenuSelect(workspaceId: string, name: string, itemId: string) {
+  if (itemId === "rename") startRename(`ws:${workspaceId}`, name);
+  if (itemId === "delete") {
+    const count = tree.value.workspaces.find((g) => g.key === workspaceId)?.count ?? 0;
+    openConfirm({
+      key: `ws:${workspaceId}`,
+      kind: "workspace-delete",
+      title: name,
+      count,
+      workspaceId
+    });
+  }
+}
+
+// ── 确认处理器（受控确认标准模板：inflight→await→成功关/失败停留） ────────
+async function runConfirm(kind: ConfirmKind, target: ConfirmTarget) {
+  confirmState.loading = true;
+  confirmState.error = "";
+  let outcome: { ok: boolean; error?: string };
+  try {
+    if (kind === "workspace-delete") {
+      outcome = await runtimeStore.deleteWorkspace(target.workspaceId ?? "");
+    } else if (kind === "session-archive") {
+      outcome = await runtimeStore.archiveSession(target.sessionId ?? "");
+    } else {
+      try {
+        await runtimeStore.deleteSession(target.sessionId ?? "");
+        outcome = { ok: true };
+      } catch (error) {
+        outcome = { ok: false, error: String(error) };
+      }
+    }
+    if (!outcome.ok && confirmOpen.value) {
+      confirmState.error = `${SIDEBAR_COPY.confirmFailurePrefix}${outcome.error ?? "未知错误"}`;
+      confirmState.loading = false;
+      return;
+    }
+    closeConfirm();
+  } finally {
+    confirmState.loading = false;
+  }
+}
+
+// ── 其余 UI 状态 ──────────────────────────────────────────────────────────
+const menuInteractiveClass =
+  "rounded-[0.2rem] transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900";
+const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
+
+const hasPersistableMessages = (list: ChatMessage[]) =>
+  list.some(
+    (message) =>
+      (message.role === "user" || message.role === "assistant") && message.content.trim().length > 0
+  );
+
+const canCreateSession = computed(
+  () => !sessionOperation.value && hasPersistableMessages(messages.value)
+);
+const createSessionTitle = computed(() => {
+  if (isSubmitting.value) {
+    return "当前对话正在运行；新建空白对话后，运行会转入后台继续。";
+  }
+  return hasPersistableCurrentSession.value
+    ? "新建一个空白对话到默认工作区，并保留当前已存在的历史会话。"
+    : "当前已经是空白新对话，发送首条消息后才会保存到历史。";
+});
+
+function loadStoredBoolean(key: string, fallback: boolean) {
+  if (typeof window === "undefined") return fallback;
+  return window.localStorage.getItem(key) === "1";
+}
+
+const sidebarCollapsed = computed(() => collapsed.value || props.forceCollapsed);
+const asideClass = computed(() =>
+  sidebarCollapsed.value ? "w-[3.4rem] shrink-0" : "w-[17.5rem] shrink-0 xl:w-[18.5rem]"
+);
+
+function toggleCollapsed() {
+  collapsed.value = !collapsed.value;
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(SESSION_SIDEBAR_STORAGE_KEY, collapsed.value ? "1" : "0");
+  }
+}
+
+function navigate(page: SidebarNavigationPage) {
+  emit("navigate", page);
+}
+
+function workspaceDeleteDescription(name: string, count: number): string {
+  return SIDEBAR_COPY.deleteWorkspaceDescription(name, count);
+}
+
+function confirmPopoverProps(
+  kind: ConfirmKind,
+  target: ConfirmTarget | null
+): { title: string; description: string; confirmText: string } {
+  if (!target) {
+    return { title: "", description: "", confirmText: "" };
+  }
+  if (kind === "workspace-delete") {
+    return {
+      title: SIDEBAR_COPY.deleteWorkspaceTitle,
+      description: workspaceDeleteDescription(target.title, target.count ?? 0),
+      confirmText: SIDEBAR_COPY.deleteWorkspaceConfirm
+    };
+  }
+  if (kind === "session-archive") {
+    return {
+      title: SIDEBAR_COPY.archiveTitle,
+      description: SIDEBAR_COPY.archiveDescription,
+      confirmText: SIDEBAR_COPY.archiveConfirm
+    };
+  }
+  return { title: SIDEBAR_COPY.deleteConversationTitle, description: "", confirmText: SIDEBAR_COPY.deleteConversationConfirm };
 }
 </script>
 
@@ -459,6 +503,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
         </button>
       </div>
 
+      <!-- 折叠 rail -->
       <div
         v-if="sidebarCollapsed"
         class="mt-4 flex flex-1 flex-col items-center gap-2"
@@ -473,7 +518,6 @@ function clearPendingDeleteSession(session: SessionOverview) {
         >
           <PonyBrandIcon class-name="h-7 w-7 shrink-0 rounded-[0.65rem]" />
         </button>
-
         <button
           class="inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] bg-transparent text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:text-stone-300"
           type="button"
@@ -484,41 +528,30 @@ function clearPendingDeleteSession(session: SessionOverview) {
         >
           <Plus class="h-4 w-4" />
         </button>
-
         <button
           class="relative inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
-          :class="
-            props.currentPage === 'home'
-              ? 'bg-[#f7e3bf] text-stone-900'
-              : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
-          "
+          :class="props.currentPage === 'home' ? 'bg-[#f7e3bf] text-stone-900' : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'"
           type="button"
           title="对话工作区"
           data-testid="session-sidebar-home-collapsed"
           @click="navigate('home')"
         >
-          <MessageSquareMore class="h-4 w-4" />
+          <FolderOpen class="h-4 w-4" />
           <span
             v-if="Object.keys(runtimeStore.runningSessionMap).length > 0"
             class="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500"
             data-testid="session-sidebar-collapsed-running-indicator"
           />
         </button>
-
         <button
           class="relative mt-auto inline-flex h-8 w-8 items-center justify-center rounded-[0.42rem] transition"
-          :class="
-            props.currentPage === 'settings'
-              ? 'bg-[#f7e3bf] text-stone-900'
-              : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'
-          "
+          :class="props.currentPage === 'settings' ? 'bg-[#f7e3bf] text-stone-900' : 'bg-transparent text-stone-500 hover:bg-[#f7e3bf] hover:text-stone-900'"
           type="button"
           title="设置"
           data-testid="session-sidebar-nav-settings-collapsed"
           @click="navigate('settings')"
         >
           <Settings class="h-4 w-4" />
-          <!-- PA-099：GitHub 有新发版时的角标提醒（点击仍导航设置页）。 -->
           <span
             v-if="updateStore.hasUpdate"
             class="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-500"
@@ -529,8 +562,7 @@ function clearPendingDeleteSession(session: SessionOverview) {
       </div>
 
       <template v-else>
-        <!-- PA-096：操作行只保留"新对话"；激活工作区名并入工作区 section 头部，
-             消除相邻双开关（UX 审核 P2-2）。 -->
+        <!-- 展开态：顶层新对话（恒落默认工作区平铺区） -->
         <div class="mt-4 flex items-center gap-1.5" data-testid="session-sidebar-actions">
           <button
             class="flex h-8 min-w-0 flex-1 items-center gap-2 px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
@@ -546,309 +578,294 @@ function clearPendingDeleteSession(session: SessionOverview) {
           </button>
         </div>
 
-        <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="pr-1.5"><div class="flex flex-col gap-2">
-          <!-- PA-096：工作区第一优先（需求 #3）——先于会话列表；激活工作区名并入头部。 -->
-          <section class="rounded-[0.5rem]" data-testid="session-sidebar-workspace-nav">
-            <button
-              class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
-              :class="[menuInteractiveClass, 'text-stone-800']"
-              type="button"
-              data-testid="session-sidebar-workspace-toggle"
-              @click="toggleWorkspaceSection"
-            >
+        <ScrollArea class="mt-3 min-h-0 flex-1" viewport-class="pr-1.5">
+          <section data-testid="session-sidebar-tree">
+            <!-- 一级标题行（不可折叠）+ 右端添加工作区 -->
+            <div class="flex w-full items-center justify-between gap-2 px-1.5 py-2">
               <div class="flex min-w-0 items-center gap-2 text-[12px] font-medium text-stone-800">
-                <Folder class="h-3.5 w-3.5 shrink-0" />
-                <span class="shrink-0">工作区</span>
-                <span v-if="!isTauriRuntime" class="shrink-0 text-[10px] font-normal text-stone-400">浏览器模式不可用</span>
+                <FolderOpen class="h-3.5 w-3.5 shrink-0" />
+                <span class="shrink-0">{{ SIDEBAR_COPY.sectionTitle }}</span>
               </div>
-              <span class="flex min-w-0 shrink-0 items-center gap-1">
-                <span
-                  class="max-w-[7.5rem] truncate text-[10px] text-stone-400"
-                  :title="`当前工作区：${activeWorkspaceName}`"
-                  data-testid="session-sidebar-active-workspace-name"
-                >{{ activeWorkspaceName }}</span>
-                <ChevronDown
-                  class="h-4 w-4 shrink-0 text-stone-400 transition"
-                  :class="{ 'rotate-180': workspaceSectionOpen }"
-                />
-              </span>
-            </button>
-
-            <div v-if="workspaceSectionOpen" class="space-y-1 py-0.5">
-              <div
-                v-for="workspace in workspaceList"
-                :key="workspace.id"
-                class="flex items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1"
-                :class="workspace.id === activeWorkspaceId ? 'bg-[#f7e3bf]/60' : ''"
-                :data-testid="`workspace-row-${workspace.id}`"
-              >
-                <span class="min-w-0 truncate text-[11px] leading-4 text-stone-700" :title="workspace.rootPath">
-                  {{ workspace.name || workspace.id }}
-                  <span v-if="workspace.id === activeWorkspaceId" class="ml-1 text-[10px] text-amber-600">激活</span>
-                </span>
-                <button
-                  v-if="workspace.id !== activeWorkspaceId"
-                  class="h-5 shrink-0 rounded-[0.35rem] px-1.5 text-[10px] text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900"
-                  type="button"
-                  :data-testid="`workspace-activate-${workspace.id}`"
-                  @click="activateWorkspaceById(workspace.id)"
-                >
-                  切换
-                </button>
-              </div>
-
-              <template v-if="isTauriRuntime">
-                <button
-                  v-if="!workspaceFormOpen"
-                  class="flex w-full items-center justify-start gap-1.5 px-1.5 py-1 text-left text-[11px] text-stone-500 transition hover:text-stone-900"
-                  type="button"
-                  data-testid="workspace-new-open-form"
-                  @click="workspaceFormOpen = true"
-                >
-                  <Plus class="h-3 w-3" />
-                  <span>新建工作区</span>
-                </button>
-                <div v-else class="space-y-1 rounded-[0.35rem] bg-[#fbf4e8]/70 p-1.5">
-                  <input
-                    v-model="newWorkspaceName"
-                    class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
-                    placeholder="名称"
-                    data-testid="workspace-new-name"
-                  />
-                  <input
-                    v-model="newWorkspaceRootPath"
-                    class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
-                    placeholder="根路径（如 D:\\projects\\demo）"
-                    data-testid="workspace-new-path"
-                  />
-                  <div class="flex items-center gap-1.5">
-                    <button
-                      class="h-6 rounded-[0.3rem] bg-[#f3c98d] px-2 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
-                      type="button"
-                      :disabled="workspaceCreating || !newWorkspaceName.trim() || !newWorkspaceRootPath.trim()"
-                      data-testid="workspace-new-submit"
-                      @click="submitNewWorkspace"
-                    >
-                      {{ workspaceCreating ? "创建中…" : "创建并激活" }}
-                    </button>
-                    <button
-                      class="h-6 rounded-[0.3rem] px-2 text-[11px] text-stone-500 transition hover:text-stone-900"
-                      type="button"
-                      @click="workspaceFormOpen = false"
-                    >
-                      取消
-                    </button>
-                  </div>
-                  <!-- PA-081（实施后审核 P2）：新建失败的可见反馈。 -->
-                  <p
-                    v-if="workspaceError"
-                    class="px-0.5 pt-1 text-[10px] leading-4 text-rose-600"
-                    data-testid="workspace-new-error"
+              <TooltipProvider v-if="isTauriRuntime" :delay-duration="300">
+                <Tooltip :text="SIDEBAR_COPY.addWorkspaceTooltip" side="bottom">
+                  <button
+                    class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                    type="button"
+                    aria-label="添加工作区"
+                    data-testid="workspace-add-button"
+                    @click="openAddWorkspaceFlow"
                   >
-                    {{ workspaceError }}
-                  </p>
-                </div>
-              </template>
-              <p v-else class="px-1.5 py-1 text-[10px] leading-4 text-stone-400">
-                浏览器预览模式仅提供默认工作区；启动桌面端后可管理项目。
+                    <FolderPlus class="h-3.5 w-3.5" />
+                  </button>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+
+            <!-- 添加表单 -->
+            <div v-if="workspaceFormOpen && isTauriRuntime" class="space-y-1 rounded-[0.35rem] bg-[#fbf4e8]/70 p-1.5">
+              <input
+                v-model="newWorkspaceName"
+                class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
+                placeholder="名称"
+                maxlength="64"
+                data-testid="workspace-new-name"
+              />
+              <input
+                v-model="newWorkspaceRootPath"
+                class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
+                placeholder="根路径"
+                data-testid="workspace-new-path"
+              />
+              <div class="flex items-center gap-1.5">
+                <button
+                  class="h-6 rounded-[0.3rem] bg-[#f3c98d] px-2 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
+                  type="button"
+                  :disabled="workspaceCreating || !newWorkspaceName.trim() || !newWorkspaceRootPath.trim()"
+                  data-testid="workspace-new-submit"
+                  @click="submitNewWorkspace"
+                >
+                  {{ workspaceCreating ? "创建中…" : "创建" }}
+                </button>
+                <button
+                  class="h-6 rounded-[0.3rem] px-2 text-[11px] text-stone-500 transition hover:text-stone-900"
+                  type="button"
+                  data-testid="workspace-new-cancel"
+                  @click="workspaceFormOpen = false"
+                >
+                  取消
+                </button>
+              </div>
+              <p v-if="workspaceError" class="px-0.5 pt-1 text-[10px] leading-4 text-rose-600" data-testid="workspace-new-error">
+                {{ workspaceError }}
               </p>
             </div>
-          </section>
 
-          <section class="rounded-[0.5rem]" data-testid="session-sidebar-session-list">
-            <button
-              class="flex w-full items-center justify-between gap-2 px-1.5 py-2 text-left"
-              :class="[menuInteractiveClass, 'text-stone-800']"
-              type="button"
-              data-testid="session-sidebar-conversation-toggle"
-              @click="toggleConversationSection"
+            <p
+              v-if="totalVisibleSessions === 0"
+              class="px-1.5 py-2 text-[11px] leading-4 text-stone-400"
+              data-testid="session-sidebar-empty"
             >
-              <div class="flex items-center gap-2 text-[12px] font-medium text-stone-800">
-                <MessageSquareMore class="h-3.5 w-3.5" />
-                <span>对话</span>
-              </div>
-              <ChevronDown
-                class="h-4 w-4 text-stone-400 transition"
-                :class="{ 'rotate-180': conversationOpen }"
-              />
-            </button>
-            <div v-if="conversationOpen" class="space-y-1 py-0.5">
-                <p
-                  v-if="totalVisibleSessions === 0"
-                  class="px-1.5 py-2 text-[11px] leading-4 text-stone-400"
-                  data-testid="session-sidebar-empty"
-                >
-                  暂无对话；发送第一条消息后会自动保存到当前工作区。
-                </p>
-                <!-- PA-081（实施后审核 P2）：v-else 防止全空时与空组提示双渲染。 -->
-                <template v-else v-for="row in sidebarRows" :key="sidebarRowKey(row)">
-                  <button
-                    v-if="row.kind === 'group'"
-                    class="flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1 text-left transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900"
-                    type="button"
-                    :data-testid="`session-sidebar-group-${row.key}`"
-                    @click="toggleWorkspaceGroup(row.key)"
-                  >
-                    <span class="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-stone-700">
-                      <FolderOpen v-if="!row.collapsed" class="h-3 w-3 shrink-0 text-stone-400" />
-                      <Folder v-else class="h-3 w-3 shrink-0 text-stone-400" />
-                      <span class="truncate">{{ row.name }}</span>
-                      <span class="shrink-0 text-[10px] text-stone-400">{{ row.count }}</span>
-                    </span>
-                    <span class="flex shrink-0 items-center gap-1">
-                      <!-- design §2：组头"新建对话"快捷入口（在该组 Workspace 下新建）。 -->
-                      <button
-                        v-if="row.workspaceId"
-                        class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900"
-                        type="button"
-                        title="在此工作区新建对话"
-                        :data-testid="`session-sidebar-group-new-${row.key}`"
-                        @click.stop="createSessionInWorkspace(row.workspaceId)"
-                      >
-                        <Plus class="h-3 w-3" />
-                      </button>
-                      <ChevronDown
-                        class="h-3.5 w-3.5 transition"
-                        :class="{ 'rotate-180': !row.collapsed }"
-                      />
-                    </span>
-                  </button>
-                  <p
-                    v-else-if="row.kind === 'group-empty'"
-                    class="px-6 py-1 text-[10px] leading-4 text-stone-400"
-                    :data-testid="`session-sidebar-group-empty-${row.key}`"
-                  >
-                    该工作区暂无对话
-                  </p>
-                  <div
-                    v-else
-                    class="group rounded-[0.2rem]"
-                    :class="[
-                      row.session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass
-                    ]"
-                    @mouseleave="clearPendingDeleteSession(row.session)"
-                  >
-                    <div class="flex items-center gap-2 px-1.5 py-1">
-                      <button
-                        class="min-w-0 flex-1 text-left"
-                        type="button"
-                        :disabled="Boolean(sessionOperation)"
-                        :data-testid="`session-switch-${row.session.conversationId}`"
-                        @click="openSessionHistory(row.session.conversationId)"
-                      >
-                        <div class="flex items-center gap-2 text-[12px] leading-5">
-                          <span
-                            class="truncate"
-                            :class="row.session.conversationId === sessionId ? 'font-medium text-stone-900' : 'text-stone-700'"
-                          >
-                            {{ sessionHeadline(row.session) }}
-                          </span>
-                          <span v-if="isTransientSession(row.session)" class="shrink-0 text-[10px] text-amber-600">
-                            未保存
-                          </span>
-                          <span class="shrink-0 text-[10px] text-stone-400">
-                            {{ formatSessionTime(row.session.updatedAtMs) }}
-                          </span>
-                        </div>
-                      </button>
+              {{ SIDEBAR_COPY.emptyTreeHint }}
+            </p>
 
-                      <span
-                        v-if="row.session.conversationId in runtimeStore.completedSessionSet"
-                        class="h-2 w-2 shrink-0 cursor-pointer rounded-full bg-emerald-500"
-                        title="后台任务已完成，点击查看"
-                        :data-testid="`session-completed-${row.session.conversationId}`"
-                        @click="openSessionHistory(row.session.conversationId)"
-                      />
-                      <span
-                        v-else-if="row.session.conversationId in runtimeStore.failedSessionSet"
-                        class="h-2 w-2 shrink-0 cursor-pointer rounded-full bg-rose-500"
-                        title="后台任务执行失败，点击查看"
-                        :data-testid="`session-failed-${row.session.conversationId}`"
-                        @click="openSessionHistory(row.session.conversationId)"
-                      />
-
-                      <button
-                        class="pointer-events-none inline-flex shrink-0 cursor-pointer items-center justify-center text-[10px] text-stone-400 opacity-0 transition hover:cursor-pointer hover:text-rose-600 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 disabled:cursor-not-allowed disabled:text-stone-300 min-w-[2rem]"
-                        :class="
-                          isDeletingSession(row.session)
-                            ? 'h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100'
-                            : pendingDeleteSessionId === row.session.conversationId
-                            ? 'h-5 rounded-full bg-rose-200 px-1.5 text-rose-800 hover:bg-rose-300 hover:text-rose-900'
-                            : runtimeStore.isSessionRunning(row.session.conversationId) || (isSubmitting && row.session.conversationId === sessionId)
-                            ? 'pointer-events-auto h-5 rounded-[0.35rem] px-1.5 py-1 opacity-100 hover:text-amber-600'
-                            : 'h-5 rounded-[0.35rem] px-1.5 py-1'
-                        "
-                        type="button"
-                        :disabled="!canDeleteSession(row.session)"
-                        :title="
-                          isTransientSession(row.session)
-                            ? '空白新对话会在切换后自动丢弃，无需单独删除。'
-                            : isDeletingSession(row.session)
-                              ? '正在删除'
-                              : pendingDeleteSessionId === row.session.conversationId
-                              ? '确认删除'
-                              : '删除对话'
-                        "
-                        :data-testid="`session-delete-${row.session.conversationId}`"
-                        @click.stop="handleDeleteSession(row.session)"
-                      >
-                        <LoaderCircle
-                          v-if="isDeletingSession(row.session)"
-                          class="h-3.5 w-3.5 animate-spin text-stone-400"
-                          :data-testid="`session-delete-loading-${row.session.conversationId}`"
-                        />
-                        <LoaderCircle
-                          v-else-if="runtimeStore.isSessionRunning(row.session.conversationId) || (isSubmitting && row.session.conversationId === sessionId)"
-                          class="h-3.5 w-3.5 animate-spin text-amber-600"
-                          :data-testid="`session-running-${row.session.conversationId}`"
-                        />
-                        <Trash2 v-else-if="pendingDeleteSessionId !== row.session.conversationId" class="h-3.5 w-3.5" />
-                        <span v-else class="inline-flex items-center justify-center text-[10px] font-medium text-rose-800">
-                          确认
-                        </span>
-                      </button>
-                    </div>
-                  </div>
+            <!-- 平铺区 -->
+            <div class="space-y-0.5 pt-1">
+              <div
+                v-for="session in partitionPreview(tree.flatZone)"
+                :key="`flat-${session.conversationId}`"
+                class="group relative rounded-[0.2rem]"
+                :class="session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass"
+                data-testid="flat-zone-session-row"
+              >
+                <SessionRow
+                  :session="session"
+                  :menu-items="sessionMenuItems(session)"
+                  :selected="session.conversationId === sessionId"
+                  :renaming="renamingKey === `s:${session.conversationId}`"
+                  :rename-draft="renameDraft"
+                  :rename-error="renameError"
+                  :renaming-busy="renamingBusy"
+                  :hide-menu="isTransientSession(session)"
+                  @open-session="(id: string) => { if (currentPage !== 'home') navigate('home'); runtimeStore.switchSession(id); }"
+                  @menu-select="(id: string) => onSessionMenuSelect(session, id)"
+                  @update:rename-draft="(v: string) => (renameDraft = v)"
+                  @submit-rename="submitRename"
+                  @cancel-rename="cancelRename"
+                />
+                <template v-if="confirmTarget?.kind === 'session-archive' && confirmTarget.sessionId === session.conversationId">
+                  <ConfirmPopover
+                    v-bind="confirmPopoverProps('session-archive', confirmTarget)"
+                    :open="true"
+                    :loading="confirmState.loading"
+                    :error="confirmState.error"
+                    @confirm="runConfirm('session-archive', confirmTarget)"
+                    @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
+                  >
+                    <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                  </ConfirmPopover>
                 </template>
-                <button
-                  v-if="canShowMoreConversations"
-                  class="w-full px-1.5 py-1 text-left text-[11px] font-normal leading-5 text-stone-500 transition hover:text-stone-900"
-                  type="button"
-                  data-testid="session-sidebar-show-more-conversations"
-                  @click="showMoreConversations"
-                >
-                  显示全部
-                </button>
+                <template v-else-if="confirmTarget?.kind === 'session-delete' && confirmTarget.sessionId === session.conversationId">
+                  <ConfirmPopover
+                    v-bind="confirmPopoverProps('session-delete', confirmTarget)"
+                    :open="true"
+                    :loading="confirmState.loading"
+                    :error="confirmState.error"
+                    @confirm="runConfirm('session-delete', confirmTarget)"
+                    @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
+                  >
+                    <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                  </ConfirmPopover>
+                </template>
+              </div>
             </div>
-          </section>
 
-        </div></ScrollArea>
-
-          <!-- ADR 0013：底部一级导航仅剩"设置"——观测入口移至对话页右栏浮动按钮，
-               模型配置直达键并入配置页"模型" tab。 -->
-          <div class="mt-auto space-y-0.5 pt-2">
-            <button
-              class="relative flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
-              :class="
-                props.currentPage === 'settings'
-                  ? menuSelectedClass
-                  : `${menuInteractiveClass} text-stone-800`
-              "
-              type="button"
-              data-testid="session-sidebar-nav-settings"
-              @click="navigate('settings')"
+            <!-- 各工作区组 -->
+            <div
+              v-for="group in tree.workspaces"
+              :key="group.key"
+              class="pt-1.5"
+              :data-testid="`workspace-group-${group.key}`"
             >
-              <Settings class="h-3.5 w-3.5" />
-              <span class="text-[12px] font-bold leading-4">设置</span>
-              <!-- PA-099：GitHub 有新发版时的角标提醒（点击仍导航设置页）。 -->
-              <span
-                v-if="updateStore.hasUpdate"
-                class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-amber-500"
-                title="发现新版本"
-                data-testid="session-sidebar-nav-settings-update-badge"
-              />
+              <div class="relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1 hover:bg-[#f6dfb8]/60">
+                <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] font-medium text-stone-700">
+                  <Folder class="h-3 w-3 shrink-0 text-stone-400" />
+                  <input
+                    v-if="renamingKey === `ws:${group.key}`"
+                    v-model="renameDraft"
+                    class="min-w-0 flex-1 rounded-[0.2rem] border border-amber-300 bg-white px-1 py-0.5 text-[11px] outline-none"
+                    maxlength="64"
+                    :disabled="renamingBusy"
+                    data-testid="workspace-rename-input"
+                    @keydown.enter.prevent="submitRename"
+                    @keydown.esc.prevent="cancelRename"
+                  />
+                  <span v-else class="truncate">{{ group.name }}</span>
+                  <span class="shrink-0 text-[10px] text-stone-400">{{ group.count }}</span>
+                </span>
+                <span v-if="renamingKey !== `ws:${group.key}`" class="flex shrink-0 items-center gap-0.5">
+                  <button
+                    v-if="isTauriRuntime"
+                    class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                    type="button"
+                    :title="SIDEBAR_COPY.newConversationHere"
+                    :data-testid="`workspace-row-new-${group.key}`"
+                    @click="createSessionInWorkspace(group.key)"
+                  >
+                    <Plus class="h-3 w-3" />
+                  </button>
+                  <DropdownMenu
+                    v-if="isTauriRuntime"
+                    :items="workspaceMenuItems(group.key)"
+                    @select="(id: string) => onWorkspaceMenuSelect(group.key, group.name, id)"
+                  >
+                    <button
+                      class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                      type="button"
+                      :aria-label="`${group.name} 的操作`"
+                      :data-testid="`workspace-row-menu-${group.key}`"
+                    >
+                      <Ellipsis class="h-3 w-3" />
+                    </button>
+                  </DropdownMenu>
+                </span>
+
+                <span v-if="renamingKey === `ws:${group.key}`" class="flex shrink-0 items-center gap-1">
+                  <button class="text-[10px] text-stone-500 transition hover:text-stone-900 disabled:opacity-50" type="button" :disabled="renamingBusy" data-testid="workspace-rename-submit" @click="submitRename">确认</button>
+                  <button class="text-[10px] text-stone-400 transition hover:text-stone-700" type="button" @click="cancelRename">取消</button>
+                </span>
+                <p
+                  v-if="renamingKey === `ws:${group.key}` && renameError"
+                  class="absolute -bottom-3.5 left-6 z-10 text-[10px] leading-3 text-rose-600"
+                  data-testid="workspace-rename-error"
+                >
+                  {{ renameError }}
+                </p>
+
+                <ConfirmPopover
+                  v-if="confirmTarget?.key === `ws:${group.key}`"
+                  :title="SIDEBAR_COPY.deleteWorkspaceTitle"
+                  :description="workspaceDeleteDescription(confirmTarget.title, confirmTarget.count ?? 0)"
+                  :confirm-text="SIDEBAR_COPY.deleteWorkspaceConfirm"
+                  :open="true"
+                  :loading="confirmState.loading"
+                  :error="confirmState.error"
+                  align="end"
+                  @confirm="runConfirm('workspace-delete', confirmTarget)"
+                  @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
+                >
+                  <span class="pointer-events-none absolute inset-y-0 left-0 w-0" aria-hidden="true" />
+                </ConfirmPopover>
+              </div>
+
+              <p
+                v-if="group.count === 0"
+                class="px-6 py-1 text-[10px] leading-4 text-stone-400"
+                :data-testid="`workspace-group-empty-${group.key}`"
+              >
+                {{ SIDEBAR_COPY.emptyGroupHint }}
+              </p>
+
+              <div class="space-y-0.5 pt-0.5">
+                <div
+                  v-for="session in partitionPreview(group.sessions)"
+                  :key="session.conversationId"
+                  class="group relative rounded-[0.2rem]"
+                  :class="session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass"
+                  :data-testid="`workspace-session-row-${group.key}-${session.conversationId}`"
+                >
+                  <SessionRow
+                    :session="session"
+                    :menu-items="sessionMenuItems(session)"
+                    :selected="session.conversationId === sessionId"
+                    :renaming="renamingKey === `s:${session.conversationId}`"
+                    :rename-draft="renameDraft"
+                    :rename-error="renameError"
+                    :renaming-busy="renamingBusy"
+                    :hide-menu="isTransientSession(session)"
+                    @open-session="(id: string) => { if (currentPage !== 'home') navigate('home'); runtimeStore.switchSession(id); }"
+                    @menu-select="(id: string) => onSessionMenuSelect(session, id)"
+                    @update:rename-draft="(v: string) => (renameDraft = v)"
+                    @submit-rename="submitRename"
+                    @cancel-rename="cancelRename"
+                  />
+                  <template v-if="confirmTarget?.kind === 'session-archive' && confirmTarget.sessionId === session.conversationId">
+                    <ConfirmPopover
+                      v-bind="confirmPopoverProps('session-archive', confirmTarget)"
+                      :open="true"
+                      :loading="confirmState.loading"
+                      :error="confirmState.error"
+                      @confirm="runConfirm('session-archive', confirmTarget)"
+                      @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
+                    >
+                      <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                    </ConfirmPopover>
+                  </template>
+                  <template v-else-if="confirmTarget?.kind === 'session-delete' && confirmTarget.sessionId === session.conversationId">
+                    <ConfirmPopover
+                      v-bind="confirmPopoverProps('session-delete', confirmTarget)"
+                      :open="true"
+                      :loading="confirmState.loading"
+                      :error="confirmState.error"
+                      @confirm="runConfirm('session-delete', confirmTarget)"
+                      @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
+                    >
+                      <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                    </ConfirmPopover>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <button
+              v-if="hasHiddenSessions && !showAllPartitions"
+              class="w-full px-1.5 py-1 text-left text-[11px] font-normal leading-5 text-stone-500 transition hover:text-stone-900"
+              type="button"
+              data-testid="session-sidebar-show-more-conversations"
+              @click="showAllPartitions = true"
+            >
+              显示全部
             </button>
-          </div>
+          </section>
+        </ScrollArea>
+
+        <div class="mt-auto space-y-0.5 pt-2">
+          <button
+            class="relative flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
+            :class="props.currentPage === 'settings' ? menuSelectedClass : `${menuInteractiveClass} text-stone-800`"
+            type="button"
+            data-testid="session-sidebar-nav-settings"
+            @click="navigate('settings')"
+          >
+            <Settings class="h-3.5 w-3.5" />
+            <span class="text-[12px] font-bold leading-4">设置</span>
+            <span
+              v-if="updateStore.hasUpdate"
+              class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-amber-500"
+              title="发现新版本"
+              data-testid="session-sidebar-nav-settings-update-badge"
+            />
+          </button>
+        </div>
       </template>
     </div>
   </aside>

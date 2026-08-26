@@ -45,6 +45,8 @@ export type RuntimeState = {
   // PA-081：Workspace 树导航状态。
   workspaceList: import("./workspace-api").WorkspaceRecord[];
   workspaceListLoaded: boolean;
+  /** 三级树：侧边栏操作 inflight 守卫（key=op:id）。 */
+  sidebarOpInflightSet: Record<string, true>;
   activeWorkspaceId: string;
   phase: RuntimePhase;
   health: HealthPayload | null;
@@ -207,4 +209,3 @@ export type SessionInitializationStrategy =
   | { kind: "local-cache"; persistedState: PersistedRuntimeState }
   | { kind: "host-read"; sessionId: string; reason: "no-cache" | "insufficient-checkpoint" }
   | { kind: "empty-fallback"; sessionId: string };
-
