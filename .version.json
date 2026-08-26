@@ -2015,11 +2015,23 @@
           "to": "0.1.88"
         }
       ]
+    },
+    {
+      "commit": "246f01a",
+      "timestamp": "2026-08-27T01:26:22+08:00",
+      "bumps": [
+        {
+          "component": "tauri",
+          "segment": "patch",
+          "from": "0.1.89",
+          "to": "0.1.90"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-08-27T01:22:55+08:00",
+  "lastBump": "2026-08-27T01:26:22+08:00",
   "tauri": {
-    "patch": 89,
+    "patch": 90,
     "minor": 1,
     "major": 0
   },

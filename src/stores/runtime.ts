@@ -2124,6 +2124,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         this.resetSessionRuntimeState();
         this.sessionId = fallbackSessionId;
         this.phase = "connecting";
+        // 三级树 #3：冻结归属随 fallback 同步（与 switchSession 水合一致）。
+        this.sessionWorkspaceId =
+          this.sessionList.find((session) => session.conversationId === fallbackSessionId)
+            ?.workspaceId?.trim() || DEFAULT_WORKSPACE_ID;
 
         try {
           if (this.sessionList.length === 0 && fallbackSessionId === DEFAULT_SESSION_ID) {
