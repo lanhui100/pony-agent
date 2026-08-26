@@ -1,7 +1,7 @@
 // PA-081/PA-三级树：Workspace 注册表 + 会话操作的前端 API（Tauri 命令封装）。
 // 浏览器预览模式下 safeInvoke 抛错，由调用方（store）捕获并保持空列表 +
 // 仅默认组的降级呈现。
-import { safeInvoke } from "@/lib/tauri";
+import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 
 export interface WorkspaceRecord {
   id: string;
@@ -39,9 +39,12 @@ export async function archiveSession(sessionId: string): Promise<void> {
 
 /**
  * 系统目录选择器（tauri-plugin-dialog）：仅允许选择已存在的目录；
- * 用户取消返回 null。浏览器模式由调用方先行降级，不进入本函数。
+ * 用户取消返回 null（≠失败）。与同模块其余封装一致，浏览器模式抛统一降级文案。
  */
 export async function pickExistingDirectory(): Promise<string | null> {
+  if (!isTauriAvailable()) {
+    throw new Error("当前运行在浏览器预览模式，Tauri 后端不可用。");
+  }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const picked = await open({
     directory: true,

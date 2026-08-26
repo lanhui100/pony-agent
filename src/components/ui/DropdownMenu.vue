@@ -1,6 +1,10 @@
 <script setup lang="ts">
 // 三点操作菜单基件（reka-ui DropdownMenu 封装）：行容器锚定触发器，
 // 菜单项支持 danger / disabled + 原因 tooltip；选择即回传 id 后关闭。
+// 已知限制：
+// - select 事件截断了 reka 的可取消 CustomEvent——不支持"点击后保持菜单
+//   开启"的 checkbox 类条目（未来扩展即 API break）；
+// - 内容区未设 max-height 滚动上限（当前条目固定少量；长菜单化前需补）。
 import type { Component } from "vue";
 import {
   DropdownMenuArrow,
@@ -59,7 +63,7 @@ function onDisabledTitle(item: DropdownMenuItemSpec) {
       >
         <template v-for="(item, index) in items" :key="item.id">
           <DropdownMenuSeparator
-            v-if="index > 0 && items[index - 1].danger !== item.danger && !item.disabled"
+            v-if="index > 0 && items[index - 1].danger !== item.danger"
             class="my-1 h-px bg-stone-900/8"
           />
           <DropdownMenuItem

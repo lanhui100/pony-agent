@@ -48,6 +48,10 @@ const emit = defineEmits<{
   (event: "update:open", open: boolean): void;
 }>();
 
+// 受控/非受控在挂载时刻冻结（reka useVModel passive 按初始 props.open 判定）：
+// 调用方必须固定其一用法（恒传 v-model:open 或恒不传），不可运行时切换。
+// loading 中 Esc/外点仍会关闭弹层且不打断请求（spec 纪律场景）；此后到达的
+// 失败由调用方经"非弹层面"一次性呈现（见 design 文案基线）——组件不兜此策略。
 const controlled = computed(() => props.open !== undefined);
 </script>
 

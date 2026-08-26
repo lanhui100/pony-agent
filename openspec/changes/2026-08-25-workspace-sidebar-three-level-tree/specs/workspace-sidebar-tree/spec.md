@@ -200,3 +200,10 @@ Each conversation row SHALL expose a three-dot menu containing 重命名, 归档
 - **THEN** its confirm/cancel controls are disabled with a pending indicator
 - **AND** Escape or outside clicks count as cancel without interrupting the request
 - **AND** repeated confirms are absorbed as no-ops
+
+#### Scenario: Failure after in-flight cancellation degrades gracefully
+
+- **GIVEN** the user cancelled a destructive confirmation while its request was in flight (popover closed)
+- **WHEN** that request subsequently fails
+- **THEN** the failure SHALL surface exactly once through a non-popover surface (an inline message on the owning row)
+- **AND** it SHALL not reopen the closed popover

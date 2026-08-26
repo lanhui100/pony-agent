@@ -125,4 +125,30 @@ describe("DropdownMenu", () => {
     expect(onSelect).not.toHaveBeenCalled();
     wrapper.unmount();
   });
+
+  it("danger 组首项被禁用时其前分隔线仍然存在（两态视觉解剖一致）", async () => {
+    // 回归钉板：分隔线条件不得依赖 !disabled——运行中会话菜单
+    // [重命名(可用), 归档(禁用,danger), 删除(禁用,danger)] 恰是常见形态。
+    const runtimeItems: DropdownMenuItemSpec[] = [
+      { id: "rename", label: "重命名" },
+      { id: "archive", label: "归档对话", danger: true, disabled: true },
+      { id: "delete", label: "删除对话", danger: true, disabled: true }
+    ];
+    const wrapper = mount(
+      {
+        components: { DropdownMenu },
+        template: `
+          <DropdownMenu :items="runtimeItems">
+            <button data-testid="trigger">⋯</button>
+          </DropdownMenu>
+        `,
+        data: () => ({ runtimeItems })
+      },
+      { attachTo: document.body }
+    );
+    await wrapper.get('[data-testid="trigger"]').trigger("click");
+    await flush();
+    expect(document.body.querySelector(".h-px")).not.toBeNull();
+    wrapper.unmount();
+  });
 });

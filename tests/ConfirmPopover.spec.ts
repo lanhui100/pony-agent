@@ -136,3 +136,66 @@ describe("ConfirmPopover（受控·异步模式）", () => {
     wrapper.unmount();
   });
 });
+
+describe("ConfirmPopover（受控·取消通道 = spec 纪律场景载体）", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  function emittedOpenFalse(wrapper: ReturnType<typeof mount>): boolean {
+    const popover = wrapper.findComponent(ConfirmPopover);
+    return (popover.emitted("update:open") ?? []).some((args) => args[0] === false);
+  }
+
+  it("cancel 点击 → emit update:open(false) 且不触发 confirm", async () => {
+    const onConfirm = vi.fn();
+    const wrapper = await openAndMountConfirm(
+      `<ConfirmPopover title="删除工作区" :open="true" @confirm="onConfirm" @update:open="onOpen">
+         <button data-testid="trigger">打开</button>
+       </ConfirmPopover>`,
+      { methods: { onConfirm, onOpen: () => {} } }
+    );
+    q('[data-testid="confirm-popover-cancel"]')?.dispatchEvent(
+      new MouseEvent("click", { bubbles: true })
+    );
+    await flush();
+    expect(emittedOpenFalse(wrapper)).toBe(true);
+    expect(onConfirm).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("Escape 键 → emit update:open(false) 且不触发 confirm", async () => {
+    const onConfirm = vi.fn();
+    const wrapper = await openAndMountConfirm(
+      `<ConfirmPopover title="删除工作区" :open="true" @confirm="onConfirm" @update:open="onOpen">
+         <button data-testid="trigger">打开</button>
+       </ConfirmPopover>`,
+      { methods: { onConfirm, onOpen: () => {} } }
+    );
+    q('[data-testid="confirm-popover-confirm"]')?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+    );
+    await flush();
+    expect(emittedOpenFalse(wrapper)).toBe(true);
+    expect(onConfirm).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("loading 中按 Esc → 取消信号照发、请求不打断（confirm 不再触发）", async () => {
+    const onConfirm = vi.fn();
+    const wrapper = await openAndMountConfirm(
+      `<ConfirmPopover title="归档对话" :open="true" :loading="true"
+         @confirm="onConfirm" @update:open="onOpen">
+         <button data-testid="trigger">打开</button>
+       </ConfirmPopover>`,
+      { methods: { onConfirm, onOpen: () => {} }, data: () => ({}) }
+    );
+    q('[data-testid="confirm-popover-confirm"]')?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+    );
+    await flush();
+    expect(emittedOpenFalse(wrapper)).toBe(true);
+    expect(onConfirm).toHaveBeenCalledTimes(0);
+    wrapper.unmount();
+  });
+});

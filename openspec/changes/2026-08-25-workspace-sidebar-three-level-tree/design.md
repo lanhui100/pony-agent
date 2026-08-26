@@ -49,3 +49,15 @@ rename 引入 trim 非空、≤64 字符、对**其他**工作区重名拒绝；
 - 重命名（工作区/会话通用）：确认键禁用 + 提示「名称不能为空」；上限 64 字符（超长提示「名称不能超过 64 个字符」）；重名即时提示「已存在同名工作区」。
 - 菜单禁用原因 tooltip：运行中「对话运行中，暂不能执行该操作」；提交中「正在提交，请稍候」。
 - 异步确认失败槽：「操作失败：{错误信息}」，弹层保留、行保留、可重试。
+- 飞行中取消（Esc/外点）后到达的失败：弹层已关 → 以所属行的行内一次性提示呈现，不重开弹层（Phase 2 审核定案的 spec 契约；三条破坏性操作共用）。
+
+## Phase 3 调用方契约（Phase 2 审核 8 条警示浓缩）
+
+1. 受控确认标准模板：confirm 入口先查 inflight set；`loading=true → await → 成功 setOpen(false)+清 error / 失败 error=文案+停留`。
+2. 成功后必须显式 `setOpen(false)`——组件无自动关闭。
+3. 飞行中取消后的失败走非弹层面（见文案基线末条）。
+4. per-target 弹层状态隔离：`v-if="confirmTarget"` 强制重挂载，或 inflight 期间禁其他行菜单入口。
+5. 受控模式下 trigger 点击会发 toggle——程序化置 true 时父组件需接 `update:open(true)`。
+6. 三点菜单 select 即关闭：ConfirmPopover 锚定行容器，trigger 不得塞进 menu item 内部。
+7. 归档过滤读 `Boolean(overview.archived)`，在 deriveSidebarTree doc-comment 钉"缺省 ⇒ 存活"并配单测（本地构造不带字段的 overview 必须判活）。
+8. pickExistingDirectory 仅 Tauri 可用时调用；取消 null ≠ 失败（返回值已收窄为 string|null）。
