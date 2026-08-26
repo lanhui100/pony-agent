@@ -174,22 +174,11 @@ impl SessionStore {
         let mcp_source_snapshots = persisted.mcp_source_snapshots;
         let skill_source_snapshots = persisted.skill_source_snapshots;
         let mut should_save = false;
-        // Workspace 注册表：加载 + 确保默认 workspace 始终存在（PA-079）。
+        // Workspace 注册表：加载 + 默认工作区引导（三级树安装期行为：Windows
+        // Documents\pony_agent / Unix ~/pony_agent，缺失即自动创建并登记；
+        // 既有 default 登记永不静默迁移）。
         let mut workspaces = persisted.workspaces;
-        if !crate::agent::workspace::default_workspace_exists(&workspaces) {
-            let raw_default_root = std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .display()
-                .to_string();
-            // P2-6：默认 root 也过规范化（canonicalize + 去 \\?\ 前缀），与 create 路径一致，
-            // 避免与 create_workspace_entry 存储形式不一致导致 PA-080 前缀比较失配。
-            let default_root = crate::agent::workspace::normalize_workspace_root(&raw_default_root)
-                .unwrap_or(raw_default_root);
-            workspaces.push(crate::agent::workspace::WorkspaceRecord {
-                id: crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string(),
-                name: "默认工作区".to_string(),
-                root_path: default_root,
-            });
+        if crate::agent::workspace::bootstrap_default_workspace(&mut workspaces) {
             should_save = true;
         }
         for session in sessions.values_mut() {
@@ -1910,6 +1899,13 @@ impl SessionStore {
 
     pub fn resolve_workspace_root(&self, workspace_id: Option<&str>) -> Result<String, String> {
         crate::agent::workspace::resolve_workspace_root(&self.workspaces, workspace_id)
+    }
+
+    /// 读取会话的权威 workspace 归属（不创建、不落盘）。None = 尚未盖章。
+    pub fn read_workspace_owner(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .get(session_id)
+            .and_then(|session| session.workspace_id.clone())
     }
 
     /// 首次持久化盖章 workspace_id（PA-079）：会话 workspace_id 为 None 时写入并落盘；

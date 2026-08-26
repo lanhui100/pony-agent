@@ -1773,6 +1773,12 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         delete this.runningSessionMap[nextSessionId];
       }
 
+      // 三级树 #3：冻结归属随会话切换同步——切回旧会话时从目录投影恢复，
+      // 保证 submitTurn 的 workspaceId 链首项始终代表当前会话的归属。
+      this.sessionWorkspaceId =
+        this.sessionList.find((session) => session.conversationId === nextSessionId)
+          ?.workspaceId?.trim() || DEFAULT_WORKSPACE_ID;
+
       debugLog("session:switch", {
         from: previousSnapshot.sessionId,
         to: nextSessionId,
@@ -4292,11 +4298,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         nodeId: this.visibleNodeId,
         history: buildTurnHistory(this.messages),
         images,
-        // PA-079/PA-081 传输通道：以会话自身归属优先（防止"会话在 B 组、工具在
-        // A root 执行"的跨项目错位——实施后审核 P1），transient/无归属时回退激活项。
+        // 三级树 #3：冻结归属优先（创建时确定、随删除归一/切换水合同步）；
+        // 列表投影次之（防旧快照漂移），激活态仅作历史兜底。
         workspaceId:
-          this.sessionList.find((session) => session.conversationId === this.sessionId)?.workspaceId?.trim() ||
           this.sessionWorkspaceId ||
+          this.sessionList.find((session) => session.conversationId === this.sessionId)?.workspaceId?.trim() ||
           this.activeWorkspaceId ||
           DEFAULT_WORKSPACE_ID
       };

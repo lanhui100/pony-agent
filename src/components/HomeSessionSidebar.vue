@@ -31,6 +31,7 @@ import { deriveSidebarTree, isVisibleSession } from "@/lib/runtime/sidebar-group
 import { SIDEBAR_COPY, formatSidebarCopy } from "@/lib/runtime/sidebar-copy";
 import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
 import { isTauriAvailable } from "@/lib/tauri";
+import { pickExistingDirectory } from "@/lib/runtime/workspace-api";
 import type { SidebarNavigationPage } from "@/types/config";
 import type { ChatMessage, SessionOverview } from "@/types/runtime";
 
@@ -151,66 +152,38 @@ async function submitRename() {
   }
 }
 
-// ── 添加工作区（目录选择 → 名称预填 basename） ───────────────────────────
-const workspaceFormOpen = ref(false);
-const newWorkspaceName = ref("");
-const newWorkspaceRootPath = ref("");
-const workspaceCreating = ref(false);
+// ── 添加/打开工作区：单一入口即选即建 ────────────────────────────────────
+// FolderPlus 打开系统文件夹选择弹窗（Windows 原生弹窗内可直接「新建文件夹」，
+// 亦可选择既有目录）；选中即以 basename 命名注册，无需二次确认表单。
 const workspaceError = ref("");
+let workspaceErrorTimer: number | undefined;
+
+function flashWorkspaceError(message: string) {
+  workspaceError.value = message;
+  if (workspaceErrorTimer !== undefined) window.clearTimeout(workspaceErrorTimer);
+  workspaceErrorTimer = window.setTimeout(() => {
+    workspaceError.value = "";
+  }, 6000);
+}
 
 async function openAddWorkspaceFlow() {
-  const { pickExistingDirectory } = await import("@/lib/runtime/workspace-api");
   try {
     const picked = await pickExistingDirectory();
-    if (!picked) return;
+    if (!picked) return; // 取消 ≠ 失败
     const base = picked.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? "";
-    workspaceFormOpen.value = true;
-    newWorkspaceRootPath.value = picked;
-    newWorkspaceName.value = base;
-    workspaceError.value = "";
-  } catch (error) {
-    // 选择目录失败也要可见：展开表单承载错误信息（否则 p 在 v-if 内不可见）。
-    workspaceFormOpen.value = true;
-    newWorkspaceRootPath.value = "";
-    newWorkspaceName.value = "";
-    workspaceError.value = `选择目录失败：${String(error)}`;
-  }
-}
-
-async function submitNewWorkspace() {
-  if (workspaceCreating.value) return;
-  const name = newWorkspaceName.value.trim();
-  const rootPath = newWorkspaceRootPath.value.trim();
-  if (!name) {
-    workspaceError.value = SIDEBAR_COPY.renameEmptyError;
-    return;
-  }
-  if ([...name].length > 64) {
-    workspaceError.value = SIDEBAR_COPY.renameTooLongError;
-    return;
-  }
-  if (workspaceList.value.some((w) => w.name === name)) {
-    workspaceError.value = SIDEBAR_COPY.renameDuplicateWorkspaceError;
-    return;
-  }
-  workspaceError.value = "";
-  workspaceCreating.value = true;
-  try {
-    const result = await runtimeStore.createNewWorkspace(name, rootPath);
-    if (result.ok) {
-      newWorkspaceName.value = "";
-      newWorkspaceRootPath.value = "";
-      workspaceFormOpen.value = false;
-    } else {
-      workspaceError.value = result.error ?? "创建失败：请检查根路径是否有效。";
+    if (!base) {
+      flashWorkspaceError(SIDEBAR_COPY.renameEmptyError);
+      return;
+    }
+    // 与既有工作区重名等后端拒绝 → 文案原样透传到标题行下方提示
+    const result = await runtimeStore.createNewWorkspace(base, picked);
+    if (!result.ok) {
+      flashWorkspaceError(result.error ?? "创建失败");
     }
   } catch (error) {
-    workspaceError.value = `创建失败：${String(error)}`;
-  } finally {
-    workspaceCreating.value = false;
+    flashWorkspaceError(`添加工作区失败：${String(error)}`);
   }
 }
-
 // ── 树派生 ───────────────────────────────────────────────────────────────
 const hasPersistableCurrentSession = computed(() => hasPersistableMessages(messages.value));
 const hasVisibleCurrentSession = computed(() =>
@@ -645,45 +618,13 @@ function confirmPopoverProps(
               </TooltipProvider>
             </div>
 
-            <!-- 添加表单 -->
-            <div v-if="workspaceFormOpen && isTauriRuntime" class="space-y-1 rounded-[0.35rem] bg-[#fbf4e8]/70 p-1.5">
-              <input
-                v-model="newWorkspaceName"
-                class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
-                placeholder="名称"
-                maxlength="64"
-                data-testid="workspace-new-name"
-              />
-              <input
-                v-model="newWorkspaceRootPath"
-                class="w-full rounded-[0.25rem] border border-stone-200 bg-white px-1.5 py-1 text-[11px] text-stone-800 outline-none focus:border-amber-300"
-                placeholder="根路径"
-                data-testid="workspace-new-path"
-              />
-              <div class="flex items-center gap-1.5">
-                <button
-                  class="h-6 rounded-[0.3rem] bg-[#f3c98d] px-2 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
-                  type="button"
-                  :disabled="workspaceCreating || !newWorkspaceName.trim() || !newWorkspaceRootPath.trim()"
-                  data-testid="workspace-new-submit"
-                  @click="submitNewWorkspace"
-                >
-                  {{ workspaceCreating ? "创建中…" : "创建" }}
-                </button>
-                <button
-                  class="h-6 rounded-[0.3rem] px-2 text-[11px] text-stone-500 transition hover:text-stone-900"
-                  type="button"
-                  data-testid="workspace-new-cancel"
-                  @click="workspaceFormOpen = false"
-                >
-                  取消
-                </button>
-              </div>
-              <p v-if="workspaceError" class="px-0.5 pt-1 text-[10px] leading-4 text-rose-600" data-testid="workspace-new-error">
-                {{ workspaceError }}
-              </p>
-            </div>
-
+            <p
+              v-if="workspaceError"
+              class="mx-1.5 mb-1 rounded-[0.25rem] bg-rose-50/80 px-1.5 py-1 text-[10px] leading-4 text-rose-600"
+              data-testid="workspace-error"
+            >
+              {{ workspaceError }}
+            </p>
             <p
               v-if="totalVisibleSessions === 0"
               class="px-1.5 py-2 text-[11px] leading-4 text-stone-400"

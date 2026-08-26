@@ -236,16 +236,26 @@ impl AgentRuntime {
     /// still bind the session; `host_control_available` stays `true` so an interactive host can
     /// answer. When the executor is not governed this is a no-op.
     pub(crate) fn apply_governed_turn_context(&self, input: &TurnInput, facts: &RunTurnFacts) {
-        // PA-079：turn 携带 workspace_id 时，在会话上首次持久化盖章（幂等）。
-        if let Some(workspace_id) = input.workspace_id.as_deref().filter(|value| !value.trim().is_empty()) {
-            if let Some(session_id) = input.session_id.as_deref() {
-                let mut sessions = self.sessions.write().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
-                    e.into_inner()
-                });
+        // 三级树 #3（确定性根解析）：先按 input 盖章/归一（未注册 id 由 stamp
+        // 归一为 default），随后一律以"盖章后的会话权威归属"解析工具根——
+        // 前端 id 漂移/旧列表快照对后端免疫，杜绝"会话在新工作区、工具在默认 root"。
+        let stamped_owner: Option<String> = 'stamp: {
+            let Some(session_id) = input.session_id.as_deref() else {
+                break 'stamp None;
+            };
+            let mut sessions = self.sessions.write().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            });
+            if let Some(workspace_id) = input
+                .workspace_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 sessions.stamp_workspace_id(session_id, workspace_id);
             }
-        }
+            break 'stamp sessions.read_workspace_owner(session_id);
+        };
         let Some(governed) = self
             .tool_executor
             .as_any()
@@ -254,16 +264,14 @@ impl AgentRuntime {
             return;
         };
         // PA-080（consultant 修复）：会话级 workspace root 解析——优先取 facts 显式传入的
-        // root；否则按 input.workspace_id 从 workspace 注册表解析（生产链路 control_plane
-        // 传 None，这里补齐）；解析失败（孤儿 workspace_id）→ 读回退默认 root（带告警）、
-        // 写 fail-closed 由工具层判定兜底；无 workspace_id → 默认 root。
+        // root；否则按上面盖章后的权威归属解析；解析失败（孤儿 workspace_id）→ 读回退
+        // 默认 root（带告警）、写 fail-closed 由工具层判定兜底。
         let resolved_workspace_root = facts.workspace_root.clone().or_else(|| {
-            let workspace_id = input.workspace_id.as_deref();
             let sessions = self.sessions.read().unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             });
-            match sessions.resolve_workspace_root(workspace_id) {
+            match sessions.resolve_workspace_root(stamped_owner.as_deref()) {
                 Ok(root) => Some(root),
                 Err(error) => {
                     eprintln!("[pony-agent] workspace root 解析失败（回退默认 root）：{error}");

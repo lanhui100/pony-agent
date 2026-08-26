@@ -26,6 +26,15 @@ vi.mock("@/lib/tauri", () => ({
   isTauriAvailable: tauriMocks.mockIsTauriAvailable
 }));
 
+const apiMocks = vi.hoisted(() => ({
+  mockPickExistingDirectory: vi.fn()
+}));
+
+vi.mock("@/lib/runtime/workspace-api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/runtime/workspace-api")>()),
+  pickExistingDirectory: (...args: unknown[]) => apiMocks.mockPickExistingDirectory(...args)
+}));
+
 const ScrollAreaStub = defineComponent({
   template: '<div class="scroll-area-stub"><slot /></div>'
 });
@@ -112,6 +121,7 @@ describe("HomeSessionSidebar（三级树·chrome 沿革）", () => {
     setActivePinia(createPinia());
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     tauriMocks.mockSafeInvoke.mockResolvedValue(null);
+    apiMocks.mockPickExistingDirectory.mockReset();
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
     vi.stubGlobal(
           "ResizeObserver",
@@ -196,6 +206,7 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     setActivePinia(createPinia());
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     tauriMocks.mockSafeInvoke.mockResolvedValue(null);
+    apiMocks.mockPickExistingDirectory.mockReset();
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
     vi.stubGlobal(
           "ResizeObserver",
@@ -333,6 +344,7 @@ describe("HomeSessionSidebar（管理操作·Tauri 模式）", () => {
     setActivePinia(createPinia());
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     tauriMocks.mockSafeInvoke.mockResolvedValue(null);
+    apiMocks.mockPickExistingDirectory.mockReset();
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
     vi.spyOn(console, "info").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -536,6 +548,37 @@ describe("HomeSessionSidebar（管理操作·Tauri 模式）", () => {
     await flushPromises();
     await flushUI();
     expect(spy).toHaveBeenCalledWith("s-idle", "新标题");
+    wrapper.unmount();
+  });
+
+  it("添加工作区：选目录即创建（basename 命名），无确认表单", async () => {
+    const runtimeStore = seedStandard();
+    const spy = vi
+      .spyOn(runtimeStore, "createNewWorkspace")
+      .mockResolvedValue({ ok: true, record: { id: "ws-new", name: "dir", rootPath: "D:\\picked\\dir" } });
+    const wrapper = mountSidebar();
+    await flushUI();
+    apiMocks.mockPickExistingDirectory.mockResolvedValue("D:\\picked\\dir");
+    await wrapper.get('[data-testid="workspace-add-button"]').trigger("click");
+    await flushPromises();
+    await flushUI();
+    expect(spy).toHaveBeenCalledWith("dir", "D:\\picked\\dir");
+    expect(wrapper.find('[data-testid="workspace-new-name"]').exists()).toBe(false);
+
+    // 取消（null）不触发创建
+    apiMocks.mockPickExistingDirectory.mockResolvedValue(null);
+    await wrapper.get('[data-testid="workspace-add-button"]').trigger("click");
+    await flushPromises();
+    await flushUI();
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // 后端拒绝 → 标题行下方错误提示可见
+    spy.mockResolvedValue({ ok: false, error: "已存在同名工作区" });
+    apiMocks.mockPickExistingDirectory.mockResolvedValue("D:\\another");
+    await wrapper.get('[data-testid="workspace-add-button"]').trigger("click");
+    await flushPromises();
+    await flushUI();
+    expect(wrapper.get('[data-testid="workspace-error"]').text()).toContain("已存在同名工作区");
     wrapper.unmount();
   });
 

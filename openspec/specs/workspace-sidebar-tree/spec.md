@@ -65,12 +65,12 @@ The session sidebar SHALL render a single three-level tree: one fixed non-collap
 
 The sidebar section header SHALL expose an add-workspace icon button using a semantic folder-plus glyph with hover tooltip 「添加工作区」, and each non-default workspace row SHALL expose rename and delete actions via its three-dot menu. Creating a workspace registers an existing directory; deletion removes only the registry entry and rewrites member ownership to the default workspace. User-visible activation affordances (激活 badge, 当前工作区 indicator, activation-driven creation) are retired by this change; the persisted activation state remains solely as internal fallback context normalized on registry changes.
 
-#### Scenario: Add-workspace button
+#### Scenario: Add-workspace button (select-or-create, instant confirm)
 
 - **WHEN** the user hovers the section header's trailing icon button
 - **THEN** a tooltip reading 「添加工作区」 appears beside a semantic folder-plus glyph
-- **AND** clicking it opens a directory picker restricted to existing directories
-- **AND** the create form prefills the name with the picked directory's basename (editable)
+- **AND** clicking it opens the OS directory picker where an existing folder may be chosen OR a new folder created natively
+- **AND** confirming the picker immediately registers the workspace named by the picked folder's basename — no secondary confirmation form
 
 #### Scenario: Create validates like rename
 

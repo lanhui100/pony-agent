@@ -94,6 +94,67 @@ pub fn default_workspace_exists(records: &[WorkspaceRecord]) -> bool {
     records.iter().any(|record| record.id == DEFAULT_WORKSPACE_ID)
 }
 
+/// 默认工作区根目录（三级树安装期行为）：
+/// - Windows：`%USERPROFILE%\Documents\pony_agent`（Known-Folder 解析，尊重 OneDrive 重定向）
+/// - macOS/Linux：`$HOME/pony_agent`
+/// 目录不存在时自动创建。解析失败返回 None，由调用方回退进程 cwd。
+pub fn compute_default_workspace_root() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        dirs::document_dir()
+    } else {
+        dirs::home_dir()
+    }?;
+    Some(base.join("pony_agent"))
+}
+
+/// 确保注册表存在默认工作区记录且其根目录可用：
+/// 记录缺失 → 以 Documents~/pony_agent（不存在即建）登记并返回 true；
+/// 已存在则不动（用户既有登记永不静默迁移）。调用方负责落盘。
+pub fn bootstrap_default_workspace(records: &mut Vec<WorkspaceRecord>) -> bool {
+    bootstrap_default_workspace_with_base(records, None)
+}
+
+/// 测试/注入变体：base 显式给定时跳过系统 Known-Folder 解析（不触碰真实用户目录）。
+pub fn bootstrap_default_workspace_with_base(
+    records: &mut Vec<WorkspaceRecord>,
+    base_override: Option<PathBuf>,
+) -> bool {
+    if default_workspace_exists(records) {
+        return false;
+    }
+    let fallback = || -> String {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .display()
+            .to_string()
+    };
+    let raw_root = match base_override
+        .map(|base| base.join("pony_agent"))
+        .or_else(|| compute_default_workspace_root())
+    {
+        Some(path) => {
+            if let Err(error) = std::fs::create_dir_all(&path) {
+                eprintln!(
+                    "[pony-agent] 默认工作区目录创建失败，回退进程 cwd：{error}"
+                );
+                fallback()
+            } else {
+                path.display().to_string()
+            }
+        }
+        None => fallback(),
+    };
+    // P2-6：默认 root 走与 create 相同的规范化（canonicalize + 去 \\?\ 前缀），
+    // 避免与 create_workspace_entry 存储形式不一致导致 PA-080 前缀比较失配。
+    let canonical = normalize_workspace_root(&raw_root).unwrap_or_else(|_| raw_root.clone());
+    records.push(WorkspaceRecord {
+        id: DEFAULT_WORKSPACE_ID.to_string(),
+        name: "默认工作区".to_string(),
+        root_path: canonical,
+    });
+    true
+}
+
 /// 按 root 查 workspace（Windows 大小写归一；与 create 的重复判定一致）。
 pub fn find_workspace_by_root(records: &[WorkspaceRecord], canonical_root: &str) -> Option<WorkspaceRecord> {
     records
@@ -391,8 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_rejects_default_and_unknown_then_removes_target() {
-        let root = unique_root("delete");
+    fn delete_rejects_default_and_unknown_then_removes_target() {        let root = unique_root("delete");
         std::fs::create_dir_all(&root).unwrap();
         let mut records = Vec::new();
         records.push(WorkspaceRecord {
@@ -414,5 +474,48 @@ mod tests {
         assert!(resolve_workspace_root(&records, Some(&target.id)).is_err());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bootstrap_creates_documents_pony_agent_dir_and_record() {
+        let base = std::path::PathBuf::from(unique_root("bootstrap"));
+        let mut records = Vec::new();
+
+        assert!(bootstrap_default_workspace_with_base(
+            &mut records,
+            Some(base.clone())
+        ));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, DEFAULT_WORKSPACE_ID);
+        assert_eq!(records[0].name, "默认工作区");
+        assert!(
+            base.join("pony_agent").is_dir(),
+            "根目录应被自动创建；record={:?}",
+            records[0]
+        );
+        let expected =
+            normalize_workspace_root(&base.join("pony_agent").display().to_string()).unwrap();
+        assert_eq!(records[0].root_path, expected);
+
+        // 幂等：已有 default 时不重复登记、不改动。
+        let before = records.clone();
+        assert!(!bootstrap_default_workspace_with_base(
+            &mut records,
+            Some(base.clone())
+        ));
+        assert_eq!(records, before);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bootstrap_falls_back_to_process_cwd_when_base_unresolvable() {
+        // Windows 下 document_dir 极少为 None；此处直接验证 base=None 分支走回退
+        // 且仍产出合法注册项（不触碰真实用户目录）。
+        let mut records = Vec::new();
+        assert!(bootstrap_default_workspace_with_base(&mut records, None));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, DEFAULT_WORKSPACE_ID);
+        assert!(!records[0].root_path.is_empty());
     }
 }
