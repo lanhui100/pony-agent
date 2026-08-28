@@ -60,3 +60,7 @@
 
 - [0004 前端工作台先采用原生 TypeScript + Vite 壳层](superseded/0004-frontend-shell-workbench-direction.md) —— 被 [0003](0003-frontend-stack-vue-pinia-no-router.md) 接替
 - [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](superseded/0009-workbench-ia-telemetry-page-and-config-tabs.md) —— 被 [0013](0013-workbench-nav-observation-entry-and-provider-hierarchy.md) 部分接替（入口决定修订，其余承接重述）
+
+### 已拒绝
+
+- [0016 否决改写 Git 历史以清除已提交调试截图](rejected/0016-reject-git-history-rewrite-for-debug-png.md)
