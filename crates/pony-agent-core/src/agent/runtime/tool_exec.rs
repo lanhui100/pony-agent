@@ -41,6 +41,14 @@ impl AgentRuntime {
         &self,
         tool_call: &ToolCall,
     ) -> CapabilityToolExecutionResult {
+        self.execute_capability_tool_call_with_context(tool_call, &ToolExecutionContext::default())
+    }
+
+    pub(crate) fn execute_capability_tool_call_with_context(
+        &self,
+        tool_call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> CapabilityToolExecutionResult {
         let action = match self.capability_registry.resolve_tool_call(tool_call) {
             Ok(action) => action,
             Err(failure_kind) => {
@@ -62,7 +70,7 @@ impl AgentRuntime {
             action.capability.invocation_mode.as_str()
         ));
 
-        let tool_result = self.tool_executor.execute(&action.tool_call);
+        let tool_result = self.tool_executor.execute_with_context(&action.tool_call, context);
         let failure_kind = if let Some(failure_kind) = tool_result_failure_kind(&tool_result) {
             Some(failure_kind)
         } else if is_out_of_scope_tool_result(&tool_result) {
@@ -81,9 +89,22 @@ impl AgentRuntime {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn execute_registered_tool_call(
         &self,
         tool_call: &ToolCall,
+    ) -> (
+        crate::agent::tools::ToolResult,
+        crate::agent::telemetry::CapabilityInvocationRecord,
+        Vec<HookTraceRecord>,
+    ) {
+        self.execute_registered_tool_call_with_context(tool_call, &ToolExecutionContext::default())
+    }
+
+    pub(crate) fn execute_registered_tool_call_with_context(
+        &self,
+        tool_call: &ToolCall,
+        context: &ToolExecutionContext,
     ) -> (
         crate::agent::tools::ToolResult,
         crate::agent::telemetry::CapabilityInvocationRecord,
@@ -113,10 +134,13 @@ impl AgentRuntime {
                 );
             }
 
-            let execution = self.execute_skill_tool_call(&SkillInvocationRequest {
-                skill_id: skill.skill_id.clone(),
-                arguments: mediation.arguments.clone(),
-            });
+            let execution = self.execute_skill_tool_call_with_context(
+                &SkillInvocationRequest {
+                    skill_id: skill.skill_id.clone(),
+                    arguments: mediation.arguments.clone(),
+                },
+                context,
+            );
             let mut hook_trace_records = mediation.trace_records;
             hook_trace_records.push(self.build_skill_resolution_trace_record(
                 &SkillInvocationRequest {
@@ -534,9 +558,18 @@ impl AgentRuntime {
         (tool_result, invocation_record)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn execute_skill_tool_call(
         &self,
         request: &SkillInvocationRequest,
+    ) -> SkillToolExecutionResult {
+        self.execute_skill_tool_call_with_context(request, &ToolExecutionContext::default())
+    }
+
+    pub(crate) fn execute_skill_tool_call_with_context(
+        &self,
+        request: &SkillInvocationRequest,
+        context: &ToolExecutionContext,
     ) -> SkillToolExecutionResult {
         let (skill, actions) = match self.capability_registry.resolve_skill_tool_actions(request) {
             Ok(resolved) => resolved,
@@ -569,7 +602,7 @@ impl AgentRuntime {
         let mut failure_layer = None;
 
         for action in actions {
-            let tool_result = self.tool_executor.execute(&action.tool_call);
+            let tool_result = self.tool_executor.execute_with_context(&action.tool_call, context);
             let capability_failure = tool_result_failure_kind(&tool_result).or_else(|| {
                 if is_out_of_scope_tool_result(&tool_result) {
                     Some(CapabilityFailureKind::OutOfScope)

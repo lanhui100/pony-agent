@@ -3,6 +3,7 @@ use super::*;
 impl AgentRuntime {
     fn handle_sync_tool_turn(
         &self,
+        session_id: Option<&str>,
         user_message: String,
         display_message: String,
         provider: &ProviderManager,
@@ -54,8 +55,12 @@ impl AgentRuntime {
                 ));
             }
 
+            let execution_context = ToolExecutionContext {
+                workspace_root: self.resolve_session_workspace_root(session_id),
+                ..Default::default()
+            };
             let (tool_result, invocation_record, capability_hook_trace_records) =
-                self.execute_registered_tool_call(&current_tool_call);
+                self.execute_registered_tool_call_with_context(&current_tool_call, &execution_context);
             hook_trace_records.extend(capability_hook_trace_records);
             runtime_log(format!(
                 "turn:tool-result hop={} name={} status={} output_preview={}",
@@ -596,6 +601,7 @@ impl AgentRuntime {
         ) = if let Some(tool_call) = resolved_tool_call {
             let initial_visible_first_token_latency_ms = None;
             match self.handle_sync_tool_turn(
+                input.session_id.as_deref(),
                 user_message.clone(),
                 display_message.clone(),
                 &provider,

@@ -5078,4 +5078,151 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     expect(runtimeStore.draftMessage).toBe("新问题");
   });
 
+  it("supports branching and checkout of historical node through runtime store and action controls", async () => {
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionList: [{ conversationId: "session-current", title: "Current", summary: "", turnCount: 1, lastReferencedFile: null, updatedAtMs: 1000 }],
+      sessionOperation: null,
+      historyNodes: [
+        {
+          nodeId: "node-root",
+          sessionId: "session-current",
+          parentNodeId: null,
+          branchId: "branch-main",
+          kind: "root",
+          summary: "root",
+          title: "root",
+          turnCount: 0,
+          turnId: null,
+          createdAtMs: 1000
+        },
+        {
+          nodeId: "node-turn1",
+          sessionId: "session-current",
+          parentNodeId: "node-root",
+          branchId: "branch-main",
+          kind: "turn_committed",
+          summary: "turn 1",
+          title: "turn 1",
+          turnCount: 1,
+          turnId: "turn-1",
+          createdAtMs: 2000
+        }
+      ],
+      historyBranches: [
+        {
+          branchId: "branch-main",
+          sessionId: "session-current",
+          baseNodeId: "node-root",
+          headNodeId: "node-turn1",
+          forkedFromBranchId: null,
+          forkedFromNodeId: null,
+          label: "main",
+          createdAtMs: 1000,
+          updatedAtMs: 2000
+        }
+      ],
+      historyCursor: {
+        sessionId: "session-current",
+        visibleNodeId: "node-turn1",
+        activeBranchId: "branch-main",
+        branchHeadNodeId: "node-turn1",
+        workspaceNodeId: "node-turn1",
+        mode: "live",
+        authorityMode: "host_authoritative",
+        cursorVersion: 10,
+        isAtBranchHead: true
+      },
+      messages: [
+        createMessage({
+          id: "user-1",
+          turnId: "turn-1",
+          role: "user",
+          content: "历史问题"
+        }),
+        createMessage({
+          id: "assistant-1",
+          turnId: "turn-1",
+          role: "assistant",
+          content: "历史回复",
+          status: "done"
+        })
+      ]
+    });
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "fork_from_history_node") {
+        return {
+          sessionId: "session-current",
+          nodeId: "node-turn1",
+          branch: {
+            branchId: "branch-fork-1",
+            sessionId: "session-current",
+            baseNodeId: "node-turn1",
+            headNodeId: "node-turn1",
+            forkedFromBranchId: "branch-main",
+            forkedFromNodeId: "node-turn1",
+            label: "fork-1",
+            createdAtMs: 3000,
+            updatedAtMs: 3000
+          },
+          cursor: {
+            visibleNodeId: "node-turn1",
+            activeBranchId: "branch-fork-1",
+            branchHeadNodeId: "node-turn1",
+            workspaceNodeId: "node-turn1",
+            mode: "live",
+            authorityMode: "host_authoritative",
+            cursorVersion: 11,
+            isAtBranchHead: true
+          },
+          messageDelta: null,
+          historyStateEvidence: null,
+          historyStateAuditSummary: null
+        };
+      }
+      if (
+        command === "load_session_runtime_view" ||
+        command === "get_session_snapshot" ||
+        command === "load_session_state"
+      ) {
+        return {
+          session: {
+            conversationId: "session-current",
+            history: [
+              { role: "user", content: "历史问题", turnId: "turn-1" },
+              { role: "assistant", content: "历史回复", turnId: "turn-1" }
+            ],
+            historyNodes: runtimeStore.historyNodes,
+            historyBranches: runtimeStore.historyBranches,
+            historyCursor: runtimeStore.historyCursor,
+            longTermMemory: { status: "empty", summary: "", entries: [] },
+            transcript: { providerNativeMessages: [] }
+          },
+          checkpoint: null,
+          submissionPlan: null,
+          controlBoundaryEvidence: null,
+          historyStateAuditSummary: null,
+          runControlAuditSummary: null,
+          historyNodes: runtimeStore.historyNodes,
+          historyBranches: runtimeStore.historyBranches,
+          historyCursor: runtimeStore.historyCursor
+        };
+      }
+      return null;
+    });
+
+    const result = await runtimeStore.forkHistoryNode("node-turn1");
+    if (!result) {
+      console.error("FORK FAILED WITH SESSION ERROR:", runtimeStore.sessionError);
+    }
+    expect(result).not.toBeNull();
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("fork_from_history_node", {
+      sessionId: "session-current",
+      nodeId: "node-turn1",
+      expectedCursorVersion: null
+    });
+  });
 });

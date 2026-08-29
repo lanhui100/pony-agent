@@ -111,6 +111,9 @@ impl HostControlPlane {
         drop(sessions);
         // PA-095 #3：同 fork——释放写锁后立即重试提交锁内发射的全局事件。
         let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        if let Ok(mut sessions) = self.sessions_rwlock.write() {
+            sessions.finalize_event_watermark(session_id.as_str(), "");
+        }
         // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态——
         // 命令自身 history-control 事件已入日志并推进水位，"响应版本即下次
         // 通行版本"的乐观锁 round-trip 才成立（pre-flush 快照必然滞后一拍）。
@@ -177,6 +180,9 @@ impl HostControlPlane {
         drop(sessions);
         // PA-095 #3：同 fork——释放写锁后立即重试提交锁内发射的全局事件。
         let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        if let Ok(mut sessions) = self.sessions_rwlock.write() {
+            sessions.finalize_event_watermark(session_id.as_str(), "");
+        }
         // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态。
         let message_state = Self::project_message_state(&snapshot);
         let message_delta = Self::diff_message_state(&before_state, &message_state);
@@ -231,6 +237,9 @@ impl HostControlPlane {
         // PA-095 #3：写锁内经 emit_global_event 发射的 ForkCreated 在内联 flush
         // 时因锁忙被保留（try_write 化防自锁死锁）；释放锁后立即重试提交。
         let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        if let Ok(mut sessions) = self.sessions_rwlock.write() {
+            sessions.finalize_event_watermark(session_id.as_str(), "");
+        }
         // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态。
         let message_state = Self::project_message_state(&snapshot);
         let message_delta = Self::diff_message_state(&before_state, &message_state);
@@ -287,6 +296,9 @@ impl HostControlPlane {
         drop(sessions);
         // PA-095 #3：同 fork——释放写锁后立即重试提交锁内发射的全局事件。
         let _ = crate::agent::turn_flow::flush_session_buffered_events(session_id.as_str());
+        if let Ok(mut sessions) = self.sessions_rwlock.write() {
+            sessions.finalize_event_watermark(session_id.as_str(), "");
+        }
         // PA-095 #6（实施后审核 P1）：响应 cursor 取补 flush 后的最新状态。
         let message_state = Self::project_message_state(&snapshot);
         let message_delta = Self::diff_message_state(&before_state, &message_state);

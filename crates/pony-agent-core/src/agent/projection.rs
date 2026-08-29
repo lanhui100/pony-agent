@@ -1013,6 +1013,115 @@ pub fn fold_all<S, P: Projection<S>>(events: &[(u64, TurnEvent)]) -> S {
     state
 }
 
+/// PA-096 Phase 2：基于拓扑 Ancestor DAG 路径的确定性折叠重放。
+/// 精确从 `target_node_id` 沿 `parent_node_id` 回溯构建血缘链路，
+/// 排除非祖先节点与被撤回/回滚的 turn 事件，彻底根除幽灵事件与 Trace 僵尸复活。
+pub fn fold_all_with_dag<S, P: Projection<S>>(
+    events: &[(u64, String, TurnEvent)],
+    target_node_id: &str,
+    nodes: &[crate::agent::session::HistoryNode],
+    branches: &[crate::agent::session::HistoryBranch],
+) -> S {
+    let mut state = P::init();
+
+    // 1. O(1) 节点索引
+    let node_map: HashMap<&str, &crate::agent::session::HistoryNode> =
+        nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
+
+    // 2. 从 target_node_id 回溯至 root，构建祖先拓扑节点集合与允许分支集
+    let mut ancestor_node_ids = std::collections::HashSet::new();
+    let mut ancestor_turn_ids = std::collections::HashSet::new();
+    let mut ancestor_branches = std::collections::HashSet::new();
+
+    let mut current_id = Some(target_node_id);
+    while let Some(id) = current_id {
+        if !ancestor_node_ids.insert(id.to_string()) {
+            break; // 环检测防御
+        }
+        if let Some(node) = node_map.get(id) {
+            ancestor_branches.insert(node.branch_id.clone());
+            if let Some(turn_id) = &node.turn_id {
+                ancestor_turn_ids.insert(turn_id.as_str());
+            }
+            current_id = node.parent_node_id.as_deref();
+        } else {
+            break;
+        }
+    }
+
+    let target_branch = node_map
+        .get(target_node_id)
+        .map(|n| n.branch_id.as_str())
+        .unwrap_or(target_node_id);
+    let mut allowed_branches = branch_lineage(target_branch, branches);
+    allowed_branches.insert(target_branch.to_string());
+    for b in &ancestor_branches {
+        allowed_branches.insert(b.clone());
+    }
+    if allowed_branches.contains("main")
+        || allowed_branches.contains("branch-main")
+        || allowed_branches.contains("")
+        || target_branch == "branch-main"
+        || target_branch == "main"
+        || target_branch.is_empty()
+    {
+        allowed_branches.insert("main".to_string());
+        allowed_branches.insert("branch-main".to_string());
+        allowed_branches.insert("".to_string());
+    }
+
+    // 3. 构建明确被排除/撤回的 turn_id 与 node_id 集合
+    let mut excluded_turn_ids = std::collections::HashSet::new();
+    let mut excluded_node_ids = std::collections::HashSet::new();
+    for node in nodes {
+        if !ancestor_node_ids.contains(&node.node_id) {
+            excluded_node_ids.insert(node.node_id.as_str());
+            if let Some(turn_id) = &node.turn_id {
+                if !ancestor_turn_ids.contains(turn_id.as_str()) {
+                    excluded_turn_ids.insert(turn_id.as_str());
+                }
+            }
+        }
+    }
+
+    for (seq, branch_id, event) in events {
+        // 墓碑节点隔离，放行健康主干
+        if matches!(event, TurnEvent::CorruptedEventTombstone { .. }) {
+            continue;
+        }
+
+        // 检查分支可见性
+        if !branch_id.is_empty()
+            && !allowed_branches.contains(branch_id)
+            && branch_id != target_branch
+        {
+            continue;
+        }
+
+        // 检查 turn 级排除
+        if let Some(turn_id) = event.turn_id() {
+            if excluded_turn_ids.contains(turn_id) {
+                continue;
+            }
+        }
+
+        // 检查节点级排除
+        match event {
+            TurnEvent::CheckpointCreated { node_id, .. }
+            | TurnEvent::CheckpointCheckout { node_id, .. } => {
+                if excluded_node_ids.contains(node_id.as_str()) {
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        P::apply(&mut state, *seq, event);
+    }
+
+    state
+}
+
 /// PA-093：带分支可见性的全量折叠（阶段 3）。
 /// 输入为 `(seq, branch_id, event)` 三元组（branch_id 来自 turn_events 列）。
 /// 可见集合语义：初始 = **目标节点所在分支的血缘链**（折叠目标是该节点的

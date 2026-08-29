@@ -1,7 +1,7 @@
 use super::store::PersistedStore;
 use super::types::{
-    AttachmentAssetMap, HistoryCursor, HistoryNode, SessionAttachmentIndex, SessionState,
-    TurnHistoryMessage, TurnTraceRecord,
+    AttachmentAssetMap, HistoryBranch, HistoryCursor, HistoryNode, SessionAttachmentIndex,
+    SessionState, TurnHistoryMessage, TurnTraceRecord,
 };
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 use crate::agent::hooks::HookTraceRecord;
@@ -111,6 +111,11 @@ pub enum PersistCommand {
         session_id: String,
         cursor: HistoryCursor,
     },
+    UpdateBranch {
+        epoch: u64,
+        session_id: String,
+        branch: HistoryBranch,
+    },
     UpdateSessionMeta {
         epoch: u64,
         session_id: String,
@@ -166,9 +171,11 @@ pub struct TraceTerminalPatch {
 }
 
 /// 会话元数据补丁（normalized_sessions 更新）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SessionMetaPatch {
     pub title: Option<String>,
+    pub title_override: Option<Option<String>>,
+    pub archived: Option<bool>,
     pub summary: Option<String>,
     pub turn_count: Option<usize>,
     pub last_referenced_file: Option<String>,
@@ -196,6 +203,7 @@ impl PersistCommand {
             | PersistCommand::AppendHookRecords { epoch, .. }
             | PersistCommand::UpdateHistoryNode { epoch, .. }
             | PersistCommand::UpdateCursor { epoch, .. }
+            | PersistCommand::UpdateBranch { epoch, .. }
             | PersistCommand::UpdateSessionMeta { epoch, .. }
             | PersistCommand::RemoveSession { epoch, .. }
             | PersistCommand::FlushEvents { epoch, .. }
@@ -213,6 +221,19 @@ pub trait SessionBackend: Send + Sync {
     /// 默认 Unsupported——File/Memory backend 无需实现；SqliteSessionBackend 实现。
     fn persist_command(&self, _command: PersistCommand) -> PersistCommandOutcome {
         PersistCommandOutcome::Unsupported
+    }
+    /// 批量规范化持久化命令（单个 SQLite BEGIN EXCLUSIVE 事务原子提交）。
+    fn persist_commands_batch(&self, commands: Vec<PersistCommand>) -> PersistCommandOutcome {
+        for command in commands {
+            let outcome = self.persist_command(command);
+            if !matches!(
+                outcome,
+                PersistCommandOutcome::Succeeded | PersistCommandOutcome::Unsupported
+            ) {
+                return outcome;
+            }
+        }
+        PersistCommandOutcome::Succeeded
     }
     fn upsert_session(&self, _session_id: &str, _session: &SessionState) -> bool {
         false

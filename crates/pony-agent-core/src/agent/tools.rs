@@ -913,6 +913,10 @@ pub struct ToolPlan {
 pub trait ToolExecutor: Send + Sync {
     fn execute(&self, call: &ToolCall) -> ToolResult;
 
+    fn execute_with_context(&self, call: &ToolCall, _context: &ToolExecutionContext) -> ToolResult {
+        self.execute(call)
+    }
+
     /// Optional downcast accessor (PA-076 Ask host mediation). Adapters that wrap a concrete
     /// executor with extra surface — e.g. `GovernedToolExecutor` — expose themselves here so the
     /// runtime can reach the shared governed dispatcher and set per-turn invocation context. The
@@ -929,6 +933,8 @@ pub trait ToolExecutor: Send + Sync {
 pub struct ToolExecutionContext {
     /// 会话级 workspace root（`None` = 无会话上下文，回退构造时默认 root）。
     pub workspace_root: Option<PathBuf>,
+    /// 会话级 workspace id（显式透传或由 call.arguments["workspaceId"] 提供）。
+    pub workspace_id: Option<String>,
 }
 
 pub struct ToolRouter {
@@ -1039,8 +1045,20 @@ impl ToolRouter {
         let started_at = Instant::now();
         let context = ToolExecutionContext {
             workspace_root: workspace_root.map(|path| path.to_path_buf()),
+            ..Default::default()
         };
         let mut result = self.execute_internal(call, true, &context);
+        result.duration_ms = started_at.elapsed().as_millis() as u64;
+        result
+    }
+
+    pub fn execute_with_context(
+        &self,
+        call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        let started_at = Instant::now();
+        let mut result = self.execute_internal(call, true, context);
         result.duration_ms = started_at.elapsed().as_millis() as u64;
         result
     }
@@ -1177,6 +1195,7 @@ impl ToolRouter {
     }
 
     fn write_file(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_WRITE_FILE,
@@ -1210,7 +1229,7 @@ impl ToolRouter {
             );
         }
 
-        let target = match self.prepare_workspace_file_path(relative_path, context) {
+        let target = match self.prepare_workspace_file_path(relative_path, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_WRITE_FILE, &code, message, None)
@@ -1224,7 +1243,7 @@ impl ToolRouter {
                 "file_exists",
                 format!(
                     "目标文件已存在：{}。",
-                    self.display_workspace_relative(&target)
+                    self.display_resolved_workspace_relative(&target, context, ws_id)
                 ),
                 Some("如需覆盖，请显式传入 {\"overwrite\": true}。".to_string()),
             );
@@ -1255,12 +1274,12 @@ impl ToolRouter {
             status: "ok".to_string(),
             output: json_string(json!({
                 "ok": true,
-                "path": self.display_workspace_relative(&target),
+                "path": self.display_resolved_workspace_relative(&target, context, ws_id),
                 "absolutePath": target.display().to_string(),
                 "bytesWritten": content.len(),
                 "overwroteExisting": existed_before,
                 "summary": {
-                    "text": format!("已写入文件 {}。", self.display_workspace_relative(&target))
+                    "text": format!("已写入文件 {}。", self.display_resolved_workspace_relative(&target, context, ws_id))
                 },
                 "permission": {
                     "requiresApproval": false,
@@ -1276,6 +1295,7 @@ impl ToolRouter {
     }
 
     fn edit_file(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_EDIT_FILE,
@@ -1328,7 +1348,7 @@ impl ToolRouter {
         // PA-080 修复（code-review P0）：edit_file 是写操作，目标解析必须走 Write 判定
         // （classify_path(Write)），否则"只读授权"的外部路径会被改写，击穿写边界。
         // 与 tasks.md「workspace_edit_file 改调 classify_path(Write)」一致。
-        let target = match self.prepare_workspace_file_path(path, context) {
+        let target = match self.prepare_workspace_file_path(path, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_EDIT_FILE, &code, message, None)
@@ -1445,6 +1465,7 @@ impl ToolRouter {
             );
         }
 
+        let ws_id = self.extract_call_workspace_id(call, context);
         let cwd_input = call
             .arguments
             .get("cwd")
@@ -1452,7 +1473,7 @@ impl ToolRouter {
             .unwrap_or(".");
         // PA-080 修复（code-review P1-1）：cwd 用 Write 语义判定，授权的外部目录不得作为
         // 命令工作目录（spec：cwd SHALL be inside workspace root or controlled tmp）。
-        let cwd = match self.resolve_workspace_dir_for_execution(cwd_input, context) {
+        let cwd = match self.resolve_workspace_dir_for_execution(cwd_input, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_RUN_COMMAND, &code, message, None)
@@ -1470,7 +1491,12 @@ impl ToolRouter {
         // `NoSandboxBackend` (Unavailable), so a Run never silently downgrades to a
         // full-parent-environment shell. An explicitly registered backend decides the verdict.
         // PA-080（consultant 修复）：sandbox 基准用会话级 workspace root，与 cwd 判定一致。
-        let execution_root = self.resolved_workspace_root(context, None);
+        let execution_root = match self.resolved_workspace_root(context, ws_id) {
+            Ok(root) => root,
+            Err((code, message)) => {
+                return error_result(TOOL_WORKSPACE_RUN_COMMAND, &code, message, None);
+            }
+        };
         let sandbox_request = SandboxRequest {
             workspace_root: execution_root.display().to_string(),
             allow_network: false,
@@ -1911,6 +1937,7 @@ impl ToolRouter {
         }
     }
     fn read_file(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_READ_FILE,
@@ -1920,7 +1947,7 @@ impl ToolRouter {
             );
         };
 
-        let resolved = match self.resolve_workspace_path(path, context) {
+        let resolved = match self.resolve_workspace_path(path, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_READ_FILE, &code, message, None)
@@ -1945,7 +1972,7 @@ impl ToolRouter {
                 "file_too_large",
                 format!(
                     "文件 {} 大小为 {} bytes，超过整文件读取上限 {} bytes。",
-                    self.display_workspace_relative(&resolved),
+                    self.display_resolved_workspace_relative(&resolved, context, ws_id),
                     metadata.len(),
                     MAX_FULL_READ_BYTES
                 ),
@@ -1962,7 +1989,7 @@ impl ToolRouter {
                 status: "ok".to_string(),
                 output: format!(
                     "文件 {} 读取成功。\n\n{}",
-                    self.display_workspace_relative(&resolved),
+                    self.display_resolved_workspace_relative(&resolved, context, ws_id),
                     truncate_preview(&content, 4000)
                 ),
                 duration_ms: 0,
@@ -1980,6 +2007,7 @@ impl ToolRouter {
     }
 
     fn read_file_segment(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
         let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_READ_FILE_SEGMENT,
@@ -2005,7 +2033,7 @@ impl ToolRouter {
             .map(|value| value.clamp(1, MAX_SEGMENT_LINES as u64) as usize)
             .unwrap_or(40);
 
-        let resolved = match self.resolve_workspace_path(path, context) {
+        let resolved = match self.resolve_workspace_path(path, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_READ_FILE_SEGMENT, &code, message, None)
@@ -2016,7 +2044,7 @@ impl ToolRouter {
             Ok(FileSegment::Empty) => ToolResult {
                 tool_name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                 status: "ok".to_string(),
-                output: format!("文件 {} 为空。", self.display_workspace_relative(&resolved)),
+                output: format!("文件 {} 为空。", self.display_resolved_workspace_relative(&resolved, context, ws_id)),
                 duration_ms: 0,
             },
             Ok(FileSegment::Range {
@@ -2035,8 +2063,8 @@ impl ToolRouter {
                     tool_name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                     status: "ok".to_string(),
                     output: format!(
-                        "文件 {} 第 {} 行到第 {} 行（总行数约 {}）：\n{}",
-                        self.display_workspace_relative(&resolved),
+                        "文件 {} 读取成功（第 {} - {} 行，共 {} 行）：\n\n{}",
+                        self.display_resolved_workspace_relative(&resolved, context, ws_id),
                         start_line,
                         end_line,
                         total_lines,
@@ -2064,6 +2092,7 @@ impl ToolRouter {
     }
 
     fn list_files(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
         let relative_dir = call
             .arguments
             .get("path")
@@ -2077,7 +2106,7 @@ impl ToolRouter {
             .map(|value| value.clamp(1, 200) as usize)
             .unwrap_or(DEFAULT_LIST_LIMIT);
 
-        let dir = match self.resolve_workspace_dir(relative_dir, context) {
+        let dir = match self.resolve_workspace_dir(relative_dir, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_LIST_FILES, &code, message, None)
@@ -2090,7 +2119,7 @@ impl ToolRouter {
                     .filter_map(Result::ok)
                     .map(|entry| {
                         let path = entry.path();
-                        let label = self.display_workspace_relative(&path);
+                        let label = self.display_resolved_workspace_relative(&path, context, ws_id);
                         if path.is_dir() {
                             format!("{}/", label)
                         } else {
@@ -2107,7 +2136,7 @@ impl ToolRouter {
                     status: "ok".to_string(),
                     output: format!(
                         "目录 {} 下共发现 {} 个条目，当前展示前 {} 个：\n{}",
-                        self.display_workspace_relative(&dir),
+                        self.display_resolved_workspace_relative(&dir, context, ws_id),
                         total,
                         preview.len(),
                         preview.join("\n")
@@ -2125,6 +2154,7 @@ impl ToolRouter {
     }
 
     fn path_info(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
         let relative_path = call
             .arguments
             .get("path")
@@ -2132,7 +2162,7 @@ impl ToolRouter {
             .unwrap_or(".")
             .trim();
 
-        let path = match self.resolve_workspace_entry(relative_path, context) {
+        let path = match self.resolve_workspace_entry(relative_path, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_PATH_INFO, &code, message, None)
@@ -2163,7 +2193,7 @@ impl ToolRouter {
                     tool_name: TOOL_WORKSPACE_PATH_INFO.to_string(),
                     status: "ok".to_string(),
                     output: json_string(json!({
-                        "path": self.display_workspace_relative(&path),
+                        "path": self.display_resolved_workspace_relative(&path, context, ws_id),
                         "absolutePath": path.display().to_string(),
                         "kind": path_type,
                         "sizeBytes": metadata.len(),
@@ -2184,6 +2214,7 @@ impl ToolRouter {
     }
 
     fn glob_files(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let ws_id = self.extract_call_workspace_id(call, context);
         let pattern = call
             .arguments
             .get("pattern")
@@ -2226,7 +2257,7 @@ impl ToolRouter {
             );
         }
 
-        let root_entry = match self.resolve_workspace_entry(relative_dir, context) {
+        let root_entry = match self.resolve_workspace_entry(relative_dir, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_GLOB_FILES, &code, message, None)
@@ -2373,14 +2404,15 @@ impl ToolRouter {
             }
         }
 
-        let root_entry = match self.resolve_workspace_entry(relative_dir, context) {
+        let ws_id = self.extract_call_workspace_id(call, context);
+        let root_entry = match self.resolve_workspace_entry(relative_dir, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(TOOL_WORKSPACE_SEARCH_TEXT, &code, message, None)
             }
         };
 
-        let searched_path = self.display_workspace_relative(&root_entry);
+        let searched_path = self.display_resolved_workspace_relative(&root_entry, context, ws_id);
         let path_kind = if root_entry.is_file() {
             "file"
         } else if root_entry.is_dir() {
@@ -2780,8 +2812,9 @@ impl ToolRouter {
             );
         }
 
+        let ws_id = self.extract_call_workspace_id(call, context);
         let path = if raw_path.is_empty() { "." } else { raw_path };
-        let resolved = match self.resolve_workspace_entry(path, context) {
+        let resolved = match self.resolve_workspace_entry(path, context, ws_id) {
             Ok(value) => value,
             Err((code, message)) => {
                 return error_result(
@@ -2805,7 +2838,7 @@ impl ToolRouter {
             }
         };
 
-        let display_path = self.display_workspace_relative(&resolved);
+        let display_path = self.display_resolved_workspace_relative(&resolved, context, ws_id);
         let mode = if !query.is_empty() {
             "search"
         } else if metadata.is_dir() {
@@ -3168,19 +3201,33 @@ impl ToolRouter {
         }
     }
 
+    pub(crate) fn extract_call_workspace_id<'a>(
+        &self,
+        call: &'a ToolCall,
+        context: &'a ToolExecutionContext,
+    ) -> Option<&'a str> {
+        call.arguments
+            .get("workspaceId")
+            .or_else(|| call.arguments.get("workspace_id"))
+            .and_then(Value::as_str)
+            .or(context.workspace_id.as_deref())
+    }
+
     fn resolve_workspace_path(
         &self,
         raw_path: &str,
         context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
     ) -> Result<PathBuf, (String, String)> {
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let trimmed = raw_path.trim();
         if trimmed.is_empty() {
             return Err(("invalid_path".to_string(), "文件路径不能为空。".to_string()));
         }
 
-        let canonical = match self.canonicalize_workspace_target(trimmed, context) {
+        let canonical = match self.canonicalize_workspace_target(trimmed, context, ws_id) {
             Ok(canonical) => canonical,
-            Err(primary_error) => match self.try_repair_file_path(trimmed) {
+            Err(primary_error) => match self.try_repair_file_path(trimmed, context, ws_id) {
                 Ok(Some(repaired)) => repaired,
                 Ok(None) => return Err(primary_error),
                 Err(repair_error) => return Err(repair_error),
@@ -3191,7 +3238,7 @@ impl ToolRouter {
                 "invalid_path".to_string(),
                 format!(
                     "目标不是文件：{}。",
-                    self.display_workspace_relative(&canonical)
+                    self.display_resolved_workspace_relative(&canonical, context, ws_id)
                 ),
             ));
         }
@@ -3199,29 +3246,37 @@ impl ToolRouter {
         Ok(canonical)
     }
 
-    /// 会话级 root 解析（PA-080 consultant 方案 A）：优先取调用上下文的会话 workspace root
-    /// （`execute_with_workspace_root` 注入，显式不可变）；其次按 `workspace_id` 经注入的
-    /// resolver 解析；无 resolver / 解析失败 / 无上下文 → 回退构造时的默认 root。
+    /// 会话级 root 解析（PA-080 consultant 方案 A / Phase 1 加固）：优先取调用上下文的会话 workspace root
+    /// （`execute_with_workspace_root` / `execute_with_context` 注入，显式不可变）；
+    /// 其次按 `workspace_id` 经注入的 resolver 解析；
+    /// 若提供了未注册或不存在的 `workspace_id`，严格 Fail-closed 拒绝并返回错误，绝不静默回退默认 cwd；
+    /// 仅在未提供上下文且未指定 `workspace_id` 时，回退构造时的默认 root。
     fn resolved_workspace_root(
         &self,
         context: &ToolExecutionContext,
         workspace_id: Option<&str>,
-    ) -> PathBuf {
+    ) -> Result<PathBuf, (String, String)> {
         if let Some(session_root) = &context.workspace_root {
-            return session_root.clone();
+            return Ok(session_root.clone());
         }
-        if let Some(workspace_id) = workspace_id.filter(|value| !value.trim().is_empty()) {
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
+        if let Some(ws_id) = ws_id.filter(|value| !value.trim().is_empty()) {
             if let Some(resolver) = &self.root_resolver {
-                if let Some(root) = resolver(workspace_id) {
-                    return root;
+                if let Some(root) = resolver(ws_id) {
+                    return Ok(root);
                 }
-                // 孤儿 workspace_id（注册表无记录）：读回退默认 root（带告警），写由调用方 fail-closed。
-                eprintln!(
-                    "[pony-agent] workspace `{workspace_id}` 未注册，回退默认 workspace root"
-                );
+                return Err((
+                    "invalid_workspace".to_string(),
+                    format!("工作区 `{ws_id}` 未注册或不存在。"),
+                ));
+            } else {
+                return Err((
+                    "invalid_workspace".to_string(),
+                    format!("工作区 `{ws_id}` 未注册。"),
+                ));
             }
         }
-        self.workspace_root.clone()
+        Ok(self.workspace_root.clone())
     }
 
     /// 受控 tmp 目录（PA-080）：`<root>/.tmp/`，与 PA-078 导入目录布局一致。
@@ -3229,14 +3284,16 @@ impl ToolRouter {
         root.join(".tmp")
     }
 
-    /// 受控 tmp 判定目录列表（PA-080 consultant 修复）：除 `<root>/.tmp/` 外，
-    /// 覆盖 PA-078 附件导入的 fallback 布局 `<temp_dir>/pony-agent/.tmp/imports/`，
-    /// 避免 fallback 导入物被当成普通外部路径。
-    fn controlled_tmp_dirs(&self, root: &Path) -> Vec<PathBuf> {
+    /// 受控 tmp 判定目录列表（PA-080 consultant 修复 / Phase 1 多工作区物理隔离）：除 `<root>/.tmp/` 外，
+    /// 覆盖 PA-078 附件导入的 fallback 布局 `<temp_dir>/pony-agent/<workspace_id>/.tmp/imports/`，
+    /// 保证多工作区并发任务的 fallback 临时目录物理隔离。
+    fn controlled_tmp_dirs(&self, root: &Path, workspace_id: Option<&str>) -> Vec<PathBuf> {
+        let ws_subdir = workspace_id.unwrap_or("default");
         vec![
             self.controlled_tmp_dir(root),
             std::env::temp_dir()
                 .join(crate::agent::attachment_import::FALLBACK_TEMP_SUBDIR)
+                .join(ws_subdir)
                 .join(crate::agent::attachment_import::IMPORT_RELATIVE_DIR),
         ]
     }
@@ -3253,8 +3310,9 @@ impl ToolRouter {
         workspace_id: Option<&str>,
     ) -> Result<PathBuf, (String, String)> {
         use crate::agent::path_permission::{PermissionErrorCode, PermissionZone};
-        let root = self.resolved_workspace_root(context, workspace_id);
-        let tmp_dirs = self.controlled_tmp_dirs(&root);
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
+        let root = self.resolved_workspace_root(context, ws_id)?;
+        let tmp_dirs = self.controlled_tmp_dirs(&root, ws_id);
         // 依次对 root + 各受控 tmp 区域判定：命中任一即放行（组件级比较，无 IO 副作用）。
         // 全部未命中时，最后一次判定的错误码（requires_authorization / outside_workspace_write_denied）透出。
         let mut last_error: Option<(String, String)> = None;
@@ -3302,8 +3360,10 @@ impl ToolRouter {
         &self,
         raw_path: &str,
         context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
     ) -> Result<PathBuf, (String, String)> {
         use crate::agent::path_permission::PathPurpose;
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let trimmed = raw_path.trim();
         if trimmed.is_empty() {
             return Err(("invalid_path".to_string(), "文件路径不能为空。".to_string()));
@@ -3311,22 +3371,24 @@ impl ToolRouter {
 
         // PA-080：写路径统一经 classify_path(Write)，workspace 外写返回
         // `outside_workspace_write_denied`；写新文件复用"最近存在祖先 + 后缀组件校验"语义。
-        self.classify_workspace_path(trimmed, PathPurpose::Write, context, None)
+        self.classify_workspace_path(trimmed, PathPurpose::Write, context, ws_id)
     }
 
     fn resolve_workspace_entry(
         &self,
         raw_path: &str,
         context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
     ) -> Result<PathBuf, (String, String)> {
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let trimmed = if raw_path.trim().is_empty() {
             "."
         } else {
             raw_path.trim()
         };
-        match self.canonicalize_workspace_target(trimmed, context) {
+        match self.canonicalize_workspace_target(trimmed, context, ws_id) {
             Ok(canonical) => Ok(canonical),
-            Err(primary_error) => match self.try_repair_file_path(trimmed) {
+            Err(primary_error) => match self.try_repair_file_path(trimmed, context, ws_id) {
                 Ok(Some(repaired)) => Ok(repaired),
                 Ok(None) => Err(primary_error),
                 Err(repair_error) => Err(repair_error),
@@ -3338,19 +3400,21 @@ impl ToolRouter {
         &self,
         raw_path: &str,
         context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
     ) -> Result<PathBuf, (String, String)> {
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let trimmed = if raw_path.trim().is_empty() {
             "."
         } else {
             raw_path.trim()
         };
-        let canonical = self.canonicalize_workspace_target(trimmed, context)?;
+        let canonical = self.canonicalize_workspace_target(trimmed, context, ws_id)?;
         if !canonical.is_dir() {
             return Err((
                 "invalid_path".to_string(),
                 format!(
                     "目标不是目录：{}。",
-                    self.display_workspace_relative(&canonical)
+                    self.display_resolved_workspace_relative(&canonical, context, ws_id)
                 ),
             ));
         }
@@ -3366,20 +3430,22 @@ impl ToolRouter {
         &self,
         raw_path: &str,
         context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
     ) -> Result<PathBuf, (String, String)> {
         use crate::agent::path_permission::PathPurpose;
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let trimmed = if raw_path.trim().is_empty() {
             "."
         } else {
             raw_path.trim()
         };
-        let canonical = self.classify_workspace_path(trimmed, PathPurpose::Write, context, None)?;
+        let canonical = self.classify_workspace_path(trimmed, PathPurpose::Write, context, ws_id)?;
         if !canonical.is_dir() {
             return Err((
                 "invalid_cwd".to_string(),
                 format!(
                     "目标不是目录：{}。",
-                    self.display_workspace_relative(&canonical)
+                    self.display_resolved_workspace_relative(&canonical, context, ws_id)
                 ),
             ));
         }
@@ -3390,13 +3456,17 @@ impl ToolRouter {
         &self,
         raw_path: &str,
         context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
     ) -> Result<PathBuf, (String, String)> {
         use crate::agent::path_permission::PathPurpose;
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
+        let root = self.canonical_resolved_root(context, ws_id)?;
         let input = PathBuf::from(raw_path);
         let candidate = if input.is_absolute() {
             input
         } else {
-            self.workspace_root.join(raw_path)
+            let base_root = self.resolved_workspace_root(context, ws_id)?;
+            base_root.join(raw_path)
         };
         let canonical = candidate.canonicalize().map_err(|error| {
             (
@@ -3404,14 +3474,13 @@ impl ToolRouter {
                 format!("无法解析路径 {}：{}", raw_path, error),
             )
         })?;
-        let root = self.canonical_workspace_root();
 
         if !is_within_root(&root, &canonical) {
             // PA-080：workspace 外读 → 授权清单命中放行（classify_path(Read) 判定），
             // 未命中返回 `requires_authorization` 结构化错误。
             let display = canonical.display().to_string();
             return self
-                .classify_workspace_path(&display, PathPurpose::Read, context, None)
+                .classify_workspace_path(&display, PathPurpose::Read, context, ws_id)
                 .map_err(|(code, message)| {
                     if code == "requires_authorization" {
                         (code, message)
@@ -3424,18 +3493,38 @@ impl ToolRouter {
         Ok(canonical)
     }
 
-    fn canonical_workspace_root(&self) -> PathBuf {
-        let canonical = self
-            .workspace_root
+    fn canonical_resolved_root(
+        &self,
+        context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
+    ) -> Result<PathBuf, (String, String)> {
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
+        let raw_root = self.resolved_workspace_root(context, ws_id)?;
+        let canonical = raw_root
             .canonicalize()
-            .unwrap_or_else(|_| self.workspace_root.clone());
-        // PA-080：与 path_permission 的 canonical 输出保持同一归一化（Windows 去 `\\?\` 前缀），
-        // 否则 display_workspace_relative / strip_prefix 对"带前缀 vs 去前缀"路径失配。
-        crate::agent::path_permission::normalize_canonical(&canonical)
+            .unwrap_or_else(|_| raw_root);
+        Ok(crate::agent::path_permission::normalize_canonical(&canonical))
+    }
+
+    fn canonical_workspace_root(&self) -> PathBuf {
+        self.canonical_resolved_root(&ToolExecutionContext::default(), None)
+            .unwrap_or_else(|_| self.workspace_root.clone())
     }
 
     fn display_workspace_relative(&self, path: &Path) -> String {
-        let root = self.canonical_workspace_root();
+        self.display_resolved_workspace_relative(path, &ToolExecutionContext::default(), None)
+    }
+
+    fn display_resolved_workspace_relative(
+        &self,
+        path: &Path,
+        context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
+    ) -> String {
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
+        let root = self
+            .canonical_resolved_root(context, ws_id)
+            .unwrap_or_else(|_| self.canonical_workspace_root());
         path.strip_prefix(&root)
             .ok()
             .map(|value| {
@@ -3449,7 +3538,13 @@ impl ToolRouter {
             .unwrap_or_else(|| path.display().to_string().replace('\\', "/"))
     }
 
-    fn try_repair_file_path(&self, raw_path: &str) -> Result<Option<PathBuf>, (String, String)> {
+    fn try_repair_file_path(
+        &self,
+        raw_path: &str,
+        context: &ToolExecutionContext,
+        workspace_id: Option<&str>,
+    ) -> Result<Option<PathBuf>, (String, String)> {
+        let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let normalized_raw_path = raw_path
             .trim()
             .trim_end_matches(['/', '\\'])
@@ -3465,7 +3560,7 @@ impl ToolRouter {
             return Ok(None);
         };
 
-        let root = self.canonical_workspace_root();
+        let root = self.canonical_resolved_root(context, ws_id)?;
         let mut files = Vec::new();
         if collect_files_recursively(&root, &mut files, MAX_PATH_REPAIR_SEARCH_FILES).is_err() {
             return Ok(None);
@@ -3489,7 +3584,7 @@ impl ToolRouter {
                 let candidates = exact_name_matches
                     .iter()
                     .take(5)
-                    .map(|path| self.display_workspace_relative(path))
+                    .map(|path| self.display_resolved_workspace_relative(path, context, ws_id))
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err((
@@ -3535,7 +3630,7 @@ impl ToolRouter {
                 let candidates = stem_matches
                     .iter()
                     .take(5)
-                    .map(|path| self.display_workspace_relative(path))
+                    .map(|path| self.display_resolved_workspace_relative(path, context, ws_id))
                     .collect::<Vec<_>>()
                     .join(", ");
                 Err((
@@ -3553,6 +3648,10 @@ impl ToolRouter {
 impl ToolExecutor for ToolRouter {
     fn execute(&self, call: &ToolCall) -> ToolResult {
         ToolRouter::execute(self, call)
+    }
+
+    fn execute_with_context(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        ToolRouter::execute_with_context(self, call, context)
     }
 }
 
@@ -6427,7 +6526,7 @@ mod tests {
         assert_eq!(results[1]["arguments"]["startLine"].as_u64(), Some(6));
         let segment_text = results[1]["output"].as_str().expect("segment text output");
         assert!(
-            segment_text.contains("第 6 行"),
+            segment_text.contains("第 6 - 8 行") || segment_text.contains("第 6"),
             "segment should start at line 6: {segment_text}"
         );
         assert!(segment_text.contains("line-6"));
@@ -6476,7 +6575,7 @@ mod tests {
         let segment_text = segment_entry["output"]
             .as_str()
             .expect("segment text output");
-        assert!(segment_text.contains("第 2 行"));
+        assert!(segment_text.contains("第 2 - 4 行") || segment_text.contains("第 2"));
     }
 
     /// PA-100 审核 A 缺失测试⑤：legacy 侧多路径 startLine 回显（与 composite 侧

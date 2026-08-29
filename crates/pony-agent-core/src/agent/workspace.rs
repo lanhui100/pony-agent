@@ -518,4 +518,199 @@ mod tests {
         assert_eq!(records[0].id, DEFAULT_WORKSPACE_ID);
         assert!(!records[0].root_path.is_empty());
     }
+
+    #[test]
+    fn workspace_concurrent_immutable_context_isolation_test() {
+        use crate::agent::tools::{ToolCall, ToolExecutionContext, ToolRouter};
+        use serde_json::json;
+        use std::sync::Arc;
+
+        let num_workspaces = 4;
+        let num_threads = 16;
+        let mut ws_roots = Vec::new();
+
+        for i in 0..num_workspaces {
+            let root = std::path::PathBuf::from(unique_root(&format!("concur_ws_{i}")));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("identity.txt"), format!("ws_{i}_identity")).unwrap();
+            ws_roots.push(root);
+        }
+
+        let router = Arc::new(ToolRouter::new());
+        let mut handles = Vec::new();
+
+        for thread_idx in 0..num_threads {
+            let ws_idx = thread_idx % num_workspaces;
+            let ws_root = ws_roots[ws_idx].clone();
+            let router_clone = router.clone();
+
+            let handle = std::thread::spawn(move || {
+                let context = ToolExecutionContext {
+                    workspace_root: Some(ws_root.clone()),
+                    ..Default::default()
+                };
+
+                // 1. Read identity
+                let read_call = ToolCall {
+                    call_id: Some(format!("call-read-{thread_idx}")),
+                    name: "workspace_read_file".to_string(),
+                    arguments: json!({ "path": "identity.txt" }),
+                    plan: None,
+                };
+                let read_res = router_clone.execute_with_context(&read_call, &context);
+                assert_eq!(read_res.status, "ok", "Thread {thread_idx} read failed: {}", read_res.output);
+                assert!(read_res.output.contains(&format!("ws_{ws_idx}_identity")), "Thread {thread_idx} got corrupted identity: {}", read_res.output);
+
+                // 2. Write file
+                let write_call = ToolCall {
+                    call_id: Some(format!("call-write-{thread_idx}")),
+                    name: "workspace_write_file".to_string(),
+                    arguments: json!({
+                        "path": format!("thread_{thread_idx}.txt"),
+                        "content": format!("payload_{thread_idx}"),
+                        "overwrite": true
+                    }),
+                    plan: None,
+                };
+                let write_res = router_clone.execute_with_context(&write_call, &context);
+                assert_eq!(write_res.status, "ok", "Thread {thread_idx} write failed: {}", write_res.output);
+
+                // 3. Verify file exists in this workspace and not others
+                let written_file = ws_root.join(format!("thread_{thread_idx}.txt"));
+                assert!(written_file.exists(), "Thread {thread_idx} file not in correct workspace");
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        for root in ws_roots {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn workspace_unknown_id_fail_closed_rejection_test() {
+        use crate::agent::tools::{ToolCall, ToolExecutionContext, ToolRouter};
+        use serde_json::json;
+
+        let base_root = std::path::PathBuf::from(unique_root("unknown_ws_test"));
+        std::fs::create_dir_all(&base_root).unwrap();
+
+        // Create router with a resolver that knows only "ws-valid"
+        let valid_root = base_root.join("valid");
+        std::fs::create_dir_all(&valid_root).unwrap();
+
+        let resolver_root = valid_root.clone();
+        let router = ToolRouter::new().with_root_resolver(move |ws_id: &str| {
+            if ws_id == "ws-valid" {
+                Some(resolver_root.clone())
+            } else {
+                None
+            }
+        });
+
+        // Attempting to read using an unknown workspace_id must FAIL-CLOSED
+        let call = ToolCall {
+            call_id: Some("call-unknown".to_string()),
+            name: "workspace_read_file".to_string(),
+            arguments: json!({
+                "path": "secret.txt",
+                "workspaceId": "ws-unknown-hacker"
+            }),
+            plan: None,
+        };
+        let res = router.execute_with_context(&call, &ToolExecutionContext::default());
+        assert_eq!(res.status, "error", "Unknown workspace must fail closed: {}", res.output);
+        assert!(res.output.contains("未注册") || res.output.contains("不存在") || res.output.contains("invalid_workspace"), "Output: {}", res.output);
+
+        let _ = std::fs::remove_dir_all(&base_root);
+    }
+
+    #[test]
+    fn workspace_relative_path_non_default_resolution_test() {
+        use crate::agent::tools::{ToolCall, ToolExecutionContext, ToolRouter};
+        use serde_json::json;
+
+        let base_root = std::path::PathBuf::from(unique_root("rel_path_test"));
+        std::fs::create_dir_all(&base_root).unwrap();
+
+        let default_dir = base_root.join("default_dir");
+        let non_default_dir = base_root.join("non_default_dir");
+        std::fs::create_dir_all(default_dir.join("src")).unwrap();
+        std::fs::create_dir_all(non_default_dir.join("src")).unwrap();
+
+        std::fs::write(default_dir.join("src/app.rs"), "WS_DEFAULT_UNIQUE_PAYLOAD_1234").unwrap();
+        std::fs::write(non_default_dir.join("src/app.rs"), "WS_NON_DEFAULT_UNIQUE_PAYLOAD_5678").unwrap();
+
+        let router = ToolRouter::new();
+
+        // Reading relative path "src/app.rs" under non-default context
+        let context = ToolExecutionContext {
+            workspace_root: Some(non_default_dir.clone()),
+            ..Default::default()
+        };
+        let call = ToolCall {
+            call_id: Some("call-rel".to_string()),
+            name: "workspace_read_file".to_string(),
+            arguments: json!({ "path": "src/app.rs" }),
+            plan: None,
+        };
+        let res = router.execute_with_context(&call, &context);
+        assert_eq!(res.status, "ok", "Read failed: {}", res.output);
+        assert!(res.output.contains("WS_NON_DEFAULT_UNIQUE_PAYLOAD_5678"), "Corrupted content: {}", res.output);
+        assert!(!res.output.contains("WS_DEFAULT_UNIQUE_PAYLOAD_1234"), "Leaked default workspace content: {}", res.output);
+
+        let _ = std::fs::remove_dir_all(&base_root);
+    }
+
+    #[test]
+    fn workspace_cross_boundary_path_attack_test() {
+        use crate::agent::tools::{ToolCall, ToolExecutionContext, ToolRouter};
+        use serde_json::json;
+
+        let base_root = std::path::PathBuf::from(unique_root("attack_test"));
+        std::fs::create_dir_all(&base_root).unwrap();
+
+        let ws_a = base_root.join("ws_a");
+        let ws_b = base_root.join("ws_b");
+        std::fs::create_dir_all(&ws_a).unwrap();
+        std::fs::create_dir_all(&ws_b).unwrap();
+        std::fs::write(ws_b.join("secret.txt"), "TOP_SECRET_B").unwrap();
+
+        let router = ToolRouter::new();
+        let context_a = ToolExecutionContext {
+            workspace_root: Some(ws_a.clone()),
+            ..Default::default()
+        };
+
+        // 1. Directory traversal attempt
+        let traversal_call = ToolCall {
+            call_id: Some("call-traversal".to_string()),
+            name: "workspace_read_file".to_string(),
+            arguments: json!({ "path": "../ws_b/secret.txt" }),
+            plan: None,
+        };
+        let res = router.execute_with_context(&traversal_call, &context_a);
+        assert_eq!(res.status, "error", "Traversal must fail: {}", res.output);
+
+        // 2. Write to outside workspace
+        let write_escape_call = ToolCall {
+            call_id: Some("call-write-escape".to_string()),
+            name: "workspace_write_file".to_string(),
+            arguments: json!({
+                "path": "../ws_b/hacked.txt",
+                "content": "pwned",
+                "overwrite": true
+            }),
+            plan: None,
+        };
+        let res_write = router.execute_with_context(&write_escape_call, &context_a);
+        assert_eq!(res_write.status, "error", "Write escape must fail: {}", res_write.output);
+        assert!(!ws_b.join("hacked.txt").exists(), "Escape file was written to disk!");
+
+        let _ = std::fs::remove_dir_all(&base_root);
+    }
 }

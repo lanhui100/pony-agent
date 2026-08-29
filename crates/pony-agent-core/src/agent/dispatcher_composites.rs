@@ -28,8 +28,8 @@ use crate::agent::dispatcher::{
 use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
 use crate::agent::tools::{
     canonical_tool_name, explicit_gather_start_line, ToolCall, ToolControlKind,
-    ToolExecutionStatus, ToolExecutor, ToolOutcome, ToolPermissionScope, ToolPlan, ToolPlanStep,
-    ToolRegistrySnapshot, ToolResult,
+    ToolExecutionContext, ToolExecutionStatus, ToolExecutor, ToolOutcome, ToolPermissionScope,
+    ToolPlan, ToolPlanStep, ToolRegistrySnapshot, ToolResult,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -102,11 +102,18 @@ impl GovernedToolExecutor {
 
 impl ToolExecutor for GovernedToolExecutor {
     fn execute(&self, call: &ToolCall) -> ToolResult {
-        let context = self
+        self.execute_with_context(call, &ToolExecutionContext::default())
+    }
+
+    fn execute_with_context(&self, call: &ToolCall, exec_context: &ToolExecutionContext) -> ToolResult {
+        let mut context = self
             .context
             .lock()
-            .expect("governed executor context poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone();
+        if let Some(workspace_root) = &exec_context.workspace_root {
+            context.workspace_root = Some(workspace_root.display().to_string());
+        }
         let outcome = self.dispatcher.dispatch_governed(
             ToolDispatchRequest {
                 origin: InvocationOrigin::Model,

@@ -118,11 +118,7 @@
 
 - [重构阶段计划](roadmap/phases.md)
 
-## 11. 分析文档
-
-- [内置工具面三方对比](analysis/builtin-tool-surface-comparison-2026-06-22.md)
-- [Trace Redteam 审计](analysis/trace-redteam-2026-06-01.md)
-- [Turn 完成时 UI 冻结诊断](analysis/turn-completion-ui-freeze-diagnosis-2026-06-16.md)
+## 11. 分析文档（索引见 §2.5 性能与诊断、§2.6 工具面研究）
 
 ## 12. 文档使用建议
 

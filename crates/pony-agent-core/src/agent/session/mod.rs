@@ -18,9 +18,9 @@ pub use types::{
     HistoryBranch, HistoryCheckoutMode, HistoryCheckoutStatus, HistoryCursor, HistoryCursorMode,
     HistoryNode, HistoryNodeKind, HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext,
     HistoryStateAuditSummary, LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
-    RunControlAuditCurrentContext, RunControlAuditSummary, SessionAttachment, SessionOverview,
-    SessionSnapshot, SessionState, TraceTimelineEntry, TurnHistoryMessage, TurnTraceRecord,
-    TurnTraceRef, WorkspaceRef, WorkspaceRefKind,
+    RunControlAuditCurrentContext, RunControlAuditSummary, SessionAttachment, SessionError,
+    SessionOverview, SessionSnapshot, SessionState, TraceTimelineEntry, TurnHistoryMessage,
+    TurnTraceRecord, TurnTraceRef, WorkspaceRef, WorkspaceRefKind,
 };
 // 生产路径仅用 DEFAULT_SESSION_ID；两个附件类型仅 control_plane 测试模块经
 // 本模块命名空间引用（见下方测试供给区同款模式），故按测试构建条件导出。

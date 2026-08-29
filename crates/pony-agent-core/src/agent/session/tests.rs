@@ -848,7 +848,7 @@ fn materialize_last_turn_messages_picks_latest_turn() {
             chunk_missing: None,
         },
     ]);
-    let (user, assistant) = materialize_last_turn_messages(&two_turns).expect("materialized");
+    let (user, assistant) = materialize_last_turn_messages(&two_turns, 0).expect("materialized");
     assert_eq!(user.as_deref(), Some("第二问"));
     assert_eq!(
         assistant
@@ -873,12 +873,12 @@ fn materialize_last_turn_messages_picks_latest_turn() {
             turn_duration_ms: None,
         },
     ]);
-    let (user, assistant) = materialize_last_turn_messages(&failed_turn).expect("materialized");
+    let (user, assistant) = materialize_last_turn_messages(&failed_turn, 0).expect("materialized");
     assert_eq!(user.as_deref(), Some("失败问"));
     assert!(assistant.is_none(), "failed turn has no assistant message");
 
     // 无 turn 归属事件 → None（整体回退）。
-    assert!(materialize_last_turn_messages(&[]).is_none());
+    assert!(materialize_last_turn_messages(&[], 0).is_none());
 }
 
 #[test]
@@ -5699,6 +5699,574 @@ fn workspace_rename_delete_survive_sqlite_restart_write_separate() {
             Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
         );
     }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+struct FailingCommandBackend {
+    attachment_root: PathBuf,
+}
+
+impl SessionBackend for FailingCommandBackend {
+    fn load_store(&self) -> Option<PersistedStore> {
+        None
+    }
+    fn save_store(&self, _store: &PersistedStore) {}
+    fn attachment_root(&self) -> Option<PathBuf> {
+        Some(self.attachment_root.clone())
+    }
+    fn supports_turn_events(&self) -> bool {
+        true
+    }
+    fn persist_command(&self, _command: PersistCommand) -> PersistCommandOutcome {
+        PersistCommandOutcome::Failed
+    }
+}
+
+struct CorruptedEventBackend {
+    attachment_root: PathBuf,
+}
+
+impl SessionBackend for CorruptedEventBackend {
+    fn load_store(&self) -> Option<PersistedStore> {
+        None
+    }
+    fn save_store(&self, _store: &PersistedStore) {}
+    fn attachment_root(&self) -> Option<PathBuf> {
+        Some(self.attachment_root.clone())
+    }
+    fn supports_turn_events(&self) -> bool {
+        true
+    }
+    fn load_turn_events_checked(
+        &self,
+        _session_id: &str,
+        _up_to_seq: Option<u64>,
+    ) -> Result<Vec<(u64, String, crate::agent::turn_event::TurnEvent)>, String> {
+        Err("Simulated event stream degradation / CRC mismatch".to_string())
+    }
+}
+
+#[test]
+fn append_turn_aborts_memory_mutation_on_backend_failure() {
+    let dir = std::env::temp_dir().join(format!("failing-command-{}", std::process::id()));
+    let mut store = SessionStore::with_backend(Box::new(FailingCommandBackend {
+        attachment_root: dir.clone(),
+    }));
+    let sid = "session-staging-test";
+    store.ensure_session(sid);
+    let initial_history_len = store.snapshot_for_session(sid).history.len();
+    let initial_turn_count = store.snapshot_for_session(sid).turn_count;
+
+    let result = store.append_turn_fallible(Some(sid), "user q", "assistant ans", None, Vec::new());
+    assert!(result.is_err(), "append_turn_fallible must return Err on backend failure");
+    match result {
+        Err(SessionError::BackendFailure(msg)) => {
+            assert!(msg.contains("Failed"), "Error message contains failure detail: {msg}");
+        }
+        other => panic!("Expected BackendFailure, got {other:?}"),
+    }
+
+    // Assert no memory split-brain: history length and turn count must not be incremented
+    let after_snapshot = store.snapshot_for_session(sid);
+    assert_eq!(after_snapshot.history.len(), initial_history_len, "History was not mutated on failure");
+    assert_eq!(after_snapshot.turn_count, initial_turn_count, "Turn count was not incremented on failure");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn append_turn_returns_error_when_event_stream_corrupted() {
+    let dir = std::env::temp_dir().join(format!("corrupted-event-{}", std::process::id()));
+    let mut store = SessionStore::with_backend(Box::new(CorruptedEventBackend {
+        attachment_root: dir.clone(),
+    }));
+    let sid = "session-corrupted-test";
+    store.ensure_session(sid);
+    let initial_history_len = store.snapshot_for_session(sid).history.len();
+
+    let result = store.append_turn_fallible(Some(sid), "user q", "assistant ans", None, Vec::new());
+    assert!(result.is_err(), "append_turn_fallible must return Err when event stream is degraded");
+    match result {
+        Err(SessionError::EventStreamDegraded(msg)) => {
+            assert!(msg.contains("Simulated event stream degradation"), "Error message preserved: {msg}");
+        }
+        other => panic!("Expected EventStreamDegraded, got {other:?}"),
+    }
+
+    let after_snapshot = store.snapshot_for_session(sid);
+    assert_eq!(after_snapshot.history.len(), initial_history_len, "Memory was not mutated on degraded stream error");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn event_flush_registry_recovers_from_poisoned_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // 1. 制造真实的 Mutex 锁中毒（子线程持锁 panic）
+    let handle = std::thread::spawn(|| {
+        crate::agent::turn_flow::register_event_flush(Arc::new(|_| {
+            panic!("Intentional panic to poison mutex");
+        }));
+        let _ = crate::agent::turn_flow::flush_session_buffered_events("poison-test");
+    });
+    let _ = handle.join(); // 线程 panic 导致内部 Mutex 中毒
+
+    // 2. 验证注册与 flush 能自愈并正常工作，绝不 panic 或静默丢事件
+    let healed_flag = Arc::new(AtomicBool::new(false));
+    let healed_flag_clone = Arc::clone(&healed_flag);
+    crate::agent::turn_flow::register_event_flush(Arc::new(move |_| {
+        healed_flag_clone.store(true, Ordering::SeqCst);
+        Ok(42)
+    }));
+
+    let flush_res = crate::agent::turn_flow::flush_session_buffered_events("healed-session");
+    assert!(flush_res.is_ok(), "Flush succeeds after recovering from poisoned lock");
+    assert_eq!(flush_res.unwrap(), 42, "Healed handler executed and returned correct count");
+    assert!(healed_flag.load(Ordering::SeqCst), "Healed handler was actually invoked");
+
+    crate::agent::turn_flow::clear_event_flush();
+}
+
+#[test]
+fn normalized_sessions_preserves_title_override_and_archived_across_restart() {
+    let (mut store, dir, sid) = pa093_sqlite_store("meta-persist");
+    store.ensure_session(&sid);
+    store.append_turn(Some(&sid), "first question", "first answer", None, Vec::new());
+    
+    // Set custom title_override and archived = true
+    if let Some(session) = store.sessions.get_mut(&sid) {
+        session.title_override = Some("My Custom Title".to_string());
+        session.archived = true;
+    }
+    
+    // Append another turn which runs incremental update_session_meta
+    store.append_turn(Some(&sid), "second question", "second answer", None, Vec::new());
+
+    // Set storage.normalized.v1.phase = "retired" to strictly force load_store_normalized on reload
+    {
+        let conn = rusqlite::Connection::open(dir.join("test.db")).expect("open db for phase");
+        conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) VALUES ('storage.normalized.v1.phase', 'retired')",
+            [],
+        )
+        .expect("write retired phase");
+    }
+
+    // Verify memory state and overview
+    let session = store.sessions.get(&sid).expect("session exists");
+    assert_eq!(session.title_override.as_deref(), Some("My Custom Title"));
+    assert!(session.archived, "Session must be marked as archived");
+    let overview = store.list_sessions().into_iter().find(|s| s.conversation_id == sid).expect("overview exists");
+    assert!(overview.archived, "Overview must reflect archived state");
+
+    // Close and reload from SQLite via normalized tables
+    drop(store);
+    let reloaded_store = SessionStore::with_backend(Box::new(
+        crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+            dir.join("test.db"),
+            crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+        ),
+    ));
+    let reloaded_session = reloaded_store.sessions.get(&sid).expect("session reloaded");
+    assert_eq!(
+        reloaded_session.title_override.as_deref(),
+        Some("My Custom Title"),
+        "title_override is preserved across SQLite normalized reloads"
+    );
+    assert!(
+        reloaded_session.archived,
+        "archived flag is preserved across SQLite normalized reloads"
+    );
+    let reloaded_overview = reloaded_store.list_sessions().into_iter().find(|s| s.conversation_id == sid).expect("reloaded overview exists");
+    assert!(reloaded_overview.archived, "Reloaded overview reflects archived");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn multibranch_append_turn_does_not_collide_on_ordinal() {
+    let (mut store, dir, sid) = pa093_sqlite_store("multibranch-ordinal");
+    store.append_turn(Some(&sid), "turn1 q", "turn1 a", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-1",
+        "branch-main",
+        &pa093_turn_events("turn-1", "turn1 q", "turn1 a"),
+    );
+    store.append_turn(Some(&sid), "turn2 q", "turn2 a", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-2",
+        "branch-main",
+        &pa093_turn_events("turn-2", "turn2 q", "turn2 a"),
+    );
+
+    let node1 = pa093_first_turn_node_id(&store, &sid);
+    let _fork_snapshot = store
+        .fork_from_history_node(Some(&sid), &node1, None)
+        .expect("fork");
+
+    // Appending on fork branch produces messages starting at ordinal 2 again,
+    // which must NOT violate UNIQUE constraints or overwrite main branch messages!
+    let fork_turn_res = store.append_turn_fallible(Some(&sid), "fork q", "fork a", None, Vec::new());
+    assert!(fork_turn_res.is_ok(), "append on fork branch succeeds without ordinal collision");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn session_state_parity_and_write_amplification_test() {
+    let (mut store, dir, sid) = pa093_sqlite_store("parity-test");
+    store.ensure_session(&sid);
+
+    // 1. Perform multi-hop / multi-turn conversation
+    for i in 1..=5 {
+        let q = format!("User question {i}");
+        let a = format!("Assistant response {i}");
+        let turn_id = format!("turn-{i}");
+        store.append_turn(Some(&sid), &q, &a, None, Vec::new());
+        pa093_flush(
+            &mut store,
+            &sid,
+            &turn_id,
+            "branch-main",
+            &pa093_turn_events(&turn_id, &q, &a),
+        );
+    }
+
+    // 2. Fork from node 2
+    let node2 = store.snapshot_for_session(&sid).history_nodes.get(1).map(|n| n.node_id.clone()).expect("node 2 exists");
+    let _fork_snap = store.fork_from_history_node(Some(&sid), &node2, None).expect("fork");
+
+    // 3. Append turn on fork branch
+    store.append_turn(Some(&sid), "fork question", "fork answer", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-fork",
+        "branch-fork",
+        &pa093_turn_events("turn-fork", "fork question", "fork answer"),
+    );
+
+    // 4. Force metadata phase to "retired" so reload strictly reconstructs via normalized tables
+    {
+        let conn = rusqlite::Connection::open(dir.join("test.db")).expect("open db for parity phase");
+        conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) VALUES ('storage.normalized.v1.phase', 'retired')",
+            [],
+        )
+        .expect("write retired phase");
+    }
+
+    // 5. Parity check: reload via Sqlite backend and compare reconstructed state against live memory snapshot
+    let live_snapshot = store.snapshot_for_session(&sid);
+    drop(store);
+
+    let reloaded_store = SessionStore::with_backend(Box::new(
+        crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+            dir.join("test.db"),
+            crate::agent::session::SeparateTraceTableMode::WriteSeparate,
+        ),
+    ));
+    let reloaded_snapshot = reloaded_store.snapshot_for_session(&sid);
+
+    // Exact parity comparisons:
+    assert_eq!(reloaded_snapshot.conversation_id, live_snapshot.conversation_id, "Parity: conversation_id");
+    assert_eq!(reloaded_snapshot.title, live_snapshot.title, "Parity: title");
+    assert_eq!(reloaded_snapshot.summary, live_snapshot.summary, "Parity: summary");
+    assert_eq!(reloaded_snapshot.turn_count, live_snapshot.turn_count, "Parity: turn_count");
+    assert_eq!(reloaded_snapshot.history.len(), live_snapshot.history.len(), "Parity: history len");
+    for (idx, (r_msg, l_msg)) in reloaded_snapshot.history.iter().zip(live_snapshot.history.iter()).enumerate() {
+        assert_eq!(r_msg.role, l_msg.role, "Parity: history[{idx}].role");
+        assert_eq!(r_msg.content, l_msg.content, "Parity: history[{idx}].content");
+    }
+    assert_eq!(reloaded_snapshot.history_branches.len(), live_snapshot.history_branches.len(), "Parity: branches len");
+    assert_eq!(reloaded_snapshot.history_nodes.len(), live_snapshot.history_nodes.len(), "Parity: nodes len");
+    assert_eq!(reloaded_snapshot.history_cursor.active_branch_id, live_snapshot.history_cursor.active_branch_id, "Parity: active_branch_id");
+    assert_eq!(reloaded_snapshot.history_cursor.visible_node_id, live_snapshot.history_cursor.visible_node_id, "Parity: visible_node_id");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn time_travel_same_branch_checkout_no_ghost_resurrection_test() {
+    let (mut store, dir, sid) = pa093_sqlite_store("tt-no-ghost");
+    store.ensure_session(&sid);
+
+    // Turn 1
+    store.append_turn(Some(&sid), "Q1", "A1", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-1",
+        "branch-main",
+        &pa093_turn_events("turn-1", "Q1", "A1"),
+    );
+
+    // Turn 2
+    store.append_turn(Some(&sid), "Q2", "A2", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-2",
+        "branch-main",
+        &pa093_turn_events("turn-2", "Q2", "A2"),
+    );
+
+    // Turn 3
+    store.append_turn(Some(&sid), "Q3", "A3", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-3",
+        "branch-main",
+        &pa093_turn_events("turn-3", "Q3", "A3"),
+    );
+
+    let nodes = store.snapshot_for_session(&sid).history_nodes;
+    // nodes: [root, turn1, turn2, turn3]
+    assert_eq!(nodes.len(), 4);
+    let node2_id = nodes[2].node_id.clone();
+
+    // Checkout Turn 2 (same branch rollback)
+    let snap_after_checkout = store
+        .checkout_history_node(
+            Some(&sid),
+            &node2_id,
+            crate::agent::session::HistoryCheckoutMode::TranscriptOnly,
+            None,
+        )
+        .expect("checkout turn 2");
+
+    // Must strictly contain Q1, A1, Q2, A2 - NOT Q3/A3
+    assert_eq!(snap_after_checkout.history.len(), 4);
+    assert_eq!(snap_after_checkout.history[0].content, "Q1");
+    assert_eq!(snap_after_checkout.history[1].content, "A1");
+    assert_eq!(snap_after_checkout.history[2].content, "Q2");
+    assert_eq!(snap_after_checkout.history[3].content, "A2");
+
+    // Append Turn 4
+    store.append_turn(Some(&sid), "Q4", "A4", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-4",
+        "branch-main",
+        &pa093_turn_events("turn-4", "Q4", "A4"),
+    );
+
+    let snap_after_turn4 = store.snapshot_for_session(&sid);
+    // Must contain Q1, A1, Q2, A2, Q4, A4 (6 messages) - Q3/A3 must NEVER resurrect
+    assert_eq!(snap_after_turn4.history.len(), 6);
+    let contents: Vec<&str> = snap_after_turn4.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents, vec!["Q1", "A1", "Q2", "A2", "Q4", "A4"]);
+    assert!(!contents.contains(&"Q3"), "Ghost event Q3 resurrected!");
+    assert!(!contents.contains(&"A3"), "Ghost event A3 resurrected!");
+
+    // 物理落盘与冷启动重载物理对拍（Parity & No-Ghost Verification Across Restart）
+    let db_path = dir.join("test.db");
+    drop(store);
+    let mut reloaded_store = SessionStore::with_backend(Box::new(crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+        db_path,
+        SeparateTraceTableMode::WriteSeparate,
+    )));
+    let reloaded_snap = reloaded_store.snapshot(Some(&sid), &[]);
+    let reloaded_contents: Vec<&str> = reloaded_snap.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(reloaded_contents, vec!["Q1", "A1", "Q2", "A2", "Q4", "A4"]);
+    assert!(!reloaded_contents.contains(&"Q3"), "Ghost event Q3 resurrected after SQLite reload!");
+    assert!(!reloaded_contents.contains(&"A3"), "Ghost event A3 resurrected after SQLite reload!");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn time_travel_diamond_topology_differential_parity_test() {
+    let (mut store, dir, sid) = pa093_sqlite_store("diamond-topo");
+    store.ensure_session(&sid);
+
+    // Root / Turn 1
+    store.append_turn(Some(&sid), "Root Q", "Root A", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-1",
+        "branch-main",
+        &pa093_turn_events("turn-1", "Root Q", "Root A"),
+    );
+
+    // Turn 2
+    store.append_turn(Some(&sid), "Common Q", "Common A", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-2",
+        "branch-main",
+        &pa093_turn_events("turn-2", "Common Q", "Common A"),
+    );
+
+    let node2_id = store.snapshot_for_session(&sid).history_cursor.visible_node_id.clone().unwrap();
+
+    // Fork branch B from node 2
+    let _ = store.fork_from_history_node(Some(&sid), &node2_id, None).expect("fork B");
+    store.append_turn(Some(&sid), "Branch B Q", "Branch B A", None, Vec::new());
+    let branch_b_id = store.snapshot_for_session(&sid).history_cursor.active_branch_id.unwrap();
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-3b",
+        &branch_b_id,
+        &pa093_turn_events("turn-3b", "Branch B Q", "Branch B A"),
+    );
+    let node3b_id = store.snapshot_for_session(&sid).history_cursor.visible_node_id.clone().unwrap();
+
+    // Switch back to main branch and append Turn 3A
+    let _ = store.switch_history_branch(Some(&sid), "branch-main", None).expect("switch main");
+    store.append_turn(Some(&sid), "Branch A Q", "Branch A A", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-3a",
+        "branch-main",
+        &pa093_turn_events("turn-3a", "Branch A Q", "Branch A A"),
+    );
+    let node3a_id = store.snapshot_for_session(&sid).history_cursor.visible_node_id.clone().unwrap();
+
+    // Verify view on Branch A
+    let snap_a = store.snapshot_for_session(&sid);
+    let msgs_a: Vec<&str> = snap_a.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(msgs_a, vec!["Root Q", "Root A", "Common Q", "Common A", "Branch A Q", "Branch A A"]);
+
+    // Checkout Node 3B
+    let snap_b = store
+        .checkout_history_node(
+            Some(&sid),
+            &node3b_id,
+            crate::agent::session::HistoryCheckoutMode::TranscriptOnly,
+            None,
+        )
+        .expect("checkout 3b");
+    let msgs_b: Vec<&str> = snap_b.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(msgs_b, vec!["Root Q", "Root A", "Common Q", "Common A", "Branch B Q", "Branch B A"]);
+
+    // Checkout Node 3A
+    let snap_a_again = store
+        .checkout_history_node(
+            Some(&sid),
+            &node3a_id,
+            crate::agent::session::HistoryCheckoutMode::TranscriptOnly,
+            None,
+        )
+        .expect("checkout 3a");
+    let msgs_a_again: Vec<&str> = snap_a_again.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(msgs_a_again, vec!["Root Q", "Root A", "Common Q", "Common A", "Branch A Q", "Branch A A"]);
+
+    // 钻石拓扑跨 SQLite 重载物理对拍（Differential Parity Across Cold Reload）
+    let db_path = dir.join("test.db");
+    drop(store);
+    let mut reloaded_store = SessionStore::with_backend(Box::new(crate::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+        db_path,
+        SeparateTraceTableMode::WriteSeparate,
+    )));
+    let reloaded_snap_a = reloaded_store.snapshot(Some(&sid), &[]);
+    let reloaded_msgs_a: Vec<&str> = reloaded_snap_a.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(reloaded_msgs_a, vec!["Root Q", "Root A", "Common Q", "Common A", "Branch A Q", "Branch A A"]);
+
+    let reloaded_snap_b = reloaded_store
+        .checkout_history_node(
+            Some(&sid),
+            &node3b_id,
+            crate::agent::session::HistoryCheckoutMode::TranscriptOnly,
+            None,
+        )
+        .expect("reloaded checkout 3b");
+    let reloaded_msgs_b: Vec<&str> = reloaded_snap_b.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(reloaded_msgs_b, vec!["Root Q", "Root A", "Common Q", "Common A", "Branch B Q", "Branch B A"]);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn time_travel_corrupted_payload_tombstone_graceful_recovery_test() {
+    let (mut store, dir, sid) = pa093_sqlite_store("tombstone-test");
+    store.ensure_session(&sid);
+
+    // Turn 1
+    store.append_turn(Some(&sid), "Healthy Q1", "Healthy A1", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-1",
+        "branch-main",
+        &pa093_turn_events("turn-1", "Healthy Q1", "Healthy A1"),
+    );
+
+    // Direct SQLite insert of corrupted event at seq 9999
+    {
+        let conn = rusqlite::Connection::open(dir.join("test.db")).expect("open db");
+        conn.execute(
+            "INSERT INTO turn_events (session_id, seq, branch_id, turn_id, event_type, payload, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                &sid,
+                9999i64,
+                "branch-main",
+                "turn-corrupted",
+                "corrupted/type",
+                "INVALID_JSON_{{bad_data: true",
+                123456789i64,
+            ],
+        )
+        .expect("insert corrupted event");
+    }
+
+    // Load events via backend (tolerant load with tombstones)
+    let events = store.load_turn_events(&sid, None);
+    let tombstone_found = events.iter().any(|(_, _, ev)| {
+        matches!(ev, crate::agent::turn_event::TurnEvent::CorruptedEventTombstone { .. })
+    });
+    assert!(tombstone_found, "Corrupted event must be isolated into a CorruptedEventTombstone");
+
+    // Session snapshot projection gracefully handles tombstones without crashing
+    let snapshot = store.snapshot_for_session(&sid);
+    assert_eq!(snapshot.history.len(), 2, "Healthy messages projected");
+    assert_eq!(snapshot.history[0].content, "Healthy Q1");
+    assert_eq!(snapshot.history[1].content, "Healthy A1");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn time_travel_history_command_atomic_watermark_sync_test() {
+    let (mut store, dir, sid) = pa093_sqlite_store("watermark-sync-test");
+    store.ensure_session(&sid);
+
+    store.append_turn(Some(&sid), "Turn 1 Q", "Turn 1 A", None, Vec::new());
+    pa093_flush(
+        &mut store,
+        &sid,
+        "turn-1",
+        "branch-main",
+        &pa093_turn_events("turn-1", "Turn 1 Q", "Turn 1 A"),
+    );
+
+    let node1 = store.snapshot_for_session(&sid).history_nodes[0].node_id.clone();
+    let initial_watermark = store.snapshot_for_session(&sid).history_cursor.event_watermark;
+
+    // Fork from node 1
+    let fork_snap = store.fork_from_history_node(Some(&sid), &node1, Some(initial_watermark)).expect("fork");
+    let after_fork_watermark = fork_snap.history_cursor.event_watermark;
+    assert!(after_fork_watermark >= initial_watermark);
+
+    // Subsequent command with exact after_fork_watermark succeeds without false optimistic lock conflict
+    let checkout_res = store.checkout_history_node(
+        Some(&sid),
+        &node1,
+        crate::agent::session::HistoryCheckoutMode::TranscriptOnly,
+        Some(after_fork_watermark),
+    );
+    assert!(checkout_res.is_ok(), "Checkout with synchronized watermark succeeds: {:?}", checkout_res.err());
 
     std::fs::remove_dir_all(&dir).ok();
 }

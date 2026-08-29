@@ -47,7 +47,7 @@ fn event_persist_registry() -> &'static Mutex<Option<Arc<EventPersistFn>>> {
 pub fn register_event_persist(f: Arc<EventPersistFn>) {
     let mut slot = event_persist_registry()
         .lock()
-        .expect("event persist registry lock poisoned");
+        .unwrap_or_else(|e| e.into_inner());
     // PA-095 #3（实施后审核 P2）：覆盖非同源通道时告警——多控制面并存时
     // 后建者的单槽注册会劫持先建者未绑定会话的事件流（结构性已知问题，
     // 登记于任务卡；测试侧应使用会话绑定路由）。
@@ -65,7 +65,7 @@ pub fn register_event_persist(f: Arc<EventPersistFn>) {
 pub fn clear_event_persist() {
     let mut slot = event_persist_registry()
         .lock()
-        .expect("event persist registry lock poisoned");
+        .unwrap_or_else(|e| e.into_inner());
     *slot = None;
 }
 
@@ -90,8 +90,8 @@ pub fn emit_global_event(
 fn current_event_persist() -> Option<Arc<EventPersistFn>> {
     event_persist_registry()
         .lock()
-        .ok()
-        .and_then(|slot| slot.clone())
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// PA-095：分发事件到生产通道与测试多播 sink。生产单槽可被任意
@@ -116,7 +116,7 @@ fn dispatch_event_persist(
     #[cfg(test)]
     for sink in event_persist_test_sinks()
         .lock()
-        .expect("event persist test sinks lock poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .iter()
     {
         sink(session_id, turn_id, event.clone(), is_terminal);
@@ -158,7 +158,7 @@ pub fn register_event_persist_test_sink(
 ) -> EventPersistTestSinkGuard {
     let mut sinks = event_persist_test_sinks()
         .lock()
-        .expect("event persist test sinks lock poisoned");
+        .unwrap_or_else(|e| e.into_inner());
     sinks.push(Arc::clone(&f));
     drop(sinks);
     EventPersistTestSinkGuard { sink: f }
@@ -175,7 +175,7 @@ impl Drop for EventPersistTestSinkGuard {
     fn drop(&mut self) {
         let mut sinks = event_persist_test_sinks()
             .lock()
-            .expect("event persist test sinks lock poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         sinks.retain(|sink| !Arc::ptr_eq(sink, &self.sink));
     }
 }
@@ -196,7 +196,7 @@ fn session_event_persist_bindings(
 fn session_event_persist_binding(session_id: &str) -> Option<Arc<EventPersistFn>> {
     session_event_persist_bindings()
         .lock()
-        .ok()?
+        .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
         .cloned()
 }
@@ -209,7 +209,7 @@ pub fn bind_event_persist_session(
 ) -> SessionEventPersistBindingGuard {
     session_event_persist_bindings()
         .lock()
-        .expect("session event persist bindings lock poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(session_id.to_string(), Arc::clone(&f));
     SessionEventPersistBindingGuard {
         session_id: session_id.to_string(),
@@ -228,13 +228,14 @@ impl Drop for SessionEventPersistBindingGuard {
     fn drop(&mut self) {
         // PA-095 #3（实施后审核 P2）：仅当当前占用者仍是自己时才解绑——
         // 同名 session 的嵌套/并行绑定不得被先结束的守卫误摘。
-        if let Ok(mut bindings) = session_event_persist_bindings().lock() {
-            if bindings
-                .get(&self.session_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
-            {
-                bindings.remove(&self.session_id);
-            }
+        let mut bindings = session_event_persist_bindings()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if bindings
+            .get(&self.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
+        {
+            bindings.remove(&self.session_id);
         }
     }
 }
@@ -265,7 +266,7 @@ pub fn bind_event_flush_session(
 ) -> SessionEventFlushBindingGuard {
     session_event_flush_bindings()
         .lock()
-        .expect("session event flush bindings lock poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(session_id.to_string(), Arc::clone(&f));
     SessionEventFlushBindingGuard {
         session_id: session_id.to_string(),
@@ -283,13 +284,14 @@ pub struct SessionEventFlushBindingGuard {
 impl Drop for SessionEventFlushBindingGuard {
     fn drop(&mut self) {
         // 同 persist 守卫——仅解绑自己（Arc::ptr_eq 校验）。
-        if let Ok(mut bindings) = session_event_flush_bindings().lock() {
-            if bindings
-                .get(&self.session_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
-            {
-                bindings.remove(&self.session_id);
-            }
+        let mut bindings = session_event_flush_bindings()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if bindings
+            .get(&self.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
+        {
+            bindings.remove(&self.session_id);
         }
     }
 }
@@ -302,7 +304,7 @@ fn event_flush_registry() -> &'static Mutex<Option<Arc<EventFlushFn>>> {
 pub fn register_event_flush(f: Arc<EventFlushFn>) {
     let mut slot = event_flush_registry()
         .lock()
-        .expect("event flush registry lock poisoned");
+        .unwrap_or_else(|e| e.into_inner());
     *slot = Some(f);
 }
 
@@ -310,7 +312,7 @@ pub fn register_event_flush(f: Arc<EventFlushFn>) {
 pub fn clear_event_flush() {
     let mut slot = event_flush_registry()
         .lock()
-        .expect("event flush registry lock poisoned");
+        .unwrap_or_else(|e| e.into_inner());
     *slot = None;
 }
 
@@ -320,15 +322,18 @@ pub fn flush_session_buffered_events(session_id: &str) -> Result<usize, String> 
     #[cfg(test)]
     if let Some(bound) = session_event_flush_bindings()
         .lock()
-        .ok()
-        .and_then(|bindings| bindings.get(session_id).cloned())
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .cloned()
     {
         return bound(session_id);
     }
-    match event_flush_registry().lock().ok().and_then(|slot| {
-        slot.as_ref()
-            .map(|f| Arc::clone(f) as Arc<EventFlushFn>)
-    }) {
+    match event_flush_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|f| Arc::clone(f) as Arc<EventFlushFn>)
+    {
         Some(flush) => flush(session_id),
         None => Ok(0),
     }
@@ -789,7 +794,7 @@ fn now_timestamp_ms() -> u64 {
 
 fn next_turn_event_sequence(turn_id: &str) -> u64 {
     let registry = turn_event_sequence_registry();
-    let mut state = registry.lock().expect("turn event sequence lock poisoned");
+    let mut state = registry.lock().unwrap_or_else(|e| e.into_inner());
     let next = state.get(turn_id).copied().unwrap_or(0).saturating_add(1);
     state.insert(turn_id.to_string(), next);
     next
@@ -797,7 +802,7 @@ fn next_turn_event_sequence(turn_id: &str) -> u64 {
 
 fn clear_turn_event_sequence(turn_id: &str) {
     let registry = turn_event_sequence_registry();
-    let mut state = registry.lock().expect("turn event sequence lock poisoned");
+    let mut state = registry.lock().unwrap_or_else(|e| e.into_inner());
     state.remove(turn_id);
 }
 

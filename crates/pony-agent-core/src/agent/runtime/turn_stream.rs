@@ -182,8 +182,12 @@ impl AgentRuntime {
                 return;
             }
 
+            let execution_context = ToolExecutionContext {
+                workspace_root: self.resolve_session_workspace_root(input.session_id.as_deref()),
+                ..Default::default()
+            };
             let (tool_result, invocation_record, capability_hook_trace_records) =
-                self.execute_registered_tool_call(&current_tool_call);
+                self.execute_registered_tool_call_with_context(&current_tool_call, &execution_context);
             hook_trace_records.extend(capability_hook_trace_records);
             all_tools_ok &= tool_result.status == "ok";
             tool_activities.extend(annotate_capability_tool_activities(

@@ -168,6 +168,15 @@ pub enum TurnEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         observation_ref: Option<String>,
     },
+    /// 坏事件墓碑节点（PA-096 Phase 2）：遇无法解析的非致命坏事件时，降级为墓碑隔离，
+    /// 记录损坏序号与错误摘要，放行其余主干事件投影。
+    CorruptedEventTombstone {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        corrupted_seq: u64,
+        error_message: String,
+        raw_snippet: String,
+    },
 }
 
 impl TurnEvent {
@@ -190,6 +199,7 @@ impl TurnEvent {
             TurnEvent::CheckpointCheckout { .. } => "checkpoint/checkout",
             TurnEvent::ForkCreated { .. } => "fork/created",
             TurnEvent::ContextObservation { .. } => "context/observation",
+            TurnEvent::CorruptedEventTombstone { .. } => "corrupted/tombstone",
         }
     }
 
@@ -207,6 +217,7 @@ impl TurnEvent {
             | TurnEvent::ToolResult { turn_id, .. }
             | TurnEvent::ProviderUsage { turn_id, .. }
             | TurnEvent::ContextObservation { turn_id, .. } => Some(turn_id),
+            TurnEvent::CorruptedEventTombstone { turn_id, .. } => turn_id.as_deref(),
             TurnEvent::PlanUpdate { .. }
             | TurnEvent::HistorySquash { .. }
             | TurnEvent::CheckpointCreated { .. }

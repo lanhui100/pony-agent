@@ -314,6 +314,8 @@ impl SqliteSessionBackend {
                 session_id TEXT PRIMARY KEY,
                 workspace_id TEXT,
                 title TEXT NOT NULL DEFAULT '',
+                title_override TEXT,
+                archived INTEGER NOT NULL DEFAULT 0,
                 summary TEXT NOT NULL DEFAULT '',
                 turn_count INTEGER NOT NULL DEFAULT 0,
                 last_referenced_file TEXT,
@@ -339,7 +341,6 @@ impl SqliteSessionBackend {
                 created_at_ms INTEGER,
                 updated_at_ms INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (session_id, turn_id),
-                UNIQUE (session_id, ordinal),
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
              CREATE TABLE IF NOT EXISTS normalized_messages (
@@ -356,7 +357,6 @@ impl SqliteSessionBackend {
                 attachments_json TEXT,
                 created_at_ms INTEGER,
                 PRIMARY KEY (session_id, message_id),
-                UNIQUE (session_id, ordinal),
                 FOREIGN KEY (session_id) REFERENCES normalized_sessions(session_id) ON DELETE CASCADE
              );
              CREATE INDEX IF NOT EXISTS idx_normalized_messages_session_turn_role
@@ -513,6 +513,16 @@ impl SqliteSessionBackend {
         let _ = conn.execute(
             "ALTER TABLE normalized_turn_traces
              ADD COLUMN event_watermark INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE normalized_sessions
+             ADD COLUMN title_override TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE normalized_sessions
+             ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             [],
         );
         // PA-095 #6（实施后审核 P2）：cursor_version 退役的一次性升级校正——
@@ -1171,6 +1181,7 @@ impl SqliteSessionBackend {
                 | PersistCommand::AppendHookRecords { session_id, .. }
                 | PersistCommand::UpdateHistoryNode { session_id, .. }
                 | PersistCommand::UpdateCursor { session_id, .. }
+                | PersistCommand::UpdateBranch { session_id, .. }
                 | PersistCommand::UpdateSessionMeta { session_id, .. }
                 | PersistCommand::RemoveSession { session_id, .. }
                 | PersistCommand::FlushEvents { session_id, .. } => session_id,
@@ -1190,7 +1201,10 @@ impl SqliteSessionBackend {
                 ordinal,
                 ..
             } => {
-                let message_id = message.stable_id();
+                let message_id = match &message.turn_id {
+                    Some(turn_id) if !turn_id.is_empty() => format!("{turn_id}-{}", message.role),
+                    _ => format!("msg-{ordinal}-{}", message.role),
+                };
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_messages
                      (session_id, message_id, turn_id, ordinal, role, content, reasoning_content,
@@ -1405,11 +1419,25 @@ impl SqliteSessionBackend {
             PersistCommand::UpdateHistoryNode {
                 session_id, node, ..
             } => {
+                let snapshot_json = if !node.history.is_empty() {
+                    serde_json::to_string(&serde_json::json!({
+                        "history": node.history,
+                        "providerNativeTranscript": node.provider_native_transcript,
+                        "longTermMemoryEntries": node.long_term_memory_entries,
+                        "memoryWriteEvidence": node.memory_write_evidence,
+                        "memoryWriteHookTraceRecords": node.memory_write_hook_trace_records,
+                        "turnCount": node.turn_count,
+                        "lastReferencedFile": node.last_referenced_file,
+                    }))
+                    .ok()
+                } else {
+                    None
+                };
                 tx.execute(
                     "INSERT OR REPLACE INTO normalized_history_nodes
                      (session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id,
                       turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
                         session_id,
                         node.node_id,
@@ -1424,6 +1452,7 @@ impl SqliteSessionBackend {
                         node.summary,
                         node.title,
                         node.created_at_ms,
+                        snapshot_json,
                         serde_json::to_string(&node.event_seq_range).unwrap_or_else(|_| "null".to_string()),
                     ],
                 )
@@ -1452,17 +1481,45 @@ impl SqliteSessionBackend {
                 )
                 .map_err(|e| format!("update cursor: {e}"))?;
             }
+            PersistCommand::UpdateBranch {
+                session_id, branch, ..
+            } => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO normalized_history_branches
+                     (session_id, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        session_id,
+                        branch.branch_id,
+                        branch.base_node_id,
+                        branch.head_node_id,
+                        branch.forked_from_branch_id,
+                        branch.forked_from_node_id,
+                        branch.label,
+                        branch.created_at_ms as i64,
+                        branch.updated_at_ms as i64,
+                    ],
+                )
+                .map_err(|e| format!("update branch: {e}"))?;
+            }
             PersistCommand::UpdateSessionMeta {
                 session_id,
                 meta_patch,
                 ..
             } => {
+                let (has_title_override, title_override_val) = match &meta_patch.title_override {
+                    Some(Some(val)) => (1, Some(val.clone())),
+                    Some(None) => (1, None),
+                    None => (0, None),
+                };
                 tx.execute(
                     "UPDATE normalized_sessions
                      SET title = COALESCE(?2, title), summary = COALESCE(?3, summary),
                          turn_count = COALESCE(?4, turn_count),
                          last_referenced_file = COALESCE(?5, last_referenced_file),
                          updated_at_ms = COALESCE(?6, updated_at_ms),
+                         title_override = CASE WHEN ?7 = 1 THEN ?8 ELSE title_override END,
+                         archived = COALESCE(?9, archived),
                          state_version = state_version + 1
                      WHERE session_id = ?1",
                     params![
@@ -1472,6 +1529,9 @@ impl SqliteSessionBackend {
                         meta_patch.turn_count.map(|v| v as i64),
                         meta_patch.last_referenced_file,
                         meta_patch.updated_at_ms.map(|v| v as i64),
+                        has_title_override,
+                        title_override_val,
+                        meta_patch.archived.map(|b| if b { 1i64 } else { 0i64 }),
                     ],
                 )
                 .map_err(|e| format!("update session meta: {e}"))?;
@@ -1850,7 +1910,7 @@ impl SqliteSessionBackend {
     }
     fn load_store_normalized(&self, conn: &Connection) -> Option<PersistedStore> {
         let session_rows = conn
-            .prepare("SELECT session_id, title, summary, turn_count, last_referenced_file, created_at_ms, updated_at_ms, state_version, trace_migration_state, turn_trace_refs_json, provider_native_transcript_json, history_state_evidence_json, memory_json, workspace_id FROM normalized_sessions")
+            .prepare("SELECT session_id, title, summary, turn_count, last_referenced_file, created_at_ms, updated_at_ms, state_version, trace_migration_state, turn_trace_refs_json, provider_native_transcript_json, history_state_evidence_json, memory_json, workspace_id, title_override, archived FROM normalized_sessions")
             .ok()?
             .query_map([], |row| {
                 Ok((
@@ -1869,6 +1929,8 @@ impl SqliteSessionBackend {
                         row.get::<_, Option<String>>(11)?,
                         row.get::<_, Option<String>>(12)?,
                         row.get::<_, Option<String>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
+                        row.get::<_, Option<i64>>(15)?.unwrap_or(0),
                     ),
                 ))
             })
@@ -1885,6 +1947,7 @@ impl SqliteSessionBackend {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
@@ -1979,6 +2042,8 @@ impl SqliteSessionBackend {
                 history_state_evidence_json,
                 memory_json,
                 workspace_id,
+                title_override,
+                archived,
             ),
         ) in session_rows
         {
@@ -2010,11 +2075,8 @@ impl SqliteSessionBackend {
                 event_watermark: 0,
                 last_commit_watermark: 0,
                 workspace_id,
-                // PA-089 规范化表尚无 titleOverride/archived 列（回填前该路径不承载
-                // 数据）；回填阶段必须同步投影这两列，否则归档/改名在规范化路径丢失
-                // （ADR 0015）。
-                title_override: None,
-                archived: false,
+                title_override,
+                archived: archived != 0,
             };
             // 记忆四件套（memory_json）
             if let Some(raw) = memory_json {
@@ -2038,14 +2100,15 @@ impl SqliteSessionBackend {
                 // 目前仅记录日志，revision 逻辑归阶段 5 前端分页
             }
 
-            // messages → history（批量预取）
+            // messages → history（批量预取，消除 N+1）
             let messages = all_messages
                 .iter()
-                .filter(|(sid, _, _, _, _, _, _, _)| sid == &session_id)
+                .filter(|(sid, _, _, _, _, _, _, _, _)| sid == &session_id)
                 .map(
                     |(
                         _,
                         turn_id,
+                        role,
                         content,
                         reasoning_content,
                         status,
@@ -2055,6 +2118,7 @@ impl SqliteSessionBackend {
                     )| {
                         (
                             turn_id.clone(),
+                            role.clone(),
                             content.clone(),
                             reasoning_content.clone(),
                             status.clone(),
@@ -2067,6 +2131,7 @@ impl SqliteSessionBackend {
                 .collect::<Vec<_>>();
             for (
                 turn_id,
+                role,
                 content,
                 reasoning_content,
                 status,
@@ -2076,7 +2141,7 @@ impl SqliteSessionBackend {
             ) in messages
             {
                 session.history.push(TurnHistoryMessage {
-                    role: "assistant".to_string(),
+                    role,
                     content,
                     attachments: attachments_json
                         .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -2087,19 +2152,6 @@ impl SqliteSessionBackend {
                     token_count: token_count.map(|v| v as u64),
                     reasoning_content,
                 });
-            }
-            // role 修正（上面简化用 assistant，这里重新按表读）
-            let role_rows = conn
-                .prepare("SELECT role, ordinal FROM normalized_messages WHERE session_id = ?1 ORDER BY ordinal")
-                .ok()?
-                .query_map(params![session_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
-                .ok()?
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>();
-            for (role, ordinal) in role_rows {
-                if let Some(message) = session.history.get_mut(ordinal as usize) {
-                    message.role = role;
-                }
             }
 
             // traces → turn_trace_history（批量预取）
@@ -2311,6 +2363,23 @@ impl SqliteSessionBackend {
                         .and_then(|raw| serde_json::from_str(&raw).ok())
                         .unwrap_or(HistoryCheckoutStatus::NotRequested),
                 };
+                session.event_watermark = session.history_cursor.event_watermark;
+                session.last_commit_watermark = session.history_cursor.event_watermark;
+
+                if let Some(visible_id) = &session.history_cursor.visible_node_id {
+                    if let Some(node) = session.history_nodes.iter().find(|n| &n.node_id == visible_id) {
+                        if !node.history.is_empty() {
+                            session.history = node.history.clone();
+                            session.long_term_memory_entries = node.long_term_memory_entries.clone();
+                            if node.turn_count > 0 {
+                                session.turn_count = node.turn_count;
+                            }
+                            if node.last_referenced_file.is_some() {
+                                session.last_referenced_file = node.last_referenced_file.clone();
+                            }
+                        }
+                    }
+                }
             }
 
             sessions.insert(session_id, session);
@@ -2559,6 +2628,14 @@ impl SessionBackend for SqliteSessionBackend {
     /// PA-089 阶段 3：规范化双写命令——统一事务写 blob（旧 sessions 表）+ normalized_* 表。
     /// 迁移 barrier：epoch 检查（旧 epoch 命令拒绝）。
     fn persist_command(&self, command: PersistCommand) -> PersistCommandOutcome {
+        self.persist_commands_batch(vec![command])
+    }
+
+    /// 批量规范化持久化命令（单个 SQLite BEGIN EXCLUSIVE 事务原子提交，附带 busy 退避重试）。
+    fn persist_commands_batch(&self, commands: Vec<PersistCommand>) -> PersistCommandOutcome {
+        if commands.is_empty() {
+            return PersistCommandOutcome::Succeeded;
+        }
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
@@ -2567,26 +2644,46 @@ impl SessionBackend for SqliteSessionBackend {
             }
         };
         let conn = slot.as_ref().expect("connection initialized");
-        let tx = match conn.unchecked_transaction() {
-            Ok(tx) => tx,
-            Err(error) => {
-                eprintln!("[pony-agent][session] SQLite command begin tx error: {error}");
-                return PersistCommandOutcome::Failed;
-            }
-        };
 
-        let result = self.apply_persist_command_tx(&tx, &command);
-        match result {
-            Ok(()) => {
-                if let Err(error) = tx.commit() {
-                    eprintln!("[pony-agent][session] SQLite command commit error: {error}");
+        let mut retries = 3;
+        loop {
+            let tx = match conn.unchecked_transaction() {
+                Ok(tx) => tx,
+                Err(error) => {
+                    if retries > 0 && error.to_string().contains("busy") {
+                        retries -= 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
+                    }
+                    eprintln!("[pony-agent][session] SQLite batch command begin tx error: {error}");
                     return PersistCommandOutcome::Failed;
                 }
-                PersistCommandOutcome::Succeeded
+            };
+
+            let mut all_ok = true;
+            for command in &commands {
+                if let Err(error) = self.apply_persist_command_tx(&tx, command) {
+                    eprintln!("[pony-agent][session] SQLite batch command error: {error}");
+                    all_ok = false;
+                    break;
+                }
             }
-            Err(error) => {
-                eprintln!("[pony-agent][session] SQLite command error: {error}");
-                PersistCommandOutcome::Failed
+
+            if !all_ok {
+                return PersistCommandOutcome::Failed;
+            }
+
+            match tx.commit() {
+                Ok(()) => return PersistCommandOutcome::Succeeded,
+                Err(error) => {
+                    if retries > 0 && error.to_string().contains("busy") {
+                        retries -= 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
+                    }
+                    eprintln!("[pony-agent][session] SQLite batch command commit error: {error}");
+                    return PersistCommandOutcome::Failed;
+                }
             }
         }
     }
@@ -2942,9 +3039,26 @@ impl SessionBackend for SqliteSessionBackend {
             };
             match serde_json::from_str::<crate::agent::turn_event::TurnEvent>(&payload) {
                 Ok(event) => events.push((seq, branch_id, event)),
-                Err(error) => eprintln!(
-                    "[pony-agent][session] load turn event {seq} parse error: {error} (skipped)"
-                ),
+                Err(error) => {
+                    eprintln!(
+                        "[pony-agent][session] load turn event {seq} parse error: {error} (tombstone isolated)"
+                    );
+                    let preview = if payload.len() > 100 {
+                        format!("{}...", &payload[..100])
+                    } else {
+                        payload.clone()
+                    };
+                    events.push((
+                        seq,
+                        branch_id,
+                        crate::agent::turn_event::TurnEvent::CorruptedEventTombstone {
+                            turn_id: None,
+                            corrupted_seq: seq,
+                            error_message: format!("{error}"),
+                            raw_snippet: preview,
+                        },
+                    ));
+                }
             }
         }
         events

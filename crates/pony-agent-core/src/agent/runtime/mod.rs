@@ -46,9 +46,10 @@ use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
     TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
+use std::path::PathBuf;
 use crate::agent::tools::{
     builtin_tools, canonical_tool_name, default_permission_facts_for_name, tool_error_from_output,
-    ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutor, ToolResult,
 };
 use crate::agent::tool_runtime::{
     PendingControlRequest, PendingControlRequestKind, PendingControlRequestState,
@@ -263,29 +264,49 @@ impl AgentRuntime {
         else {
             return;
         };
-        // PA-080（consultant 修复）：会话级 workspace root 解析——优先取 facts 显式传入的
-        // root；否则按上面盖章后的权威归属解析；解析失败（孤儿 workspace_id）→ 读回退
-        // 默认 root（带告警）、写 fail-closed 由工具层判定兜底。
-        let resolved_workspace_root = facts.workspace_root.clone().or_else(|| {
+        // PA-096 Phase 1：会话级 workspace root 解析——严格 Fail-closed 边界。
+        // 若 stamped_owner 显式存在但无法解析（已删除/未注册），严禁回退宿主 root，
+        // 传递 None 使下游工具层严格阻断。
+        let resolved_workspace_root = if let Some(root) = facts.workspace_root.clone() {
+            Some(root)
+        } else if let Some(owner) = stamped_owner.as_deref() {
             let sessions = self.sessions.read().unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             });
-            match sessions.resolve_workspace_root(stamped_owner.as_deref()) {
+            match sessions.resolve_workspace_root(Some(owner)) {
                 Ok(root) => Some(root),
                 Err(error) => {
-                    eprintln!("[pony-agent] workspace root 解析失败（回退默认 root）：{error}");
+                    eprintln!("[pony-agent] workspace root 解析失败（Fail-closed 禁止回退默认 root）：{error}");
                     None
                 }
             }
-        });
+        } else {
+            self.workspace_root.clone()
+        };
         governed.set_context(DispatchContext {
             session_id: input.session_id.clone(),
             run_id: facts.run_id.clone(),
             turn_id: facts.turn_id.clone(),
-            workspace_root: resolved_workspace_root.or_else(|| self.workspace_root.clone()),
+            workspace_root: resolved_workspace_root,
             host_control_available: true,
         });
+    }
+
+    pub(crate) fn resolve_session_workspace_root(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<PathBuf> {
+        let Some(sid) = session_id else {
+            return self.workspace_root.as_ref().map(PathBuf::from);
+        };
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+        let owner = sessions.read_workspace_owner(sid);
+        sessions
+            .resolve_workspace_root(owner.as_deref())
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| self.workspace_root.as_ref().map(PathBuf::from))
     }
 
     pub fn annotate_turn_trace_terminal_event(

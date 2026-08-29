@@ -668,3 +668,31 @@ pub struct TurnTraceRecord {
     #[serde(default)]
     pub updated_at: u64,
 }
+
+/// 会话与持久化层结构化错误枚举。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionError {
+    BackendFailure(String),
+    EventStreamDegraded(String),
+    SessionNotFound(String),
+    StaleVersion { expected: u64, actual: u64 },
+    StorageCorruption(String),
+    InvalidOperation(String),
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BackendFailure(msg) => write!(f, "Backend persistence failure: {msg}"),
+            Self::EventStreamDegraded(msg) => write!(f, "Event stream degraded: {msg}"),
+            Self::SessionNotFound(id) => write!(f, "Session not found: {id}"),
+            Self::StaleVersion { expected, actual } => {
+                write!(f, "Stale session version: expected {expected}, actual {actual}")
+            }
+            Self::StorageCorruption(msg) => write!(f, "Storage corruption: {msg}"),
+            Self::InvalidOperation(msg) => write!(f, "Invalid operation: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}

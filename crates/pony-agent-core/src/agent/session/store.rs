@@ -12,7 +12,7 @@ use super::types::{
     HistoryNodeKind, HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext,
     HistoryStateAuditSummary, LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
     RunControlAuditCurrentContext, RunControlAuditSummary, SessionAttachment,
-    SessionAttachmentIndex, SessionMap, SessionOverview, SessionSnapshot, SessionState,
+    SessionAttachmentIndex, SessionError, SessionMap, SessionOverview, SessionSnapshot, SessionState,
     TurnHistoryMessage, TurnTraceRecord, TurnTraceRef, WorkspaceRef,
     DEFAULT_ATTACHMENT_RECLAIM_TTL_MS, DEFAULT_HISTORY_BRANCH_ID, DEFAULT_HISTORY_LIMIT,
     DEFAULT_SESSION_ID, DEFAULT_SESSION_SUMMARY, DEFAULT_SESSION_TITLE, TITLE_MAX_CHARS,
@@ -108,15 +108,23 @@ pub struct PersistedStore {
 /// 最近 turn 取最后一个带归属的事件之 turn_id。
 pub(super) fn materialize_last_turn_messages(
     events: &[(u64, String, crate::agent::turn_event::TurnEvent)],
+    min_watermark: u64,
 ) -> Option<(Option<String>, Option<(String, Option<String>)>)> {
     use crate::agent::turn_event::TurnEvent;
-    let last_turn_id = events
+    let fresh_events: Vec<&(u64, String, TurnEvent)> = events
+        .iter()
+        .filter(|(seq, _, _)| *seq >= min_watermark)
+        .collect();
+    if fresh_events.is_empty() {
+        return None;
+    }
+    let last_turn_id = fresh_events
         .iter()
         .rev()
         .find_map(|(_, _, event)| event.turn_id().map(str::to_string))?;
     let mut user_text: Option<String> = None;
     let mut assistant: Option<(String, Option<String>)> = None;
-    for (_, _, event) in events {
+    for (_, _, event) in fresh_events {
         if event.turn_id() != Some(last_turn_id.as_str()) {
             continue;
         }
@@ -183,6 +191,9 @@ impl SessionStore {
         }
         for session in sessions.values_mut() {
             refresh_session_metadata(session, false);
+            if ensure_history_graph(session) {
+                should_save = true;
+            }
             if session.updated_at_ms == 0 {
                 session.updated_at_ms = now_timestamp_ms();
             }
@@ -341,14 +352,14 @@ impl SessionStore {
         snapshot
     }
 
-    pub fn append_turn(
+    pub fn append_turn_fallible(
         &mut self,
         session_id: Option<&str>,
         user_message: &str,
         assistant_message: &str,
         provider_native_transcript: Option<Vec<Value>>,
         attachments: Vec<SessionAttachment>,
-    ) -> SessionSnapshot {
+    ) -> Result<SessionSnapshot, SessionError> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         // PA-095 #2：事件源物化——事件能力后端先请求提交本会话缓冲（commit 先于
         // 清空，由注册闭包保证），再按事件表物化本 turn 的消息文本；消息文本以
@@ -358,10 +369,11 @@ impl SessionStore {
         // ——并行测试下全局注册表被外来 control plane 抢占亦落入此路径）。
         // 事件读取失败（degraded/版本不匹配）属数据完整性错误，fail loud 上抛。
         let (mut event_user, mut event_assistant) = (None, None);
+        let current_watermark = self.sessions.get(&session_key).map(|s| s.event_watermark).unwrap_or(0);
         if self.backend.supports_turn_events() {
             match crate::agent::turn_flow::flush_session_buffered_events(&session_key) {
                 Ok(_) => match self.load_turn_events_checked(&session_key, None) {
-                    Ok(events) => match materialize_last_turn_messages(&events) {
+                    Ok(events) => match materialize_last_turn_messages(&events, current_watermark) {
                         Some(materialized) => {
                             (event_user, event_assistant) = materialized;
                         }
@@ -372,7 +384,9 @@ impl SessionStore {
                         }
                     },
                     Err(error) => {
-                        panic!("[pony-agent][session] append_turn materialization: event read failed (event stream degraded?): {error}");
+                        return Err(SessionError::EventStreamDegraded(format!(
+                            "[pony-agent][session] append_turn materialization: event read failed: {error}"
+                        )));
                     }
                 },
                 Err(error) => {
@@ -387,24 +401,23 @@ impl SessionStore {
             event_assistant.unwrap_or_else(|| (assistant_message.to_string(), None));
         let memory_write_hook_executor = Arc::clone(&self.memory_write_hook_executor);
         let history_len_before;
-        // 块内无条件唯一赋值（PA-095 #2 截断窗口取实际追加项），延迟初始化即可；
-        // appended_* 保留 mut：persist 分支经 take() 原地取空；meta_patch 单次
-        // move 消费，无需 mut。
         let mut appended_user: Option<TurnHistoryMessage>;
         let mut appended_assistant: Option<TurnHistoryMessage>;
         let meta_patch: Option<SessionMetaPatch>;
+
+        // 两阶段暂存提交（Staging Commit）：在克隆状态上计算新 turn，持久化成功后才提交到 live
+        let mut staged_session = self.ensure_session(&session_key).clone();
         {
-            let session = self.ensure_session(&session_key);
-            ensure_history_graph(session);
-            prepare_session_for_new_turn(session);
-            history_len_before = session.history.len();
-            session.history.push(TurnHistoryMessage {
+            ensure_history_graph(&mut staged_session);
+            prepare_session_for_new_turn(&mut staged_session);
+            history_len_before = staged_session.history.len();
+            staged_session.history.push(TurnHistoryMessage {
                 role: "user".to_string(),
                 content: user_content,
                 attachments,
                 ..Default::default()
             });
-            session.history.push(TurnHistoryMessage {
+            staged_session.history.push(TurnHistoryMessage {
                 role: "assistant".to_string(),
                 content: assistant_content,
                 attachments: Vec::new(),
@@ -412,86 +425,171 @@ impl SessionStore {
                 ..Default::default()
             });
 
-            if session.history.len() > DEFAULT_HISTORY_LIMIT {
-                let keep_from = session.history.len() - DEFAULT_HISTORY_LIMIT;
-                session.history.drain(..keep_from);
+            if staged_session.history.len() > DEFAULT_HISTORY_LIMIT {
+                let keep_from = staged_session.history.len() - DEFAULT_HISTORY_LIMIT;
+                staged_session.history.drain(..keep_from);
             }
 
             if let Some(messages) = provider_native_transcript {
-                session.provider_native_transcript.extend(messages);
+                staged_session.provider_native_transcript.extend(messages);
             }
 
             update_long_term_memory_from_user_message(
-                session,
+                &mut staged_session,
                 user_message,
                 memory_write_hook_executor.as_ref(),
             );
-            refresh_session_metadata(session, true);
-            commit_history_node_from_live_state(session, HistoryNodeKind::TurnCommitted, None);
-            // PA-095 #2：截断后取实际追加的两条（可能已被 LIMIT 截掉——此时命令
-            // 退化为仅元数据；normalized_messages 以 ordinal 幂等，不会错位）。
-            let window_start = history_len_before.min(session.history.len());
-            appended_user = session.history.get(window_start).cloned();
-            appended_assistant = session.history.get(window_start + 1).cloned();
+            refresh_session_metadata(&mut staged_session, true);
+            commit_history_node_from_live_state(&mut staged_session, HistoryNodeKind::TurnCommitted, None);
+            let window_start = history_len_before.min(staged_session.history.len());
+            appended_user = staged_session.history.get(window_start).cloned();
+            appended_assistant = staged_session.history.get(window_start + 1).cloned();
             meta_patch = Some(SessionMetaPatch {
-                title: Some(session.title.clone()),
-                summary: Some(session.summary.clone()),
-                turn_count: Some(session.turn_count),
-                last_referenced_file: session.last_referenced_file.clone(),
-                updated_at_ms: Some(session.updated_at_ms),
+                title: Some(staged_session.title.clone()),
+                title_override: Some(staged_session.title_override.clone()),
+                archived: Some(staged_session.archived),
+                summary: Some(staged_session.summary.clone()),
+                turn_count: Some(staged_session.turn_count),
+                last_referenced_file: staged_session.last_referenced_file.clone(),
+                updated_at_ms: Some(staged_session.updated_at_ms),
             });
         }
-        self.refresh_attachment_catalog();
-        let snapshot = self.snapshot_for_session(&session_key);
 
-        // PA-095 #2：增量持久化（消除 store 级整包写）——消息经 AppendMessage
-        // 命令写 normalized_messages（observing 切读源）；元数据经
-        // UpdateSessionMeta；blob 行及其余 facet（transcript/memory/nodes/trace）
-        // 走既有单会话落库路径。事件能力后端不再调用 save_to_backend（全 store
-        // 扫描序列化 + 每 turn checkpoint 的写放大根因）。
+        let latest_node = staged_session.history_nodes.last().cloned();
+        let latest_cursor = staged_session.history_cursor.clone();
+
+        // 增量批事务持久化（消除写放大）
         if self.backend.supports_turn_events() {
+            let mut commands = Vec::new();
             for (ordinal, message) in [
                 (history_len_before, appended_user.take()),
                 (history_len_before + 1, appended_assistant.take()),
             ] {
                 let Some(message) = message else { continue };
-                let outcome = self.backend.persist_command(PersistCommand::AppendMessage {
+                commands.push(PersistCommand::AppendMessage {
                     epoch: 1,
                     session_id: session_key.clone(),
                     message,
                     ordinal,
                 });
-                if !matches!(
-                    outcome,
-                    PersistCommandOutcome::Succeeded | PersistCommandOutcome::Unsupported
-                ) {
-                    eprintln!(
-                        "[pony-agent][session] append_turn incremental persist failed: {outcome:?}"
-                    );
-                }
             }
             if let Some(meta_patch) = meta_patch {
-                let outcome = self
-                    .backend
-                    .persist_command(PersistCommand::UpdateSessionMeta {
-                        epoch: 1,
-                        session_id: session_key.clone(),
-                        meta_patch,
-                    });
-                if !matches!(
-                    outcome,
-                    PersistCommandOutcome::Succeeded | PersistCommandOutcome::Unsupported
-                ) {
-                    eprintln!("[pony-agent][session] append_turn meta persist failed: {outcome:?}");
-                }
+                commands.push(PersistCommand::UpdateSessionMeta {
+                    epoch: 1,
+                    session_id: session_key.clone(),
+                    meta_patch,
+                });
             }
-            // blob 行 + 非 normalized facet：单会话落库（内部含 Authoritative
-            // trace mutation / upsert 回退链，不触发 save_store 整包写）。
-            self.save_session_to_backend(&session_key);
+            if let Some(node) = latest_node {
+                commands.push(PersistCommand::UpdateHistoryNode {
+                    epoch: 1,
+                    session_id: session_key.clone(),
+                    node,
+                });
+            }
+            commands.push(PersistCommand::UpdateCursor {
+                epoch: 1,
+                session_id: session_key.clone(),
+                cursor: latest_cursor,
+            });
+            for branch in &staged_session.history_branches {
+                commands.push(PersistCommand::UpdateBranch {
+                    epoch: 1,
+                    session_id: session_key.clone(),
+                    branch: branch.clone(),
+                });
+            }
+
+            let outcome = self.backend.persist_commands_batch(commands);
+            if matches!(outcome, PersistCommandOutcome::Failed | PersistCommandOutcome::StaleEpoch) {
+                return Err(SessionError::BackendFailure(format!(
+                    "append_turn batch persist failed: {outcome:?}"
+                )));
+            }
+            self.save_session_state_to_backend(&session_key, &staged_session);
         } else {
-            self.save_to_backend();
+            self.save_session_state_to_backend(&session_key, &staged_session);
         }
-        snapshot
+
+        // 持久化成功，原子写入主内存并更新快照
+        self.sessions.insert(session_key.clone(), staged_session);
+        self.refresh_attachment_catalog();
+        Ok(self.snapshot_for_session(&session_key))
+    }
+
+    pub fn append_turn(
+        &mut self,
+        session_id: Option<&str>,
+        user_message: &str,
+        assistant_message: &str,
+        provider_native_transcript: Option<Vec<Value>>,
+        attachments: Vec<SessionAttachment>,
+    ) -> SessionSnapshot {
+        match self.append_turn_fallible(
+            session_id,
+            user_message,
+            assistant_message,
+            provider_native_transcript,
+            attachments,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                eprintln!("[pony-agent][session] append_turn error: {e}");
+                self.snapshot_for_session(session_id.unwrap_or(DEFAULT_SESSION_ID))
+            }
+        }
+    }
+
+    pub fn append_failed_turn_fallible(
+        &mut self,
+        session_id: Option<&str>,
+        user_message: &str,
+        assistant_message: &str,
+        mut trace: TurnTraceRecord,
+    ) -> Result<SessionSnapshot, SessionError> {
+        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        let mut staged_session = self.ensure_session(&session_key).clone();
+        {
+            ensure_history_graph(&mut staged_session);
+            prepare_session_for_new_turn(&mut staged_session);
+            staged_session.history.push(TurnHistoryMessage {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+                attachments: Vec::new(),
+                ..Default::default()
+            });
+            staged_session.history.push(TurnHistoryMessage {
+                role: "assistant".to_string(),
+                content: assistant_message.to_string(),
+                attachments: Vec::new(),
+                ..Default::default()
+            });
+            trace.updated_at = now_timestamp_ms();
+            staged_session.turn_trace_history.push(trace);
+            if staged_session.history.len() > DEFAULT_HISTORY_LIMIT {
+                let keep_from = staged_session.history.len() - DEFAULT_HISTORY_LIMIT;
+                staged_session.history.drain(..keep_from);
+            }
+            if staged_session.turn_trace_history.len() > DEFAULT_HISTORY_LIMIT {
+                let keep_from = staged_session.turn_trace_history.len() - DEFAULT_HISTORY_LIMIT;
+                staged_session.turn_trace_history = staged_session.turn_trace_history[keep_from..].to_vec();
+            }
+            refresh_session_metadata(&mut staged_session, true);
+            commit_history_node_from_live_state(
+                &mut staged_session,
+                classify_turn_node_kind(assistant_message),
+                None,
+            );
+        }
+
+        self.sessions.insert(session_key.clone(), staged_session.clone());
+        let mutation = SessionTraceMutation::ReplaceAll {
+            traces: staged_session.turn_trace_history.clone(),
+        };
+        self.save_session_state_to_backend(&session_key, &staged_session);
+        self.persist_session_and_trace_change(&session_key, mutation);
+
+        Ok(self.snapshot_for_session(&session_key))
     }
 
     pub fn append_failed_turn(
@@ -499,51 +597,15 @@ impl SessionStore {
         session_id: Option<&str>,
         user_message: &str,
         assistant_message: &str,
-        mut trace: TurnTraceRecord,
+        trace: TurnTraceRecord,
     ) -> SessionSnapshot {
-        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
-        {
-            let session = self.ensure_session(&session_key);
-            ensure_history_graph(session);
-            prepare_session_for_new_turn(session);
-            session.history.push(TurnHistoryMessage {
-                role: "user".to_string(),
-                content: user_message.to_string(),
-                attachments: Vec::new(),
-                ..Default::default()
-            });
-            session.history.push(TurnHistoryMessage {
-                role: "assistant".to_string(),
-                content: assistant_message.to_string(),
-                attachments: Vec::new(),
-                ..Default::default()
-            });
-            trace.updated_at = now_timestamp_ms();
-            session.turn_trace_history.push(trace);
-            if session.history.len() > DEFAULT_HISTORY_LIMIT {
-                let keep_from = session.history.len() - DEFAULT_HISTORY_LIMIT;
-                session.history.drain(..keep_from);
+        match self.append_failed_turn_fallible(session_id, user_message, assistant_message, trace) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[pony-agent][session] append_failed_turn error: {e}");
+                self.snapshot_for_session(session_id.unwrap_or(DEFAULT_SESSION_ID))
             }
-            if session.turn_trace_history.len() > DEFAULT_HISTORY_LIMIT {
-                let keep_from = session.turn_trace_history.len() - DEFAULT_HISTORY_LIMIT;
-                session.turn_trace_history = session.turn_trace_history[keep_from..].to_vec();
-            }
-            refresh_session_metadata(session, true);
-            commit_history_node_from_live_state(
-                session,
-                classify_turn_node_kind(assistant_message),
-                None,
-            );
         }
-
-        let snapshot = self.snapshot_for_session(&session_key);
-        self.persist_session_and_trace_change(
-            &session_key,
-            SessionTraceMutation::ReplaceAll {
-                traces: snapshot.turn_trace_history.clone(),
-            },
-        );
-        snapshot
     }
 
     /// 替换会话的历史记录（用于上下文压缩后更新历史）
@@ -2018,7 +2080,7 @@ impl SessionStore {
             Err(error) => {
                 self.event_stream_degraded
                     .lock()
-                    .expect("event stream degraded lock poisoned")
+                    .unwrap_or_else(|e| e.into_inner())
                     .insert(session_id.to_string());
                 Err(error)
             }
@@ -2030,7 +2092,7 @@ impl SessionStore {
     pub fn is_event_stream_degraded(&self, session_id: &str) -> bool {
         self.event_stream_degraded
             .lock()
-            .expect("event stream degraded lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .contains(session_id)
     }
 
@@ -2068,6 +2130,9 @@ impl SessionStore {
                 .iter_mut()
                 .find(|n| n.node_id == head_id)
             {
+                if !_turn_id.is_empty() {
+                    node.turn_id = Some(_turn_id.to_string());
+                }
                 if node.event_seq_range.is_none() && new_watermark > session.last_commit_watermark {
                     node.event_seq_range = Some((session.last_commit_watermark, new_watermark - 1));
                     // 引用化：事件可重建的视图字段不再内嵌快照。
@@ -2106,7 +2171,7 @@ impl SessionStore {
             let session = self.sessions.get(session_id).expect("session exists");
             fold_session_views(
                 &events,
-                &node.branch_id,
+                &node.node_id,
                 &session.history_nodes,
                 &session.history_branches,
             )
@@ -2226,6 +2291,10 @@ impl SessionStore {
         let Some(session) = self.sessions.get(session_id) else {
             return;
         };
+        self.save_session_state_to_backend(session_id, session);
+    }
+
+    fn save_session_state_to_backend(&self, session_id: &str, session: &SessionState) {
         let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
         if matches!(
             prepared.trace_migration_state,
@@ -2246,7 +2315,28 @@ impl SessionStore {
         if session_is_persistable(session) && self.backend.upsert_session(session_id, &prepared) {
             return;
         }
-        self.save_to_backend();
+        let mut sessions_map = self.sessions.clone();
+        sessions_map.insert(session_id.to_string(), session.clone());
+        let trace_mode = self.backend.trace_storage_mode();
+        let store = PersistedStore {
+            sessions: sessions_map
+                .into_iter()
+                .filter(|(_, session)| session_is_persistable(session))
+                .map(|(session_id, session)| {
+                    (
+                        session_id,
+                        session_state_for_backend(&session, trace_mode),
+                    )
+                })
+                .collect::<SessionMap>(),
+            attachment_assets: self.attachment_assets.clone(),
+            session_attachment_index: self.session_attachment_index.clone(),
+            mcp_source_snapshots: self.mcp_source_snapshots.clone(),
+            skill_source_snapshots: self.skill_source_snapshots.clone(),
+            workspaces: self.workspaces.clone(),
+            path_authorizations: self.path_authorizations.entries(),
+        };
+        self.backend.save_store(&store);
     }
 
     fn persist_session_and_trace_change(
@@ -2490,7 +2580,7 @@ impl SessionStore {
                     &self
                         .backend
                         .load_turn_events(session_id, node.event_seq_range.map(|(_, e)| e)),
-                    &node.branch_id,
+                    &node.node_id,
                     &view.history_nodes,
                     &view.history_branches,
                 );
@@ -3000,10 +3090,15 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
                 .iter()
                 .find(|branch| branch.branch_id == DEFAULT_HISTORY_BRANCH_ID)
                 .and_then(|branch| branch.base_node_id.clone());
-            let should_insert_root = session.history_nodes[first_index].parent_node_id.is_none()
+            let parent_is_root_or_none = session.history_nodes[first_index]
+                .parent_node_id
+                .as_ref()
+                .map(|p| p == &root_node_id)
+                .unwrap_or(true);
+            let should_insert_root = parent_is_root_or_none
                 && main_branch_base_node_id
                     .as_deref()
-                    .map(|base| base == first_node_id)
+                    .map(|base| base == first_node_id || base == root_node_id.as_str())
                     .unwrap_or(true);
             if should_insert_root {
                 let created_at_ms = session.history_nodes[first_index]
@@ -3353,42 +3448,37 @@ pub(in crate::agent::session) fn hydrate_session_from_projection(
     session.last_referenced_file = node.last_referenced_file.clone();
 }
 
-/// PA-093：事件流 → 会话视图（history/trace 双投影，按分支可见集合过滤）。
-/// 可见集合语义：初始 = 目标节点所在分支的血缘链（折叠目标是该节点的视图）；
-/// 流内 `checkpoint/checkout` 事件按序重放更新集合（历史切换序列正确重放）；
-/// 其余事件 branch_id ∉ 可见集合则跳过（被撤回分支的事件不复活）。
+/// PA-096 Phase 2：事件流 → 会话视图（history/trace 双投影，按 Ancestor DAG 路径过滤）。
+/// 基于目标节点沿 parent_node_id 递归回溯得到的祖先节点链路确定性重放，
+/// 彻底消除同分支回滚或侧分支被撤回事件的复活。
 pub(super) fn fold_session_views(
     events: &[(u64, String, crate::agent::turn_event::TurnEvent)],
-    node_branch_id: &str,
+    target_node_id: &str,
     nodes: &[HistoryNode],
     branches: &[HistoryBranch],
 ) -> (Vec<TurnHistoryMessage>, Vec<TurnTraceRecord>) {
     use crate::agent::projection::{
-        fold_all_with_branches, HistoryProjectionState, MetricsProjectionState,
+        fold_all_with_dag, HistoryProjectionState, MetricsProjectionState,
         TraceProjectionState,
     };
-    let node_branch: HashMap<&str, &str> = nodes
-        .iter()
-        .map(|n| (n.node_id.as_str(), n.branch_id.as_str()))
-        .collect();
-    let history_state = fold_all_with_branches::<_, HistoryProjectionState>(
+    let history_state = fold_all_with_dag::<_, HistoryProjectionState>(
         events,
-        node_branch_id,
-        &node_branch,
+        target_node_id,
+        nodes,
         branches,
     );
-    let trace_state = fold_all_with_branches::<_, TraceProjectionState>(
+    let trace_state = fold_all_with_dag::<_, TraceProjectionState>(
         events,
-        node_branch_id,
-        &node_branch,
+        target_node_id,
+        nodes,
         branches,
     );
     // PA-094：ProviderCallCacheRecord 由 MetricsProjection 生成（design.md §5）——
     // trace 记录不再独立存储，重建时从 ProviderUsage 事件派生并挂载。
-    let metrics_state = fold_all_with_branches::<_, MetricsProjectionState>(
+    let metrics_state = fold_all_with_dag::<_, MetricsProjectionState>(
         events,
-        node_branch_id,
-        &node_branch,
+        target_node_id,
+        nodes,
         branches,
     );
     let mut traces = trace_state.traces();
