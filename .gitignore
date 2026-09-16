@@ -58,6 +58,8 @@ nul
 
 # PA-096（review P2-1）：包管理缓存与 Windows NUL 设备泄漏的 Rust 编译产物
 .pnpm-store/
+# 项目主用 npm + package-lock.json，pnpm-lock.yaml 为孤儿产物不跟踪
+pnpm-lock.yaml
 NUL.*
 NUL*/
 tsconfig.tsbuildinfo
