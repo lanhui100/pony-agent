@@ -107,6 +107,10 @@
 - [上下文构建与缓存策略 canonical spec](../openspec/specs/context-assembly-and-cache-strategy/spec.md)
 - [工具权限模型 canonical spec](../openspec/specs/tool-permission-contract/spec.md)
 - [工具可观测性 canonical spec](../openspec/specs/tool-observability-contract/spec.md)
+- [trace 面板折叠与懒挂载 canonical spec](../openspec/specs/trace-panel-collapse/spec.md)
+- [trace 面板 turn 级虚拟滚动 canonical spec](../openspec/specs/trace-panel-virtual-scroll/spec.md)
+- [trace 渲染快照投影 canonical spec](../openspec/specs/trace-render-snapshot/spec.md)
+- [composer 输入优先级隔离 canonical spec](../openspec/specs/composer-input-priority/spec.md)
 - [OpenSpec 归档目录](../openspec/changes/archive)
 
 ## 9. UI/UX 设计

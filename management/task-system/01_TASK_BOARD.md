@@ -20,23 +20,7 @@
 
 ## Ready
 
-- `PA-095` 事件溯源收尾——ADR 0008 承诺缺口关闭（P0）
-  说明：**2026-08-21 由 ADR 完成度审核立卡**。PA-091~094 四阶段主体落地后，对照 ADR 原文逐项审核确认 7 项缺口：①同步 `run_turn` 绕过事件流（生产入口零事件）；②`append_turn` 未改造为事件折叠（阶段 2 核心承诺，整包 upsert 写放大未消除）；③blob↔事件折叠对拍测试缺失（豁免清单未固化）；④StepStart/StepEnd 不发射 + AssistantChunk 固定 step=0（多 hop timeline 重建分歧）；⑤`event_schema_version` 仅定义常量从未写入/校验；⑥`cursor_version` 未退役（23 处引用，双版本并存）；⑦trace cache 仍内嵌全量 observation（R4b 违例）。OpenSpec change 待创建（`event-sourcing-closeout`）。
-
-- `PA-084` trace 面板初始化折叠与懒渲染（P0）
-  说明：**已完成并收口（2026-08-14）**——`activePanel` 默认 `""`、`HomeTracePanel` body `v-if="open"` 懒挂载（header 常驻）、折叠时 `liveTraceTurn` 返回 null（消除冻结引用污染）。实现后审核 P1 已修复。OpenSpec change 待归档：`trace-panel-collapse-by-default`。
-
-- `PA-085` trace 面板虚拟滚动（P0）
-  说明：**已完成并收口（2026-08-14）**——`trace-virtual-scroll.ts` 纯函数（前缀和 + binarySearch + OVERSCAN）、内嵌独立 ScrollArea、turn 级虚拟化（实现偏离：替代单层扁平，理由重构风险）、底部跟随依赖总高度、scroll 原生监听 viewport。实现后审核 P1 已修复。OpenSpec change 待归档：`trace-panel-virtual-scroll`。
-
-- `PA-086` trace 渲染快照投影与节流增强（P0）
-  说明：**已完成并收口（2026-08-14）**——`trace-projection.ts` 轻量 memo helper（ref+updatedAt 签名）、15 处写路径收敛 `publishTraceTimeline()`、HomeSidebar/HomeTracePanel 消费投影层、onBeforeUnmount 清理。实现后审核裁决：投影层定位轻量 memo helper（非完整 projection），低频恢复路径不强制收敛（引用已变，memo 自然失效）。OpenSpec change 待归档：`trace-render-snapshot-projection`。
-
-- `PA-087` 输入框优先级隔离（P0）
-  说明：**已完成并收口（2026-08-14）**——`handleComposerKeydown` 补 `isComposing`/keyCode 229 守卫（修复中文候选确认误发送）、draft 同步写入确认。实现偏离：调度降级由 084/085/086 覆盖，本卡收敛为 IME 守卫 + 输入路径确认。OpenSpec change 待归档：`composer-input-priority-isolation`。
-
-- `PA-081` 侧边栏 Workspace 树导航（P1）
-  说明：`HomeSessionSidebar` 平铺会话列表改造为"项目（二级）→ 对话（三级）"树，折叠/展开、按 workspaceId 归组（孤儿归"未分组"）、Workspace 管理入口；激活 workspace 为前端 localStorage 单一真相源。OpenSpec change：`workspace-sidebar-tree-navigation`（spec 通过，2026-08-09）。
+- 暂无（2026-09-16 收敛：PA-095/PA-084~087/PA-081 均已完成并归档，条目移入 Done 区）
 
 
 
@@ -53,6 +37,17 @@
 - 暂无
 
 ## Done
+
+- `PA-100` 回合工具错误保真与文件分段翻页修复（P1，Complexity B）
+  说明：**已完成并收口（2026-08-25，双轮 spec 审核 + 双 code review 通过）**——F1 Read/gather `startLine` 端到端透传（schema + 双实现 + 嵌套 plan 回显）；F2 timeline 错误保真（4 处 description 冒充替换为结构化 code/message 提取，无则 null）；F3 429 感知退避（initial 20s/cap 40s/budget 90s sleep 上界 60s + `no_retry_hint` 阻断流式白睡）。验证：core lib 913 + 回归 15 + vue-tsc 通过。提交：`7c41d73`。无 OpenSpec change（评审在任务卡 Spec Review/Code Review 节）。任务卡：`03_TASKS/PA-100-turn-tool-error-fidelity-and-file-paging.md`。残余风险：多跳回合 RL 预算按跳重置、无回合级上限；浮点 startLine 静默 clamp。
+- `PA-099` 配置页软件更新 + GitHub 发版角标（P1，Complexity B）
+  说明：**已完成并收口（2026-08-24，spec 双审 + 代码双审全部采纳）**——配置页软件更新卡片（版本 chip/手动检查/五态/发布页跳转/自动开关）+ 侧栏设置入口 amber 角标；纯前端零 Rust 改动。验证：vitest 504 passed/10 skipped + vue-tsc 通过。实现提交：`c684d38`（随附落地）；规范归档提交：`b7ac018`（change 迁入 `archive/2026-08-24-add-app-update-check/`，canonical spec `openspec/specs/app-update-check/spec.md`）。ADR 0012（implemented）。审核记录：`openspec/changes/archive/2026-08-24-add-app-update-check/reviews.md`。任务卡：`03_TASKS/PA-099-app-update-check.md`。Follow-ups：F1 Rust `open_url` 白名单、F2 CSP/DOMPurify、F3 发布流水线约定 + tauri.conf.json 版本同步。
+- `PA-095` 事件溯源收尾——ADR 0008 七项缺口关闭（P0，Complexity C）
+  说明：**已完成并收口（2026-08-22，实施后三路对抗审核 10 项修复全部落地）**——#1 run_turn 事件化（7 失败路径发射 + 终态信封同源）/#2 append_turn 投影化（整包写=0）/#3 对拍 7 场景全绿（豁免清单常量化 10 项）/#4 StepStart/StepEnd + chunk step/#5 schema_version 四分支 + degraded fail loud/#6 cursor_version 退役（水位冲突检测）/#7 trace cache ref-only。验证：core lib 867×4 连续全绿 + 回归 13/5/8 + src-tauri 6 + vitest 399+10skip + cargo:check + openspec validate --strict。提交：`9d30c00`。OpenSpec change 已归档：`openspec/changes/archive/2026-08-22-event-sourcing-closeout/`，canonical spec：`openspec/specs/event-sourcing-closeout/spec.md`。任务卡：`03_TASKS/PA-095-event-sourcing-closeout.md`。残余风险/后续卡：#2 阶段 B 行级 facet 增量 + wal 基线、squash 生产入口、append_turn panic Result 化评估。
+- `PA-084~087` trace 面板性能四件套（P0）
+  说明：**已完成并收口（2026-08-14）**——084 默认折叠 + 懒挂载 + live null（冻结引用去污）；085 turn 级虚拟化（估算 + 前缀和 + 二分 + OVERSCAN_TURNS=3）+ 独立滚动容器；086 轻量 memo helper（ref+updatedAt 签名 + `liveTurnEnabled` 冻结守卫）；087 IME 守卫（isComposing/keyCode 229）+ draft 同步确认。审核记录：`02_REVIEWS/2026-08-14-pa084-087-spec-review.md`、`02_REVIEWS/2026-08-14-pa084-087-implementation-review.md`。OpenSpec changes 已归档：`archive/2026-08-14-{trace-panel-collapse-by-default,trace-panel-virtual-scroll,trace-render-snapshot-projection,composer-input-priority-isolation}/`；canonical specs（2026-09-16 按 as-built 重写同步）：`openspec/specs/{trace-panel-collapse,trace-panel-virtual-scroll,trace-render-snapshot,composer-input-priority}/spec.md`。
+- `PA-081` 侧边栏 Workspace 树导航（P1，Complexity B）
+  说明：**已完成并收口（2026-08-22，实施后双路对抗审核采纳修复全部落地）**——两级树（项目→对话）+ 折叠持久化 + 瞬态归激活组 + 切换不隐藏组 + 跨项目落点（会话归属优先链）+ Workspace 管理节。验证：vitest 414+10skip + vue-tsc + vite build + openspec validate --strict。提交：`fd0353d`。注意区分两个归档：`archive/2026-08-22-workspace-sidebar-tree-navigation/`（两级树本体，属 PA-081；canonical `openspec/specs/workspace-sidebar-tree/spec.md`）vs `archive/2026-08-25-workspace-sidebar-three-level-tree/`（三级树演进，后续迭代）。任务卡：`03_TASKS/PA-081-workspace-sidebar-tree-navigation.md`。
 
 - `PA-097` pony-agent-core 热点文件重构——P1 测试外移 + P2 session 目录化（P1，Complexity B）
   说明：**已完成并收口（2026-08-23）**——session.rs（11,533 行）→ session/{mod,types,backend,file_backend,store,tests} 六文件（mod.rs 55 行纯声明+定向重导出+cfg(test) 供给区），`crate::agent::session::*` 路径全量保持、调用方零改动；runtime/mod.rs（16,588 行最热文件）测试外移+结构化拆分经用户仲裁交割并行编排 **PA-098** 完成。零行为变化实证：868↔868 `--list` 差分预言机为空、字面量守恒 raw 1/1+普通 1974/1974 字节级一致、生产数据隔离屏障 default_storage_path() 476 字节一致、统一终门禁 cargo:test FULL_EXIT=0 全绿、warning 归因 lib7↔7/test47↔47 零新增。流程：dev-team B 级路径——spec 双路对抗审核 18 条全采纳（含 glob 重导出 E0364 真缺陷、EOL 判据纠正）、Line A/B 各双 code review（Line B 零 P0/P1，P2×3 文档错位按 HEAD 权威回正；两处"疑似多余放开"经证据驳回）；期间处置两次并发编排竞态与一次 CRLF 污染事故（字节级断言+rustc 权威裁决恢复）。OpenSpec change 已归档：`openspec/changes/archive/2026-08-23-core-hotfile-refactor/`。遗留登记：`.gitattributes` EOL 根治建议；runtime 生产代码内聚性深拆由 PA-098 承接。

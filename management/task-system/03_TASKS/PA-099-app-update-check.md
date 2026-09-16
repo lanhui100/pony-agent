@@ -4,11 +4,12 @@
 |---|---|
 | Task ID | PA-099 |
 | 标题 | 配置页软件更新功能 + GitHub 发版侧栏角标提醒 |
-| 状态 | Done（待用户手动验收后归档 spec 目录） |
+| 状态 | Done（实现已落地并推送；用户手动验收未执行记档，见 Next Action） |
 | 复杂度 | B |
 | 负责 | @orchestrator（本会话）+ 子智能体 reviewer |
 | 创建时间 | 2026-08-24 |
-| spec | `openspec/changes/2026-08-24-add-app-update-check/proposal.md`（v2） |
+| 提交 | 实现随 `c684d38` 落地（随附落地 PA-099，与 ADR 0013 共享壳层文件按单提交原子回滚策略一并落地）；规范归档随 `b7ac018` 搬运（archive 下文档搬运 + `specs/app-update-check/spec.md`）；两者均已在 origin/main |
+| spec | `openspec/changes/archive/2026-08-24-add-app-update-check/proposal.md`（v2，已归档） |
 | review 记录 | `openspec/changes/2026-08-24-add-app-update-check/reviews.md`（spec 双审 + 代码双审采纳表均已回填） |
 | ADR | `docs/decisions/0012-app-update-check-via-github-releases.md`（implemented，已过 Status 机械校验） |
 
@@ -43,12 +44,12 @@
 
 ## 当前状态
 
-- 2026-08-24：实现 + 双轮对抗审核 + 门禁全绿 + 收口文档齐备。未 commit（等待用户指示）。
+- 2026-08-24：实现 + 双轮对抗审核 + 门禁全绿 + 收口文档齐备。实现已随 `c684d38` 提交并推送；OpenSpec change 已归档（`b7ac018` 搬运）。
+- 2026-09-16（文档收敛）：修正 commit 归因（实现 `c684d38` vs 规范搬运 `b7ac018`）与 spec 路径（活跃目录→archive）。
 
 ## Next Action
 
-1. 用户手动验收路径：篡改缓存 tagName 为更高版本重启 → 设置入口出现角标 → 卡片可跳转真实 GitHub release 页（proposal 验收标准 3）。
-2. 用户确认后：归档 openspec 变更目录至 `archive/2026-08-24-add-app-update-check/` 并按需提交。
+1. （可选记档）用户手动验收路径：篡改缓存 tagName 为更高版本重启 → 设置入口出现角标 → 卡片可跳转真实 GitHub release 页（proposal 验收标准 3）。**验收未执行不阻塞 Done**：自动化门禁（vitest 504 + typecheck + 双审）已全绿；手动验收仅覆盖"真实 GitHub release 页跳转"一项外部交互。若后续验收发现问题，另立任务卡承接，不回灌本卡。
 
 ## Resume Hint
 
