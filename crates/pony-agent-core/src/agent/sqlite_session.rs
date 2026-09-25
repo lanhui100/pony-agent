@@ -5535,7 +5535,14 @@ mod tests {
             "error marks stream degraded"
         );
         let unchecked = SessionBackend::load_turn_events(&backend, "s1", None);
-        assert_eq!(unchecked.len(), 0, "legacy path skips bad row (transition)");
+        assert_eq!(unchecked.len(), 1, "legacy path isolates bad row as tombstone");
+        assert!(
+            matches!(
+                unchecked[0].2,
+                crate::agent::turn_event::TurnEvent::CorruptedEventTombstone { .. }
+            ),
+            "bad row must be returned as CorruptedEventTombstone"
+        );
 
         // PA-095：SessionStore 层——坏 payload 上抛同时标记会话 degraded；
         // 正常会话不受影响。

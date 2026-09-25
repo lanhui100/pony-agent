@@ -1648,6 +1648,10 @@ fn validate_against_schema(value: &Value, schema: &Value, path: &str, depth: usi
                 Err(format!("argument at `{path}` must be a string"))
             }
         }
+        // T2-A 三态契约（硬门，逻辑不动）：integer 分支只看类型——浮点/字符串/bool
+        // 在此直接 `invalid_arguments`；负整数（`as_i64` 成功）过门进入 parser，
+        // 由 `parse_start_line_arg` 判为 `Invalid` 并回退到 1 + 留痕（direct-call
+        // 全类型同理，不过此门）。
         Some("integer") => {
             if value.as_i64().is_some() || value.as_u64().is_some() {
                 Ok(())
@@ -3046,5 +3050,33 @@ mod tests {
         assert!(!summary.host_mediated);
         assert_eq!(summary.child_decisions.len(), 2);
         assert_eq!(summary.child_decisions[1].verdict, PermissionVerdict::Deny);
+    }
+
+    // ── T2-A：startLine 硬门契约（只加测试，不改逻辑） ─────────────────────────────
+    // integer 分支只看类型：浮点/字符串/bool 在此直接拒（`invalid_arguments`）；
+    // 负整数/零（`as_i64` 成功）放行进入 parser，由 `parse_start_line_arg` 判
+    // `Invalid`（负数）或 `Valid(1)`（零 clamp）并留痕/回退。
+    #[test]
+    fn integer_gate_rejects_float_string_bool_but_passes_negative_and_zero() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "startLine": { "type": "integer" } },
+        });
+        for rejected in [
+            json!({ "startLine": 80.5 }),
+            json!({ "startLine": "80" }),
+            json!({ "startLine": true }),
+        ] {
+            let error = validate_against_schema(&rejected, &schema, "$", 0)
+                .expect_err("float/string/bool startLine must be rejected at the gate");
+            assert!(
+                error.contains("must be an integer"),
+                "unexpected gate message: {error}"
+            );
+        }
+        for passed in [json!({ "startLine": -5 }), json!({ "startLine": 0 })] {
+            validate_against_schema(&passed, &schema, "$", 0)
+                .expect("negative/zero integers must pass the gate into the parser");
+        }
     }
 }

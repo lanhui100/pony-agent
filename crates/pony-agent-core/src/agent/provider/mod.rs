@@ -4,7 +4,7 @@ use crate::agent::config::{
 use crate::agent::input::TurnInputImage;
 use crate::agent::retry::{
     compute_delay, is_rate_limit_error, BackoffConfig, JitterKind, ProviderRetryPolicy,
-    RetryBudget, RetryDecision, Sleeper, StdThreadSleeper, StreamState,
+    RetryBudget, RetryDecision, SingleHopRetryReport, Sleeper, StdThreadSleeper, StreamState,
 };
 use crate::agent::runtime_helper::block_on;
 use crate::agent::tools::{builtin_tool_surface, ToolCall, ToolDefinition, ToolResult};
@@ -3354,13 +3354,50 @@ where
 fn retry_provider_scoped_with_sleeper<T, F>(
     label: &str,
     scope: ProviderRetryScope,
-    mut operation: F,
+    operation: F,
     sleeper: &dyn Sleeper,
     no_retry_hint: Option<&dyn Fn() -> bool>,
 ) -> Result<T, String>
 where
     F: FnMut() -> Result<T, String>,
 {
+    // T2-B：旧入口委托带报告版本并丢弃报告，生产行为（重试/退避/日志/返回）零变。
+    retry_provider_scoped_with_report(label, scope, operation, sleeper, no_retry_hint).0
+}
+
+/// T2-B：单跳重试 + 观测报告。调度语义与旧函数完全一致，仅额外累计报告字段：
+///
+/// - `attempts_total` = `operation` 调用次数（含最终成功的一次）；
+/// - `slept_ms` = sleep-only 累计（成功执行的 sleep 之和，不含请求自身耗时）；
+/// - `switched_to_rl` = 本跳内是否切换过 rate-limit 长退避；
+/// - `exhausted_reason` = 终态 `budget.exhausted_reason()`。
+fn retry_provider_scoped_with_report<T, F>(
+    label: &str,
+    scope: ProviderRetryScope,
+    mut operation: F,
+    sleeper: &dyn Sleeper,
+    no_retry_hint: Option<&dyn Fn() -> bool>,
+) -> (Result<T, String>, SingleHopRetryReport)
+where
+    F: FnMut() -> Result<T, String>,
+{
+    let scope_label: &'static str = match scope {
+        ProviderRetryScope::Decision => "decision",
+        ProviderRetryScope::Followup => "followup",
+    };
+    let report = |budget: &RetryBudget,
+                  attempts_total: u32,
+                  slept_ms: u64,
+                  switched_to_rl: bool|
+     -> SingleHopRetryReport {
+        SingleHopRetryReport {
+            attempts_total,
+            slept_ms,
+            switched_to_rl,
+            scope: scope_label,
+            exhausted_reason: budget.exhausted_reason(),
+        }
+    };
     let base_config = provider_timeout_backoff_config();
     let policy = ProviderRetryPolicy::new(base_config);
     let mut budget = RetryBudget::new(base_config.max_retries, base_config.total_budget_ms);
@@ -3370,6 +3407,9 @@ where
     // （指数基数以切换点为基准重置）。attempts_total 仅用于日志。
     let mut attempt = 0_u32;
     let mut attempts_total = 0_u32;
+    // T2-B：sleep-only 累计（成功执行的 sleep 之和），与 budget.elapsed_ms 同步累加、
+    // 单独计数字段，避免未来 scoped 路径引入 record_execution 时口径漂移。
+    let mut slept_ms = 0_u64;
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let mut last_failure: Option<String> = None;
 
@@ -3377,16 +3417,30 @@ where
         if attempt > 0 {
             // 调用方提示"重试已无意义"（如流式增量已发出）→ 放弃最近一次错误。
             if no_retry_hint.is_some_and(|hint| hint()) {
-                return Err(last_failure.unwrap_or_else(|| "retry aborted by caller".to_string()));
+                let terminal = last_failure
+                    .unwrap_or_else(|| "retry aborted by caller".to_string());
+                let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                return (Err(terminal), outcome);
             }
             let delay = compute_delay(attempt, &active_config, 0.5);
-            sleeper
-                .sleep(delay, &cancelled)
-                .map_err(|_| format!("{label}: retry sleep cancelled"))?;
-            budget.record_attempt(delay.as_millis() as u64);
+            if let Err(cancelled_err) = sleeper.sleep(delay, &cancelled) {
+                let _ = cancelled_err;
+                let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                return (
+                    Err(format!("{label}: retry sleep cancelled")),
+                    outcome,
+                );
+            }
+            let slept = delay.as_millis() as u64;
+            budget.record_attempt(slept);
+            slept_ms += slept;
         }
         match operation() {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                let outcome = report(&budget, attempts_total + 1, slept_ms, rl_active);
+                // attempts_total 口径 = operation 调用次数：成功这次同样计入。
+                return (Ok(value), outcome);
+            }
             Err(err) => {
                 attempts_total += 1;
                 let hint_blocking = no_retry_hint.is_some_and(|hint| hint());
@@ -3419,7 +3473,10 @@ where
                     ));
                     match decision {
                         RetryDecision::Retry { .. } => continue,
-                        _ => return Err(last_error),
+                        _ => {
+                            let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                            return (Err(last_error), outcome);
+                        }
                     }
                 }
 
@@ -3439,7 +3496,10 @@ where
                     RetryDecision::Retry { .. } => {
                         attempt += 1;
                     }
-                    _ => return Err(last_error),
+                    _ => {
+                        let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                        return (Err(last_error), outcome);
+                    }
                 }
             }
         }
@@ -5686,19 +5746,20 @@ mod tests {
     fn followup_rate_limit_switches_to_long_backoff_schedule() {
         let sleeper = crate::agent::retry::FakeSleeper::new();
         let attempts = std::cell::Cell::new(0);
-        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
-            "followup_sync",
-            ProviderRetryScope::Followup,
-            || {
-                attempts.set(attempts.get() + 1);
-                Err(
-                    "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
-                        .to_string(),
-                )
-            },
-            &sleeper,
-            None,
-        );
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "followup_sync",
+                ProviderRetryScope::Followup,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err(
+                        "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
+                            .to_string(),
+                    )
+                },
+                &sleeper,
+                None,
+            );
 
         assert!(result.is_err());
         // 切换后调度：sleep 20s → 重试 → sleep 40s → 重试 → 预算耗尽。
@@ -5709,22 +5770,29 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             60_000
         );
+        // T2-B：单跳报告口径（attempts=operation 调用次数；slept=sleep-only 累计）。
+        assert_eq!(report.attempts_total, 3);
+        assert_eq!(report.slept_ms, 60_000);
+        assert!(report.switched_to_rl);
+        assert_eq!(report.scope, "followup");
+        assert_eq!(report.exhausted_reason, Some("attempt_limit_exhausted"));
     }
 
     #[test]
     fn decision_scope_keeps_short_backoff_for_rate_limit_errors() {
         let sleeper = crate::agent::retry::FakeSleeper::new();
         let attempts = std::cell::Cell::new(0);
-        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
-            "decision",
-            ProviderRetryScope::Decision,
-            || {
-                attempts.set(attempts.get() + 1);
-                Err("HTTP 429 too many requests".to_string())
-            },
-            &sleeper,
-            None,
-        );
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "decision",
+                ProviderRetryScope::Decision,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err("HTTP 429 too many requests".to_string())
+                },
+                &sleeper,
+                None,
+            );
 
         assert!(result.is_err());
         // 对话首跳不启用长退避：维持原短退避（≤7.5s sleep、5 次尝试）快败进 fallback。
@@ -5735,6 +5803,11 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             7_500
         );
+        // T2-B：Decision 作用域从不切换 RL。
+        assert_eq!(report.attempts_total, 5);
+        assert_eq!(report.slept_ms, 7_500);
+        assert!(!report.switched_to_rl);
+        assert_eq!(report.scope, "decision");
     }
 
     #[test]
@@ -5864,6 +5937,187 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
         );
+    }
+
+    /// T2-B：quota-only 报文不触发 RL 长退避——`classify` 不含 quota 特征，
+    /// 直接 Abort（安全方向：不在永久配额耗尽上烧退避）。
+    #[test]
+    fn single_hop_report_quota_only_aborts_without_retry() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "followup_sync",
+                ProviderRetryScope::Followup,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err("monthly quota exhausted".to_string())
+                },
+                &sleeper,
+                None,
+            );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(report.attempts_total, 1);
+        assert_eq!(report.slept_ms, 0);
+        assert!(!report.switched_to_rl);
+        assert_eq!(report.scope, "followup");
+        assert_eq!(report.exhausted_reason, None);
+    }
+
+    /// T2-B F2：quota+429 混合走 RL 长退避——报文同时含 quota 与 429 特征，
+    /// `classify` 先判 TransientRetryable，再由 `is_rate_limit_error` 命中切 RL。
+    /// 与 quota-only Abort 测试并列，锁住混合语义（残余：永久配额场景白烧 ~60s）。
+    #[test]
+    fn single_hop_report_quota_and_429_mixed_follows_rate_limit_schedule() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "followup_sync",
+                ProviderRetryScope::Followup,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err("HTTP 429 quota exceeded for org".to_string())
+                },
+                &sleeper,
+                None,
+            );
+
+        assert!(result.is_err());
+        // RL 调度：sleep 20s → 重试 → sleep 40s → 重试 → 预算耗尽。
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            60_000
+        );
+        assert_eq!(report.attempts_total, 3);
+        assert_eq!(report.slept_ms, 60_000);
+        assert!(report.switched_to_rl);
+        assert_eq!(report.scope, "followup");
+        assert_eq!(report.exhausted_reason, Some("attempt_limit_exhausted"));
+    }
+
+    /// T2-B：首跳 429 切 RL（sleep 20s），第二跳前 hint 变真则在 sleep 前放弃——
+    /// attempts==2、sleep==20_000、switched==true。
+    #[test]
+    fn single_hop_report_rl_then_hint_aborts_before_second_sleep() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let hint = std::sync::atomic::AtomicBool::new(false);
+        let attempts = std::cell::Cell::new(0);
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "followup_stream",
+                ProviderRetryScope::Followup,
+                || {
+                    let next = attempts.get() + 1;
+                    attempts.set(next);
+                    if next == 2 {
+                        // 第二跳已进入 RL 调度（首跳后 sleep 20s），此时增量发出，
+                        // hint 变真 → 循环顶在第二次 sleep 前放弃。
+                        hint.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(
+                        "{\"error\":{\"message\":\"inference tpm exhausted\",\"code\":\"429001\"}}"
+                            .to_string(),
+                    )
+                },
+                &sleeper,
+                Some(&|| hint.load(std::sync::atomic::Ordering::Relaxed)),
+            );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            20_000
+        );
+        assert_eq!(report.attempts_total, 2);
+        assert_eq!(report.slept_ms, 20_000);
+        assert!(report.switched_to_rl);
+        assert_eq!(report.scope, "followup");
+        assert_eq!(report.exhausted_reason, None);
+    }
+
+    /// T2-B F4：首试成功——覆盖 report 成功分支 `attempts_total + 1` 口径
+    /// （attempts==1、slept==0、switched==false、exhausted==None）。
+    #[test]
+    fn single_hop_report_first_attempt_success() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let (result, report): (Result<&str, String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "decision",
+                ProviderRetryScope::Decision,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Ok("ok")
+                },
+                &sleeper,
+                None,
+            );
+
+        assert_eq!(result.expect("first attempt should succeed"), "ok");
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(report.attempts_total, 1);
+        assert_eq!(report.slept_ms, 0);
+        assert!(!report.switched_to_rl);
+        assert_eq!(report.scope, "decision");
+        assert_eq!(report.exhausted_reason, None);
+    }
+
+    /// T2-B F4：重试后成功——timeout 一次后成功（attempts==2、slept==500、scope 正确）。
+    #[test]
+    fn single_hop_report_success_after_timeout_retry() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let (result, report): (Result<&str, String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "decision",
+                ProviderRetryScope::Decision,
+                || {
+                    let next = attempts.get() + 1;
+                    attempts.set(next);
+                    if next < 2 {
+                        Err("调用 provider 失败：operation timed out；type=timeout".to_string())
+                    } else {
+                        Ok("ok")
+                    }
+                },
+                &sleeper,
+                None,
+            );
+
+        assert_eq!(result.expect("retry should eventually succeed"), "ok");
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            500
+        );
+        assert_eq!(report.attempts_total, 2);
+        assert_eq!(report.slept_ms, 500);
+        assert!(!report.switched_to_rl);
+        assert_eq!(report.scope, "decision");
+        assert_eq!(report.exhausted_reason, None);
     }
 
     #[test]

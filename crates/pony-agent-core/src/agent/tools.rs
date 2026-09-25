@@ -2020,12 +2020,12 @@ impl ToolRouter {
             );
         };
 
-        let start_line = call
-            .arguments
-            .get("startLine")
-            .and_then(Value::as_u64)
-            .map(|value| value.max(1) as usize)
-            .unwrap_or(1);
+        let start_line = match parse_start_line_arg(&call.arguments) {
+            StartLineArg::Valid(value) => value,
+            // 三态契约：Missing/Invalid 统一回退到 1（Invalid 留痕在 gather 层，
+            // segment 本体沿用原“静默回退”行为，不加字段）。
+            StartLineArg::Missing | StartLineArg::Invalid { .. } => 1,
+        };
         let line_count = call
             .arguments
             .get("lineCount")
@@ -2705,6 +2705,9 @@ impl ToolRouter {
             .map(|value| value.clamp(1, MAX_SEGMENT_LINES as u64) as usize)
             .unwrap_or(DEFAULT_SEGMENT_LINES);
         // PA-100：显式 startLine 全模式生效；未提供时文件模式=1、搜索模式自动定位。
+        // T2-A 三态契约：`explicit_start_line` 供现有 `unwrap_or(1)` 链不动（零行为漂移），
+        // `start_line_arg` 另行承载 Missing/Valid/Invalid 可观测回显。
+        let start_line_arg = parse_start_line_arg(&call.arguments);
         let explicit_start_line = explicit_gather_start_line(&call.arguments);
         let paths = call
             .arguments
@@ -2742,13 +2745,16 @@ impl ToolRouter {
                     let nested_call = ToolCall {
                         call_id: None,
                         name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
-                        arguments: json!({
+                        arguments: with_requested_start_line(
+                            json!({
                             "path": path,
                             "query": if query.is_empty() { Value::Null } else { Value::String(query.clone()) },
                             "limit": limit,
                             "startLine": explicit_start_line.unwrap_or(1),
                             "lineCount": line_count,
                         }),
+                            &start_line_arg,
+                        ),
                         plan: None,
                     };
                     let result = self.gather_context(&nested_call, context);
@@ -2759,12 +2765,15 @@ impl ToolRouter {
                 let skipped_call = ToolCall {
                     call_id: None,
                     name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
-                    arguments: json!({
+                    arguments: with_requested_start_line(
+                        json!({
                         "paths": skipped_paths,
                         "limit": limit,
                         "startLine": explicit_start_line.unwrap_or(1),
                         "lineCount": line_count,
                     }),
+                        &start_line_arg,
+                    ),
                     plan: None,
                 };
                 nested.push((
@@ -2794,11 +2803,13 @@ impl ToolRouter {
                 limit,
                 explicit_start_line.unwrap_or(1),
                 line_count,
+                &start_line_arg,
             );
 
             return self.aggregate_nested_results(
                 TOOL_WORKSPACE_GATHER_CONTEXT,
-                json!({
+                with_start_line_fallback_meta(
+                    json!({
                     "mode": "multi_path",
                     "paths": gathered_paths,
                     "requestedPathCount": requested_path_count,
@@ -2807,6 +2818,8 @@ impl ToolRouter {
                     "pathLimit": MAX_GATHER_CONTEXT_PATHS,
                     "query": if query.is_empty() { Value::Null } else { Value::String(query) },
                 }),
+                    &start_line_arg,
+                ),
                 Some(plan),
                 nested,
             );
@@ -2860,11 +2873,14 @@ impl ToolRouter {
                 let segment_call = ToolCall {
                     call_id: None,
                     name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
-                    arguments: json!({
+                    arguments: with_requested_start_line(
+                        json!({
                         "path": display_path,
                         "startLine": file_start_line,
                         "lineCount": line_count,
                     }),
+                        &start_line_arg,
+                    ),
                     plan: None,
                 };
                 let info_handle = scope.spawn(|| {
@@ -2899,11 +2915,14 @@ impl ToolRouter {
                             ToolCall {
                                 call_id: None,
                                 name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
-                                arguments: json!({
+                                arguments: with_requested_start_line(
+                                    json!({
                                     "path": display_path,
                                     "startLine": file_start_line,
                                     "lineCount": line_count,
                                 }),
+                                    &start_line_arg,
+                                ),
                                 plan: None,
                             },
                             error_result(
@@ -3028,19 +3047,28 @@ impl ToolRouter {
                     collected.push((1usize, search_call, search_result));
 
                     // PA-100：显式 startLine 优先；未提供时才按搜索命中自动定位。
-                    let start_line = explicit_start_line
-                        .or_else(|| {
-                            segment_line.map(|line| line.saturating_sub(line_count / 2).max(1))
-                        })
-                        .unwrap_or(1);
+                    // T2-B F1 语义B：Invalid 强制 1 并跳过搜索自动定位（与 file 一致）；
+                    // Valid 保持 explicit 优先，Missing 才走 auto。
+                    let start_line = match &start_line_arg {
+                        StartLineArg::Invalid { .. } => 1,
+                        _ => explicit_start_line
+                            .or_else(|| {
+                                segment_line
+                                    .map(|line| line.saturating_sub(line_count / 2).max(1))
+                            })
+                            .unwrap_or(1),
+                    };
                     let segment_call = ToolCall {
                         call_id: None,
                         name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
-                        arguments: json!({
+                        arguments: with_requested_start_line(
+                            json!({
                             "path": display_path,
                             "startLine": start_line,
                             "lineCount": line_count,
                         }),
+                            &start_line_arg,
+                        ),
                         plan: None,
                     };
                     collected.push((
@@ -3109,13 +3137,23 @@ impl ToolRouter {
             &nested,
         );
 
+        // T2-B F1：directory 模式 startLine 未消费，双实现统一不打标；
+        // file/search 才打标（composite directory 分支本来就不加，此处镜像同步）。
+        let gather_meta = {
+            let base = json!({
+            "mode": mode,
+            "path": display_path,
+            "query": if query.is_empty() { Value::Null } else { Value::String(query) },
+        });
+            if mode == "directory" {
+                base
+            } else {
+                with_start_line_fallback_meta(base, &start_line_arg)
+            }
+        };
         self.aggregate_nested_results(
             TOOL_WORKSPACE_GATHER_CONTEXT,
-            json!({
-                "mode": mode,
-                "path": display_path,
-                "query": if query.is_empty() { Value::Null } else { Value::String(query) },
-            }),
+            gather_meta,
             Some(plan),
             nested,
         )
@@ -3778,7 +3816,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     },
                     "startLine": {
                         "type": "integer",
-                        "description": "从第几行开始读取，最小为 1"
+                        "description": "从第几行开始读取，最小为 1；分页参数以 gather 回显为准"
                     },
                     "lineCount": {
                         "type": "integer",
@@ -4102,7 +4140,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     },
                     "startLine": {
                         "type": "integer",
-                        "description": "从第几行开始读取（最小 1）。显式提供时对所有模式生效，多路径下逐路径生效；未提供时文件模式从第 1 行、搜索模式自动定位命中附近片段"
+                        "description": "从第几行开始读取（最小 1）。显式提供时对所有模式生效，多路径下逐路径生效；未提供时文件模式从第 1 行、搜索模式自动定位命中附近片段。requestedStartLine/startLineFallback 为 output-only 聚合回显，模型不得回填（回填触发 invalid_arguments）"
                     },
                     "lineCount": {
                         "type": "integer",
@@ -6073,26 +6111,93 @@ fn build_batch_tool_plan(
     }
 }
 
+/// `workspace_gather_context` 起始行三态可观测契约（T2-A）。
+///
+/// - dispatcher 硬门（`dispatcher.rs:validate_against_schema` integer 分支）只拒
+///   浮点/字符串/bool（`as_i64||as_u64` 失败→`invalid_arguments`）；负整数等
+///   `integer` 类型过门，进入 parser 统一处理。
+/// - parser（本函数族）处理过门整数 + direct-call（`ToolRouter::execute` 不过硬门）
+///   全类型：缺席/`null`→`Missing`；`as_u64` 成功→`Valid(max(1))`（`0→Valid(1)` clamp，
+///   无 fallback 标记）；其余（负数/浮点/字符串/bool/数组/对象）→`Invalid{raw}`，
+///   应用层回退到 `1` 并在 nested `requestedStartLine` + `meta.startLineFallback` 留痕。
+/// - EOF 越界（`read_file_lines` `StartOutOfRange`→`line_out_of_range`）与 fallback
+///   正交组合覆盖（T2-B F3 修订：此前“同 payload 共存”措辞过声明，实际是两个
+///   payload 各断一半——Valid 大值→partial 无标；Invalid→有标无 partial；
+///   multi_path 混合 payload 可同现两者条目）。顶层 `ToolResult.status` 语义不动
+///   （`ok`/`partial` 裁决5）。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum StartLineArg {
+    Missing,
+    Valid(usize),
+    Invalid { raw: Value },
+}
+
+/// 解析 `arguments["startLine"]` 为三态（见 [`StartLineArg`] 契约注释）。
+/// composite（dispatcher_composites）与 legacy（`ToolRouter::gather_context`）双实现
+/// 及 `read_file_segment` 共用本函数，避免解析规则漂移。
+pub(crate) fn parse_start_line_arg(arguments: &Value) -> StartLineArg {
+    match arguments.get("startLine") {
+        None | Some(Value::Null) => StartLineArg::Missing,
+        Some(raw) => match raw.as_u64() {
+            Some(value) => StartLineArg::Valid(value.max(1) as usize),
+            None => StartLineArg::Invalid { raw: raw.clone() },
+        },
+    }
+}
+
+/// 合成 nested/plan `arguments` 回显规则：`"startLine": applied` 保持不变；
+/// 仅 `Invalid` 时追加 `"requestedStartLine": raw`（`Valid`/`Missing` 不加字段）。
+pub(crate) fn with_requested_start_line(mut args: Value, arg: &StartLineArg) -> Value {
+    if let StartLineArg::Invalid { raw } = arg {
+        if let Some(object) = args.as_object_mut() {
+            object.insert("requestedStartLine".to_string(), raw.clone());
+        }
+    }
+    args
+}
+
+/// 聚合 `meta` 回显规则：仅 `Invalid` 时追加
+/// `"startLineFallback": {"requested": raw, "applied": 1, "reason": "invalid_start_line_fallback_to_1"}`。
+/// `Valid`/`Missing` 不加字段；顶层 `status` 不动。
+pub(crate) fn with_start_line_fallback_meta(mut meta: Value, arg: &StartLineArg) -> Value {
+    if let StartLineArg::Invalid { raw } = arg {
+        if let Some(object) = meta.as_object_mut() {
+            object.insert(
+                "startLineFallback".to_string(),
+                json!({
+                    "requested": raw.clone(),
+                    "applied": 1,
+                    "reason": "invalid_start_line_fallback_to_1",
+                }),
+            );
+        }
+    }
+    meta
+}
+
 /// 解析模型显式提供的分页起始行（`workspace_gather_context` 语境，PA-100）。
-/// 返回 `None` 表示未提供或值无法按 u64 解析（浮点/负数等沿用 lineCount 的松散
-/// 解析契约：静默回退到调用方默认，而非报错）。返回值保证 ≥ 1。
+/// 本函数为三态契约的兼容薄层：`Valid(v)`→`Some(v)`，`Missing`/`Invalid`→`None`
+/// （调用方 `unwrap_or(1)` 即静默回退到默认，而非报错；返回值保证 ≥ 1）。
 /// composite（dispatcher_composites）与 legacy（ToolRouter::gather_context）双实现
 /// 共用本函数，避免解析规则漂移。
 pub(crate) fn explicit_gather_start_line(arguments: &Value) -> Option<usize> {
-    arguments
-        .get("startLine")
-        .and_then(Value::as_u64)
-        .map(|value| value.max(1) as usize)
+    match parse_start_line_arg(arguments) {
+        StartLineArg::Valid(value) => Some(value),
+        StartLineArg::Missing | StartLineArg::Invalid { .. } => None,
+    }
 }
 
 // PA-100（code-review A 建议3）：本函数与 dispatcher_composites.rs 中的同名拷贝
 // 为双实现镜像——修改签名/回显字段必须两处同步（task 8.1 移除 legacy 路径前有效）。
+// T2-A：新增 `start_line_arg` 参数，仅 Invalid 时在 plan step arguments 追加
+// `requestedStartLine`（`with_requested_start_line`），`startLine: applied` 不变。
 fn build_multi_path_gather_plan(
     paths: &[String],
     query: &str,
     limit: usize,
     start_line: usize,
     line_count: usize,
+    start_line_arg: &StartLineArg,
 ) -> ToolPlan {
     ToolPlan {
         kind: "gather_context".to_string(),
@@ -6112,13 +6217,16 @@ fn build_multi_path_gather_plan(
             .enumerate()
             .map(|(index, path)| ToolPlanStep {
                 name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
-                arguments: json!({
+                arguments: with_requested_start_line(
+                    json!({
                     "path": path,
                     "query": if query.trim().is_empty() { Value::Null } else { Value::String(query.to_string()) },
                     "limit": limit,
                     "startLine": start_line,
                     "lineCount": line_count,
                 }),
+                    start_line_arg,
+                ),
                 summary: format!("第 {} 个路径聚合：`{}`。", index + 1, path),
             })
             .collect(),
@@ -6578,6 +6686,74 @@ mod tests {
         assert!(segment_text.contains("第 2 - 4 行") || segment_text.contains("第 2"));
     }
 
+    /// T2-B F1 语义B：search × Invalid 强制 1 并忽略搜索自动定位（与 file 一致）。
+    /// 命中行 5、lineCount=3 时 auto 本应是 4，Invalid 必须回 1 而非 4。
+    #[test]
+    fn gather_context_search_invalid_start_line_forces_one_ignoring_auto() {
+        let workspace = temp_workspace();
+        let mut lines: Vec<String> = (1..=8).map(|index| format!("filler-{index}")).collect();
+        lines[4] = "needle-line".to_string();
+        fs::write(workspace.join("searched.rs"), lines.join("\n")).expect("write searched.rs");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({
+                "path": "searched.rs",
+                "query": "needle",
+                "startLine": -5,
+                "lineCount": 3
+            }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload["meta"]["mode"], "search");
+        let results = payload
+            .get("results")
+            .and_then(Value::as_array)
+            .expect("results");
+        let segment_entry = results
+            .iter()
+            .find(|entry| entry["tool"] == "workspace_read_file_segment")
+            .expect("segment entry");
+        // 非 auto（auto=4）：Invalid 强制 1。
+        assert_eq!(segment_entry["arguments"]["startLine"].as_u64(), Some(1));
+        assert_eq!(segment_entry["arguments"]["requestedStartLine"], json!(-5));
+        assert_eq!(payload["meta"]["startLineFallback"]["requested"], json!(-5));
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["applied"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["reason"].as_str(),
+            Some("invalid_start_line_fallback_to_1")
+        );
+    }
+
+    /// T2-B F1：directory 模式不消费 startLine——Invalid 也不打标。
+    #[test]
+    fn gather_context_directory_invalid_start_line_marks_nothing() {
+        let workspace = temp_workspace();
+        fs::create_dir_all(workspace.join("subdir")).expect("create subdir");
+        fs::write(workspace.join("subdir/inner.rs"), "fn inner() {}\n").expect("write inner");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({ "path": "subdir", "startLine": -5 }),
+            plan: None,
+        });
+
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload["meta"]["mode"], "directory");
+        assert!(payload["meta"].get("startLineFallback").is_none());
+    }
+
     /// PA-100 审核 A 缺失测试⑤：legacy 侧多路径 startLine 回显（与 composite 侧
     /// gather_context_multi_path_echoes_start_line_in_plan_and_skipped_entries 对称）。
     #[test]
@@ -6703,6 +6879,246 @@ mod tests {
                 .and_then(Value::as_str),
             Some("too_many_paths")
         );
+    }
+
+    // ── T2-A：startLine 三态可观测契约 ────────────────────────────────────────────
+    // dispatcher 硬门拒浮点/字符串/bool（见 dispatcher.rs 门单测）；legacy direct-call
+    // 不过硬门，全类型进入 `parse_start_line_arg`：
+    // 缺席/null→Missing；as_u64 成功→Valid(max(1)，0→1 clamp 无标记)；
+    // 其余（负数/浮点/字符串/bool）→Invalid，回退 applied=1 + `requestedStartLine` +
+    // `meta.startLineFallback` 留痕，顶层 status 语义不动。
+
+    #[test]
+    fn parse_start_line_arg_tristate_matrix() {
+        // Missing：缺席 / null。
+        assert_eq!(parse_start_line_arg(&json!({})), StartLineArg::Missing);
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": null })),
+            StartLineArg::Missing
+        );
+        // Valid：正整数直通；0 clamp 到 1（无 fallback 标记，由调用方断言）。
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": 80 })),
+            StartLineArg::Valid(80)
+        );
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": 1 })),
+            StartLineArg::Valid(1)
+        );
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": 0 })),
+            StartLineArg::Valid(1)
+        );
+        // Invalid：负数/浮点/字符串/bool/数组/对象（raw 原样保留）。
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": -5 })),
+            StartLineArg::Invalid {
+                raw: json!(-5)
+            }
+        );
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": 80.5 })),
+            StartLineArg::Invalid {
+                raw: json!(80.5)
+            }
+        );
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": "80" })),
+            StartLineArg::Invalid {
+                raw: json!("80")
+            }
+        );
+        assert_eq!(
+            parse_start_line_arg(&json!({ "startLine": true })),
+            StartLineArg::Invalid {
+                raw: json!(true)
+            }
+        );
+        // 兼容薄层零漂移：Valid→Some，Missing/Invalid→None（调用方 unwrap_or(1)）。
+        assert_eq!(explicit_gather_start_line(&json!({ "startLine": 80 })), Some(80));
+        assert_eq!(explicit_gather_start_line(&json!({ "startLine": 0 })), Some(1));
+        assert_eq!(explicit_gather_start_line(&json!({})), None);
+        assert_eq!(explicit_gather_start_line(&json!({ "startLine": -5 })), None);
+        assert_eq!(
+            explicit_gather_start_line(&json!({ "startLine": "80" })),
+            None
+        );
+    }
+
+    /// 非法矩阵 × legacy file 模式：行为（applied）+ fallback 标记有无 +
+    /// nested `requestedStartLine`。顶层 status 始终不动。
+    #[test]
+    fn gather_context_start_line_tristate_fallback_observability() {
+        let workspace = temp_workspace();
+        let body = (1..=10)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(workspace.join("paged.rs"), body).expect("write paged.rs");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        // (输入 startLine, 期望 applied, 是否应有 fallback 标记)
+        let matrix: Vec<(Value, u64, bool)> = vec![
+            (json!(-5), 1, true),
+            (json!(0), 1, false),
+            (json!("80"), 1, true),
+            (json!(true), 1, true),
+            (json!(80.5), 1, true),
+            (Value::Null, 1, false),
+        ];
+        for (start_line, applied, fallback) in matrix {
+            let mut args = serde_json::Map::new();
+            args.insert("path".to_string(), Value::String("paged.rs".to_string()));
+            args.insert("lineCount".to_string(), json!(3));
+            if !start_line.is_null() {
+                args.insert("startLine".to_string(), start_line.clone());
+            }
+            let result = router.execute(&ToolCall {
+                call_id: None,
+                name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+                arguments: Value::Object(args),
+                plan: None,
+            });
+            assert_eq!(result.status, "ok", "input: {start_line}");
+            let payload =
+                serde_json::from_str::<Value>(&result.output).expect("gather output json");
+            assert_eq!(payload["meta"]["mode"], "file", "input: {start_line}");
+            let segment = payload["results"]
+                .as_array()
+                .expect("results")
+                .iter()
+                .find(|entry| entry["tool"] == "workspace_read_file_segment")
+                .expect("segment entry");
+            assert_eq!(
+                segment["arguments"]["startLine"].as_u64(),
+                Some(applied),
+                "input: {start_line}"
+            );
+            if fallback {
+                assert_eq!(
+                    segment["arguments"]["requestedStartLine"], start_line,
+                    "input: {start_line}"
+                );
+                assert_eq!(
+                    payload["meta"]["startLineFallback"]["requested"], start_line,
+                    "input: {start_line}"
+                );
+                assert_eq!(
+                    payload["meta"]["startLineFallback"]["applied"].as_u64(),
+                    Some(1),
+                    "input: {start_line}"
+                );
+                assert_eq!(
+                    payload["meta"]["startLineFallback"]["reason"].as_str(),
+                    Some("invalid_start_line_fallback_to_1"),
+                    "input: {start_line}"
+                );
+            } else {
+                assert!(
+                    segment["arguments"].get("requestedStartLine").is_none(),
+                    "input: {start_line}"
+                );
+                assert!(
+                    payload["meta"].get("startLineFallback").is_none(),
+                    "input: {start_line}"
+                );
+            }
+        }
+        // 缺省 startLine：Missing，无标记。
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({ "path": "paged.rs", "lineCount": 3 }),
+            plan: None,
+        });
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert!(payload["meta"].get("startLineFallback").is_none());
+    }
+
+    /// segment 直读与 gather 三实现一致：0→第1行；非法值→回退第1行。
+    #[test]
+    fn read_file_segment_start_line_parity_with_gather() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("tiny.rs"), "aaa\nbbb\nccc\n").expect("write tiny.rs");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+        for start_line in [json!(0), json!(-5), json!("80"), json!(true)] {
+            let result = router.execute(&ToolCall {
+                call_id: None,
+                name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
+                arguments: json!({ "path": "tiny.rs", "startLine": start_line, "lineCount": 2 }),
+                plan: None,
+            });
+            assert_eq!(result.status, "ok", "input: {start_line}");
+            assert!(
+                result.output.contains("aaa"),
+                "invalid startLine must fall back to line 1: {start_line} -> {}",
+                result.output
+            );
+        }
+    }
+
+    /// EOF 正交组合覆盖（T2-B F3 修订：此前“共存”措辞过声明——实际是两个 payload
+    /// 各断一半）：Valid 大值→partial 无标；Invalid→有标无 partial；
+    /// multi_path 混合 payload 可同现两者条目。顶层 status 语义不动（ok + 聚合 partial）。
+    #[test]
+    fn gather_context_eof_out_of_range_orthogonal_matrix() {
+        let workspace = temp_workspace();
+        fs::write(workspace.join("short.rs"), "one\ntwo\n").expect("write short.rs");
+        fs::write(workspace.join("paged.rs"), "a\nb\nc\nd\n").expect("write paged.rs");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        // 单路径 Valid 越界：partial + firstError line_out_of_range，无 fallback 标记。
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({ "path": "short.rs", "startLine": 99, "lineCount": 10 }),
+            plan: None,
+        });
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload["status"], "partial");
+        assert_eq!(
+            payload["summary"]["firstError"]["error"]["code"].as_str(),
+            Some("line_out_of_range")
+        );
+        assert!(payload["meta"].get("startLineFallback").is_none());
+
+        // multi_path 正交：外层 Valid(99) 无外层 fallback 标记，per-path 内层越界
+        // partial；与外层 Invalid 有标无 partial 的分支正交互补（见下段）。
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({ "paths": ["paged.rs", "short.rs"], "startLine": 99, "lineCount": 10 }),
+            plan: None,
+        });
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload["status"], "partial");
+        // 注意：multi_path 外层 startLine=99 是 Valid（整型），无外层 fallback 标记；
+        // 越界发生在 per-path 递归内层。此处断言共存语义：partial + firstError 透出。
+        assert_eq!(
+            payload["summary"]["firstError"]["error"]["code"].as_str(),
+            Some("line_out_of_range")
+        );
+
+        // multi_path 外层 Invalid：meta.startLineFallback + 各 nested requestedStartLine。
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
+            arguments: json!({ "paths": ["paged.rs"], "startLine": -5, "lineCount": 10 }),
+            plan: None,
+        });
+        assert_eq!(result.status, "ok");
+        let payload = serde_json::from_str::<Value>(&result.output).expect("gather output json");
+        assert_eq!(payload["meta"]["startLineFallback"]["requested"], json!(-5));
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["reason"].as_str(),
+            Some("invalid_start_line_fallback_to_1")
+        );
+        for step in payload["plan"]["steps"].as_array().expect("plan steps") {
+            assert_eq!(step["arguments"]["startLine"].as_u64(), Some(1));
+            assert_eq!(step["arguments"]["requestedStartLine"], json!(-5));
+        }
     }
 
     #[test]

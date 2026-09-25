@@ -3132,12 +3132,13 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tokio",
+ "url",
  "window-vibrancy",
 ]
 
 [[package]]
 name = "pony-agent-core"
-version = "0.1.89"
+version = "0.1.90"
 dependencies = [
  "anydoc",
  "base64 0.22.1",

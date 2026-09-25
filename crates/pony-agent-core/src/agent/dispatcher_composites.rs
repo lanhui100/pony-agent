@@ -27,9 +27,10 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::tool_runtime::{InvocationOrigin, ToolDispatchRequest};
 use crate::agent::tools::{
-    canonical_tool_name, explicit_gather_start_line, ToolCall, ToolControlKind,
-    ToolExecutionContext, ToolExecutionStatus, ToolExecutor, ToolOutcome, ToolPermissionScope,
-    ToolPlan, ToolPlanStep, ToolRegistrySnapshot, ToolResult,
+    canonical_tool_name, explicit_gather_start_line, parse_start_line_arg, with_requested_start_line,
+    with_start_line_fallback_meta, StartLineArg, ToolCall, ToolControlKind, ToolExecutionContext,
+    ToolExecutionStatus, ToolExecutor, ToolOutcome, ToolPermissionScope, ToolPlan, ToolPlanStep,
+    ToolRegistrySnapshot, ToolResult,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -279,6 +280,9 @@ impl CompositeToolHandler for GatherContextComposite {
             .map(|value| value.clamp(1, MAX_SEGMENT_LINES as u64) as usize)
             .unwrap_or(DEFAULT_SEGMENT_LINES);
         // PA-100：显式 startLine 全模式生效；未提供时文件模式=1、搜索模式自动定位。
+        // T2-A 三态契约：`explicit_start_line` 供现有 `unwrap_or(1)` 链不动（零行为漂移），
+        // `start_line_arg` 另行承载 Missing/Valid/Invalid 可观测回显（与 tools.rs 镜像同步）。
+        let start_line_arg = parse_start_line_arg(arguments);
         let explicit_start_line = explicit_gather_start_line(arguments);
         let paths = arguments
             .get("paths")
@@ -307,20 +311,23 @@ impl CompositeToolHandler for GatherContextComposite {
                     path,
                     &query,
                     limit,
-                    explicit_start_line,
+                    &start_line_arg,
                     line_count,
                     children,
                 )?;
                 entries.push(NestedEntry {
                     index,
                     tool: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
-                    arguments: json!({
+                    arguments: with_requested_start_line(
+                        json!({
                         "path": path,
                         "query": null_or(&query),
                         "limit": limit,
                         "startLine": explicit_start_line.unwrap_or(1),
                         "lineCount": line_count,
                     }),
+                        &start_line_arg,
+                    ),
                     outcome: ToolOutcome::from_legacy_result(per_path),
                 });
             }
@@ -345,12 +352,15 @@ impl CompositeToolHandler for GatherContextComposite {
                 entries.push(NestedEntry {
                     index: gathered_count,
                     tool: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
-                    arguments: json!({
+                    arguments: with_requested_start_line(
+                        json!({
                         "paths": skipped_paths,
                         "limit": limit,
                         "startLine": explicit_start_line.unwrap_or(1),
                         "lineCount": line_count,
                     }),
+                        &start_line_arg,
+                    ),
                     outcome: ToolOutcome::from_legacy_result(skipped_result),
                 });
             }
@@ -361,10 +371,12 @@ impl CompositeToolHandler for GatherContextComposite {
                 limit,
                 explicit_start_line.unwrap_or(1),
                 line_count,
+                &start_line_arg,
             );
             let payload = aggregate_nested_entries(
                 TOOL_WORKSPACE_GATHER_CONTEXT,
-                json!({
+                with_start_line_fallback_meta(
+                    json!({
                     "mode": "multi_path",
                     "paths": gathered_paths,
                     "requestedPathCount": requested_path_count,
@@ -373,6 +385,8 @@ impl CompositeToolHandler for GatherContextComposite {
                     "pathLimit": MAX_GATHER_CONTEXT_PATHS,
                     "query": null_or(&query),
                 }),
+                    &start_line_arg,
+                ),
                 Some(plan),
                 entries,
                 Some(children.registry()),
@@ -390,7 +404,7 @@ impl CompositeToolHandler for GatherContextComposite {
             path,
             &query,
             limit,
-            explicit_start_line,
+            &start_line_arg,
             line_count,
             children,
         )?;
@@ -413,10 +427,16 @@ impl GatherContextComposite {
         path: &str,
         query: &str,
         limit: usize,
-        explicit_start_line: Option<usize>,
+        start_line_arg: &StartLineArg,
         line_count: usize,
         children: &ChildDispatch,
     ) -> Result<ToolResult, String> {
+        // T2-A：三态契约（与 tools.rs 镜像同步）；`unwrap_or(1)` 链保持零行为漂移，
+        // `Invalid` 仅追加 `requestedStartLine` + `meta.startLineFallback` 留痕。
+        let explicit_start_line = match start_line_arg {
+            StartLineArg::Valid(value) => Some(*value),
+            StartLineArg::Missing | StartLineArg::Invalid { .. } => None,
+        };
         let path_info_call = ChildDispatchRequest {
             descriptor_id: TOOL_WORKSPACE_PATH_INFO.to_string(),
             call_id: "gather-path-info".to_string(),
@@ -452,6 +472,9 @@ impl GatherContextComposite {
             "file" => {
                 // PA-100：显式 startLine 生效；未提供时从第 1 行开始（原行为）。
                 let file_start_line = explicit_start_line.unwrap_or(1);
+                // T2-A：派发的子调用参数必须保持 schema 干净（生产 segment schema
+                // `additionalProperties:false`，多余键会被硬门判 `unexpected argument`）；
+                // `requestedStartLine` 只写进聚合记录的 entry arguments（下）+ plan + meta。
                 let segment_call = ChildDispatchRequest {
                     descriptor_id: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                     call_id: "gather-segment".to_string(),
@@ -465,16 +488,27 @@ impl GatherContextComposite {
                 let segment_outcome = children.dispatch(segment_call.clone())?;
                 let entries = vec![
                     nested_entry(0, &path_info_call, path_info_outcome),
-                    nested_entry(1, &segment_call, segment_outcome),
+                    NestedEntry {
+                        index: 1,
+                        tool: segment_call.descriptor_id.clone(),
+                        arguments: with_requested_start_line(
+                            segment_call.arguments.clone(),
+                            start_line_arg,
+                        ),
+                        outcome: segment_outcome,
+                    },
                 ];
                 let plan = build_nested_gather_plan(mode, &display_path, query, &entries);
                 let payload = aggregate_nested_entries(
                     TOOL_WORKSPACE_GATHER_CONTEXT,
-                    json!({
+                    with_start_line_fallback_meta(
+                        json!({
                         "mode": "file",
                         "path": display_path,
                         "query": null_or(query),
                     }),
+                        start_line_arg,
+                    ),
                     Some(plan),
                     entries,
                     Some(children.registry()),
@@ -544,12 +578,19 @@ impl GatherContextComposite {
                 if is_file {
                     let search_payload = child_outcome_output(&search_outcome);
                     // PA-100：显式 startLine 优先；未提供时才按搜索命中自动定位。
-                    let start_line = explicit_start_line
-                        .or_else(|| {
-                            first_search_match_line(&search_payload, &display_path)
-                                .map(|line| line.saturating_sub(line_count / 2).max(1))
-                        })
-                        .unwrap_or(1);
+                    // T2-B F1 语义B：Invalid 强制 1 并跳过搜索自动定位（与 file 一致，
+                    // 与 tools.rs legacy 镜像同步）；Valid 保持 explicit 优先，Missing 才走 auto。
+                    let start_line = match start_line_arg {
+                        StartLineArg::Invalid { .. } => 1,
+                        _ => explicit_start_line
+                            .or_else(|| {
+                                first_search_match_line(&search_payload, &display_path)
+                                    .map(|line| line.saturating_sub(line_count / 2).max(1))
+                            })
+                            .unwrap_or(1),
+                    };
+                    // T2-A：派发参数保持 schema 干净（见 file 分支注释）；
+                    // `requestedStartLine` 只写入聚合记录的 entry arguments。
                     let segment_call = ChildDispatchRequest {
                         descriptor_id: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                         call_id: "gather-segment".to_string(),
@@ -561,7 +602,15 @@ impl GatherContextComposite {
                         }),
                     };
                     let segment_outcome = children.dispatch(segment_call.clone())?;
-                    entries.push(nested_entry(2, &segment_call, segment_outcome));
+                    entries.push(NestedEntry {
+                        index: 2,
+                        tool: segment_call.descriptor_id.clone(),
+                        arguments: with_requested_start_line(
+                            segment_call.arguments.clone(),
+                            start_line_arg,
+                        ),
+                        outcome: segment_outcome,
+                    });
                 } else {
                     let search_payload = child_outcome_output(&search_outcome);
                     let should_add_listing = search_outcome.execution_status
@@ -585,11 +634,14 @@ impl GatherContextComposite {
                 let plan = build_nested_gather_plan(mode, &display_path, query, &entries);
                 let payload = aggregate_nested_entries(
                     TOOL_WORKSPACE_GATHER_CONTEXT,
-                    json!({
+                    with_start_line_fallback_meta(
+                        json!({
                         "mode": "search",
                         "path": display_path,
                         "query": null_or(query),
                     }),
+                        start_line_arg,
+                    ),
                     Some(plan),
                     entries,
                     Some(children.registry()),
@@ -997,12 +1049,15 @@ fn build_batch_tool_plan(
 
 // PA-100（code-review A 建议3）：本函数与 tools.rs 中的同名拷贝为双实现镜像——
 // 修改签名/回显字段必须两处同步（task 8.1 移除 legacy 路径前有效）。
+// T2-A：新增 `start_line_arg` 参数，仅 Invalid 时在 plan step arguments 追加
+// `requestedStartLine`（`with_requested_start_line`），`startLine: applied` 不变。
 fn build_multi_path_gather_plan(
     paths: &[String],
     query: &str,
     limit: usize,
     start_line: usize,
     line_count: usize,
+    start_line_arg: &StartLineArg,
 ) -> ToolPlan {
     ToolPlan {
         kind: "gather_context".to_string(),
@@ -1022,13 +1077,16 @@ fn build_multi_path_gather_plan(
             .enumerate()
             .map(|(index, path)| ToolPlanStep {
                 name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
-                arguments: json!({
+                arguments: with_requested_start_line(
+                    json!({
                     "path": path,
                     "query": null_or(query),
                     "limit": limit,
                     "startLine": start_line,
                     "lineCount": line_count,
                 }),
+                    start_line_arg,
+                ),
                 summary: format!("第 {} 个路径聚合：`{}`。", index + 1, path),
             })
             .collect(),
@@ -2382,6 +2440,166 @@ mod tests {
         assert_eq!(results[2]["arguments"]["startLine"].as_u64(), Some(7));
     }
 
+    /// T2-B F1 语义B（与 tools.rs legacy 镜像同步）：search × Invalid 强制 1 并
+    /// 忽略搜索自动定位。命中行 50、lineCount=40 时 auto 本应是 30，
+    /// Invalid 必须回 1 而非 30。
+    #[test]
+    fn gather_context_search_invalid_start_line_forces_one_ignoring_auto() {
+        let registry = registry(vec![
+            dynamic_descriptor(
+                "dynamic:gather",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                gather_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_path_info",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_read_file_segment",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_list_files",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_search_text",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+        ]);
+        let dispatcher = dispatcher_for(registry);
+        dispatcher.register_composite_handler_with_authority(
+            "dynamic:gather",
+            vec![
+                "builtin:workspace_path_info".to_string(),
+                "builtin:workspace_read_file_segment".to_string(),
+                "builtin:workspace_list_files".to_string(),
+                "builtin:workspace_search_text".to_string(),
+            ],
+            Arc::new(GatherContextComposite),
+        );
+        dispatcher.register_handler(
+            "builtin:workspace_path_info",
+            Arc::new(FakePathInfo { kind: "file" }),
+        );
+        dispatcher.register_handler("builtin:workspace_read_file_segment", echo_handler());
+        dispatcher.register_handler("builtin:workspace_list_files", echo_handler());
+        dispatcher.register_handler(
+            "builtin:workspace_search_text",
+            Arc::new(FakeSearch {
+                match_count: 1,
+                matches: vec![json!({ "path": "demo.rs", "line": 50, "preview": "needle" })],
+            }),
+        );
+
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "gather-search-invalid",
+            json!({ "path": "demo.rs", "query": "needle", "lineCount": 40, "startLine": -5 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        assert_eq!(payload["meta"]["mode"], "search");
+        let results = payload["results"].as_array().expect("results array");
+        assert_eq!(results[2]["tool"], "workspace_read_file_segment");
+        // 非 auto（auto=30）：Invalid 强制 1。
+        assert_eq!(results[2]["arguments"]["startLine"].as_u64(), Some(1));
+        assert_eq!(results[2]["arguments"]["requestedStartLine"], json!(-5));
+        assert_eq!(payload["meta"]["startLineFallback"]["requested"], json!(-5));
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["applied"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["reason"].as_str(),
+            Some("invalid_start_line_fallback_to_1")
+        );
+    }
+
+    /// T2-B F1：directory 模式不消费 startLine——Invalid 也不打标
+    /// （composite directory 分支本来就不加，此处锁住该语义）。
+    #[test]
+    fn gather_context_directory_invalid_start_line_marks_nothing() {
+        let registry = registry(vec![
+            dynamic_descriptor(
+                "dynamic:gather",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                gather_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_path_info",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_read_file_segment",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_list_files",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_search_text",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+        ]);
+        let dispatcher = dispatcher_for(registry);
+        dispatcher.register_composite_handler_with_authority(
+            "dynamic:gather",
+            vec![
+                "builtin:workspace_path_info".to_string(),
+                "builtin:workspace_read_file_segment".to_string(),
+                "builtin:workspace_list_files".to_string(),
+                "builtin:workspace_search_text".to_string(),
+            ],
+            Arc::new(GatherContextComposite),
+        );
+        dispatcher.register_handler(
+            "builtin:workspace_path_info",
+            Arc::new(FakePathInfo { kind: "directory" }),
+        );
+        dispatcher.register_handler("builtin:workspace_read_file_segment", echo_handler());
+        dispatcher.register_handler("builtin:workspace_list_files", echo_handler());
+        dispatcher.register_handler(
+            "builtin:workspace_search_text",
+            Arc::new(FakeSearch {
+                matches: Vec::new(),
+                match_count: 0,
+            }),
+        );
+
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "gather-directory-invalid",
+            json!({ "path": "src", "limit": 10, "startLine": -5 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        assert_eq!(payload["meta"]["mode"], "directory");
+        assert!(payload["meta"].get("startLineFallback").is_none());
+    }
+
     #[test]
     fn gather_context_multi_path_echoes_start_line_in_plan_and_skipped_entries() {
         let registry = registry(vec![
@@ -2425,5 +2643,153 @@ mod tests {
         let results = payload["results"].as_array().expect("results array");
         // 被跳过路径的兜底条目同样回显 startLine。
         assert_eq!(results[6]["arguments"]["startLine"].as_u64(), Some(9));
+    }
+
+    // ── T2-A：startLine 三态可观测契约（与 tools.rs 镜像同步） ─────────────────────
+    // 测试经 dispatcher 门：浮点/字符串/bool 在门直接拒（invalid_arguments）；
+    // 负整数过门进 parser →Invalid（fallback 留痕）；0 过门→Valid(1) clamp 无标记；
+    // 缺席/null→Missing 无标记。顶层 status 语义不动。
+
+    #[test]
+    fn gather_context_start_line_tristate_matches_legacy() {
+        let registry = registry(vec![
+            dynamic_descriptor(
+                "dynamic:gather",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                gather_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_path_info",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_read_file_segment",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+        ]);
+        let dispatcher = dispatcher_for(registry);
+        register_gather(&dispatcher);
+
+        // 门拒：浮点/字符串/bool（dispatcher integer 硬门，invalid_arguments）。
+        for (call_id, start_line) in [
+            ("gate-float", json!(80.5)),
+            ("gate-string", json!("80")),
+            ("gate-bool", json!(true)),
+        ] {
+            let outcome = dispatch(
+                &dispatcher,
+                "dynamic:gather",
+                call_id,
+                json!({ "path": "demo.rs", "startLine": start_line, "lineCount": 40 }),
+            );
+            assert_ne!(
+                outcome.execution_status,
+                ToolExecutionStatus::Ok,
+                "input: {start_line}"
+            );
+        }
+
+        // 过门 Invalid：负整数 → applied=1 + requestedStartLine + meta.startLineFallback。
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "fallback-negative",
+            json!({ "path": "demo.rs", "startLine": -5, "lineCount": 40 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        assert_eq!(payload["meta"]["mode"], "file");
+        let results = payload["results"].as_array().expect("results array");
+        assert_eq!(results[1]["arguments"]["startLine"].as_u64(), Some(1));
+        assert_eq!(results[1]["arguments"]["requestedStartLine"], json!(-5));
+        assert_eq!(payload["meta"]["startLineFallback"]["requested"], json!(-5));
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["applied"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["reason"].as_str(),
+            Some("invalid_start_line_fallback_to_1")
+        );
+
+        // 0 → Valid(1) clamp，无标记。
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "clamp-zero",
+            json!({ "path": "demo.rs", "startLine": 0, "lineCount": 40 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        let results = payload["results"].as_array().expect("results array");
+        assert_eq!(results[1]["arguments"]["startLine"].as_u64(), Some(1));
+        assert!(results[1]["arguments"].get("requestedStartLine").is_none());
+        assert!(payload["meta"].get("startLineFallback").is_none());
+
+        // 缺席 → Missing，无标记（既有行为）。
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "missing",
+            json!({ "path": "demo.rs", "lineCount": 40 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        let results = payload["results"].as_array().expect("results array");
+        assert_eq!(results[1]["arguments"]["startLine"].as_u64(), Some(1));
+        assert!(results[1]["arguments"].get("requestedStartLine").is_none());
+        assert!(payload["meta"].get("startLineFallback").is_none());
+    }
+
+    #[test]
+    fn gather_context_multi_path_invalid_start_line_marks_plan_and_meta() {
+        let registry = registry(vec![
+            dynamic_descriptor(
+                "dynamic:gather",
+                ToolKind::Composite,
+                ToolExposure::ModelVisible,
+                gather_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_path_info",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+            workspace_primitive_descriptor(
+                "workspace_read_file_segment",
+                ToolKind::Read,
+                ToolExposure::Internal,
+                description_required_schema(),
+            ),
+        ]);
+        let dispatcher = dispatcher_for(registry);
+        register_gather(&dispatcher);
+
+        let outcome = dispatch(
+            &dispatcher,
+            "dynamic:gather",
+            "gather-multipath-invalid",
+            json!({ "paths": ["a.rs", "b.rs"], "startLine": -5, "lineCount": 20 }),
+        );
+        assert_eq!(outcome.execution_status, ToolExecutionStatus::Ok);
+        let payload = parsed_output(&outcome);
+        assert_eq!(
+            payload["meta"]["startLineFallback"]["reason"].as_str(),
+            Some("invalid_start_line_fallback_to_1")
+        );
+        for step in payload["plan"]["steps"].as_array().expect("plan steps") {
+            assert_eq!(step["arguments"]["startLine"].as_u64(), Some(1));
+            assert_eq!(step["arguments"]["requestedStartLine"], json!(-5));
+        }
+        for entry in payload["results"].as_array().expect("results array") {
+            assert_eq!(entry["arguments"]["startLine"].as_u64(), Some(1));
+            assert_eq!(entry["arguments"]["requestedStartLine"], json!(-5));
+        }
     }
 }
