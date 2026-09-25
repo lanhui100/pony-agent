@@ -33,6 +33,10 @@ jobs:
         shell: pwsh
         run: ./scripts/verify-decisions.ps1
 
+      - name: 版本同步校验（四处一致）
+        shell: pwsh
+        run: ./scripts/check-version-sync.ps1
+
       - name: 安装依赖
         run: npm ci
 

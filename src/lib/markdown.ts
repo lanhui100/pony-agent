@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import { marked } from "marked";
+import DOMPurify from "dompurify";
 
 export const markdownRenderEpoch = ref(0);
 
@@ -40,47 +41,7 @@ const SAFE_TAGS = new Set([
   "ul"
 ]);
 
-const SAFE_GLOBAL_ATTRS = new Set(["aria-label", "aria-hidden", "role", "title"]);
-const SAFE_TAG_ATTRS: Record<string, Set<string>> = {
-  a: new Set(["href", "rel", "target", "title"]),
-  code: new Set(["class"]),
-  div: new Set(["class"]),
-  img: new Set(["alt", "height", "loading", "src", "title", "width"]),
-  input: new Set(["checked", "disabled", "type"]),
-  pre: new Set(["class"]),
-  td: new Set(["align", "colspan", "rowspan"]),
-  th: new Set(["align", "colspan", "rowspan"])
-};
 
-function isSafeUrl(value: string) {
-  const trimmed = value.trim();
-
-  if (!trimmed) {
-    return false;
-  }
-
-  if (
-    trimmed.startsWith("#") ||
-    trimmed.startsWith("/") ||
-    trimmed.startsWith("./") ||
-    trimmed.startsWith("../")
-  ) {
-    return true;
-  }
-
-  const lower = trimmed.toLowerCase();
-
-  if (lower.startsWith("mailto:") || lower.startsWith("tel:")) {
-    return true;
-  }
-
-  try {
-    const parsed = new URL(trimmed, "https://pony-agent.local");
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 /**
  * String-based HTML sanitizer.
@@ -95,104 +56,59 @@ function isSafeUrl(value: string) {
  *   - href/src verified by isSafeUrl()
  *   - <a href="…"> gets target="_blank" rel="noopener noreferrer"
  *   - <input> gets disabled="" and only "checkbox" type survives
+ *
+ * Non-DOM early-return 契约（显式决策：直通）：
+ *   - `typeof document === "undefined"` 时直接 `return html`（不过滤）。
+ *   - 该路径仅测试/SSR 环境可达；生产 Tauri WebView 必有 document，
+ *     MarkdownRenderer.vue 两处 v-html（:308/:322）消费的永远是已消毒输出。
+ *   - 直通意味着非 DOM 环境下调用方不得把返回值当作"已消毒"使用；
+ *     红队矩阵 tests/markdown-sanitize.redteam.spec.ts 锁定该契约（含直通断言）。
  */
-function sanitizeMarkdownHtml(html: string): string {
+if (typeof window !== "undefined") {
+  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.tagName === "A" && node.hasAttribute("href")) {
+      node.setAttribute("target", "_blank");
+      node.setAttribute("rel", "noopener noreferrer");
+    }
+    if (node.tagName === "INPUT") {
+      if (node.getAttribute("type") !== "checkbox") {
+        node.remove();
+      } else {
+        node.setAttribute("disabled", "");
+      }
+    }
+  });
+}
+
+export function sanitizeMarkdownHtml(html: string): string {
   if (typeof document === "undefined") {
+    // 非 DOM 仅测试/SSR 路径：显式直通（见上契约），生产 WebView 必有 document。
     return html;
   }
 
-  // ── Phase 1: Strip script/style blocks entirely (tag + content) ──
-  let clean = html.replace(
-    /<script\b[^<>]*>[\s\S]*?<\/script\s*>/gi,
-    "",
-  );
-  clean = clean.replace(
-    /<style\b[^<>]*>[\s\S]*?<\/style\s*>/gi,
-    "",
-  );
-
-  // ── Phase 2: Walk tags with a regex, sanitize in place ──
-  // Matches: leading slash? | tag-name | optional attrs   | self-close?
-  // Group:        (1)        |   (2)    |      (3)         |    (4)
-  const TAG_RE = /<(\/?)([a-zA-Z]\w*)((?:\s[^>]*)?)\s*(\/?)>/g;
-
-  let result = "";
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = TAG_RE.exec(clean)) !== null) {
-    // Text content before this tag
-    result += clean.slice(lastIndex, match.index);
-    lastIndex = match.index + match[0].length;
-
-    const closingSlash = match[1];
-    const tagName = match[2].toLowerCase();
-    const attrsStr = match[3];
-    const selfClose = match[4];
-
-    if (closingSlash) {
-      // Closing tag — keep only if tag is safe
-      if (SAFE_TAGS.has(tagName)) {
-        result += `</${tagName}>`;
-      }
-      continue;
-    }
-
-    if (!SAFE_TAGS.has(tagName)) {
-      // Unknown tag — skip (content between tags is preserved as text)
-      continue;
-    }
-
-    // Safe tag — collect and sanitize attributes
-    const safe: [string, string][] = [];
-    if (attrsStr.trim()) {
-      const allowed = SAFE_TAG_ATTRS[tagName];
-      if (allowed) {
-        const ATTR_RE = /(\w[\w-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+)))?\s*/g;
-        let attrMatch: RegExpExecArray | null;
-        while ((attrMatch = ATTR_RE.exec(attrsStr)) !== null) {
-          const name = attrMatch[1].toLowerCase();
-          const value = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? "";
-
-          if (!allowed.has(name) && !SAFE_GLOBAL_ATTRS.has(name)) {
-            continue;
-          }
-          if (tagName === "a" && name === "href" && !isSafeUrl(value)) {
-            continue;
-          }
-          if (tagName === "img" && name === "src" && !isSafeUrl(value)) {
-            continue;
-          }
-          if (tagName === "input" && name === "type" && value !== "checkbox") {
-            continue;
-          }
-          if (tagName === "input" && name === "disabled") {
-            continue; // added unconditionally below
-          }
-          safe.push([name, value]);
-        }
-      }
-    }
-
-    // Enforce security invariants
-    if (tagName === "a" && safe.some(([n]) => n === "href")) {
-      safe.push(["target", "_blank"]);
-      safe.push(["rel", "noopener noreferrer"]);
-    }
-    if (tagName === "input") {
-      safe.push(["disabled", ""]);
-    }
-
-    const attrStr = safe
-      .map(([n, v]) => (v ? `${n}="${v.replace(/"/g, "&quot;")}"` : n))
-      .join(" ");
-
-    result += `<${tagName}${attrStr ? " " + attrStr : ""}${selfClose ? "/" : ""}>`;
-  }
-
-  // Trailing text after the last tag
-  result += clean.slice(lastIndex);
-  return result;
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: Array.from(SAFE_TAGS),
+    ALLOWED_ATTR: [
+      "href",
+      "title",
+      "target",
+      "rel",
+      "src",
+      "alt",
+      "width",
+      "height",
+      "align",
+      "colspan",
+      "rowspan",
+      "type",
+      "checked",
+      "disabled",
+      "open",
+      "class",
+    ],
+    ALLOW_DATA_ATTR: false,
+    ADD_ATTR: ["target", "rel"],
+  });
 }
 
 function normalizeMarkdownLine(line: string) {

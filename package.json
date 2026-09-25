@@ -1,6 +1,6 @@
 {
   "name": "pony-agent",
-  "version": "0.1.91",
+  "version": "0.1.92",
   "private": true,
   "type": "module",
   "scripts": {
@@ -35,11 +35,12 @@
     "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
     "test:e2e": "npm run build && playwright test",
     "test:tauri:smoke": "node scripts/tauri-smoke.js",
-    "verify": "npm run test:unit && npm run build && npm run cargo:check:shared",
+    "verify": "npm run version:check && npm run test:unit && npm run build && npm run cargo:check:shared",
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri",
     "version": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1",
+    "version:check": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-version-sync.ps1",
     "version:core": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Target core",
     "version:tauri": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Target tauri",
     "version:minor": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Segment minor",
@@ -64,8 +65,10 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",
     "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@types/dompurify": "^3.0.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dompurify": "^3.4.16",
     "lucide-vue-next": "^1.0.0",
     "marked": "^18.0.3",
     "misans": "^4.1.0",

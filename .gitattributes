@@ -1,0 +1,94 @@
+# PA-097/PA-098 EOL 根治：统一换行策略，防止跨平台 CRLF 污染。
+# 策略：文本默认 LF 入库且 LF 检出（eol 属性优先于 core.autocrlf，
+# Windows 下次全量检出 213 w/crlf 会翻转为 LF，为一次性预期 churn）。
+# 入库一律归一化为 LF。审查时禁止越权改写他人文件行尾（PA-098 事故教训）。
+# 本次只定策略，不做全库 renormalize（步骤见文件尾注释，可选、需单独评审）。
+
+* text=auto eol=lf
+
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.githooks/* text eol=lf
+.githooks/** text eol=lf
+
+# Windows 批处理保留 CRLF（cmd.exe 对纯 LF 兼容性差）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell / 脚本统一 LF
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.py text eol=lf
+*.pl text eol=lf
+
+# 主要文本类型：显式声明为文本 + LF（跨平台一致：Rust/前端/Markdown/配置）
+*.rs text eol=lf
+*.toml text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.vue text eol=lf
+*.css text eol=lf
+*.scss text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.mdx text eol=lf
+*.json text eol=lf
+*.jsonc text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.xml text eol=lf
+*.svg text eol=lf
+
+# 二进制：禁止行尾转换/diff/merge（binary = -text -diff -merge）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.webp binary
+*.avif binary
+*.heic binary
+*.cur binary
+*.ico binary
+*.icns binary
+*.node binary
+*.wasm binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.bin binary
+*.pdb binary
+*.lib binary
+*.a binary
+*.rlib binary
+*.sqlite binary
+*.db binary
+*.mp4 binary
+*.mov binary
+*.webm binary
+*.mkv binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.flac binary
+
+# 锁文件：统一 LF（避免 auto 启发式两语义）
+*.lock text eol=lf
+
+# 可选后续 renormalize（本次不执行，需单独评审；禁止直接复制执行——
+# 213 w/crlf + 27 mixed 会瞬间变“已修改”，需先 dry-run 预演）：
+#   git status && git ls-files --eol | Select-String "mixed|crlf"

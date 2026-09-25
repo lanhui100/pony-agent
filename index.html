@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 浏览器预览用 meta CSP：与 tauri.conf.json prod 口径一致。
+      说明：Tauri prod enforce 以 tauri.conf.json app.security.csp 为准（单 CSP，不支持 dev/prod 分键）；
+      `tauri dev`（devUrl http://127.0.0.1:4176 + HMR ws）需本地临时放宽 connect-src/script-src，不落库。
+      本 meta 仅覆盖纯浏览器预览（非 Tauri WebView）场景。 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'" />
     <title>Pony Agent</title>
     <script type="module" src="/src/main.ts"></script>
   </head>

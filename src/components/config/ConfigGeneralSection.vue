@@ -18,6 +18,7 @@ import { useUpdateStore } from "@/stores/update";
 import Input from "@/components/ui/Input.vue";
 import Switch from "@/components/ui/Switch.vue";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
+import { openExternalUrl } from "@/lib/open-external-url";
 
 /**
  * PA-096：配置页"通用" tab 内容（原 SettingsPanel 去壳版）。
@@ -61,19 +62,9 @@ function openReleasePage() {
   const url = updateStore.releasePageUrl;
   if (!url) return;
 
-  if (isTauriAvailable()) {
-    safeInvoke("open_url", { url }).catch((error) => {
-      // 旧宿主二进制等场景下命令可能失败：告警并回退浏览器打开。
-      console.warn("[pony-agent][update] open_url failed, falling back to window.open", error);
-      window.open(url, "_blank", "noopener,noreferrer");
-    });
-    return;
-  }
-
-  const opened = window.open(url, "_blank", "noopener,noreferrer");
-  if (!opened) {
-    console.warn("[pony-agent][update] release page popup was blocked");
-  }
+  // PA-101 F1：统一走 openExternalUrl（白名单拒绝禁 window.open 回退，仅告警；
+  // 旧二进制缺命令才由出口内部回退浏览器打开）。
+  void openExternalUrl(url);
 }
 // ────────────────────────────────────────────────────────────────────
 
@@ -127,11 +118,8 @@ async function saveExaKey() {
 }
 
 function openExa() {
-  if (isTauriAvailable()) {
-    safeInvoke("open_url", { url: "https://exa.ai/" });
-  } else {
-    window.open("https://exa.ai/", "_blank");
-  }
+  // PA-101 F1：统一走 openExternalUrl（含 catch 语义；白名单拒绝禁回退仅告警）。
+  void openExternalUrl("https://exa.ai/");
 }
 </script>
 

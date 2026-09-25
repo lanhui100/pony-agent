@@ -1,6 +1,6 @@
 # 0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转
 
-Status: implemented
+Status: superseded by 0017
 
 ## 背景
 

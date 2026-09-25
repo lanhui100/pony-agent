@@ -419,8 +419,8 @@ fn set_service_api_key(service: String, key: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_url(url: String) {
-    let _ = platform::open_url_in_browser(&url);
+fn open_url(url: String) -> Result<(), String> {
+    platform::open_url_in_browser(&url)
 }
 
 #[tauri::command]

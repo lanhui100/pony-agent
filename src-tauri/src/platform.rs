@@ -76,21 +76,213 @@ pub fn apply_window_style(window: &tauri::WebviewWindow) {
     let _ = window;
 }
 
-/// Open a URL in the system default browser.
-pub fn open_url_in_browser(url: &str) {
+/// Hosts permitted for external browser opening (exact match, lowercase).
+/// A new call site MUST extend this list in sync.
+const ALLOWED_OPEN_HOSTS: [&str; 3] = ["github.com", "api.github.com", "exa.ai"];
+
+/// Pure allowlist check for URLs opened in the system browser.
+///
+/// Only `https` URLs whose lowercased host exactly matches
+/// `{github.com, api.github.com, exa.ai}` pass; everything else fails closed.
+/// Path/query/fragment are unrestricted.
+pub fn is_allowed_open_url(url: &str) -> bool {
+    // Pre-check: raw control characters reject, even as a prefix/suffix.
+    if url
+        .bytes()
+        .any(|b| b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return false;
+    }
+    let candidate = url.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    // String-level trailing-dot probe BEFORE crate parsing: the crate may
+    // normalize a trailing dot away, so the raw authority is rejected first.
+    {
+        let raw_hp = authority_hostport(candidate);
+        let raw_host = match raw_hp.rfind(':') {
+            Some(i) => &raw_hp[..i],
+            None => raw_hp,
+        };
+        if raw_host.ends_with('.') {
+            return false;
+        }
+    }
+    // Mandatory `url` crate parsing — hand-rolled parsing is forbidden.
+    let parsed = match url::Url::parse(candidate) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    // Scheme: only `https` (`http` is permanently rejected; the crate
+    // lowercases the scheme, so mixed-case `HTTPS` normalizes here).
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let host = match parsed.host_str() {
+        Some(h) if !h.is_empty() => h,
+        _ => return false,
+    };
+    // Non-ASCII host (IDN lookalike) rejects outright: the `url` crate
+    // converts Unicode hosts to punycode, so the raw authority is checked
+    // for ASCII as well as the parsed host.
+    if !authority_hostport(candidate).is_ascii() {
+        return false;
+    }
+    if !host.is_ascii() {
+        return false;
+    }
+    // Lowercase normalization (paranoia alongside the crate's own), then a
+    // second trailing-dot probe on the normalized host.
+    let host = host.to_ascii_lowercase();
+    if host.ends_with('.') {
+        return false;
+    }
+    // Exact host match — subdomain lookalikes (`github.com.evil.test`,
+    // `evil-github.com`) never match exactly.
+    if !ALLOWED_OPEN_HOSTS.contains(&host.as_str()) {
+        return false;
+    }
+    // Userinfo / credentials reject even when the host matches.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    // Explicit port rejects even when the host matches. The `url` crate drops
+    // default ports per WHATWG (so `:443` reads as `port() == None`), hence
+    // the additional string-level explicit-port probe.
+    if parsed.port().is_some() || has_explicit_port(candidate) {
+        return false;
+    }
+    true
+}
+
+/// Raw hostport probe on the URL authority (pre-crate).
+///
+/// Returns the text after `://` up to the first `/?#`, stripped of userinfo
+/// (only the text after the last `@` is the real hostport).
+fn authority_hostport(candidate: &str) -> &str {
+    let after_scheme = match candidate.find("://") {
+        Some(i) => &candidate[i + 3..],
+        None => return "",
+    };
+    let auth_end = after_scheme
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..auth_end];
+    match authority.rfind('@') {
+        Some(i) => &authority[i + 1..],
+        None => authority,
+    }
+}
+
+/// String-level explicit-port probe on the URL authority.
+///
+/// Allowlisted hosts are plain ASCII domains, so any `:` in the hostport is
+/// an explicit port — including `:443`, which `Url::port()` cannot see (the
+/// `url` crate drops default ports per WHATWG, reading `:443` as
+/// `port() == None`).
+fn has_explicit_port(candidate: &str) -> bool {
+    authority_hostport(candidate).contains(':')
+}
+
+// Windows-only: `ShellExecuteW` binding (bare FFI, no new crates).
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn ShellExecuteW(
+        hwnd: isize,
+        lpoperation: *const u16,
+        lpfile: *const u16,
+        lpparameters: *const u16,
+        lpdirectory: *const u16,
+        nshowcmd: i32,
+    ) -> isize;
+}
+
+/// Encode `s` as NUL-terminated UTF-16 for Win32 APIs.
+///
+/// Windows uses `OsStrExt::encode_wide` (per spec); other platforms use
+/// `str::encode_utf16` so the construction logic stays unit-testable without
+/// spawning anything (pure constructor, no `Command`, no FFI call).
+#[cfg(target_os = "windows")]
+fn to_wide_null(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn to_wide_null(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Open a URL in the system default browser. Fail-closed: URLs outside the
+/// allowlist return `Err("url_allowlist_rejected:<host>")` (host only, never
+/// path/query) and spawn nothing.
+pub fn open_url_in_browser(url: &str) -> Result<(), String> {
+    let candidate = url.trim();
+    if !is_allowed_open_url(candidate) {
+        // Rejection log carries scheme+host+reason only — never path/query/
+        // fragment or the full URL.
+        let (scheme, host) = url::Url::parse(candidate)
+            .map(|u| {
+                let h = u
+                    .host_str()
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                (u.scheme().to_owned(), h)
+            })
+            .unwrap_or_else(|_| ("unknown".to_owned(), "unknown".to_owned()));
+        eprintln!("[open_url] rejected scheme={scheme} host={host} reason=allowlist");
+        return Err(format!("url_allowlist_rejected:{host}"));
+    }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", &url.replace('&', "^&")])
-            .spawn();
+        // Locked parameter shape: verb=`open`, file=URL UTF-16, params/dir=NULL,
+        // SW_SHOWNORMAL=1; the URL never passes through a shell.
+        let verb = to_wide_null("open");
+        let file = to_wide_null(candidate);
+        let ret = unsafe {
+            ShellExecuteW(
+                0,
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        return if ret > 32 {
+            Ok(())
+        } else {
+            Err("open_failed".to_string())
+        };
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        // `--` ends option parsing so a URL can never be taken as a flag.
+        return std::process::Command::new("open")
+            .args(["--", candidate])
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "open_failed".to_string());
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        // `--` ends option parsing so a URL can never be taken as a flag.
+        return std::process::Command::new("xdg-open")
+            .args(["--", candidate])
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "open_failed".to_string());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = candidate;
+        return Err("open_failed".to_string());
     }
 }
 
@@ -319,5 +511,163 @@ mod tests {
                 ICON_ICO.len()
             );
         }
+    }
+
+    // ── is_allowed_open_url: allow matrix ──
+
+    #[test]
+    fn allow_github_release_page() {
+        assert!(is_allowed_open_url(
+            "https://github.com/pony-agent/releases/tag/v0.1.91"
+        ));
+    }
+
+    #[test]
+    fn allow_api_github_and_exa() {
+        assert!(is_allowed_open_url(
+            "https://api.github.com/repos/owner/repo/releases/latest"
+        ));
+        assert!(is_allowed_open_url("https://exa.ai/search?q=pony"));
+    }
+
+    #[test]
+    fn allow_uppercase_scheme_and_host_normalize() {
+        assert!(is_allowed_open_url("HTTPS://GITHUB.COM/owner/repo"));
+        assert!(is_allowed_open_url("https://GitHub.COM/owner/repo"));
+        assert!(is_allowed_open_url("https://API.GITHUB.COM/x"));
+    }
+
+    #[test]
+    fn allow_path_query_fragment_unrestricted() {
+        assert!(is_allowed_open_url(
+            "https://github.com/o/r/releases/tag/v1?a=1&b=2#notes"
+        ));
+        assert!(is_allowed_open_url("https://exa.ai/?q=a%20b#frag"));
+    }
+
+    // ── is_allowed_open_url: deny matrix ──
+
+    #[test]
+    fn deny_non_https_schemes_and_case_confusion() {
+        for url in [
+            "file:///etc/passwd",
+            "FILE:///etc/passwd",
+            "data:text/html,<h1>x</h1>",
+            "DATA:text/html,hi",
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "vbscript:msgbox(1)",
+            "VBScript:msgbox(1)",
+            "blob:https://github.com/abc",
+            "BLOB:https://github.com/abc",
+            "http://github.com/owner/repo",
+            "HTTP://github.com/owner/repo",
+        ] {
+            assert!(!is_allowed_open_url(url), "must reject {url}");
+        }
+    }
+
+    #[test]
+    fn deny_lookalike_hosts() {
+        for url in [
+            "https://github.com.evil.test/",
+            "https://evil-github.com/",
+            "https://evilgithub.com/",
+            "https://notexa.ai/",
+            "https://exa.ai.evil.test/",
+            "https://github.com./",
+            "https://github.com./owner",
+        ] {
+            assert!(!is_allowed_open_url(url), "must reject {url}");
+        }
+    }
+
+    #[test]
+    fn deny_userinfo_and_explicit_ports() {
+        for url in [
+            "https://user@github.com/",
+            "https://user:pass@github.com/",
+            "https://github.com@evil.com/",
+            "https://github.com:443/",
+            "https://github.com:443/owner",
+            "https://github.com:8443/",
+            "https://api.github.com:443/x",
+        ] {
+            assert!(!is_allowed_open_url(url), "must reject {url}");
+        }
+    }
+
+    #[test]
+    fn deny_idn_non_ascii_and_punycode() {
+        assert!(!is_allowed_open_url("https://githüb.com/owner"));
+        assert!(!is_allowed_open_url("https://github。com/owner"));
+        assert!(!is_allowed_open_url("https://xn--githb-vua.com/owner"));
+    }
+
+    #[test]
+    fn deny_control_chars_empty_garbage_no_host() {
+        assert!(!is_allowed_open_url(""));
+        assert!(!is_allowed_open_url("   "));
+        assert!(!is_allowed_open_url("\r\nhttps://github.com/owner"));
+        assert!(!is_allowed_open_url("https://github.com/owner\n"));
+        assert!(!is_allowed_open_url("https://github.com/\tevil"));
+        assert!(!is_allowed_open_url(
+            "nota url at all !@#$%^&*()_+-=[]{}|;':,./<>?"
+        ));
+        assert!(!is_allowed_open_url("https:///no-host-here"));
+        assert!(!is_allowed_open_url("https://"));
+        assert!(!is_allowed_open_url(&"A".repeat(8192)));
+        assert!(!is_allowed_open_url("https://exa.ai:9999/"));
+    }
+
+    #[test]
+    fn deny_error_carries_host_only() {
+        // Fail-closed: host only in the error, never path/query.
+        // All inputs here are rejected, so nothing is spawned.
+        let err = open_url_in_browser("https://evil.test/secret?tok=abc#x")
+            .expect_err("must reject");
+        assert_eq!(err, "url_allowlist_rejected:evil.test");
+        let err2 = open_url_in_browser("file:///etc/passwd").expect_err("must reject");
+        assert!(
+            !err2.contains("passwd"),
+            "error must not leak path: {err2}"
+        );
+        let err3 = open_url_in_browser("nota url").expect_err("must reject");
+        assert_eq!(err3, "url_allowlist_rejected:unknown");
+    }
+
+    // ── ShellExecuteW argument construction (no spawn) ──
+
+    #[test]
+    fn wide_null_encoding_is_nul_terminated_utf16() {
+        // Pure constructor check — asserts the NUL-terminated UTF-16 shape
+        // handed to ShellExecuteW without spawning anything.
+        let url = "https://github.com/o/r?a=1&b=2";
+        let verb = to_wide_null("open");
+        let file = to_wide_null(url);
+        assert_eq!(verb.last(), Some(&0), "verb must be NUL-terminated");
+        assert_eq!(file.last(), Some(&0), "url must be NUL-terminated");
+        assert_eq!(
+            verb.len(),
+            "open".encode_utf16().count() + 1,
+            "verb length must be units + NUL"
+        );
+        assert_eq!(
+            file.len(),
+            url.encode_utf16().count() + 1,
+            "url length must be units + NUL"
+        );
+        assert_eq!(
+            String::from_utf16(&file[..file.len() - 1]).expect("valid UTF-16"),
+            url,
+            "round-trip must preserve the URL (incl. &)"
+        );
+        // `&` must pass through raw — no shell escaping exists on this path.
+        let amp: Vec<u16> = "&".encode_utf16().collect();
+        assert!(
+            file.windows(1).any(|w| w == amp.as_slice()),
+            "& must be preserved verbatim (no ^& mangling)"
+        );
     }
 }

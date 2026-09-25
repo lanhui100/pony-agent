@@ -51,15 +51,16 @@
 - [0008 会话数据架构向事件溯源演进（分阶段落地）](0008-event-sourcing-evolution.md)
 - [0010 CI rust-cache 对齐 target 槽位与最小令牌权限](0010-ci-rust-cache-slot-alignment-and-minimal-token.md)
 - [0011 版本 bump 自动同步 Cargo.lock](0011-bump-version-syncs-cargo-lock.md)
-- [0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转](0012-app-update-check-via-github-releases.md)
 - [0013 工作台导航精简：观测右栏浮动入口、配置页收敛与提供商页层次折叠](0013-workbench-nav-observation-entry-and-provider-hierarchy.md)
 - [0014 提供商协议三值化与模型目录：Responses 适配、模型级覆盖与收起取消编辑](0014-provider-protocol-tri-value-and-model-catalog.md)
 - [0015 侧边栏三级树的持久化字段、删除归属重写与 dialog 插件依赖](0015-workspace-sidebar-persistence-and-dialog-plugin.md)
+- [0017 发版流水线约定、四处版本一致性同步与安全加固](0017-release-tag-convention-and-tauri-version-sync.md)
 
 ### 已接替
 
 - [0004 前端工作台先采用原生 TypeScript + Vite 壳层](superseded/0004-frontend-shell-workbench-direction.md) —— 被 [0003](0003-frontend-stack-vue-pinia-no-router.md) 接替
 - [0009 工作台信息架构：trace/metrics 二级遥测页与配置页 tab 化](superseded/0009-workbench-ia-telemetry-page-and-config-tabs.md) —— 被 [0013](0013-workbench-nav-observation-entry-and-provider-hierarchy.md) 部分接替（入口决定修订，其余承接重述）
+- [0012 应用内更新检测：前端直连 GitHub Releases 与构造式发布页跳转](superseded/0012-app-update-check-via-github-releases.md) —— 被 [0017](0017-release-tag-convention-and-tauri-version-sync.md) 接替
 
 ### 已拒绝
 

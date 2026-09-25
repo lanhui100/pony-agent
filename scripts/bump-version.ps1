@@ -67,6 +67,7 @@ $VersionFile = "$RepoRoot/.version.json"
 $CoreCargo   = "$RepoRoot/crates/pony-agent-core/Cargo.toml"
 $TauriCargo  = "$RepoRoot/src-tauri/Cargo.toml"
 $PackageJson = "$RepoRoot/package.json"
+$TauriConf   = "$RepoRoot/src-tauri/tauri.conf.json"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -229,6 +230,14 @@ if ($DryRun) {
     $ver = if ($comp -eq "core") { $coreVer } else { $tauriVer }
     $verStr = Get-VersionString $ver.major $ver.minor $ver.patch
     Write-Host "  $($comp): $verStr"
+    if ($comp -eq "core") {
+      Write-Host "    - crates/pony-agent-core/Cargo.toml → $verStr" -ForegroundColor DarkGray
+    }
+    if ($comp -eq "tauri") {
+      Write-Host "    - src-tauri/Cargo.toml → $verStr" -ForegroundColor DarkGray
+      Write-Host "    - package.json → $verStr" -ForegroundColor DarkGray
+      Write-Host "    - src-tauri/tauri.conf.json → $verStr" -ForegroundColor DarkGray
+    }
   }
   exit 0
 }
@@ -277,7 +286,7 @@ if ($bumpTargets -contains "tauri") {
   Update-CargoVersion $TauriCargo "tauri" $tauriVer.major $tauriVer.minor $tauriVer.patch
 }
 
-# 3) Sync package.json version with tauri version
+# 3) Sync package.json and tauri.conf.json version with tauri version
 if ($bumpTargets -contains "tauri") {
   $tauriVerStr = Get-VersionString $tauriVer.major $tauriVer.minor $tauriVer.patch
   $pkgJson = Get-Content -Raw -LiteralPath $PackageJson | ConvertFrom-Json
@@ -287,6 +296,20 @@ if ($bumpTargets -contains "tauri") {
     Set-Content -LiteralPath $PackageJson -Value $pkgJsonStr
     $changedFiles += $PackageJson
     Write-Host "[bump-version] Synced package.json → $tauriVerStr" -ForegroundColor DarkGray
+  }
+
+  if (Test-Path -LiteralPath $TauriConf) {
+    $tauriConfContent = Get-Content -Raw -LiteralPath $TauriConf
+    if ($tauriConfContent -match '(?m)^(\s*"version"\s*:\s*)"\d+\.\d+\.\d+"') {
+      $newTauriConf = $tauriConfContent -replace '(?m)^(\s*"version"\s*:\s*)"\d+\.\d+\.\d+"', "`${1}`"$tauriVerStr`""
+      if ($newTauriConf -ne $tauriConfContent) {
+        Set-Content -LiteralPath $TauriConf -Value $newTauriConf
+        $changedFiles += $TauriConf
+        Write-Host "[bump-version] Synced src-tauri/tauri.conf.json → $tauriVerStr" -ForegroundColor DarkGray
+      }
+    } else {
+      Write-Warning "Could not find version field in $TauriConf"
+    }
   }
 }
 

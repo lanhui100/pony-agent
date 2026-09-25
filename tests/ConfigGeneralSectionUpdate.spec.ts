@@ -90,7 +90,11 @@ describe("ConfigGeneralSection 软件更新卡片", () => {
     await wrapper.get('[data-testid="config-update-release-link"]').trigger("click");
 
     expect(openSpy).toHaveBeenCalledTimes(1);
-    expect(console.warn).toHaveBeenCalledWith("[pony-agent][update] release page popup was blocked");
+    // PA-101 F1：弹窗拦截告警改由 openExternalUrl 统一出口发出。
+    expect(console.warn).toHaveBeenCalledWith(
+      "[pony-agent][open-external-url] popup was blocked",
+      "https://github.com/lanhui100/pony-agent/releases/tag/v99.0.0"
+    );
   });
 
   it("已是最新版本时不提供跳转入口", async () => {
@@ -189,6 +193,7 @@ describe("ConfigGeneralSection 软件更新卡片", () => {
 
     const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     await wrapper.get('[data-testid="config-update-release-link"]').trigger("click");
+    await flushPromises();
 
     expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith(
       "open_url",
@@ -199,9 +204,39 @@ describe("ConfigGeneralSection 软件更新卡片", () => {
       "_blank",
       "noopener,noreferrer"
     );
+    // PA-101 F1：跳转经 openExternalUrl 统一出口（告警口径随出口迁移）。
     expect(console.warn).toHaveBeenCalledWith(
-      "[pony-agent][update] open_url failed, falling back to window.open",
+      "[pony-agent][open-external-url] open_url failed, falling back to window.open",
       expect.any(Error)
+    );
+  });
+
+  it("PA-101 F1：白名单拒绝（url_allowlist_rejected）时禁止 window.open 回退，仅告警", async () => {
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (command === "open_url") {
+        throw new Error("url_allowlist_rejected:github.com");
+      }
+      return "";
+    });
+
+    const wrapper = mountSection();
+    await wrapper.get('[data-testid="config-update-check-button"]').trigger("click");
+    await flushPromises();
+
+    const openSpy = vi.spyOn(window, "open").mockReturnValue({} as Window);
+    await wrapper.get('[data-testid="config-update-release-link"]').trigger("click");
+    await flushPromises();
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith(
+      "open_url",
+      { url: "https://github.com/lanhui100/pony-agent/releases/tag/v99.0.0" }
+    );
+    // fail-closed：白名单拒绝禁止 window.open 回退（零调用）。
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledWith(
+      "[pony-agent][open-external-url] allowlist rejected, fallback refused",
+      expect.stringContaining("url_allowlist_rejected")
     );
   });
 });
