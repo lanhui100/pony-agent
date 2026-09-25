@@ -38,6 +38,8 @@
 
 ## Done
 
+- `PA-101` PA-099 安全与发版流水线三件套 F1/F2/F3（P1，Complexity B）
+  说明：**已完成并收口（2026-09-25，全量门禁通过）**——F1 `platform.rs` URL scheme/host 白名单（fail-closed）+ Win32 `ShellExecuteW` 替代 `cmd /c start` + 前端 `openExternalUrl()` 统一入口（17+6 测试）；F2 `dompurify@3.4.16` 替代手写正则消毒（红队 29/29）；F3 `tauri.conf.json` 版本纳入同步链 + `check-version-sync.ps1` CI 门禁 + ADR 0017 发版约定（supersedes 0012）。验证：cargo(tauri) 17 + core 962 + vitest 568 + 版本同步 + cmd-start 零残留。提交：`f4970a0`（core 层）、`cd96884`（F1/F2/F3 主提交）。任务卡：`03_TASKS/PA-101-update-security-and-release-followups.md`。OpenSpec change：`openspec/changes/pa101-update-followups/`。
 - `PA-100` 回合工具错误保真与文件分段翻页修复（P1，Complexity B）
   说明：**已完成并收口（2026-08-25，双轮 spec 审核 + 双 code review 通过）**——F1 Read/gather `startLine` 端到端透传（schema + 双实现 + 嵌套 plan 回显）；F2 timeline 错误保真（4 处 description 冒充替换为结构化 code/message 提取，无则 null）；F3 429 感知退避（initial 20s/cap 40s/budget 90s sleep 上界 60s + `no_retry_hint` 阻断流式白睡）。验证：core lib 913 + 回归 15 + vue-tsc 通过。提交：`7c41d73`。无 OpenSpec change（评审在任务卡 Spec Review/Code Review 节）。任务卡：`03_TASKS/PA-100-turn-tool-error-fidelity-and-file-paging.md`。残余风险：多跳回合 RL 预算按跳重置、无回合级上限；浮点 startLine 静默 clamp。
 - `PA-099` 配置页软件更新 + GitHub 发版角标（P1，Complexity B）

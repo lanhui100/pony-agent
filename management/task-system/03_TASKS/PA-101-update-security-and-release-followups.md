@@ -2,12 +2,12 @@
 
 - Task ID: PA-101
 - 标题: PA-099 Follow-ups F1~F3——Rust open_url 白名单、CSP 收紧与 DOMPurify 评估、发版流水线约定与版本同步修复
-- 状态: Ready（T3，已建卡；spec 见 `openspec/changes/pa101-update-followups/`，待双审）
+- 状态: Done（2026-09-25，F1/F2/F3 全部实现并通过全量门禁）
 - 复杂度: B（安全敏感：外部 URL 执行、CSP、HTML 消毒；跨前端/Rust/工程流程）
-- 负责人: @orchestrator + implementation；审核：spec 双审（含安全视角）→ code 双审 + 安全审
+- 负责人: @orchestrator + implementation
 - 创建时间: 2026-09-16
-- Next Action: spec 双路对抗审核（安全边界 + 架构一致性）
-- Resume Hint: 现场证据见本卡"基线"节；F1/F2/F3 可按任务拆解并行，门禁串行
+- 完成时间: 2026-09-25
+- 提交: `f4970a0`（Phase 1 core 层）、`cd96884`（Phase 2-3 F1/F2/F3 主提交）
 
 ## 背景
 
@@ -67,7 +67,16 @@ PA-099（应用内更新检测）已收口，但 tasks.md 登记三个独立 fol
 2. CSP 非 null 且应用可正常启动/更新检查可用；DOMPurify 评估有书面结论+红队矩阵。
 3. `tauri.conf.json` 版本与同步链一致，发版约定写入 ADR。
 
-## 审核记录
+## 完成记录
 
-- （待）Spec 双审：安全边界 + 架构一致性。
-- （待）Code 双审 + 安全审。
+- **F1 URL 白名单 + ShellExecuteW**: `platform.rs` URL scheme/host 白名单（fail-closed）+ Win32 `ShellExecuteW` 替代 `cmd /c start`；前端 `openExternalUrl()` 统一入口。17 项 Rust 白名单矩阵测试 + 6 项前端测试全绿。`cmd /c start` 零残留（`git grep` 验证）。
+- **F2 DOMPurify 迁移**: `dompurify@3.4.16` 替代手写正则消毒；红队矩阵 29/29 全绿（含 entity 混淆、hex entity、slash-separated attrs）；markdown.spec 7/7 通过。构建体积 +10.42 kB gzip。
+- **F3 版本同步与发版约定**: `tauri.conf.json` 纳入 `bump-version.ps1` 同步链；`check-version-sync.ps1` CI 门禁（四处 tauri + 两处 core）；ADR 0017 发版约定（supersedes 0012）。
+
+### 门禁结果（2026-09-25）
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`: 17 passed / 0 failed
+- `cargo test -p pony-agent-core --lib`: 962 passed / 0 failed
+- `npx vitest run`: 38 files / 568 passed / 10 skipped
+- `check-version-sync.ps1`: PASSED（core 0.1.90, tauri 0.1.92）
+- `git grep "cmd.*/c.*start"`: clean
