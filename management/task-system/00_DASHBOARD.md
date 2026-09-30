@@ -4,11 +4,23 @@
 
 - 项目：`Pony Agent`
 - 类型：学习模式重构项目
-- 当前主线：`Phase 4 / Graph Runtime Mainline`
-- 当前阶段：`Mainline Stabilizing`
+- 当前主线：`Phase 8 / 高级能力（子代理、workflow、代码智能）`（Phase 1–7 已全部完成）
+- 当前阶段：`Phase 8 起步 / Ready 区清空，待选定下一张卡`
 - 总体状态：`In Progress`
+- 最近提交：`4d40ce9`（2026-09-25，PA-101 收口）
+- 版本现况：tauri `0.1.92`（四处一致）/ core `0.1.90`（两处一致），`npm run version:check` PASSED
+- 最近会话：2026-09-30（PA-101 收尾补齐，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`）
+
+## 已知库存问题
+
+- **canonical spec 库存 39 份不合规**：`npm run openspec -- validate --all --strict` 报 `14 passed / 39 failed`，失败原因统一为缺少 `## Purpose` / `## Requirements`（仍是 delta 格式）。非本轮引入——事件溯源主线多份 spec 在内（含 `event-sourcing-closeout`、`turn-event-log`、`session-projection-layer`、`trace-event-projection`）。已立卡 `PA-102`。
+- **工作树噪音**：`src-tauri/gen/schemas/*.json` 显示被修改，diff 仅为"文件末尾无换行"，属 `tauri dev` 生成物。
 
 ## 当前进行中
+
+- **PA-101 安全与发版流水线三件套已收口（2026-09-25 实现，2026-09-30 补齐收尾账）**
+  F1 `platform.rs` URL scheme/host 白名单（fail-closed）+ Win32 `ShellExecuteW` 替代 `cmd /c start` + 前端 `openExternalUrl()` 统一出口；F2 `dompurify@3.4.16` 替代手写正则消毒（红队 29/29）；F3 `tauri.conf.json` 纳入四处版本同步链 + `check-version-sync.ps1` CI 门禁 + ADR 0017（supersedes 0012）。验证：cargo(tauri) 17 + core 962 + vitest 568 + 版本同步 + cmd-start 零残留。提交 `f4970a0`（core 层）、`cd96884`（F1/F2/F3 主提交）、`4d40ce9`（任务卡收口）。
+  **2026-09-30 补齐**：canonical spec `openspec/specs/update-security-and-release-followups/spec.md`（此前缺失）、change 归档 `openspec/changes/archive/2026-09-25-pa101-update-followups/`、tasks.md 15 项全部勾选。归档前逐条实测复核 F1/F2/F3 as-built 证据，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。
 
 - **事件溯源演进主线（PA-091~094）已全部收口（2026-08-20）；ADR 0008 完成度审核产出收尾卡 PA-095（2026-08-21）**
   阶段 1-4 连续完成：`PA-091`（turn 事件日志，`turn_events` append-only + 15 类 `TurnEvent`）、`PA-092`（投影层，History/Trace/Plan/Metrics 四投影）、`PA-093`（checkpoint 引用化，event_seq_range + 分支可见性）、`PA-094`（trace 事件化——trace 表降级为投影缓存带 seq 水位、timeline 事件折叠映射表、ProviderCallCacheRecord 由 MetricsProjection 重建、大字段外置 `bco` 引用 + `load_build_context_observation` host command、三终态发射 turn/end + provider/usage（per-call 逐条）+ user/message）。**三轮 3 路对抗审核（code-reviewer + consultant + tester + ox-alpha 模型）全部采纳修复**：seq=0 watermark、completed 拆批、ProviderUsage step 坍缩、UserMessage 缺失、多分支重建丢失、事件缓冲跨 session、前端 ref 缓存串数据、prefix reason Debug 格式、顶层 token 非累计、普通 streaming watermark、failed/cancelled usage 缺失、legacy observation 清表丢失、重建回写预热。验证：core 849 + src-tauri 6 + 前端 399 全绿。OpenSpec changes 已归档，canonical specs 已同步。**2026-08-21 对照 ADR 0008 原文完成度审核**：确认 7 项承诺缺口（同步 run_turn 绕过事件流、append_turn 未改造为事件折叠、对拍测试缺失、StepStart/StepEnd 不发射、schema_version 未落地、cursor_version 未退役、trace cache 内嵌大字段），正式立卡 **PA-095（事件溯源收尾，P0）** 作为 ADR 0008 的关闭条件。**2026-08-22 PA-095 已完成并收口**：7 项缺口全部关闭（run_turn 事件化 / append_turn 投影化整包写=0 / 对拍 7 场景全绿 / StepStart-StepEnd + chunk step / schema_version 契约 / cursor_version 退役水位替代 / trace cache ref-only），实施后三路对抗审核 10 项修复落地，验证 core lib 867×4 全绿。提交 `9d30c00`；change 已归档 `archive/2026-08-22-event-sourcing-closeout/`，canonical spec `openspec/specs/event-sourcing-closeout/spec.md`。残余：#2 阶段 B 行级 facet 增量、squash 生产入口、append_turn panic Result 化评估（后续卡）。

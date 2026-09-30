@@ -29,7 +29,7 @@ Status: implemented
 ## 决策
 
 1. **接替 [0012](superseded/0012-app-update-check-via-github-releases.md)**：承接其前端更新检测设计，重述并强化版本与流水线约束。
-2. **四处版本一致性**：仓库内 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`.version.json` 保持严格一致。一次性修复历史残留的 `0.1.0` 为 `0.1.91`。
+2. **四处版本一致性**：仓库内 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`.version.json` 保持严格一致。一次性修复历史残留的 `0.1.0` 为当时的 tauri 版本（修复后随发版推进至 `0.1.92`；`npm run version:check` 为当前口径的唯一事实源）。
 3. **版本工具链升级**：
    - `scripts/bump-version.ps1` 在更新 tauri 目标时，以键级正则替换同步修改 `tauri.conf.json` 的 `"version"` 字段；
    - 增加只读检查脚本 `scripts/check-version-sync.ps1`，并在 `.github/workflows/ci.yml` 与 `npm run verify` 中接入。

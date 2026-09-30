@@ -66,3 +66,6 @@ tsconfig.tsbuildinfo
 
 # start-tauri-dev.ps1 的启动器 pid 记录（强杀/崩溃时 finally 清理不会执行）
 .tauri-dev.pid
+
+# DSH Windows 沙箱 ACL 修复的备份与回滚脚本（本地环境产物，不含项目内容）
+.acl-recovery/

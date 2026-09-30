@@ -80,3 +80,13 @@ PA-099（应用内更新检测）已收口，但 tasks.md 登记三个独立 fol
 - `npx vitest run`: 38 files / 568 passed / 10 skipped
 - `check-version-sync.ps1`: PASSED（core 0.1.90, tauri 0.1.92）
 - `git grep "cmd.*/c.*start"`: clean
+
+### 收尾补齐（2026-09-30）
+
+本卡在 2026-09-25 提交时，代码与门禁均已完成，但**流程账未结清**：canonical spec 缺失、OpenSpec change 未归档、`tasks.md` 15 项未勾选（`openspec list` 曾显示 `0/15 tasks`）。2026-09-30 补齐：
+
+- 新建 canonical spec `openspec/specs/update-security-and-release-followups/spec.md`（按 canonical 格式重写 delta 的 4 ADDED / 2 MODIFIED / 1 REMOVED）。
+- change 迁入 `openspec/changes/archive/2026-09-25-pa101-update-followups/`，`tasks.md` 15 项全部勾选并补收口记录。
+- 归档前逐条实测复核 F1/F2/F3 as-built 证据；`openspec validate update-security-and-release-followups --strict` 通过，`openspec list` 返回 `No active changes found`。
+- 版本文字更正：上表门禁行的 tauri 版本为 0.1.92（本卡正文早期写的 0.1.91 是修复前的历史记录，非当前值；当前 `npm run version:check` PASSED 于 tauri 0.1.92 / core 0.1.90）。
+- 会话日志：`99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。
