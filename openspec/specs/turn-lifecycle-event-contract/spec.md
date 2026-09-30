@@ -1,4 +1,10 @@
-## ADDED Requirements
+# turn-lifecycle-event-contract Specification
+
+## Purpose
+
+规范 Pony Agent 的 canonical turn 生命周期与事件契约（PA-031）：定义 turn phase 的 canonical 语义、生命周期事件流的名称、顺序与 terminal 基线、多 hop model/tool 执行边界的表达方式，以及 `checkpointing` phase 与前端消费读面的约束，使执行、trace、checkpoint 与前端消费基于同一套 phase vocabulary 与事件名集合观测同一个 turn。
+
+## Requirements
 
 ### Requirement: Runtime SHALL expose a canonical turn lifecycle
 Pony Agent SHALL 为每个 turn 暴露统一的生命周期阶段语义，使执行、trace、checkpoint 与前端消费基于同一套 phase vocabulary。

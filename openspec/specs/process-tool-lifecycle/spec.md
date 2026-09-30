@@ -1,6 +1,10 @@
-# process-tool-lifecycle Spec
+# process-tool-lifecycle Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 受控进程工具族的运行时契约：可持续命令执行以 start、poll、write-stdin 与 kill 生命周期表达，进程输出在运行期间并发排空并有稳定预算，timeout/cancel/explicit kill/session shutdown 时清理完整进程树；start、stdin、kill 各自做权限决策，process handle 绑定 session/run/owner 且子进程环境最小化，无人值守 Run 必须在真实 sandbox backend 可用时才可执行，否则 fail closed。原为 delta 格式（PA-076，change `2026-08-05-harden-and-expand-agent-tool-runtime`），按 canonical 格式规范化，语义未变。
+
+## Requirements
 
 ### Requirement: Process execution SHALL have an explicit lifecycle
 

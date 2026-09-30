@@ -1,6 +1,10 @@
-# turn-event-log Delta
+# turn-event-log Specification
 
-## ADDED Requirements
+## Purpose
+
+规范事件溯源演进阶段 1（PA-091、ADR 0008）的 turn 内事件日志契约：`turn_events` append-only 表与归档表保留 `seq`/PK 的语义、`domain/action` 命名的事件类型词汇表与发射映射、turn 终态缓冲 flush 与失败分层、双写期既有 blob 消费方零回归，以及 legacy 快照的 per-session 幂等回填与截断损失声明。原为 delta 格式，2026-09-30 按 canonical 格式规范化（PA-102），语义未变。
+
+## Requirements
 
 ### Requirement: turn_events table
 

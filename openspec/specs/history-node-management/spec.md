@@ -1,4 +1,8 @@
-# History Node Management
+# history-node-management Specification
+
+## Purpose
+
+规范 Pony Agent 的历史节点管理契约（PA-028）：可恢复的会话历史 SHALL 由不可变历史节点与显式分支构成，明确定义 transcript-only 与 transcript-and-workspace 两种 checkout 语义、当前可见节点与活跃分支 latest 的区分、从指定历史节点重建检索上下文与运行时视图，以及 Tauri 前端对历史态与分叉分支的显式呈现。原为 delta 格式，2026-09-30 按 canonical 格式规范化（PA-102），语义未变。
 
 ## Requirements
 

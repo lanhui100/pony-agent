@@ -1,4 +1,8 @@
-# Cache Hit Optimization
+# cache-hit-optimization Specification
+
+## Purpose
+
+规范 Pony Agent 运行时缓存命中优化的工程契约（任务卡 `PA-029`）：provider 调用级 cache telemetry（区分 `initial_request` 与 `tool_followup`）、turn 聚合与 per-call 明细并存、前缀变更原因记录，以及把高波动注释移出最早 stable prefix 的第一版前缀稳定化，同时保留 `PA-025` 的三层 build-context 观测语义。原为 delta 格式，2026-09-30 按 canonical 格式规范化（`PA-102`），语义未变。
 
 ## Requirements
 

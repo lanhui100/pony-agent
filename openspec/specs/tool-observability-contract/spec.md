@@ -1,6 +1,10 @@
-# tool-observability-contract Spec
+# tool-observability-contract Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 工具系统的可观测与展示读面契约：前端、trace、monitor 与 session drilldown SHALL 共享同一套稳定工具展示字段，并统一本地化展示名、复合工具子步骤、权限与失败状态、附件与子结果容器的展示语义，以及新旧工具迁移期的展示兼容与回退口径。该契约由任务卡 `PA-049` 建立；`PA-076` 追加 dispatcher 生命周期、资源预算、deferred 工具提升与敏感输入摘要四条可观测要求。
+
+## Requirements
 
 ### Requirement: Tool activity surfaces SHALL share a stable display field set
 

@@ -1,6 +1,10 @@
-# web-access-safety Spec
+# web-access-safety Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 中任意 URL 网络抓取（WebFetch）的安全契约：对初始请求与每次 redirect 的 scheme、host、解析地址、port 与 credentials 做网络范围校验，用可注入 resolver 与 pinned connector 把已验证目标绑定到实际连接并逐跳校验 peer IP，默认忽略环境代理，对响应时间、redirect 次数、正文大小与解码内容施加 hard limits，并按 content type 区分可解码文本与不支持的二进制内容。对应任务卡 `PA-076` 与已归档 change `2026-08-05-harden-and-expand-agent-tool-runtime`。原为 delta 格式，2026-09-30 按 canonical 格式规范化（PA-102），语义未变。
+
+## Requirements
 
 ### Requirement: Web access SHALL validate every network target
 

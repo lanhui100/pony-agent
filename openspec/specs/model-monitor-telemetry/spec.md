@@ -1,4 +1,8 @@
-# Model Monitor Telemetry
+# model-monitor-telemetry Specification
+
+## Purpose
+
+规范 Pony Agent 模型监控与遥测聚合读面的契约：overview 与 provider/model/tool/session 维度聚合读模型、会话下钻与 trace 证据联动、检索可观测性作为一等监控维度、trace 步骤（`prepare_retrieval`、`build_context`、`call_model`、`call_tool`、`return_result`）的显示语义，以及 Tauri 面向 `ModelMonitorPage` 提供的 summary 与 drill-down 读接口。对应任务卡 `PA-024`，并以 `PA-025` build-context 语义、`PA-029` cache 遥测捕获为上游输入，不扩展到 provider 执行、prompt 组装或远程分析设施。
 
 ## Requirements
 

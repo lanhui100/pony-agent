@@ -1,6 +1,10 @@
-# tool-system-contract Spec
+# tool-system-contract Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 工具系统的统一契约与暴露边界：模型可见工具名、canonical tool name 与 execution primitive 的分层标识模型，统一的 `ToolDefinition / ToolCall / ToolResult / ToolFailureKind` 合同，工具分类与暴露策略，以及展示层元数据与底层工具标识的分离。同时收口单一描述符真相源、显式执行策略、别名唯一性与版本化且命名空间安全的 registry snapshot 边界。该契约由 PA-045 建立，PA-076 扩展为单一描述符来源并要求所有执行来源走统一 dispatcher。
+
+## Requirements
 
 ### Requirement: The system SHALL separate model-visible tool names from internal execution primitives
 

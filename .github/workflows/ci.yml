@@ -40,6 +40,12 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      # PA-102：canonical spec 曾长期漂移（39/53 为 delta 格式）而无人发现，
+      # 因为 strict 校验从未进 CI。必须在 npm ci 之后（依赖 OpenSpec CLI）。
+      - name: OpenSpec 严格校验（specs + changes）
+        shell: pwsh
+        run: ./scripts/check-openspec.ps1
+
       - name: 类型检查
         run: npm run typecheck
 

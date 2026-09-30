@@ -1,6 +1,10 @@
-# trace-event-projection Delta
+# trace-event-projection Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 trace 事件化（ADR 0008 阶段 4，任务卡 `PA-094`）后 trace 投影的运行时契约：trace 表降级为 `TraceProjection` 的持久化缓存（事件权威、清表可重建、每行携带 seq 水位），`trace_timeline` 按事件映射表折叠、`provider_call_records` 由 `MetricsProjection` 从 `ProviderUsage` 事件生成，前端 trace 视图与消息视图从同一份事件派生，大字段（`build_context_observation`）以引用外置存储并按需加载。本文件原为 delta 格式，2026-09-30 依 PA-102 按 canonical 格式规范化，语义未变。
+
+## Requirements
 
 ### Requirement: Trace as projection cache
 

@@ -20,16 +20,17 @@
 
 ## Ready
 
-- `PA-102` canonical spec 库存规范化与仓库卫生（P1，Complexity B）
-  说明：**2026-09-30 立卡**——`openspec validate --all --strict` 全库体检发现 **39 / 53 份 canonical spec 不合规**（仍为 delta 格式，缺 `## Purpose`/`## Requirements`；非本轮引入，事件溯源主线多份在内，含 `event-sourcing-closeout`），另加 `src-tauri/gen/schemas/*.json` 恒常换行噪音、以及散落在各卡的残余待办收敛。任务卡：`03_TASKS/PA-102-canonical-spec-normalization-and-repo-hygiene.md`。发现经过见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。
-
 - 其余暂无（2026-09-30 复核：PA-095/PA-084~087/PA-081/PA-101 均已完成并归档，条目在 Done 区）
 
 
 
 ## In Progress
 
-- 暂无
+- `PA-102` canonical spec 库存规范化与仓库卫生（P1，Complexity B）
+  说明：**2026-09-30 立卡并推进**——`openspec validate --all --strict` 全库体检发现 **39 / 53 份 canonical spec 不合规**（仍为 delta 格式，缺 `## Purpose`/`## Requirements`；非本轮引入，事件溯源主线多份在内，含 `event-sourcing-closeout`），另加 `src-tauri/gen/schemas/*.json` 恒常换行噪音、以及散落在各卡的残余待办收敛。
+  **§1 已完成**：38 份 spec 结构规范化（补 `## Purpose`、`## ADDED Requirements`→`## Requirements`、`Scope` 并入 Purpose），全库 `53 passed / 0 failed`；防漂移验证对全部 38 份做了需求/场景标题集合差分，**零语义漂移**；新增 `scripts/check-openspec.ps1` 并接入 CI 与 `npm run verify`（双态实测通过，过程中修掉门禁自身的 BOM 与 native-stderr 两个缺陷）。
+  **§2/§3 待决策**：`src-tauri/gen/schemas/` 产物定位、残余待办优先级（属产品/排期判断）。
+  任务卡：`03_TASKS/PA-102-canonical-spec-normalization-and-repo-hygiene.md`。发现经过见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。
 
 ## Review
 

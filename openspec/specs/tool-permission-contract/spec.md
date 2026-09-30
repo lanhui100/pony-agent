@@ -1,6 +1,10 @@
-# tool-permission-contract Spec
+# tool-permission-contract Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 工具系统的统一权限事实与审批契约：`ToolPermissionFacts` 等稳定字段的暴露面、工具定义层与权限决策层的分层边界、`permission_denied` / `approval_required` / `out_of_scope` 等失败的机器可读归一化，以及 builtin descriptor、capability bridge、skill 与 composite tool 在权限聚合上的保守上收和每个实际执行子调用的独立鉴权。原为 delta 格式，按 canonical 格式结构规范化，语义未变（PA-047、PA-076）。
+
+## Requirements
 
 ### Requirement: The system SHALL define unified tool permission facts
 

@@ -1,19 +1,12 @@
-# third-wave-default-tool-alignment Spec
+# third-wave-default-tool-alignment Specification
 
-## Scope
+## Purpose
 
-This canonical spec captures the stable product-level contract for the third-wave default tool alignment.
-It focuses on the long-lived boundary, sequencing, and non-goals for:
+规范第三波默认工具对齐（`Plan`、`Ask`、`MCP Resource`、`ToolSearch`、`Run`）的稳定产品级契约：这 5 个默认工具视为同一波次收口的长期边界、收口顺序与非目标；对应任务卡 `PA-055` 与 change `add-third-wave-default-tool-alignment`。
 
-- `Plan`
-- `Ask`
-- `MCP Resource`
-- `ToolSearch`
-- `Run`
+实现细节、临时兼容选择与会话级评审细节 SHOULD 留在 change artifacts 或 task-system 记录中，不在此处展开。
 
-Implementation notes, temporary compatibility choices, and per-session review details SHOULD remain in change artifacts or task-system records rather than being expanded here.
-
-## ADDED Requirements
+## Requirements
 
 ### Requirement: The system SHALL align a third wave of default tools as one implementation package
 

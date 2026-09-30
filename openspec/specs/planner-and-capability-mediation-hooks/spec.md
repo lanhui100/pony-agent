@@ -1,4 +1,10 @@
-## ADDED Requirements
+# planner-and-capability-mediation-hooks Specification
+
+## Purpose
+
+规范 planner 与 capability mediation hooks 的契约：hooks 只消费规范化 planner facts 与 capability mediation envelope，通过既有 capability bridge / skill ingress 边界中介而不得绕开 registry；transform 仅允许改写预先声明的白名单字段，其余字段保持只读；hooks 不得演化成第二 scheduler 或第二 capability registry，其 evidence 须可进入 trace / monitor / control-plane 读面。原为 delta 格式，现按 canonical 格式规范化（PA-040），语义未变。
+
+## Requirements
 
 ### Requirement: Planner hooks SHALL consume normalized planner facts only
 planner hooks SHALL 只消费规范化 planner facts，而不是 provider raw protocol 或 UI 私有状态。

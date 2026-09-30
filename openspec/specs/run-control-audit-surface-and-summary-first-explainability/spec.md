@@ -1,4 +1,10 @@
-## ADDED Requirements
+# run-control-audit-surface-and-summary-first-explainability Specification
+
+## Purpose
+
+规范 Pony Agent 的 `Run Control audit surface v1`（PA-043）契约：为 `stop / continue / resume / replay(start)` 四类 run-control 动作提供统一、可持久化、reload 后可读回的 `RunControlAuditSummary`，并规定该 summary 必须由既有 persisted evidence 与 run truth-source 投影而来，只能是只读审计面，不得反向成为 `submission plan / checkpoint / graph phase` 的仲裁输入。同时规范前端 run-control explainability 以 summary-first 方式消费该契约，且 `PA-043 v1` 不覆盖普通首轮 `start_graph_run_stream`，也不重做 `PA-037` 已成立的按钮编排、disabled reason 与状态语言。
+
+## Requirements
 
 ### Requirement: PA-043 v1 SHALL expose a canonical run-control audit summary
 Pony Agent SHALL 为 run-control 读面提供 canonical audit summary，使前端和调试面能够直接理解最近一次 `stop / continue / resume / replay(start)` 动作，而不是自行拼装多份局部字段。

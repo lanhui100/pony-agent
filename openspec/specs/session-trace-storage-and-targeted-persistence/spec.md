@@ -1,4 +1,10 @@
-## ADDED Requirements
+# session-trace-storage-and-targeted-persistence Specification
+
+## Purpose
+
+规范 live session trace 独立于 `sessions.session_data` blob 的持久化契约（任务卡 `PA-058`）：以 `session_turn_traces` 等独立存储承载当前分支的 trace，由 feature flag 约束 `Off -> DualWrite -> WriteSeparate` 的迁移阶段与 dual-read / dual-write 行为。契约同时固定上层读面不变（`SessionSnapshot.turn_trace_history`）、`HistoryNode.turn_trace_history` 仍是历史快照真相源，以及事务一致性、按 `DEFAULT_HISTORY_LIMIT` 清理、session 删除级联与坏行降级等安全行为。
+
+## Requirements
 
 ### Requirement: Live session traces SHALL support storage independent from session blob
 Pony Agent 的 live session trace SHALL 能独立于 `sessions.session_data` blob 持久化，而不要求每次 trace 更新都重写整个 session blob。

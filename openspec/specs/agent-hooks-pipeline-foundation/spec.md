@@ -1,4 +1,10 @@
-## ADDED Requirements
+# agent-hooks-pipeline-foundation Specification
+
+## Purpose
+
+规范 Pony Agent 受控 hooks pipeline foundation 的契约（PA-033）：hooks 只能挂接在 canonical lifecycle boundary 上、按类别显式声明失败策略与恢复模式、以稳定顺序执行并遵循固定冲突裁决、通过结构化结果（`observe / allow / deny / patch / side-effect-request`）影响系统，以及其持久化证据与 trace / audit 读面要求。原为 delta 格式，本次按 canonical 格式规范化，语义未变。
+
+## Requirements
 
 ### Requirement: Hooks SHALL attach only to canonical lifecycle boundaries
 Pony Agent 的 hooks SHALL 只允许挂接在 canonical lifecycle boundary 上，而不是任意插入 runtime 内部细节。

@@ -1,6 +1,10 @@
-# checkpoint-event-referencing Delta
+# checkpoint-event-referencing Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 checkpoint 引用化（ADR 0008 阶段 3，任务卡 PA-093）的运行时契约。范围包括：`HistoryNode` 由内嵌全量快照改为 `event_seq_range` 事件区间引用（无区间的 legacy 节点走内嵌兜底），checkout 退化为追加 `checkpoint/checkout` 事件并移动投影水位（含 MetricsProjection 缓存同步回退），fork 共享事件前缀、仅分叉水位，投影折叠按分支可见性跳过被撤回分支的事件，任意节点可由事件折叠实现时间旅行，以及 `cursor_version` 乐观锁由 seq 水位取代。
+
+## Requirements
 
 ### Requirement: Node event referencing
 

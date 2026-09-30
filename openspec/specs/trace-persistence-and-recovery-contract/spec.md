@@ -1,4 +1,10 @@
-## ADDED Requirements
+# trace-persistence-and-recovery-contract Specification
+
+## Purpose
+
+规范 Pony Agent 桌面运行时的 trace 持久化与恢复契约：后端已持久化 trace 数据是 canonical truth，运行中控制用 checkpoint 与可恢复 checkpoint 的语义必须显式区分，history checkout 必须明确返回 transcript 与 workspace 两个维度的恢复或降级结果，前端只消费而不发明 canonical trace 指标与恢复语义。对应任务卡 PA-032 与 OpenSpec change `add-trace-persistence-and-recovery-contract`。
+
+## Requirements
 
 ### Requirement: Backend trace persistence SHALL be the canonical source of truth
 Pony Agent 的桌面运行时 SHALL 以后端持久化 trace 数据作为 canonical truth，而不是由前端在 reload 后重新拼装新的指标真相。

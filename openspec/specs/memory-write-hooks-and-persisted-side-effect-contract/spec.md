@@ -1,4 +1,10 @@
-## ADDED Requirements
+# memory-write-hooks-and-persisted-side-effect-contract Specification
+
+## Purpose
+
+规范 memory-write hooks 与 persisted side-effect 的契约：memory-write hooks SHALL 只消费规范化写入意图，而不是直接操作底层 store；声明 `persisted_effect` 的 hook SHALL 同时声明最小持久化证据与 recovery 判定依据，证据不足时默认回退到 `replay_required`；hook 的 deny / transform / observe 决策与 evidence SHALL 进入 session truth-source，并在 reload 后可被 control-plane / runtime view 读回。对应任务卡 `PA-039`，边界承接 `PA-018` / `PA-032` / `PA-033`。
+
+## Requirements
 
 ### Requirement: Memory-write hooks SHALL consume normalized write intents
 系统 SHALL 只允许 memory-write hooks 消费规范化写入意图，而不是直接操作底层 store。

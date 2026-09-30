@@ -1,4 +1,10 @@
-## ADDED Requirements
+# runtime-hook-dispatch-on-stable-boundaries Specification
+
+## Purpose
+
+规范 Pony Agent 在 hooks foundation（`PA-033`）之上把 hook dispatch 正式接入 runtime 的契约：runtime 只在一组已真实发射并可验证的稳定 canonical lifecycle boundary 上执行 hooks，保持 registry 顺序、受控失败语义与受控扩展边界，并让 `HookExecutionResult -> HookTraceRecord -> TurnStreamEvent / TurnTraceRecord` 的 trace evidence 链可写、可 reload。对应任务卡 `PA-035`；本契约不吸收 prepare/context build 早期 boundary，也不扩展到 `run / memory write / planner / skills / MCP` 范围。
+
+## Requirements
 
 ### Requirement: Runtime SHALL dispatch hooks only on stable canonical boundaries
 runtime SHALL 只在已真实发射并可验证的 canonical lifecycle boundary 上执行 hooks。

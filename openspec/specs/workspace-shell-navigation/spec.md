@@ -1,4 +1,12 @@
-# Workspace Shell Navigation
+# workspace-shell-navigation Specification
+
+## Purpose
+
+规范 Pony Agent 工作台外壳的信息架构与导航契约：对话页右侧栏只承载会话过程面板（状态 / Plan / Debug），Turn trace 与模型指标收敛为由右栏浮动图标进入的二级「观测」页（Trace tab 仅 coding 模式，指标 tab 双模式可见），工具目录与设置迁入 tab 化配置页，左侧栏以工作区区段为第一优先。
+
+同时规范提供商管理页的扁平提供商列表与「提供商详情 / 模型列表」两级折叠详情交互（折叠即取消编辑态、空闲行尾操作仅悬停或键盘聚焦时可见），以及页签与配置页的 WAI-ARIA APG 键盘漫游与页面切换焦点落点。
+
+对应任务卡 `PA-096` 与 OpenSpec change `openspec/changes/archive/2026-08-22-workspace-shell-layout-optimization/`，以及后续观测入口与提供商层级变更 `openspec/changes/archive/2026-08-24-workspace-nav-observation-entry-and-provider-hierarchy/`。
 
 ## Requirements
 

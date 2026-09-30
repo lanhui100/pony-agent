@@ -55,17 +55,29 @@ F1/F2/F3 as-built 实测证据：
 
 PA-101 的**代码与门禁本身是完整的**（17 + 962 + 568 测试全绿、`cmd /c start` 零残留、四处版本一致）。欠的只是流程账：canonical spec 未同步、change 未归档、tasks.md 未勾选。本轮全部结清。
 
+## 后续同轮进展：PA-102 §1 完成
+
+同上会话继续推进 PA-102，§1（canonical spec 规范化 + CI 门禁）已完成：
+
+- **诊断比立卡假设更简单**：38 份失败 spec 的原因**完全统一**——只缺 `## Purpose`。30 份需把 `## ADDED Requirements` 改名 `## Requirements`；8 份已有 `## Requirements`；`third-wave-default-tool-alignment` 的 `## Scope` 并入 `## Purpose`。立卡时设想的 MODIFIED/REMOVED 合并问题实际几乎不存在（仅 `event-sourcing-closeout` 一份含 MODIFIED）。
+- **执行**：样板（`event-sourcing-closeout`）手工完成后，37 份交给 37 个并行子代理，每份独立读写并自跑 `validate` 自证。
+- **防语义漂移（关键）**：对全部 38 份做 `git show HEAD:<file>` 与工作树的语义不变量差分——逐份比对 `### Requirement:` 与 `#### Scenario:` 的**数量与规范化标题文本集合**。结果**零漂移**；唯一差异是样板中两条需求标题去掉的跨 spec 来源标注，来源已改记在 Purpose 与条内引用块。
+- **行尾卫生**：产出中 4 份缺结尾换行、1 份（`workspace-shell-navigation`）含 128 处 CRLF（违反 `.gitattributes` 的 `*.md text eol=lf`），已统一为 LF + 恰好一个结尾换行。此类"产出未过 EOL 卫生"是已知复发点。
+- **CI 门禁**：新增 `scripts/check-openspec.ps1`（只读、解析 `Totals:` 行作判据、exit 0/1），接入 `.github/workflows/ci.yml`（置于 `npm ci` 之后）与 `package.json` 的 `npm run verify`（新增 `openspec:check`）。
+- **门禁自身两个缺陷由双态实测暴露并修掉**（非推测）：① 脚本无 BOM 保存 → Windows PowerShell 5.1 按 ANSI 解码中文导致**语法错误**，已加 UTF-8 BOM；② 在 `$ErrorActionPreference='Stop'` 下 `2>&1` 捕获 native 命令 → OpenSpec 向 stderr 打印进度被提升为终止性 ErrorRecord，脚本**误判失败**，已在调用处临时降级为 `Continue` 且判据只认 stdout。
+- **未决**：§2（`src-tauri/gen/schemas/` 产物定位需先决策，不宜单方面 gitignore）、§3（残余待办优先级属产品/排期判断）。
+
 ## 下一步最小动作
 
-1. 处理 PA-102：39 份 delta 格式 canonical spec 的批量规范化（先做一份样板并复验 `validate --strict`，再批量）。
-2. 工作树噪音：`src-tauri/gen/schemas/*.json` 的"文件末尾无换行"差异已确认是 tauri dev 生成物；本轮已把 `.acl-recovery/` 入 `.gitignore`。
-3. 若继续 Phase 8，从 PA-102 卡中登记的残余清单（Job Object containment、完整 SandboxBackend、`McpResourceSurface` 接线、事件溯源 facet 增量等）选取。
+1. **PA-102 §2**：先决策 `src-tauri/gen/schemas/` 是"随 `tauri dev` 重生成的产物"还是"应随源码评审的契约文件"，再选 gitignore 或构建后补 LF。
+2. **PA-102 §3**：逐条给残余待办定去向（已做 / 立卡 / 明确不做并写理由）。
+3. 若继续 Phase 8，从 PA-102 卡 §3 登记的残余清单（Job Object containment、完整 SandboxBackend、`McpResourceSurface` 接线、事件溯源 facet 增量等）选取。
 
 ## Resume Hint
 
 继续前先看：
 
 - `management/task-system/03_TASKS/PA-101-update-security-and-release-followups.md`
-- `management/task-system/03_TASKS/PA-102-*.md`
+- `management/task-system/03_TASKS/PA-102-canonical-spec-normalization-and-repo-hygiene.md`
 - `openspec/specs/update-security-and-release-followups/spec.md`
 - `management/task-system/00_DASHBOARD.md`

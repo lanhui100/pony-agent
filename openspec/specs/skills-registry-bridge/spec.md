@@ -1,4 +1,8 @@
-# Skills Registry Bridge
+# skills-registry-bridge Specification
+
+## Purpose
+
+规范 Pony Agent 的 skills registry bridge（PA-021）契约：技能作为位于统一 capability registry 之上的能力组合层，而不是宿主私有脚本或第二套发现系统；桥接层需提供规范化的 skill manifest/registry 与检视入口，保持 `tool`/`resource`/`prompt_template` 组合语义，并让 planner/runtime 只依赖规范化 skill facts。同时约定 skill 注册与执行的宿主无关读写/调用边界、复用既有权限与失败分类、以及可经既有监控链路读取的 skill 血缘，并明确本变更不吸收 lifecycle hooks、workflow mode、marketplace 与 planner 重设计范围。原为 delta 格式，2026-09-30 按 canonical 格式规范化（PA-102），语义未变。
 
 ## Requirements
 

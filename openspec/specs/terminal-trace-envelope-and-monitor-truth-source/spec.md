@@ -1,4 +1,10 @@
-## ADDED Requirements
+# terminal-trace-envelope-and-monitor-truth-source Specification
+
+## Purpose
+
+规范 Pony Agent 的 terminal trace envelope 与 monitor 真相源契约：completed、failed、cancelled 三类 terminal persisted trace SHALL 统一持有 canonical terminal event envelope（`eventId / eventType / eventVersion / sequence / emittedAtMs`），monitor / control-plane 聚合 SHALL 以 persisted terminal trace 为唯一真相源，前端 SHALL NOT 在 envelope 缺失时自行推导 canonical terminal metrics。对应任务卡 `PA-036`（change `add-terminal-trace-envelope-and-monitor-truth-source`），terminal event 集合复用 `PA-031` 已定义的 canonical terminal lifecycle event。
+
+## Requirements
 
 ### Requirement: Persisted terminal traces SHALL carry canonical terminal envelope across sync and stream paths
 Pony Agent SHALL 为 completed、failed、cancelled 三类 terminal persisted trace 统一持有 canonical terminal event envelope，而不区分该 turn 源自 sync `run_turn()` 还是 streamed turn。

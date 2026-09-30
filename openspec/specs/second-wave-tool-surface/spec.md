@@ -1,6 +1,10 @@
-# second-wave-tool-surface Spec
+# second-wave-tool-surface Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 第二批工具面的契约：区分首批已冻结但尚未真实实现的合同缺口（`Edit` / `Write` / `Run`）与真正新增的第二批能力，并按 Phase A~D 定义最小 coding loop 的收口顺序、代码库探索增强层（`Glob` / `Grep`）、外部读取层（`WebFetch` / `WebSearch`）以及 MCP 资源桥接与工具发现治理层的稳定边界与进入条件，同时明确哪些更大能力面不在本 change 的近线范围内。对应任务卡 `PA-050` 与 OpenSpec change `add-second-wave-tool-surface`（2026-06-15 归档）；原为 delta 格式，现按 canonical 格式规范化，语义未变。
+
+## Requirements
 
 ### Requirement: The system SHALL distinguish first-wave contract gaps from second-wave new capabilities
 

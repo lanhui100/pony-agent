@@ -1,6 +1,10 @@
-# tool-runtime-dispatch Spec
+# tool-runtime-dispatch Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 工具运行内核的统一分发契约：以单一 registry descriptor 表达工具身份，builtin、MCP、skill、dynamic 与 composite child 调用统一经过同一 dispatcher 生命周期，并覆盖调用来源授权、可改写 hook 后的最终参数重新鉴权、`ToolOutcome` 执行状态与 control outcome 的分离、nested dispatch 预算与取消，以及模型可见性与可执行性分离的动态暴露边界。对应任务卡 `PA-076` 与 OpenSpec change `harden-and-expand-agent-tool-runtime`（已归档）。
+
+## Requirements
 
 ### Requirement: Every executable tool SHALL be represented by one registry descriptor
 

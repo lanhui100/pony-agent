@@ -1,4 +1,10 @@
-## ADDED Requirements
+# session-control-surface-and-feedback-loop Specification
+
+## Purpose
+
+规范 session 控制交互面与反馈闭环的前端契约（任务卡 PA-037）：stop / resume / continue / replay 等控制动作 SHALL 有显式用户入口，checkout / restore 的结果（含 transcript-only 降级与工作区未恢复、branch / visible node / mode 变化）SHALL 对用户可见，且 `live / historical / historical_dirty / paused / recovery-capable` SHALL 收口为统一用户状态语言。该契约只在前端既有 submission plan / runtime store / history graph 边界上做展示与派发，不新增 replay backend command，也不新增前端私有语义位。
+
+## Requirements
 
 ### Requirement: Session control actions SHALL be explicit in the frontend
 Pony Agent 前端 SHALL 为 stop、resume、continue、replay 等 session 控制动作提供显式入口，而不是只依赖下一次用户提交去隐式触发 runtime store 仲裁。

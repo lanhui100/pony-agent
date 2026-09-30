@@ -1,4 +1,10 @@
-## ADDED Requirements
+# checkpoint-lifecycle-boundary Specification
+
+## Purpose
+
+规范 Pony Agent turn 执行链在真实持久化提交边界发射并持久化 canonical checkpoint lifecycle 事件的契约：`checkpointing` phase 与 `turn.checkpoint_persisted` 须对应真实持久化边界并与 hooks `CheckpointPersistStart / End` 对齐，persisted trace / reload 与前端 hydration 须仍能读回这组 evidence，且该 boundary 只表达生命周期事实、不自动承诺 recovery capability。对应任务卡 `PA-034`（change `add-checkpoint-lifecycle-boundary-implementation`）。
+
+## Requirements
 
 ### Requirement: Runtime SHALL emit canonical checkpoint lifecycle boundaries
 Pony Agent 的 turn 执行链 SHALL 在真实持久化提交边界发射 canonical checkpoint lifecycle 事件，而不是只在文档里声明 `checkpointing`。

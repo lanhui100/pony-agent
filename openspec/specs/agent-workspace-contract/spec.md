@@ -1,6 +1,12 @@
-# agent-workspace-contract Spec
+# agent-workspace-contract Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 agent run 的 workspace 正式合同与路径边界（任务卡 PA-046）：把 workspace 确立为运行时上下文边界而非隐式实现细节，统一相对路径解析基准、基于路径访问前的 canonicalize 与越界拒绝、工作区内路径的相对化展示，以及有界路径修复的规则。
+
+同时规范文件与目录类工具的 workspace 默认范围、执行类工具的默认工作目录边界，以及 workspace 作为 runtime、tool、trace、permission 与 host seam 共享的上下文真相源。
+
+## Requirements
 
 ### Requirement: The system SHALL define workspace as a formal runtime boundary
 

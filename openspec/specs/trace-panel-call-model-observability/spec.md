@@ -1,4 +1,10 @@
-## ADDED Requirements
+# trace-panel-call-model-observability Specification
+
+## Purpose
+
+规范前端 trace 面板中单次 `call_model` 节点的可观测性契约：每个 `call_model` 节点 SHALL 优先展示该次模型调用自身的缓存命中、TTFT、输出 token 与耗时指标，如实展示该次调用实际产出的工具调用输出与消息输出，并在多 hop 链路上保持输出归因稳定（前序 hop 不得借用后续 hop 的指标或输出）。验收 SHALL 由 `tests/HomeSidebar.spec.ts` 与 `tests/runtime-store.spec.ts` 的前端高层联动测试锁定，而非人工目测。对应任务卡 `PA-030` 与 OpenSpec change `add-trace-panel-call-model-observability`。
+
+## Requirements
 
 ### Requirement: Trace panel SHALL expose per-call-model cache hit and TTFT metrics
 前端 trace 面板中的每个 `call_model` 节点 SHALL 优先展示该次模型调用自己的 token 与延时指标，而不是只展示整轮 turn 聚合值。

@@ -1,4 +1,8 @@
-# MCP Capability Bridge
+# mcp-capability-bridge Specification
+
+## Purpose
+
+规范 MCP 能力接入桥（PA-020）的契约：MCP 作为 capability-ingress 层，把外部 MCP 工具、资源与 prompt 类能力规范化成 planner 与 runtime 可消费的能力事实，并与 builtin 能力共用统一的能力注册表视图。同时规范权限、失败与可观测性边界，确保 MCP 协议与会话细节不向上泄漏到 planner、host 与前端层。本次仅按 canonical 格式规范化标题与 Purpose 章节，需求与场景语义未变。
 
 ## Requirements
 

@@ -1,4 +1,10 @@
-## ADDED Requirements
+# session-control-audit-surface-and-history-evidence-summary Specification
+
+## Purpose
+
+规范 Pony Agent `Session Control Plane audit surface v1` 的 history-control 契约（PA-042）：为 `history checkout / restore / fork / switch` 提供统一、可持久化、可 reload 的 canonical audit summary，由既有 persisted evidence 与 session truth-source 在后端投影，并在 `session snapshot / runtime view / history-control response` 暴露同口径字段。该 summary 明确区分动作证据与当前现态投影，只作只读审计读面，不得反向成为 `restore / cursor / branch / rollback` 的仲裁源；前端 control explainability 主展示 SHALL 优先消费该 summary contract。原为 delta 格式，本次按 canonical 格式规范化（PA-042），语义未变。
+
+## Requirements
 
 ### Requirement: PA-042 v1 SHALL expose a canonical history-control audit summary
 Pony Agent SHALL 为 history-control 读面提供 canonical audit summary，使前端和调试面能够直接理解最近一次 `checkout / restore / fork / switch` 动作，而不是自行拼装多份局部字段。

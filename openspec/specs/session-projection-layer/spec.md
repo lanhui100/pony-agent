@@ -1,6 +1,10 @@
-# session-projection-layer Delta
+# session-projection-layer Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 ADR 0008 阶段 2 投影层（任务卡 `PA-092`）的契约：定义 `init`/`apply`/`view` 三函数的投影抽象与 `TraceProjection`/`MetricsProjection` 等实现，`SessionSnapshot` 与 trace、指标视图改由 `turn_events` 折叠生成、blob 快照降级为可失效可重建的持久化缓存，`append_turn` 从"push 消息 + 整包序列化"改为"追加事件 + 增量折叠"，并以 golden fixture 与参考实现对拍验证。原为 delta 格式，2026-09-30 按 canonical 格式规范化（PA-102），语义未变。
+
+## Requirements
 
 ### Requirement: Projection trait
 

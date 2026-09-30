@@ -1,4 +1,10 @@
-## ADDED Requirements
+# history-state-hooks-and-restore-boundaries Specification
+
+## Purpose
+
+规范 Pony Agent 把 hooks 扩展到 session 历史态控制路径的契约（PA-041）：history-state hooks 只能挂接在 `history checkout / branch restore / branch fork / branch switch` 四类稳定 boundary 上，只消费 normalized history-control envelope，并保持既有 degrade / rollback 合同而不成为第二套恢复真相源。其执行证据 SHALL 进入 session truth-source 并可被 control-plane / runtime view 读回，但只作为 persisted audit chain，不得成为 restore、submission 或 history cursor 的仲裁输入。原为 delta 格式，本次按 canonical 格式规范化（PA-102），语义未变。
+
+## Requirements
 
 ### Requirement: History-state hooks SHALL attach only to stable session-history control boundaries
 系统 SHALL 只允许在稳定的 `history checkout / branch restore / branch fork / branch switch` boundary 上执行 history-state hooks。

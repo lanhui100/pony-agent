@@ -5,16 +5,17 @@
 - 项目：`Pony Agent`
 - 类型：学习模式重构项目
 - 当前主线：`Phase 8 / 高级能力（子代理、workflow、代码智能）`（Phase 1–7 已全部完成）
-- 当前阶段：`Phase 8 起步 / Ready 区清空，待选定下一张卡`
+- 当前阶段：`Phase 8 起步 / PA-102 §1 已完成，§2/§3 待决策`
 - 总体状态：`In Progress`
-- 最近提交：`4d40ce9`（2026-09-25，PA-101 收口）
+- 最近提交：`4a02fc7`（2026-09-30，PA-101 收尾补齐与仓库收敛）
 - 版本现况：tauri `0.1.92`（四处一致）/ core `0.1.90`（两处一致），`npm run version:check` PASSED
-- 最近会话：2026-09-30（PA-101 收尾补齐，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`）
+- 门禁现况：`npm run verify` = version:check → openspec:check → test:unit → build → cargo:check:shared；OpenSpec 严格校验 **53/53 passed**
+- 最近会话：2026-09-30（PA-101 收尾 + PA-102 §1，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`）
 
 ## 已知库存问题
 
-- **canonical spec 库存 39 份不合规**：`npm run openspec -- validate --all --strict` 报 `14 passed / 39 failed`，失败原因统一为缺少 `## Purpose` / `## Requirements`（仍是 delta 格式）。非本轮引入——事件溯源主线多份 spec 在内（含 `event-sourcing-closeout`、`turn-event-log`、`session-projection-layer`、`trace-event-projection`）。已立卡 `PA-102`。
-- **工作树噪音**：`src-tauri/gen/schemas/*.json` 显示被修改，diff 仅为"文件末尾无换行"，属 `tauri dev` 生成物。
+- ~~**canonical spec 库存 39 份不合规**~~ → **已于 2026-09-30 修复（PA-102 §1）**：38 份 delta 格式 spec 已结构规范化，全库 `npm run openspec -- validate --all --strict` 现为 **53 passed / 0 failed**，并新增 `scripts/check-openspec.ps1` 门禁接入 CI 与 `npm run verify` 防复发。防漂移验证对全部 38 份做了 `Requirement`/`Scenario` 标题集合差分，零语义漂移。
+- **工作树噪音**：`src-tauri/gen/schemas/*.json` 显示被修改，diff 仅为"文件末尾无换行"，属 `tauri dev` 生成物。**根治方案待决策（PA-102 §2）**：需先确定该目录是"随 dev 重生成的产物"还是"应随源码评审的契约文件"。
 
 ## 当前进行中
 

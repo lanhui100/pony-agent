@@ -1,4 +1,8 @@
-# Session Cursor View Contract
+# session-cursor-view-contract Specification
+
+## Purpose
+
+规范多界面宿主（Tauri / TUI / CLI / HTTP）共享的会话游标与视图契约（PA-060，来源变更 `2026-06-22-unify-session-cursor-view-contract`）：把可恢复历史、权威游标与派生视图划分为三层职责，明确 `HistoryGraph` 是分支拓扑与分支头部的唯一权威、`Cursor` 只表达当前可见位置，客户端须经由宿主命令与读模型而非本地重建来读写历史状态。同时约束游标版本化带来的多界面并发冲突、本地缓存与非宿主 preview 模式的降级权威显式声明、前端回退路径的分阶段退役，以及旧有 runtime-view / retrieved-context / history-control API 到该契约的兼容桥接。本 spec 原为 delta 格式，已按 canonical 格式规范化，语义未变。
 
 ## Requirements
 

@@ -1,6 +1,10 @@
-# first-wave-tool-surface Spec
+# first-wave-tool-surface Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 首批长期模型可见工具面的契约（对应任务卡 `PA-048`）：冻结 `Plan / Read / Search / List / Edit / Write / Run / Ask` 这组产品级工具名及其功能边界，要求旧 `workspace_*` 名称收口为内部执行原语或迁移期兼容别名，复合工具须经统一 `ToolPlan` 与子步骤结果结构暴露执行细节，并以 canonical product tool name 作为 trace、telemetry 与前端聚合的稳定主键。原为 delta 格式，本次仅按 canonical 格式规范化，语义未变。
+
+## Requirements
 
 ### Requirement: The system SHALL define a first-wave model-visible tool surface
 

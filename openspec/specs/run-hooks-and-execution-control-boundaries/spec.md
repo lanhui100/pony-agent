@@ -1,4 +1,10 @@
-## ADDED Requirements
+# run-hooks-and-execution-control-boundaries Specification
+
+## Purpose
+
+规范 graph run / execution control 层 run-level hooks 的运行时契约（PA-038，OpenSpec change `add-run-hooks-and-execution-control-boundaries`）：hooks SHALL 只挂接稳定的 canonical boundary（`wait_user` / `submission_plan` / `stop_requested` / `run_resume`），只消费规范化 control envelope，不得成为第二 arbitration source 或新的 graph scheduler。hook 执行证据 SHALL 进入 `GraphRun / GraphRunCheckpoint` persisted evidence，并被 runtime view / control-plane 读回 boundary、结果类型与耗时。原为 delta 格式，2026-09-30 按 canonical 格式规范化（PA-102），语义未变。
+
+## Requirements
 
 ### Requirement: Hooks SHALL attach only to stable graph-run and execution-control boundaries
 系统 SHALL 只允许在稳定的 graph run / execution control boundary 上执行 run-level hooks。

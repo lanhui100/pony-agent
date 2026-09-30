@@ -1,6 +1,10 @@
-# Context Assembly And Cache Strategy
+# context-assembly-and-cache-strategy Specification
 
-## ADDED Requirements
+## Purpose
+
+规范 Pony Agent 请求构建的上下文分层与缓存稳定性契约：定义 `Tools`、`Base System`、`Runtime Facts`、`Project Instructions`、`Memory Injection`、`Conversation Carry`、`Turn-local Volatile Input` 七层模型及各层的缓存稳定性归属，约束 base system 与动态会话数据的边界、coding/work 双 profile、`AGENT.md` 与 workspace 作用域及覆盖规则、conversation carry 优先续写、显式低频 cache-reset 边界、长期记忆扩展点，以及分层与变更决策的可观测性。对应任务卡 `PA-056` 与归档 change `2026-06-16-redesign-context-assembly-and-cache-strategy`。原为 delta 格式，现按 canonical 格式规范化，语义未变。
+
+## Requirements
 
 ### Requirement: Formal Context Layering
 

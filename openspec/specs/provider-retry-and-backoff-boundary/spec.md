@@ -1,4 +1,8 @@
-# Provider Retry And Backoff Boundary
+# provider-retry-and-backoff-boundary Specification
+
+## Purpose
+
+规范 provider 请求重试与退避的 core-side 契约：把 retry 语义拆分为 request-level retry、phase-level fallback 与 turn-level retry 三层，明确各层归属与 escalation 边界（backoff、失败分类与 fallback policy 由 `pony-agent-core` 持有，`src-tauri` 与前端不得自行决策或静默重试），并定义 stream 重试安全边界与 tool-call commitment、结构化失败分类、有界预算与 `Retry-After` 合并规则、fallback 来源等级、跨层稳定字段与枚举。同时约定与 turn lifecycle、trace persistence、run-control audit 等既有合同的边界对齐，以及不依赖真实 sleep 的确定性测试策略。对应任务卡 `PA-070`，OpenSpec change `unify-provider-retry-and-backoff-boundary`。
 
 ## Requirements
 
