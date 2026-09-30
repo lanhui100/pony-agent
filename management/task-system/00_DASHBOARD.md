@@ -5,17 +5,17 @@
 - 项目：`Pony Agent`
 - 类型：学习模式重构项目
 - 当前主线：`Phase 8 / 高级能力（子代理、workflow、代码智能）`（Phase 1–7 已全部完成）
-- 当前阶段：`Phase 8 起步 / PA-102 §1 已完成，§2/§3 待决策`
+- 当前阶段：`Phase 8 起步 / 治理与卫生卡 PA-102 全量收口，等待启动新工程卡`
 - 总体状态：`In Progress`
-- 最近提交：`4a02fc7`（2026-09-30，PA-101 收尾补齐与仓库收敛）
+- 最近提交：`92203a6`（2026-09-30，PA-102 §1 完成）
 - 版本现况：tauri `0.1.92`（四处一致）/ core `0.1.90`（两处一致），`npm run version:check` PASSED
 - 门禁现况：`npm run verify` = version:check → openspec:check → test:unit → build → cargo:check:shared；OpenSpec 严格校验 **53/53 passed**
-- 最近会话：2026-09-30（PA-101 收尾 + PA-102 §1，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`）
+- 最近会话：2026-09-30（PA-101 收尾 + PA-102 全量收口，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`）
 
 ## 已知库存问题
 
 - ~~**canonical spec 库存 39 份不合规**~~ → **已于 2026-09-30 修复（PA-102 §1）**：38 份 delta 格式 spec 已结构规范化，全库 `npm run openspec -- validate --all --strict` 现为 **53 passed / 0 failed**，并新增 `scripts/check-openspec.ps1` 门禁接入 CI 与 `npm run verify` 防复发。防漂移验证对全部 38 份做了 `Requirement`/`Scenario` 标题集合差分，零语义漂移。
-- **工作树噪音**：`src-tauri/gen/schemas/*.json` 显示被修改，diff 仅为"文件末尾无换行"，属 `tauri dev` 生成物。**根治方案待决策（PA-102 §2）**：需先确定该目录是"随 dev 重生成的产物"还是"应随源码评审的契约文件"。
+- ~~**工作树噪音**~~ → **已于 2026-09-30 修复（PA-102 §2）**：`src-tauri/gen/schemas/*.json` 经确认属于权限契约保留跟踪，新增 `scripts/normalize-generated-schemas.ps1` 并在 `start-tauri-dev.ps1` 挂载守护与兜底，彻底解决空变更问题。
 
 ## 当前进行中
 

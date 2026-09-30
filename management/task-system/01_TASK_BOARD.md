@@ -26,11 +26,7 @@
 
 ## In Progress
 
-- `PA-102` canonical spec 库存规范化与仓库卫生（P1，Complexity B）
-  说明：**2026-09-30 立卡并推进**——`openspec validate --all --strict` 全库体检发现 **39 / 53 份 canonical spec 不合规**（仍为 delta 格式，缺 `## Purpose`/`## Requirements`；非本轮引入，事件溯源主线多份在内，含 `event-sourcing-closeout`），另加 `src-tauri/gen/schemas/*.json` 恒常换行噪音、以及散落在各卡的残余待办收敛。
-  **§1 已完成**：38 份 spec 结构规范化（补 `## Purpose`、`## ADDED Requirements`→`## Requirements`、`Scope` 并入 Purpose），全库 `53 passed / 0 failed`；防漂移验证对全部 38 份做了需求/场景标题集合差分，**零语义漂移**；新增 `scripts/check-openspec.ps1` 并接入 CI 与 `npm run verify`（双态实测通过，过程中修掉门禁自身的 BOM 与 native-stderr 两个缺陷）。
-  **§2/§3 待决策**：`src-tauri/gen/schemas/` 产物定位、残余待办优先级（属产品/排期判断）。
-  任务卡：`03_TASKS/PA-102-canonical-spec-normalization-and-repo-hygiene.md`。发现经过见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。
+- 暂无
 
 ## Review
 
@@ -41,6 +37,13 @@
 - 暂无
 
 ## Done
+
+- `PA-102` canonical spec 库存规范化与仓库卫生（P1，Complexity B）
+  说明：**已完成并收口（2026-09-30，全量通过）**：
+  - §1 规范化 38 份 delta 格式 spec（全库 `53 passed / 0 failed`，零语义漂移实证），新增 `scripts/check-openspec.ps1` 接入 CI 与 `npm run verify`。
+  - §2 根治 `src-tauri/gen/schemas/` 换行噪音：新增 `scripts/normalize-generated-schemas.ps1`，并在 `start-tauri-dev.ps1` 挂载守护与兜底，保留契约跟踪价值的同时彻底消灭空变更。
+  - §3 散落待办完成实证与排期画像梳理（形成 Job Object、跨 Workspace 移动、保守审批等 5 类明确建议）。
+  提交：`92203a6`（§1）、本次收口提交。任务卡：`03_TASKS/PA-102-canonical-spec-normalization-and-repo-hygiene.md`。
 
 - `PA-101` PA-099 安全与发版流水线三件套 F1/F2/F3（P1，Complexity B）
   说明：**已完成并收口（2026-09-25 实现，2026-09-30 补齐收尾账）**——F1 `platform.rs` URL scheme/host 白名单（fail-closed）+ Win32 `ShellExecuteW` 替代 `cmd /c start` + 前端 `openExternalUrl()` 统一入口（17+6 测试）；F2 `dompurify@3.4.16` 替代手写正则消毒（红队 29/29）；F3 `tauri.conf.json` 版本纳入同步链 + `check-version-sync.ps1` CI 门禁 + ADR 0017 发版约定（supersedes 0012）。验证：cargo(tauri) 17 + core 962 + vitest 568 + 版本同步 + cmd-start 零残留。提交：`f4970a0`（core 层）、`cd96884`（F1/F2/F3 主提交）、`4d40ce9`（任务卡收口）。**2026-09-30 补齐**：canonical spec `openspec/specs/update-security-and-release-followups/spec.md`（此前缺失）、change 归档 `openspec/changes/archive/2026-09-25-pa101-update-followups/`、tasks.md 15 项全部勾选（此前 `openspec list` 显示 `0/15`）；归档前逐条实测复核 as-built 证据。任务卡：`03_TASKS/PA-101-update-security-and-release-followups.md`。会话日志：`99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。

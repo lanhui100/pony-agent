@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $workspaceNormalized = [System.IO.Path]::GetFullPath($workspace)
@@ -111,10 +111,39 @@ if (-not (Test-Path $tauriShim)) {
 }
 
 Set-Content -LiteralPath $pidFile -Value $PID
+
+# ── 生成物文本约定（PA-102 §2）──────────────────────────────────────
+# `tauri dev` 每次重新生成 src-tauri/gen/schemas/*.json 且不写结尾换行，
+# 导致工作树在整个 dev 会话期间恒定出现 4 个空 diff 的"已修改"文件。
+# 这些文件是 Tauri 权限契约，保留跟踪（不 gitignore），改为后台监听补齐
+# LF + 结尾换行。监听失败不影响 dev 启动，退出时兜底再规范化一次。
+$normalizer = Join-Path $PSScriptRoot "normalize-generated-schemas.ps1"
+$normalizerJob = $null
+$normalizerShell = $null
+if (Test-Path -LiteralPath $normalizer) {
+  try {
+    $normalizerShell = Start-Job -ScriptBlock {
+      param($scriptPath, $root)
+      & pwsh -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Watch -Quiet
+    } -ArgumentList $normalizer, $workspace
+    $normalizerJob = $normalizerShell.Id
+  } catch {
+    Write-Warning "schema 规范化监听未启动（不影响 dev）：$($_.Exception.Message)"
+  }
+}
+
 try {
   & $tauriShim dev
 } finally {
   if (Test-Path $pidFile) {
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+  }
+  # 先停监听（它自身退出前会做一次最终规范化），再兜底规范化一次
+  if ($normalizerJob) {
+    Stop-Job -Id $normalizerJob -ErrorAction SilentlyContinue
+    Remove-Job -Id $normalizerJob -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $normalizer) {
+    & pwsh -NoProfile -ExecutionPolicy Bypass -File $normalizer -Quiet | Out-Null
   }
 }

@@ -31,6 +31,8 @@
     "openspec:update": "npm run openspec -- update",
     "openspec:list": "npm run openspec -- list",
     "openspec:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-openspec.ps1",
+    "schemas:normalize": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/normalize-generated-schemas.ps1",
+    "schemas:watch": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/normalize-generated-schemas.ps1 -Watch",
     "test": "npm run test:unit",
     "test:unit": "vitest run",
     "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",

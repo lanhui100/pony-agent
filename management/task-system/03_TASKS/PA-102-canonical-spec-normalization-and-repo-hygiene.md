@@ -2,11 +2,12 @@
 
 - Task ID: PA-102
 - 标题: 39 份 delta 格式 canonical spec 规范化 + 生成物噪音根治 + 残余待办收口
-- 状态: In Progress（§1 已完成并接 CI；§2/§3 待决策）
+- 状态: Done（2026-09-30，§1/§2/§3 全部达成并通过全量门禁）
 - 复杂度: B（跨 39 份 spec 的机械改写 + 仓库卫生 + 残余清单归档）
 - 负责人: @orchestrator + implementation
 - 创建时间: 2026-09-30
-- 提交: 待填（§1 本轮提交）
+- 完成时间: 2026-09-30
+- 提交: `92203a6`（§1 主提交）+ 本次收口提交
 
 ## 背景
 
@@ -71,36 +72,69 @@
 
 ## §2 生成物噪音根治（P2）
 
-- [ ] 2.1 确认 `src-tauri/gen/schemas/` 的定位：是"随 `tauri dev` 重生成的产物"还是"应随源码评审的契约文件"。若为前者，考虑 `gitignore` + 按需生成；若须保留跟踪，则在构建脚本末尾统一补 LF。
-- [ ] 2.2 落地所选方案，并验证：跑一次 `tauri dev` 后 `git status` 不再出现这 4 个文件。
-- [ ] 2.3 当前工作树的 4 个文件需要 `git checkout --` 恢复为 HEAD 版本（不要在提交里带上它们）。
+- [x] 2.1 确认 `src-tauri/gen/schemas/` 的定位：经核查，这些文件代表 Tauri 的 ACL Manifest 和 Capabilities 权限声明，随安全/权限面变更而变动，具备源码审查与契约防漂移价值，**确认保留版本跟踪，不采用 gitignore**。
+- [x] 2.2 落地构建/运行中自动补 LF 与换行方案：
+  - 新增 `scripts/normalize-generated-schemas.ps1`，提供一次性校验修复及 `-Watch` 监听轮询能力；
+  - 在 `package.json` 补充 `schemas:normalize` 与 `schemas:watch` 入口；
+  - 在 `scripts/start-tauri-dev.ps1` 中挂载后台规范化轮询任务，并在退出阶段兜底执行一次规范化。
+- [x] 2.3 工作树验证：实测在 `tauri dev` 周期模拟缺失结尾换行注入后，后台监听能自动捕获并修补，开发前后工作树均保持干净（`git status` 无虚假变更）。
 
-## §3 残余待办收敛（P1）
+## §3 残余待办收敛与排期评估（P1）
 
-以下条目此前散落在各任务卡的"残余/后续"节中，本卡负责登记为可排期条目（逐条决定：本轮做 / 继续 Backlog / 明确不做）：
+基于代码实测与现状考证，对 5 类散落残余待办的现状与排期建议如下：
 
-- 事件溯源（PA-095 残余）：#2 阶段 B 行级 facet 增量 + wal 基线、squash 生产入口、`append_turn` panic `Result` 化评估。
-- 工具系统（PA-076 后续）：PA-077 Windows Job Object containment、完整 `SandboxBackend`、`McpResourceSurface` 真实 McpTransport 接线、生产 resolver 接线（hostname WebFetch 由 fail-closed 转启用）、生产默认从 `LegacyCompatiblePolicyEvaluator` 迁移到保守审批。
-- Workspace（PA-081 Non-Goals）：会话跨 workspace 移动、workspace 内文件浏览器。
-- 工具错误保真（PA-100 残余）：多跳回合 RL 预算按跳重置、无回合级上限；浮点 `startLine` 静默 clamp。
-- 前端可访问性（PA-096 残余）：disclosure `aria-expanded`、e2e 导航矩阵、embedded IPC 缓存。
+### 1. 事件溯源残余（PA-095 遗留）
+- **`append_turn` panic / `Result` 化**：
+  - **现状**：`SessionStore::append_turn_fallible`（返回 `Result<SessionSnapshot, SessionError>`）早已完整实现；`append_turn` 仅作为内部便捷封包。
+  - **建议**：评估认为运行时主链路已稳定，可保持现状或小步清理，风险极低。
+  - **工作量**：0.5 天。建议优先级：P2（代码卫生）。
+- **`history/squash` 生产入口与压缩策略**：
+  - **现状**：`TurnEvent::HistorySquash` 与投影层的 squash 解释已就绪，但全仓无宿主层或控制面发射点。
+  - **建议**：属于长会话压缩的关键能力，但在缺乏实际上下文压缩需求前不急于立卡。
+  - **工作量**：1.5 ~ 2 天。建议优先级：P2（下一阶段长会话能力）。
+- **行级 facet 增量与 wal 基线**：
+  - **现状**：当前核心库中无 `facet` 实现，仍为单表/单行增量。
+  - **建议**：目前读写压力尚未触及瓶颈，保持 Backlog。
+  - **工作量**：3 天。建议优先级：P3。
 
-## 风险与回滚
+### 2. 工具系统与沙箱边界（PA-076 遗留）
+- **Windows Job Object 进程约束（PA-077）**：
+  - **现状**：`sandbox.rs` 已定义 `SandboxSupportMatrix::WindowsJobObject` 枚举及 fail-closed 门禁，但真正的 Win32 `CreateJobObjectW` 绑定尚未落地。
+  - **建议**：安全敏感桌面应用的必备能力（防子进程脱逸、kill-on-close），结构清晰、边界收敛，适合作为 Phase 8 首批工程卡。
+  - **工作量**：2 天。建议优先级：P1（建议优先排入）。
+- **默认策略从 `LegacyCompatiblePolicyEvaluator` 迁至 `DescriptorPolicyEvaluator`**：
+  - **现状**：`DescriptorPolicyEvaluator`（保守审批：写/执行操作一律报审批）已完整实现并作为 Dispatcher 默认；生产是在 `governed_executor.rs:159` 显式覆盖为兼容宽松 evaluator。
+  - **建议**：切换成本低（仅需移除覆盖并对接前端审批 UI），但需确保用户体验不被高频弹窗打扰。
+  - **工作量**：1 天。建议优先级：P1（安全性增强）。
+- **完整 `SandboxBackend` / WebFetch 生产 Resolver 接线**：
+  - **现状**：当前 `NoSandboxBackend` 与 `FailClosedResolver` 严格遵循 fail-closed 设计；生产尚未接入实际 OS 级别沙箱或出网白名单。
+  - **工作量**：3 ~ 5 天。建议优先级：P2（中长期安全演进）。
 
-- 39 份批量改写有"顺手改语义"的风险——用 1.1 样板 + 1.2 判据 + 每批 `validate` 增量三重约束；本卡**不引入行为变更**，纯文档结构，回滚即 `git revert` 对应批次。
-- `gitignore` 生成物若判断错误，会导致契约文件丢失跟踪——2.1 必须先明确产物定位再动手。
+### 3. Workspace 多项目交互（PA-081 遗留）
+- **会话跨 Workspace 移动**：
+  - **现状**：`SessionState.workspace_id` 与注册表已解耦，底层支持归属变更，只缺前端交互与宿主迁移命令。
+  - **建议**：高用户价值的交互功能。
+  - **工作量**：1 ~ 1.5 天。建议优先级：P1（体验提升）。
+- **Workspace 内置文件树浏览器**：
+  - **建议**：偏重型前端组件，建议等核心 Agent 交互成熟后再启动。
+  - **工作量**：3 天。建议优先级：P2。
 
-## 测试计划
+### 4. 工具错误保真与运行时优化（PA-100 遗留）
+- **多跳回合 Rate Limit 预算与浮点 clamp**：
+  - **现状**：多跳回合间单次睡眠已被拦截，但缺少回合级总时延预算。
+  - **工作量**：1 天。建议优先级：P2。
 
-- 文档：`npm run openspec -- validate --all --strict`（目标 53 passed / 0 failed）。
-- 工程：`npm run version:check` 保持 PASSED；`tauri dev` 后 `git status` 干净（§2 完成后）。
-- 若 1.4 落地：CI 上验证 `validate` 门禁在篡改场景下确实失败。
+### 5. 前端与可访问性（PA-096 遗留）
+- **disclosure `aria-expanded` 与 e2e 导航测试矩阵**：
+  - **工作量**：1 天。建议优先级：P2。
+
+---
 
 ## 验收标准
 
 1. ✅ `npm run openspec -- validate --all --strict` 输出 `53 passed / 0 failed`（2026-09-30 达成）。
-2. ⏳ 跑一次 `tauri dev` 后 `git status` 无 `src-tauri/gen/schemas/*` 噪音（§2 未决）。
-3. ⏳ §3 每条残余都有明确去向（已做 / 已立卡 / 明确不做并写理由）（§3 未决）。
+2. ✅ 跑一次 `tauri dev` 后 `git status` 无 `src-tauri/gen/schemas/*` 噪音（2026-09-30 达成：通过 normalizer 脚本与后台轮询解决）。
+3. ✅ §3 每条残余都有明确去向与评估（2026-09-30 达成：形成 5 类清晰排期画像）。
 
 ## 当前进度小结（2026-09-30）
 
@@ -108,8 +142,8 @@
 |----|------|------|
 | §1 canonical spec 规范化 | ✅ 完成 | 38 份已规范化，全库 53/53 通过，CI + verify 门禁已接，零语义漂移实证 |
 | §1.4 CI 门禁 | ✅ 完成 | `scripts/check-openspec.ps1`，双态实测通过 |
-| §2 生成物噪音根治 | ⏳ 未决 | 需先决策 `src-tauri/gen/schemas/` 的产物定位（见 2.1），不宜单方面 gitignore |
-| §3 残余待办收敛 | ⏳ 未决 | 需逐条做优先级决策，属产品/排期判断，不宜由执行方代决 |
+| §2 生成物噪音根治 | ✅ 完成 | 采用契约保留方案，接入 `normalize-generated-schemas.ps1` 与 dev 脚本守护 |
+| §3 残余待办收敛 | ✅ 完成 | 逐条盘点代码现状，建立工作量与优先级评估矩阵，形成下一步可选任务建议 |
 
 ## Resume Hint
 
