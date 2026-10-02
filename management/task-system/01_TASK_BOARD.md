@@ -40,6 +40,8 @@
 
 ## Done
 
+- `PA-103` 桌面端签名更新本地契约（P1，Complexity C）——**本地契约 gate 已完成（2026-10-02）；发布 gate 未开启**
+  说明：参考 `dev:~/pproxy/desktop` 的 Tauri signed updater 模式（仅源码/配置参考，非远端运行证据），在 pony-agent 落地 typed adapter + store 状态机 + 配置页 UI + 精确权限（updater:allow-check / allow-download-and-install / process:allow-restart）+ 双门禁模型；`SIGNED_UPDATER_ENABLED=false`、tauri.conf 不提交占位信任锚，生产一键安装保持禁用 fail-closed。验证：version:check PASS（tauri 0.1.94 四处同步）、更新相关 vitest 91/91、全量 592/602（10 skip）最终全绿、typecheck/build/cargo:check PASS。三路 plan 与三路实现审核均条件通过、意见全采纳并复验。OpenSpec change 已归档 `openspec/changes/archive/2026-10-02-signed-desktop-updater/`；ADR 0019（implemented）。任务卡：`03_TASKS/PA-103-signed-desktop-self-update.md`。发布 gate（真实 key/endpoint/签名产物/Windows smoke/prepare_update_exit/活跃 turn 确认）待 release-owner 开启。
 - `PA-102` canonical spec 库存规范化与仓库卫生（P1，Complexity B）
   说明：**已完成并收口（2026-09-30，全量通过）**：
   - §1 规范化 38 份 delta 格式 spec（全库历史快照 `53 passed / 0 failed`，零语义漂移实证），新增 `scripts/check-openspec.ps1` 接入 CI 与 `npm run verify`。

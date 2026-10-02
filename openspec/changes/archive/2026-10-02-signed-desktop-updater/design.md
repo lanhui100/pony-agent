@@ -25,13 +25,13 @@ Production Tauri release builds may expose install only when the build has signe
 
 ## User flow and state machine
 
-1. Startup performs the existing non-blocking check-only path.
+1. Startup performs the existing non-blocking check-only path. The signed check is manual-only in the local contract (settings card); automatic signed check on startup is a release-gate decision.
 2. In a configured Tauri production build, `checkSignedUpdate()` obtains a signed updater candidate. It records candidate metadata separately from `githubLatest`.
 3. Settings renders `立即升级` only for a signed candidate and only when no operation is active.
 4. The user clicks once: `idle/available -> downloading -> installing -> pending-restart`; repeated check/install clicks are ignored. Progress is monotonic 0–100; unknown content length is represented as indeterminate.
-5. The adapter performs plugin download/install. Before the host exits, the narrow `prepare_update_exit` command cleans only Pony Agent-owned runtime resources and is idempotent. The process plugin then relaunches.
-6. A successful plugin commit is never reported as ordinary failure. If commit status cannot be distinguished from relaunch failure, the UI reports `pending-restart`/`relaunch-failed` and preserves the candidate for the next startup; it never claims `installed` merely because an in-memory promise resolved.
-7. Signature, manifest, target, version, endpoint, network, disk, cleanup-before-commit, or download failures never call relaunch and never create an installable candidate. After commit, cleanup/relaunch failures are reported distinctly and are not retried as if no install occurred.
+5. The adapter performs plugin download/install. The process plugin then relaunches. A narrow `prepare_update_exit` cleanup command and an active-turn confirmation gate are design intentions for the release-owner gate and are NOT implemented in the local contract; they must be added and reviewed before production enablement.
+6. A successful plugin commit is never reported as ordinary failure. If commit status cannot be distinguished from relaunch failure, the UI reports `pending-restart`/`relaunch-failed` and preserves the committed candidate for restart retry; it never claims `installed` merely because an in-memory promise resolved.
+7. Signature, manifest, target, version, endpoint, network, disk, or download failures never call relaunch and clear the uncommitted candidate (fail closed). After commit, relaunch failures are reported as `relaunch-failed`, distinct from install failure, and are not retried as if no install occurred. User-facing error copy is fixed/safe; raw plugin errors (which may contain URLs) go to console only.
 
 A durable pending marker/startup reconciliation is required before production enablement if the plugin cannot itself guarantee recovery after crash/forced termination. Active turns must be blocked or explicitly confirmed before install; this local contract does not silently abort user work.
 

@@ -1,53 +1,53 @@
 # PA-103 Signed desktop self-update
 
 - **Task ID**: PA-103
-- **Status**: In Progress — Discovery complete; plan/spec review pending
+- **Status**: Done — local contract gate closed (2026-10-02); release-owner gate open (see below)
 - **Complexity**: C (cross-module security-sensitive release behavior)
 - **Priority**: P1
 - **Owner**: Lead + implementation-engineer
-- **Created**: 2026-10-02
-- **Spec**: `openspec/changes/2026-10-02-signed-desktop-updater/`
-- **Reviews**: `management/task-system/02_REVIEWS/` (to be added after real reviews)
+- **Created / Closed**: 2026-10-02
+- **Spec**: `openspec/changes/archive/2026-10-02-signed-desktop-updater/`
+- **Reviews**: `management/task-system/02_REVIEWS/2026-10-02-pa103-plan-{architecture,security,release}.md`, `2026-10-02-pa103-implementation-{correctness,security,test}.md`
 
 ## Background
 
-The current desktop checks GitHub Releases and opens a release page, but cannot perform a verified one-click install. SSH discovery of `dev:~/pproxy/desktop` found a Tauri updater implementation using `@tauri-apps/plugin-updater`, `downloadAndInstall`, progress state, `@tauri-apps/plugin-process` relaunch, updater/process permissions, signed updater artifacts and an idempotent pre-exit cleanup command.
+The current desktop checks GitHub Releases and opens a release page, but cannot perform a verified one-click install. SSH discovery of `dev:~/pproxy/desktop` observed a Tauri updater pattern (plugin calls, configuration, permissions) as source/config reference only — it did not prove a successful remote release, signature, install, cleanup or relaunch. Pony Agent adopts the pattern behind an explicit local-contract gate and a separate release-owner enablement gate.
 
 ## Goal
 
-Implement a signed Tauri desktop update flow for Pony Agent while preserving browser check-only compatibility and existing fail-closed URL/sandbox boundaries.
+Implement signed Tauri updater plumbing for the desktop while preserving browser check-only compatibility and existing fail-closed URL/sandbox boundaries. With no real Pony Agent endpoint/key/CI available, installation stays disabled and fail-closed.
 
-## Scope
+## Scope (local gate, done)
 
-- Tauri updater/process dependencies, registration, capabilities and signed updater configuration.
-- Frontend adapter/store/UI state for check, progress, install and relaunch.
-- Tests, release/config documentation, OpenSpec and ADR.
+- JS deps `@tauri-apps/plugin-updater` + `@tauri-apps/plugin-process`; Rust deps `tauri-plugin-updater`/`tauri-plugin-process` (workspace lock updated).
+- Plugins registered in `src-tauri/src/lib.rs`; `tauri.conf.json` updater block intentionally ABSENT (no placeholder trust anchor); capabilities grant exactly `updater:allow-check`, `updater:allow-download-and-install`, `process:allow-restart`; gen/schemas regenerated.
+- `src/lib/tauri-updater.ts`: typed opaque-handle adapter, `SIGNED_UPDATER_ENABLED=false`, case-insensitive download event mapping, defensive candidate parsing, no URL/endpoint parameter, no runtime override.
+- `src/stores/update.ts`: `githubLatest` (check-only) separated from `signedCandidate`; check/install in-flight guards; pending-restart vs relaunch-failed; failed install clears uncommitted candidate; safe error copy.
+- `src/components/config/ConfigGeneralSection.vue`: install CTA only for signed candidate; progress/error/pending-restart/relaunch-failed states; browser/dev no-install; duplicate button removed.
+- Tests: adapter (7), store signed flow (14), component signed UI (5), existing update tests unchanged (49). Full vitest 592 passed / 10 skipped / 41 files (final run green; one pre-existing MarkdownRenderer timing flake passes isolated and is unrelated).
 
-## Non-goals
+## Non-goals (unchanged)
 
 Unsigned downloads, shell-based replacement, automatic silent install, rollback engine, private key storage, widening URL allowlists, or changes to agent-core/sandbox policy.
 
-## Acceptance criteria
+## Acceptance criteria (local gate — met)
 
-1. Tauri builds have updater plugin wiring, HTTPS endpoint(s), public key, updater artifact generation and minimal updater/process permissions.
-2. A user can click one update action in the settings card; the UI shows checking/progress/error states and invokes signed `downloadAndInstall` then relaunches.
-3. Browser/dev mode remains check-only and never attempts installation.
-4. Concurrent checks/install actions are idempotently guarded; failed install preserves truthful state and does not relaunch.
-5. No private signing key, arbitrary download URL, shell command or `window.open` install fallback enters the repository.
-6. Existing version synchronization and security tests remain green; targeted updater tests cover success/failure/concurrency/browser behavior.
-7. Three independent reviewers approve the plan/spec and implementation, with accepted findings recorded.
+1. Rust/JS compile, version four-place sync 0.1.94 (core 0.1.92).
+2. Fail-closed: no fake key/endpoint/artifact; GitHub-only metadata never yields an install CTA; browser/Vite/Tauri-dev no install path.
+3. Typed-handle-only install; no shell, arbitrary URL or `window.open` install fallback.
+4. Three-way plan and implementation reviews passed (conditional findings all adopted and re-verified).
 
-## Risks / rollback
+## Release-owner gate (OPEN — NOT DONE locally)
 
-The signed endpoint/public key and release CI must agree. If release infrastructure cannot be safely configured in this checkout, keep the endpoint contract documented and disable installation rather than shipping an unsigned fallback. Rollback is file-level: remove updater plugin/config/UI integration and retain the existing check-only path.
+- Real signing key (out of git), fixed HTTPS endpoint, protected CI secrets, pinned plugin versions.
+- `plugins.updater` config + `createUpdaterArtifacts`; exact IPC payload re-verification; redirect/proxy policy.
+- `prepare_update_exit` cleanup + active-turn confirmation (NOT implemented locally); startup auto-check decision.
+- Signed artifacts, atomic manifest publication, Windows x64 signed smoke (tamper/wrong-key/install/relaunch/user-data), key rotation/revocation, crash recovery, first-rollout bootstrap for pre-updater installs; then flip `SIGNED_UPDATER_ENABLED` and fill config.
 
-## Current progress
+## Verification evidence
 
-- Workspace baseline inspected; substantial unrelated uncommitted changes exist and must not be reset.
-- SSH access to `dev` succeeded; remote implementation evidence collected.
-- OpenSpec proposal/design/tasks created.
-- Next action: complete three-way plan/spec adversarial review, then revise before implementation.
+`npm run version:check` PASS · targeted updater vitest 91/91 PASS · full vitest 592/602 PASS (10 skipped) · `npm run typecheck` PASS · `npm run build` PASS · `npm run cargo:check` PASS. Vitest/vite needed `danger-full-access` because the DSH sandbox blocks Node child-process spawn with piped stdio (EPERM; documented boundary).
 
 ## Resume hint
 
-Open `openspec/changes/2026-10-02-signed-desktop-updater/design.md`, then read the three PA-103 plan-review files once created. Do not start code changes until the review gate is marked PASS.
+To enable production updates: follow the release-owner gate items in `openspec/changes/archive/2026-10-02-signed-desktop-updater/tasks.md`, then flip `SIGNED_UPDATER_ENABLED` in `src/lib/tauri-updater.ts` and add the real updater block in `src-tauri/tauri.conf.json`. All plan/implementation reviews and the session log are under `management/task-system/02_REVIEWS/` and `99_LOGS/`.

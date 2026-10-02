@@ -19,6 +19,8 @@
 
 ## 当前进行中
 
+- **PA-103 桌面端签名更新本地契约（2026-10-02，C 级）本地 gate 收口；发布 gate 待开启**
+  参考 `dev:~/pproxy/desktop` Tauri signed updater 模式（仅源码/配置参考，无远端运行证据）实现：typed adapter（`SIGNED_UPDATER_ENABLED=false` 恒禁用）、store 来源隔离状态机（githubLatest vs signedCandidate）、配置页安装按钮/进度/待重启/失败态、精确权限（updater:allow-check / allow-download-and-install / process:allow-restart）、tauri.conf 不提交占位信任锚。验证：version:check PASS（tauri 0.1.94 四处一致 / core 0.1.92）、更新相关 vitest 91/91、全量 592/602（10 skip）最终全绿（MarkdownRenderer 预存时序 flake 隔离通过且未改动）、typecheck/build/cargo:check PASS。三路 plan 审核 + 三路实现审核均条件通过、P1 全部采纳复验。发布 gate 前不得填充 endpoint/key、不得翻转启用常量；`prepare_update_exit`/活跃 turn 确认/自动检查/签名产物/Windows smoke 属 release-owner gate。任务卡 `03_TASKS/PA-103-signed-desktop-self-update.md`；审核 `02_REVIEWS/2026-10-02-pa103-*`；会话日志 `99_LOGS/2026-10-02-pa103-signed-desktop-updater.md`。
 - **PA-077 Windows Job Object containment（实现完成；Review / closeout gate blocked）**
   已落地 private non-inheritable Job、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap 与 explicit kill/shutdown/last-owner tree cleanup；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment，也不是文件/网络/令牌/AppContainer/审批沙箱。`spawn→assign` race 受调度影响且无固定时间上界，不是安全边界；不注册 SandboxBackend、不授权 autonomous Run，`NoSandboxBackend`/`enforce_sandbox` 保持 fail-closed。当前收口阻塞：`npm run openspec:check` 不存在；direct strict validation 为 canonical 54 passed 但 active PA-103 failed；`cargo fmt --check` 有预存全仓差异；PA-077 精确定向测试受 target-test ACL 阻断；Linux/macOS 仅配置 CI、未本机执行。详见任务卡、implementation review 与 Gate0 closeout review。
 - **PA-101 安全与发版流水线三件套已收口（2026-09-25 实现，2026-09-30 补齐收尾账）**

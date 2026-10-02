@@ -14,9 +14,9 @@ Pony Agent 需要为 Tauri 桌面端预留签名更新路径，但当前工作�
 
 ## 决策
 
-桌面 host 在构建期 `signed-updater` feature 开启且存在真实 endpoint/公钥配置时才注册 Tauri updater/process 插件；本地契约默认不开启该 feature，前端只通过 typed opaque updater handle 调用受信任的 Rust plugin commands。GitHub 检查路径继续只负责发布元数据与发布页 CTA。
+桌面 host 注册 Tauri updater/process 插件（capability 权限面需要插件在构建中解析）；`tauri.conf.json` 不提交 updater endpoint/pubkey 占位块，配置在 release-owner gate 前整体缺省。前端只通过 typed opaque updater handle 调用受信任的 Rust plugin commands，且 adapter 常量 `SIGNED_UPDATER_ENABLED=false` 使检查/安装路径整体禁用，运行时不接受环境覆盖。GitHub 检查路径继续只负责发布元数据与发布页 CTA。
 
-真实 endpoint、公钥、CI secret、签名产物及 Windows smoke 属于独立 release-owner gate，完成前不得开启 feature、不得填充配置、不得翻转启用常量。
+真实 endpoint、公钥、CI secret、签名产物及 Windows smoke 属于独立 release-owner gate，完成前不得填充配置、不得翻转启用常量。
 
 ## 影响
 
