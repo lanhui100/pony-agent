@@ -208,7 +208,13 @@ wins.
   the same session id, cross-session use is rejected, and stale handles fail
   closed. stdout/stderr are drained concurrently into bounded ring buffers with
   truncation/dropped-byte evidence (`drain_stats`), and `kill_after` / `shutdown`
-  cover timeout and session-shutdown cleanup.
+  cover timeout and session-shutdown cleanup. On Windows PA-077 additionally assigns each managed
+  child to a private, non-breakaway Job Object with kill-on-close, so explicit kill/shutdown
+  terminate members after verified assignment. This guarantee covers only members successfully
+  assigned to the Job; it is best-effort only: std spawn-to-assignment is scheduler-dependent
+  and descendants created before assignment can escape. Jobs remain lifecycle containment, not
+  a real filesystem/network SandboxBackend; the real SandboxBackend for autonomous Run remains
+  open and autonomous Run remains fail-closed.
 - `sandbox.rs`: `SandboxSupportMatrix` records which containment strategy a
   platform can offer (fail closed by default), `enforce_sandbox` is the
   fail-closed gate an autonomous `Run` must pass, `NoSandboxBackend` represents
@@ -300,7 +306,7 @@ consumed by production paths:
 |---|---|
 | `ToolDispatcher`, `InvocationOrigin`, `PrimitiveToolHandler` | **Wired** — phase 3 (`dispatcher.rs`, governed executor) |
 | `PendingControlRequest` (session/run/turn/call binding, digests, nonce, version, expiry) | **Wired** — phase 4 (Ask/approval + control plane) |
-| `SandboxBackend`, `ProcessBackend` | **Wired** — phase 5 (`sandbox.rs` gate + `process.rs` `ProcessManager`); a real `SandboxBackend` implementation for autonomous Run is still open |
+| `SandboxBackend`, `ProcessBackend` | **ProcessBackend wired; SandboxBackend contract/gate wired, real autonomous-Run backend still open** — phase 5 (`sandbox.rs` gate + `process.rs` `ProcessManager`); a real `SandboxBackend` implementation for autonomous Run is not registered |
 | `WebResolver` | **Wired** — phase 6 (`web_access.rs` policy/pinned connector) |
 | `McpTransport` | **Wired** — phase 7 (`mcp_resources.rs`) |
 | `FakeClock`, `FakeResolver`, `FakeMcpTransport` | test harness |

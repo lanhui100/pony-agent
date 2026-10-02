@@ -170,3 +170,7 @@ spec 要求的终态，而非未完成缺口：
 - 决策已落到：`docs/architecture/tool-runtime-descriptor-registry.md`
   「Two Remaining Integrator Notes」第 2 条（已裁决）与
   `crates/pony-agent-core/src/agent/sandbox.rs` 模块头注记（2026-08-04）。
+
+## PA-077 设计复核补充（2026-09-30）
+
+保留以上历史评估原文；本次实施以 PA-077 design / ADR 0018 为准：Windows `std::process::Child` 实际提供稳定 `AsRawHandle`，不必按 PID 再 `OpenProcess`。spawn 到 Job assignment 之间的窗口受调度影响，没有固定时间上界，不能承诺“毫秒级”。Rust 1.95 原子 raw-attribute spawn API 仍为 nightly，本卡不引入 nightly。Job 仍仅为 best-effort 进程树生命周期 containment，不能授权无人值守 Run；assignment/verification 失败（含父进程提前退出）始终返回错误，不发布 process handle。

@@ -1,6 +1,6 @@
 {
   "name": "pony-agent",
-  "version": "0.1.92",
+  "version": "0.1.94",
   "private": true,
   "type": "module",
   "scripts": {
@@ -26,11 +26,6 @@
     "git:diagnose:objects": "git count-objects -vH",
     "git:gc": "git gc",
     "git:gc:deep": "git reflog expire --expire-unreachable=now --all && git gc --prune=now",
-    "openspec": "node ./node_modules/@fission-ai/openspec/bin/openspec.js",
-    "openspec:init": "npm run openspec -- init --tools codex --profile core --force",
-    "openspec:update": "npm run openspec -- update",
-    "openspec:list": "npm run openspec -- list",
-    "openspec:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-openspec.ps1",
     "schemas:normalize": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/normalize-generated-schemas.ps1",
     "schemas:watch": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/normalize-generated-schemas.ps1 -Watch",
     "test": "npm run test:unit",
@@ -38,7 +33,7 @@
     "test:ui-guard": "vitest run --coverage tests/App.spec.ts tests/HomeWorkspace.spec.ts tests/HomeSessionSidebar.spec.ts",
     "test:e2e": "npm run build && playwright test",
     "test:tauri:smoke": "node scripts/tauri-smoke.js",
-    "verify": "npm run version:check && npm run openspec:check && npm run test:unit && npm run build && npm run cargo:check:shared",
+    "verify": "npm run version:check && npm run test:unit && npm run build && npm run cargo:check:shared",
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri",
@@ -52,7 +47,6 @@
     "version:show": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"Get-Content .version.json | ConvertFrom-Json | ForEach-Object { Write-Host ('core: {0}.{1}.{2}' -f $_.core.major, $_.core.minor, $_.core.patch); Write-Host ('tauri: {0}.{1}.{2}' -f $_.tauri.major, $_.tauri.minor, $_.tauri.patch) }\""
   },
   "devDependencies": {
-    "@fission-ai/openspec": "^1.3.1",
     "@playwright/test": "^1.56.1",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/cli": "^2.8.0",

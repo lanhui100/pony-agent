@@ -68,8 +68,7 @@
 1. 脚本原以无 BOM UTF-8 保存 → PS 5.1 按 ANSI 解码中文导致**语法错误**。已加 UTF-8 BOM。
 2. 脚本原在 `$ErrorActionPreference='Stop'` 下调用 native 命令并 `2>&1` 捕获 → OpenSpec 向 stderr 打印进度时被提升为终止性 ErrorRecord，脚本**误判失败**。已在调用处临时降级为 `Continue`，判据只认 stdout 的 `Totals:` 行。
 
-**§1 验收**：`npm run openspec -- validate --all --strict` → `53 passed / 0 failed`；`npm run version:check` → PASSED；两个门禁互不影响。
-
+**Historical gate snapshot (2026-09-30, at PA-102 closeout):** the recorded run reported 53 passed / 0 failed for the then-scoped strict validation; at that time the `check-openspec.ps1` gate was reported as wired into CI and `npm run verify`. This is a historical record only and is not current evidence: the present `package.json` has no `openspec:check` script, the helper script is deprecated, and current direct strict validation reports canonical 54 passed while active PA-103 fails. See PA-077 Gate0 review for current facts.
 ## §2 生成物噪音根治（P2）
 
 - [x] 2.1 确认 `src-tauri/gen/schemas/` 的定位：经核查，这些文件代表 Tauri 的 ACL Manifest 和 Capabilities 权限声明，随安全/权限面变更而变动，具备源码审查与契约防漂移价值，**确认保留版本跟踪，不采用 gitignore**。
@@ -99,9 +98,8 @@
 
 ### 2. 工具系统与沙箱边界（PA-076 遗留）
 - **Windows Job Object 进程约束（PA-077）**：
-  - **现状**：`sandbox.rs` 已定义 `SandboxSupportMatrix::WindowsJobObject` 枚举及 fail-closed 门禁，但真正的 Win32 `CreateJobObjectW` 绑定尚未落地。
-  - **建议**：安全敏感桌面应用的必备能力（防子进程脱逸、kill-on-close），结构清晰、边界收敛，适合作为 Phase 8 首批工程卡。
-  - **工作量**：2 天。建议优先级：P1（建议优先排入）。
+  - **2026-09-30 当时的盘点快照**：`sandbox.rs` 已定义 `SandboxSupportMatrix::WindowsJobObject` 枚举及 fail-closed 门禁，但真正的 Win32 `CreateJobObjectW` 绑定尚未落地。
+  - **后续当前事实（同日 PA-077 工作树）**：Windows-only Job RAII 与进程树生命周期 containment 实现随后已落地并完成 Windows 侧实现审核；该能力仍是 best-effort 生命周期 containment，不是严格 containment 或 SandboxBackend。PA-077 当前处于 Review，closeout gate 因精确 diff 归属、测试环境 ACL、格式基线、active PA-103 strict failure 与非 Windows 未执行证据而未闭合，详见 `management/task-system/03_TASKS/PA-077-windows-job-object-containment.md`。
 - **默认策略从 `LegacyCompatiblePolicyEvaluator` 迁至 `DescriptorPolicyEvaluator`**：
   - **现状**：`DescriptorPolicyEvaluator`（保守审批：写/执行操作一律报审批）已完整实现并作为 Dispatcher 默认；生产是在 `governed_executor.rs:159` 显式覆盖为兼容宽松 evaluator。
   - **建议**：切换成本低（仅需移除覆盖并对接前端审批 UI），但需确保用户体验不被高频弹窗打扰。

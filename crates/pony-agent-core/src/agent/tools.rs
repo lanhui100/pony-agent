@@ -1548,10 +1548,13 @@ impl ToolRouter {
         let mut stderr_truncated = false;
         let mut exit_code: Option<i32> = None;
         let mut timed_out = false;
+        let mut timeout_cleanup_error: Option<String> = None;
 
         loop {
             if Instant::now() >= deadline {
-                let _ = self.process_manager.kill(&session_id, &handle);
+                if let Err(error) = self.process_manager.kill(&session_id, &handle) {
+                    timeout_cleanup_error = Some(error);
+                }
                 timed_out = true;
                 break;
             }
@@ -1567,11 +1570,17 @@ impl ToolRouter {
                     }
                 }
                 Err(error) => {
-                    let _ = self.process_manager.kill(&session_id, &handle);
+                    let cleanup = self.process_manager.kill(&session_id, &handle).err();
+                    let message = match cleanup {
+                        Some(cleanup) => {
+                            format!("轮询命令状态失败：{error}；清理进程树失败：{cleanup}。")
+                        }
+                        None => format!("轮询命令状态失败：{error}。"),
+                    };
                     return error_result(
                         TOOL_WORKSPACE_RUN_COMMAND,
                         "wait_failed",
-                        format!("轮询命令状态失败：{}。", error),
+                        message,
                         Some("请重试，或更换更简单的命令。".to_string()),
                     );
                 }
@@ -1580,18 +1589,35 @@ impl ToolRouter {
         }
 
         if timed_out {
-            // Best-effort entry cleanup; the kill_after timer may also fire later (idempotent).
-            let _ = self.process_manager.kill(&session_id, &handle);
+            // The deadline branch already attempted cleanup; retry for idempotent timer races and
+            // retain any native Job/child cleanup error instead of reporting a false termination.
+            let cleanup_error = timeout_cleanup_error
+                .or_else(|| self.process_manager.kill(&session_id, &handle).err());
+            let message = match cleanup_error {
+                Some(error) => format!(
+                    "命令执行超过超时上限 {} ms；进程树清理失败：{}。",
+                    timeout_ms, error
+                ),
+                None => format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
+            };
             return error_result(
                 TOOL_WORKSPACE_RUN_COMMAND,
                 "timeout",
-                format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
+                message,
                 Some("请缩短命令执行时间，或显式传入更大的 timeoutMs。".to_string()),
             );
         }
 
-        // Exited: clean up the session entry (idempotent when already exited).
-        let _ = self.process_manager.kill(&session_id, &handle);
+        // Exited: clean up the session entry (idempotent when already exited). A Job failure is
+        // surfaced rather than silently turning a lifecycle cleanup failure into tool success.
+        if let Err(error) = self.process_manager.kill(&session_id, &handle) {
+            return error_result(
+                TOOL_WORKSPACE_RUN_COMMAND,
+                "cleanup_failed",
+                format!("命令已退出，但进程树清理失败：{}。", error),
+                Some("请重试以完成进程树清理。".to_string()),
+            );
+        }
 
         let succeeded = exit_code == Some(0);
         let error_payload = (!succeeded).then(|| {
@@ -2767,11 +2793,11 @@ impl ToolRouter {
                     name: TOOL_WORKSPACE_GATHER_CONTEXT.to_string(),
                     arguments: with_requested_start_line(
                         json!({
-                        "paths": skipped_paths,
-                        "limit": limit,
-                        "startLine": explicit_start_line.unwrap_or(1),
-                        "lineCount": line_count,
-                    }),
+                            "paths": skipped_paths,
+                            "limit": limit,
+                            "startLine": explicit_start_line.unwrap_or(1),
+                            "lineCount": line_count,
+                        }),
                         &start_line_arg,
                     ),
                     plan: None,
@@ -2810,14 +2836,14 @@ impl ToolRouter {
                 TOOL_WORKSPACE_GATHER_CONTEXT,
                 with_start_line_fallback_meta(
                     json!({
-                    "mode": "multi_path",
-                    "paths": gathered_paths,
-                    "requestedPathCount": requested_path_count,
-                    "skippedPaths": skipped_paths,
-                    "limitApplied": requested_path_count > MAX_GATHER_CONTEXT_PATHS,
-                    "pathLimit": MAX_GATHER_CONTEXT_PATHS,
-                    "query": if query.is_empty() { Value::Null } else { Value::String(query) },
-                }),
+                        "mode": "multi_path",
+                        "paths": gathered_paths,
+                        "requestedPathCount": requested_path_count,
+                        "skippedPaths": skipped_paths,
+                        "limitApplied": requested_path_count > MAX_GATHER_CONTEXT_PATHS,
+                        "pathLimit": MAX_GATHER_CONTEXT_PATHS,
+                        "query": if query.is_empty() { Value::Null } else { Value::String(query) },
+                    }),
                     &start_line_arg,
                 ),
                 Some(plan),
@@ -2875,10 +2901,10 @@ impl ToolRouter {
                     name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                     arguments: with_requested_start_line(
                         json!({
-                        "path": display_path,
-                        "startLine": file_start_line,
-                        "lineCount": line_count,
-                    }),
+                            "path": display_path,
+                            "startLine": file_start_line,
+                            "lineCount": line_count,
+                        }),
                         &start_line_arg,
                     ),
                     plan: None,
@@ -2917,10 +2943,10 @@ impl ToolRouter {
                                 name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                                 arguments: with_requested_start_line(
                                     json!({
-                                    "path": display_path,
-                                    "startLine": file_start_line,
-                                    "lineCount": line_count,
-                                }),
+                                        "path": display_path,
+                                        "startLine": file_start_line,
+                                        "lineCount": line_count,
+                                    }),
                                     &start_line_arg,
                                 ),
                                 plan: None,
@@ -3053,8 +3079,7 @@ impl ToolRouter {
                         StartLineArg::Invalid { .. } => 1,
                         _ => explicit_start_line
                             .or_else(|| {
-                                segment_line
-                                    .map(|line| line.saturating_sub(line_count / 2).max(1))
+                                segment_line.map(|line| line.saturating_sub(line_count / 2).max(1))
                             })
                             .unwrap_or(1),
                     };
@@ -3063,10 +3088,10 @@ impl ToolRouter {
                         name: TOOL_WORKSPACE_READ_FILE_SEGMENT.to_string(),
                         arguments: with_requested_start_line(
                             json!({
-                            "path": display_path,
-                            "startLine": start_line,
-                            "lineCount": line_count,
-                        }),
+                                "path": display_path,
+                                "startLine": start_line,
+                                "lineCount": line_count,
+                            }),
                             &start_line_arg,
                         ),
                         plan: None,
@@ -3141,10 +3166,10 @@ impl ToolRouter {
         // file/search 才打标（composite directory 分支本来就不加，此处镜像同步）。
         let gather_meta = {
             let base = json!({
-            "mode": mode,
-            "path": display_path,
-            "query": if query.is_empty() { Value::Null } else { Value::String(query) },
-        });
+                "mode": mode,
+                "path": display_path,
+                "query": if query.is_empty() { Value::Null } else { Value::String(query) },
+            });
             if mode == "directory" {
                 base
             } else {
@@ -3477,7 +3502,8 @@ impl ToolRouter {
         } else {
             raw_path.trim()
         };
-        let canonical = self.classify_workspace_path(trimmed, PathPurpose::Write, context, ws_id)?;
+        let canonical =
+            self.classify_workspace_path(trimmed, PathPurpose::Write, context, ws_id)?;
         if !canonical.is_dir() {
             return Err((
                 "invalid_cwd".to_string(),
@@ -3538,10 +3564,10 @@ impl ToolRouter {
     ) -> Result<PathBuf, (String, String)> {
         let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let raw_root = self.resolved_workspace_root(context, ws_id)?;
-        let canonical = raw_root
-            .canonicalize()
-            .unwrap_or_else(|_| raw_root);
-        Ok(crate::agent::path_permission::normalize_canonical(&canonical))
+        let canonical = raw_root.canonicalize().unwrap_or_else(|_| raw_root);
+        Ok(crate::agent::path_permission::normalize_canonical(
+            &canonical,
+        ))
     }
 
     fn canonical_workspace_root(&self) -> PathBuf {
@@ -6912,33 +6938,34 @@ mod tests {
         // Invalid：负数/浮点/字符串/bool/数组/对象（raw 原样保留）。
         assert_eq!(
             parse_start_line_arg(&json!({ "startLine": -5 })),
-            StartLineArg::Invalid {
-                raw: json!(-5)
-            }
+            StartLineArg::Invalid { raw: json!(-5) }
         );
         assert_eq!(
             parse_start_line_arg(&json!({ "startLine": 80.5 })),
-            StartLineArg::Invalid {
-                raw: json!(80.5)
-            }
+            StartLineArg::Invalid { raw: json!(80.5) }
         );
         assert_eq!(
             parse_start_line_arg(&json!({ "startLine": "80" })),
-            StartLineArg::Invalid {
-                raw: json!("80")
-            }
+            StartLineArg::Invalid { raw: json!("80") }
         );
         assert_eq!(
             parse_start_line_arg(&json!({ "startLine": true })),
-            StartLineArg::Invalid {
-                raw: json!(true)
-            }
+            StartLineArg::Invalid { raw: json!(true) }
         );
         // 兼容薄层零漂移：Valid→Some，Missing/Invalid→None（调用方 unwrap_or(1)）。
-        assert_eq!(explicit_gather_start_line(&json!({ "startLine": 80 })), Some(80));
-        assert_eq!(explicit_gather_start_line(&json!({ "startLine": 0 })), Some(1));
+        assert_eq!(
+            explicit_gather_start_line(&json!({ "startLine": 80 })),
+            Some(80)
+        );
+        assert_eq!(
+            explicit_gather_start_line(&json!({ "startLine": 0 })),
+            Some(1)
+        );
         assert_eq!(explicit_gather_start_line(&json!({})), None);
-        assert_eq!(explicit_gather_start_line(&json!({ "startLine": -5 })), None);
+        assert_eq!(
+            explicit_gather_start_line(&json!({ "startLine": -5 })),
+            None
+        );
         assert_eq!(
             explicit_gather_start_line(&json!({ "startLine": "80" })),
             None

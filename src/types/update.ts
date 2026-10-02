@@ -14,6 +14,18 @@ export type UpdateStatus =
   | "unpublished" // 仓库暂无发布版本（404 负缓存）
   | "error"; // 手动检查失败（后台静默失败不进入此态）
 
+/** Signed updater operation state. GitHub metadata never enters this state machine. */
+export type SignedUpdateStatus =
+  | "disabled"
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "installing"
+  | "pending-restart"
+  | "relaunch-failed"
+  | "error";
+
 /** 一次成功响应中与 UI 相关的原始字段（不含 html_url）。 */
 export interface AppReleaseInfo {
   tagName: string;

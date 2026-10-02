@@ -55,6 +55,8 @@
 - [0014 提供商协议三值化与模型目录：Responses 适配、模型级覆盖与收起取消编辑](0014-provider-protocol-tri-value-and-model-catalog.md)
 - [0015 侧边栏三级树的持久化字段、删除归属重写与 dialog 插件依赖](0015-workspace-sidebar-persistence-and-dialog-plugin.md)
 - [0017 发版流水线约定、四处版本一致性同步与安全加固](0017-release-tag-convention-and-tauri-version-sync.md)
+- [0018 Windows Job Object 进程生命周期约束](0018-windows-job-object-containment.md)
+- [0019 本地契约优先的签名桌面更新](0019-signed-desktop-updater-local-contract.md)
 
 ### 已接替
 

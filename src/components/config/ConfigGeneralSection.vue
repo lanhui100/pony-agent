@@ -36,6 +36,8 @@ const isCoding = computed(() => settings.value.workspaceMode === "coding");
 // ── PA-099：软件更新 ────────────────────────────────────────────────
 const updateStore = useUpdateStore();
 const updateChecking = computed(() => updateStore.status === "checking");
+const signedInstalling = computed(() => ["downloading", "installing"].includes(updateStore.signedStatus));
+const signedUpdateAvailable = computed(() => updateStore.signedStatus === "available" && updateStore.signedCandidate !== null);
 /** 仅在 available 态非空，模板内免空值收窄问题。 */
 const availableRelease = computed(() =>
   updateStore.status === "available" ? updateStore.latest : null
@@ -44,7 +46,15 @@ const lastCheckedLabel = computed(() => formatTimestamp(updateStore.lastCheckedA
 
 function checkForUpdateNow() {
   if (updateChecking.value) return;
-  void updateStore.checkForUpdates(true);
+  void Promise.allSettled([
+    updateStore.checkForUpdates(true),
+    updateStore.checkSignedUpdate()
+  ]);
+}
+
+function installSignedUpdate() {
+  if (signedInstalling.value || !signedUpdateAvailable.value) return;
+  void updateStore.installSignedUpdate();
 }
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -282,7 +292,7 @@ function openExa() {
                 <ExternalLink class="h-3 w-3" />
               </button>
             </template>
-            <template v-else-if="updateStore.status === 'up-to-date'">
+             <template v-else-if="updateStore.status === 'up-to-date'">
               <div class="flex items-center gap-1.5 text-stone-600">
                 <Check class="h-3.5 w-3.5 text-emerald-600" />
                 当前已是最新版本。
@@ -302,7 +312,41 @@ function openExa() {
             </template>
           </div>
 
-          <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-0.5">
+                                <button
+             v-if="signedUpdateAvailable"
+             type="button"
+             class="inline-flex items-center gap-1 rounded-[0.35rem] bg-[#f3c98d] px-2 py-1 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
+             :disabled="signedInstalling"
+             data-testid="config-update-install-button"
+             @click="installSignedUpdate()"
+           >
+             <LoaderCircle v-if="signedInstalling" class="h-3 w-3 animate-spin" />
+             <ArrowUpCircle v-else class="h-3 w-3" />
+             立即升级
+           </button>
+
+                      <button
+             v-if="signedUpdateAvailable"
+             type="button"
+             class="inline-flex items-center gap-1 rounded-[0.35rem] bg-[#f3c98d] px-2 py-1 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
+             :disabled="signedInstalling"
+             data-testid="config-update-install-button"
+             @click="installSignedUpdate()"
+           >
+             <LoaderCircle v-if="signedInstalling" class="h-3 w-3 animate-spin" />
+             <ArrowUpCircle v-else class="h-3 w-3" />
+             立即升级
+           </button>
+
+           <div v-if="signedInstalling && updateStore.signedProgress !== null" class="h-1.5 overflow-hidden rounded-full bg-stone-100" data-testid="config-update-progress">
+             <div class="h-full bg-amber-400 transition-all" :style="{ width: `${updateStore.signedProgress}%` }" />
+           </div>
+           <div v-if="updateStore.signedStatus === 'pending-restart'" class="text-[12px] text-emerald-700" data-testid="config-update-pending-restart">更新已提交，请重启应用完成更新。</div>
+           <div v-if="updateStore.signedStatus === 'relaunch-failed' || updateStore.signedStatus === 'error'" class="text-[12px] text-rose-600" data-testid="config-update-signed-error">
+             {{ updateStore.signedErrorMessage || "签名更新失败，应用未重启。" }}
+           </div>
+
+           <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-0.5">
             <label class="flex cursor-pointer items-center gap-2 text-[11px] text-stone-500">
               <Switch
                 :model-value="updateStore.autoCheck"

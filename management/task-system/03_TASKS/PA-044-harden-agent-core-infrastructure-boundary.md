@@ -2,20 +2,20 @@
 
 ## 状态
 - Status: `Ready`
+- Delivery state: `Frozen / Not started`（本轮不实施；无代码影响、无提交）
 - Priority: `P1`
 - Owner: `Codex`
 
 ## OpenSpec Change
-- 活跃路径：
-  [harden-agent-core-infrastructure-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary>)
+- 稳定归档路径：
+  `openspec/changes/archive/2026-06-09-harden-agent-core-infrastructure-boundary/`
 
 ## Delta Spec
-- 活跃路径：
-  [agent-core-infrastructure-boundary/spec.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary/specs/agent-core-infrastructure-boundary/spec.md>)
+- 归档路径：
+  `openspec/changes/archive/2026-06-09-harden-agent-core-infrastructure-boundary/specs/agent-core-infrastructure-boundary/spec.md`
 
 ## Canonical Spec
-- 待实现并归档后同步到：
-  `openspec/specs/agent-core-infrastructure-boundary/spec.md`
+- `openspec/specs/agent-core-infrastructure-boundary/spec.md`（若当前仓库未单独落 canonical 文件，须在重新启动实现前补齐并复核；本轮不启动）
 
 ## Spec 状态
 - Proposal: `ready`
@@ -70,40 +70,25 @@
 - 架构文档 SHALL 明确“Tauri 是 first host adapter，不是 core ownership boundary”
 
 ## 当前进展
-- 已完成 agent core 边界审核，确认代码内依赖方向总体正确，但 package/constructor/default preset 边界仍需加固
-- 已新增 OpenSpec change：
-  [harden-agent-core-infrastructure-boundary](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary>)
-- 已完成 proposal / design / tasks / delta spec 草案
-- 已修复 OpenSpec CLI 调用入口：新增 `npm run openspec -- ...`，直接调用本地 `@fission-ai/openspec` CLI，避免依赖全局 PATH
-- 已通过 OpenSpec 校验：
-  `npm run openspec -- validate harden-agent-core-infrastructure-boundary --type change --strict --json --no-interactive`
-- 已通过 artifact 状态检查：
-  `npm run openspec -- status --change harden-agent-core-infrastructure-boundary --json`
-- 已完成独立 spec review：
-  [2026-06-09-pa044-spec-review.md](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/02_REVIEWS/2026-06-09-pa044-spec-review.md>)
+- **历史 spec 阶段快照（2026-06-09）**：完成 agent core 边界审核、proposal/design/tasks/delta spec 草案与独立 spec review；当时的 active change 后续已归档。
+- **当前状态（2026-09-30）**：保持 `Ready / Frozen / Not started`。本轮不启动实现，不把历史 acceptance audit 当作当前 PA-077 或本轮交付证明。
+- PA-044 的历史验收/架构记录需按其对应提交与归档快照理解；若重新启动，先核对当前 HEAD 的 core boundary、canonical spec 与 non-Tauri harness 证据，再重新走三路计划/spec 审核。
 
 ## 下一步动作
-Spec 阶段已可交付。下一步进入实现时，从 OpenSpec tasks 的 `2. Construction Boundary` 开始，优先实现 host-injectable construction：
 
-- `AgentRuntimeBuilder` 或等价稳定构造 API
-- `HostControlPlaneBuilder` 或等价稳定构造 API
-- 非测试可用的 workspace root / session backend / graph store / provider resolver / tool executor 注入路径
+PA-044 本轮不实施。重新启动前必须先完成 PA-077 closeout，并重新核对：
+
+- archived OpenSpec change 与 canonical spec 是否可复核；
+- 当前 core/Tauri-free target 与历史 acceptance audit 是否仍一致；
+- 新一轮三路 plan/spec 审核是否通过。
 
 ## 当前卡点
-- 暂无。OpenSpec CLI 已可通过仓库脚本入口调用：
-  `npm run openspec -- <command>`
+- 冻结等待 PA-077 closeout；不属于本轮实现阻塞。
 
 ## 断点续跑提示
+
 继续前先看：
 
-- [proposal.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary/proposal.md>)
-- [design.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary/design.md>)
-- [tasks.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary/tasks.md>)
-- [spec.md](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary/specs/agent-core-infrastructure-boundary/spec.md>)
-- [runtime.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/runtime.rs>)
-- [control_plane.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/control_plane.rs>)
-- [tools.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/tools.rs>)
-- [session.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/session.rs>)
-- [graph.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/agent/graph.rs>)
-- [tauri_adapter.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/tauri_adapter.rs>)
-- [sse_adapter.rs](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri/src/sse_adapter.rs>)
+- `openspec/changes/archive/2026-06-09-harden-agent-core-infrastructure-boundary/`
+- `management/task-system/02_REVIEWS/2026-06-09-pa044-acceptance-audit.md`（历史验收快照）
+- `management/task-system/03_TASKS/PA-044-harden-agent-core-infrastructure-boundary.md`

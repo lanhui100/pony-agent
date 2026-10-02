@@ -19,19 +19,30 @@
 //!   documented alias for the same operation, `kill_after` arms a background timer, and
 //!   `shutdown(session_id)` terminates and removes every process owned by a session.
 //!
-//! Containment note (design.md Decision 7): this module is the *lifecycle* backend only. Windows
-//! Job Objects / Unix process groups are containment concerns handled by the sandbox layer
-//! (`sandbox.rs`); `ProcessManager` deliberately does not promise to contain process trees.
+//! Windows lifecycle containment (PA-077): each process is assigned to a private non-inheritable
+//! Job Object before its handle is published. Explicit kill/shutdown and final Job owner drop kill
+//! contained descendants, including when the direct child already exited. Assignment is fail-closed,
+//! but spawn-before-assignment has a scheduling window; this is not a sandbox/security boundary.
+//! `SandboxBackend` remains separate, and non-Windows behavior is direct-child lifecycle only.
 
 use crate::agent::tool_runtime::{
     ProcessBackend, ProcessPollResult, ProcessStartRequest, ProcessState,
 };
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(all(windows, test))]
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(windows)]
+mod windows_job;
+#[cfg(windows)]
+use windows_job::Job;
 
 /// Default per-stream output cap (64 KiB).
 const DEFAULT_BUFFER_CAP: usize = 64 * 1024;
@@ -40,6 +51,60 @@ const DRAIN_SETTLE_MAX: Duration = Duration::from_millis(500);
 /// Best-effort reap budget after `kill` (30 × 10 ms = 300 ms).
 const KILL_REAP_ATTEMPTS: u32 = 30;
 const KILL_REAP_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(windows)]
+fn failed_start_cleanup(child: &mut Child, job: &Job, cause: String) -> String {
+    let mut errors = Vec::new();
+    if let Err(error) = job.terminate(1) {
+        errors.push(format!("Job termination: {error}"));
+    }
+    // Close immediately as a kill-on-close fallback even if another owner is retained.
+    job.close();
+    if let Err(error) = kill_and_reap(child, "bounded child cleanup") {
+        errors.push(error);
+    }
+    if errors.is_empty() {
+        cause
+    } else {
+        format!("{cause}; cleanup failed: {}", errors.join("; "))
+    }
+}
+
+#[cfg(windows)]
+/// Kill a child and synchronously reap it within the bounded cleanup budget.
+///
+/// A failed `kill` is tolerated only when `try_wait` proves that the child had already exited;
+/// otherwise every failure is returned with the operation context so callers cannot silently leak a
+/// native process.
+fn kill_and_reap(child: &mut Child, context: &str) -> Result<(), String> {
+    let kill_error = child.kill().err();
+    let mut last_wait_error = None;
+    for _ in 0..KILL_REAP_ATTEMPTS {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(error) => {
+                last_wait_error = Some(error);
+                break;
+            }
+        }
+        std::thread::sleep(KILL_REAP_INTERVAL);
+    }
+
+    let mut details = Vec::new();
+    if let Some(error) = kill_error {
+        details.push(format!("kill failed: {error}"));
+    }
+    if let Some(error) = last_wait_error {
+        details.push(format!("wait failed: {error}"));
+    } else {
+        details.push(format!(
+            "child did not exit within {:?}",
+            KILL_REAP_ATTEMPTS * KILL_REAP_INTERVAL
+        ));
+    }
+    Err(format!("{context}; {}", details.join("; ")))
+}
 
 /// Minimal environment a sandboxed child is allowed to inherit even after `env_clear()`, so it can
 /// still spawn commands / resolve system paths without leaking provider keys, session secrets, or
@@ -142,6 +207,8 @@ struct ManagedProcess {
     stderr: Arc<Mutex<BoundedBuffer>>,
     stdout_done: Arc<AtomicBool>,
     stderr_done: Arc<AtomicBool>,
+    #[cfg(windows)]
+    job: Job,
 }
 
 struct Inner {
@@ -149,6 +216,14 @@ struct Inner {
     seq: AtomicU64,
     stdout_cap: usize,
     stderr_cap: usize,
+    #[cfg(all(windows, test))]
+    job_failure: Mutex<Option<windows_job::FailureInjection>>,
+    #[cfg(all(windows, test))]
+    child_observers: Mutex<BTreeMap<u32, OwnedHandle>>,
+    #[cfg(all(windows, test))]
+    wait_before_assign: AtomicBool,
+    #[cfg(all(windows, test))]
+    missing_pipe: Mutex<Option<&'static str>>,
 }
 
 /// Session-scoped `ProcessBackend` implementation. Clones share the same process table via an
@@ -173,8 +248,21 @@ impl ProcessManager {
                 seq: AtomicU64::new(0),
                 stdout_cap,
                 stderr_cap,
+                #[cfg(all(windows, test))]
+                job_failure: Mutex::new(None),
+                #[cfg(all(windows, test))]
+                child_observers: Mutex::new(BTreeMap::new()),
+                #[cfg(all(windows, test))]
+                wait_before_assign: AtomicBool::new(false),
+                #[cfg(all(windows, test))]
+                missing_pipe: Mutex::new(None),
             }),
         }
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn set_job_failure(&self, failure: Option<windows_job::FailureInjection>) {
+        *self.inner.job_failure.lock().unwrap() = failure;
     }
 
     /// Terminate a process owned by `session_id` and (if it had already exited) clean its entry
@@ -187,6 +275,14 @@ impl ProcessManager {
             ExitState::Exited { .. }
         );
         if already_exited {
+            // Even if the direct child has already exited, ensure any descendants
+            // contained in the Windows Job Object are unconditionally terminated.
+            #[cfg(windows)]
+            if let Err(error) = entry.job.terminate(1) {
+                entry.job.close();
+                return Err(error);
+            }
+
             // Idempotent cleanup: close stdin and drop the stale handle.
             drop(entry.stdin.lock().expect("process stdin poisoned").take());
             self.inner
@@ -212,7 +308,9 @@ impl ProcessManager {
         let handle = handle.to_string();
         std::thread::spawn(move || {
             std::thread::sleep(duration);
-            let _ = this.kill(&session_id, &handle);
+            if let Err(error) = this.kill(&session_id, &handle) {
+                eprintln!("[process] kill_after cleanup failed for `{handle}`: {error}");
+            }
         });
     }
 
@@ -228,7 +326,11 @@ impl ProcessManager {
         };
         let count = entries.len();
         for (handle, entry) in entries {
-            let _ = self.terminate(&entry);
+            if let Err(err) = self.terminate(&entry) {
+                eprintln!("[process] shutdown termination error for `{handle}`: {err}");
+            }
+            #[cfg(windows)]
+            entry.job.close();
             self.inner
                 .processes
                 .lock()
@@ -254,6 +356,90 @@ impl ProcessManager {
             .expect("stderr buffer poisoned")
             .dropped_bytes();
         Ok((stdout_dropped, stderr_dropped))
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn query_job_limits(&self, session_id: &str, handle: &str) -> Result<u32, String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry.job.query_limit_flags()
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn is_child_in_job(&self, session_id: &str, handle: &str) -> Result<bool, String> {
+        let entry = self.lookup(session_id, handle)?;
+        let raw = entry.child.lock().unwrap().as_raw_handle();
+        entry.job.is_process_in_job(raw)
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn set_job_failure_for_handle(
+        &self,
+        session_id: &str,
+        handle: &str,
+        failure: windows_job::FailureInjection,
+    ) -> Result<(), String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry.job.set_failure(failure);
+        Ok(())
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn set_wait_before_assign(&self, enabled: bool) {
+        self.inner
+            .wait_before_assign
+            .store(enabled, Ordering::Release);
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn set_missing_pipe(&self, pipe: Option<&'static str>) {
+        *self.inner.missing_pipe.lock().unwrap() = pipe;
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn failed_start_observer_pids(&self) -> Vec<u32> {
+        self.inner
+            .child_observers
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn observer_waits_for_exit(
+        &self,
+        pid: u32,
+        timeout_ms: u32,
+    ) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        let observers = self.inner.child_observers.lock().unwrap();
+        let handle = observers
+            .get(&pid)
+            .ok_or_else(|| format!("no child observer for pid {pid}"))?;
+        let result = unsafe { WaitForSingleObject(handle.as_raw_handle(), timeout_ms) };
+        Ok(result == WAIT_OBJECT_0)
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn remove_child_observer(&self, pid: u32) {
+        self.inner.child_observers.lock().unwrap().remove(&pid);
+    }
+
+    #[cfg(all(windows, test))]
+    pub(crate) fn query_job_handle_flags(
+        &self,
+        session_id: &str,
+        handle: &str,
+    ) -> Result<u32, String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry.job.handle_flags()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_count(&self) -> usize {
+        self.inner.processes.lock().unwrap().len()
     }
 
     // ── internals ─────────────────────────────────────────────────────────────────────────────
@@ -289,20 +475,158 @@ impl ProcessManager {
                 }
             }
         }
-        let mut child = command.spawn().map_err(|error| {
-            format!("spawn failed for `{}`: {error}", request.program)
-        })?;
+        #[cfg(windows)]
+        let job = {
+            #[cfg(test)]
+            let failure = *self.inner.job_failure.lock().unwrap();
+            #[cfg(test)]
+            let res = Job::create(failure);
+            #[cfg(not(test))]
+            let res = Job::create();
+            res.map_err(|error| format!("failed to initialize job object: {error}"))?
+        };
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("spawn failed for `{}`: {error}", request.program))?;
+
+        #[cfg(all(windows, test))]
+        {
+            use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            let mut duplicated = std::ptr::null_mut();
+            let current = unsafe { GetCurrentProcess() };
+            if unsafe {
+                DuplicateHandle(
+                    current,
+                    child.as_raw_handle(),
+                    current,
+                    &mut duplicated,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+            {
+                let error = io::Error::last_os_error();
+                let cleanup = kill_and_reap(&mut child, "observer duplicate failure cleanup");
+                job.close();
+                return Err(format!(
+                    "DuplicateHandle child observer failed: {error}; cleanup={cleanup:?}"
+                ));
+            }
+            // SAFETY: DuplicateHandle returned a new exclusively owned process handle.
+            let observer = unsafe { OwnedHandle::from_raw_handle(duplicated) };
+            self.inner
+                .child_observers
+                .lock()
+                .unwrap()
+                .insert(child.id(), observer);
+            if self.inner.wait_before_assign.load(Ordering::Acquire) {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(KILL_REAP_INTERVAL)
+                        }
+                        result => {
+                            let cleanup = kill_and_reap(&mut child, "wait-before-assign cleanup");
+                            job.close();
+                            return Err(format!(
+                                "wait-before-assign failed: {result:?}; cleanup={cleanup:?}"
+                            ));
+                        }
+                    }
+                }
+                // Injection occurs only after a native wait has proved that this exact child exited.
+                job.set_failure(windows_job::FailureInjection {
+                    assign: true,
+                    ..Default::default()
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let raw_handle = child.as_raw_handle();
+            if let Err(error) = job.assign_and_verify(raw_handle) {
+                return Err(failed_start_cleanup(
+                    &mut child,
+                    &job,
+                    format!("job assignment failed for `{}`: {error}", request.program),
+                ));
+            }
+        }
 
         // Move the pipe endpoints into drain threads. The child itself stays in the manager so
         // `poll` can reap and `kill` can terminate it.
-        let stdout_pipe = child
-            .stdout
-            .take()
-            .ok_or_else(|| "stdout pipe unavailable".to_string())?;
-        let stderr_pipe = child
-            .stderr
-            .take()
-            .ok_or_else(|| "stderr pipe unavailable".to_string())?;
+        #[cfg(all(windows, test))]
+        if *self.inner.missing_pipe.lock().unwrap() == Some("stdout") {
+            let _ = child.stdout.take();
+        }
+        let stdout_pipe = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => {
+                #[cfg(windows)]
+                let job_error = {
+                    let terminate = job.terminate(1).err();
+                    let reap = kill_and_reap(
+                        &mut child,
+                        "failed to clean up child after stdout pipe failure",
+                    )
+                    .err();
+                    job.close();
+                    let mut errors = Vec::new();
+                    if let Some(error) = terminate {
+                        errors.push(format!("Job termination: {error}"));
+                    }
+                    if let Some(error) = reap {
+                        errors.push(format!("child cleanup: {error}"));
+                    }
+                    (!errors.is_empty()).then(|| errors.join("; "))
+                };
+                #[cfg(not(windows))]
+                let job_error: Option<String> = None;
+                return Err(match job_error {
+                    Some(cleanup) => format!("stdout pipe unavailable; cleanup failed: {cleanup}"),
+                    None => "stdout pipe unavailable".to_string(),
+                });
+            }
+        };
+        #[cfg(all(windows, test))]
+        if *self.inner.missing_pipe.lock().unwrap() == Some("stderr") {
+            let _ = child.stderr.take();
+        }
+        let stderr_pipe = match child.stderr.take() {
+            Some(pipe) => pipe,
+            None => {
+                #[cfg(windows)]
+                let job_error = {
+                    let terminate = job.terminate(1).err();
+                    let reap = kill_and_reap(
+                        &mut child,
+                        "failed to clean up child after stderr pipe failure",
+                    )
+                    .err();
+                    job.close();
+                    let mut errors = Vec::new();
+                    if let Some(error) = terminate {
+                        errors.push(format!("Job termination: {error}"));
+                    }
+                    if let Some(error) = reap {
+                        errors.push(format!("child cleanup: {error}"));
+                    }
+                    (!errors.is_empty()).then(|| errors.join("; "))
+                };
+                #[cfg(not(windows))]
+                let job_error: Option<String> = None;
+                return Err(match job_error {
+                    Some(cleanup) => format!("stderr pipe unavailable; cleanup failed: {cleanup}"),
+                    None => "stderr pipe unavailable".to_string(),
+                });
+            }
+        };
         let stdin_pipe = child.stdin.take();
 
         let stdout = Arc::new(Mutex::new(BoundedBuffer::new(self.inner.stdout_cap)));
@@ -321,6 +645,8 @@ impl ProcessManager {
             std::thread::spawn(move || drain_pipe(stderr_pipe, buffer, done));
         }
 
+        #[cfg(all(windows, test))]
+        let child_pid = child.id();
         let handle = self.next_handle(child.id());
         let entry = Arc::new(ManagedProcess {
             session_id: request.session_id.clone(),
@@ -332,12 +658,20 @@ impl ProcessManager {
             stderr,
             stdout_done,
             stderr_done,
+            #[cfg(windows)]
+            job,
         });
         self.inner
             .processes
             .lock()
             .expect("process map poisoned")
             .insert(handle.clone(), entry);
+        #[cfg(all(windows, test))]
+        self.inner
+            .child_observers
+            .lock()
+            .unwrap()
+            .remove(&child_pid);
         Ok(handle)
     }
 
@@ -369,16 +703,10 @@ impl ProcessManager {
             self.wait_for_drain(&entry);
         }
 
-        let (stdout, stdout_truncated, _stdout_dropped) = entry
-            .stdout
-            .lock()
-            .expect("stdout buffer poisoned")
-            .drain();
-        let (stderr, stderr_truncated, _stderr_dropped) = entry
-            .stderr
-            .lock()
-            .expect("stderr buffer poisoned")
-            .drain();
+        let (stdout, stdout_truncated, _stdout_dropped) =
+            entry.stdout.lock().expect("stdout buffer poisoned").drain();
+        let (stderr, stderr_truncated, _stderr_dropped) =
+            entry.stderr.lock().expect("stderr buffer poisoned").drain();
         Ok(ProcessPollResult {
             state: if exited {
                 ProcessState::Exited
@@ -418,28 +746,61 @@ impl ProcessManager {
     /// report the final `Exited` state; entry removal is handled by `kill` (idempotent cleanup)
     /// and `shutdown`.
     fn terminate(&self, entry: &Arc<ManagedProcess>) -> Result<(), String> {
+        #[cfg(windows)]
+        let job_terminate_res = entry.job.terminate(1);
+
         let mut state = entry.state.lock().expect("process state poisoned");
         if matches!(*state, ExitState::Exited { .. }) {
+            #[cfg(windows)]
+            if let Err(error) = job_terminate_res {
+                entry.job.close();
+                return Err(error);
+            }
             return Ok(());
         }
         {
             let mut child = entry.child.lock().expect("process child poisoned");
-            let _ = child.kill();
-            for _ in 0..KILL_REAP_ATTEMPTS {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        *state = ExitState::Exited {
-                            exit_code: status.code().unwrap_or(-1),
-                        };
-                        break;
+            #[cfg(windows)]
+            let reap_result = kill_and_reap(&mut child, "failed to terminate managed child");
+            #[cfg(not(windows))]
+            let reap_result: Result<(), String> = {
+                let _ = child.kill();
+                for _ in 0..KILL_REAP_ATTEMPTS {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            *state = ExitState::Exited {
+                                exit_code: status.code().unwrap_or(-1),
+                            };
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(_) => break,
                     }
-                    Ok(None) => {}
-                    Err(_) => break,
+                    std::thread::sleep(KILL_REAP_INTERVAL);
                 }
-                std::thread::sleep(KILL_REAP_INTERVAL);
+                Ok(())
+            };
+            if let Ok(Some(status)) = child.try_wait() {
+                *state = ExitState::Exited {
+                    exit_code: status.code().unwrap_or(-1),
+                };
+            }
+            if let Err(error) = reap_result {
+                drop(entry.stdin.lock().expect("process stdin poisoned").take());
+                #[cfg(windows)]
+                if let Err(job_error) = job_terminate_res {
+                    entry.job.close();
+                    return Err(format!("{error}; job termination failed: {job_error}"));
+                }
+                return Err(error);
             }
         }
         drop(entry.stdin.lock().expect("process stdin poisoned").take());
+        #[cfg(windows)]
+        if let Err(error) = job_terminate_res {
+            entry.job.close();
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -622,14 +983,18 @@ mod tests {
         handle: &str,
     ) -> ProcessPollResult {
         let deadline = Instant::now() + Duration::from_secs(20);
-        let mut last = manager.poll(session_id, handle).expect("poll should succeed");
+        let mut last = manager
+            .poll(session_id, handle)
+            .expect("poll should succeed");
         let mut stdout = last.stdout.clone();
         let mut stderr = last.stderr.clone();
         let mut stdout_truncated = last.stdout_truncated;
         let mut stderr_truncated = last.stderr_truncated;
         while last.state == ProcessState::Running && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
-            last = manager.poll(session_id, handle).expect("poll should succeed");
+            last = manager
+                .poll(session_id, handle)
+                .expect("poll should succeed");
             stdout.push_str(&last.stdout);
             stderr.push_str(&last.stderr);
             stdout_truncated |= last.stdout_truncated;
@@ -671,7 +1036,10 @@ mod tests {
 
     #[cfg(not(windows))]
     fn long_running_command() -> (String, Vec<String>) {
-        ("sh".to_string(), vec!["-lc".to_string(), "sleep 30".to_string()])
+        (
+            "sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
     }
 
     #[cfg(windows)]
@@ -689,10 +1057,7 @@ mod tests {
     fn large_output_command() -> (String, Vec<String>) {
         (
             "sh".to_string(),
-            vec![
-                "-lc".to_string(),
-                "printf '%4096s' ''; echo".to_string(),
-            ],
+            vec!["-lc".to_string(), "printf '%4096s' ''; echo".to_string()],
         )
     }
 
@@ -711,7 +1076,10 @@ mod tests {
     fn stdin_echo_command() -> (String, Vec<String>) {
         (
             "sh".to_string(),
-            vec!["-lc".to_string(), "read line; echo \"got:$line\"".to_string()],
+            vec![
+                "-lc".to_string(),
+                "read line; echo \"got:$line\"".to_string(),
+            ],
         )
     }
 
@@ -722,7 +1090,10 @@ mod tests {
         let first = start(&manager, "session-uniq", &program, arguments.clone());
         let second = start(&manager, "session-uniq", &program, arguments);
         assert_ne!(first, second, "handles must be unique");
-        assert!(!first.contains("session"), "handle must be opaque, got {first}");
+        assert!(
+            !first.contains("session"),
+            "handle must be opaque, got {first}"
+        );
     }
 
     #[test]
@@ -757,7 +1128,10 @@ mod tests {
 
         let after_kill = poll_until_exited(&manager, "session-long", &handle);
         assert_eq!(after_kill.state, ProcessState::Exited);
-        assert!(after_kill.exit_code.is_some(), "killed process has an exit code");
+        assert!(
+            after_kill.exit_code.is_some(),
+            "killed process has an exit code"
+        );
 
         // A second kill is safe/ignored and cleans the entry up; the stale handle fails closed.
         assert!(manager.kill("session-long", &handle).is_ok());
@@ -883,11 +1257,7 @@ mod tests {
         let manager = ProcessManager::new();
         let (program, arguments) = long_running_command();
         let handle = start(&manager, "session-timer", &program, arguments);
-        manager.kill_after(
-            "session-timer",
-            &handle,
-            Duration::from_millis(300),
-        );
+        manager.kill_after("session-timer", &handle, Duration::from_millis(300));
         let result = poll_until_exited(&manager, "session-timer", &handle);
         assert_eq!(result.state, ProcessState::Exited);
         assert!(manager.kill("session-timer", &handle).is_ok());
@@ -897,18 +1267,8 @@ mod tests {
     fn shutdown_kills_every_process_owned_by_the_session() {
         let manager = ProcessManager::new();
         let (program, arguments) = long_running_command();
-        let h1 = start(
-            &manager,
-            "session-shut",
-            &program,
-            arguments.clone(),
-        );
-        let h2 = start(
-            &manager,
-            "session-shut",
-            &program,
-            arguments.clone(),
-        );
+        let h1 = start(&manager, "session-shut", &program, arguments.clone());
+        let h2 = start(&manager, "session-shut", &program, arguments.clone());
         let h3 = start(&manager, "session-other", &program, arguments);
 
         assert_eq!(manager.shutdown("session-shut"), 2);
@@ -933,5 +1293,491 @@ mod tests {
             .expect("clean up the remaining process");
         let _ = poll_until_exited(&manager, "session-other", &h3);
         assert!(manager.kill("session-other", &h3).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_process() {
+        let mode = match std::env::var("PONY_AGENT_TEST_HELPER") {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        match mode.as_str() {
+            "descendant" => {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            "parent" => {
+                println!("PARENT_READY");
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).unwrap();
+                if line.trim() == "spawn" {
+                    let descendant = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "agent::process::tests::helper_process",
+                            "--nocapture",
+                        ])
+                        .env("PONY_AGENT_TEST_HELPER", "descendant")
+                        .spawn()
+                        .unwrap();
+                    println!("DESCENDANT_PID:{}", descendant.id());
+                    std::io::stdout().flush().unwrap();
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+            }
+            "parent_exit_early" => {
+                println!("PARENT_READY");
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).unwrap();
+                if line.trim() == "spawn" {
+                    let descendant = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "agent::process::tests::helper_process",
+                            "--nocapture",
+                        ])
+                        .env("PONY_AGENT_TEST_HELPER", "descendant")
+                        .spawn()
+                        .unwrap();
+                    println!("DESCENDANT_PID:{}", descendant.id());
+                    std::io::stdout().flush().unwrap();
+                    std::process::exit(0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(windows)]
+    struct NativeProcessHandle(windows_sys::Win32::Foundation::HANDLE);
+
+    #[cfg(windows)]
+    impl NativeProcessHandle {
+        fn open_synchronize(pid: u32) -> Result<Self, String> {
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::System::Threading::OpenProcess;
+            const SYNCHRONIZE: u32 = 0x0010_0000;
+            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return Err(format!("OpenProcess for pid {pid} failed"));
+            }
+            Ok(Self(handle))
+        }
+
+        fn wait_for_exit(&self, timeout_ms: u32) -> bool {
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            let res = unsafe { WaitForSingleObject(self.0, timeout_ms) };
+            res == WAIT_OBJECT_0
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for NativeProcessHandle {
+        fn drop(&mut self) {
+            use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+            if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn spawn_helper_and_get_descendant(
+        manager: &ProcessManager,
+        session: &str,
+        helper_mode: &str,
+    ) -> (String, u32) {
+        let handle = manager
+            .start(&ProcessStartRequest {
+                session_id: session.to_string(),
+                program: std::env::current_exe()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                arguments: vec![
+                    "--exact".to_string(),
+                    "agent::process::tests::helper_process".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                sandbox: SandboxRequest {
+                    workspace_root: ".".to_string(),
+                    allow_network: false,
+                    environment_allowlist: vec![format!("PONY_AGENT_TEST_HELPER={helper_mode}")],
+                    isolate_environment: true,
+                },
+            })
+            .expect("start helper");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut output = String::new();
+        while !output.contains("PARENT_READY") && Instant::now() < deadline {
+            if let Ok(poll) = manager.poll(session, &handle) {
+                output.push_str(&poll.stdout);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            output.contains("PARENT_READY"),
+            "helper failed to become ready: {output}"
+        );
+
+        manager
+            .write_stdin(session, &handle, b"spawn\n")
+            .expect("write spawn to stdin");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut descendant_pid = None;
+        while descendant_pid.is_none() && Instant::now() < deadline {
+            if let Ok(poll) = manager.poll(session, &handle) {
+                output.push_str(&poll.stdout);
+            }
+            if let Some(pos) = output.find("DESCENDANT_PID:") {
+                let rest = &output[pos + "DESCENDANT_PID:".len()..];
+                if let Some(end) = rest.find('\n') {
+                    let pid_str = rest[..end].trim();
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        descendant_pid = Some(pid);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid = descendant_pid.expect("helper failed to report descendant pid");
+        (handle, pid)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendant_on_explicit_kill() {
+        let manager = ProcessManager::new();
+        let session = "session-kill-descendant";
+        let (handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant should initially be running"
+        );
+
+        manager.kill(session, &handle).expect("kill parent");
+
+        assert!(
+            native.wait_for_exit(5000),
+            "descendant should have been terminated by Job Object"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendant_when_parent_exits_then_kill_is_called() {
+        let manager = ProcessManager::new();
+        let session = "session-parent-exited-kill";
+        let (handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent_exit_early");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if manager.poll(session, &handle).unwrap().state == ProcessState::Exited {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert_eq!(
+            manager.poll(session, &handle).unwrap().state,
+            ProcessState::Exited
+        );
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant must survive before explicit kill"
+        );
+        manager
+            .kill(session, &handle)
+            .expect("kill retained exited record");
+        assert!(
+            native.wait_for_exit(5000),
+            "explicit kill must terminate the Job tree"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_parent_exits_then_shutdown_kills_descendant() {
+        let manager = ProcessManager::new();
+        let session = "session-parent-exited-first";
+        let (handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent_exit_early");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut parent_exited = false;
+        while Instant::now() < deadline {
+            if let Ok(poll) = manager.poll(session, &handle) {
+                if poll.state == ProcessState::Exited {
+                    parent_exited = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(parent_exited, "parent process should have exited early");
+
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant should still be alive after parent exits"
+        );
+
+        assert_eq!(manager.shutdown(session), 1);
+
+        assert!(
+            native.wait_for_exit(5000),
+            "descendant should have been terminated upon shutdown"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendant_on_last_owner_drop() {
+        let manager = ProcessManager::new();
+        let clone = manager.clone();
+        let session = "session-drop-descendant";
+        let (_handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+
+        drop(manager);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant must survive while clone still exists"
+        );
+
+        drop(clone);
+        assert!(
+            native.wait_for_exit(5000),
+            "descendant should be killed when final manager owner is dropped"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_object_limit_flags_and_membership_verified() {
+        use windows_sys::Win32::System::JobObjects::{
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+        let manager = ProcessManager::new();
+        let session = "session-limits";
+        let (program, arguments) = echo_command();
+        let handle = start(&manager, session, &program, arguments);
+
+        let flags = manager
+            .query_job_limits(session, &handle)
+            .expect("query limits");
+        assert_ne!(
+            flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            0,
+            "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE must be set"
+        );
+        assert_eq!(
+            flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            0,
+            "JOB_OBJECT_LIMIT_BREAKAWAY_OK must NOT be set"
+        );
+        assert_eq!(
+            flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+            0,
+            "JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK must NOT be set"
+        );
+
+        let is_member = manager
+            .is_child_in_job(session, &handle)
+            .expect("membership check");
+        assert!(is_member, "spawned child must be verified as job member");
+
+        use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+        let handle_flags = manager
+            .query_job_handle_flags(session, &handle)
+            .expect("query Job handle flags");
+        assert_eq!(
+            handle_flags & HANDLE_FLAG_INHERIT,
+            0,
+            "Job handle must be non-inheritable"
+        );
+
+        let _ = manager.kill(session, &handle);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_failure_injection_cleans_up_and_publishes_no_handle() {
+        use super::windows_job::FailureInjection;
+        let manager = ProcessManager::new();
+        let session = "session-inj";
+        let (program, arguments) = echo_command();
+
+        manager.set_job_failure(Some(FailureInjection {
+            create: true,
+            ..Default::default()
+        }));
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: program.clone(),
+            arguments: arguments.clone(),
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job create injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+
+        manager.set_job_failure(Some(FailureInjection {
+            configure: true,
+            ..Default::default()
+        }));
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: program.clone(),
+            arguments: arguments.clone(),
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job configure injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+
+        manager.set_job_failure(Some(FailureInjection {
+            assign: true,
+            ..Default::default()
+        }));
+        let (long_program, long_arguments) = long_running_command();
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: long_program.clone(),
+            arguments: long_arguments.clone(),
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job assign injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+        let assign_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("assign failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(assign_pid, 5_000).unwrap());
+        manager.remove_child_observer(assign_pid);
+
+        manager.set_job_failure(Some(FailureInjection {
+            verify: true,
+            ..Default::default()
+        }));
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: long_program.clone(),
+            arguments: long_arguments.clone(),
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job verify injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+        let verify_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("verify failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(verify_pid, 5_000).unwrap());
+        manager.remove_child_observer(verify_pid);
+
+        // A native wait proves this child exited before the injected assignment failure. The
+        // start transaction still fails closed and publishes no opaque handle.
+        manager.set_job_failure(None);
+        manager.set_wait_before_assign(true);
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: echo_command().0,
+            arguments: echo_command().1,
+            sandbox: sandbox(),
+        });
+        manager.set_wait_before_assign(false);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job assign injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+        let exited_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("early-exit failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(exited_pid, 0).unwrap());
+        manager.remove_child_observer(exited_pid);
+
+        manager.set_missing_pipe(Some("stdout"));
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: long_program.clone(),
+            arguments: long_arguments.clone(),
+            sandbox: sandbox(),
+        });
+        manager.set_missing_pipe(None);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("stdout pipe unavailable"));
+        let pipe_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("pipe failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(pipe_pid, 5_000).unwrap());
+        manager.remove_child_observer(pipe_pid);
+
+        // 5. Injected terminate failure is surfaced by kill()
+        manager.set_job_failure(None);
+        let (prog, args) = long_running_command();
+        let handle = start(&manager, session, &prog, args);
+        manager
+            .set_job_failure_for_handle(
+                session,
+                &handle,
+                FailureInjection {
+                    terminate: true,
+                    ..Default::default()
+                },
+            )
+            .expect("set job failure on handle");
+
+        let kill_res = manager.kill(session, &handle);
+        assert!(kill_res.is_err());
+        assert!(kill_res
+            .unwrap_err()
+            .contains("job terminate injected failure"));
+
+        // Clean up: clear failure injection on handle and terminate successfully
+        manager
+            .set_job_failure_for_handle(session, &handle, FailureInjection::default())
+            .expect("clear job failure on handle");
+        let clean_res = manager.kill(session, &handle);
+        assert!(clean_res.is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_fast_exit_command_succeeds_naturally() {
+        let manager = ProcessManager::new();
+        let session = "session-fast-cmd";
+        let handle = start(
+            &manager,
+            session,
+            "cmd",
+            vec!["/c".to_string(), "echo fast".to_string()],
+        );
+        let res = poll_until_exited(&manager, session, &handle);
+        assert_eq!(res.state, ProcessState::Exited);
+        assert_eq!(res.exit_code, Some(0));
+        assert!(res.stdout.contains("fast"));
     }
 }

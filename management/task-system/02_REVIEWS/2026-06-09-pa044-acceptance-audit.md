@@ -1,13 +1,15 @@
-# PA-044 Acceptance Audit
+# PA-044 Acceptance Audit (historical snapshot — 2026-06-09)
+
+> This audit records the 2026-06-09 implementation/acceptance snapshot. It is not the current task status: PA-044 is currently `Ready / Frozen / Not started` pending a fresh revalidation before any restart.
 
 ## 审核对象
 
-- [PA-044 任务卡](</C:/Users/HUAWEI/Documents/pony-agent/management/task-system/03_TASKS/PA-044-harden-agent-core-infrastructure-boundary.md>)
-- [OpenSpec change](</C:/Users/HUAWEI/Documents/pony-agent/openspec/changes/harden-agent-core-infrastructure-boundary>)
-- [agent core crate](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core>)
-- [Tauri adapter crate](</C:/Users/HUAWEI/Documents/pony-agent/src-tauri>)
-- [runtime architecture doc](</C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/runtime.md>)
-- [architecture overview](</C:/Users/HUAWEI/Documents/pony-agent/docs/architecture/overview.md>)
+- [PA-044 任务卡](../../../management/task-system/03_TASKS/PA-044-harden-agent-core-infrastructure-boundary.md)
+- [OpenSpec change（archived）](../../../openspec/changes/archive/2026-06-09-harden-agent-core-infrastructure-boundary/)
+- [agent core crate](../../../crates/pony-agent-core/)
+- [Tauri adapter crate](../../../src-tauri/)
+- [runtime architecture doc](../../../docs/architecture/runtime.md)
+- [architecture overview](../../../docs/architecture/overview.md)
 
 ## 结论
 
@@ -48,7 +50,7 @@
 
 已新增：
 
-- [non_tauri_harness.rs](</C:/Users/HUAWEI/Documents/pony-agent/crates/pony-agent-core/src/bin/non_tauri_harness.rs>)
+- [non_tauri_harness.rs](../../../crates/pony-agent-core/src/bin/non_tauri_harness.rs)
 
 覆盖：
 

@@ -13,12 +13,12 @@
 //!
 //! Adjudication record (2026-08-04, PA-076 remaining item 4): the real backend is split out as
 //! follow-up work, and staying fail-closed is the design-compliant terminal state for this card.
-//! A Windows Job Object containment backend is feasible — `windows-sys` 0.61.2 is already in the
-//! dependency tree (transitive) and exposes `CreateJobObjectW` / `SetInformationJobObject`
-//! (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, breakaway flags off) / `AssignProcessToJobObject` /
-//! `TerminateJobObject` under the `Win32_System_JobObjects` feature. A full sandbox (workspace
-//! file + network containment plus Job Object) is a larger, separate effort. Both are follow-up
-//! cards; see `management/task-system/02_REVIEWS/2026-08-04-pa076-sandbox-backend-evaluation.md`.
+//! PA-077 adds Windows Job Object lifecycle containment in `process.rs` / `process/windows_job.rs`:
+//! kill-on-close, no breakaway permission flags, and explicit tree termination. Assignment occurs
+//! after std spawn, so pre-assignment descendants can escape (scheduler-dependent window).
+//! This best-effort protection is NOT a real SandboxBackend. Full filesystem/network isolation
+//! remains separate follow-up work; the historical evaluation is in
+//! `management/task-system/02_REVIEWS/2026-08-04-pa076-sandbox-backend-evaluation.md`.
 //! Until a real backend is registered, `NoSandboxBackend` + `enforce_sandbox` keep autonomous
 //! `Run` at `sandbox_unavailable`, never silently downgrading to an unsandboxed shell.
 
@@ -31,10 +31,10 @@ pub use crate::agent::tool_runtime::{SandboxAvailability, SandboxBackend, Sandbo
 pub enum SandboxSupportMatrix {
     /// Windows Job Object with breakaway forbidden. Intended containment for Windows children.
     ///
-    /// Implementation note: Job Objects are a documented spike decision for this phase and are
-    /// NOT implemented as full containment yet. Even when implemented, a Job Object limits what a
-    /// process tree can do (kill-on-close, breakaway prevention); it does NOT mediate file or
-    /// network access and is therefore never a substitute for the `SandboxBackend` approval gate.
+    /// PA-077 implements best-effort Job lifecycle containment in `ProcessManager`; the
+    /// post-spawn assignment window is not an escape-proof boundary. This enum is a platform
+    /// strategy, NOT `SandboxBackend` availability. Job Objects do not mediate file or network
+    /// access and never replace the independent approval/sandbox gate.
     WindowsJobObject,
     /// Unix process group. Best-effort containment only: killing a process group does not stop a
     /// child that calls `setsid` or double-forks. This variant explicitly does not promise to
@@ -68,9 +68,9 @@ pub fn enforce_sandbox(
     request: &SandboxRequest,
 ) -> Result<(), String> {
     match backend.availability() {
-        SandboxAvailability::Unavailable => Err(
-            "sandbox is unavailable; autonomous process execution fails closed".to_string(),
-        ),
+        SandboxAvailability::Unavailable => {
+            Err("sandbox is unavailable; autonomous process execution fails closed".to_string())
+        }
         SandboxAvailability::Available | SandboxAvailability::HostApprovedUnsandboxed => {
             backend.validate(request)
         }
@@ -119,9 +119,10 @@ impl TestSandboxBackend {
 
     /// A backend that reports the sandbox as unavailable (fails closed).
     pub fn unavailable() -> Self {
-        Self::new(SandboxAvailability::Unavailable, Err(
-            "sandbox is unavailable".to_string(),
-        ))
+        Self::new(
+            SandboxAvailability::Unavailable,
+            Err("sandbox is unavailable".to_string()),
+        )
     }
 
     /// A backend that reports an explicit host-approved unsandboxed run and accepts the request.
@@ -202,7 +203,9 @@ mod tests {
         assert!(accepting.validate(&sample_request()).is_ok());
 
         let rejecting = TestSandboxBackend::rejecting("workspace path outside root");
-        let error = rejecting.validate(&sample_request()).expect_err("must reject");
+        let error = rejecting
+            .validate(&sample_request())
+            .expect_err("must reject");
         assert!(error.contains("workspace path outside root"));
     }
 
@@ -217,11 +220,9 @@ mod tests {
     fn enforce_sandbox_accepts_available_backend_and_rejects_denied_request() {
         let request = sample_request();
         assert!(enforce_sandbox(&TestSandboxBackend::available(), &request).is_ok());
-        assert!(enforce_sandbox(
-            &TestSandboxBackend::host_approved_unsandboxed(),
-            &request
-        )
-        .is_ok());
+        assert!(
+            enforce_sandbox(&TestSandboxBackend::host_approved_unsandboxed(), &request).is_ok()
+        );
         assert!(enforce_sandbox(&TestSandboxBackend::rejecting("denied"), &request).is_err());
     }
 }

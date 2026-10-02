@@ -5,20 +5,22 @@
 - 项目：`Pony Agent`
 - 类型：学习模式重构项目
 - 当前主线：`Phase 8 / 高级能力（子代理、workflow、代码智能）`（Phase 1–7 已全部完成）
-- 当前阶段：`Phase 8 起步 / 治理与卫生卡 PA-102 全量收口，等待启动新工程卡`
-- 总体状态：`In Progress`
-- 最近提交：`92203a6`（2026-09-30，PA-102 §1 完成）
+- 当前阶段：`Phase 8 / PA-077 implementation complete; closeout in Review with blocked validation gate`
+- 总体状态：`Review`（PA-077 实现已落地；收口验证与工作树归属尚未闭合；PA-044 不启动）
+- 最近提交：`6032843`（2026-09-30，PA-102 收口）；当前未提交工作：PA-077 实现/治理变更混合在工作树中，尚未形成可审计交付边界
 - 版本现况：tauri `0.1.92`（四处一致）/ core `0.1.90`（两处一致），`npm run version:check` PASSED
-- 门禁现况：`npm run verify` = version:check → openspec:check → test:unit → build → cargo:check:shared；OpenSpec 严格校验 **53/53 passed**
+- 门禁现况：canonical OpenSpec direct strict validation `54 passed`；active PA-103 change `failed`；`npm run openspec:check` 不存在；`cargo fmt --check` 有预存全仓差异；PA-077 精确定向测试受 `target-test\\debug\\.cargo-lock` ACL 阻断；Linux/macOS CI 已配置但未本机执行
 - 最近会话：2026-09-30（PA-101 收尾 + PA-102 全量收口，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`）
 
 ## 已知库存问题
 
-- ~~**canonical spec 库存 39 份不合规**~~ → **已于 2026-09-30 修复（PA-102 §1）**：38 份 delta 格式 spec 已结构规范化，全库 `npm run openspec -- validate --all --strict` 现为 **53 passed / 0 failed**，并新增 `scripts/check-openspec.ps1` 门禁接入 CI 与 `npm run verify` 防复发。防漂移验证对全部 38 份做了 `Requirement`/`Scenario` 标题集合差分，零语义漂移。
+- ~~**canonical spec 库存 39 份不合规**~~ → **PA-102 历史收口已完成（2026-09-30）**：当时的 canonical 快照为 53/53；当前 direct strict 结果必须另看 active PA-103：canonical 54 passed、active PA-103 failed，不能将当前全库写成 clean。
 - ~~**工作树噪音**~~ → **已于 2026-09-30 修复（PA-102 §2）**：`src-tauri/gen/schemas/*.json` 经确认属于权限契约保留跟踪，新增 `scripts/normalize-generated-schemas.ps1` 并在 `start-tauri-dev.ps1` 挂载守护与兜底，彻底解决空变更问题。
 
 ## 当前进行中
 
+- **PA-077 Windows Job Object containment（实现完成；Review / closeout gate blocked）**
+  已落地 private non-inheritable Job、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap 与 explicit kill/shutdown/last-owner tree cleanup；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment，也不是文件/网络/令牌/AppContainer/审批沙箱。`spawn→assign` race 受调度影响且无固定时间上界，不是安全边界；不注册 SandboxBackend、不授权 autonomous Run，`NoSandboxBackend`/`enforce_sandbox` 保持 fail-closed。当前收口阻塞：`npm run openspec:check` 不存在；direct strict validation 为 canonical 54 passed 但 active PA-103 failed；`cargo fmt --check` 有预存全仓差异；PA-077 精确定向测试受 target-test ACL 阻断；Linux/macOS 仅配置 CI、未本机执行。详见任务卡、implementation review 与 Gate0 closeout review。
 - **PA-101 安全与发版流水线三件套已收口（2026-09-25 实现，2026-09-30 补齐收尾账）**
   F1 `platform.rs` URL scheme/host 白名单（fail-closed）+ Win32 `ShellExecuteW` 替代 `cmd /c start` + 前端 `openExternalUrl()` 统一出口；F2 `dompurify@3.4.16` 替代手写正则消毒（红队 29/29）；F3 `tauri.conf.json` 纳入四处版本同步链 + `check-version-sync.ps1` CI 门禁 + ADR 0017（supersedes 0012）。验证：cargo(tauri) 17 + core 962 + vitest 568 + 版本同步 + cmd-start 零残留。提交 `f4970a0`（core 层）、`cd96884`（F1/F2/F3 主提交）、`4d40ce9`（任务卡收口）。
   **2026-09-30 补齐**：canonical spec `openspec/specs/update-security-and-release-followups/spec.md`（此前缺失）、change 归档 `openspec/changes/archive/2026-09-25-pa101-update-followups/`、tasks.md 15 项全部勾选。归档前逐条实测复核 F1/F2/F3 as-built 证据，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。
@@ -163,8 +165,9 @@ npm run test:unit -- --run tests/HomeSidebar.spec.ts
 
 ## 下一步最小动作
 
+0. `PA-077` 当前只做 Gate0 收口对账：冻结新功能开发，PA-044、完整 SandboxBackend、strict suspended-start、生产 resolver 与保守 evaluator 迁移均不在本轮启动；PA-044 保持 Ready/冻结，不代表本轮实现。
+
 1. `PA-078 ~ PA-081` 新主线已全部收口：PA-078（附件入口）与 PA-079（workspace 数据模型）**均已完成并收口（2026-08-09），2026-08-13 完成 OpenSpec 归档与 canonical spec 同步**；**PA-080（路径权限边界）已完成、审核修复并收口（2026-08-13，commits `2db0b0e`/`a1b75d8`）**；**PA-081（侧边栏树）已完成并收口（2026-08-22，提交 `fd0353d`）**。spec 审核记录：`02_REVIEWS/2026-08-09-pa078-081-spec-review.md`；实现后审核：`02_REVIEWS/2026-08-09-pa078-implementation-review.md`、`2026-08-09-pa079-implementation-review.md`。后续候选：会话跨 workspace 移动、workspace 内文件浏览器（PA-081 Non-Goals 登记项）。
-2. `PA-076` 已收口（2026-08-05），不再是下一步目标。后续工具系统扩展以新卡承接：`PA-077`（Windows Job Object containment）、完整 `SandboxBackend`、`McpResourceSurface` 真实 McpTransport 接线、生产 resolver 接线（hostname WebFetch 从 fail-closed 转启用）、生产默认从 `LegacyCompatiblePolicyEvaluator` 迁移到保守审批。
 3. 后续若继续扩展工具系统，应以新 change 承接，不再回灌已归档的 `PA-045 ~ PA-049` 或 `PA-076`。
 3. 在 validate 通过后，为工具系统五卡确定实现顺序与首批落地范围，继续保持“spec 审核 -> 实现 -> acceptance -> 归档”的整批闭环节奏。
 4. 如继续扩展全栈配置项，优先复用本轮 `AppSettings + settings store + settings panel + runtime pass-through` 这条主链，而不是把新配置散落到 provider 配置或单轮 prompt 推断里。

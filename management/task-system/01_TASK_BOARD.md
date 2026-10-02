@@ -20,7 +20,7 @@
 
 ## Ready
 
-- 其余暂无（2026-09-30 复核：PA-095/PA-084~087/PA-081/PA-101 均已完成并归档，条目在 Done 区）
+- `PA-044` agent core infrastructure boundary hardening — **Ready / Frozen / Not started**（本轮不实施；无代码影响、无提交）。
 
 
 
@@ -30,17 +30,19 @@
 
 ## Review
 
-- 暂无
+- `PA-077` Windows Job Object 进程树 containment（P1，Complexity C）
+  状态：Review（implementation complete；closeout gate blocked）。
+  说明：Job RAII、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap、显式 kill/shutdown/last-owner cleanup 已在当前工作树实现；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment 或文件/网络/令牌/AppContainer/审批沙箱。当前收口阻塞：`npm run openspec:check` 不存在；direct strict validation 为 canonical 54 passed 但 active PA-103 failed；`cargo fmt --check` 存在预存全仓差异；PA-077 精确定向测试受 `target-test\debug\.cargo-lock` ACL 阻断；Linux/macOS 仅配置 CI、未本机执行。解锁：核对最小 diff 归属，修复/批准 ACL 后重跑同一测试并完成可复现门禁。任务卡：`03_TASKS/PA-077-windows-job-object-containment.md`；实现审核：`02_REVIEWS/2026-09-30-pa077-implementation-review.md`；Gate0 对账：`02_REVIEWS/2026-09-30-pa077-gate0-closeout-review.md`。
 
 ## Blocked
 
-- 暂无
+- 暂无功能开发阻塞任务；PA-077 的阻塞项属于 Review 下的 closeout validation gate，不代表实现未完成。
 
 ## Done
 
 - `PA-102` canonical spec 库存规范化与仓库卫生（P1，Complexity B）
   说明：**已完成并收口（2026-09-30，全量通过）**：
-  - §1 规范化 38 份 delta 格式 spec（全库 `53 passed / 0 failed`，零语义漂移实证），新增 `scripts/check-openspec.ps1` 接入 CI 与 `npm run verify`。
+  - §1 规范化 38 份 delta 格式 spec（全库历史快照 `53 passed / 0 failed`，零语义漂移实证），新增 `scripts/check-openspec.ps1` 接入 CI 与 `npm run verify`。
   - §2 根治 `src-tauri/gen/schemas/` 换行噪音：新增 `scripts/normalize-generated-schemas.ps1`，并在 `start-tauri-dev.ps1` 挂载守护与兜底，保留契约跟踪价值的同时彻底消灭空变更。
   - §3 散落待办完成实证与排期画像梳理（形成 Job Object、跨 Workspace 移动、保守审批等 5 类明确建议）。
   提交：`92203a6`（§1）、本次收口提交。任务卡：`03_TASKS/PA-102-canonical-spec-normalization-and-repo-hygiene.md`。

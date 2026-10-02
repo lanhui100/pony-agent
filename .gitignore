@@ -44,6 +44,11 @@ target-core-test/
 target-test-exact*/
 target-check-tests*/
 target-check-tests-*/
+target-pa077-check/
+pa103-lock-workspace/
+pa103-head-workspace/
+pa103-base-workspace/
+pa103-*.tmp
 playwright-report/
 test-results/
 attachments/

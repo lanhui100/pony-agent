@@ -2,7 +2,7 @@
 
 ## Purpose
 
-规范 Pony Agent 受控进程工具族的运行时契约：可持续命令执行以 start、poll、write-stdin 与 kill 生命周期表达，进程输出在运行期间并发排空并有稳定预算，timeout/cancel/explicit kill/session shutdown 时清理完整进程树；start、stdin、kill 各自做权限决策，process handle 绑定 session/run/owner 且子进程环境最小化，无人值守 Run 必须在真实 sandbox backend 可用时才可执行，否则 fail closed。原为 delta 格式（PA-076，change `2026-08-05-harden-and-expand-agent-tool-runtime`），按 canonical 格式规范化，语义未变。
+规范 Pony Agent 受控进程工具族的运行时契约：可持续命令执行以 start、poll、write-stdin 与 kill 生命周期表达，进程输出在运行期间并发排空并有稳定预算，timeout/cancel/explicit kill/session shutdown 时清理平台后端已成功纳入管理的进程成员；start、stdin、kill 各自做权限决策，process handle 绑定 session/run/owner 且子进程环境最小化，无人值守 Run 必须在真实 sandbox backend 可用时才可执行，否则 fail closed。原为 delta 格式（PA-076，change `2026-08-05-harden-and-expand-agent-tool-runtime`），按 canonical 格式规范化，语义未变。
 
 ## Requirements
 
@@ -24,14 +24,14 @@ Pony Agent SHALL 在进程运行期间并发排空 stdout/stderr，并使用稳�
 - **THEN** 工具 SHALL NOT 因未读取管道而死锁
 - **AND** 结果 SHALL 标明截断状态与丢弃字节数
 
-### Requirement: Process containment SHALL be accurate and platform-aware
+### Requirement: Process containment SHALL be accurate within the platform-managed scope
 
-Pony Agent SHALL 在 timeout、cancel、explicit kill 和 session shutdown 时清理完整进程树。
+Pony Agent SHALL 在 timeout、cancel、explicit kill 和 session shutdown 时清理平台后端已成功纳入管理的进程成员；该要求不构成对 spawn→assignment 窗口内创建后代的绝对保证。各平台必须记录 containment backend 与证明范围；若平台只能提供 best-effort process group 或 post-spawn Job assignment，必须明确其限制，不得宣称消除 breakaway 或 pre-assignment descendant escape。
 
 #### Scenario: A contained process starts descendants and times out
-- **WHEN** 父 shell 与子进程在 deadline 到达时仍运行
-- **THEN** platform containment backend SHALL 终止其受管 descendants
-- **AND** SHALL 记录 containment backend 与证明结果
+- **WHEN** 父 shell 与其已成功纳入平台 containment backend 的 descendants 在 deadline 到达时仍运行
+- **THEN** platform containment backend SHALL 终止其受管成员
+- **AND** SHALL 记录 containment backend、已证明的成员范围与残余限制（包括适用时的 spawn→assignment 窗口）。
 
 #### Scenario: A platform only has a process group
 - **WHEN** 平台无法提供防 breakaway 的 containment

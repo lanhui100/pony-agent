@@ -1,6 +1,6 @@
 [package]
 name = "pony-agent-core"
-version = "0.1.90"
+version = "0.1.92"
 edition = "2021"
 
 [lib]
@@ -26,6 +26,7 @@ url = "2"
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 winreg = "0.56.0"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
@@ -35,6 +36,8 @@ keyring = { version = "3.6.3", default-features = false, features = ["linux-nati
 
 [dev-dependencies]
 zip = "8.6"
+
+
 
 
 

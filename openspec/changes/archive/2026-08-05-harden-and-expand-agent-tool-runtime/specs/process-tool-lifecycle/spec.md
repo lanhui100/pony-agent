@@ -1,4 +1,9 @@
-## ADDED Requirements
+<!-- Historical archived delta snapshot from PA-076. The normative current contract is openspec/specs/process-tool-lifecycle/spec.md; this archived text is retained for audit history and must not be read as a stronger guarantee than the current platform-managed/best-effort wording. -->
+
+## Historical Status
+
+This archived delta is non-normative after canonical synchronization; consult the canonical spec for current containment scope and limitations.
+
 
 ### Requirement: Process execution SHALL have an explicit lifecycle
 

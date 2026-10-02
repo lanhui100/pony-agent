@@ -12,7 +12,9 @@ import {
   UpdateCheckError,
   UPDATE_CHECK_MIN_INTERVAL_MS
 } from "@/lib/update-check";
-import type { AppReleaseInfo, UpdateStatus } from "@/types/update";
+import type { AppReleaseInfo, SignedUpdateStatus, UpdateStatus } from "@/types/update";
+import { getTauriUpdaterAdapter, isSignedUpdaterAvailable } from "@/lib/tauri-updater";
+import type { SignedUpdateCandidate, UpdaterDownloadProgress } from "@/lib/tauri-updater";
 
 /**
  * PA-099：应用更新检测 store。
@@ -34,6 +36,10 @@ type UpdateState = {
   errorMessage: string | null;
   lastCheckedAtMs: number | null;
   autoCheck: boolean;
+  signedStatus: SignedUpdateStatus;
+  signedCandidate: SignedUpdateCandidate | null;
+  signedProgress: number | null;
+  signedErrorMessage: string | null;
 };
 
 export const useUpdateStore = defineStore("update", {
@@ -43,7 +49,11 @@ export const useUpdateStore = defineStore("update", {
     latest: null,
     errorMessage: null,
     lastCheckedAtMs: null,
-    autoCheck: true
+    autoCheck: true,
+    signedStatus: isSignedUpdaterAvailable() ? "idle" : "disabled",
+    signedCandidate: null,
+    signedProgress: null,
+    signedErrorMessage: null
   }),
   getters: {
     /** 唯一驱动侧栏角标的派生值；latest 为不可信输入的现算结果。 */
@@ -147,6 +157,63 @@ export const useUpdateStore = defineStore("update", {
       }
     },
 
+    async checkSignedUpdate(): Promise<void> {
+      if (!isSignedUpdaterAvailable() || this.signedStatus === "disabled") {
+        this.signedStatus = "disabled";
+        this.signedCandidate = null;
+        return;
+      }
+      if (["checking", "downloading", "installing"].includes(this.signedStatus)) return;
+
+      this.signedStatus = "checking";
+      this.signedErrorMessage = null;
+      try {
+        const candidate = await getTauriUpdaterAdapter().check();
+        this.signedCandidate = candidate;
+        this.signedStatus = candidate === null ? "idle" : "available";
+      } catch (error) {
+        this.signedErrorMessage = error instanceof Error ? error.message : "签名更新检查失败。";
+        this.signedStatus = "error";
+      }
+    },
+
+    async installSignedUpdate(): Promise<void> {
+      const candidate = this.signedCandidate;
+      if (
+        candidate === null ||
+        this.signedStatus !== "available" ||
+        !isSignedUpdaterAvailable()
+      ) {
+        return;
+      }
+
+      this.signedStatus = "downloading";
+      this.signedProgress = null;
+      this.signedErrorMessage = null;
+      try {
+        await getTauriUpdaterAdapter().downloadAndInstall(candidate, (progress: UpdaterDownloadProgress) => {
+          if (this.signedStatus !== "downloading") return;
+          if (progress.contentLength === null) {
+            this.signedProgress = null;
+            return;
+          }
+          this.signedProgress = Math.min(100, Math.max(0, Math.round((progress.downloaded / progress.contentLength) * 100)));
+        });
+        this.signedStatus = "installing";
+        // The updater plugin commits before this call. A relaunch error must not be reported as
+        // an ordinary install failure; the candidate is kept for startup reconciliation.
+        try {
+          await getTauriUpdaterAdapter().relaunch();
+          this.signedStatus = "pending-restart";
+        } catch (error) {
+          this.signedErrorMessage = error instanceof Error ? error.message : "更新已提交，但重启失败。";
+          this.signedStatus = "relaunch-failed";
+        }
+      } catch (error) {
+        this.signedErrorMessage = error instanceof Error ? error.message : "签名更新安装失败。";
+        this.signedStatus = "error";
+      }
+    },
     setAutoCheck(enabled: boolean) {
       this.autoCheck = enabled;
       saveUpdatePrefs({ autoCheck: enabled });

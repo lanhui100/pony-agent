@@ -2069,16 +2069,52 @@
           "component": "tauri"
         }
       ]
+    },
+    {
+      "commit": "6032843",
+      "timestamp": "2026-10-02T16:05:16+08:00",
+      "bumps": [
+        {
+          "to": "0.1.91",
+          "from": "0.1.90",
+          "segment": "patch",
+          "component": "core"
+        },
+        {
+          "to": "0.1.93",
+          "from": "0.1.92",
+          "segment": "patch",
+          "component": "tauri"
+        }
+      ]
+    },
+    {
+      "commit": "6032843",
+      "timestamp": "2026-10-02T16:05:45+08:00",
+      "bumps": [
+        {
+          "component": "core",
+          "from": "0.1.91",
+          "to": "0.1.92",
+          "segment": "patch"
+        },
+        {
+          "component": "tauri",
+          "from": "0.1.93",
+          "to": "0.1.94",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-09-25T16:24:12+08:00",
+  "lastBump": "2026-10-02T16:05:45+08:00",
   "tauri": {
-    "patch": 92,
+    "patch": 94,
     "minor": 1,
     "major": 0
   },
   "core": {
-    "patch": 90,
+    "patch": 92,
     "minor": 1,
     "major": 0
   }

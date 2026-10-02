@@ -961,6 +961,10 @@ async fn export_frontend_trace_chrome_trace(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // PA-103: updater configuration is intentionally empty until the release-owner gate
+        // provisions a real endpoint and public key. The frontend adapter remains disabled.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(HostControlPlane::new())
         .manage(StreamDebugMetricsState {
             latest: Mutex::new(json!({})),
