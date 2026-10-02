@@ -172,7 +172,9 @@ export const useUpdateStore = defineStore("update", {
         this.signedCandidate = candidate;
         this.signedStatus = candidate === null ? "idle" : "available";
       } catch (error) {
-        this.signedErrorMessage = error instanceof Error ? error.message : "签名更新检查失败。";
+        // 安全文案固定，不把插件原始错误（可能含 endpoint/URL）透传到 UI。
+        console.warn("[pony-agent][update] signed check failed", error);
+        this.signedErrorMessage = "签名更新检查失败，请稍后重试。";
         this.signedStatus = "error";
       }
     },
@@ -193,7 +195,7 @@ export const useUpdateStore = defineStore("update", {
       try {
         await getTauriUpdaterAdapter().downloadAndInstall(candidate, (progress: UpdaterDownloadProgress) => {
           if (this.signedStatus !== "downloading") return;
-          if (progress.contentLength === null) {
+          if (progress.contentLength === null || progress.contentLength <= 0) {
             this.signedProgress = null;
             return;
           }
@@ -201,16 +203,20 @@ export const useUpdateStore = defineStore("update", {
         });
         this.signedStatus = "installing";
         // The updater plugin commits before this call. A relaunch error must not be reported as
-        // an ordinary install failure; the candidate is kept for startup reconciliation.
+        // an ordinary install failure; the committed candidate is kept for restart retry.
         try {
           await getTauriUpdaterAdapter().relaunch();
           this.signedStatus = "pending-restart";
         } catch (error) {
-          this.signedErrorMessage = error instanceof Error ? error.message : "更新已提交，但重启失败。";
+          console.warn("[pony-agent][update] relaunch failed after committed install", error);
+          this.signedErrorMessage = "更新已提交，但重启失败。请手动重启应用。";
           this.signedStatus = "relaunch-failed";
         }
       } catch (error) {
-        this.signedErrorMessage = error instanceof Error ? error.message : "签名更新安装失败。";
+        // 下载/验签/安装未提交：清除候选，不允许以"可安装"姿态残留。
+        console.warn("[pony-agent][update] signed install failed", error);
+        this.signedCandidate = null;
+        this.signedErrorMessage = "签名更新安装失败，请稍后重试。";
         this.signedStatus = "error";
       }
     },

@@ -44,10 +44,40 @@ type CheckMetadata = {
   body?: unknown;
 };
 
-type DownloadEvent =
-  | { event: "started"; data?: { contentLength?: unknown } }
-  | { event: "progress"; data?: { chunkLength?: unknown } }
-  | { event: "finished"; data?: unknown };
+/**
+ * Raw events delivered over the plugin IPC channel. The Tauri v2 updater plugin emits
+ * `Started` / `Progress` / `Finished` (capitalized); matching is normalized to
+ * lowercase so the mapping is robust against any casing drift.
+ */
+export type RawDownloadEvent = Readonly<{
+  event: unknown;
+  data?: Readonly<{ contentLength?: unknown; chunkLength?: unknown }>;
+}>;
+
+export type MappedDownloadEvent =
+  | { kind: "started"; contentLength: number | null }
+  | { kind: "progress"; chunkLength: number }
+  | { kind: "finished" }
+  | { kind: "unknown" };
+
+/** Pure mapper from a raw plugin channel event to a typed download step. */
+export function mapDownloadEvent(raw: RawDownloadEvent): MappedDownloadEvent {
+  if (!raw || typeof raw !== "object") {
+    return { kind: "unknown" };
+  }
+  const name = typeof raw.event === "string" ? raw.event.toLowerCase() : "";
+  const data = raw.data && typeof raw.data === "object" ? raw.data : undefined;
+  if (name === "started") {
+    return { kind: "started", contentLength: asPositiveInteger(data?.contentLength) };
+  }
+  if (name === "progress") {
+    return { kind: "progress", chunkLength: asPositiveInteger(data?.chunkLength) ?? 0 };
+  }
+  if (name === "finished") {
+    return { kind: "finished" };
+  }
+  return { kind: "unknown" };
+}
 
 function unavailable(): Error {
   return new Error("签名更新未配置，已安全禁用。");
@@ -61,7 +91,11 @@ function asOptionalString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function parseCandidate(value: unknown): SignedUpdateCandidate | null {
+/**
+ * Defensively parse the `plugin:updater|check` result into a typed candidate.
+ * Any missing/invalid trust field rejects the whole candidate (fail closed).
+ */
+export function parseSignedCandidate(value: unknown): SignedUpdateCandidate | null {
   if (!value || typeof value !== "object") return null;
   const metadata = value as CheckMetadata;
   const resourceId = asPositiveInteger(metadata.rid);
@@ -85,10 +119,9 @@ const productionTauriAdapter: TauriUpdaterAdapter = {
       headers: null,
       timeout: 10_000,
       proxy: null,
-      target: null,
-      allowDowngrades: false
+      target: null
     });
-    return parseCandidate(metadata);
+    return parseSignedCandidate(metadata);
   },
 
   async downloadAndInstall(candidate, onProgress) {
@@ -98,15 +131,16 @@ const productionTauriAdapter: TauriUpdaterAdapter = {
 
     let contentLength: number | null = null;
     let downloaded = 0;
-    const channel = new Channel<DownloadEvent>();
-    channel.onmessage = event => {
-      if (event.event === "started") {
-        contentLength = asPositiveInteger(event.data?.contentLength);
-      } else if (event.event === "progress") {
-        const chunk = asPositiveInteger(event.data?.chunkLength) ?? 0;
-        downloaded += chunk;
+    const channel = new Channel<RawDownloadEvent>();
+    channel.onmessage = rawEvent => {
+      const mapped = mapDownloadEvent(rawEvent);
+      if (mapped.kind === "started") {
+        contentLength = mapped.contentLength;
+      } else if (mapped.kind === "progress") {
+        downloaded += mapped.chunkLength;
         onProgress?.({ downloaded, contentLength });
       }
+      // finished/unknown: no per-chunk progress to report.
     };
 
     await safeInvoke("plugin:updater|download_and_install", {

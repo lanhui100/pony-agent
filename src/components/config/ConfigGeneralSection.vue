@@ -253,7 +253,7 @@ function openExa() {
                   ? 'bg-stone-100 text-stone-400'
                   : 'bg-[#f3c98d] text-stone-900 hover:bg-[#f6dfb8]'
               "
-              :disabled="updateChecking"
+              :disabled="updateChecking || signedInstalling"
               data-testid="config-update-check-button"
               @click="checkForUpdateNow()"
             >
@@ -312,39 +312,32 @@ function openExa() {
             </template>
           </div>
 
-                                <button
-             v-if="signedUpdateAvailable"
-             type="button"
-             class="inline-flex items-center gap-1 rounded-[0.35rem] bg-[#f3c98d] px-2 py-1 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
-             :disabled="signedInstalling"
-             data-testid="config-update-install-button"
-             @click="installSignedUpdate()"
-           >
-             <LoaderCircle v-if="signedInstalling" class="h-3 w-3 animate-spin" />
-             <ArrowUpCircle v-else class="h-3 w-3" />
-             立即升级
-           </button>
-
-                      <button
-             v-if="signedUpdateAvailable"
-             type="button"
-             class="inline-flex items-center gap-1 rounded-[0.35rem] bg-[#f3c98d] px-2 py-1 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
-             :disabled="signedInstalling"
-             data-testid="config-update-install-button"
-             @click="installSignedUpdate()"
-           >
-             <LoaderCircle v-if="signedInstalling" class="h-3 w-3 animate-spin" />
-             <ArrowUpCircle v-else class="h-3 w-3" />
-             立即升级
-           </button>
-
-           <div v-if="signedInstalling && updateStore.signedProgress !== null" class="h-1.5 overflow-hidden rounded-full bg-stone-100" data-testid="config-update-progress">
-             <div class="h-full bg-amber-400 transition-all" :style="{ width: `${updateStore.signedProgress}%` }" />
-           </div>
-           <div v-if="updateStore.signedStatus === 'pending-restart'" class="text-[12px] text-emerald-700" data-testid="config-update-pending-restart">更新已提交，请重启应用完成更新。</div>
-           <div v-if="updateStore.signedStatus === 'relaunch-failed' || updateStore.signedStatus === 'error'" class="text-[12px] text-rose-600" data-testid="config-update-signed-error">
-             {{ updateStore.signedErrorMessage || "签名更新失败，应用未重启。" }}
-           </div>
+          <div class="flex items-center gap-2">
+            <button
+              v-if="signedUpdateAvailable || signedInstalling"
+              type="button"
+              class="inline-flex items-center gap-1 rounded-[0.35rem] bg-[#f3c98d] px-2 py-1 text-[11px] font-medium text-stone-900 transition hover:bg-[#f6dfb8] disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="signedInstalling"
+              data-testid="config-update-install-button"
+              @click="installSignedUpdate()"
+            >
+              <LoaderCircle v-if="signedInstalling" class="h-3 w-3 animate-spin" />
+              <ArrowUpCircle v-else class="h-3 w-3" />
+              {{ signedInstalling ? "正在升级…" : "立即升级" }}
+            </button>
+            <div
+              v-if="signedInstalling && updateStore.signedProgress !== null"
+              class="h-1.5 w-28 overflow-hidden rounded-full bg-stone-100"
+              data-testid="config-update-progress"
+            >
+              <div class="h-full bg-amber-400 transition-all" :style="{ width: `${updateStore.signedProgress}%` }" />
+            </div>
+          </div>
+          <div v-if="updateStore.signedStatus === 'pending-restart'" class="text-[12px] text-emerald-700" data-testid="config-update-pending-restart">更新已提交，请重启应用完成更新。</div>
+          <div v-if="updateStore.signedStatus === 'relaunch-failed'" class="text-[12px] text-rose-600" data-testid="config-update-relaunch-failed">更新已提交，但重启失败，请手动重启应用。</div>
+          <div v-if="updateStore.signedStatus === 'error'" class="text-[12px] text-rose-600" data-testid="config-update-signed-error">
+            {{ updateStore.signedErrorMessage || "签名更新失败，请稍后重试。" }}
+          </div>
 
            <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pt-0.5">
             <label class="flex cursor-pointer items-center gap-2 text-[11px] text-stone-500">

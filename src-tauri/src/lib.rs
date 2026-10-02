@@ -961,8 +961,11 @@ async fn export_frontend_trace_chrome_trace(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        // PA-103: updater configuration is intentionally empty until the release-owner gate
-        // provisions a real endpoint and public key. The frontend adapter remains disabled.
+        // PA-103: updater/process plugins are registered so the capability permission IDs
+        // (updater:allow-check, updater:allow-download-and-install, process:allow-restart)
+        // resolve in this build. The tauri.conf.json updater block stays absent until the
+        // release-owner gate provisions a real endpoint and public key; the frontend adapter
+        // is disabled (SIGNED_UPDATER_ENABLED=false), so the plugin commands are never invoked.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(HostControlPlane::new())
