@@ -1,0 +1,109 @@
+# Pony Agent release — signed desktop updater (DRAFT)
+
+# 触发：推送 vX.Y.Z tag。启用前提：TAURI_SIGNING_PRIVATE_KEY secrets 已配置、
+# tauri.conf.json 已启用 plugins.updater + createUpdaterArtifacts、前端常量已翻转。
+# 未满足前 push tag 会 hard fail（这是设计意图，不允许无签名发布）。
+
+name: release-signed-updater
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify secrets present (hard fail)
+        shell: pwsh
+        run: |
+          if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" -eq "") { throw "TAURI_SIGNING_PRIVATE_KEY is required" }
+          if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" -eq "") { throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required" }
+      - name: Tag/version consistency
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $pkg = (Get-Content package.json | ConvertFrom-Json).version
+          if ($tag -notmatch "^v$([regex]::Escape($pkg))$") { throw "tag $tag does not match package version $pkg" }
+      - name: Version sync + frontend checks
+        run: |
+          npm run version:check
+          npm run typecheck
+          npm run test:unit
+      - name: Rust check
+        run: npm run cargo:check
+
+  build-release:
+    needs: verify
+    runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install and build bundle with updater artifacts
+        shell: pwsh
+        run: |
+          npm ci
+          npm run build
+          npx tauri build --bundles nsis
+      - name: Assemble latest.json from produced artifacts
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
+          $bundle = "src-tauri/target/release/bundle/updater"   # 以实际产物路径为准（Tauri v2 约定），若缺失则 fail
+          if (-not (Test-Path $bundle)) { throw "updater bundle dir missing: $bundle" }
+          $archive = Get-ChildItem $bundle -Filter "*.tar.gz" | Select-Object -First 1
+          if (-not $archive) { throw "no .tar.gz artifact found" }
+          $sigPath = "$($archive.FullName).sig"
+          if (-not (Test-Path $sigPath)) { throw "missing .sig for $($archive.Name)" }
+          $signature = (Get-Content $sigPath -Raw).Trim()
+          $asset = $archive.Name
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          $manifest = [ordered]@{
+            version = $ver
+            notes   = ""
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url = "https://github.com/$repo/releases/download/$tag/$asset"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$bundle/latest.json" -Encoding utf8
+          Write-Host "latest.json written"
+      - name: Publish draft release and upload assets (latest.json last)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release"
+          $bundle = "src-tauri/target/release/bundle/updater"
+          Get-ChildItem $bundle -File | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          # 安装器与 tar.gz 同源，一并上传；latest.json 最后上传以保证 latest/download 指向新 manifest
+          gh release edit "$tag" --latest
+          Write-Host "release published: $tag"
+
+  smoke:
+    needs: build-release
+    if: false # 预留：下载产物 + 篡改/错误 key/安装冒烟；启用后按 §6 手册补证据
+    runs-on: windows-latest
+    steps:
+      - run: echo "signed smoke steps (tamper/wrong-key/install evidence) to be implemented per docs/release/signed-updater.md"

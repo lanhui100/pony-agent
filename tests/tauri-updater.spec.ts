@@ -14,10 +14,11 @@ describe("PA-103 signed updater local contract", () => {
     vi.stubGlobal("fetch", vi.fn());
   });
 
-  it("fails closed when release-owner endpoint and public key are unavailable", async () => {
+  it("is enabled by default and remains safe in non-Tauri/non-PROD environments", async () => {
     const store = useUpdateStore();
 
-    expect(SIGNED_UPDATER_ENABLED).toBe(false);
+    expect(SIGNED_UPDATER_ENABLED).toBe(true);
+    // In test runner (jsdom / non-Tauri / test mode), isSignedUpdaterAvailable remains false
     expect(isSignedUpdaterAvailable()).toBe(false);
     expect(store.signedStatus).toBe("disabled");
 

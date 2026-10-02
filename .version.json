@@ -2117,11 +2117,23 @@
         }
       ],
       "commit": "87a6562"
+    },
+    {
+      "bumps": [
+        {
+          "from": "0.1.95",
+          "to": "0.1.96",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ],
+      "commit": "a8c0977",
+      "timestamp": "2026-10-02T18:09:24+08:00"
     }
   ],
-  "lastBump": "2026-10-02T17:24:36+08:00",
+  "lastBump": "2026-10-02T18:09:24+08:00",
   "tauri": {
-    "patch": 95,
+    "patch": 96,
     "minor": 1,
     "major": 0
   },

@@ -44,6 +44,8 @@ Unsigned downloads, shell-based replacement, automatic silent install, rollback 
 - `prepare_update_exit` cleanup + active-turn confirmation (NOT implemented locally); startup auto-check decision.
 - Signed artifacts, atomic manifest publication, Windows x64 signed smoke (tamper/wrong-key/install/relaunch/user-data), key rotation/revocation, crash recovery, first-rollout bootstrap for pre-updater installs; then flip `SIGNED_UPDATER_ENABLED` and fill config.
 
+**草案已就绪（2026-10-02）**：发布运行手册 `docs/release/signed-updater.md`（密钥生成/保管、manifest 契约、smoke 清单、回滚/撤下/key rotation）与 `.github/workflows/release.yml`（tag 触发、secrets hard-fail、签名构建、latest.json 组装、draft→publish 原子顺序）。待发布方生成真实密钥并提供公钥后，落地启用改动（tauri.conf.json `plugins.updater` + `createUpdaterArtifacts`、`SIGNED_UPDATER_ENABLED=true`、schemas 重生成、版本/门禁复验）。
+
 ## Verification evidence
 
 `npm run version:check` PASS · targeted updater vitest 91/91 PASS · full vitest 592/602 PASS (10 skipped) · `npm run typecheck` PASS · `npm run build` PASS · `npm run cargo:check` PASS. Vitest/vite needed `danger-full-access` because the DSH sandbox blocks Node child-process spawn with piped stdio (EPERM; documented boundary).

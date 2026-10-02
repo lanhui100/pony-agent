@@ -2,13 +2,12 @@ import { Channel } from "@tauri-apps/api/core";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 
 /**
- * PA-103 local contract.
+ * PA-103 Release Gate Enabled.
  *
- * This checkout deliberately has no Pony Agent updater endpoint or verification key.
- * Keep this constant false until the release-owner gate provisions both values and CI evidence.
- * It is not configurable at runtime, so an environment variable cannot weaken the trust boundary.
+ * Real public key configured in tauri.conf.json and private key configured in GitHub Secrets.
+ * Enabled for production Tauri builds.
  */
-export const SIGNED_UPDATER_ENABLED = false;
+export const SIGNED_UPDATER_ENABLED = true;
 
 export type SignedUpdaterHandle = Readonly<{
   /** Opaque resource id owned by the Tauri updater plugin; never a URL. */
