@@ -140,6 +140,8 @@ jobs:
           gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
           # latest.json last so /releases/latest/download/latest.json points to the new manifest
           gh release upload "$tag" "$nsis/latest.json" --clobber
+          # Publish: a draft release cannot be marked as latest — clear draft first, then promote
+          gh release edit "$tag" --draft=false
           gh release edit "$tag" --latest
           Write-Host "release published: $tag"
 
