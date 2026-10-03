@@ -1208,20 +1208,19 @@ onBeforeUnmount(() => {
                       <Pencil class="h-3.5 w-3.5" />
                     </button>
                   </Tooltip>
-                  <ConfirmPopover
-                    v-if="canDeleteProvider"
-                    :title="`删除提供商「${detailProvider?.name || detailProvider?.id || '当前提供商'}」？`"
-                    description="此操作不可撤销。"
-                    side="bottom"
-                    align="end"
-                    @confirm="removeCurrentProvider()"
-                  >
-                    <Tooltip text="删除" side="top">
+                  <Tooltip v-if="canDeleteProvider" text="删除" side="top">
+                    <ConfirmPopover
+                      :title="`删除提供商「${detailProvider?.name || detailProvider?.id || '当前提供商'}」？`"
+                      description="此操作不可撤销。"
+                      side="bottom"
+                      align="end"
+                      @confirm="removeCurrentProvider()"
+                    >
                       <button type="button" :class="ICON_ACTION_CLASS" aria-label="删除提供商">
                         <Trash2 class="h-3.5 w-3.5" />
                       </button>
-                    </Tooltip>
-                  </ConfirmPopover>
+                    </ConfirmPopover>
+                  </Tooltip>
                 </div>
                 <div v-else class="flex shrink-0 items-center gap-0.5" @click.stop>
                   <Button size="sm" variant="ghost" data-testid="provider-edit-cancel" @click="cancelEditing()">取消</Button>
@@ -1781,15 +1780,14 @@ onBeforeUnmount(() => {
                             <Pencil class="h-3.5 w-3.5" />
                           </button>
                         </Tooltip>
-                        <ConfirmPopover
-                          v-if="modelActionsIdle"
-                          :title="`删除模型「${model.name || model.model || '未命名模型'}」？`"
-                          description="此操作不可撤销。"
-                          side="bottom"
-                          align="end"
-                          @confirm="removeModelById(detailProvider!.id, model.id)"
-                        >
-                          <Tooltip text="删除" side="top">
+                        <Tooltip v-if="modelActionsIdle" text="删除" side="top">
+                          <ConfirmPopover
+                            :title="`删除模型「${model.name || model.model || '未命名模型'}」？`"
+                            description="此操作不可撤销。"
+                            side="bottom"
+                            align="end"
+                            @confirm="removeModelById(detailProvider!.id, model.id)"
+                          >
                             <button
                               type="button"
                               :class="ICON_ACTION_CLASS"
@@ -1798,8 +1796,8 @@ onBeforeUnmount(() => {
                             >
                               <Trash2 class="h-3.5 w-3.5" />
                             </button>
-                          </Tooltip>
-                        </ConfirmPopover>
+                          </ConfirmPopover>
+                        </Tooltip>
                         <ChevronDown
                           aria-hidden="true"
                           class="h-3.5 w-3.5 shrink-0 text-stone-400 transition-transform duration-200 motion-reduce:transition-none"

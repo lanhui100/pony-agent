@@ -632,7 +632,8 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     seedRegistry();
     const wrapper = await mountProviderPage();
 
-    // 当前选中 Alpha；section 头部的删除经 ConfirmPopover stub 确认
+    // 当前选中 Alpha；点击删除触发 ConfirmPopover
+    await wrapper.get('button[aria-label="删除提供商"]').trigger("click");
     const providerSection = wrapper.get('[data-testid="provider-detail-section"]');
     await providerSection.get('[data-testid="confirm-popover-confirm"]').trigger("click");
     await Promise.resolve();
