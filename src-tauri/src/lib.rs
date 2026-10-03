@@ -960,6 +960,13 @@ async fn export_frontend_trace_chrome_trace(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         // PA-103: updater/process plugins are registered so the capability permission IDs
         // (updater:allow-check, updater:allow-download-and-install, process:allow-restart)
