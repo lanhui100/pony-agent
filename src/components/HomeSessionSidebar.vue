@@ -666,7 +666,7 @@ function confirmPopoverProps(
                     @confirm="runConfirm('session-archive', confirmTarget)"
                     @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
                   >
-                    <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                    <span class="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" aria-hidden="true" />
                   </ConfirmPopover>
                 </template>
                 <template v-else-if="confirmTarget?.kind === 'session-delete' && confirmTarget.sessionId === session.conversationId">
@@ -678,7 +678,7 @@ function confirmPopoverProps(
                     @confirm="runConfirm('session-delete', confirmTarget)"
                     @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
                   >
-                    <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                    <span class="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" aria-hidden="true" />
                   </ConfirmPopover>
                 </template>
                 <p
@@ -773,7 +773,7 @@ function confirmPopoverProps(
                   @confirm="runConfirm('workspace-delete', confirmTarget)"
                   @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
                 >
-                  <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                  <span class="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" aria-hidden="true" />
                 </ConfirmPopover>
               </div>
 
@@ -817,7 +817,7 @@ function confirmPopoverProps(
                       @confirm="runConfirm('session-archive', confirmTarget)"
                       @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
                     >
-                      <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                      <span class="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" aria-hidden="true" />
                     </ConfirmPopover>
                   </template>
                   <template v-else-if="confirmTarget?.kind === 'session-delete' && confirmTarget.sessionId === session.conversationId">
@@ -829,7 +829,7 @@ function confirmPopoverProps(
                       @confirm="runConfirm('session-delete', confirmTarget)"
                       @update:open="(v: boolean) => { if (!v) closeConfirm(); }"
                     >
-                      <span class="pointer-events-none absolute inset-y-0 right-0 w-0" aria-hidden="true" />
+                      <span class="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2" aria-hidden="true" />
                     </ConfirmPopover>
                   </template>
                   <p

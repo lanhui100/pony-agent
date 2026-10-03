@@ -3088,7 +3088,8 @@ describe("runtime session resilience", () => {
         turnCount: 1,
         lastReferencedFile: null,
         updatedAtMs: 4000,
-        workspaceId: null
+        workspaceId: null,
+        archived: false
       }
     ]);
   });

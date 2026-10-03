@@ -206,6 +206,7 @@ import {
   mergeRuntimeViews,
   persistSessionState,
   persistSessionStateAndRuntimeMaps,
+  archivePersistedSessionState,
   removePersistedSessionState,
   restoreSessionRuntimeSnapshot,
   shouldAcceptTurnEvent
@@ -1971,7 +1972,11 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       }
       this.sidebarOpInflightSet[key] = true;
       try {
-        await invokeArchiveSession(sessionId);
+        if (isTauriAvailable()) {
+          await invokeArchiveSession(sessionId);
+        } else {
+          archivePersistedSessionState(sessionId);
+        }
         delete this.completedSessionSet[sessionId];
         delete this.failedSessionSet[sessionId];
         await this.loadSessionCatalog();

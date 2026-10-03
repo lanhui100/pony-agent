@@ -567,6 +567,21 @@ export function loadRunningSessionMap(): Record<string, RunningTurn> {
   }
 }
 
+export function archivePersistedSessionState(sessionId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const cache = loadPersistedRuntimeCache();
+  if (cache.sessions[sessionId]) {
+    cache.sessions[sessionId] = {
+      ...cache.sessions[sessionId]!,
+      archived: true
+    };
+    window.localStorage.setItem(RUNTIME_STORAGE_KEY, JSON.stringify(cache));
+  }
+}
+
 export function removePersistedSessionState(sessionId: string) {
   if (typeof window === "undefined") {
     return;
@@ -670,7 +685,8 @@ export function buildSessionOverviewFromPersistedState(
         ? legacyTraceHistory[legacyTraceHistory.length - 1]!.updatedAt
         : Date.now(),
     // PA-081（审核 P2）：透传会话归属，防止本地列表变更后分组漂移到默认组。
-    workspaceId: state.sessionWorkspaceId?.trim() || null
+    workspaceId: state.sessionWorkspaceId?.trim() || null,
+    archived: Boolean(state.archived)
   };
 }
 

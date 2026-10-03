@@ -121,6 +121,7 @@ export type PersistedRuntimeState = {
   phase: RuntimePhase;
   // PA-081：会话归属 Workspace（浏览器持久化往返保持分组稳定）。
   sessionWorkspaceId?: string;
+  archived?: boolean;
   canonicalTerminalPhase?: "completed" | "failed" | "cancelled";
   messages: ChatMessage[];
   attachmentAssets: AttachmentAsset[];
