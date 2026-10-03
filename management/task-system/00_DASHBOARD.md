@@ -7,14 +7,14 @@
 - 当前主线：`Phase 8 / 高级能力（子代理、workflow、代码智能）`（Phase 1–7 已全部完成）
 - 当前阶段：`Phase 8 / PA-077 implementation complete; closeout in Review with blocked validation gate`
 - 总体状态：`Review`（PA-077 实现已落地；收口验证与工作树归属尚未闭合；PA-044 不启动）
-- 最近提交：`6032843`（2026-09-30，PA-102 收口）；当前未提交工作：PA-077 实现/治理变更混合在工作树中，尚未形成可审计交付边界
-- 版本现况：tauri `0.1.92`（四处一致）/ core `0.1.90`（两处一致），`npm run version:check` PASSED
-- 门禁现况：canonical OpenSpec direct strict validation `54 passed`；active PA-103 change `failed`；`npm run openspec:check` 不存在；`cargo fmt --check` 有预存全仓差异；PA-077 精确定向测试受 `target-test\\debug\\.cargo-lock` ACL 阻断；Linux/macOS CI 已配置但未本机执行
+- 最近提交：`4f16b83`（2026-10-02，PA-103 发布门禁提交）；PA-077 runtime 已随 `origin/main@87a6562`（`87a6562`）集成，当前未提交工作包含任务系统收口文档修改
+- 版本现况：tauri `0.1.96`（四处一致）/ core `0.1.92`（两处一致），`npm run version:check` PASSED
+- 门禁现况：`npx openspec validate --all --strict` **54/54 passed**；`npm run openspec:check` 不存在；`npm run cargo:check:shared` Passed（raw：`target-pa077-check/pa077-cargo-check-2026-10-02.txt`）；PA-077 `agent::process::tests` 定向 gate 已通过（21 passed / 0 failed，exit 0，949 filtered out，raw：`target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`）；`pony-agent-core` 全量回归启动 970 tests 后在两个 runtime 测试处停滞并无最终退出码（Incomplete/Stalled，raw：`target-pa077-check/pa077-cargo-core-test-2026-10-02.txt`）；scoped runtime rustfmt 已通过但 manifest `cargo fmt --check` 仍非 clean；Linux/macOS CI 已配置但未执行，整体 closeout 仍 Blocked
 - 最近会话：2026-09-30（PA-101 收尾 + PA-102 全量收口，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`）
 
 ## 已知库存问题
 
-- ~~**canonical spec 库存 39 份不合规**~~ → **PA-102 历史收口已完成（2026-09-30）**：当时的 canonical 快照为 53/53；当前 direct strict 结果必须另看 active PA-103：canonical 54 passed、active PA-103 failed，不能将当前全库写成 clean。
+- ~~**canonical spec 库存 39 份不合规**~~ → **PA-102 历史收口已完成（2026-09-30）**：当时 canonical 快照为 53/53；当前 `npx openspec validate --all --strict` 为 **54/54 passed**，`npm run version:check` 为 **Passed**。
 - ~~**工作树噪音**~~ → **已于 2026-09-30 修复（PA-102 §2）**：`src-tauri/gen/schemas/*.json` 经确认属于权限契约保留跟踪，新增 `scripts/normalize-generated-schemas.ps1` 并在 `start-tauri-dev.ps1` 挂载守护与兜底，彻底解决空变更问题。
 
 ## 当前进行中
@@ -22,7 +22,7 @@
 - **PA-103 桌面端签名更新本地契约（2026-10-02，C 级）本地 gate 收口；发布 gate 待开启**
   参考 `dev:~/pproxy/desktop` Tauri signed updater 模式（仅源码/配置参考，无远端运行证据）实现：typed adapter（`SIGNED_UPDATER_ENABLED=false` 恒禁用）、store 来源隔离状态机（githubLatest vs signedCandidate）、配置页安装按钮/进度/待重启/失败态、精确权限（updater:allow-check / allow-download-and-install / process:allow-restart）、tauri.conf 不提交占位信任锚。验证：version:check PASS（tauri 0.1.94 四处一致 / core 0.1.92）、更新相关 vitest 91/91、全量 592/602（10 skip）最终全绿（MarkdownRenderer 预存时序 flake 隔离通过且未改动）、typecheck/build/cargo:check PASS。三路 plan 审核 + 三路实现审核均条件通过、P1 全部采纳复验。发布 gate 前不得填充 endpoint/key、不得翻转启用常量；`prepare_update_exit`/活跃 turn 确认/自动检查/签名产物/Windows smoke 属 release-owner gate。任务卡 `03_TASKS/PA-103-signed-desktop-self-update.md`；审核 `02_REVIEWS/2026-10-02-pa103-*`；会话日志 `99_LOGS/2026-10-02-pa103-signed-desktop-updater.md`。
 - **PA-077 Windows Job Object containment（实现完成；Review / closeout gate blocked）**
-  已落地 private non-inheritable Job、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap 与 explicit kill/shutdown/last-owner tree cleanup；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment，也不是文件/网络/令牌/AppContainer/审批沙箱。`spawn→assign` race 受调度影响且无固定时间上界，不是安全边界；不注册 SandboxBackend、不授权 autonomous Run，`NoSandboxBackend`/`enforce_sandbox` 保持 fail-closed。当前收口阻塞：`npm run openspec:check` 不存在；direct strict validation 为 canonical 54 passed 但 active PA-103 failed；`cargo fmt --check` 有预存全仓差异；PA-077 精确定向测试受 target-test ACL 阻断；Linux/macOS 仅配置 CI、未本机执行。详见任务卡、implementation review 与 Gate0 closeout review。
+  已落地 private non-inheritable Job、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap 与 explicit kill/shutdown/last-owner tree cleanup；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment，也不是文件/网络/令牌/AppContainer/审批沙箱。`spawn→assign` race 受调度影响且无固定时间上界，不是安全边界；不注册 SandboxBackend、不授权 autonomous Run，`NoSandboxBackend`/`enforce_sandbox` 保持 fail-closed。当前收口阻塞：`npm run openspec:check` 不存在；`npx openspec validate --all --strict` 已 54/54 passed；PA-077 `agent::process::tests` 定向 gate 已通过（21 passed / 0 failed，949 filtered out，exit 0，raw：`target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`），且四个 PA-077 runtime 文件 scoped `rustfmt --check --edition 2021` 通过（exit 0，raw：`target-pa077-check/pa077-rustfmt-scoped-2026-10-02.txt`）；仓库/core manifest `cargo fmt --check` 仍有广泛预存差异（raw：`target-pa077-check/pa077-fmt-2026-10-02.txt`）；Linux/macOS 仅配置 CI、未本机执行。整体 closeout 仍 Blocked。详见任务卡、implementation review 与 Gate0 closeout review。
 - **PA-101 安全与发版流水线三件套已收口（2026-09-25 实现，2026-09-30 补齐收尾账）**
   F1 `platform.rs` URL scheme/host 白名单（fail-closed）+ Win32 `ShellExecuteW` 替代 `cmd /c start` + 前端 `openExternalUrl()` 统一出口；F2 `dompurify@3.4.16` 替代手写正则消毒（红队 29/29）；F3 `tauri.conf.json` 纳入四处版本同步链 + `check-version-sync.ps1` CI 门禁 + ADR 0017（supersedes 0012）。验证：cargo(tauri) 17 + core 962 + vitest 568 + 版本同步 + cmd-start 零残留。提交 `f4970a0`（core 层）、`cd96884`（F1/F2/F3 主提交）、`4d40ce9`（任务卡收口）。
   **2026-09-30 补齐**：canonical spec `openspec/specs/update-security-and-release-followups/spec.md`（此前缺失）、change 归档 `openspec/changes/archive/2026-09-25-pa101-update-followups/`、tasks.md 15 项全部勾选。归档前逐条实测复核 F1/F2/F3 as-built 证据，见 `99_LOGS/2026-09-30-pa101-closeout-and-repo-convergence.md`。

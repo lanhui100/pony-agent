@@ -93,16 +93,18 @@ PA-076 评估确认：`windows-sys` 的 Job Object API 可用，最小聚焦实�
 ## 当前状态
 
 - 2026-09-30：实现已落地于当前工作树，设计三路审核有条件通过；实现审核在批准的 best-effort 范围内 conditional pass。
-- Gate0 收口状态：`Review`，closeout gate `Blocked`。阻塞不是功能实现未完成，而是当前精确 diff 归属、可复现验证与跨平台证据尚未闭合。
-- 当前证据分层：version check 通过；canonical OpenSpec direct strict validation 54 passed；active PA-103 change failed；不存在 `npm run openspec:check`；cargo fmt 有预存全仓差异；精确定向测试受 target-test ACL 阻断；Linux/macOS 仅 CI 配置、未本机执行。
+- Gate0 收口状态：`Review`，closeout gate `Blocked`。PA-077 runtime 已集成于 `origin/main@87a6562`；当前真实 `HEAD=4f16b83`，runtime 相对基线无差异。定向 process gate 已通过；剩余阻塞项是 fmt baseline、Linux/macOS 证据、最小归属最终复核与 archive task 3.4。
+- Scoped fmt evidence: `rustfmt --edition 2021 --check crates/pony-agent-core/src/agent/process.rs crates/pony-agent-core/src/agent/process/windows_job.rs crates/pony-agent-core/src/agent/sandbox.rs crates/pony-agent-core/src/agent/tools.rs` exited 0; raw output `target-pa077-check/pa077-rustfmt-scoped-2026-10-02.txt`. This is limited to the four PA-077 runtime files and does not override the manifest-level `cargo fmt` Not clean result above.
+- Full core regression evidence: `npm run cargo:check:shared` passed (exit 0; raw `target-pa077-check/pa077-cargo-check-2026-10-02.txt`). `npm run cargo:test:shared -- --package=pony-agent-core` started 970 tests but stopped after two `agent::runtime::tests::start_turn_stream_*` cases reported running over 60 seconds; the process later exited without a final test summary or `EXIT_CODE` (raw `target-pa077-check/pa077-cargo-core-test-2026-10-02.txt`). Record this gate as `Incomplete/Stalled`, not Passed or Failed; do not repeat concurrent runs or delete locks.
+- 当前证据分层：真实 `HEAD=4f16b83`、PA-077 runtime 相对 `origin/main@87a6562` 无差异；`npm run version:check` Passed（core 0.1.92 / Tauri 0.1.96）；`npx openspec validate --all --strict` Passed（54/54）。PA-103 发布门禁已进入 HEAD，不再作为当前 PA-077 阻塞项；PA-077 原定向测试已在 ACL 修复后通过（21 passed / 0 failed，exit 0），完整 raw 输出见 `target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`；cargo fmt 有预存全仓差异；Linux/macOS 仅 CI 配置、未本机执行。
 - 三路 Gate0 对抗审核均 PASS WITH FINDINGS / 有条件通过；已采纳既有状态枚举、证据分层和安全免责声明要求。
 
 ## Next Action
 
 1. 冻结 PA-077 新功能开发，不启动 PA-044 或完整 SandboxBackend。
-2. 先核对并隔离 PA-077 与工作树中 PA-102/治理/CI/脚本等其他变更的归属，不执行提交。
-3. 修复或批准 `target-test` ACL 后，重跑原精确定向测试；按 Passed / Not run / Blocked 记录 raw evidence。
-4. 等待 PA-103 active change 独立修复/关闭后再重跑全库 strict OpenSpec；本卡不修改或归档 PA-103。
+2. PA-103 保持独立，不修改其发布流程；当前未提交变更仅限任务系统收口文档。不要对共享 Dashboard/Board 或 `87a6562` 混合提交执行整文件 reset/restore。
+3. PA-077 原定向测试已在 ACL 修复后通过（21/21，exit 0，raw evidence 已记录）；保留其模块过滤范围，不将其写成全量 core 回归。
+4. 当前 `npx openspec validate --all --strict` 已 54/54 passed；不再等待 PA-103 active change。保持 PA-103 独立，本卡不修改其归档。
 5. 取得跨平台 CI 结果或明确其为未执行，再由三路实现/收口 reviewer 复核，完成 archive tasks 3.4 后才可转 Done。
 
 ## Resume Hint
@@ -118,6 +120,6 @@ PA-076 评估确认：`windows-sys` 的 Job Object API 可用，最小聚焦实�
 - Transactional start：setup/assignment/verification/pipe failure all return errors without publication; Windows paths use bounded kill/reap diagnostics. Per-manager DuplicateHandle + native `WaitForSingleObject` proves assign/verify/pipe failed-start direct child exit; deterministic wait-before-assign proves an already-exited child still fails closed. Exited-parent explicit `kill` and shutdown are both covered.
 - Sandbox boundary unchanged：Job is lifecycle containment only, not `SandboxBackend`; autonomous Run remains fail-closed. Accepted residual is scheduler-dependent spawn→assign window with no strict containment claim. Nested host Job/breakaway empirical coverage and timer/outstanding-Arc stress coverage remain follow-up evidence, not advertised guarantees.
 - Validation evidence (historical implementation snapshot, not a current full-green claim): Windows/core/process/tools/version/ADR evidence is recorded in the implementation review. The current tree must be revalidated before closeout.
-- Current Gate0 evidence: `npm run version:check` passed; `npm run openspec:check` is not a repository script; direct strict validation reports 54 canonical specs passed but active PA-103 failed; `cargo fmt --check` has pre-existing repository-wide differences; the exact PA-077 targeted test rerun is blocked by `target-test\debug\.cargo-lock` access denied; Linux/macOS CI jobs are configured but not locally executed.
+- Current Gate0 evidence: `npm run version:check` passed; `npx openspec validate --all --strict` passed 54/54; `npm run openspec:check` is not a repository script; PA-077 `agent::process::tests` targeted gate passed after permissions repair (`21 passed / 0 failed / 949 filtered out`, exit 0, raw `target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`); the earlier ACL exit 101 is historical evidence only; `cargo fmt --check` has pre-existing repository-wide differences; Linux/macOS CI jobs are configured but not locally executed.
 - Security boundary: Job is best-effort lifecycle/process-tree containment only. The scheduler-dependent spawn→assign race has no fixed bound and is not a security boundary; Job is not a filesystem/network/token/AppContainer/approval sandbox, does not register a SandboxBackend, and does not authorize autonomous Run. `NoSandboxBackend` and `enforce_sandbox` remain fail-closed.
 - Independent fixed-snapshot correctness review: conditional pass within the approved best-effort scope; no remaining P0/P1 lifecycle blocker was identified, but closeout evidence is not yet closed.

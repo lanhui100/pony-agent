@@ -32,7 +32,7 @@
 
 - `PA-077` Windows Job Object 进程树 containment（P1，Complexity C）
   状态：Review（implementation complete；closeout gate blocked）。
-  说明：Job RAII、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap、显式 kill/shutdown/last-owner cleanup 已在当前工作树实现；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment 或文件/网络/令牌/AppContainer/审批沙箱。当前收口阻塞：`npm run openspec:check` 不存在；direct strict validation 为 canonical 54 passed 但 active PA-103 failed；`cargo fmt --check` 存在预存全仓差异；PA-077 精确定向测试受 `target-test\debug\.cargo-lock` ACL 阻断；Linux/macOS 仅配置 CI、未本机执行。解锁：核对最小 diff 归属，修复/批准 ACL 后重跑同一测试并完成可复现门禁。任务卡：`03_TASKS/PA-077-windows-job-object-containment.md`；实现审核：`02_REVIEWS/2026-09-30-pa077-implementation-review.md`；Gate0 对账：`02_REVIEWS/2026-09-30-pa077-gate0-closeout-review.md`。
+  说明：Job RAII、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap、显式 kill/shutdown/last-owner cleanup 已集成于 `origin/main@87a6562`；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment 或文件/网络/令牌/AppContainer/审批沙箱。当前收口阻塞：`npx openspec validate --all --strict` 已 54/54 passed；`npm run openspec:check` 不存在；PA-077 `agent::process::tests` 定向 gate 已通过（21 passed / 0 failed / 949 filtered out，exit 0，raw：`target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`），仅代表 filtered module gate；`cargo fmt --check` 存在预存全仓差异；Linux/macOS 仅配置 CI、未本机执行。解锁：完成 fmt 适用范围对账、取得跨平台执行证据或明确 Not run，并完成三路 closeout 复核。任务卡：`03_TASKS/PA-077-windows-job-object-containment.md`；实现审核：`02_REVIEWS/2026-09-30-pa077-implementation-review.md`；Gate0 对账：`02_REVIEWS/2026-09-30-pa077-gate0-closeout-review.md`。
 
 ## Blocked
 

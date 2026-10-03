@@ -40,10 +40,17 @@
 - 三路独立 Gate0 reviewer 均有条件通过：治理 reviewer 要求沿用既有 `Review` 状态、不得引入未定义 `Validation`；测试 reviewer 要求拆分 canonical/active OpenSpec 结果并记录 ACL/fmt/平台证据边界；安全 reviewer 要求维持 best-effort/non-sandbox/fail-closed 免责声明。
 - PA-077 任务卡、任务板、Dashboard 已改为一致语义：实现已落地；当前处于 `Review`，closeout gate blocked；不代表功能实现未完成，也不代表可发布/已提交。
 - 稳定引用已指向 `openspec/changes/archive/2026-09-30-windows-job-object-containment/` 与 `openspec/specs/windows-process-containment/spec.md`。archive tasks 3.4 暂不勾选，待当前精确 diff、验证和平台证据闭合后再复核。
-- 真实门禁分层：version check Passed；canonical strict 54 passed；active PA-103 failed；`npm run openspec:check` 不存在；cargo fmt 存在预存差异；PA-077 定向测试受 `target-test\\debug\\.cargo-lock` ACL 阻断；Linux/macOS CI 已配置但未本机执行。
+- **Historical Gate0 snapshot (2026-09-30):** version check Passed；canonical strict 54 passed；active PA-103 failed；`npm run openspec:check` 不存在；cargo fmt 存在预存差异；PA-077 定向测试受 `target-test\\debug\\.cargo-lock` ACL 阻断；Linux/macOS CI 已配置但未本机执行。当前 follow-up 已解除 PA-103 failure，现行证据见下方 `Current baseline and validation follow-up`。
 - 本轮未修改运行时代码、Cargo、测试、CI 或 PA-103；未提交、未重置、未删除混合工作树改动；PA-044 保持 Ready/冻结，不启动。
 - 安全口径保持：Job 是 best-effort 生命周期/进程树 containment，不是严格 containment、SandboxBackend 或文件/网络/令牌/AppContainer/审批边界；spawn→assign race 非安全边界；NoSandboxBackend/enforce_sandbox 继续 fail-closed。
 
-## Gate0 Resume Hint
 
-下次先打开 `management/task-system/02_REVIEWS/2026-09-30-pa077-gate0-closeout-review.md`，核对 PA-077 最小 diff 归属与 target-test ACL 解除情况；不要启动 PA-044 或 PA-077 新功能实现。
+## Current baseline and validation follow-up (2026-10-02)
+
+- Git baseline: `HEAD=4f16b83`; PA-077 runtime has no diff relative to `origin/main@87a6562` (`87a6562`); current uncommitted changes are task-system closeout documentation updates. PA-077 is integrated in commit history, but not released or fully validated.
+- `npm run version:check`: Passed; core `0.1.92`, Tauri `0.1.96`.
+- `npx openspec validate --all --strict`: Passed, `54 passed / 0 failed`; the previously recorded PA-103 active failure is resolved and must not remain as a current blocker.
+- Historical first attempt: PA-077 targeted command `npm run cargo:test:shared -- --package=pony-agent-core --lib agent::process::tests` exited `101` before test execution because `target-test\\debug\\.cargo-lock` returned access denied. Raw output: `target-pa077-check/pa077-process-rerun-2026-10-02.txt`. This is retained as the pre-repair evidence only.
+- PA-077 targeted process gate follow-up: after the verified permissions repair, the exact command `npm run cargo:test:shared -- --package=pony-agent-core --lib agent::process::tests` completed with `21 passed / 0 failed / 0 ignored / 949 filtered out`, exit code `0`, raw output `target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`. This is a filtered module gate, not a full-core or cross-platform result.
+- Scoped PA-077 formatting: `rustfmt --edition 2021 --check` over the four runtime files (`process.rs`, `process/windows_job.rs`, `sandbox.rs`, `tools.rs`) passed, exit `0`; raw output `target-pa077-check/pa077-rustfmt-scoped-2026-10-02.txt`. Manifest-level `cargo fmt --manifest-path crates/pony-agent-core/Cargo.toml -- --check` remains exit `1` with broad pre-existing differences; raw output `target-pa077-check/pa077-fmt-2026-10-02.txt`. No broad formatting was applied.
+- Full-core regression: `npm run cargo:check:shared` passed (exit `0`; raw `target-pa077-check/pa077-cargo-check-2026-10-02.txt`). The command `npm run cargo:test:shared -- --package=pony-agent-core` started 970 tests, then stalled at two `start_turn_stream_*` runtime tests reporting over 60 seconds; the process exited without final summary or exit code (raw `target-pa077-check/pa077-cargo-core-test-2026-10-02.txt`). Record full-core status as `Incomplete/Stalled`, not Passed or Failed; no concurrent rerun, lock deletion, or process termination was performed.

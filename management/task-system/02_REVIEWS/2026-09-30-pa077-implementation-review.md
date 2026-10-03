@@ -25,7 +25,7 @@ Final / conditional pass within approved best-effort scope.
 ## Validation evidence
 
 - Historical implementation snapshot only: the recorded Windows/core/process/tools/version/ADR results were produced before Gate0 reconciliation and are not a current exact-diff full-green claim.
-- Current Gate0 replacement evidence is tracked in `2026-09-30-pa077-gate0-closeout-review.md`: `npm run version:check` passed; no `npm run openspec:check` script exists; canonical strict validation is 54 passed while active PA-103 fails; cargo fmt has pre-existing repository-wide differences; exact targeted rerun is ACL-blocked; Linux/macOS CI is configured but not locally executed.
+- Historical Gate0 snapshot (2026-09-30): `version:check` passed; no `npm run openspec:check` script existed; PA-103 active validation failed; the targeted process test was ACL-blocked; cargo fmt had broad pre-existing differences; Linux/macOS CI was configured but not locally executed. These are historical facts only. Current validation is maintained in `2026-09-30-pa077-gate0-closeout-review.md`: version check and OpenSpec 54/54 passed; targeted process module 21/21 passed after ACL repair; four PA-077 runtime files scoped rustfmt passed; manifest-level cargo fmt remains exit 1; Linux/macOS has no raw execution evidence.
 
 ## Final verdict
 

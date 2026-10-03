@@ -11,22 +11,22 @@
 | Reviewer | 范围 | 结论 | 采纳项 |
 |---|---|---|---|
 | 架构/治理 reviewer `cad497fb-8613-4a6f-8972-5f66ef725cb8` | 状态枚举、任务板分区、OpenSpec/任务卡引用 | 有条件通过 | 使用既有 `Review` 主状态；将 closeout blocked 作为说明，不引入未定义的 `Validation` 状态；PA-044 保持 Ready/冻结 |
-| 测试/交付 reviewer `0eea9b57-58f9-448a-7db-e713867df1c8` | 可复现门禁、历史证据与当前证据分层 | 有条件通过 | 分列 canonical 54 passed 与 active PA-103 failed；记录不存在的 `npm run openspec:check`、fmt 基线差异、target-test ACL 阻断、Linux/macOS 未本机执行 |
+| 测试/交付 reviewer `0eea9b57-58f9-4480-a7db-e713867df1c8` | 可复现门禁、历史证据与当前证据分层 | 有条件通过 | 历史快照曾记录 PA-103 active failure；当前复核为 54/54 passed；保留不存在的 `npm run openspec:check`、fmt 基线差异、target-test ACL 阻断、Linux/macOS 未本机执行 |
 | 安全 reviewer `1fe11756-2d5b-431e-8010-fd9371b33d10` | containment 语义、sandbox 边界、平台证据 | PASS WITH FINDINGS | 保留 spawn→assign race 非安全边界、Job 非 SandboxBackend、NoSandboxBackend/enforce_sandbox fail-closed 与跨平台未执行免责声明 |
 
 前置设计与实现审核仍以原记录为准：设计三路审核是有条件通过；实现审核是批准 best-effort 范围内的 conditional pass，不是严格安全批准。
 
 ## Gate0 事实
 
-- `git status` 显示 PA-077 实现、任务系统、CI、脚本、OpenSpec 与其他治理改动混合在未提交工作树中；本轮未提交、未重置、未删除用户改动。
+- 当前 Git 基线：`HEAD=4f16b83`，PA-077 runtime 相对 `origin/main@87a6562` 无差异；当前未提交改动为任务系统收口文档修改。
 - PA-077 OpenSpec change 的稳定引用已指向 `openspec/changes/archive/2026-09-30-windows-job-object-containment/`；canonical spec 为 `openspec/specs/windows-process-containment/spec.md`。
-- `npm run version:check`：Passed。
+- `npm run version:check`：Passed（core 0.1.92 / Tauri 0.1.96）。
+- `npx openspec validate --all --strict`：Passed，54/54；此前 PA-103 active change failure 已解除并归档，不再作为当前 PA-077 阻塞项。
 - `npm run openspec:check`：Not applicable / repository script 不存在；不得把该命令写为通过。
-- direct `openspec validate --all --strict`：canonical specs 54 passed；active PA-103 change failed；因此当前全库 strict 不是 clean。
-- `cargo fmt --check`：Blocked/Not clean，存在预存的仓库级格式差异；本轮不通过无关格式化抹平。
-- PA-077 精确定向测试：Blocked by `target-test\debug\.cargo-lock` access denied；解除条件是修复/批准 target-test ACL 后重跑同一命令并保留 raw output。
-- Linux/macOS：CI jobs 已配置，未在本机执行；不得写成跨平台本地验证通过。
-- PA-103 active change 不在本轮范围；不得为消除 strict failure 归档、删除或修改它。
+- Scoped PA-077 runtime format check: `rustfmt --edition 2021 --check` over `process.rs`, `process/windows_job.rs`, `sandbox.rs`, and `tools.rs` passed (exit 0; raw `target-pa077-check/pa077-rustfmt-scoped-2026-10-02.txt`). This does not override manifest-level `cargo fmt --check` (exit 1; broad pre-existing diffs, raw `target-pa077-check/pa077-fmt-2026-10-02.txt`).
+- Full-core regression: `npm run cargo:test:shared -- --package=pony-agent-core` started 970 tests but stopped at two `agent::runtime::tests::start_turn_stream_*` cases reporting over 60 seconds; the process later exited without final summary or exit code. Raw: `target-pa077-check/pa077-cargo-core-test-2026-10-02.txt`. Status: `Incomplete/Stalled`, not Passed or Failed. `npm run cargo:check:shared` independently passed (raw `target-pa077-check/pa077-cargo-check-2026-10-02.txt`).
+- PA-077 targeted process gate: after ACL repair, exact command `npm run cargo:test:shared -- --package=pony-agent-core --lib agent::process::tests` passed; `21 passed / 0 failed / 0 ignored / 949 filtered out`, exit 0, raw `target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`. Earlier exit 101 is historical pre-repair evidence; this is a filtered module gate, not full-core or cross-platform validation.
+- Linux/macOS：CI jobs 已配置，当前无 raw CI run/artifact；本机未执行，记录为 `Not run`，不得写成跨平台验证通过。
 
 ## 安全语义
 
@@ -47,9 +47,9 @@ PA-077 提供 Windows Job Object 的 best-effort 进程生命周期/进程树 co
 ## 下一步最小动作
 
 1. 冻结 PA-077 新功能开发，不启动 PA-044、完整 SandboxBackend 或 strict suspended-start 方案。
-2. 核对 PA-077 与 PA-102/治理/CI/脚本改动的最小 diff 归属，不执行提交。
-3. 修复或批准 `target-test` ACL，重跑原精确定向测试。
-4. 由 PA-103 自己的任务流程处理 active change failure；之后再重跑全库 strict validation。
+2. 保留 PA-077 runtime 与 `origin/main@87a6562` 无差异的归属证据；共享 Cargo/CI/治理文件不整文件 reset/restore，不执行提交。
+3. ACL 子门禁已关闭：原定向命令已通过 21/21；保留成功 raw 输出与历史 exit 101 失败记录，不再重复 ACL 修复。
+4. PA-103 当前门禁已解除并独立归档；本卡不修改其发布流程。无需将 PA-103 作为 PA-077 strict validation 前置条件。
 5. 取得跨平台 CI 结果或明确保持 Not run，再启动实现/收口三路复核。
 
 ## Resume Hint
