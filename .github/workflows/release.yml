@@ -78,12 +78,12 @@ jobs:
           $errors = @()
 
           # Windows desktop installer (NSIS)
-          $nsis = "src-tauri/target/release/bundle/nsis"
+          $nsis = "target/release/bundle/nsis"
           $installer = Get-ChildItem $nsis -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $installer) { $errors += "Windows NSIS installer missing under $nsis" }
 
           # Signed updater artifact (.tar.gz + .sig)
-          $bundle = "src-tauri/target/release/bundle/updater"
+          $bundle = "target/release/bundle/updater"
           $archive = Get-ChildItem $bundle -Filter "*.tar.gz" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $archive) { $errors += "updater .tar.gz missing under $bundle" }
           if ($archive) {
@@ -106,7 +106,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
-          $bundle = "src-tauri/target/release/bundle/updater"
+          $bundle = "target/release/bundle/updater"
           $archive = Get-ChildItem $bundle -Filter "*.tar.gz" | Select-Object -First 1
           $sigPath = "$($archive.FullName).sig"
           $signature = (Get-Content $sigPath -Raw).Trim()
@@ -133,9 +133,9 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
           # Windows desktop assets
-          $nsis = "src-tauri/target/release/bundle/nsis"
+          $nsis = "target/release/bundle/nsis"
           Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          $bundle = "src-tauri/target/release/bundle/updater"
+          $bundle = "target/release/bundle/updater"
           Get-ChildItem $bundle -Filter "*.tar.gz" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
           Get-ChildItem $bundle -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
           # CLI binary
