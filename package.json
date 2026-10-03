@@ -48,8 +48,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
-    "@tauri-apps/api": "^2.8.0",
-    "@tauri-apps/cli": "^2.8.0",
+    "@tauri-apps/api": "^2.12.1",
+    "@tauri-apps/cli": "^2.12.1",
     "@vitejs/plugin-vue": "^6.0.7",
     "@vitest/coverage-v8": "^4.1.9",
     "@vue/test-utils": "^2.4.6",
