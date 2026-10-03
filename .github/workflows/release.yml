@@ -1,8 +1,9 @@
-# Pony Agent release — signed desktop updater (DRAFT)
+# Pony Agent release — signed desktop updater + CLI
 
 # 触发：推送 vX.Y.Z tag。启用前提：TAURI_SIGNING_PRIVATE_KEY secrets 已配置、
 # tauri.conf.json 已启用 plugins.updater + createUpdaterArtifacts、前端常量已翻转。
-# 未满足前 push tag 会 hard fail（这是设计意图，不允许无签名发布）。
+# 产物门禁：发布前强制要求 Windows 桌面产物（NSIS 安装器 + updater 包）与
+# CLI 二进制（non_tauri_harness）全部存在，任一缺失即 hard fail，不允许发布。
 
 name: release-signed-updater
 
@@ -24,6 +25,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install frontend dependencies
+        run: npm ci
       - name: Verify secrets present (hard fail)
         shell: pwsh
         run: |
@@ -40,8 +43,10 @@ jobs:
           npm run version:check
           npm run typecheck
           npm run test:unit
-      - name: Rust check
-        run: npm run cargo:check
+      - name: Rust check (desktop + CLI)
+        run: |
+          npm run cargo:check
+          cargo check --release -p pony-agent-core --bin non_tauri_harness
 
   build-release:
     needs: verify
@@ -55,23 +60,55 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install and build bundle with updater artifacts
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build Windows desktop bundle with signed updater artifacts
         shell: pwsh
         run: |
-          npm ci
           npm run build
           npx tauri build --bundles nsis
+      - name: Build CLI binary (non_tauri_harness)
+        shell: pwsh
+        run: |
+          cargo build --release -p pony-agent-core --bin non_tauri_harness
+      - name: Gate — required artifacts present (Windows desktop + CLI, hard fail)
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $errors = @()
+
+          # Windows desktop installer (NSIS)
+          $nsis = "src-tauri/target/release/bundle/nsis"
+          $installer = Get-ChildItem $nsis -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $installer) { $errors += "Windows NSIS installer missing under $nsis" }
+
+          # Signed updater artifact (.tar.gz + .sig)
+          $bundle = "src-tauri/target/release/bundle/updater"
+          $archive = Get-ChildItem $bundle -Filter "*.tar.gz" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $archive) { $errors += "updater .tar.gz missing under $bundle" }
+          if ($archive) {
+            $sigPath = "$($archive.FullName).sig"
+            if (-not (Test-Path $sigPath)) { $errors += "missing .sig for $($archive.Name)" }
+          }
+
+          # CLI binary (Windows)
+          $cli = "target/release/non_tauri_harness.exe"
+          if (-not (Test-Path $cli)) { $errors += "CLI binary missing: $cli" }
+
+          if ($errors.Count -gt 0) {
+            Write-Host "Required release artifacts missing:"
+            $errors | ForEach-Object { Write-Host "  - $_" }
+            throw "Release gate failed: require Windows desktop AND CLI artifacts"
+          }
+          Write-Host "Release gate PASS: NSIS installer, updater archive+sig, CLI binary present"
       - name: Assemble latest.json from produced artifacts
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
-          $bundle = "src-tauri/target/release/bundle/updater"   # 以实际产物路径为准（Tauri v2 约定），若缺失则 fail
-          if (-not (Test-Path $bundle)) { throw "updater bundle dir missing: $bundle" }
+          $bundle = "src-tauri/target/release/bundle/updater"
           $archive = Get-ChildItem $bundle -Filter "*.tar.gz" | Select-Object -First 1
-          if (-not $archive) { throw "no .tar.gz artifact found" }
           $sigPath = "$($archive.FullName).sig"
-          if (-not (Test-Path $sigPath)) { throw "missing .sig for $($archive.Name)" }
           $signature = (Get-Content $sigPath -Raw).Trim()
           $asset = $archive.Name
           $ver = (Get-Content package.json | ConvertFrom-Json).version
@@ -94,10 +131,17 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release"
+          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
+          # Windows desktop assets
+          $nsis = "src-tauri/target/release/bundle/nsis"
+          Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
           $bundle = "src-tauri/target/release/bundle/updater"
-          Get-ChildItem $bundle -File | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          # 安装器与 tar.gz 同源，一并上传；latest.json 最后上传以保证 latest/download 指向新 manifest
+          Get-ChildItem $bundle -Filter "*.tar.gz" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          Get-ChildItem $bundle -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          # CLI binary
+          gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
+          # latest.json last so /releases/latest/download/latest.json points to the new manifest
+          gh release upload "$tag" "$bundle/latest.json" --clobber
           gh release edit "$tag" --latest
           Write-Host "release published: $tag"
 
