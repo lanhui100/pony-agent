@@ -179,6 +179,11 @@ async function openAddWorkspaceFlow() {
     const result = await runtimeStore.createNewWorkspace(base, picked);
     if (!result.ok) {
       flashWorkspaceError(result.error ?? "创建失败");
+    } else if (result.record) {
+      // 若当前为尚未发送消息的空白对话，将其归属自动定向到刚添加的新工作区
+      if (!hasPersistableCurrentSession.value) {
+        void runtimeStore.createSession(result.record.id);
+      }
     }
   } catch (error) {
     flashWorkspaceError(`添加工作区失败：${String(error)}`);
@@ -429,6 +434,17 @@ const hasPersistableMessages = (list: ChatMessage[]) =>
 const canCreateSession = computed(
   () => !sessionOperation.value && hasPersistableMessages(messages.value)
 );
+function canCreateSessionInWorkspace(workspaceId: string): boolean {
+  if (sessionOperation.value) return false;
+  // 若有消息，允许新建；若当前为空白会话且目标工作区不是当前会话工作区，允许重定向到该工作区
+  return hasPersistableMessages(messages.value) || sessionWorkspaceId.value !== workspaceId;
+}
+function workspaceRowNewTitle(workspaceId: string): string {
+  if (canCreateSessionInWorkspace(workspaceId)) {
+    return SIDEBAR_COPY.newConversationHere;
+  }
+  return "当前已在此工作区的空白新对话中";
+}
 const createSessionTitle = computed(() => {
   if (isSubmitting.value) {
     return "当前对话正在运行；新建空白对话后，运行会转入后台继续。";
@@ -719,8 +735,8 @@ function confirmPopoverProps(
                     v-if="isTauriRuntime"
                     class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-40"
                     type="button"
-                    :disabled="!canCreateSession"
-                    :title="canCreateSession ? SIDEBAR_COPY.newConversationHere : createSessionTitle"
+                    :disabled="!canCreateSessionInWorkspace(group.key)"
+                    :title="workspaceRowNewTitle(group.key)"
                     :data-testid="`workspace-row-new-${group.key}`"
                     @click="createSessionInWorkspace(group.key)"
                   >

@@ -2019,7 +2019,22 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     async createSession(targetWorkspaceId?: string) {
       // 新建会话意图即清空待发送附件（即使空消息 no-op 也清，避免残留携带）
       this.clearPendingAttachments();
-      if (this.sessionOperation || !hasPersistableMessages(this.messages)) {
+      if (this.sessionOperation) {
+        return;
+      }
+      const targetWorkspace = targetWorkspaceId?.trim() || DEFAULT_WORKSPACE_ID;
+      if (!hasPersistableMessages(this.messages)) {
+        // 当前已是空白新会话：若指定的目标工作区与当前不同，允许无缝重定向归属
+        if (this.sessionWorkspaceId !== targetWorkspace) {
+          this.sessionWorkspaceId = targetWorkspace;
+          const currentProvisional = this.sessionList.find(
+            (session) => session.conversationId === this.sessionId
+          );
+          if (currentProvisional) {
+            currentProvisional.workspaceId =
+              targetWorkspace === DEFAULT_WORKSPACE_ID ? null : targetWorkspace;
+          }
+        }
         return;
       }
 
@@ -2049,7 +2064,6 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       const dedupedCurrentSessionList = this.sessionList.filter((session) => session.conversationId !== nextSessionId);
       // 三级树（裁决①）：创建目标显式化——顶层入口落默认工作区，组内＋传该组 id；
       // 不再读取激活态。目标冻结到会话（submitTurn 以会话归属优先）。
-      const targetWorkspace = targetWorkspaceId?.trim() || DEFAULT_WORKSPACE_ID;
       this.sessionWorkspaceId = targetWorkspace;
       const transientOverview = {
         ...createTransientSessionOverview(nextSessionId),
