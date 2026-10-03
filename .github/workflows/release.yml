@@ -77,18 +77,16 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $errors = @()
 
-          # Windows desktop installer (NSIS)
+          # Windows desktop installer + signed updater artifact
+          # Tauri v2 NSIS updater mode produces: <product>_<ver>_x64-setup.exe + .sig (no tar.gz)
           $nsis = "target/release/bundle/nsis"
           $installer = Get-ChildItem $nsis -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $installer) { $errors += "Windows NSIS installer missing under $nsis" }
 
-          # Signed updater artifact (.tar.gz + .sig)
-          $bundle = "target/release/bundle/updater"
-          $archive = Get-ChildItem $bundle -Filter "*.tar.gz" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $archive) { $errors += "updater .tar.gz missing under $bundle" }
-          if ($archive) {
-            $sigPath = "$($archive.FullName).sig"
-            if (-not (Test-Path $sigPath)) { $errors += "missing .sig for $($archive.Name)" }
+          # Signed updater signature (.sig next to the installer)
+          if ($installer) {
+            $sigPath = "$($installer.FullName).sig"
+            if (-not (Test-Path $sigPath)) { $errors += "missing .sig for $($installer.Name)" }
           }
 
           # CLI binary (Windows)
@@ -100,17 +98,19 @@ jobs:
             $errors | ForEach-Object { Write-Host "  - $_" }
             throw "Release gate failed: require Windows desktop AND CLI artifacts"
           }
-          Write-Host "Release gate PASS: NSIS installer, updater archive+sig, CLI binary present"
+          Write-Host "Release gate PASS: NSIS installer + signature, CLI binary present"
       - name: Assemble latest.json from produced artifacts
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
-          $bundle = "target/release/bundle/updater"
-          $archive = Get-ChildItem $bundle -Filter "*.tar.gz" | Select-Object -First 1
-          $sigPath = "$($archive.FullName).sig"
+          $nsis = "target/release/bundle/nsis"
+          $installer = Get-ChildItem $nsis -Filter "*-setup.exe" | Select-Object -First 1
+          $sigPath = "$($installer.FullName).sig"
           $signature = (Get-Content $sigPath -Raw).Trim()
-          $asset = $archive.Name
+          # Escape spaces in the asset name for the GitHub download URL (e.g. "Pony Agent_..." -> "Pony%20Agent_...")
+          $asset = $installer.Name
+          $assetUrl = [uri]::EscapeDataString($asset)
           $ver = (Get-Content package.json | ConvertFrom-Json).version
           $manifest = [ordered]@{
             version = $ver
@@ -119,12 +119,12 @@ jobs:
             platforms = [ordered]@{
               "windows-x86_64" = [ordered]@{
                 signature = $signature
-                url = "https://github.com/$repo/releases/download/$tag/$asset"
+                url = "https://github.com/$repo/releases/download/$tag/$assetUrl"
               }
             }
           }
-          $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$bundle/latest.json" -Encoding utf8
-          Write-Host "latest.json written"
+          $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$nsis/latest.json" -Encoding utf8
+          Write-Host "latest.json written (asset=$asset)"
       - name: Publish draft release and upload assets (latest.json last)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -132,16 +132,14 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
-          # Windows desktop assets
           $nsis = "target/release/bundle/nsis"
+          # Windows desktop assets: NSIS installer + its updater signature
           Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          $bundle = "target/release/bundle/updater"
-          Get-ChildItem $bundle -Filter "*.tar.gz" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          Get-ChildItem $bundle -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
           # CLI binary
           gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
           # latest.json last so /releases/latest/download/latest.json points to the new manifest
-          gh release upload "$tag" "$bundle/latest.json" --clobber
+          gh release upload "$tag" "$nsis/latest.json" --clobber
           gh release edit "$tag" --latest
           Write-Host "release published: $tag"
 
