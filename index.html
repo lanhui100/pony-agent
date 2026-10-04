@@ -13,5 +13,89 @@
   </head>
   <body>
     <div id="app"></div>
+    <div id="app-loading-screen" aria-live="polite">
+      <style>
+        #app-loading-screen {
+          position: fixed;
+          inset: 0;
+          z-index: 999999;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: radial-gradient(circle at top, rgba(248, 226, 184, 0.25), transparent 45%),
+                      linear-gradient(180deg, #fdfbf9 0%, #faf7f2 50%, #f4ede2 100%);
+          user-select: none;
+          -webkit-user-select: none;
+          transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        #app-loading-screen.fade-out {
+          opacity: 0;
+          visibility: hidden;
+          pointer-events: none;
+        }
+        .loading-title-container {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 16px;
+        }
+        .loading-badge {
+          width: 52px;
+          height: 52px;
+          border-radius: 14px;
+          box-shadow: 0 10px 25px -4px rgba(217, 119, 6, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+          animation: loading-pulse 2.2s ease-in-out infinite;
+        }
+        .loading-brand-title {
+          font-family: -apple-system, BlinkMacSystemFont, "Montserrat", "Arial Black", "Impact", "Trebuchet MS", "Segoe UI", sans-serif;
+          font-size: 2.1rem;
+          font-weight: 900;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          background: linear-gradient(135deg, #1c1917 0%, #44403c 45%, #b45309 100%);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          text-shadow: 0 2px 12px rgba(217, 119, 6, 0.12);
+          margin: 0;
+          padding-left: 0.18em;
+        }
+        .loading-progress-bar {
+          width: 140px;
+          height: 3px;
+          background: rgba(120, 113, 108, 0.12);
+          border-radius: 9999px;
+          overflow: hidden;
+          position: relative;
+          margin-top: 4px;
+        }
+        .loading-progress-indicator {
+          position: absolute;
+          top: 0;
+          bottom: 0;
+          left: -40%;
+          width: 40%;
+          background: linear-gradient(90deg, #d97706, #f59e0b);
+          border-radius: 9999px;
+          animation: loading-shimmer 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+        }
+        @keyframes loading-pulse {
+          0%, 100% { transform: scale(1); filter: drop-shadow(0 4px 10px rgba(245, 158, 11, 0.25)); }
+          50% { transform: scale(1.05); filter: drop-shadow(0 8px 18px rgba(245, 158, 11, 0.38)); }
+        }
+        @keyframes loading-shimmer {
+          0% { left: -40%; width: 40%; }
+          50% { left: 30%; width: 50%; }
+          100% { left: 100%; width: 40%; }
+        }
+      </style>
+      <div class="loading-title-container">
+        <img class="loading-badge" src="/src/assets/pony-brand-icon.png" alt="" />
+        <h1 class="loading-brand-title">PONY AGENT</h1>
+        <div class="loading-progress-bar">
+          <div class="loading-progress-indicator"></div>
+        </div>
+      </div>
+    </div>
   </body>
   </html>

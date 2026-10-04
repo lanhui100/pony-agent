@@ -19,6 +19,19 @@ app.use(pinia);
 app.use(MotionPlugin);
 app.mount("#app");
 
+// 优雅淡出 index.html 预加载启动屏
+if (typeof window !== "undefined") {
+  requestAnimationFrame(() => {
+    const splash = document.getElementById("app-loading-screen");
+    if (splash) {
+      splash.classList.add("fade-out");
+      setTimeout(() => {
+        splash.remove();
+      }, 400);
+    }
+  });
+}
+
 if (import.meta.env.DEV && typeof window !== "undefined") {
   (window as unknown as Record<string, unknown>).__ponyaPinia = pinia;
 }
