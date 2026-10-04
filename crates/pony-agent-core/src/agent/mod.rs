@@ -24,6 +24,7 @@ pub mod jobs;
 pub mod lsp;
 pub mod patch;
 pub mod mcp_resources;
+pub mod orchestration;
 pub mod planner;
 pub mod plan_state;
 pub mod path_permission;

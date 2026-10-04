@@ -53,6 +53,11 @@ pub use crate::agent::goal::{
     create_goal, get_goal, update_goal, CreateGoalArgs, CreateGoalResult, GetGoalResult,
     GoalData, UpdateGoalAction, UpdateGoalArgs, UpdateGoalResult,
 };
+pub use crate::agent::orchestration::{
+    subagent, team_task_create, team_task_list, team_task_update, workflow, SubagentArgs,
+    SubagentResult, TeamTaskAction, TeamTaskCreateArgs, TeamTaskItem, TeamTaskListResult,
+    TeamTaskUpdateArgs, WorkflowArgs, WorkflowResult, WorkflowStep,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::sandbox::{enforce_sandbox, NoSandboxBackend};
 use crate::agent::search::{SearchEngine, SearchOptions};
