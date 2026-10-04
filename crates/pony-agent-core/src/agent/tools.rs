@@ -49,6 +49,10 @@ pub use crate::agent::git_search::{
     fuzzy_file_search, git_diff_remote, FuzzyFileSearchArgs, FuzzyFileSearchResult,
     FuzzyMatchItem, GitDiffRemoteArgs, GitDiffRemoteResult,
 };
+pub use crate::agent::goal::{
+    create_goal, get_goal, update_goal, CreateGoalArgs, CreateGoalResult, GetGoalResult,
+    GoalData, UpdateGoalAction, UpdateGoalArgs, UpdateGoalResult,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::sandbox::{enforce_sandbox, NoSandboxBackend};
 use crate::agent::search::{SearchEngine, SearchOptions};
