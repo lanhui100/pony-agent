@@ -25,6 +25,13 @@
 //!   `.gitignore`-aware traversal and explicit truncation evidence (design Decision 9).
 
 use crate::agent::process::ProcessManager;
+pub use crate::agent::terminal::{
+    terminal_close, terminal_open, terminal_read, terminal_send, terminal_signal,
+    MAX_ACTIVE_TERMINALS, TERMINAL_BUFFER_CAP,
+    TerminalCloseArgs, TerminalCloseResult, TerminalOpenArgs, TerminalOpenResult,
+    TerminalReadArgs, TerminalReadResult, TerminalSendArgs, TerminalSendResult,
+    TerminalSignal, TerminalSignalArgs, TerminalSignalResult,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::sandbox::{enforce_sandbox, NoSandboxBackend};
 use crate::agent::search::{SearchEngine, SearchOptions};

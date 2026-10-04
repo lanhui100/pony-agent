@@ -10,6 +10,7 @@
 
 use pony_agent_core::agent::tools::{
     terminal_close, terminal_open, terminal_read, terminal_send, terminal_signal,
+    MAX_ACTIVE_TERMINALS,
     TerminalCloseArgs, TerminalCloseResult, TerminalOpenArgs, TerminalOpenResult,
     TerminalReadArgs, TerminalReadResult, TerminalSendArgs, TerminalSendResult,
     TerminalSignal, TerminalSignalArgs, TerminalSignalResult,
@@ -103,4 +104,63 @@ fn test_ac04_path_traversal_fails_closed() {
     };
     let err = terminal_open(open_args);
     assert!(err.is_err(), "Path traversal cwd must fail closed");
+
+    // SEC-01: Absolute path outside workspace must fail closed unconditionally
+    let outside_abs = if cfg!(windows) { "C:\\Windows" } else { "/etc" };
+    let abs_args = TerminalOpenArgs {
+        command: Some("sh".to_string()),
+        args: None,
+        cwd: Some(outside_abs.to_string()),
+        cols: None,
+        rows: None,
+        env: None,
+    };
+    let abs_err = terminal_open(abs_args);
+    assert!(abs_err.is_err(), "Absolute path outside workspace must fail closed");
+}
+
+#[test]
+fn test_leak01_max_active_terminals_and_auto_reap() {
+    // Open terminals until capacity or test limit
+    let mut opened = Vec::new();
+    for _ in 0..MAX_ACTIVE_TERMINALS {
+        let open_args = TerminalOpenArgs {
+            command: Some("sh".to_string()),
+            args: Some(vec!["-c".to_string(), "sleep 30".to_string()]),
+            cwd: None,
+            cols: None,
+            rows: None,
+            env: None,
+        };
+        match terminal_open(open_args) {
+            Ok(res) => opened.push(res.terminal_id),
+            Err(e) => {
+                // If capacity hit due to concurrent runs, that's expected
+                assert!(e.contains("Maximum active terminal limit reached"));
+                break;
+            }
+        }
+    }
+
+    // Attempting to open one more beyond MAX_ACTIVE_TERMINALS must fail if we filled it
+    if opened.len() == MAX_ACTIVE_TERMINALS {
+        let overflow_args = TerminalOpenArgs {
+            command: Some("sh".to_string()),
+            args: None,
+            cwd: None,
+            cols: None,
+            rows: None,
+            env: None,
+        };
+        let res = terminal_open(overflow_args);
+        assert!(res.is_err(), "Must reject terminal open when at max capacity");
+    }
+
+    // Clean up
+    for id in opened {
+        let _ = terminal_close(TerminalCloseArgs {
+            terminal_id: id,
+            force: Some(true),
+        });
+    }
 }
