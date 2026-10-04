@@ -99,18 +99,41 @@ jobs:
             throw "Release gate failed: require Windows desktop AND CLI artifacts"
           }
           Write-Host "Release gate PASS: NSIS installer + signature, CLI binary present"
-      - name: Assemble latest.json from produced artifacts
+      - name: Publish draft release and upload desktop/CLI assets (no latest.json yet)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
+          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
+          $nsis = "target/release/bundle/nsis"
+          # Windows desktop assets: NSIS installer + its updater signature
+          Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          # CLI binary
+          gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
+          Write-Host "desktop + CLI assets uploaded"
+
+      - name: Assemble latest.json from actually-uploaded asset names
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          # GitHub normalizes upload filenames (spaces -> dots), so the manifest URL must
+          # reference the POST-upload asset name, never the local build name (a stale local
+          # name 404s in the updater and surfaces as "签名更新安装失败" in the client).
+          $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
           $nsis = "target/release/bundle/nsis"
-          $installer = Get-ChildItem $nsis -Filter "*-setup.exe" | Select-Object -First 1
-          $sigPath = "$($installer.FullName).sig"
-          $signature = (Get-Content $sigPath -Raw).Trim()
-          # Escape spaces in the asset name for the GitHub download URL (e.g. "Pony Agent_..." -> "Pony%20Agent_...")
-          $asset = $installer.Name
+          $assets = @(gh api "repos/$repo/releases/tags/$tag" --jq '.assets[].name')
+          $setup = @($assets | Where-Object { $_ -like "*-setup.exe" })
+          if ($setup.Count -eq 0) { throw "no setup.exe asset found after upload: [$($assets -join ', ')]" }
+          if ($setup.Count -gt 1) { throw "ambiguous setup.exe assets: [$($setup -join ', ')]" }
+          $asset = $setup[0]
           $assetUrl = [uri]::EscapeDataString($asset)
+          $sigFile = Get-ChildItem $nsis -Filter "*.sig" | Select-Object -First 1
+          if (-not $sigFile) { throw "missing local .sig under $nsis" }
+          $signature = (Get-Content $sigFile.FullName -Raw).Trim()
           $ver = (Get-Content package.json | ConvertFrom-Json).version
           $manifest = [ordered]@{
             version = $ver
@@ -124,26 +147,26 @@ jobs:
             }
           }
           $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$nsis/latest.json" -Encoding utf8
-          Write-Host "latest.json written (asset=$asset)"
-      - name: Publish draft release and upload assets (latest.json last)
+          # Gate: the manifest must reference an asset that actually exists on the release
+          if ($assets -notcontains $asset) { throw "manifest asset '$asset' not found in uploaded assets" }
+          Write-Host "latest.json assembled against uploaded asset: $asset"
+
+      - name: Upload latest.json last and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
-          $nsis = "target/release/bundle/nsis"
-          # Windows desktop assets: NSIS installer + its updater signature
-          Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          # CLI binary
-          gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
           # latest.json last so /releases/latest/download/latest.json points to the new manifest
-          gh release upload "$tag" "$nsis/latest.json" --clobber
+          $tag = "${{ github.ref_name }}"
+          gh release upload "$tag" "target/release/bundle/nsis/latest.json" --clobber
           # Publish: a draft release cannot be marked as latest — clear draft first, then promote
           gh release edit "$tag" --draft=false
           gh release edit "$tag" --latest
-          Write-Host "release published: $tag"
+          # Regression gate: the manifest download URL must resolve to the real asset
+          $manifestUrl = gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq '.assets[] | select(.name=="latest.json") | .browser_download_url'
+          $resp = Invoke-WebRequest -Uri $manifestUrl -Method Head -MaximumRedirection 10
+          if ($resp.StatusCode -ne 200) { throw "latest.json HEAD check failed: HTTP $($resp.StatusCode)" }
+          Write-Host "release published: $tag (manifest URL verified)"
 
   smoke:
     needs: build-release

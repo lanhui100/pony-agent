@@ -1,6 +1,6 @@
 # Pony Agent 签名桌面更新 · 发布运行手册（release-owner gate）
 
-状态：**草案（DRAFT）**。真实密钥未生成、endpoint 未启用、workflow 未运行。完成下列步骤后本卡才可标记"发布 gate 完成"。
+状态：**生效（ACTIVE）**。真实密钥已生成并配置于 CI secrets，endpoint 已启用，release workflow 已多轮运行（v0.1.96/v0.1.97 曾因 manifest 引用本地资产名导致"签名更新安装失败"，2026-10-04 修复线上 manifest 与 workflow，见 §4 manifest 契约）。
 
 ## 1. 信任锚（固定，运行时不接受环境覆盖）
 
@@ -40,8 +40,9 @@ npx --no-install tauri signer generate --ci -w .\tauri-signing.key
 2. 提交并 push 到 `main`；随后 push 匹配 tag（`vX.Y.Z`）。
 3. `.github/workflows/release.yml` 触发（见 §5）：
    - 校验：tag == 四处版本、version:check、typecheck、vitest、cargo check。
-   - 构建：Windows x64 NSIS bundle + updater artifacts（.tar.gz/.sig）。
-   - 组装 latest.json（manifest），draft release → 上传全部资产（安装器 + tar.gz + sig）→ **最后上传 latest.json** → publish（确保 `/releases/latest/download/latest.json` 指向新 manifest）。
+   - 构建：Windows x64 NSIS bundle + updater artifacts（setup.exe + .sig）。
+   - 上传：draft release → 先上传安装器 + .sig + CLI 二进制。
+   - 组装 latest.json：**上传后**用 `gh api` 查询 release 上真实存在的资产名（GitHub 会上传时规范化文件名：空格 → 点，本地名 `Pony Agent_...` 在 release 上实际为 `Pony.Agent_...`），manifest 的 `url` 只引用真实资产名 → **最后上传 latest.json** → publish → HEAD 校验 manifest URL 可达。
    - 任一步失败 → 删除 draft release、job fail；不产生半成品 manifest。
 
 ### manifest（latest.json）契约
@@ -54,14 +55,15 @@ npx --no-install tauri signer generate --ci -w .\tauri-signing.key
   "platforms": {
     "windows-x86_64": {
       "signature": "<minisign signature base64，来自产物 .sig>",
-      "url": "https://github.com/lanhui100/pony-agent/releases/download/v0.1.95/pony-agent_0.1.95_x64-setup.nsis.tar.gz"
+      "url": "https://github.com/lanhui100/pony-agent/releases/download/v0.1.95/pony-agent_0.1.95_x64-setup.exe"
     }
   }
 }
 ```
 
 - `signature` 必须与产物 `*.sig` 完全一致（workflow 内做字节比对，防止手抄漂移）。
-- `url` 使用静态 `releases/download/<tag>/<asset>` 形式，资产名与上传名必须一致。
+- `url` 使用静态 `releases/download/<tag>/<asset>` 形式，资产名必须是 **release 上真实存在的上传后名称**：
+  GitHub 上传 release 资产时会规范化文件名（空格 → 点），本地构建名含空格的（如 `Pony Agent_0.1.97_x64-setup.exe`）上传后变成 `Pony.Agent_0.1.97_x64-setup.exe`。**严禁**用本地构建名拼 URL——否则 updater 下载 404，客户端表现为"签名更新安装失败，请稍后重试。"（2026-10-04 v0.1.96/0.1.97 线上事故即因此，修复见同次提交的 release.yml）。
 
 ## 5. release workflow（.github/workflows/release.yml）
 
@@ -69,6 +71,7 @@ npx --no-install tauri signer generate --ci -w .\tauri-signing.key
 
 - 触发：`push` tag `v*`；`permissions: contents: write`（仅该 job 需要），`pull-requests: read`。
 - secrets 缺失即 fail；签名失败（tauri build 报错）即 fail。
+- latest.json 组装前先上传安装器/.sig/CLI，随后用 `gh api` 取**上传后的真实资产名**拼 URL；组装后 gate 校验 URL 引用的资产确实存在；发布后对 manifest URL 做 HEAD 校验（200 才放行）。
 - 当前草案覆盖 Windows x64；macOS/Linux 目标与 notarization 属后续扩展，未启用前 UI 仍不展示安装按钮（平台矩阵见 PA-103 design）。
 
 ## 6. 发布后 smoke（必须留证据）
