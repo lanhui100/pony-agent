@@ -2141,13 +2141,25 @@
           "segment": "patch"
         }
       ]
+    },
+    {
+      "commit": "",
+      "timestamp": "2026-10-04T07:59:39.872Z",
+      "bumps": [
+        {
+          "from": "0.1.97",
+          "to": "0.1.98",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-10-03T16:15:46.882Z",
+  "lastBump": "2026-10-04T07:59:39.872Z",
   "tauri": {
     "major": 0,
     "minor": 1,
-    "patch": 97
+    "patch": 98
   },
   "core": {
     "patch": 92,

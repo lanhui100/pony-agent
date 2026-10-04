@@ -1,6 +1,6 @@
 {
   "name": "pony-agent",
-  "version": "0.1.97",
+  "version": "0.1.98",
   "private": true,
   "type": "module",
   "scripts": {
@@ -37,8 +37,9 @@
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri",
-    "version": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1",
-    "version:check": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-version-sync.ps1",
+    "version": "node scripts/release.mjs",
+    "version:check": "node scripts/check-version-sync.mjs",
+    "release": "node scripts/release.mjs --push",
     "version:core": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Target core",
     "version:tauri": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Target tauri",
     "version:minor": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -Segment minor",
