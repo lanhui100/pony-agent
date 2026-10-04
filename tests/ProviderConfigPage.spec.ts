@@ -547,6 +547,41 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     expect(added?.protocol).toBe("openai-completions");
   });
 
+  it("adds models in batch from the model list header fetch button", async () => {
+    seedRegistry();
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "fetch_provider_models") {
+        return ["batch-1", "batch-2"];
+      }
+      if (command === "save_provider_registry") {
+        return (args?.registry as unknown) ?? null;
+      }
+      return null;
+    });
+
+    const wrapper = await mountProviderPage();
+    // 点击列表头部的"获取模型列表并批量添加"图标
+    await wrapper.get('[data-testid="model-catalog-fetch-batch-header"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const card = wrapper.get('[data-testid="model-create-card"]');
+    const panel = card.get('[data-testid="model-catalog-panel"]');
+    await panel.get('[data-testid="model-catalog-option-batch-1"]').setValue(true);
+    await panel.get('[data-testid="model-catalog-option-batch-2"]').setValue(true);
+
+    await panel.get('[data-testid="model-catalog-add-selected"]').trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const store = useProviderStore();
+    expect(store.notice).toBe("已添加 2 个模型。");
+    const modelValues = store.registry?.providers[0].models.map((model) => model.model) ?? [];
+    expect(modelValues).toContain("batch-1");
+    expect(modelValues).toContain("batch-2");
+  });
+
   it("shows info tooltip on the selector and swaps to failure semantics when fetch errors (迭代五)", async () => {
     seedRegistry();
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
@@ -640,7 +675,7 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     await Promise.resolve();
 
     const store = useProviderStore();
-    expect(store.notice).toBe("提供商已删除。");
+    expect(wrapper.find('[data-testid="provider-toast"]').text()).toBe("提供商已删除。");
     expect(store.registry?.providers.map((provider) => provider.id)).toEqual(["provider-beta"]);
     // 回落到下一个提供商的视图
     expect(wrapper.get("section h2").text()).toBe("Beta");

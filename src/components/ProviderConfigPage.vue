@@ -108,6 +108,19 @@ const modelCreateOpen = ref(false);
 const hasInitializedEditor = ref(false);
 const modelSaveSucceeded = ref(false);
 let modelSaveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
+const toastMessage = ref<string | null>(null);
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(message: string) {
+  toastMessage.value = message;
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+  }
+  toastTimer = setTimeout(() => {
+    toastMessage.value = null;
+    toastTimer = null;
+  }, 2400);
+}
 
 const editorState = reactive<EditorState>({
   entity: "provider",
@@ -761,12 +774,15 @@ function toggleModelRow(providerId: string, modelId: string) {
   beginViewModel(providerId, modelId);
 }
 
-function beginViewProvider(providerId: string) {
+function beginViewProvider(providerId: string, clearNotice = false) {
   const provider = findProvider(providerId);
   if (!provider) {
     return;
   }
 
+  if (clearNotice) {
+    providerStore.clearNotice();
+  }
   resetModelActionStates();
   providerStore.selectProvider(providerId);
   expandedModelId.value = null;
@@ -777,13 +793,16 @@ function beginViewProvider(providerId: string) {
   editorState.modelId = null;
 }
 
-function beginViewModel(providerId: string, modelId: string) {
+function beginViewModel(providerId: string, modelId: string, clearNotice = false) {
   const provider = findProvider(providerId);
   const model = findModel(providerId, modelId);
   if (!provider || !model) {
     return;
   }
 
+  if (clearNotice) {
+    providerStore.clearNotice();
+  }
   resetModelActionStates();
   providerStore.selectModel(providerId, modelId);
   expandedModelId.value = modelId;
@@ -795,6 +814,7 @@ function beginViewModel(providerId: string, modelId: string) {
 }
 
 function beginCreateProvider() {
+  providerStore.clearNotice();
   resetModelActionStates();
   resetProviderForm();
   // P1 修复（review A）：折叠态进入创建/编辑时自动展开，杜绝"表单不可见+折叠锁死"。
@@ -968,7 +988,7 @@ async function removeCurrentProvider() {
     return;
   }
 
-  providerStore.notice = "提供商已删除。";
+  showToast("提供商已删除。");
   const nextProvider = providers.value[0] ?? null;
 
   if (nextProvider) {
@@ -1091,6 +1111,9 @@ onBeforeUnmount(() => {
   if (modelSaveSuccessTimer) {
     clearTimeout(modelSaveSuccessTimer);
   }
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+  }
 });
 </script>
 
@@ -1122,7 +1145,7 @@ onBeforeUnmount(() => {
                 : 'bg-white/30'
             "
             :data-testid="`provider-list-item-${provider.id}`"
-            @click="beginViewProvider(provider.id)"
+            @click="beginViewProvider(provider.id, true)"
           >
             <span class="min-w-0 truncate text-sm font-medium text-stone-950">
               {{ provider.name || "未命名提供商" }}
@@ -1419,6 +1442,17 @@ onBeforeUnmount(() => {
                 </button>
 
                 <div v-if="modelActionsIdle" :class="HOVER_ACTIONS_CLASS" @click.stop>
+                  <Tooltip v-if="detailProvider" text="获取模型列表并批量添加" side="top">
+                    <button
+                      type="button"
+                      :class="ICON_ACTION_CLASS"
+                      aria-label="获取模型列表"
+                      data-testid="model-catalog-fetch-batch-header"
+                      @click="beginCreateModel(detailProvider.id); fetchModelCatalog()"
+                    >
+                      <RefreshCw class="h-3.5 w-3.5" :class="catalogLoading ? 'animate-spin' : ''" />
+                    </button>
+                  </Tooltip>
                   <Tooltip v-if="detailProvider" text="新增模型" side="top">
                     <button
                       type="button"
@@ -1871,7 +1905,7 @@ onBeforeUnmount(() => {
                             <RefreshCw class="h-3.5 w-3.5" :class="catalogLoading ? 'animate-spin' : ''" />
                           </button>
                           <button
-                            v-if="filteredCatalogIds.length > 0"
+                            v-if="catalogIds.length > 0"
                             type="button"
                             class="inline-flex h-7 w-5 cursor-pointer items-center justify-center rounded text-stone-400 transition hover:text-stone-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
                             :aria-expanded="catalogPanelOpen"
@@ -1891,7 +1925,7 @@ onBeforeUnmount(() => {
                         :text="
                           catalogError
                             ? catalogError
-                            : '点击右端刷新按钮，从该协议的 /models 接口获取可选模型 ID；在下拉列表中单击即填充'
+                            : '点击右端刷新按钮，从该协议的 /models 接口获取可选模型 ID；在下拉列表中勾选后可批量添加'
                         "
                         side="top"
                       >
@@ -1906,21 +1940,63 @@ onBeforeUnmount(() => {
                       </Tooltip>
                     </div>
 
+                    <div v-if="selectedCatalogIds.length > 0" class="flex flex-wrap gap-1 pt-0.5">
+                      <span
+                        v-for="id in selectedCatalogIds"
+                        :key="id"
+                        class="inline-flex max-w-full items-center gap-1 rounded-full bg-stone-900/85 py-[2px] pl-2 pr-1 font-mono text-[10px] leading-[1.4] text-stone-50"
+                        :data-testid="`model-catalog-chip-edit-${id}`"
+                      >
+                        <span class="truncate">{{ id }}</span>
+                        <button type="button" class="cursor-pointer rounded-full p-0.5 hover:bg-white/20" :aria-label="`移除 ${id}`" @click="toggleCatalogSelection(id)">
+                          <X class="h-3 w-3" />
+                        </button>
+                      </span>
+                    </div>
+
                     <div
-                      v-if="filteredCatalogIds.length > 0 && catalogPanelOpen"
-                      class="max-h-24 space-y-0.5 overflow-y-auto rounded-[0.35rem] bg-white p-1.5 ring-1 ring-stone-200/70"
+                      v-if="catalogIds.length > 0 && catalogPanelOpen"
+                      class="rounded-[0.35rem] bg-white p-2 ring-1 ring-stone-200/70"
                       data-testid="model-catalog-panel-edit"
                     >
-                      <button
-                        v-for="id in filteredCatalogIds"
-                        :key="id"
-                        type="button"
-                        class="block w-full cursor-pointer truncate rounded px-2 py-1 text-left font-mono text-[11px] text-stone-700 transition hover:bg-[#f7e3bf]/60 hover:text-stone-900"
-                        :data-testid="`model-catalog-suggest-${id}`"
-                        @click="modelForm.model = id; catalogPanelOpen = false"
+                      <div class="flex items-center gap-2 pb-1.5">
+                        <Search class="h-3.5 w-3.5 shrink-0 text-stone-400" />
+                        <input
+                          :value="catalogSearch"
+                          placeholder="搜索模型..."
+                          class="h-7 w-full min-w-0 rounded-[0.3rem] bg-stone-100/80 px-2 text-[12px] text-stone-900 outline-none transition focus:bg-white"
+                          data-testid="model-catalog-search-edit"
+                          @input="catalogSearch = ($event.target as HTMLInputElement).value"
+                        />
+                        <span class="shrink-0 text-[10px] text-stone-400">{{ selectedCatalogIds.length }}/{{ catalogIds.length }}</span>
+                      </div>
+                      <div class="max-h-40 space-y-0.5 overflow-y-auto">
+                        <label
+                          v-for="id in filteredCatalogIds"
+                          :key="id"
+                          class="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 font-mono text-[11px] text-stone-800 transition hover:bg-[#f7e3bf]/60"
+                        >
+                          <input
+                            type="checkbox"
+                            class="accent-stone-900"
+                            :checked="selectedCatalogIds.includes(id)"
+                            :data-testid="`model-catalog-option-edit-${id}`"
+                            @change="toggleCatalogSelection(id)"
+                          />
+                          <span class="truncate">{{ id }}</span>
+                        </label>
+                      </div>
+                      <Button
+                        v-if="selectedCatalogIds.length > 0 && !catalogLoading"
+                        size="sm"
+                        variant="secondary"
+                        class="mt-1.5 w-full justify-center"
+                        data-testid="model-catalog-add-selected-edit"
+                        @click="addSelectedCatalogModels()"
                       >
-                        {{ id }}
-                      </button>
+                        <Plus class="mr-1 h-3.5 w-3.5" />
+                        添加选中的 {{ selectedCatalogIds.length }} 个模型
+                      </Button>
                     </div>
                   </div>
                 </div>
@@ -2169,6 +2245,24 @@ onBeforeUnmount(() => {
         </ScrollArea>
       </template>
     </section>
+
+    <!-- 全局 Toast 提示（如提供商删除等瞬态反馈） -->
+    <transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="translate-y-2 opacity-0"
+      enter-to-class="translate-y-0 opacity-100"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="translate-y-0 opacity-100"
+      leave-to-class="translate-y-2 opacity-0"
+    >
+      <div
+        v-if="toastMessage"
+        class="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-[0.45rem] bg-stone-900/90 px-3.5 py-2.5 text-xs text-white shadow-lg backdrop-blur"
+        data-testid="provider-toast"
+      >
+        <span>{{ toastMessage }}</span>
+      </div>
+    </transition>
   </section>
 </template>
 

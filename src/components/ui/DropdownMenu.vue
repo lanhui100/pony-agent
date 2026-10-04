@@ -60,6 +60,7 @@ function onDisabledTitle(item: DropdownMenuItemSpec) {
         :align="align"
         :side-offset="6"
         class="z-50 min-w-[7rem] rounded-[0.35rem] bg-white/95 py-1 shadow-lg ring-1 ring-stone-900/8 backdrop-blur"
+        @close-auto-focus.prevent
       >
         <template v-for="(item, index) in items" :key="item.id">
           <DropdownMenuSeparator
