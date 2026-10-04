@@ -89,6 +89,19 @@ function Get-PathSize([string]$path) {
   return (Get-Item -LiteralPath $path).Length
 }
 
+# ---------------------------------------------------------------------------
+# 敏感信息与凭证扫描 (跨平台 Node.js 门禁)
+# ---------------------------------------------------------------------------
+$checkSecretsScript = Join-Path $PSScriptRoot "check-secrets.mjs"
+if (Test-Path -LiteralPath $checkSecretsScript) {
+  $secretCheckArgs = if ($Mode -eq "pre-push") { @("--pre-push") } else { @("--staged") }
+  & "node" $checkSecretsScript @secretCheckArgs
+  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
+    Write-Host "[pony-agent] Git guard 拦截到未脱敏敏感信息，已阻止操作。" -ForegroundColor Red
+    exit 1
+  }
+}
+
 $stagedPaths = Get-StagedPaths
 if ($stagedPaths.Count -eq 0) {
   exit 0
