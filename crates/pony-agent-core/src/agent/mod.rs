@@ -28,6 +28,7 @@ pub mod orchestration;
 pub mod planner;
 pub mod plan_state;
 pub mod path_permission;
+pub mod present;
 pub mod process;
 pub mod projection;
 pub mod provider;

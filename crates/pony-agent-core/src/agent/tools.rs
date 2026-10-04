@@ -58,6 +58,9 @@ pub use crate::agent::orchestration::{
     SubagentResult, TeamTaskAction, TeamTaskCreateArgs, TeamTaskItem, TeamTaskListResult,
     TeamTaskUpdateArgs, WorkflowArgs, WorkflowResult, WorkflowStep,
 };
+pub use crate::agent::present::{
+    present, PresentArgs, PresentFileInput, PresentResult, PresentedFileItem,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::sandbox::{enforce_sandbox, NoSandboxBackend};
 use crate::agent::search::{SearchEngine, SearchOptions};
