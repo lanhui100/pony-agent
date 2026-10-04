@@ -35,6 +35,12 @@ import {
   estimateTurnHeight
 } from "@/lib/runtime/trace-virtual-scroll";
 import { loadBuildContextObservation } from "@/lib/runtime/trace";
+import {
+  deriveTrajectoryTimeline,
+  type TrajectoryTimelineSpan
+} from "@/lib/runtime/trajectory-core";
+import TrajectoryToolbar from "@/components/trajectory/TrajectoryToolbar.vue";
+import TrajectoryTimeline from "@/components/trajectory/TrajectoryTimeline.vue";
 
 type DetailRowTone = "default" | "muted" | "warning" | "danger";
 type InputKind = "text" | "image" | "video" | "audio";
@@ -103,6 +109,56 @@ const activeTraceStepKey = ref("");
 const activeTraceDetailKey = ref("");
 const expandedResultKeys = ref<string[]>([]);
 
+// Trajectory Toolbar & Timeline States
+const actualDuration = ref(false);
+const allTurnsCollapsed = ref(false);
+const allCallsCollapsed = ref(false);
+const searchQuery = ref("");
+const selectedTimelineSpanId = ref<string | null>(null);
+
+const trajectoryTimelineModel = computed(() => {
+  return deriveTrajectoryTimeline(
+    props.turns,
+    actualDuration.value ? "duration" : "sequence"
+  );
+});
+
+function handleSpanSelected(span: TrajectoryTimelineSpan) {
+  selectedTimelineSpanId.value = span.id;
+  activeTurnId.value = span.turnId;
+  activeTraceStepKey.value = `${span.turnId}:${span.id}`;
+}
+
+function handleToggleAllTurns() {
+  allTurnsCollapsed.value = !allTurnsCollapsed.value;
+  if (allTurnsCollapsed.value) {
+    activeTurnId.value = "";
+    activeTraceStepKey.value = "";
+    activeTraceDetailKey.value = "";
+  } else {
+    activeTurnId.value = latestTurnId.value;
+  }
+}
+
+function handleToggleAllCalls() {
+  allCallsCollapsed.value = !allCallsCollapsed.value;
+  if (allCallsCollapsed.value) {
+    activeTraceStepKey.value = "";
+    activeTraceDetailKey.value = "";
+    expandedResultKeys.value = [];
+  } else {
+    if (activeTurnId.value) {
+      const turn = props.turns.find((t) => t.turnId === activeTurnId.value);
+      if (turn) {
+        const timeline = getCachedTimeline(turn);
+        if (timeline.length > 0) {
+          activeTraceStepKey.value = `${turn.turnId}:${timeline[0].id}`;
+        }
+      }
+    }
+  }
+}
+
 const latestTurnId = computed(() => props.turns[props.turns.length - 1]?.turnId ?? "");
 // Signature only tracks turnId list — the watch below only needs to react
 // to turn additions/removals, not to status/timeline updates within a turn.
@@ -144,14 +200,31 @@ function turnHeightAt(turn: TurnTraceRecord): number {
   return estimateTurnHeight(timeline, isTurnExpanded, expandedEntryCount);
 }
 
+const filteredTurns = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return props.turns;
+  return props.turns.filter((turn) => {
+    if (turn.title && turn.title.toLowerCase().includes(query)) return true;
+    if (turn.turnId && turn.turnId.toLowerCase().includes(query)) return true;
+    const timeline = getCachedTimeline(turn);
+    return timeline.some((entry) => {
+      if (entry.label && entry.label.toLowerCase().includes(query)) return true;
+      if (entry.kind && entry.kind.toLowerCase().includes(query)) return true;
+      if (entry.text && entry.text.toLowerCase().includes(query)) return true;
+      if (entry.error && entry.error.toLowerCase().includes(query)) return true;
+      return false;
+    });
+  });
+});
+
 const turnPrefixHeights = computed(() =>
-  buildTurnPrefixHeights(props.turns, turnHeightAt)
+  buildTurnPrefixHeights(filteredTurns.value, turnHeightAt)
 );
 const virtualTurnWindow = computed(() =>
   computeVirtualTurnWindow(turnPrefixHeights.value, traceScrollTop.value, traceViewportHeight.value)
 );
 const visibleTurns = computed(() =>
-  props.turns.slice(virtualTurnWindow.value.startIndex, virtualTurnWindow.value.endIndex)
+  filteredTurns.value.slice(virtualTurnWindow.value.startIndex, virtualTurnWindow.value.endIndex)
 );
 const virtualPaddingTop = computed(() => virtualTurnWindow.value.paddingTop);
 const virtualPaddingBottom = computed(() => virtualTurnWindow.value.paddingBottom);
@@ -1400,6 +1473,23 @@ function resolveBuildContextObservation(
     </button>
 
     <div v-if="open" :class="bodyClass">
+      <!-- Trajectory Controls: Toolbar & Swimlane Timeline (deepseek-harness inspired) -->
+      <TrajectoryToolbar
+        v-model:actual-duration="actualDuration"
+        v-model:search-query="searchQuery"
+        :all-turns-collapsed="allTurnsCollapsed"
+        :all-calls-collapsed="allCallsCollapsed"
+        @toggle-all-turns="handleToggleAllTurns"
+        @toggle-all-calls="handleToggleAllCalls"
+      />
+
+      <TrajectoryTimeline
+        v-if="trajectoryTimelineModel.spans.length > 0"
+        :model="trajectoryTimelineModel"
+        :selected-span-id="selectedTimelineSpanId"
+        @select-span="handleSpanSelected"
+      />
+
       <ScrollArea
         ref="traceBodyScrollRef"
         :class="bodyScrollClass"

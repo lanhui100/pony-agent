@@ -17,6 +17,22 @@
   说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
 - `PA-026` workflow mode 与用户自定义流程编排
   说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
+- `PA-104` 交互式持久终端 PTY 工具族（terminal_* / command:exec）
+  说明：参考 DSH `terminal_open` / `terminal_send` / `terminal_read` / `terminal_signal` / `terminal_close` 与 Codex `command/exec` 系列协议。补齐维持长会话 Shell、向交互式 CLI 发送输入、监听增量输出、调整终端窗口尺寸（PTY resize）及下发 POSIX/Windows 信号的原生核心能力。
+- `PA-105` 异步后台作业生命周期工具族（job_*）
+  说明：参考 DSH `job_list` / `job_output` / `job_kill`。补齐长时间运行命令（构建、长时间测试、服务启动）的后台挂起、不阻塞主 Turn 执行、按 Job ID 轮询截断日志流及随时终止的生命周期管控能力。
+- `PA-106` 原子代码补丁应用工具（apply_patch / apply）
+  说明：参考 Codex `apply` / `apply_patch` 核心协议。补齐解析标准 Unified Diff 并在工作区原子落盘校验的能力，解决跨行大变动与重构时 `workspace_edit_file` 标记漂移与 Token 浪费问题。
+- `PA-107` 语言服务器协议（LSP）智能工具
+  说明：参考 DSH `lsp`。集成语言服务器客户端，支持代码跳转（Go to Definition）、查找引用（Find References）、符号查询、类型提示与语法诊断（Diagnostics），提升复杂代码库语义分析精度。
+- `PA-108` 极速模糊文件检索与 Git 差异工具（fuzzy_file_search / git_diff_remote）
+  说明：参考 Codex `fuzzyFileSearch` 与 `gitDiffToRemote`。引入快速路径匹配与打分检索，并补齐比较本地工作树与远端/分支差异的内置工具能力。
+- `PA-109` 长程自驱目标工具族（goal_*）
+  说明：参考 DSH `create_goal` / `get_goal` / `update_goal`。补齐跨多轮持久化长程执行目标、动态记录与评估阻塞原因（blocked reason）及自闭环校验能力。
+- `PA-110` 智能体派生与协作编排工具族（subagent / teams）
+  说明：参考 DSH `subagent` / `workflow` / `team_task_*` 与 Codex `CollabAgentTool`。支持在独立 Context 中派生子智能体执行聚焦子任务、多 Agent 共享任务看板及编排大规模扇出工作流。
+- `PA-111` 结构化成果物声明工具（present）
+  说明：参考 DSH `present`。支持模型在执行后显式将图片、文档、报告等提升为“终态交付物”，联动前端呼出专用预览卡片与原生打开动作。
 
 ## Ready
 

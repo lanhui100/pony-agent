@@ -7,7 +7,7 @@ import {
 } from "@/lib/runtime/trajectory-core";
 import type { TurnTraceRecord } from "@/types/runtime";
 
-describe("Trajectory Core Contract & Acceptance (Stage 1)", () => {
+describe("Trajectory Core Contract & Acceptance (Stage 2 Green Phase Verification)", () => {
   const mockTurns: TurnTraceRecord[] = [
     {
       turnId: "turn-1",
@@ -24,6 +24,7 @@ describe("Trajectory Core Contract & Acceptance (Stage 1)", () => {
           state: "done",
           sequence: 1,
           durationMs: 50,
+          text: "Please read the config file",
         },
         {
           id: "step-1-context",
@@ -42,6 +43,8 @@ describe("Trajectory Core Contract & Acceptance (Stage 1)", () => {
           durationMs: 800,
           inputTokens: 100,
           outputTokens: 40,
+          reasoningTokens: 25,
+          cacheHitInputTokens: 10,
         },
         {
           id: "step-1-tool",
@@ -74,55 +77,87 @@ describe("Trajectory Core Contract & Acceptance (Stage 1)", () => {
     },
   ];
 
-  describe("deriveTrajectoryTimeline (Red Phase Acceptance)", () => {
-    it("throws NotImplementedError prior to implementation", () => {
-      expect(() => deriveTrajectoryTimeline(mockTurns, "sequence")).toThrowError(
-        "NotImplementedError: deriveTrajectoryTimeline"
-      );
-    });
-
+  describe("deriveTrajectoryTimeline", () => {
     it("verifies 3-lane assignment, spans, and turnBoundaries contract", () => {
-      // In Red Phase, calling this directly must fail with NotImplementedError
-      // Once implemented by UI Executor, it will verify the contract:
       const timeline = deriveTrajectoryTimeline(mockTurns, "sequence");
+      expect(timeline).toBeDefined();
       expect(timeline.turnBoundaries).toBeDefined();
       expect(timeline.turnBoundaries.length).toBe(2);
+      expect(timeline.turnBoundaries[0].turnId).toBe("turn-1");
+      expect(timeline.turnBoundaries[1].turnId).toBe("turn-2");
+
       expect(timeline.spans).toBeDefined();
+      expect(timeline.spans.length).toBe(5);
 
       const inputSpan = timeline.spans.find((s) => s.id === "step-1-input");
       const contextSpan = timeline.spans.find((s) => s.id === "step-1-context");
       const modelSpan = timeline.spans.find((s) => s.id === "step-1-model");
       const toolSpan = timeline.spans.find((s) => s.id === "step-1-tool");
+      const errorModelSpan = timeline.spans.find((s) => s.id === "step-2-model");
 
       // Lane 0: user/system/context, Lane 1: model/message, Lane 2: tool
+      expect(inputSpan).toBeDefined();
       expect(inputSpan?.lane).toBe(0);
       expect(contextSpan?.lane).toBe(0);
+
+      expect(modelSpan).toBeDefined();
       expect(modelSpan?.lane).toBe(1);
+
+      expect(toolSpan).toBeDefined();
       expect(toolSpan?.lane).toBe(2);
+
+      expect(errorModelSpan).toBeDefined();
+      expect(errorModelSpan?.lane).toBe(1);
+      expect(errorModelSpan?.isError).toBe(true);
+
+      // Total metrics
+      expect(timeline.totalDurationMs).toBeGreaterThan(0);
+      expect(timeline.totalEnd).toBeGreaterThanOrEqual(timeline.totalStart);
+    });
+
+    it("supports duration mode and time mode calculations", () => {
+      const durationTimeline = deriveTrajectoryTimeline(mockTurns, "duration");
+      expect(durationTimeline.spans.length).toBe(5);
+      const firstSpan = durationTimeline.spans[0];
+      expect(firstSpan.end).toBeGreaterThan(firstSpan.start);
     });
   });
 
-  describe("deriveTrajectoryRecords (Red Phase Acceptance)", () => {
-    it("throws NotImplementedError prior to implementation", () => {
-      expect(() => deriveTrajectoryRecords(mockTurns)).toThrowError(
-        "NotImplementedError: deriveTrajectoryRecords"
-      );
-    });
-
-    it("verifies flattened cells, status, and token metrics extraction contract", () => {
+  describe("deriveTrajectoryRecords", () => {
+    it("extracts flattened measurable cells, statuses, and token metrics", () => {
       const records = deriveTrajectoryRecords(mockTurns);
       expect(Array.isArray(records)).toBe(true);
-      expect(records.length).toBeGreaterThan(0);
-      const first = records[0];
-      expect(first).toHaveProperty("id");
-      expect(first).toHaveProperty("turnId");
-      expect(first).toHaveProperty("kind");
-      expect(first).toHaveProperty("status");
-      expect(first).toHaveProperty("durationMs");
+      expect(records.length).toBe(5);
+
+      const modelRecord = records.find((r) => r.id === "step-1-model");
+      expect(modelRecord).toBeDefined();
+      expect(modelRecord?.turnId).toBe("turn-1");
+      expect(modelRecord?.kind).toBe("message");
+      expect(modelRecord?.status).toBe("completed");
+      expect(modelRecord?.durationMs).toBe(800);
+      expect(modelRecord?.inputTokens).toBe(100);
+      expect(modelRecord?.outputTokens).toBe(40);
+      expect(modelRecord?.reasoningTokens).toBe(25);
+      expect(modelRecord?.cacheHitTokens).toBe(10);
+      expect(modelRecord?.isError).toBe(false);
+
+      const errorRecord = records.find((r) => r.id === "step-2-model");
+      expect(errorRecord).toBeDefined();
+      expect(errorRecord?.turnId).toBe("turn-2");
+      expect(errorRecord?.status).toBe("failed");
+      expect(errorRecord?.isError).toBe(true);
+    });
+
+    it("extracts from multiple turns with distinct turns and sequence numbers", () => {
+      const records = deriveTrajectoryRecords(mockTurns);
+      const turn1Records = records.filter((r) => r.turnId === "turn-1");
+      const turn2Records = records.filter((r) => r.turnId === "turn-2");
+      expect(turn1Records.length).toBe(4);
+      expect(turn2Records.length).toBe(1);
     });
   });
 
-  describe("filterTrajectoryRecords (Red Phase Acceptance)", () => {
+  describe("filterTrajectoryRecords", () => {
     const dummyCells: TrajectoryRecordCell[] = [
       {
         id: "cell-1",
@@ -148,22 +183,37 @@ describe("Trajectory Core Contract & Acceptance (Stage 1)", () => {
         durationMs: 500,
         isError: false,
       },
+      {
+        id: "cell-3",
+        turnId: "turn-2",
+        turnTitle: "Turn 2",
+        index: 0,
+        kind: "context",
+        title: "Build Context",
+        preview: "Loaded 3 system memories",
+        status: "completed",
+        durationMs: 100,
+        isError: false,
+      },
     ];
 
-    it("throws NotImplementedError prior to implementation", () => {
-      expect(() => filterTrajectoryRecords(dummyCells, "read")).toThrowError(
-        "NotImplementedError: filterTrajectoryRecords"
-      );
+    it("returns all records when search query is empty or blank", () => {
+      expect(filterTrajectoryRecords(dummyCells, "").length).toBe(3);
+      expect(filterTrajectoryRecords(dummyCells, "   ").length).toBe(3);
     });
 
-    it("verifies case-insensitive filtering by title or preview contract", () => {
-      const filteredByTitle = filterTrajectoryRecords(dummyCells, "command");
+    it("filters records case-insensitively across title, preview, and kind", () => {
+      const filteredByTitle = filterTrajectoryRecords(dummyCells, "COMMAND");
       expect(filteredByTitle.length).toBe(1);
       expect(filteredByTitle[0].id).toBe("cell-1");
 
-      const filteredByPreview = filterTrajectoryRecords(dummyCells, "CONTENT");
+      const filteredByPreview = filterTrajectoryRecords(dummyCells, "content");
       expect(filteredByPreview.length).toBe(1);
       expect(filteredByPreview[0].id).toBe("cell-2");
+
+      const filteredByKind = filterTrajectoryRecords(dummyCells, "context");
+      expect(filteredByKind.length).toBe(1);
+      expect(filteredByKind[0].id).toBe("cell-3");
     });
   });
 });
