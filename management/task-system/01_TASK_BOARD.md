@@ -42,7 +42,8 @@
 
 ## In Progress
 
-- 暂无
+- `PA-104` 交互式持久终端 PTY 工具族（terminal_* / command:exec）
+  说明：Phase 8 Stage 1。提供跨平台 PTY 会话托管、Windows Job Object / POSIX pgid 隔离绑定、2MB 环形内存缓冲、输入输出流与优雅信号清理。
 
 ## Review
 

@@ -19,6 +19,8 @@
 
 ## 当前进行中
 
+- **PA-104 交互式持久终端 PTY 工具族（2026-10-02，Stage 1，B 级）**
+  依托 Phase 0 系统架构蓝图（`docs/architecture/system-design.md`，校验通过），正式启动 Phase 8 核心工具拓展。PA-104 实现跨平台 PTY 会话托管（`terminal_open/send/read/signal/close`）、进程树绑定与环形缓冲。
 - **PA-103 桌面端签名更新本地契约（2026-10-02，C 级）本地 gate 收口；发布 gate 待开启**
   参考 `dev:~/pproxy/desktop` Tauri signed updater 模式（仅源码/配置参考，无远端运行证据）实现：typed adapter（`SIGNED_UPDATER_ENABLED=false` 恒禁用）、store 来源隔离状态机（githubLatest vs signedCandidate）、配置页安装按钮/进度/待重启/失败态、精确权限（updater:allow-check / allow-download-and-install / process:allow-restart）、tauri.conf 不提交占位信任锚。验证：version:check PASS（tauri 0.1.94 四处一致 / core 0.1.92）、更新相关 vitest 91/91、全量 592/602（10 skip）最终全绿（MarkdownRenderer 预存时序 flake 隔离通过且未改动）、typecheck/build/cargo:check PASS。三路 plan 审核 + 三路实现审核均条件通过、P1 全部采纳复验。发布 gate 前不得填充 endpoint/key、不得翻转启用常量；`prepare_update_exit`/活跃 turn 确认/自动检查/签名产物/Windows smoke 属 release-owner gate。任务卡 `03_TASKS/PA-103-signed-desktop-self-update.md`；审核 `02_REVIEWS/2026-10-02-pa103-*`；会话日志 `99_LOGS/2026-10-02-pa103-signed-desktop-updater.md`。
 - **PA-077 Windows Job Object containment（实现完成；Review / closeout gate blocked）**
