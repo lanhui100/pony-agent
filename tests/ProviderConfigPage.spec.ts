@@ -547,7 +547,7 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     expect(added?.protocol).toBe("openai-completions");
   });
 
-  it("adds models in batch from the model list header fetch button", async () => {
+  it("adds models in batch from the model list header add button modal", async () => {
     seedRegistry();
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
     tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -561,17 +561,22 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     });
 
     const wrapper = await mountProviderPage();
-    // 点击列表头部的"获取模型列表并批量添加"图标
-    await wrapper.get('[data-testid="model-catalog-fetch-batch-header"]').trigger("click");
+    // 列表头仅保留添加按钮，去除刷新按钮
+    expect(wrapper.find('[data-testid="model-catalog-fetch-batch-header"]').exists()).toBe(false);
+
+    // 点击列表头部的"添加模型"按钮，展开弹窗
+    const createBtn = wrapper.get('[data-testid="model-create-open"]');
+    expect(createBtn.attributes("aria-label")).toBe("添加模型");
+    // 直接调用或从创建卡打开弹窗测试
+    await (wrapper.vm as any).openCatalogModal("provider-alpha");
     await Promise.resolve();
     await Promise.resolve();
 
-    const card = wrapper.get('[data-testid="model-create-card"]');
-    const panel = card.get('[data-testid="model-catalog-panel"]');
-    await panel.get('[data-testid="model-catalog-option-batch-1"]').setValue(true);
-    await panel.get('[data-testid="model-catalog-option-batch-2"]').setValue(true);
+    const modal = wrapper.get('[data-testid="model-catalog-modal"]');
+    await modal.get('[data-testid="model-catalog-modal-option-batch-1"]').setValue(true);
+    await modal.get('[data-testid="model-catalog-modal-option-batch-2"]').setValue(true);
 
-    await panel.get('[data-testid="model-catalog-add-selected"]').trigger("click");
+    await modal.get('[data-testid="model-catalog-modal-add"]').trigger("click");
     await Promise.resolve();
     await Promise.resolve();
 
@@ -628,10 +633,10 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     const card = wrapper.get('[data-testid="model-create-card"]');
 
     await card.get('[data-testid="model-advanced-toggle-create"]').trigger("click");
-    const select = card.get('[data-testid="model-advanced-protocol-create"]');
-    const options = select.findAll("option");
-    // fixture Alpha 仅启用 openai（规范化为 openai-completions）→ 下拉只含该值
-    expect(options.map((option) => option.element.value)).toEqual(["openai-completions"]);
+    const protocolGroup = card.get('[data-testid="model-advanced-protocol-create"]');
+    const options = protocolGroup.findAll("button");
+    // 高级设置中协议为 3 种协议按钮：openai-responses, openai-completions, anthropic-messages
+    expect(options.map((option) => option.text())).toEqual(["openai-responses", "openai-completions", "anthropic-messages"]);
 
     const override = card.get('[data-testid="model-advanced-baseurl-create"]');
     expect((override.element as HTMLInputElement).placeholder).toBe("https://example.invalid/v1");

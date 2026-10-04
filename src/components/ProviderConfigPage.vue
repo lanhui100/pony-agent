@@ -155,6 +155,7 @@ const providerForm = reactive<ProviderFormState>({
 const catalogSearch = ref("");
 const selectedCatalogIds = ref<string[]>([]);
 const catalogPanelOpen = ref(false);
+const catalogModalOpen = ref(false);
 const catalogLoading = computed(() => providerStore.loadingModels);
 const catalogError = computed(() => providerStore.catalogError);
 const catalogIds = computed(() => providerStore.catalogModels);
@@ -662,6 +663,26 @@ function toggleCatalogSelection(modelId: string) {
   selectedCatalogIds.value.push(modelId);
 }
 
+function toggleSelectAllCatalog() {
+  if (selectedCatalogIds.value.length === filteredCatalogIds.value.length) {
+    selectedCatalogIds.value = [];
+  } else {
+    selectedCatalogIds.value = [...filteredCatalogIds.value];
+  }
+}
+
+async function openCatalogModal(providerId: string) {
+  const provider = findProvider(providerId);
+  if (!provider) {
+    return;
+  }
+  beginCreateModel(providerId);
+  catalogModalOpen.value = true;
+  catalogSearch.value = "";
+  selectedCatalogIds.value = [];
+  await fetchModelCatalog();
+}
+
 // D6：批量添加走专用 action，预去重并返回 {added, skipped}，不复用 this.error 通道。
 async function addSelectedCatalogModels() {
   const provider = detailProvider.value;
@@ -685,6 +706,8 @@ async function addSelectedCatalogModels() {
         : "";
     providerStore.notice = `已添加 ${result.added} 个模型${suffix}。`;
     selectedCatalogIds.value = [];
+    catalogModalOpen.value = false;
+    catalogPanelOpen.value = false;
     if (result.added > 0 && result.lastAddedModelId) {
       beginViewModel(provider.id, result.lastAddedModelId);
     }
@@ -1115,6 +1138,11 @@ onBeforeUnmount(() => {
     clearTimeout(toastTimer);
   }
 });
+
+defineExpose({
+  openCatalogModal,
+  catalogModalOpen,
+});
 </script>
 
 <template>
@@ -1442,24 +1470,13 @@ onBeforeUnmount(() => {
                 </button>
 
                 <div v-if="modelActionsIdle" :class="HOVER_ACTIONS_CLASS" @click.stop>
-                  <Tooltip v-if="detailProvider" text="获取模型列表并批量添加" side="top">
+                  <Tooltip v-if="detailProvider" text="添加模型" side="top">
                     <button
                       type="button"
                       :class="ICON_ACTION_CLASS"
-                      aria-label="获取模型列表"
-                      data-testid="model-catalog-fetch-batch-header"
-                      @click="beginCreateModel(detailProvider.id); fetchModelCatalog()"
-                    >
-                      <RefreshCw class="h-3.5 w-3.5" :class="catalogLoading ? 'animate-spin' : ''" />
-                    </button>
-                  </Tooltip>
-                  <Tooltip v-if="detailProvider" text="新增模型" side="top">
-                    <button
-                      type="button"
-                      :class="ICON_ACTION_CLASS"
-                      aria-label="新增模型"
+                      aria-label="添加模型"
                       data-testid="model-create-open"
-                      @click="beginCreateModel(detailProvider.id)"
+                      @click="openCatalogModal(detailProvider.id)"
                     >
                       <Plus class="h-3.5 w-3.5" />
                     </button>
@@ -1741,16 +1758,27 @@ onBeforeUnmount(() => {
                         class="mt-2 grid gap-2.5 xl:grid-cols-2"
                         data-testid="model-advanced-body-create"
                       >
-                        <label class="space-y-1 text-[11px] text-stone-500">
+                        <div class="space-y-1 text-[11px] text-stone-500">
                           <span>协议</span>
-                          <select
-                            v-model="modelForm.protocol"
-                            class="config-select cursor-pointer"
-                            data-testid="model-advanced-protocol-create"
-                          >
-                            <option v-for="protocol in modelProtocolOptions" :key="protocol" :value="protocol">{{ protocol }}</option>
-                          </select>
-                        </label>
+                          <div class="flex flex-wrap items-center gap-1.5 pt-0.5" role="radiogroup" aria-label="协议" data-testid="model-advanced-protocol-create">
+                            <button
+                              v-for="protocol in endpointOrder"
+                              :key="protocol"
+                              type="button"
+                              class="cursor-pointer rounded-full px-2.5 py-1 font-mono text-[11px] leading-[1.4] transition"
+                              :class="
+                                modelForm.protocol === protocol
+                                  ? 'bg-stone-900 text-white'
+                                  : 'bg-white/85 text-stone-500 ring-1 ring-stone-200/80 hover:bg-[#f7e3bf] hover:text-stone-900'
+                              "
+                              :aria-checked="modelForm.protocol === protocol"
+                              :data-testid="`model-advanced-protocol-option-create-${protocol}`"
+                              @click="modelForm.protocol = protocol"
+                            >
+                              {{ protocol }}
+                            </button>
+                          </div>
+                        </div>
                         <label class="space-y-1 text-[11px] text-stone-500">
                           <span>Base URL 覆盖</span>
                           <Input
@@ -2123,16 +2151,27 @@ onBeforeUnmount(() => {
                     class="mt-2 grid gap-2.5 xl:grid-cols-2"
                     data-testid="model-advanced-body-edit"
                   >
-                    <label class="space-y-1 text-[11px] text-stone-500">
+                    <div class="space-y-1 text-[11px] text-stone-500">
                       <span>协议</span>
-                      <select
-                        v-model="modelForm.protocol"
-                        class="config-select cursor-pointer"
-                        data-testid="model-advanced-protocol-edit"
-                      >
-                        <option v-for="protocol in modelProtocolOptions" :key="protocol" :value="protocol">{{ protocol }}</option>
-                      </select>
-                    </label>
+                      <div class="flex flex-wrap items-center gap-1.5 pt-0.5" role="radiogroup" aria-label="协议" data-testid="model-advanced-protocol-edit">
+                        <button
+                          v-for="protocol in endpointOrder"
+                          :key="protocol"
+                          type="button"
+                          class="cursor-pointer rounded-full px-2.5 py-1 font-mono text-[11px] leading-[1.4] transition"
+                          :class="
+                            modelForm.protocol === protocol
+                              ? 'bg-stone-900 text-white'
+                              : 'bg-white/85 text-stone-500 ring-1 ring-stone-200/80 hover:bg-[#f7e3bf] hover:text-stone-900'
+                          "
+                          :aria-checked="modelForm.protocol === protocol"
+                          :data-testid="`model-advanced-protocol-option-edit-${protocol}`"
+                          @click="modelForm.protocol = protocol"
+                        >
+                          {{ protocol }}
+                        </button>
+                      </div>
+                    </div>
                     <label class="space-y-1 text-[11px] text-stone-500">
                       <span>Base URL 覆盖</span>
                       <Input
@@ -2263,6 +2302,150 @@ onBeforeUnmount(() => {
         <span>{{ toastMessage }}</span>
       </div>
     </transition>
+
+    <!-- 点击“添加模型”弹窗：获取并展示该 provider 下所有模型，支持多选批量添加 -->
+    <div
+      v-if="catalogModalOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/40 p-4 backdrop-blur-xs"
+      data-testid="model-catalog-modal"
+      @click.self="catalogModalOpen = false"
+    >
+      <div
+        class="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-[0.55rem] bg-white p-4 shadow-xl ring-1 ring-stone-900/10"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="catalog-modal-title"
+      >
+        <div class="flex items-center justify-between pb-3">
+          <div>
+            <h3 id="catalog-modal-title" class="text-sm font-semibold text-stone-950">
+              添加模型
+            </h3>
+            <p class="mt-0.5 text-[11px] text-stone-500">
+              从提供商「{{ detailProvider?.name }}」获取远程可用模型列表，勾选后批量添加
+            </p>
+          </div>
+          <div class="flex items-center gap-1">
+            <button
+              type="button"
+              :class="ICON_ACTION_CLASS"
+              :disabled="catalogLoading"
+              aria-label="刷新模型列表"
+              title="重新获取模型列表"
+              data-testid="model-catalog-modal-refresh"
+              @click="fetchModelCatalog()"
+            >
+              <RefreshCw class="h-3.5 w-3.5" :class="catalogLoading ? 'animate-spin' : ''" />
+            </button>
+            <button
+              type="button"
+              :class="ICON_ACTION_CLASS"
+              aria-label="关闭"
+              data-testid="model-catalog-modal-close"
+              @click="catalogModalOpen = false"
+            >
+              <X class="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        <!-- 错误提示 -->
+        <div
+          v-if="catalogError"
+          class="mb-3 flex items-start gap-2 rounded-[0.35rem] bg-rose-50/90 px-3 py-2 text-[12px] text-rose-800"
+          data-testid="model-catalog-modal-error"
+        >
+          <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-600" />
+          <span>{{ catalogError }}</span>
+        </div>
+
+        <!-- 搜索与全选工具栏 -->
+        <div class="flex items-center gap-2 pb-2">
+          <div class="relative min-w-0 flex-1">
+            <Search class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400" />
+            <input
+              :value="catalogSearch"
+              placeholder="搜索模型 ID..."
+              class="h-8 w-full rounded-[0.35rem] bg-stone-100/80 pl-8 pr-2 text-xs text-stone-900 outline-none transition focus:bg-white focus:ring-1 focus:ring-stone-300"
+              data-testid="model-catalog-modal-search"
+              @input="catalogSearch = ($event.target as HTMLInputElement).value"
+            />
+          </div>
+          <button
+            v-if="filteredCatalogIds.length > 0"
+            type="button"
+            class="shrink-0 cursor-pointer rounded-[0.35rem] px-2 py-1 text-[11px] font-medium text-stone-600 transition hover:bg-stone-100 hover:text-stone-900"
+            data-testid="model-catalog-modal-select-all"
+            @click="toggleSelectAllCatalog()"
+          >
+            {{ selectedCatalogIds.length === filteredCatalogIds.length ? "取消全选" : "全选" }}
+          </button>
+          <span class="shrink-0 text-[11px] text-stone-400">
+            已选 {{ selectedCatalogIds.length }}/{{ filteredCatalogIds.length }}
+          </span>
+        </div>
+
+        <!-- 模型列表滚动区 -->
+        <div class="min-h-0 flex-1 overflow-y-auto rounded-[0.35rem] border border-stone-200/80 p-1">
+          <div v-if="catalogLoading && catalogIds.length === 0" class="flex flex-col items-center justify-center py-12 text-xs text-stone-400">
+            <RefreshCw class="mb-2 h-5 w-5 animate-spin text-stone-400" />
+            <span>正在获取模型列表...</span>
+          </div>
+          <div v-else-if="filteredCatalogIds.length === 0" class="py-10 text-center text-xs text-stone-400">
+            {{ catalogIds.length === 0 ? "暂未获取到模型，请检查配置后点击右上角刷新" : "未找到匹配的模型" }}
+          </div>
+          <div v-else class="space-y-0.5">
+            <label
+              v-for="id in filteredCatalogIds"
+              :key="id"
+              class="flex cursor-pointer items-center gap-2.5 rounded px-2.5 py-1.5 font-mono text-[12px] text-stone-800 transition hover:bg-stone-100"
+              :class="selectedCatalogIds.includes(id) ? 'bg-[#f7e3bf]/40' : ''"
+            >
+              <input
+                type="checkbox"
+                class="accent-stone-900"
+                :checked="selectedCatalogIds.includes(id)"
+                :data-testid="`model-catalog-modal-option-${id}`"
+                @change="toggleCatalogSelection(id)"
+              />
+              <span class="truncate">{{ id }}</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 底部操作按钮 -->
+        <div class="mt-3 flex items-center justify-between gap-2 border-t border-stone-100 pt-3">
+          <Button
+            size="sm"
+            variant="ghost"
+            data-testid="model-catalog-modal-manual-create"
+            @click="catalogModalOpen = false; beginCreateModel(detailProvider!.id)"
+          >
+            手动配置单个模型
+          </Button>
+          <div class="flex gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              data-testid="model-catalog-modal-cancel"
+              @click="catalogModalOpen = false"
+            >
+              取消
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              :disabled="selectedCatalogIds.length === 0 || catalogLoading"
+              data-testid="model-catalog-modal-add"
+              @click="addSelectedCatalogModels()"
+            >
+              <Plus class="mr-1 h-3.5 w-3.5" />
+              添加选中的 {{ selectedCatalogIds.length }} 个模型
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
