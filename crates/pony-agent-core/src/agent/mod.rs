@@ -13,6 +13,7 @@ pub mod dispatcher_composites;
 pub mod document_conversion;
 pub mod execution_control;
 pub mod frontend_diagnostics;
+pub mod git_search;
 pub mod graph;
 pub mod governed_executor;
 pub mod hooks;

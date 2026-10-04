@@ -45,6 +45,10 @@ pub use crate::agent::lsp::{
     LspHoverArgs, LspHoverResult, LspLocation, LspPosition, LspRange, LspReferencesArgs,
     LspReferencesResult,
 };
+pub use crate::agent::git_search::{
+    fuzzy_file_search, git_diff_remote, FuzzyFileSearchArgs, FuzzyFileSearchResult,
+    FuzzyMatchItem, GitDiffRemoteArgs, GitDiffRemoteResult,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::sandbox::{enforce_sandbox, NoSandboxBackend};
 use crate::agent::search::{SearchEngine, SearchOptions};
