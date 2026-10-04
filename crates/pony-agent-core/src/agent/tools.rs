@@ -39,6 +39,12 @@ pub use crate::agent::terminal::{
     TerminalSignal, TerminalSignalArgs, TerminalSignalResult,
 };
 pub use crate::agent::patch::{apply_patch, ApplyPatchArgs, ApplyPatchResult};
+pub use crate::agent::lsp::{
+    lsp_definition, lsp_diagnostics, lsp_hover, lsp_references, LspDefinitionArgs,
+    LspDefinitionResult, LspDiagnosticItem, LspDiagnosticsArgs, LspDiagnosticsResult,
+    LspHoverArgs, LspHoverResult, LspLocation, LspPosition, LspRange, LspReferencesArgs,
+    LspReferencesResult,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::sandbox::{enforce_sandbox, NoSandboxBackend};
 use crate::agent::search::{SearchEngine, SearchOptions};
