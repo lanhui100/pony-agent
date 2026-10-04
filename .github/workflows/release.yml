@@ -21,6 +21,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -56,6 +58,8 @@ jobs:
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -105,7 +109,17 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
+          $repo = "${{ github.repository }}"
+          # Force the release to attach to THIS exact tag commit. Without an explicit
+          # target, gh can create a release that ends up detached ("untagged-…" URL),
+          # which breaks the releases/tags/$tag lookup used to assemble latest.json.
+          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)" --target "${{ github.sha }}"
+          # Attachment gate: the release MUST resolve via releases/tags/<tag>.
+          $null = gh api "repos/$repo/releases/tags/$tag" --jq '.tag_name'
+          if ($LASTEXITCODE -ne 0) {
+            $draftUrl = gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .html_url"
+            throw "release not resolvable via releases/tags/$tag — untagged release detected: $draftUrl"
+          }
           $nsis = "target/release/bundle/nsis"
           # Windows desktop assets: NSIS installer + its updater signature
           Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
