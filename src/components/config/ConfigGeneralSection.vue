@@ -346,7 +346,7 @@ function openExa() {
                 data-testid="config-update-autocheck-switch"
                 @update:model-value="updateStore.setAutoCheck($event)"
               />
-              <span>自动检查更新（启动时匿名访问 api.github.com）</span>
+              <span>自动检查更新</span>
             </label>
             <span
               v-if="lastCheckedLabel"
