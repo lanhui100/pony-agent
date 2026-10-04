@@ -99,19 +99,36 @@ jobs:
             throw "Release gate failed: require Windows desktop AND CLI artifacts"
           }
           Write-Host "Release gate PASS: NSIS installer + signature, CLI binary present"
-      - name: Assemble latest.json from produced artifacts
+      - name: Publish draft release, upload assets, assemble latest.json from uploaded names, publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
+          # NOTE: GitHub keeps draft releases UNTAGGED ("untagged-…" html_url) until they
+          # are published, so releases/tags/<tag> 404s on drafts. Resolve drafts by the
+          # tag_name FIELD via the releases list endpoint instead.
+          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
           $nsis = "target/release/bundle/nsis"
-          $installer = Get-ChildItem $nsis -Filter "*-setup.exe" | Select-Object -First 1
-          $sigPath = "$($installer.FullName).sig"
-          $signature = (Get-Content $sigPath -Raw).Trim()
-          # The NSIS updater artifact is produced by Tauri with this repo's dotted
-          # product name (no spaces), so the local name equals the POST-upload name.
-          $asset = $installer.Name
+          # Windows desktop assets: NSIS installer + its updater signature
+          Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
+          # CLI binary
+          gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
+
+          # Compose latest.json from the POST-upload (GitHub-normalized) asset names:
+          # GitHub uploads rename spaces to dots, so the local build name (with space)
+          # would 404 in the updater. Read the draft's real asset list by release id.
+          $relId = gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\" and .draft == true) | .id"
+          $rel = gh api "repos/$repo/releases/$relId" | ConvertFrom-Json
+          $setup = @($rel.assets | Where-Object { $_.name -like "*-setup.exe" })
+          if ($setup.Count -ne 1) { throw "expected exactly one setup.exe asset, got $($setup.Count): $(($rel.assets.name) -join ', ')" }
+          $asset = $setup[0].name
           $assetUrl = [uri]::EscapeDataString($asset)
+          $sigFile = Get-ChildItem $nsis -Filter "*.sig" | Select-Object -First 1
+          if (-not $sigFile) { throw "missing local .sig under $nsis" }
+          $signature = (Get-Content $sigFile.FullName -Raw).Trim()
           $ver = (Get-Content package.json | ConvertFrom-Json).version
           $manifest = [ordered]@{
             version = $ver
@@ -125,34 +142,27 @@ jobs:
             }
           }
           $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$nsis/latest.json" -Encoding utf8
-          Write-Host "latest.json written (asset=$asset)"
-      - name: Publish draft release and upload assets (latest.json last)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          # NOTE: GitHub keeps draft releases untagged ("untagged-…" html_url) until they
-          # are published, so releases/tags/<tag> must NOT be queried before this step.
-          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
-          $nsis = "target/release/bundle/nsis"
-          # Windows desktop assets: NSIS installer + its updater signature
-          Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          # CLI binary
-          gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
+          Write-Host "latest.json references uploaded asset: $asset"
           # latest.json last so /releases/latest/download/latest.json points to the new manifest
           gh release upload "$tag" "$nsis/latest.json" --clobber
+
           # Publish: a draft release cannot be marked as latest — clear draft first, then promote
           gh release edit "$tag" --draft=false
           gh release edit "$tag" --latest
-          # Regression gate: after publishing, the release must resolve via releases/tags/<tag>
-          # (drafts are untagged, published releases are tagged) and latest.json must exist.
-          $tagged = gh api "repos/$repo/releases/tags/$tag" --jq '.html_url'
-          if ($LASTEXITCODE -ne 0 -or -not $tagged) { throw "published release not resolvable via releases/tags/$tag" }
-          $hasManifest = gh api "repos/$repo/releases/tags/$tag" --jq '.assets[] | select(.name=="latest.json") | .id'
-          if (-not $hasManifest) { throw "latest.json asset missing on published release" }
-          Write-Host "release published and verified: $tag ($tagged)"
+
+          # Regression gate (with retry): tag attachment + asset resolution propagate
+          # asynchronously for a few seconds after publishing.
+          $ok = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            $tagged = gh api "repos/$repo/releases/tags/$tag" --jq '.html_url' 2>$null
+            if ($LASTEXITCODE -eq 0 -and $tagged) {
+              $manifestId = gh api "repos/$repo/releases/tags/$tag" --jq '.assets[] | select(.name=="latest.json") | .id' 2>$null
+              if ($LASTEXITCODE -eq 0 -and $manifestId) { $ok = $true; break }
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $ok) { throw "published release verification failed: releases/tags/$tag not resolvable or latest.json missing" }
+          Write-Host "release published and verified: $tag"
 
   smoke:
     needs: build-release
