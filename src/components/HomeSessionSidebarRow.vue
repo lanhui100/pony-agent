@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 三级树会话行（三级条目）：标题截断 + hover 原生 tooltip 全文 + 相对时间 +
 // 三点菜单（重命名/归档/删除对话）+ 行内重命名。纯展示：数据与回调全经 props/emits。
-import { computed, ref } from "vue";
+import { computed, watch, ref } from "vue";
 import { Ellipsis } from "lucide-vue-next";
 import DropdownMenu from "@/components/ui/DropdownMenu.vue";
 import type { DropdownMenuItemSpec } from "@/components/ui/DropdownMenu.vue";
@@ -62,6 +62,7 @@ function refreshTime() {
       )}天前`;
 }
 refreshTime();
+watch(() => props.session.updatedAtMs, refreshTime);
 
 function onRenameInput(event: Event) {
   emit("update:renameDraft", (event.target as HTMLInputElement).value);

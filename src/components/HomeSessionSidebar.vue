@@ -615,20 +615,20 @@ function confirmPopoverProps(
           <section data-testid="session-sidebar-tree">
             <!-- 一级标题行（不可折叠）+ 右端添加工作区 -->
             <div class="flex w-full items-center justify-between gap-2 px-1.5 py-2">
-              <div class="flex min-w-0 items-center gap-2 text-[12px] font-medium text-stone-800">
-                <FolderOpen class="h-3.5 w-3.5 shrink-0" />
+              <div class="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-stone-900">
+                <FolderOpen class="h-4 w-4 shrink-0 fill-stone-800 text-stone-900" />
                 <span class="shrink-0">{{ SIDEBAR_COPY.sectionTitle }}</span>
               </div>
               <TooltipProvider v-if="isTauriRuntime" :delay-duration="300">
                 <Tooltip :text="SIDEBAR_COPY.addWorkspaceTooltip" side="bottom">
                   <button
-                    class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900"
+                    class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-600 transition hover:bg-[#f7e3bf] hover:text-stone-950"
                     type="button"
                     aria-label="添加工作区"
                     data-testid="workspace-add-button"
                     @click="openAddWorkspaceFlow"
                   >
-                    <FolderPlus class="h-3.5 w-3.5" />
+                    <FolderPlus class="h-4 w-4" />
                   </button>
                 </Tooltip>
               </TooltipProvider>
@@ -714,21 +714,21 @@ function confirmPopoverProps(
               class="pt-1.5"
               :data-testid="`workspace-group-${group.key}`"
             >
-              <div class="relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1 hover:bg-[#f6dfb8]/60">
-                <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] font-medium text-stone-700">
-                  <Folder class="h-3 w-3 shrink-0 text-stone-400" />
+              <div class="relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1.5 hover:bg-[#f6dfb8]/60">
+                <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-semibold text-stone-850 text-stone-800">
+                  <Folder class="h-3.5 w-3.5 shrink-0 fill-stone-700 text-stone-800" />
                   <input
                     v-if="renamingKey === `ws:${group.key}`"
                     v-model="renameDraft"
-                    class="min-w-0 flex-1 rounded-[0.2rem] border border-amber-300 bg-white px-1 py-0.5 text-[11px] outline-none"
+                    class="min-w-0 flex-1 rounded-[0.2rem] border border-amber-300 bg-white px-1 py-0.5 text-[12px] outline-none"
                     maxlength="64"
                     :disabled="renamingBusy"
                     data-testid="workspace-rename-input"
                     @keydown.enter.prevent="submitRename"
                     @keydown.esc.prevent="cancelRename"
                   />
-                  <span v-else class="truncate">{{ group.name }}</span>
-                  <span class="shrink-0 text-[10px] text-stone-400">{{ group.count }}</span>
+                  <span v-else class="truncate font-semibold">{{ group.name }}</span>
+                  <span class="shrink-0 text-[10px] font-medium text-stone-500">{{ group.count }}</span>
                 </span>
                 <span v-if="renamingKey !== `ws:${group.key}`" class="flex shrink-0 items-center gap-0.5">
                   <button
@@ -795,13 +795,13 @@ function confirmPopoverProps(
 
               <p
                 v-if="group.count === 0"
-                class="px-6 py-1 text-[10px] leading-4 text-stone-400"
+                class="pl-6 pr-2 py-1 text-[10px] leading-4 text-stone-400"
                 :data-testid="`workspace-group-empty-${group.key}`"
               >
                 {{ SIDEBAR_COPY.emptyGroupHint }}
               </p>
 
-              <div class="space-y-0.5 pt-0.5">
+              <div class="space-y-0.5 pl-3 pt-0.5">
                 <div
                   v-for="session in partitionPreview(group.sessions)"
                   :key="session.conversationId"
