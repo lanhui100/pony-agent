@@ -25,6 +25,12 @@
 //!   `.gitignore`-aware traversal and explicit truncation evidence (design Decision 9).
 
 use crate::agent::process::ProcessManager;
+pub use crate::agent::jobs::{
+    job_kill, job_list, job_output, job_start,
+    JobKillArgs, JobKillResult, JobListArgs, JobListItem, JobListResult,
+    JobOutputArgs, JobOutputResult, JobStartArgs, JobStartResult,
+    JOB_BUFFER_CAP, MAX_HISTORY_JOBS,
+};
 pub use crate::agent::terminal::{
     terminal_close, terminal_open, terminal_read, terminal_send, terminal_signal,
     MAX_ACTIVE_TERMINALS, TERMINAL_BUFFER_CAP,

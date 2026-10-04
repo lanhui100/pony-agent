@@ -18,6 +18,7 @@ pub mod governed_executor;
 pub mod hooks;
 pub mod image_artifact;
 pub mod input;
+pub mod jobs;
 pub mod mcp_resources;
 pub mod planner;
 pub mod plan_state;
