@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyPatchArgs {
@@ -24,8 +23,11 @@ mod boolean_or_bool {
 #[derive(Debug)]
 struct PatchHunk {
     old_start: usize,
+    #[allow(dead_code)]
     old_lines: usize,
+    #[allow(dead_code)]
     new_start: usize,
+    #[allow(dead_code)]
     new_lines: usize,
     lines: Vec<String>,
 }
@@ -116,7 +118,12 @@ fn clean_path(p: &str) -> Option<String> {
 }
 
 enum FileAction {
-    Modify { path: String, original_crlf: bool, new_content: String },
+    Modify {
+        path: String,
+        #[allow(dead_code)]
+        original_crlf: bool,
+        new_content: String,
+    },
     Create { path: String, new_content: String },
     Delete { path: String },
 }
