@@ -20,7 +20,7 @@ import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProje
 
 const runtimeStore = useRuntimeStore();
 const planStore = usePlanStore();
-const { plans } = storeToRefs(planStore);
+const hasPlans = computed(() => planStore.plans.length > 0);
 
 const {
   error,
@@ -76,10 +76,13 @@ function togglePlan() {
   activePanel.value = activePanel.value === "plan" ? "" : "plan";
 }
 
-watch(sessionId, () => {
-  resetCopy();
-  clearTraceProjectionMemo();
-});
+watch(
+  sessionId,
+  () => {
+    resetCopy();
+    clearTraceProjectionMemo();
+  }
+);
 
 onBeforeUnmount(() => {
   dispose();
@@ -111,7 +114,7 @@ onBeforeUnmount(() => {
         />
 
         <PlanPanel
-          v-if="plans.length > 0"
+          v-if="hasPlans"
           :session-id="sessionId"
           :open="activePanel === 'plan'"
           @toggle="togglePlan()"

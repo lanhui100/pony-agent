@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ArrowUp, Check, ChevronDown, Paperclip, Search, Shield, ShieldAlert, ShieldCheck, Square, Undo2, X } from "lucide-vue-next";
+import { ArrowUp, Check, ChevronDown, Paperclip, Search, Shield, Square, Undo2, X } from "lucide-vue-next";
 import type { ProviderModelConfig, ProviderReasoningEffort } from "@/types/provider";
 import type { ToolAuthorizationMode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
