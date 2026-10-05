@@ -299,7 +299,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       initialRollbackActive: false,
       pendingQueuedMessages: [] as QueuedMessageItem[],
       queueDeliveryMode: "queue" as QueueDeliveryMode,
-      toolAuthorizationMode: "ask" as ToolAuthorizationMode,
+      toolAuthorizationMode: "workspace_write" as ToolAuthorizationMode,
       eventsReady: false,
       deferredPersistTimerId: null,
       streamFlushFrameId: null,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ArrowUp, Check, ChevronDown, Paperclip, Search, Shield, Square, Undo2, X } from "lucide-vue-next";
+import { ArrowUp, Check, ChevronDown, Paperclip, Search, Square, Undo2, X } from "lucide-vue-next";
 import type { ProviderModelConfig, ProviderReasoningEffort } from "@/types/provider";
 import type { ToolAuthorizationMode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
@@ -14,7 +14,15 @@ import {
   TooltipPortal,
   TooltipRoot,
   TooltipTrigger,
+  DialogRoot,
+  DialogPortal,
+  DialogOverlay,
+  DialogContent,
+  DialogTitle,
+  DialogDescription
 } from "reka-ui";
+import { AlertTriangle } from "lucide-vue-next";
+import PermissionModeIcon from "@/components/chat/PermissionModeIcon.vue";
 
 type ComposerActionKind = "submit" | "resume" | "continue" | "restart";
 
@@ -110,21 +118,22 @@ function modelDisplayName(model: Pick<ProviderModelConfig, "name" | "model"> | n
   return model?.model?.trim() || "未命名模型";
 }
 
-// ── 授权模式选择器 ──────────────────────────────────────────
+// ── 授权/权限模式选择器 ──────────────────────────────────────────
 const authMenuOpen = ref(false);
 const authTriggerRef = ref<HTMLButtonElement | null>(null);
 const authFloatingMenuRef = ref<HTMLElement | null>(null);
 const authMenuStyle = ref<Record<string, string>>({});
+const fullAccessConfirmOpen = ref(false);
 
 const authModes: Array<{ id: ToolAuthorizationMode; label: string; desc: string }> = [
-  { id: "ask", label: "每次询问", desc: "敏感或变更操作前提示确认" },
-  { id: "auto", label: "自动允许", desc: "自动执行所有工具，无需确认" },
-  { id: "read_only", label: "只读模式", desc: "仅允许读操作，禁止修改与执行" }
+  { id: "read_only", label: "工作区查看", desc: "仅允许读操作，禁止修改文件与执行环境" },
+  { id: "workspace_write", label: "工作区修改", desc: "允许修改工作区文件及常规沙箱操作" },
+  { id: "full_access", label: "完全权限", desc: "无限制执行，直接访问系统与外部资源" }
 ];
 
 const currentAuthModeLabel = computed(() => {
-  const current = runtimeStore.toolAuthorizationMode ?? "ask";
-  return authModes.find((m) => m.id === current)?.label || "每次询问";
+  const current = runtimeStore.toolAuthorizationMode ?? "workspace_write";
+  return authModes.find((m) => m.id === current)?.label || "工作区修改";
 });
 
 function toggleAuthMenu() {
@@ -136,8 +145,22 @@ function toggleAuthMenu() {
 }
 
 function selectAuthMode(mode: ToolAuthorizationMode) {
-  runtimeStore.setToolAuthorizationMode(mode);
   authMenuOpen.value = false;
+  if (mode === runtimeStore.toolAuthorizationMode) return;
+  if (mode === "full_access") {
+    fullAccessConfirmOpen.value = true;
+    return;
+  }
+  runtimeStore.setToolAuthorizationMode(mode);
+}
+
+function confirmFullAccess() {
+  runtimeStore.setToolAuthorizationMode("full_access");
+  fullAccessConfirmOpen.value = false;
+}
+
+function cancelFullAccess() {
+  fullAccessConfirmOpen.value = false;
 }
 
 function updateAuthMenuPosition() {
@@ -549,18 +572,22 @@ onBeforeUnmount(() => {
       <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200/70 pt-2.5">
         <div class="flex min-w-0 flex-wrap items-center gap-2">
 
-          <!-- 授权模式选择器 -->
+          <!-- 授权/权限模式选择器 -->
           <div class="relative">
             <TooltipRoot :delay-duration="300">
               <TooltipTrigger as-child>
                 <button
                   ref="authTriggerRef"
-                  class="composer-trigger flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-normal text-stone-600 hover:text-stone-900 bg-stone-100/70 hover:bg-stone-200/60 transition"
+                  class="composer-trigger flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-normal text-stone-600 hover:text-stone-900 bg-stone-100/70 hover:bg-stone-200/60 transition"
                   type="button"
                   data-testid="workspace-auth-mode-trigger"
                   @click.stop="toggleAuthMenu"
                 >
-                  <Shield class="h-3 w-3 text-amber-700/80" />
+                  <PermissionModeIcon
+                    :mode="runtimeStore.toolAuthorizationMode ?? 'workspace_write'"
+                    :size="13"
+                    class="shrink-0 text-amber-700/80"
+                  />
                   <span>{{ currentAuthModeLabel }}</span>
                   <ChevronDown
                     class="h-2.5 w-2.5 shrink-0 text-stone-400"
@@ -570,7 +597,7 @@ onBeforeUnmount(() => {
               </TooltipTrigger>
               <TooltipPortal>
                 <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 shadow-sm">
-                  工具执行授权模式：点击切换
+                  权限模式：点击切换
                 </TooltipContent>
               </TooltipPortal>
             </TooltipRoot>
@@ -631,30 +658,37 @@ onBeforeUnmount(() => {
             </TooltipRoot>
           </div>
 
-          <!-- 授权模式下拉浮窗 -->
+          <!-- 权限模式下拉浮窗 -->
           <Teleport to="body">
             <div
               v-if="authMenuOpen"
               ref="authFloatingMenuRef"
-              class="composer-menu-panel fixed z-[70] min-w-[13rem] p-1 shadow-lg border border-stone-200/90 rounded-lg bg-white"
+              class="composer-menu-panel fixed z-[70] min-w-[14.5rem] p-1 shadow-lg border border-stone-200/90 rounded-lg bg-white"
               :style="authMenuStyle"
             >
               <div class="px-2 py-1 text-[11px] font-semibold text-stone-500 border-b border-stone-100">
-                工具执行授权模式
+                权限模式
               </div>
               <div class="py-1 space-y-0.5">
                 <button
                   v-for="item in authModes"
                   :key="item.id"
                   type="button"
-                  class="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded text-left transition hover:bg-stone-100"
+                  class="w-full flex items-center justify-between gap-2.5 px-2 py-1.5 rounded text-left transition hover:bg-stone-100"
                   :class="runtimeStore.toolAuthorizationMode === item.id ? 'bg-amber-50/80 text-amber-900 font-medium' : 'text-stone-700'"
                   :data-testid="`workspace-auth-mode-item-${item.id}`"
                   @click="selectAuthMode(item.id)"
                 >
-                  <div class="flex flex-col">
-                    <span class="text-[12px] leading-4">{{ item.label }}</span>
-                    <span class="text-[10px] text-stone-400">{{ item.desc }}</span>
+                  <div class="flex items-start gap-2 min-w-0">
+                    <PermissionModeIcon
+                      :mode="item.id"
+                      :size="15"
+                      class="mt-0.5 shrink-0 text-amber-700/80"
+                    />
+                    <div class="flex flex-col min-w-0">
+                      <span class="text-[12px] leading-4">{{ item.label }}</span>
+                      <span class="text-[10px] text-stone-400 leading-tight">{{ item.desc }}</span>
+                    </div>
                   </div>
                   <Check
                     v-if="runtimeStore.toolAuthorizationMode === item.id"
@@ -664,6 +698,45 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </Teleport>
+
+          <!-- 完全权限风险警示确认弹窗 -->
+          <DialogRoot v-model:open="fullAccessConfirmOpen">
+            <DialogPortal>
+              <DialogOverlay class="fixed inset-0 z-[80] bg-black/40 backdrop-blur-sm transition-opacity" />
+              <DialogContent class="fixed left-1/2 top-1/2 z-[85] max-h-[85vh] w-[90vw] max-w-[26rem] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white p-5 shadow-2xl border border-stone-200 focus:outline-none">
+                <div class="flex items-start gap-3">
+                  <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
+                    <AlertTriangle class="h-5 w-5" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <DialogTitle class="text-[15px] font-semibold text-stone-900">
+                      确认启用完全权限？
+                    </DialogTitle>
+                    <DialogDescription class="mt-2 text-[12.5px] leading-relaxed text-stone-600">
+                      启用完全权限后，智能体将减少确认步骤，并且可以直接执行更多操作，包括敏感操作、工作区外的文件修改或执行外部宿主命令。仅建议在你完全信任当前任务时使用。
+                    </DialogDescription>
+                  </div>
+                </div>
+                <div class="mt-5 flex items-center justify-end gap-2.5">
+                  <button
+                    type="button"
+                    class="rounded-lg px-3 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-100 transition"
+                    @click="cancelFullAccess"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded-lg bg-red-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-red-700 active:bg-red-800 transition shadow-sm"
+                    data-testid="confirm-full-access-button"
+                    @click="confirmFullAccess"
+                  >
+                    启用完全权限
+                  </button>
+                </div>
+              </DialogContent>
+            </DialogPortal>
+          </DialogRoot>
 
           <Teleport to="body">
             <div
