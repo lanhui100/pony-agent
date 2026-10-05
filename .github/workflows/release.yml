@@ -1,9 +1,9 @@
-# Pony Agent release — signed desktop updater + CLI
+# Pony Agent release — signed desktop updater
 
 # 触发：推送 vX.Y.Z tag。启用前提：TAURI_SIGNING_PRIVATE_KEY secrets 已配置、
 # tauri.conf.json 已启用 plugins.updater + createUpdaterArtifacts、前端常量已翻转。
-# 产物门禁：发布前强制要求 Windows 桌面产物（NSIS 安装器 + updater 包）与
-# CLI 二进制（non_tauri_harness）全部存在，任一缺失即 hard fail，不允许发布。
+# 产物门禁：发布前强制要求 Windows 桌面产物（NSIS 安装器 + updater 包）
+# 全部存在，任一缺失即 hard fail，不允许发布。
 
 name: release-signed-updater
 
@@ -48,10 +48,9 @@ jobs:
           npm run version:check
           npm run typecheck
           npm run test:unit
-      - name: Rust check (desktop + CLI)
+      - name: Rust check (desktop)
         run: |
           npm run cargo:check
-          cargo check --release -p pony-agent-core --bin non_tauri_harness
       - name: Core 关键回归与单元测试
         run: npm run cargo:test:regression
         continue-on-error: true
@@ -79,11 +78,7 @@ jobs:
         run: |
           npm run build
           npx tauri build --bundles nsis
-      - name: Build CLI binary (non_tauri_harness)
-        shell: pwsh
-        run: |
-          cargo build --release -p pony-agent-core --bin non_tauri_harness
-      - name: Gate — required artifacts present (Windows desktop + CLI, hard fail)
+      - name: Gate — required artifacts present (Windows desktop, hard fail)
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
@@ -101,16 +96,12 @@ jobs:
             if (-not (Test-Path $sigPath)) { $errors += "missing .sig for $($installer.Name)" }
           }
 
-          # CLI binary (Windows)
-          $cli = "target/release/non_tauri_harness.exe"
-          if (-not (Test-Path $cli)) { $errors += "CLI binary missing: $cli" }
-
           if ($errors.Count -gt 0) {
             Write-Host "Required release artifacts missing:"
             $errors | ForEach-Object { Write-Host "  - $_" }
-            throw "Release gate failed: require Windows desktop AND CLI artifacts"
+            throw "Release gate failed: require Windows desktop artifacts"
           }
-          Write-Host "Release gate PASS: NSIS installer + signature, CLI binary present"
+          Write-Host "Release gate PASS: NSIS installer + signature present"
       - name: Publish draft release, upload assets, assemble latest.json from uploaded names, publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -121,13 +112,11 @@ jobs:
           # NOTE: GitHub keeps draft releases UNTAGGED ("untagged-…" html_url) until they
           # are published, so releases/tags/<tag> 404s on drafts. Resolve drafts by the
           # tag_name FIELD via the releases list endpoint instead.
-          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop + CLI)"
+          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop)"
           $nsis = "target/release/bundle/nsis"
           # Windows desktop assets: NSIS installer + its updater signature
           Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
           Get-ChildItem $nsis -Filter "*.sig" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
-          # CLI binary
-          gh release upload "$tag" "target/release/non_tauri_harness.exe" --clobber
 
           # Compose latest.json from the POST-upload (GitHub-normalized) asset names:
           # GitHub uploads rename spaces to dots, so the local build name (with space)
