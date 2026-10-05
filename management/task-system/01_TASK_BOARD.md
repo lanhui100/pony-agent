@@ -42,10 +42,13 @@
 
 ## In Progress
 
-- `PA-104` 交互式持久终端 PTY 工具族（terminal_* / command:exec）
-  说明：Phase 8 Stage 1。提供跨平台 PTY 会话托管、Windows Job Object / POSIX pgid 隔离绑定、2MB 环形内存缓冲、输入输出流与优雅信号清理。
+- 暂无
 
 ## Review
+
+- `PA-104 ~ PA-111` 核心工具拓展包全套能力（PA-104持久终端PTY、PA-105后台作业、PA-106原子补丁、PA-107语言服务器LSP、PA-108模糊检索与Git差异、PA-109长程自驱目标、PA-110智能体协作编排、PA-111成果物声明）
+  状态：Review（实现与全量回归验证全部完成，元复盘已落盘 `02_REVIEWS/2026-10-04-pa104-pa111-meta-audit.md`）。
+  说明：已全量通过 8 个 acceptance test suites (30/30 tests passed)、`cargo check --workspace` 及前端 614/614 测试全绿。
 
 - `PA-077` Windows Job Object 进程树 containment（P1，Complexity C）
   状态：Review（implementation complete；closeout gate blocked）。

@@ -18,6 +18,7 @@ import WorkspaceTurnItem, {
   type TurnBucket
 } from "@/components/chat/WorkspaceTurnItem.vue";
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
+import QueuedMessagesBubble from "@/components/chat/QueuedMessagesBubble.vue";
 import AskPanel from "@/components/AskPanel.vue";
 
 const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
@@ -31,6 +32,7 @@ const {
   historyNodes,
   isSubmitting,
   messages,
+  pendingQueuedMessages,
   sessionOperation,
   traceTimeline,
   turnTraceHistory
@@ -1323,10 +1325,24 @@ function handleWindowKeydown(event: KeyboardEvent) {
     handleUndoLastTurn();
     return;
   }
+
+  // 全局 Alt+S：切换排队 (Queue) 与插队 (Steer) 发送模式
+  if (event.altKey && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    runtimeStore.toggleQueueDeliveryMode();
+    return;
+  }
 }
 
 async function handlePrimaryAction() {
   if (isSubmitting.value) {
+    // 正在运行/忙碌时，如果用户在输入框有内容，点击发送/回车视为排队/插队发送
+    if (draftMessage.value.trim().length > 0) {
+      runtimeStore.enqueueMessage(draftMessage.value);
+      draftMessage.value = "";
+      return;
+    }
+
     const stopped = await runtimeStore.stopTurn();
     if (stopped) {
       stopRequested.value = true;
@@ -1629,6 +1645,12 @@ watch(
         ]"
       ><span class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white">{{ unreadCount > 99 ? '99+' : unreadCount }}</span></span>
     </button>
+
+    <QueuedMessagesBubble
+      :messages="pendingQueuedMessages"
+      @steer="(id) => runtimeStore.promoteToSteer(id)"
+      @remove="(id) => runtimeStore.removeQueuedMessage(id)"
+    />
 
     <WorkspaceComposer
       :show-reasoning-content="showReasoningContent"

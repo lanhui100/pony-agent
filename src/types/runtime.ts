@@ -1,5 +1,15 @@
 import type { ProviderReasoningEffort } from "@/types/provider";
 
+export type QueueDeliveryMode = "queue" | "steer";
+
+export type QueuedMessageItem = {
+  id: string;
+  sessionId: string;
+  content: string;
+  mode: QueueDeliveryMode;
+  createdAt: number;
+};
+
 export type HealthPayload = {
   appName: string;
   appVersion: string;

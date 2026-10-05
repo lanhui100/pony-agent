@@ -210,9 +210,17 @@ const primaryActionDisabled = computed(() => {
   return draftMessage.value.trim().length === 0 && !hasReadyAttachment;
 });
 
-const primaryActionTitle = computed(() =>
-  isSubmitting.value ? "请求在安全边界停止当前运行。" : composerAction.value.hint
-);
+const primaryActionTitle = computed(() => {
+  if (isSubmitting.value) {
+    if (draftMessage.value.trim().length > 0) {
+      return runtimeStore.queueDeliveryMode === "steer"
+        ? "立即插队发送（在当前回合步骤完成后优先执行）"
+        : "排队发送（当前回合完成后按序执行）";
+    }
+    return "请求在安全边界停止当前运行。";
+  }
+  return composerAction.value.hint;
+});
 
 const attachNotice = ref<string | null>(null);
 
@@ -481,6 +489,25 @@ onBeforeUnmount(() => {
 
           <TooltipRoot :delay-duration="300">
             <TooltipTrigger as-child>
+              <button
+                class="composer-trigger flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
+                :class="runtimeStore.queueDeliveryMode === 'steer' ? 'bg-amber-100/80 text-amber-800' : 'bg-stone-100 text-stone-500'"
+                type="button"
+                data-testid="workspace-delivery-mode-toggle"
+                @click="runtimeStore.toggleQueueDeliveryMode"
+              >
+                <span>模式: {{ runtimeStore.queueDeliveryMode === 'steer' ? '插队 (Alt+S)' : '排队 (Alt+S)' }}</span>
+              </button>
+            </TooltipTrigger>
+            <TooltipPortal>
+              <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 shadow-sm">
+                {{ runtimeStore.queueDeliveryMode === 'steer' ? '插队模式：忙碌时发送的消息将插入回合队列首位优先执行 (Alt+S切换)' : '排队模式：忙碌时发送的消息将排入队尾按序执行 (Alt+S切换)' }}
+              </TooltipContent>
+            </TooltipPortal>
+          </TooltipRoot>
+
+          <TooltipRoot :delay-duration="300">
+            <TooltipTrigger as-child>
               <span tabindex="0" class="inline-flex">
                 <button
                   class="composer-trigger"
@@ -703,12 +730,12 @@ onBeforeUnmount(() => {
             size="sm"
             :disabled="primaryActionDisabled"
             :title="primaryActionTitle"
-            :data-testid="isSubmitting ? 'workspace-stop-turn' : 'workspace-submit-action'"
+            :data-testid="isSubmitting && !draftMessage.trim() ? 'workspace-stop-turn' : 'workspace-submit-action'"
             @click="handlePrimaryAction"
           >
-            <Square v-if="isSubmitting" class="h-3.5 w-3.5 fill-current" />
-            <ArrowUp v-if="!isSubmitting" class="h-3.5 w-3.5" />
-            <span class="sr-only">{{ isSubmitting ? "停止" : composerAction.label }}</span>
+            <Square v-if="isSubmitting && !draftMessage.trim()" class="h-3.5 w-3.5 fill-current" />
+            <ArrowUp v-else class="h-3.5 w-3.5" />
+            <span class="sr-only">{{ isSubmitting && !draftMessage.trim() ? "停止" : composerAction.label }}</span>
           </Button>
         </div>
       </div>

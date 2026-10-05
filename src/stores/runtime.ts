@@ -31,6 +31,8 @@ import type {
   HistoryStateAuditSummary,
   MessageStateDelta,
   MessageStateSnapshot,
+  QueueDeliveryMode,
+  QueuedMessageItem,
   RetrievedContextState,
   RuntimePhase,
   SessionOverview,
@@ -294,6 +296,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       historyNodes: [],
       historyBranches: [],
       initialRollbackActive: false,
+      pendingQueuedMessages: [] as QueuedMessageItem[],
+      queueDeliveryMode: "queue" as QueueDeliveryMode,
       eventsReady: false,
       deferredPersistTimerId: null,
       streamFlushFrameId: null,
@@ -2474,6 +2478,51 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     publishTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
       this.traceTimeline = traceTimeline;
     },
+    // ── Queue & Steer (主会话排队与插队消息状态机) ──
+    enqueueMessage(content: string, mode?: QueueDeliveryMode) {
+      const trimmed = content.trim();
+      if (!trimmed) return;
+      const targetMode = mode ?? this.queueDeliveryMode;
+      const id = `queued-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const item: QueuedMessageItem = {
+        id,
+        sessionId: this.sessionId,
+        content: trimmed,
+        mode: targetMode,
+        createdAt: Date.now()
+      };
+      if (targetMode === "steer") {
+        this.pendingQueuedMessages.unshift(item);
+      } else {
+        this.pendingQueuedMessages.push(item);
+      }
+    },
+    promoteToSteer(id: string) {
+      const idx = this.pendingQueuedMessages.findIndex((m) => m.id === id);
+      if (idx !== -1) {
+        const item = this.pendingQueuedMessages[idx];
+        item.mode = "steer";
+        if (idx > 0) {
+          this.pendingQueuedMessages.splice(idx, 1);
+          this.pendingQueuedMessages.unshift(item);
+        }
+      }
+    },
+    removeQueuedMessage(id: string) {
+      const idx = this.pendingQueuedMessages.findIndex((m) => m.id === id);
+      if (idx !== -1) {
+        this.pendingQueuedMessages.splice(idx, 1);
+      }
+    },
+    toggleQueueDeliveryMode() {
+      this.queueDeliveryMode = this.queueDeliveryMode === "queue" ? "steer" : "queue";
+    },
+    setQueueDeliveryMode(mode: QueueDeliveryMode) {
+      this.queueDeliveryMode = mode;
+    },
+    dequeueNextMessage(): QueuedMessageItem | null {
+      return this.pendingQueuedMessages.shift() ?? null;
+    },
     // delta 高频事件中的 timeline 节流更新：只保留最新一份，定时合并应用。
     scheduleThrottledTraceTimeline(traceTimeline: TraceTimelineEntry[]) {
       this.pendingThrottledTraceTimeline = traceTimeline;
@@ -3745,6 +3794,15 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
                 this.retrievedContext = retrieved;
               }
             }).catch(() => {});
+
+            // 触发自动消费下一条排队消息
+            if (this.pendingQueuedMessages.length > 0 && !this.isSubmitting) {
+              const nextMsg = this.dequeueNextMessage();
+              if (nextMsg) {
+                this.draftMessage = nextMsg.content;
+                void this.submitTurn();
+              }
+            }
           });
 
           debugLog("event:completed", {
