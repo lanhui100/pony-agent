@@ -56,12 +56,13 @@ pub struct UpdateGoalResult {
     pub goal: GoalData,
 }
 
-static CURRENT_GOAL: Mutex<Option<GoalData>> = Mutex::new(None);
+static GOALS_MAP: Mutex<Option<std::collections::HashMap<String, GoalData>>> = Mutex::new(None);
+static LATEST_GOAL_ID: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
     let goal_id = format!("goal-{}", Uuid::new_v4());
     let goal = GoalData {
-        id: goal_id,
+        id: goal_id.clone(),
         objective: args.objective,
         phase: "active".to_string(),
         revision: 1,
@@ -70,26 +71,35 @@ pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
         blocked_reason: None,
     };
 
-    let mut lock = CURRENT_GOAL.lock().unwrap();
-    *lock = Some(goal.clone());
+    let mut map_lock = GOALS_MAP.lock().unwrap();
+    if map_lock.is_none() {
+        *map_lock = Some(std::collections::HashMap::new());
+    }
+    map_lock.as_mut().unwrap().insert(goal_id.clone(), goal.clone());
+
+    let mut latest_lock = LATEST_GOAL_ID.lock().unwrap();
+    *latest_lock = Some(goal_id);
 
     Ok(CreateGoalResult { goal })
 }
 
 pub fn get_goal() -> Result<GetGoalResult, String> {
-    let lock = CURRENT_GOAL.lock().unwrap();
-    Ok(GetGoalResult {
-        goal: lock.clone(),
-    })
+    let latest_lock = LATEST_GOAL_ID.lock().unwrap();
+    if let Some(ref id) = *latest_lock {
+        let map_lock = GOALS_MAP.lock().unwrap();
+        if let Some(ref map) = *map_lock {
+            return Ok(GetGoalResult {
+                goal: map.get(id).cloned(),
+            });
+        }
+    }
+    Ok(GetGoalResult { goal: None })
 }
 
 pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
-    let mut lock = CURRENT_GOAL.lock().unwrap();
-    let current = lock.as_mut().ok_or_else(|| "No active goal found".to_string())?;
-
-    if current.id != args.goal_id {
-        return Err("Goal ID mismatch".to_string());
-    }
+    let mut map_lock = GOALS_MAP.lock().unwrap();
+    let map = map_lock.as_mut().ok_or_else(|| "No active goal found".to_string())?;
+    let current = map.get_mut(&args.goal_id).ok_or_else(|| "Goal ID mismatch".to_string())?;
     if current.revision != args.revision {
         return Err(format!(
             "Stale revision: expected {}, got {}",

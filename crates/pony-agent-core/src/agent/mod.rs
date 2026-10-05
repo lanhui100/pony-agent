@@ -43,6 +43,7 @@ pub mod sqlite_session;
 pub mod sse_adapter;
 pub mod telemetry;
 pub mod terminal;
+pub mod todo;
 pub mod tool_runtime;
 pub mod tool_search_elevation;
 pub mod tools;

@@ -61,6 +61,10 @@ pub use crate::agent::orchestration::{
 pub use crate::agent::present::{
     present, PresentArgs, PresentFileInput, PresentResult, PresentedFileItem,
 };
+pub use crate::agent::todo::{
+    todo_list, todo_write, TodoItem, TodoListArgs, TodoListResult, TodoStatus, TodoWriteArgs,
+    TodoWriteResult,
+};
 use crate::agent::runtime_helper::block_on;
 use crate::agent::sandbox::{enforce_sandbox, NoSandboxBackend};
 use crate::agent::search::{SearchEngine, SearchOptions};
