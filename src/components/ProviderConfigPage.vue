@@ -1100,14 +1100,6 @@ async function removeModelById(providerId: string | null, modelId: string) {
   }
 }
 
-function providerApiKeySummary(provider: ProviderConfig) {
-  if (provider.apiKeyValue?.trim()) {
-    return "已填写待保存的新密钥";
-  }
-
-  return provider.apiKeyPresent ? "已有已保存密钥" : "未配置";
-}
-
 function toggleCapability(key: ModelCapabilityToggleKey) {
   modelForm[key] = !modelForm[key];
 }
