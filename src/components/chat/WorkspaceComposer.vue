@@ -571,6 +571,27 @@ onBeforeUnmount(() => {
 
       <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200/70 pt-2.5">
         <div class="flex min-w-0 flex-wrap items-center gap-2">
+          <TooltipRoot :delay-duration="300">
+            <TooltipTrigger as-child>
+              <span tabindex="0" class="inline-flex">
+                <button
+                  class="composer-trigger"
+                  type="button"
+                  :disabled="isSubmitting"
+                  data-testid="workspace-attach-button"
+                  @click="handleAttach"
+                >
+                  <Paperclip class="h-3 w-3" />
+                  <span class="sr-only">添加附件</span>
+                </button>
+              </span>
+            </TooltipTrigger>
+            <TooltipPortal>
+              <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 shadow-sm">
+                {{ isSubmitting ? "等待当前轮次结束后再添加附件" : "添加附件" }}
+              </TooltipContent>
+            </TooltipPortal>
+          </TooltipRoot>
 
           <!-- 授权/权限模式选择器 -->
           <div class="relative">
@@ -602,28 +623,6 @@ onBeforeUnmount(() => {
               </TooltipPortal>
             </TooltipRoot>
           </div>
-
-          <TooltipRoot :delay-duration="300">
-            <TooltipTrigger as-child>
-              <span tabindex="0" class="inline-flex">
-                <button
-                  class="composer-trigger"
-                  type="button"
-                  :disabled="isSubmitting"
-                  data-testid="workspace-attach-button"
-                  @click="handleAttach"
-                >
-                  <Paperclip class="h-3 w-3" />
-                  <span class="sr-only">添加附件</span>
-                </button>
-              </span>
-            </TooltipTrigger>
-            <TooltipPortal>
-              <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 shadow-sm">
-                {{ isSubmitting ? "等待当前轮次结束后再添加附件" : "添加附件" }}
-              </TooltipContent>
-            </TooltipPortal>
-          </TooltipRoot>
         </div>
 
         <div class="flex min-w-0 flex-wrap items-center gap-2">
