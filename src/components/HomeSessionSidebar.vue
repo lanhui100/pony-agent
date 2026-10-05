@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// PA-三级树：侧边栏单一树（「工作区」一级标题行不可折叠 → 工作区二级 → 会话三级；
+// PA-三级树：侧边栏单一树（「工作区」一级标题行不可折叠 → 工作区二级（支持折叠/展开归属会话）→ 会话三级；
 // 默认/无归属会话无组头平铺置顶；瞬态"新对话"按显式创建目标钉顶归属）。
 // 规格：openspec workspace-sidebar-tree delta；裁决与文案见 design/sidebar-copy。
 import { computed, onMounted, reactive, ref } from "vue";
@@ -36,6 +36,7 @@ import type { SidebarNavigationPage } from "@/types/config";
 import type { ChatMessage, SessionOverview } from "@/types/runtime";
 
 const SESSION_SIDEBAR_STORAGE_KEY = "pony-agent.session-sidebar-collapsed.v1";
+const WORKSPACE_COLLAPSED_STORAGE_KEY = "pony-agent.session-sidebar-workspace-groups-collapsed.v1";
 /** 分区预览上限（平铺区与每个工作区组各自生效；全局"显示全部"解除）。 */
 const PARTITION_PREVIEW_LIMIT = 5;
 
@@ -264,6 +265,12 @@ function createNewSession() {
 }
 function createSessionInWorkspace(workspaceId: string) {
   if (props.currentPage !== "home") navigate("home");
+  if (collapsedWorkspaces.value.has(workspaceId)) {
+    const next = new Set(collapsedWorkspaces.value);
+    next.delete(workspaceId);
+    collapsedWorkspaces.value = next;
+    saveCollapsedWorkspaces(next);
+  }
   void runtimeStore.createSession(workspaceId);
 }
 
@@ -405,6 +412,12 @@ async function runConfirm(kind: ConfirmKind, target: ConfirmTarget) {
   } finally {
     confirmState.loading = false;
   }
+  if (kind === "workspace-delete" && outcome.ok && target.workspaceId && collapsedWorkspaces.value.has(target.workspaceId)) {
+    const next = new Set(collapsedWorkspaces.value);
+    next.delete(target.workspaceId);
+    collapsedWorkspaces.value = next;
+    saveCollapsedWorkspaces(next);
+  }
   const mine = confirmTarget.value?.key === targetKey;
   if (!outcome.ok && mine) {
     confirmState.error = `${SIDEBAR_COPY.confirmFailurePrefix}${outcome.error ?? "未知错误"}`;
@@ -424,10 +437,53 @@ async function runConfirm(kind: ConfirmKind, target: ConfirmTarget) {
   if (mine) closeConfirm();
 }
 
+// ── 工作区折叠状态管理（本地持久化，独立于全局侧栏折叠） ────────────────────
+const collapsedWorkspaces = ref<Set<string>>(loadCollapsedWorkspaces());
+
+function loadCollapsedWorkspaces(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_COLLAPSED_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((id): id is string => typeof id === "string"));
+    }
+  } catch {
+    // 忽略异常 JSON
+  }
+  return new Set();
+}
+
+function saveCollapsedWorkspaces(set: Set<string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(WORKSPACE_COLLAPSED_STORAGE_KEY, JSON.stringify([...set]));
+  } catch {
+    // 忽略存储异常
+  }
+}
+
+function isGroupCollapsed(workspaceId: string): boolean {
+  return collapsedWorkspaces.value.has(workspaceId);
+}
+
+function toggleGroupCollapse(workspaceId: string) {
+  if (renamingKey.value === `ws:${workspaceId}`) return;
+  const next = new Set(collapsedWorkspaces.value);
+  if (next.has(workspaceId)) {
+    next.delete(workspaceId);
+  } else {
+    next.add(workspaceId);
+  }
+  collapsedWorkspaces.value = next;
+  saveCollapsedWorkspaces(next);
+}
+
 // ── 其余 UI 状态 ──────────────────────────────────────────────────────────
 const menuInteractiveClass =
   "transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900";
-const menuSelectedClass = "bg-[#f3c98d] text-stone-900";
+const menuSelectedClass = "bg-[#f6dfb8] text-stone-900";
 
 const hasPersistableMessages = (list: ChatMessage[]) =>
   list.some(
@@ -717,8 +773,24 @@ function confirmPopoverProps(
               class="pt-1"
               :data-testid="`workspace-group-${group.key}`"
             >
-              <div class="group/ws relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1 hover:bg-[#f6dfb8]/60">
+              <div
+                class="group/ws relative flex w-full items-center justify-between gap-1.5 rounded-[0.2rem] px-1.5 py-1 hover:bg-[#f6dfb8]/60 cursor-pointer select-none"
+                :data-testid="`workspace-row-header-${group.key}`"
+                @click="toggleGroupCollapse(group.key)"
+              >
                 <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-stone-700">
+                  <button
+                    type="button"
+                    class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[0.2rem] text-stone-400 transition-colors hover:text-stone-900"
+                    :data-testid="`workspace-row-toggle-${group.key}`"
+                    :aria-label="isGroupCollapsed(group.key) ? '展开工作区' : '折叠工作区'"
+                    @click.stop="toggleGroupCollapse(group.key)"
+                  >
+                    <ChevronRight
+                      class="h-3 w-3 shrink-0 transition-transform duration-150"
+                      :class="{ 'rotate-90': !isGroupCollapsed(group.key) }"
+                    />
+                  </button>
                   <Folder class="h-3.5 w-3.5 shrink-0 text-stone-700" />
                   <input
                     v-if="renamingKey === `ws:${group.key}`"
@@ -727,13 +799,18 @@ function confirmPopoverProps(
                     maxlength="64"
                     :disabled="renamingBusy"
                     data-testid="workspace-rename-input"
+                    @click.stop
                     @keydown.enter.prevent="submitRename"
                     @keydown.esc.prevent="cancelRename"
                   />
                   <span v-else class="truncate">{{ group.name }}</span>
                   <span class="shrink-0 text-[10px] font-normal text-stone-400">{{ group.count }}</span>
                 </span>
-                <span v-if="renamingKey !== `ws:${group.key}`" class="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/ws:opacity-100 group-focus-within/ws:opacity-100">
+                <span
+                  v-if="renamingKey !== `ws:${group.key}`"
+                  class="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/ws:opacity-100 group-focus-within/ws:opacity-100"
+                  @click.stop
+                >
                   <button
                     v-if="isTauriRuntime"
                     class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-40"
@@ -761,7 +838,7 @@ function confirmPopoverProps(
                   </DropdownMenu>
                 </span>
 
-                <span v-if="renamingKey === `ws:${group.key}`" class="flex shrink-0 items-center gap-1">
+                <span v-if="renamingKey === `ws:${group.key}`" class="flex shrink-0 items-center gap-1" @click.stop>
                   <button class="text-[10px] text-stone-500 transition hover:text-stone-900 disabled:opacity-50" type="button" :disabled="renamingBusy" data-testid="workspace-rename-submit" @click="submitRename">确认</button>
                   <button class="text-[10px] text-stone-400 transition hover:text-stone-700" type="button" @click="cancelRename">取消</button>
                 </span>
@@ -796,7 +873,11 @@ function confirmPopoverProps(
                 </ConfirmPopover>
               </div>
 
-              <div class="space-y-0.5 -mr-1.5 pl-3">
+              <div
+                v-if="!isGroupCollapsed(group.key)"
+                class="space-y-0.5 -mr-1.5 pl-3"
+                :data-testid="`workspace-sessions-${group.key}`"
+              >
                 <div
                   v-for="session in partitionPreview(group.sessions)"
                   :key="session.conversationId"

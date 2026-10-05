@@ -307,6 +307,87 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     wrapper.unmount();
   });
 
+  it("工作区支持折叠/展开会话列表，状态持久化到 localStorage，新建会话自动展开", async () => {
+    seedTree({
+      sessions: [
+        createSession({ conversationId: "b1", title: "B 会话1", workspaceId: "ws-b" }),
+        createSession({ conversationId: "b2", title: "B 会话2", workspaceId: "ws-b" })
+      ]
+    });
+    seedWorkspaces();
+    const runtimeStore = useRuntimeStore();
+    vi.spyOn(runtimeStore, "createSession").mockResolvedValue(undefined);
+
+    const wrapper = mountSidebar();
+    await flushUI();
+
+    // 初始状态：展开，会话行可见
+    expect(wrapper.find('[data-testid="workspace-sessions-ws-b"]').exists()).toBe(true);
+    expect(wrapper.findAll('[data-testid^="workspace-session-row-ws-b-"]').length).toBe(2);
+
+    // 点击折叠按钮折叠
+    const toggleBtn = wrapper.get('[data-testid="workspace-row-toggle-ws-b"]');
+    await toggleBtn.trigger("click");
+    await flushUI();
+
+    // 折叠后：会话容器隐藏
+    expect(wrapper.find('[data-testid="workspace-sessions-ws-b"]').exists()).toBe(false);
+    expect(wrapper.findAll('[data-testid^="workspace-session-row-ws-b-"]').length).toBe(0);
+
+    // localStorage 持久化折叠集合
+    const raw = window.localStorage.getItem("pony-agent.session-sidebar-workspace-groups-collapsed.v1");
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw!)).toContain("ws-b");
+
+    // 重新挂载能够恢复折叠态
+    wrapper.unmount();
+    const remounted = mountSidebar();
+    await flushUI();
+    expect(remounted.find('[data-testid="workspace-sessions-ws-b"]').exists()).toBe(false);
+
+    // 点击工作区行头可以重新展开
+    await remounted.get('[data-testid="workspace-row-header-ws-b"]').trigger("click");
+    await flushUI();
+    expect(remounted.find('[data-testid="workspace-sessions-ws-b"]').exists()).toBe(true);
+    expect(remounted.findAll('[data-testid^="workspace-session-row-ws-b-"]').length).toBe(2);
+
+    // 再次折叠
+    await remounted.get('[data-testid="workspace-row-toggle-ws-b"]').trigger("click");
+    await flushUI();
+    expect(remounted.find('[data-testid="workspace-sessions-ws-b"]').exists()).toBe(false);
+
+    // 在已折叠的工作区点击「＋」新建会话 → 自动展开该工作区
+    const newBtn = remounted.get('[data-testid="workspace-row-new-ws-b"]');
+    await newBtn.trigger("click");
+    await flushUI();
+    expect(remounted.find('[data-testid="workspace-sessions-ws-b"]').exists()).toBe(true);
+
+    remounted.unmount();
+  });
+
+  it("选中会话背景色使用浅色 bg-[#f6dfb8]，与 hover 背景色一致", async () => {
+    seedTree({
+      currentId: "b1",
+      sessions: [
+        createSession({ conversationId: "b1", title: "当前会话", workspaceId: "ws-b" }),
+        createSession({ conversationId: "b2", title: "其他会话", workspaceId: "ws-b" })
+      ]
+    });
+    seedWorkspaces();
+    const wrapper = mountSidebar();
+    await flushUI();
+
+    const selectedRow = wrapper.get('[data-testid="workspace-session-row-ws-b-b1"]');
+    expect(selectedRow.attributes("class")).toContain("bg-[#f6dfb8]");
+    expect(selectedRow.attributes("class")).not.toContain("bg-[#f3c98d]");
+
+    const otherRow = wrapper.get('[data-testid="workspace-session-row-ws-b-b2"]');
+    expect(otherRow.attributes("class")).toContain("hover:bg-[#f6dfb8]");
+    expect(otherRow.attributes("class")).not.toContain("bg-[#f6dfb8] text-stone-900");
+
+    wrapper.unmount();
+  });
+
   it("注入式瞬态行（createSession 主路径）同样钉顶", async () => {
     // 回归钉板：store 注入的瞬态（updatedAtMs=0）若参与排序将沉底（P1-2）。
     seedTree({

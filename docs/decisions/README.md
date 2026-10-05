@@ -57,6 +57,7 @@
 - [0017 发版流水线约定、四处版本一致性同步与安全加固](0017-release-tag-convention-and-tauri-version-sync.md)
 - [0018 Windows Job Object 进程生命周期约束](0018-windows-job-object-containment.md)
 - [0019 本地契约优先的签名桌面更新](0019-signed-desktop-updater-local-contract.md)
+- [0020 侧边栏工作区会话折叠与选中高亮浅色化](0020-workspace-sidebar-collapsible-and-selection-tone.md)
 
 ### 已接替
 

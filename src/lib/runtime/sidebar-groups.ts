@@ -1,6 +1,6 @@
 // PA-三级树：侧边栏单一树派生（Workspace 一级标题行 → 工作区二级 → 会话三级）。
-// 取代 PA-081 的 groupSessionsByWorkspace 两级分组 + 折叠持久化（该契约已废弃：
-// 组不可折叠、default 不渲染组头、孤儿并入平铺区）。
+// 取代 PA-081 的 groupSessionsByWorkspace 两级分组契约（二级工作区支持归属会话折叠、
+// default 不渲染组头、孤儿并入平铺区）。
 // 单一事实源规则：
 // - 归档会话（Boolean(session.archived) === true）不进入任何分区、计数或排序；
 // - 平铺区 = 默认工作区名下 ∪ 无 workspaceId ∪ 指向未注册 id 的孤儿，

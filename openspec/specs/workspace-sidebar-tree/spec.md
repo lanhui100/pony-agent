@@ -2,12 +2,12 @@
 
 ## Purpose
 
-侧边栏会话浏览区的信息架构与操作契约：工作区作为一级菜单组织对话，提供工作区级管理（添加/重命名/删除）与会话级操作（重命名/归档/删除），并定义归档语义、确认纪律、平铺区排序与浏览器降级矩阵。本 spec 取代早期两级分组+可折叠组契约（组折叠与激活驱动创建已退役）。
+侧边栏会话浏览区的信息架构与操作契约：工作区作为一级菜单组织对话，提供工作区级管理（添加/重命名/删除/折叠展开归属会话）与会话级操作（重命名/归档/删除），并定义归档语义、确认纪律、平铺区排序与浏览器降级矩阵。
 
 ## Requirements
 ### Requirement: Workspace-grouped session list
 
-The session sidebar SHALL render a single three-level tree: one fixed non-collapsible "工作区" section header (first level), one row per registered non-default workspace (second level), and each such workspace's conversations beneath it (third level). Sessions whose owning workspace is the default, sessions without a `workspaceId`, and sessions whose `workspaceId` has no registry entry SHALL render as header-less rows in a flat zone directly beneath the section header. The default workspace SHALL NOT render a second-level group row.
+The session sidebar SHALL render a single three-level tree: one fixed non-collapsible "工作区" section header (first level), one row per registered non-default workspace (second level), and each such workspace's conversations beneath it (third level). Sessions whose owning workspace is the default, sessions without a `workspaceId`, and sessions whose `workspaceId` has no registry entry SHALL render as header-less rows in a flat zone directly beneath the section header. The default workspace SHALL NOT render a second-level group row. Non-default workspace groups SHALL allow collapsing their third-level conversation lists.
 
 #### Scenario: Default workspace renders no group row
 
@@ -40,8 +40,14 @@ The session sidebar SHALL render a single three-level tree: one fixed non-collap
 #### Scenario: Section header is fixed
 
 - **WHEN** the sidebar renders the "工作区" section header
-- **THEN** it offers no collapse affordance and the tree always renders expanded
-- **AND** persisted per-group collapse keys neither affect rendering nor get written again
+- **THEN** it offers no collapse affordance
+
+#### Scenario: Workspace groups support session list collapse and expand
+
+- **WHEN** the user activates the collapse toggle or clicks the non-editing header of a workspace group
+- **THEN** its third-level conversations collapse or expand
+- **AND** the collapsed state is persisted in localStorage so it is preserved across app reloads
+- **AND** creating a new conversation in a collapsed workspace automatically expands that workspace
 
 #### Scenario: Unsaved current session grouping
 
