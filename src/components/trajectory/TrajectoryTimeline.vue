@@ -36,22 +36,22 @@ function getTurnBoundaryLeftPercent(time: number): number {
 
 function getSpanColorClasses(span: TrajectoryTimelineSpan): string {
   if (span.isError) {
-    return "bg-rose-500 hover:bg-rose-600 text-white border-rose-600";
+    return "bg-rose-500 hover:bg-rose-600 text-white";
   }
   switch (span.kind) {
     case "user":
-      return "bg-[#8b5e34] hover:bg-[#724c29] text-[#faf6ef] border-[#724c29]";
+      return "bg-[#8b5e34] hover:bg-[#724c29] text-[#faf6ef]";
     case "context":
     case "system":
-      return "bg-stone-300 hover:bg-stone-400 text-stone-800 border-stone-400";
+      return "bg-stone-300 hover:bg-stone-400 text-stone-800";
     case "message":
     case "compacted":
-      return "bg-[#c89d66] hover:bg-[#b88c55] text-stone-900 border-[#b88c55]";
+      return "bg-[#c89d66] hover:bg-[#b88c55] text-stone-900";
     case "tool":
     case "subtool":
-      return "bg-[#e2b882] hover:bg-[#d4a469] text-stone-900 border-[#d4a469]";
+      return "bg-[#e2b882] hover:bg-[#d4a469] text-stone-900";
     default:
-      return "bg-stone-300 hover:bg-stone-400 text-stone-800 border-stone-400";
+      return "bg-stone-300 hover:bg-stone-400 text-stone-800";
   }
 }
 
@@ -124,7 +124,7 @@ function getSpanCoreInitial(span: TrajectoryTimelineSpan): string {
             >
               <button
                 type="button"
-                class="absolute top-1 bottom-1 flex items-center justify-center truncate rounded-[3px] border px-1 text-[10px] font-medium leading-none transition shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 cursor-pointer"
+                class="absolute top-1 bottom-1 flex items-center justify-center truncate rounded-[3px] px-1 text-[10px] font-medium leading-none transition shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 cursor-pointer"
                 :class="[
                   getSpanColorClasses(span),
                   selectedSpanId === span.id

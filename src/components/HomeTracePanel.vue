@@ -1623,6 +1623,48 @@ function resolveBuildContextObservation(
                 <div v-if="!isCheckpointPersistEntry(entry) && activeTraceStepKey === turnStepKey(turn.turnId, entry.id)" class="collapsible-body-open">
                   <div class="collapsible-content mt-1 pl-4">
                     <section>
+                      <!-- DeepSeek Harness 风格的结构化指标概览面板 (Overview Metrics DL) -->
+                      <div v-if="canonicalKind(entry.kind) === 'call_model'" class="mb-2">
+                        <dl class="overview grid grid-cols-2 gap-x-4 gap-y-1 rounded bg-[#f6f0e8]/60 p-2 text-[10px]">
+                          <div class="flex items-center justify-between gap-1">
+                            <dt class="text-stone-400">输入 (Input)</dt>
+                            <dd class="font-mono text-stone-700 font-medium">
+                              {{ timelineMetricEntry(turn, entry).inputTokens != null ? formatInteger(timelineMetricEntry(turn, entry).inputTokens!) : "—" }}
+                            </dd>
+                          </div>
+                          <div class="flex items-center justify-between gap-1">
+                            <dt class="text-stone-400">输出 (Output)</dt>
+                            <dd class="font-mono text-stone-700 font-medium">
+                              {{ timelineMetricEntry(turn, entry).outputTokens != null ? formatInteger(timelineMetricEntry(turn, entry).outputTokens!) : "—" }}
+                            </dd>
+                          </div>
+                          <div class="flex items-center justify-between gap-1">
+                            <dt class="text-stone-400">缓存读取 (Cache)</dt>
+                            <dd class="font-mono text-stone-700 font-medium">
+                              {{ timelineMetricEntry(turn, entry).cacheHitInputTokens != null ? formatInteger(timelineMetricEntry(turn, entry).cacheHitInputTokens!) : "—" }}
+                            </dd>
+                          </div>
+                          <div class="flex items-center justify-between gap-1">
+                            <dt class="text-stone-400">首 Token 延时 (TTFT)</dt>
+                            <dd class="font-mono text-stone-700 font-medium">
+                              {{ timelineMetricEntry(turn, entry).firstTokenLatencyMs != null ? `${timelineMetricEntry(turn, entry).firstTokenLatencyMs} ms` : "—" }}
+                            </dd>
+                          </div>
+                          <div class="flex items-center justify-between gap-1">
+                            <dt class="text-stone-400">吞吐速度 (Speed)</dt>
+                            <dd class="font-mono text-stone-700 font-medium">
+                              {{ formatEntryTokenSpeed(timelineMetricEntry(turn, entry)) || "—" }}
+                            </dd>
+                          </div>
+                          <div class="flex items-center justify-between gap-1">
+                            <dt class="text-stone-400">总耗时 (Duration)</dt>
+                            <dd class="font-mono text-stone-700 font-medium">
+                              {{ timelineMetricEntry(turn, entry).turnDurationMs != null ? formatDurationMs(timelineMetricEntry(turn, entry).turnDurationMs!) : (timelineDurationText(turn, entry) || "—") }}
+                            </dd>
+                          </div>
+                        </dl>
+                      </div>
+
                       <div class="space-y-1">
                         <div
                           v-for="row in buildTimelineRows(turn, entry)"
