@@ -92,6 +92,8 @@ export type RuntimeState = {
   historyCursorMode: HistoryCursorMode;
   historyNodes: HistoryNode[];
   historyBranches: HistoryBranch[];
+  pendingQueuedMessages: import("@/types/runtime").QueuedMessageItem[];
+  queueDeliveryMode: import("@/types/runtime").QueueDeliveryMode;
   eventsReady: boolean;
   deferredPersistTimerId: number | null;
   streamFlushFrameId: number | null;

@@ -2498,7 +2498,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       }
     },
     promoteToSteer(id: string) {
-      const idx = this.pendingQueuedMessages.findIndex((m) => m.id === id);
+      const idx = this.pendingQueuedMessages.findIndex((m: QueuedMessageItem) => m.id === id);
       if (idx !== -1) {
         const item = this.pendingQueuedMessages[idx];
         item.mode = "steer";
@@ -2509,7 +2509,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       }
     },
     removeQueuedMessage(id: string) {
-      const idx = this.pendingQueuedMessages.findIndex((m) => m.id === id);
+      const idx = this.pendingQueuedMessages.findIndex((m: QueuedMessageItem) => m.id === id);
       if (idx !== -1) {
         this.pendingQueuedMessages.splice(idx, 1);
       }

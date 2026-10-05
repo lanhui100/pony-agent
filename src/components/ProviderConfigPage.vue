@@ -324,6 +324,7 @@ const modelsReferencingDisabledProtocols = computed(() => {
 });
 
 // D6：高级设置协议下拉仅列提供商已启用协议（含当前值兜底，防回落矛盾态）。
+/*
 const modelProtocolOptions = computed<ProviderProtocol[]>(() => {
   const enabled = endpointOrder.filter(
     (protocol) =>
@@ -336,6 +337,7 @@ const modelProtocolOptions = computed<ProviderProtocol[]>(() => {
   }
   return enabled;
 });
+*/
 
 // 高级设置 Base URL 覆盖的解析结果（placeholder 展示继承目标）。
 const resolvedModelBaseUrl = computed(() => {
