@@ -9,7 +9,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Ellipsis,
-  Folder,
   FolderOpen,
   FolderPlus,
   Pencil,
@@ -615,8 +614,7 @@ function confirmPopoverProps(
           <section data-testid="session-sidebar-tree">
             <!-- 一级标题行（不可折叠）+ 右端添加工作区 -->
             <div class="flex w-full items-center justify-between gap-2 px-1.5 py-2">
-              <div class="flex min-w-0 items-center gap-2 text-[13px] font-semibold text-stone-900">
-                <FolderOpen class="h-4 w-4 shrink-0 fill-stone-800 text-stone-900" />
+              <div class="flex min-w-0 items-center gap-2 text-[11px] font-medium tracking-[0.12em] text-stone-500 uppercase">
                 <span class="shrink-0">{{ SIDEBAR_COPY.sectionTitle }}</span>
               </div>
               <TooltipProvider v-if="isTauriRuntime" :delay-duration="300">
@@ -715,8 +713,7 @@ function confirmPopoverProps(
               :data-testid="`workspace-group-${group.key}`"
             >
               <div class="relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1.5 hover:bg-[#f6dfb8]/60">
-                <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-semibold text-stone-850 text-stone-800">
-                  <Folder class="h-3.5 w-3.5 shrink-0 fill-stone-700 text-stone-800" />
+                <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-stone-700">
                   <input
                     v-if="renamingKey === `ws:${group.key}`"
                     v-model="renameDraft"
@@ -727,8 +724,8 @@ function confirmPopoverProps(
                     @keydown.enter.prevent="submitRename"
                     @keydown.esc.prevent="cancelRename"
                   />
-                  <span v-else class="truncate font-semibold">{{ group.name }}</span>
-                  <span class="shrink-0 text-[10px] font-medium text-stone-500">{{ group.count }}</span>
+                  <span v-else class="truncate">{{ group.name }}</span>
+                  <span class="shrink-0 text-[10px] font-normal text-stone-400">{{ group.count }}</span>
                 </span>
                 <span v-if="renamingKey !== `ws:${group.key}`" class="flex shrink-0 items-center gap-0.5">
                   <button

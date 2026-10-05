@@ -193,14 +193,14 @@ watch(rightSidebarPreferredOpen, (value) => {
     >
       <!-- 全平台无边框：去除独立顶部状态栏，窗口控制按钮轻量浮动于右上角，支持原生拖拽 -->
       <div
-        class="absolute top-0 right-0 z-50 flex h-9 items-center pr-1.5"
+        class="absolute top-0 right-0 z-50 flex h-9 items-center pr-3"
         data-tauri-drag-region
       >
         <WindowControls />
       </div>
 
       <section
-        class="flex min-h-0 flex-1 w-full min-w-0 gap-4 bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.10),transparent_26%),linear-gradient(180deg,#fdfbf9_0%,#faf7f2_48%,#f6f1ea_100%)] pb-3 pt-2"
+        class="flex min-h-0 flex-1 w-full min-w-0 gap-4 bg-[radial-gradient(circle_at_top,rgba(248,226,184,0.10),transparent_26%),linear-gradient(180deg,#fdfbf9_0%,#faf7f2_48%,#f6f1ea_100%)] pb-3 pt-9"
         data-testid="app-layout-shell"
       >
         <HomeSessionSidebar :current-page="sessionSidebarActivePage" :force-collapsed="forceCollapseLeftSidebar" @navigate="handleSessionNavigate" />

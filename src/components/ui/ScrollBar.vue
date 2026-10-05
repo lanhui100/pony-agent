@@ -19,7 +19,7 @@ const props = withDefaults(
 
 const className = computed(() =>
   cn(
-    "pointer-events-none flex touch-none select-none p-[1px] transition-colors",
+    "pointer-events-none flex touch-none select-none p-[1px] transition-opacity duration-150 data-[state=visible]:opacity-100 data-[state=visible]:pointer-events-auto",
     props.orientation === "vertical" && "h-full w-2.5 border-l border-l-transparent opacity-0",
     props.orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent opacity-0",
     props.class
