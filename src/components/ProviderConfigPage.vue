@@ -14,7 +14,6 @@ import {
   RefreshCw,
   Save,
   Search,
-  Shield,
   Trash2,
   Type,
   Video,
@@ -1171,7 +1170,7 @@ defineExpose({
             class="flex w-full items-center justify-between gap-2 rounded-[0.35rem] px-2.5 py-2 text-left transition hover:bg-white/74 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
             :class="
               !isCreateMode && detailProvider?.id === provider.id
-                ? 'bg-white/78 ring-1 ring-stone-200/70'
+                ? 'bg-white/90'
                 : 'bg-white/30'
             "
             :data-testid="`provider-list-item-${provider.id}`"
@@ -1403,23 +1402,6 @@ defineExpose({
                     <div class="flex min-w-0 items-baseline gap-2">
                       <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">已启用协议</dt>
                       <dd class="min-w-0 truncate text-stone-900">{{ detailProvider.supportedProtocols.join(" / ") }}</dd>
-                    </div>
-                  </dl>
-                </section>
-
-                <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
-                  <div class="flex items-center gap-2 text-sm font-medium text-stone-900">
-                    密钥与环境
-                    <Shield class="h-3.5 w-3.5 text-stone-500" />
-                  </div>
-                  <dl class="mt-1.5 grid gap-x-4 gap-y-1 text-[13px] leading-5 sm:grid-cols-2">
-                    <div class="flex min-w-0 items-baseline gap-2">
-                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">环境变量名</dt>
-                      <dd class="min-w-0 truncate text-stone-900">{{ detailProvider.apiKeyEnvVar }}</dd>
-                    </div>
-                    <div class="flex min-w-0 items-baseline gap-2">
-                      <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">密钥状态</dt>
-                      <dd class="min-w-0 truncate text-stone-900">{{ providerApiKeySummary(detailProvider) }}</dd>
                     </div>
                   </dl>
                 </section>
@@ -2191,14 +2173,14 @@ defineExpose({
                 <!-- 迭代四：字段名与值同行、两栏排布、行距减半。 -->
                 <section class="rounded-[0.45rem] bg-white/72 px-3.5 py-2">
                   <div class="text-sm font-medium text-stone-900">模型信息</div>
-                  <dl class="mt-1.5 grid gap-x-4 gap-y-1 text-[13px] leading-5 sm:grid-cols-2">
+                  <dl class="mt-1.5 flex flex-wrap items-baseline gap-x-6 gap-y-1 text-[13px] leading-5">
                     <div class="flex min-w-0 items-baseline gap-2">
                       <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">名称</dt>
                       <dd class="min-w-0 truncate text-stone-900">{{ detailModel.name || "未命名模型" }}</dd>
                     </div>
-                    <div class="flex min-w-0 items-baseline gap-2 sm:col-span-2">
+                    <div class="flex min-w-0 items-baseline gap-2">
                       <dt class="shrink-0 text-[11px] uppercase tracking-[0.16em] text-stone-400">模型 ID</dt>
-                      <dd class="min-w-0 break-words text-stone-900">{{ detailModel.model || "未填写模型 ID" }}</dd>
+                      <dd class="min-w-0 break-words font-mono text-[12px] text-stone-900">{{ detailModel.model || "未填写模型 ID" }}</dd>
                     </div>
                   </dl>
                 </section>

@@ -148,7 +148,7 @@ describe("ProviderConfigPage hierarchical layout (ADR 0013)", () => {
     expect(wrapper.get("section h2").text()).toBe("Beta");
     expect(
       wrapper.get('[data-testid="provider-list-item-provider-beta"]').classes().join(" ")
-    ).toContain("bg-white/78");
+    ).toContain("bg-white/90");
   });
 
   it("behaves as an accordion: at most one first-level section is open", async () => {
