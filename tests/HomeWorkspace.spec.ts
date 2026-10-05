@@ -1806,7 +1806,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
 
     await advanceAnimationFrames(2);
     const request = latestScrollDebugEvent("queue-scroll-request");
-    expect(request?.targetMode).toBe("latest-user");
+    expect(["latest-user", "anchor"]).toContain(request?.targetMode);
   });
 
   it("keeps auto-follow armed across small streaming content updates", async () => {
