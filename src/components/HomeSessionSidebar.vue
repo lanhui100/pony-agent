@@ -2,7 +2,7 @@
 // PA-三级树：侧边栏单一树（「工作区」一级标题行不可折叠 → 工作区二级 → 会话三级；
 // 默认/无归属会话无组头平铺置顶；瞬态"新对话"按显式创建目标钉顶归属）。
 // 规格：openspec workspace-sidebar-tree delta；裁决与文案见 design/sidebar-copy。
-import { computed, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { storeToRefs } from "pinia";
 import {
   Archive,
@@ -67,6 +67,10 @@ const {
 
 const collapsed = ref(loadStoredBoolean(SESSION_SIDEBAR_STORAGE_KEY, false));
 const isTauriRuntime = isTauriAvailable();
+
+onMounted(() => {
+  void runtimeStore.loadWorkspaces();
+});
 
 // ── 受控确认（单例状态，per-target 弹层实例锚定行容器） ───────────────────
 type ConfirmKind = "workspace-delete" | "session-archive" | "session-delete";

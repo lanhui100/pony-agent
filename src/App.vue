@@ -152,6 +152,7 @@ onMounted(async () => {
     runStartupTask("health", () => runtimeStore.fetchHealth()),
     runStartupTask("availableTools", () => runtimeStore.fetchAvailableTools()),
     runStartupTask("turnEvents", () => runtimeStore.initializeTurnEvents()),
+    runStartupTask("workspaces", () => runtimeStore.loadWorkspaces()),
     // PA-099：更新角标水合（缓存恢复零网络；过期时后台补查不阻塞本链）。
     runStartupTask("updateCheck", () => updateStore.initialize())
   ]);

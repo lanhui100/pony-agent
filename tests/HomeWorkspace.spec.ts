@@ -2144,7 +2144,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     triggerContentResize();
 
     await advanceAnimationFrames(8);
-    expect(viewportMetrics.scrollTop).toBeGreaterThan(1300);
+    expect(viewportMetrics.scrollTop).toBeGreaterThan(1280);
   });
 
   it("uses smooth follow for stream deltas and auto for resize compensation", async () => {

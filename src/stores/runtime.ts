@@ -1808,8 +1808,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     },
     // PA-081：Workspace 注册表加载（Tauri 可用时；失败 contained 保持空列表）。
     // 幂等：已加载过则跳过（侧边栏挂载可能多次触发）。
-    async loadWorkspaces() {
-      if (this.workspaceListLoaded) {
+    async loadWorkspaces(force = false) {
+      if (this.workspaceListLoaded && !force) {
         return;
       }
       if (!isTauriAvailable()) {
@@ -1864,7 +1864,18 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         return { ok: true, record };
       } catch (error) {
         debugLog("workspace:create:failed", { error: String(error) });
-        return { ok: false, error: String(error) };
+        // 若报错包含重复 root，说明后端已登记过此目录：重新拉取注册表，尝试命中既有记录
+        const errStr = String(error);
+        if (errStr.includes("重复 root") || errStr.includes("已存在")) {
+          await this.loadWorkspaces(true);
+          const existing = this.workspaceList.find(
+            (w) => w.rootPath === trimmedPath || w.name === trimmedName
+          );
+          if (existing) {
+            return { ok: true, record: existing };
+          }
+        }
+        return { ok: false, error: errStr };
       }
     },
 
