@@ -532,8 +532,9 @@ mod tests {
         for i in 0..num_workspaces {
             let root = std::path::PathBuf::from(unique_root(&format!("concur_ws_{i}")));
             std::fs::create_dir_all(&root).unwrap();
-            std::fs::write(root.join("identity.txt"), format!("ws_{i}_identity")).unwrap();
-            ws_roots.push(root);
+            let canonical_root = root.canonicalize().unwrap_or(root);
+            std::fs::write(canonical_root.join("identity.txt"), format!("ws_{i}_identity")).unwrap();
+            ws_roots.push(canonical_root);
         }
 
         let router = Arc::new(ToolRouter::new());
