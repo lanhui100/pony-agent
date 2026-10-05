@@ -419,10 +419,15 @@ impl PathPermissionChecker {
             }
         };
 
-        // 归一化 root / tmp_dir（Windows 去 \\?\ 前缀）：调用方可能传入 canonicalize 输出，
-        // 与 canonical（已去前缀）做组件级比较前必须对齐形式，否则 prefix 组件不匹配导致误判。
-        let root_normalized = normalize_win_prefix(root);
-        let tmp_dir_normalized = normalize_win_prefix(tmp_dir);
+        // 归一化 root / tmp_dir：先尝试 canonical 化（解析 junction/symlink/8.3 短名），
+        // 失败则仅去 `\\?\` 前缀。确保与 canonical（canonicalize 输出）的形式一致，
+        // 否则 prefix 组件不匹配（RUNNER~1 vs runneradmin、\\?\ 前缀差异）导致误判。
+        let root_normalized = (self.canonicalize)(root)
+            .map(|p| normalize_win_prefix(&p))
+            .unwrap_or_else(|_| normalize_win_prefix(root));
+        let tmp_dir_normalized = (self.canonicalize)(tmp_dir)
+            .map(|p| normalize_win_prefix(&p))
+            .unwrap_or_else(|_| normalize_win_prefix(tmp_dir));
 
         // 组件级前缀判定（绝不整体字符串前缀比较）。
         if components_within(&root_normalized, &canonical) {
