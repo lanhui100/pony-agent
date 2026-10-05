@@ -128,6 +128,16 @@ pub(crate) const TOOL_VIEW_IMAGE: &str = "view_image";
 /// Excel/ODF/RTF/EPUB/CSV/PDF to GitHub-Flavored Markdown, local and offline. The handler
 /// lives in [`crate::agent::document_conversion::ReadDocumentHandler`].
 pub(crate) const TOOL_WORKSPACE_READ_DOCUMENT: &str = "workspace_read_document";
+pub(crate) const TOOL_SUBAGENT: &str = "subagent";
+pub(crate) const TOOL_WORKFLOW: &str = "workflow";
+pub(crate) const TOOL_SPAWN_TEAMMATE: &str = "spawn_teammate";
+pub(crate) const TOOL_LIST_AGENTS: &str = "list_agents";
+pub(crate) const TOOL_SEND_MESSAGE: &str = "send_message";
+pub(crate) const TOOL_INTERRUPT_AGENT: &str = "interrupt_agent";
+pub(crate) const TOOL_DRAIN_INBOX: &str = "drain_inbox";
+pub(crate) const TOOL_TEAM_TASK_CREATE: &str = "team_task_create";
+pub(crate) const TOOL_TEAM_TASK_UPDATE: &str = "team_task_update";
+pub(crate) const TOOL_TEAM_TASK_LIST: &str = "team_task_list";
 
 const MAX_FULL_READ_BYTES: u64 = 120_000;
 const MAX_PATH_REPAIR_SEARCH_FILES: usize = 2_000;
@@ -1147,12 +1157,254 @@ impl ToolRouter {
                 "workspace_batch 不允许递归调用 workspace_batch。".to_string(),
                 Some("请把嵌套批量调用拆成多个叶子工具调用。".to_string()),
             ),
+            Some(TOOL_SUBAGENT) => self.execute_subagent(call),
+            Some(TOOL_WORKFLOW) => self.execute_workflow(call),
+            Some(TOOL_SPAWN_TEAMMATE) => self.execute_spawn_teammate(call),
+            Some(TOOL_LIST_AGENTS) => self.execute_list_agents(call),
+            Some(TOOL_SEND_MESSAGE) => self.execute_send_message(call),
+            Some(TOOL_INTERRUPT_AGENT) => self.execute_interrupt_agent(call),
+            Some(TOOL_DRAIN_INBOX) => self.execute_drain_inbox(call),
+            Some(TOOL_TEAM_TASK_CREATE) => self.execute_team_task_create(call),
+            Some(TOOL_TEAM_TASK_UPDATE) => self.execute_team_task_update(call),
+            Some(TOOL_TEAM_TASK_LIST) => self.execute_team_task_list(call),
             _ => error_result(
                 &call.name,
                 "unsupported_tool",
                 format!("当前 runtime 尚未实现工具 `{}`。", call.name),
                 Some("请改用 list_available_tools 中返回的工具名。".to_string()),
             ),
+        }
+    }
+
+    fn execute_subagent(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<SubagentArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match subagent(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_SUBAGENT.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_SUBAGENT,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_SUBAGENT, "subagent_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_SUBAGENT,
+                "invalid_arguments",
+                format!("Failed to parse subagent arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_workflow(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<WorkflowArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match workflow(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_WORKFLOW.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_WORKFLOW,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_WORKFLOW, "workflow_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_WORKFLOW,
+                "invalid_arguments",
+                format!("Failed to parse workflow arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_spawn_teammate(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<SpawnTeammateArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match spawn_teammate(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_SPAWN_TEAMMATE.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_SPAWN_TEAMMATE,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_SPAWN_TEAMMATE, "spawn_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_SPAWN_TEAMMATE,
+                "invalid_arguments",
+                format!("Failed to parse spawn_teammate arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_list_agents(&self, _call: &ToolCall) -> ToolResult {
+        match list_agents() {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_LIST_AGENTS.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_LIST_AGENTS,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_LIST_AGENTS, "list_agents_failed", err, None),
+        }
+    }
+
+    fn execute_send_message(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<SendMessageArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match send_message(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_SEND_MESSAGE.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_SEND_MESSAGE,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_SEND_MESSAGE, "send_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_SEND_MESSAGE,
+                "invalid_arguments",
+                format!("Failed to parse send_message arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_interrupt_agent(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<InterruptAgentArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match interrupt_agent(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_INTERRUPT_AGENT.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_INTERRUPT_AGENT,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_INTERRUPT_AGENT, "interrupt_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_INTERRUPT_AGENT,
+                "invalid_arguments",
+                format!("Failed to parse interrupt_agent arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_drain_inbox(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<ReadInboxArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match drain_inbox(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_DRAIN_INBOX.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_DRAIN_INBOX,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_DRAIN_INBOX, "drain_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_DRAIN_INBOX,
+                "invalid_arguments",
+                format!("Failed to parse drain_inbox arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_team_task_create(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<TeamTaskCreateArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match team_task_create(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_TEAM_TASK_CREATE.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_TEAM_TASK_CREATE,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_TEAM_TASK_CREATE, "task_create_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_TEAM_TASK_CREATE,
+                "invalid_arguments",
+                format!("Failed to parse team_task_create arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_team_task_update(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<TeamTaskUpdateArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match team_task_update(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_TEAM_TASK_UPDATE.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_TEAM_TASK_UPDATE,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_TEAM_TASK_UPDATE, "task_update_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_TEAM_TASK_UPDATE,
+                "invalid_arguments",
+                format!("Failed to parse team_task_update arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_team_task_list(&self, _call: &ToolCall) -> ToolResult {
+        match team_task_list() {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_TEAM_TASK_LIST.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_TEAM_TASK_LIST,
+                    "result": res,
+                })),
+                duration_ms: 0,
+            },
+            Err(err) => error_result(TOOL_TEAM_TASK_LIST, "task_list_failed", err, None),
         }
     }
 
@@ -4315,6 +4567,228 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             })),
         },
+        ToolDefinition {
+            name: TOOL_SUBAGENT,
+            description: "派生聚焦的子智能体执行独立子任务，隔离上下文并返回聚合结果。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "传递给子智能体的具体任务描述"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "本次子任务简述，用于跟踪与显示"
+                    },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "是否在后台执行"
+                    },
+                    "fork_context": {
+                        "type": "boolean",
+                        "description": "是否继承当前会话上下文"
+                    }
+                },
+                "required": ["prompt", "description"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_WORKFLOW,
+            description: "根据定义的步骤依赖图（DAG）编排执行多步骤工作流。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "工作流名称"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "工作流步骤列表",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "action": { "type": "string" },
+                                "depends_on": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "required": ["id", "action"]
+                        }
+                    }
+                },
+                "required": ["name", "steps"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_SPAWN_TEAMMATE,
+            description: "在当前 Agent Team 中派生具有独立角色和职责的持久化队友智能体。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "队友名称（唯一标识）"
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "队友角色，如 tester, reviewer, executor"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "队友职责描述"
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "队友系统角色提示词与初始任务"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "fresh 或 fork，默认 fresh"
+                    }
+                },
+                "required": ["name", "description", "prompt"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_LIST_AGENTS,
+            description: "列出当前团队中所有活跃及持久化智能体花名册及其运行状态。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_SEND_MESSAGE,
+            description: "向团队内目标智能体发送协同消息，支持普通排队 (queue) 或紧急插队 (steer)。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "目标智能体名称或标识"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "要投递的消息文本"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["queue", "steer"],
+                        "description": "消息投递模式，默认为 queue"
+                    }
+                },
+                "required": ["target", "message"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_INTERRUPT_AGENT,
+            description: "中断目标智能体当前正在执行的回合并保留其待办收件箱。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "目标智能体名称"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "中断原因说明"
+                    }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_DRAIN_INBOX,
+            description: "读取并消费指定智能体信箱中的所有待处理消息队列。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "目标智能体名称"
+                    }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_TEAM_TASK_CREATE,
+            description: "在团队任务看板上创建待认领任务，支持设置写域范围与依赖阻塞。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "任务简明标题"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "任务详细内容与验收标准"
+                    },
+                    "write_scopes": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "该任务预期的写操作作用域"
+                    },
+                    "blocked_by": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "依赖的前序任务 ID 列表"
+                    }
+                },
+                "required": ["subject", "description"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_TEAM_TASK_UPDATE,
+            description: "通过 CAS 乐观锁推进或更新团队看板上的任务状态（认领/完成/释放/删除）。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "目标任务 ID"
+                    },
+                    "expected_revision": {
+                        "type": "integer",
+                        "description": "期望的 CAS 版本号，防并发冲突"
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["claim", "complete", "release", "delete"],
+                        "description": "要执行的流转操作"
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "认领人名称（action 为 claim 时使用）"
+                    }
+                },
+                "required": ["task_id", "expected_revision", "action"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_TEAM_TASK_LIST,
+            description: "列出团队共享看板上所有的任务项、归属人、写域及流转状态。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })),
+        },
     ]
 }
 
@@ -4792,6 +5266,16 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
         TOOL_WORKSPACE_READ_DOCUMENT | "workspace.read_document" => {
             Some(TOOL_WORKSPACE_READ_DOCUMENT)
         }
+        TOOL_SUBAGENT => Some(TOOL_SUBAGENT),
+        TOOL_WORKFLOW => Some(TOOL_WORKFLOW),
+        TOOL_SPAWN_TEAMMATE => Some(TOOL_SPAWN_TEAMMATE),
+        TOOL_LIST_AGENTS => Some(TOOL_LIST_AGENTS),
+        TOOL_SEND_MESSAGE => Some(TOOL_SEND_MESSAGE),
+        TOOL_INTERRUPT_AGENT => Some(TOOL_INTERRUPT_AGENT),
+        TOOL_DRAIN_INBOX => Some(TOOL_DRAIN_INBOX),
+        TOOL_TEAM_TASK_CREATE => Some(TOOL_TEAM_TASK_CREATE),
+        TOOL_TEAM_TASK_UPDATE => Some(TOOL_TEAM_TASK_UPDATE),
+        TOOL_TEAM_TASK_LIST => Some(TOOL_TEAM_TASK_LIST),
         _ => None,
     }
 }
@@ -4827,6 +5311,16 @@ fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
         TOOL_WORKSPACE_READ_DOCUMENT => {
             vec![TOOL_WORKSPACE_READ_DOCUMENT, "workspace.read_document"]
         }
+        TOOL_SUBAGENT => vec![TOOL_SUBAGENT],
+        TOOL_WORKFLOW => vec![TOOL_WORKFLOW],
+        TOOL_SPAWN_TEAMMATE => vec![TOOL_SPAWN_TEAMMATE],
+        TOOL_LIST_AGENTS => vec![TOOL_LIST_AGENTS],
+        TOOL_SEND_MESSAGE => vec![TOOL_SEND_MESSAGE],
+        TOOL_INTERRUPT_AGENT => vec![TOOL_INTERRUPT_AGENT],
+        TOOL_DRAIN_INBOX => vec![TOOL_DRAIN_INBOX],
+        TOOL_TEAM_TASK_CREATE => vec![TOOL_TEAM_TASK_CREATE],
+        TOOL_TEAM_TASK_UPDATE => vec![TOOL_TEAM_TASK_UPDATE],
+        TOOL_TEAM_TASK_LIST => vec![TOOL_TEAM_TASK_LIST],
         _ => Vec::new(),
     }
 }
@@ -4862,6 +5356,20 @@ fn execution_policy_for_primitive(primitive: &str) -> ToolExecutionPolicy {
         TOOL_WORKSPACE_RUN_COMMAND => {
             policy.default_timeout_ms = DEFAULT_RUN_TIMEOUT_MS;
             policy.result_budget_bytes = MAX_FULL_READ_BYTES as usize;
+        }
+        TOOL_SUBAGENT | TOOL_WORKFLOW => {
+            policy.concurrent_safe = true;
+            policy.default_timeout_ms = 120_000;
+        }
+        TOOL_SPAWN_TEAMMATE
+        | TOOL_LIST_AGENTS
+        | TOOL_SEND_MESSAGE
+        | TOOL_INTERRUPT_AGENT
+        | TOOL_DRAIN_INBOX
+        | TOOL_TEAM_TASK_CREATE
+        | TOOL_TEAM_TASK_UPDATE
+        | TOOL_TEAM_TASK_LIST => {
+            policy.concurrent_safe = true;
         }
         _ => {}
     }
@@ -4959,6 +5467,14 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_PLAN_CONTROL => ToolKind::Write,
         TOOL_VIEW_IMAGE => ToolKind::Read,
         TOOL_WORKSPACE_READ_DOCUMENT => ToolKind::Read,
+        TOOL_SUBAGENT | TOOL_WORKFLOW => ToolKind::Composite,
+        TOOL_SPAWN_TEAMMATE
+        | TOOL_LIST_AGENTS
+        | TOOL_SEND_MESSAGE
+        | TOOL_INTERRUPT_AGENT
+        | TOOL_DRAIN_INBOX => ToolKind::Interactive,
+        TOOL_TEAM_TASK_CREATE | TOOL_TEAM_TASK_UPDATE => ToolKind::Write,
+        TOOL_TEAM_TASK_LIST => ToolKind::Read,
         _ => ToolKind::External,
     }
 }
@@ -4985,6 +5501,16 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         TOOL_PLAN_CONTROL => ToolExposure::ModelVisible,
         TOOL_VIEW_IMAGE => ToolExposure::ModelVisible,
         TOOL_WORKSPACE_READ_DOCUMENT => ToolExposure::ModelVisible,
+        TOOL_SUBAGENT
+        | TOOL_WORKFLOW
+        | TOOL_SPAWN_TEAMMATE
+        | TOOL_LIST_AGENTS
+        | TOOL_SEND_MESSAGE
+        | TOOL_INTERRUPT_AGENT
+        | TOOL_DRAIN_INBOX
+        | TOOL_TEAM_TASK_CREATE
+        | TOOL_TEAM_TASK_UPDATE
+        | TOOL_TEAM_TASK_LIST => ToolExposure::ModelVisible,
         _ => ToolExposure::Internal,
     }
 }

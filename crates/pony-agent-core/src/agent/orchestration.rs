@@ -220,23 +220,6 @@ pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {
 }
 
 pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, String> {
-    let mut lock = TEAMMATES.lock().unwrap();
-    if lock.is_none() {
-        let mut map = HashMap::new();
-        map.insert(
-            "lead".to_string(),
-            TeammateMember {
-                target: "lead".to_string(),
-                name: "Lead".to_string(),
-                role: "lead".to_string(),
-                status: TeammateStatus::Running,
-                description: "Team Lead Orchestrator".to_string(),
-            },
-        );
-        *lock = Some(map);
-    }
-    let map = lock.as_mut().unwrap();
-
     let target = args.name.to_lowercase().replace(' ', "-");
     let member = TeammateMember {
         target: target.clone(),
@@ -245,14 +228,36 @@ pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, St
         status: TeammateStatus::Active,
         description: args.description,
     };
-    map.insert(target.clone(), member.clone());
 
-    // 初始化该 Agent 的独立收件箱
-    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
-    if inbox_lock.is_none() {
-        *inbox_lock = Some(HashMap::new());
+    // 1. 在独立的作用域内先完成 TEAMMATES 登记，立即释放锁
+    {
+        let mut lock = TEAMMATES.lock().unwrap();
+        if lock.is_none() {
+            let mut map = HashMap::new();
+            map.insert(
+                "lead".to_string(),
+                TeammateMember {
+                    target: "lead".to_string(),
+                    name: "Lead".to_string(),
+                    role: "lead".to_string(),
+                    status: TeammateStatus::Running,
+                    description: "Team Lead Orchestrator".to_string(),
+                },
+            );
+            *lock = Some(map);
+        }
+        let map = lock.as_mut().unwrap();
+        map.insert(target.clone(), member.clone());
     }
-    inbox_lock.as_mut().unwrap().insert(target, VecDeque::new());
+
+    // 2. 初始化该 Agent 的独立收件箱（无锁嵌套，避免跨 Mutex 死锁）
+    {
+        let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
+        if inbox_lock.is_none() {
+            *inbox_lock = Some(HashMap::new());
+        }
+        inbox_lock.as_mut().unwrap().insert(target, VecDeque::new());
+    }
 
     Ok(SpawnTeammateResult { member })
 }
@@ -281,45 +286,56 @@ pub fn list_agents() -> Result<ListAgentsResult, String> {
 
 /// 支持排队 (Queue) 与插队 (Steer) 发送消息
 pub fn send_message(args: SendMessageArgs) -> Result<SendMessageResult, String> {
-    let mut lock = TEAMMATES.lock().unwrap();
-    let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
-    let member = map.get_mut(&args.target).ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
-
     let mode = args.mode.unwrap_or(MessageDeliveryMode::Queue);
     let msg_id = format!("msg-{}", Uuid::new_v4());
 
-    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
-    if inbox_lock.is_none() {
-        *inbox_lock = Some(HashMap::new());
-    }
-    let inbox_map = inbox_lock.as_mut().unwrap();
-    let deque = inbox_map.entry(args.target.clone()).or_insert_with(VecDeque::new);
+    // 1. 检验目标并更新状态，立即释放 TEAMMATES 锁
+    {
+        let mut lock = TEAMMATES.lock().unwrap();
+        let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
+        let member = map
+            .get_mut(&args.target)
+            .ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
 
-    let queued_msg = QueuedMessage {
-        id: msg_id.clone(),
-        content: args.message,
-        is_steer: mode == MessageDeliveryMode::Steer,
+        match mode {
+            MessageDeliveryMode::Steer => {
+                if member.status == TeammateStatus::Inactive || member.status == TeammateStatus::Active {
+                    member.status = TeammateStatus::Running;
+                }
+            }
+            MessageDeliveryMode::Queue => {
+                if member.status == TeammateStatus::Inactive {
+                    member.status = TeammateStatus::Active;
+                }
+            }
+        }
+    }
+
+    // 2. 独立获取 TEAMMATE_INBOXES 锁并推入队列，绝不与 TEAMMATES 双重嵌套
+    let len = {
+        let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
+        if inbox_lock.is_none() {
+            *inbox_lock = Some(HashMap::new());
+        }
+        let inbox_map = inbox_lock.as_mut().unwrap();
+        let deque = inbox_map.entry(args.target.clone()).or_insert_with(VecDeque::new);
+
+        let queued_msg = QueuedMessage {
+            id: msg_id.clone(),
+            content: args.message,
+            is_steer: mode == MessageDeliveryMode::Steer,
+        };
+
+        match mode {
+            MessageDeliveryMode::Steer => {
+                deque.push_front(queued_msg);
+            }
+            MessageDeliveryMode::Queue => {
+                deque.push_back(queued_msg);
+            }
+        }
+        deque.len()
     };
-
-    match mode {
-        MessageDeliveryMode::Steer => {
-            // 插队模式：推入队列头部 (Steer Priority)
-            deque.push_front(queued_msg);
-            // 若原先处于 Inactive，唤醒为 Running
-            if member.status == TeammateStatus::Inactive || member.status == TeammateStatus::Active {
-                member.status = TeammateStatus::Running;
-            }
-        }
-        MessageDeliveryMode::Queue => {
-            // 普通排队模式：追加到队列尾部 (FIFO)
-            deque.push_back(queued_msg);
-            if member.status == TeammateStatus::Inactive {
-                member.status = TeammateStatus::Active;
-            }
-        }
-    }
-
-    let len = deque.len();
 
     Ok(SendMessageResult {
         message_id: msg_id,
