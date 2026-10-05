@@ -270,7 +270,7 @@ fn to_wide_null(s: &str) -> Vec<u16> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), test))]
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
