@@ -54,9 +54,11 @@ pub use crate::agent::goal::{
     GoalData, UpdateGoalAction, UpdateGoalArgs, UpdateGoalResult,
 };
 pub use crate::agent::orchestration::{
-    subagent, team_task_create, team_task_list, team_task_update, workflow, SubagentArgs,
-    SubagentResult, TeamTaskAction, TeamTaskCreateArgs, TeamTaskItem, TeamTaskListResult,
-    TeamTaskUpdateArgs, WorkflowArgs, WorkflowResult, WorkflowStep,
+    list_agents, send_message, spawn_teammate, subagent, team_task_create, team_task_list,
+    team_task_update, workflow, ListAgentsResult, SendMessageArgs, SendMessageResult,
+    SpawnTeammateArgs, SpawnTeammateResult, SubagentArgs, SubagentResult, TeamTaskAction,
+    TeamTaskCreateArgs, TeamTaskItem, TeamTaskListResult, TeamTaskUpdateArgs, TeammateMember,
+    TeammateStatus, WorkflowArgs, WorkflowResult, WorkflowStep,
 };
 pub use crate::agent::present::{
     present, PresentArgs, PresentFileInput, PresentResult, PresentedFileItem,

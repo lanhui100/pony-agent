@@ -3,11 +3,16 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use uuid::Uuid;
 
+// ==========================================
+// 1. Subagent (子智能体) 契约
+// ==========================================
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentArgs {
     pub prompt: String,
     pub description: String,
     pub run_in_background: Option<bool>,
+    pub fork_context: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +21,10 @@ pub struct SubagentResult {
     pub status: String,
     pub output: Option<String>,
 }
+
+// ==========================================
+// 2. Workflow (DAG 任务流编排) 契约
+// ==========================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowStep {
@@ -37,12 +46,71 @@ pub struct WorkflowResult {
     pub status: String,
 }
 
+// ==========================================
+// 3. Agent Teams (花名册 Roster + 邮箱 Mailbox) 契约
+// ==========================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TeammateStatus {
+    Provisioning,
+    Active,
+    Running,
+    Inactive,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeammateMember {
+    pub target: String,
+    pub name: String,
+    pub role: String,
+    pub status: TeammateStatus,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnTeammateArgs {
+    pub name: String,
+    pub role: Option<String>,
+    pub description: String,
+    pub prompt: String,
+    pub context: Option<String>, // fresh | fork
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnTeammateResult {
+    pub member: TeammateMember,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListAgentsResult {
+    pub agents: Vec<TeammateMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageArgs {
+    pub target: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageResult {
+    pub message_id: String,
+    pub delivered: bool,
+}
+
+// ==========================================
+// 4. Team Task Board (共享看板与写域) 契约
+// ==========================================
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamTaskAction {
     Claim,
     Complete,
     Release,
+    Delete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +146,12 @@ pub struct TeamTaskListResult {
     pub tasks: Vec<TeamTaskItem>,
 }
 
+// ==========================================
+// 全局状态管理
+// ==========================================
+
 static TEAM_TASKS: Mutex<Option<HashMap<String, TeamTaskItem>>> = Mutex::new(None);
+static TEAMMATES: Mutex<Option<HashMap<String, TeammateMember>>> = Mutex::new(None);
 
 pub fn subagent(args: SubagentArgs) -> Result<SubagentResult, String> {
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
@@ -91,7 +164,6 @@ pub fn subagent(args: SubagentArgs) -> Result<SubagentResult, String> {
 
 pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {
     let workflow_id = format!("workflow-{}", Uuid::new_v4());
-    // 拓扑执行模拟
     let mut executed = Vec::new();
     for step in args.steps {
         executed.push(step.id);
@@ -100,6 +172,73 @@ pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {
         workflow_id,
         executed_steps: executed,
         status: "success".to_string(),
+    })
+}
+
+pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, String> {
+    let mut lock = TEAMMATES.lock().unwrap();
+    if lock.is_none() {
+        let mut map = HashMap::new();
+        // 默认插入 Lead 节点
+        map.insert(
+            "lead".to_string(),
+            TeammateMember {
+                target: "lead".to_string(),
+                name: "Lead".to_string(),
+                role: "lead".to_string(),
+                status: TeammateStatus::Running,
+                description: "Team Lead Orchestrator".to_string(),
+            },
+        );
+        *lock = Some(map);
+    }
+    let map = lock.as_mut().unwrap();
+
+    let target = args.name.to_lowercase().replace(' ', "-");
+    let member = TeammateMember {
+        target: target.clone(),
+        name: args.name,
+        role: args.role.unwrap_or_else(|| "teammate".to_string()),
+        status: TeammateStatus::Active,
+        description: args.description,
+    };
+    map.insert(target, member.clone());
+
+    Ok(SpawnTeammateResult { member })
+}
+
+pub fn list_agents() -> Result<ListAgentsResult, String> {
+    let mut lock = TEAMMATES.lock().unwrap();
+    if lock.is_none() {
+        let mut map = HashMap::new();
+        map.insert(
+            "lead".to_string(),
+            TeammateMember {
+                target: "lead".to_string(),
+                name: "Lead".to_string(),
+                role: "lead".to_string(),
+                status: TeammateStatus::Running,
+                description: "Team Lead Orchestrator".to_string(),
+            },
+        );
+        *lock = Some(map);
+    }
+    let map = lock.as_ref().unwrap();
+    Ok(ListAgentsResult {
+        agents: map.values().cloned().collect(),
+    })
+}
+
+pub fn send_message(args: SendMessageArgs) -> Result<SendMessageResult, String> {
+    let lock = TEAMMATES.lock().unwrap();
+    let map = lock.as_ref().ok_or_else(|| "No active team".to_string())?;
+    if !map.contains_key(&args.target) {
+        return Err(format!("Teammate target not found: {}", args.target));
+    }
+
+    Ok(SendMessageResult {
+        message_id: format!("msg-{}", Uuid::new_v4()),
+        delivered: true,
     })
 }
 
@@ -149,6 +288,9 @@ pub fn team_task_update(args: TeamTaskUpdateArgs) -> Result<TeamTaskItem, String
         TeamTaskAction::Release => {
             task.status = "pending".to_string();
             task.owner = None;
+        }
+        TeamTaskAction::Delete => {
+            task.status = "deleted".to_string();
         }
     }
 

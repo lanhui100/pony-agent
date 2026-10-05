@@ -14,6 +14,7 @@ fn test_ac01_subagent_dispatch() {
         prompt: "Analyze rust codebase".to_string(),
         description: "Codebase analysis".to_string(),
         run_in_background: Some(false),
+        fork_context: Some(false),
     };
     let res = subagent(args).expect("subagent call should succeed");
     assert!(!res.subagent_id.is_empty());
@@ -87,4 +88,38 @@ fn test_ac03_team_tasks_lifecycle_and_cas() {
 
     let list = team_task_list().expect("list should succeed");
     assert!(list.tasks.iter().any(|t| t.task_id == task.task_id));
+}
+
+#[test]
+fn test_ac04_agent_teams_roster_and_mailbox() {
+    use pony_agent_core::agent::tools::{list_agents, send_message, spawn_teammate, ListAgentsResult, SendMessageArgs, SpawnTeammateArgs};
+
+    // 默认名册包含 Lead
+    let initial_roster: ListAgentsResult = list_agents().expect("list_agents should succeed");
+    assert!(initial_roster.agents.iter().any(|a| a.target == "lead"));
+
+    // 动态派生 Teammate
+    let spawn_res = spawn_teammate(SpawnTeammateArgs {
+        name: "test-evaluator".to_string(),
+        role: Some("evaluator".to_string()),
+        description: "Evaluates security risks".to_string(),
+        prompt: "Review diffs".to_string(),
+        context: Some("fresh".to_string()),
+    }).expect("spawn_teammate should succeed");
+
+    assert_eq!(spawn_res.member.target, "test-evaluator");
+
+    // 向 Teammate 投递消息
+    let msg_res = send_message(SendMessageArgs {
+        target: "test-evaluator".to_string(),
+        message: "Verify sandbox boundaries".to_string(),
+    }).expect("send_message should succeed");
+    assert!(msg_res.delivered);
+
+    // 向不存在的目标投递必须失败
+    let fail_res = send_message(SendMessageArgs {
+        target: "non-existent-agent".to_string(),
+        message: "hello".to_string(),
+    });
+    assert!(fail_res.is_err());
 }
