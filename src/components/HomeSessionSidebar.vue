@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Ellipsis,
+  Folder,
   FolderOpen,
   FolderPlus,
   Pencil,
@@ -713,11 +714,12 @@ function confirmPopoverProps(
             <div
               v-for="group in tree.workspaces"
               :key="group.key"
-              class="pt-1.5"
+              class="pt-1"
               :data-testid="`workspace-group-${group.key}`"
             >
-              <div class="relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1.5 hover:bg-[#f6dfb8]/60">
+              <div class="relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1 hover:bg-[#f6dfb8]/60">
                 <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-stone-700">
+                  <Folder class="h-3.5 w-3.5 shrink-0 text-amber-700/70" />
                   <input
                     v-if="renamingKey === `ws:${group.key}`"
                     v-model="renameDraft"
@@ -794,15 +796,7 @@ function confirmPopoverProps(
                 </ConfirmPopover>
               </div>
 
-              <p
-                v-if="group.count === 0"
-                class="pl-6 pr-2 py-1 text-[10px] leading-4 text-stone-400"
-                :data-testid="`workspace-group-empty-${group.key}`"
-              >
-                {{ SIDEBAR_COPY.emptyGroupHint }}
-              </p>
-
-              <div class="space-y-0.5 pl-3 pt-0.5">
+              <div class="space-y-0.5 pl-3">
                 <div
                   v-for="session in partitionPreview(group.sessions)"
                   :key="session.conversationId"

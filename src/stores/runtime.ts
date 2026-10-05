@@ -32,6 +32,7 @@ import type {
   MessageStateDelta,
   MessageStateSnapshot,
   QueueDeliveryMode,
+  ToolAuthorizationMode,
   QueuedMessageItem,
   RetrievedContextState,
   RuntimePhase,
@@ -298,6 +299,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       initialRollbackActive: false,
       pendingQueuedMessages: [] as QueuedMessageItem[],
       queueDeliveryMode: "queue" as QueueDeliveryMode,
+      toolAuthorizationMode: "ask" as ToolAuthorizationMode,
       eventsReady: false,
       deferredPersistTimerId: null,
       streamFlushFrameId: null,
@@ -2530,6 +2532,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     },
     setQueueDeliveryMode(mode: QueueDeliveryMode) {
       this.queueDeliveryMode = mode;
+    },
+    setToolAuthorizationMode(mode: ToolAuthorizationMode) {
+      this.toolAuthorizationMode = mode;
     },
     dequeueNextMessage(): QueuedMessageItem | null {
       return this.pendingQueuedMessages.shift() ?? null;

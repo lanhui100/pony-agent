@@ -11,6 +11,63 @@ static ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
 #[cfg(target_os = "windows")]
 static ICON_ICO: &[u8] = include_bytes!("../icons/icon.ico");
 
+/// Setup system tray icon and menu for Pony Agent.
+/// Provides "打开主窗口" (Open window) and "退出" (Quit) options.
+/// Left clicking or double clicking the tray icon will also restore/focus the main window.
+pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let open_item = MenuItem::with_id(app, "open", "打开 Pony Agent", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+
+    let icon = match tauri::image::Image::from_bytes(ICON_PNG) {
+        Ok(img) => img,
+        Err(_) => app
+            .default_window_icon()
+            .cloned()
+            .ok_or("no default window icon available")?,
+    };
+
+    let _tray = TrayIconBuilder::with_id("main-tray")
+        .icon(icon)
+        .tooltip("Pony Agent")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => {
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
 /// Load the compile-time embedded icon.png into the main window, and on Windows
 /// also explicitly set ICON_BIG for the taskbar (Tauri's set_icon() only sends
 /// ICON_SMALL).

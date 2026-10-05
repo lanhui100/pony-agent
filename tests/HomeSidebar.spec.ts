@@ -335,16 +335,36 @@ describe("HomeSidebar", () => {
     vi.restoreAllMocks();
   });
 
-  it("右侧栏只保留状态、计划、调试三段，不再渲染 Tools 与 Trace（PA-096）", async () => {
-    const wrapper = await mountSidebar();
+  it("右侧栏只保留状态、计划、调试三段，计划仅在非0时出现，不再渲染 Tools 与 Trace（PA-096）", async () => {
+    const planStore = (await import("@/stores/plan")).usePlanStore();
+    // 初始 plans 为 0，不显示计划
+    let wrapper = await mountSidebar();
     await flushAll();
 
     expect(wrapper.text()).toContain("状态");
     expect(wrapper.get('[data-testid="status-panel-toggle"]').element.closest("section")?.getAttribute("data-open")).toBe("true");
-    expect(wrapper.text()).toContain("计划");
+    expect(wrapper.text()).not.toContain("计划");
     expect(wrapper.text()).not.toContain("Tools");
     expect(wrapper.find('[data-testid="tools-panel-toggle"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="trace-panel-toggle"]').exists()).toBe(false);
+    wrapper.unmount();
+
+    // 当 plans > 0 时，显示计划
+    planStore.$patch({
+      plans: [
+        {
+          planId: "p1",
+          kind: "plan",
+          summary: "测试计划",
+          lifecycle: "active",
+          steps: [],
+          revision: 1
+        }
+      ]
+    });
+    wrapper = await mountSidebar();
+    await flushAll();
+    expect(wrapper.text()).toContain("计划");
   }, 10000);
 
   it("冻结聚合守护（PA-096 review）：进行中 turn 不计入状态面板轮次数", async () => {

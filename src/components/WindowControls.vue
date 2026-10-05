@@ -30,7 +30,7 @@ async function closeWindow() {
   >
     <button
       type="button"
-      class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-stone-500/10 text-stone-500 backdrop-blur-md transition-all hover:bg-stone-500/20 hover:text-stone-800"
+      class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-transparent text-stone-500 transition-all hover:bg-stone-500/20 hover:text-stone-800"
       title="最小化"
       aria-label="最小化"
       @click="minimize"
@@ -39,7 +39,7 @@ async function closeWindow() {
     </button>
     <button
       type="button"
-      class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-stone-500/10 text-stone-500 backdrop-blur-md transition-all hover:bg-stone-500/20 hover:text-stone-800"
+      class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-transparent text-stone-500 transition-all hover:bg-stone-500/20 hover:text-stone-800"
       title="最大化"
       aria-label="最大化"
       @click="toggleMaximize"
@@ -48,7 +48,7 @@ async function closeWindow() {
     </button>
     <button
       type="button"
-      class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-stone-500/10 text-stone-500 backdrop-blur-md transition-all hover:bg-red-500 hover:text-white"
+      class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-transparent text-stone-500 transition-all hover:bg-red-500 hover:text-white"
       title="关闭"
       aria-label="关闭"
       @click="closeWindow"

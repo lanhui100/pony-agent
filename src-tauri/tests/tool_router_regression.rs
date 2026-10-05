@@ -244,7 +244,7 @@ fn gather_context_file_mode_honors_explicit_start_line() {
         .and_then(|entry| entry["output"].as_str())
         .expect("segment output")
         .to_string();
-    assert!(segment_output.contains("第 6 行"), "{segment_output}");
+    assert!(segment_output.contains("第 6 - 8 行"), "{segment_output}");
     assert!(segment_output.contains("line-6"));
     assert!(!segment_output.contains("line-5"));
 

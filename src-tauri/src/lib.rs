@@ -985,6 +985,9 @@ pub fn run() {
                 platform::apply_icons(app);
                 platform::apply_window_style(&window);
             }
+            if let Err(e) = platform::setup_tray(app) {
+                eprintln!("[tray-warning] failed to setup tray icon: {e}");
+            }
 
             Ok(())
         })
@@ -1068,8 +1071,10 @@ pub fn run() {
             open_url
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                window.state::<TurnTaskRegistry>().abort_all();
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 当用户点击关闭按钮时，拦截默认的关闭销毁行为，隐藏窗口并保持后台/托盘常驻
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .run(tauri::generate_context!())

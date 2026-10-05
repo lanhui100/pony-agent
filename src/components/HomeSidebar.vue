@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRuntimeStore } from "@/stores/runtime";
+import { usePlanStore } from "@/stores/plan";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import DebugPanel from "@/components/DebugPanel.vue";
@@ -18,6 +19,8 @@ import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProje
  */
 
 const runtimeStore = useRuntimeStore();
+const planStore = usePlanStore();
+const { plans } = storeToRefs(planStore);
 
 const {
   error,
@@ -108,6 +111,7 @@ onBeforeUnmount(() => {
         />
 
         <PlanPanel
+          v-if="plans.length > 0"
           :session-id="sessionId"
           :open="activePanel === 'plan'"
           @toggle="togglePlan()"

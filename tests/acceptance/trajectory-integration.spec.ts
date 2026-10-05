@@ -157,6 +157,11 @@ describe("Trajectory Integration & E2E Components", () => {
       // Verify error class styling
       expect(spanError.classes()).toContain("bg-rose-500");
 
+      // Verify span label shows single uppercase letter for core event name
+      expect(spanModel.text().trim()).toBe("M");
+      expect(spanTool.text().trim()).toBe("T");
+      expect(spanInput.text().trim()).toBe("U");
+
       // Click on tool span
       await spanTool.trigger("click");
       expect(wrapper.emitted("select-span")?.[0][0]).toEqual(mockModel.spans[2]);

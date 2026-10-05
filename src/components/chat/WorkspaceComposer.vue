@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ArrowUp, Check, ChevronDown, Paperclip, Search, Square, Undo2, X } from "lucide-vue-next";
+import { ArrowUp, Check, ChevronDown, Paperclip, Search, Shield, ShieldAlert, ShieldCheck, Square, Undo2, X } from "lucide-vue-next";
 import type { ProviderModelConfig, ProviderReasoningEffort } from "@/types/provider";
+import type { ToolAuthorizationMode } from "@/types/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useRuntimeStore } from "@/stores/runtime";
 import { pickFiles } from "@/lib/runtime/file-attachments";
@@ -109,6 +110,61 @@ function modelDisplayName(model: Pick<ProviderModelConfig, "name" | "model"> | n
   return model?.model?.trim() || "未命名模型";
 }
 
+// ── 授权模式选择器 ──────────────────────────────────────────
+const authMenuOpen = ref(false);
+const authTriggerRef = ref<HTMLButtonElement | null>(null);
+const authFloatingMenuRef = ref<HTMLElement | null>(null);
+const authMenuStyle = ref<Record<string, string>>({});
+
+const authModes: Array<{ id: ToolAuthorizationMode; label: string; desc: string }> = [
+  { id: "ask", label: "每次询问", desc: "敏感或变更操作前提示确认" },
+  { id: "auto", label: "自动允许", desc: "自动执行所有工具，无需确认" },
+  { id: "read_only", label: "只读模式", desc: "仅允许读操作，禁止修改与执行" }
+];
+
+const currentAuthModeLabel = computed(() => {
+  const current = runtimeStore.toolAuthorizationMode ?? "ask";
+  return authModes.find((m) => m.id === current)?.label || "每次询问";
+});
+
+function toggleAuthMenu() {
+  authMenuOpen.value = !authMenuOpen.value;
+  if (authMenuOpen.value) {
+    menuOpen.value = false;
+    void nextTick().then(updateAuthMenuPosition);
+  }
+}
+
+function selectAuthMode(mode: ToolAuthorizationMode) {
+  runtimeStore.setToolAuthorizationMode(mode);
+  authMenuOpen.value = false;
+}
+
+function updateAuthMenuPosition() {
+  const trigger = authTriggerRef.value;
+  const menu = authFloatingMenuRef.value;
+  if (!authMenuOpen.value || !trigger || !menu) return;
+
+  const viewportPadding = 8;
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const maxLeft = Math.max(viewportPadding, window.innerWidth - menuRect.width - viewportPadding);
+  const maxTop = Math.max(viewportPadding, window.innerHeight - menuRect.height - viewportPadding);
+  const left = Math.min(
+    Math.max(viewportPadding, triggerRect.left),
+    maxLeft
+  );
+  const top = Math.min(
+    Math.max(viewportPadding, triggerRect.top - menuRect.height - viewportPadding),
+    maxTop
+  );
+
+  authMenuStyle.value = {
+    left: `${left}px`,
+    top: `${top}px`,
+    visibility: "visible"
+  };
+}
 const reasoningSummary = computed(() => {
   if (!currentModelSupportsReasoning.value) {
     return "不支持";
@@ -416,6 +472,12 @@ function handleClickOutside(event: MouseEvent) {
     modelMenuOpen.value = false;
     reasoningMenuOpen.value = false;
   }
+
+  const clickedAuthTrigger = authTriggerRef.value?.contains(target) ?? false;
+  const clickedAuthMenu = authFloatingMenuRef.value?.contains(target) ?? false;
+  if (!clickedAuthTrigger && !clickedAuthMenu) {
+    authMenuOpen.value = false;
+  }
 }
 
 onMounted(() => {
@@ -487,24 +549,32 @@ onBeforeUnmount(() => {
       <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200/70 pt-2.5">
         <div class="flex min-w-0 flex-wrap items-center gap-2">
 
-          <TooltipRoot :delay-duration="300">
-            <TooltipTrigger as-child>
-              <button
-                class="composer-trigger flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
-                :class="runtimeStore.queueDeliveryMode === 'steer' ? 'bg-amber-100/80 text-amber-800' : 'bg-stone-100 text-stone-500'"
-                type="button"
-                data-testid="workspace-delivery-mode-toggle"
-                @click="runtimeStore.toggleQueueDeliveryMode"
-              >
-                <span>模式: {{ runtimeStore.queueDeliveryMode === 'steer' ? '插队 (Alt+S)' : '排队 (Alt+S)' }}</span>
-              </button>
-            </TooltipTrigger>
-            <TooltipPortal>
-              <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 shadow-sm">
-                {{ runtimeStore.queueDeliveryMode === 'steer' ? '插队模式：忙碌时发送的消息将插入回合队列首位优先执行 (Alt+S切换)' : '排队模式：忙碌时发送的消息将排入队尾按序执行 (Alt+S切换)' }}
-              </TooltipContent>
-            </TooltipPortal>
-          </TooltipRoot>
+          <!-- 授权模式选择器 -->
+          <div class="relative">
+            <TooltipRoot :delay-duration="300">
+              <TooltipTrigger as-child>
+                <button
+                  ref="authTriggerRef"
+                  class="composer-trigger flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-normal text-stone-600 hover:text-stone-900 bg-stone-100/70 hover:bg-stone-200/60 transition"
+                  type="button"
+                  data-testid="workspace-auth-mode-trigger"
+                  @click.stop="toggleAuthMenu"
+                >
+                  <Shield class="h-3 w-3 text-amber-700/80" />
+                  <span>{{ currentAuthModeLabel }}</span>
+                  <ChevronDown
+                    class="h-2.5 w-2.5 shrink-0 text-stone-400"
+                    :class="{ 'rotate-180': authMenuOpen }"
+                  />
+                </button>
+              </TooltipTrigger>
+              <TooltipPortal>
+                <TooltipContent side="top" :side-offset="4" class="z-50 overflow-hidden rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 shadow-sm">
+                  工具执行授权模式：点击切换
+                </TooltipContent>
+              </TooltipPortal>
+            </TooltipRoot>
+          </div>
 
           <TooltipRoot :delay-duration="300">
             <TooltipTrigger as-child>
@@ -560,6 +630,40 @@ onBeforeUnmount(() => {
               </TooltipPortal>
             </TooltipRoot>
           </div>
+
+          <!-- 授权模式下拉浮窗 -->
+          <Teleport to="body">
+            <div
+              v-if="authMenuOpen"
+              ref="authFloatingMenuRef"
+              class="composer-menu-panel fixed z-[70] min-w-[13rem] p-1 shadow-lg border border-stone-200/90 rounded-lg bg-white"
+              :style="authMenuStyle"
+            >
+              <div class="px-2 py-1 text-[11px] font-semibold text-stone-500 border-b border-stone-100">
+                工具执行授权模式
+              </div>
+              <div class="py-1 space-y-0.5">
+                <button
+                  v-for="item in authModes"
+                  :key="item.id"
+                  type="button"
+                  class="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded text-left transition hover:bg-stone-100"
+                  :class="runtimeStore.toolAuthorizationMode === item.id ? 'bg-amber-50/80 text-amber-900 font-medium' : 'text-stone-700'"
+                  :data-testid="`workspace-auth-mode-item-${item.id}`"
+                  @click="selectAuthMode(item.id)"
+                >
+                  <div class="flex flex-col">
+                    <span class="text-[12px] leading-4">{{ item.label }}</span>
+                    <span class="text-[10px] text-stone-400">{{ item.desc }}</span>
+                  </div>
+                  <Check
+                    v-if="runtimeStore.toolAuthorizationMode === item.id"
+                    class="h-3.5 w-3.5 shrink-0 text-amber-700"
+                  />
+                </button>
+              </div>
+            </div>
+          </Teleport>
 
           <Teleport to="body">
             <div
@@ -794,12 +898,12 @@ onBeforeUnmount(() => {
 }
 
 .composer-trigger.composer-model-trigger {
-  max-width: 12rem;
+  max-width: 22rem;
   padding: 0 0.45rem;
 }
 
 .composer-trigger.composer-model-trigger > .truncate {
-  max-width: 8rem;
+  max-width: 16rem;
   color: rgb(87 83 78);
 }
 

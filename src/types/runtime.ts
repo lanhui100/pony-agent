@@ -1,6 +1,7 @@
 import type { ProviderReasoningEffort } from "@/types/provider";
 
 export type QueueDeliveryMode = "queue" | "steer";
+export type ToolAuthorizationMode = "ask" | "auto" | "read_only";
 
 export type QueuedMessageItem = {
   id: string;

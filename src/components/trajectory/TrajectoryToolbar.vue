@@ -18,7 +18,7 @@ const emit = defineEmits<{
 
 <template>
   <header
-    class="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200/70 bg-[#faf8f5]/90 px-3 py-2 text-xs backdrop-blur-sm dark:border-stone-800 dark:bg-stone-900/90"
+    class="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200/70 bg-[#faf6ef] px-3 py-2 text-xs"
     role="toolbar"
     aria-label="轨迹控制工具栏"
   >
@@ -26,11 +26,11 @@ const emit = defineEmits<{
       <!-- 实际时长 / 等宽切换 -->
       <button
         type="button"
-        class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-medium transition"
+        class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-medium transition cursor-pointer"
         :class="
           actualDuration
-            ? 'bg-amber-100/80 text-amber-900 shadow-xs dark:bg-amber-950/60 dark:text-amber-200'
-            : 'bg-stone-100 text-stone-600 hover:bg-stone-200/80 dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700'
+            ? 'bg-[#f7e3bf] text-stone-900 shadow-xs'
+            : 'bg-stone-200/50 text-stone-600 hover:bg-stone-200/80 hover:text-stone-900'
         "
         :title="actualDuration ? '切换为等宽模式' : '切换为实际耗时模式'"
         :aria-pressed="actualDuration"
@@ -41,12 +41,12 @@ const emit = defineEmits<{
         <span>{{ actualDuration ? "实际耗时" : "等宽视图" }}</span>
       </button>
 
-      <div class="h-3.5 w-[1px] bg-stone-300 dark:bg-stone-700 mx-0.5" aria-hidden="true" />
+      <div class="h-3.5 w-[1px] bg-stone-300 mx-0.5" aria-hidden="true" />
 
       <!-- 全部展开/折叠轮次 -->
       <button
         type="button"
-        class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-stone-600 transition hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+        class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-stone-600 transition cursor-pointer hover:bg-[#f7e3bf]/60 hover:text-stone-900"
         :title="allTurnsCollapsed ? '展开所有轮次' : '折叠所有轮次'"
         :aria-pressed="allTurnsCollapsed"
         data-testid="trajectory-toolbar-turns-toggle"
@@ -59,7 +59,7 @@ const emit = defineEmits<{
       <!-- 全部展开/折叠调用详情 -->
       <button
         type="button"
-        class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-stone-600 transition hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+        class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-stone-600 transition cursor-pointer hover:bg-[#f7e3bf]/60 hover:text-stone-900"
         :title="allCallsCollapsed ? '展开所有调用详情' : '折叠所有调用详情'"
         :aria-pressed="allCallsCollapsed"
         data-testid="trajectory-toolbar-calls-toggle"
@@ -77,14 +77,14 @@ const emit = defineEmits<{
         type="search"
         :value="searchQuery"
         placeholder="搜索轨迹 (step, tool, error)..."
-        class="w-full rounded-md border border-stone-200/80 bg-white/90 py-1 pl-8 pr-7 text-xs text-stone-800 placeholder-stone-400 outline-none transition focus:border-amber-400 focus:ring-1 focus:ring-amber-300 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder-stone-500"
+        class="w-full rounded-md border border-stone-200/80 bg-white/90 py-1 pl-8 pr-7 text-xs text-stone-800 placeholder-stone-400 outline-none transition focus:border-amber-400 focus:ring-1 focus:ring-amber-300"
         data-testid="trajectory-toolbar-search-input"
         @input="emit('update:searchQuery', ($event.target as HTMLInputElement).value)"
       />
       <button
         v-if="searchQuery"
         type="button"
-        class="absolute right-2 text-stone-400 hover:text-stone-600 dark:hover:text-stone-200"
+        class="absolute right-2 text-stone-400 hover:text-stone-600 cursor-pointer"
         title="清空搜索"
         @click="emit('update:searchQuery', '')"
       >

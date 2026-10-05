@@ -245,7 +245,7 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     wrapper.unmount();
   });
 
-  it("工作区组行解剖：文件夹图标、名称、计数徽标、＋ 与 ⋯；空组提示", () => {
+  it("工作区组行解剖：文件夹图标、名称、计数徽标、＋ 与 ⋯；无对话时不展示空组提示", () => {
     seedTree({
       sessions: [createSession({ conversationId: "b1", title: "B 会话", workspaceId: "ws-b" })]
     });
@@ -256,7 +256,7 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     expect(groupA?.textContent).toContain("项目A");
     expect(groupA?.querySelector('[data-testid="workspace-row-new-ws-a"]')).toBeTruthy();
     expect(groupA?.querySelector('[data-testid="workspace-row-menu-ws-a"]')).toBeTruthy();
-    expect(document.body.querySelector('[data-testid="workspace-group-empty-ws-a"]')?.textContent).toContain("暂无对话");
+    expect(document.body.querySelector('[data-testid="workspace-group-empty-ws-a"]')).toBeNull();
     const groupB = document.body.querySelector('[data-testid="workspace-group-ws-b"]');
     expect(groupB?.textContent).toContain("项目B");
     expect(groupB?.textContent).toContain("1");

@@ -40,25 +40,47 @@ function getSpanColorClasses(span: TrajectoryTimelineSpan): string {
   }
   switch (span.kind) {
     case "user":
-      return "bg-sky-500/80 hover:bg-sky-500 text-white border-sky-600";
+      return "bg-[#8b5e34] hover:bg-[#724c29] text-[#faf6ef] border-[#724c29]";
     case "context":
     case "system":
-      return "bg-stone-400 hover:bg-stone-500 text-stone-900 border-stone-400";
+      return "bg-stone-300 hover:bg-stone-400 text-stone-800 border-stone-400";
     case "message":
     case "compacted":
-      return "bg-emerald-500/80 hover:bg-emerald-500 text-white border-emerald-600";
+      return "bg-[#c89d66] hover:bg-[#b88c55] text-stone-900 border-[#b88c55]";
     case "tool":
     case "subtool":
-      return "bg-amber-500/80 hover:bg-amber-500 text-white border-amber-600";
+      return "bg-[#e2b882] hover:bg-[#d4a469] text-stone-900 border-[#d4a469]";
     default:
-      return "bg-stone-400 hover:bg-stone-500 text-white border-stone-500";
+      return "bg-stone-300 hover:bg-stone-400 text-stone-800 border-stone-400";
+  }
+}
+
+function getSpanCoreInitial(span: TrajectoryTimelineSpan): string {
+  // 根据事件类型或标签提取核心名称首字母：如 Model -> M, Tool -> T
+  switch (span.kind) {
+    case "message":
+    case "compacted":
+      return "M";
+    case "tool":
+    case "subtool":
+      return "T";
+    case "user":
+      return "U";
+    case "context":
+      return "C";
+    case "system":
+      return "S";
+    default: {
+      const trimmed = span.label?.trim() || "";
+      return trimmed ? trimmed.charAt(0).toUpperCase() : "?";
+    }
   }
 }
 </script>
 
 <template>
   <div
-    class="relative select-none border-b border-stone-200/80 bg-stone-50/70 p-2 text-xs dark:border-stone-800 dark:bg-stone-950/40"
+    class="relative select-none border-b border-stone-200/70 bg-[#faf6ef] p-2 text-xs"
     role="region"
     aria-label="轨迹时间轴"
     data-testid="trajectory-timeline"
@@ -68,11 +90,11 @@ function getSpanColorClasses(span: TrajectoryTimelineSpan): string {
       <div
         v-for="boundary in model.turnBoundaries"
         :key="boundary.turnId"
-        class="absolute top-0 bottom-0 border-l border-dashed border-stone-300 dark:border-stone-700"
+        class="absolute top-0 bottom-0 border-l border-dashed border-stone-300/80"
         :style="{ left: `${getTurnBoundaryLeftPercent(boundary.time)}%` }"
       >
         <span
-          class="sticky top-0 ml-1 inline-block rounded bg-stone-200/80 px-1 py-0.5 text-[9px] font-semibold text-stone-600 backdrop-blur-xs dark:bg-stone-800 dark:text-stone-300"
+          class="sticky top-0 ml-1 inline-block rounded bg-[#f6f0e8] px-1 py-0.5 text-[9px] font-semibold text-stone-600 shadow-xs"
         >
           {{ boundary.title }}
         </span>
@@ -84,11 +106,11 @@ function getSpanColorClasses(span: TrajectoryTimelineSpan): string {
       <div
         v-for="(label, laneIndex) in laneLabels"
         :key="laneIndex"
-        class="relative flex h-6 items-center rounded bg-stone-200/40 px-1 dark:bg-stone-900/60"
+        class="relative flex h-6 items-center rounded-[0.35rem] bg-[#f6f0e8] px-1"
       >
         <!-- Lane Label -->
         <span
-          class="pointer-events-none absolute left-1.5 z-20 text-[10px] font-medium tracking-tight text-stone-400 select-none opacity-60"
+          class="pointer-events-none absolute left-1.5 z-20 text-[10px] font-medium tracking-tight text-stone-400 select-none opacity-70"
         >
           {{ label }}
         </span>
@@ -102,7 +124,7 @@ function getSpanColorClasses(span: TrajectoryTimelineSpan): string {
             >
               <button
                 type="button"
-                class="absolute top-1 bottom-1 flex items-center justify-center truncate rounded-[3px] border px-1 text-[10px] font-medium leading-none transition shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+                class="absolute top-1 bottom-1 flex items-center justify-center truncate rounded-[3px] border px-1 text-[10px] font-medium leading-none transition shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 cursor-pointer"
                 :class="[
                   getSpanColorClasses(span),
                   selectedSpanId === span.id
@@ -117,7 +139,7 @@ function getSpanColorClasses(span: TrajectoryTimelineSpan): string {
                 :data-testid="`trajectory-span-${span.id}`"
                 @click="emit('select-span', span)"
               >
-                <span class="truncate">{{ span.label }}</span>
+                <span>{{ getSpanCoreInitial(span) }}</span>
               </button>
             </Tooltip>
           </template>

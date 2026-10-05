@@ -93,3 +93,19 @@ main.resizing [data-testid="home-right-sidebar-shell"] {
 .hide-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* 隐藏原生滚动条，确保与 shadcn-vue 自定义滚动条共存时不出现原生双滚动条 */
+[data-reka-scroll-area-viewport],
+.workspace-timeline-viewport,
+aside [data-reka-scroll-area-viewport] {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+[data-reka-scroll-area-viewport]::-webkit-scrollbar,
+.workspace-timeline-viewport::-webkit-scrollbar,
+aside [data-reka-scroll-area-viewport]::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
