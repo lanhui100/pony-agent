@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -47,7 +47,7 @@ pub struct WorkflowResult {
 }
 
 // ==========================================
-// 3. Agent Teams (花名册 Roster + 邮箱 Mailbox) 契约
+// 3. Agent Teams (花名册 Roster + 邮箱 Mailbox + 消息调度) 契约
 // ==========================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,16 +88,58 @@ pub struct ListAgentsResult {
     pub agents: Vec<TeammateMember>,
 }
 
+/// 投递优先级模式：普通排队 (Queue/Followup) vs 紧急插队 (Steer)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDeliveryMode {
+    Queue,
+    Steer,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageArgs {
     pub target: String,
     pub message: String,
+    pub mode: Option<MessageDeliveryMode>, // 默认为 Queue (排队)，可指定 Steer (插队)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageResult {
     pub message_id: String,
     pub delivered: bool,
+    pub mode: MessageDeliveryMode,
+    pub pending_inbox_len: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    pub id: String,
+    pub content: String,
+    pub is_steer: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptAgentArgs {
+    pub target: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptAgentResult {
+    pub success: bool,
+    pub previous_status: TeammateStatus,
+    pub new_status: TeammateStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadInboxArgs {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadInboxResult {
+    pub target: String,
+    pub messages: Vec<QueuedMessage>,
 }
 
 // ==========================================
@@ -147,11 +189,13 @@ pub struct TeamTaskListResult {
 }
 
 // ==========================================
-// 全局状态管理
+// 全局状态管理与双向信道
 // ==========================================
 
 static TEAM_TASKS: Mutex<Option<HashMap<String, TeamTaskItem>>> = Mutex::new(None);
 static TEAMMATES: Mutex<Option<HashMap<String, TeammateMember>>> = Mutex::new(None);
+/// 每个 Teammate 对应的优先级双端信箱 (双端队列支持普通排队 push_back 与插队 push_front)
+static TEAMMATE_INBOXES: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>> = Mutex::new(None);
 
 pub fn subagent(args: SubagentArgs) -> Result<SubagentResult, String> {
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
@@ -179,7 +223,6 @@ pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, St
     let mut lock = TEAMMATES.lock().unwrap();
     if lock.is_none() {
         let mut map = HashMap::new();
-        // 默认插入 Lead 节点
         map.insert(
             "lead".to_string(),
             TeammateMember {
@@ -202,7 +245,14 @@ pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, St
         status: TeammateStatus::Active,
         description: args.description,
     };
-    map.insert(target, member.clone());
+    map.insert(target.clone(), member.clone());
+
+    // 初始化该 Agent 的独立收件箱
+    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
+    if inbox_lock.is_none() {
+        *inbox_lock = Some(HashMap::new());
+    }
+    inbox_lock.as_mut().unwrap().insert(target, VecDeque::new());
 
     Ok(SpawnTeammateResult { member })
 }
@@ -229,16 +279,82 @@ pub fn list_agents() -> Result<ListAgentsResult, String> {
     })
 }
 
+/// 支持排队 (Queue) 与插队 (Steer) 发送消息
 pub fn send_message(args: SendMessageArgs) -> Result<SendMessageResult, String> {
-    let lock = TEAMMATES.lock().unwrap();
-    let map = lock.as_ref().ok_or_else(|| "No active team".to_string())?;
-    if !map.contains_key(&args.target) {
-        return Err(format!("Teammate target not found: {}", args.target));
+    let mut lock = TEAMMATES.lock().unwrap();
+    let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
+    let member = map.get_mut(&args.target).ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
+
+    let mode = args.mode.unwrap_or(MessageDeliveryMode::Queue);
+    let msg_id = format!("msg-{}", Uuid::new_v4());
+
+    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
+    if inbox_lock.is_none() {
+        *inbox_lock = Some(HashMap::new());
+    }
+    let inbox_map = inbox_lock.as_mut().unwrap();
+    let deque = inbox_map.entry(args.target.clone()).or_insert_with(VecDeque::new);
+
+    let queued_msg = QueuedMessage {
+        id: msg_id.clone(),
+        content: args.message,
+        is_steer: mode == MessageDeliveryMode::Steer,
+    };
+
+    match mode {
+        MessageDeliveryMode::Steer => {
+            // 插队模式：推入队列头部 (Steer Priority)
+            deque.push_front(queued_msg);
+            // 若原先处于 Inactive，唤醒为 Running
+            if member.status == TeammateStatus::Inactive || member.status == TeammateStatus::Active {
+                member.status = TeammateStatus::Running;
+            }
+        }
+        MessageDeliveryMode::Queue => {
+            // 普通排队模式：追加到队列尾部 (FIFO)
+            deque.push_back(queued_msg);
+            if member.status == TeammateStatus::Inactive {
+                member.status = TeammateStatus::Active;
+            }
+        }
     }
 
+    let len = deque.len();
+
     Ok(SendMessageResult {
-        message_id: format!("msg-{}", Uuid::new_v4()),
+        message_id: msg_id,
         delivered: true,
+        mode,
+        pending_inbox_len: len,
+    })
+}
+
+/// 打断正在运行的智能体（保留其信箱队列）
+pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult, String> {
+    let mut lock = TEAMMATES.lock().unwrap();
+    let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
+    let member = map.get_mut(&args.target).ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
+
+    let prev = member.status.clone();
+    member.status = TeammateStatus::Inactive;
+
+    Ok(InterruptAgentResult {
+        success: true,
+        previous_status: prev,
+        new_status: TeammateStatus::Inactive,
+    })
+}
+
+/// 读取并消费目标智能体收件箱的消息
+pub fn drain_inbox(args: ReadInboxArgs) -> Result<ReadInboxResult, String> {
+    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
+    let inbox_map = inbox_lock.as_mut().ok_or_else(|| "No inboxes".to_string())?;
+    let deque = inbox_map.get_mut(&args.target).ok_or_else(|| format!("No inbox for {}", args.target))?;
+
+    let messages: Vec<QueuedMessage> = deque.drain(..).collect();
+    Ok(ReadInboxResult {
+        target: args.target,
+        messages,
     })
 }
 

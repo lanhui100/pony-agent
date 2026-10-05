@@ -113,6 +113,7 @@ fn test_ac04_agent_teams_roster_and_mailbox() {
     let msg_res = send_message(SendMessageArgs {
         target: "test-evaluator".to_string(),
         message: "Verify sandbox boundaries".to_string(),
+        mode: None,
     }).expect("send_message should succeed");
     assert!(msg_res.delivered);
 
@@ -120,6 +121,60 @@ fn test_ac04_agent_teams_roster_and_mailbox() {
     let fail_res = send_message(SendMessageArgs {
         target: "non-existent-agent".to_string(),
         message: "hello".to_string(),
+        mode: None,
     });
     assert!(fail_res.is_err());
+}
+
+#[test]
+fn test_ac05_message_queuing_and_steering() {
+    use pony_agent_core::agent::tools::{
+        drain_inbox, interrupt_agent, send_message, spawn_teammate, InterruptAgentArgs,
+        MessageDeliveryMode, ReadInboxArgs, SendMessageArgs, SpawnTeammateArgs, TeammateStatus,
+    };
+
+    let target = "steer-worker".to_string();
+    spawn_teammate(SpawnTeammateArgs {
+        name: "steer-worker".to_string(),
+        role: Some("worker".to_string()),
+        description: "Worker for steering test".to_string(),
+        prompt: "Run tasks".to_string(),
+        context: None,
+    }).unwrap();
+
+    // 1. 发送普通排队消息 (Queue / FIFO)
+    send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "Regular task 1".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    }).unwrap();
+
+    send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "Regular task 2".to_string(),
+        mode: Some(MessageDeliveryMode::Queue),
+    }).unwrap();
+
+    // 2. 发送紧急插队消息 (Steer / Head Priority)
+    send_message(SendMessageArgs {
+        target: target.clone(),
+        message: "Emergency steer instruction!".to_string(),
+        mode: Some(MessageDeliveryMode::Steer),
+    }).unwrap();
+
+    // 3. 消费信箱并检验顺序：插队消息应排在首位
+    let inbox = drain_inbox(ReadInboxArgs { target: target.clone() }).unwrap();
+    assert_eq!(inbox.messages.len(), 3);
+    assert_eq!(inbox.messages[0].content, "Emergency steer instruction!");
+    assert!(inbox.messages[0].is_steer);
+    assert_eq!(inbox.messages[1].content, "Regular task 1");
+    assert_eq!(inbox.messages[2].content, "Regular task 2");
+
+    // 4. 打断智能体中断状态测试
+    let int_res = interrupt_agent(InterruptAgentArgs {
+        target: target.clone(),
+        reason: Some("Manual user interrupt".to_string()),
+    }).unwrap();
+    assert!(int_res.success);
+    assert_eq!(int_res.new_status, TeammateStatus::Inactive);
 }
