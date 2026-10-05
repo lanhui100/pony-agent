@@ -123,9 +123,13 @@ jobs:
           # Wait up to 30s for assets to become queryable via GitHub Releases API
           $rel = $null
           $setup = @()
+          $endpoint = "repos/$repo/releases?per_page=100"
+          $jqFilter = ".[] | select(.tag_name == `"$tag`" and .draft == true) | .id"
           for ($retry = 0; $retry -lt 10; $retry++) {
-            $relId = (gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\" and .draft == true) | .id" | Select-Object -First 1)
-            if ($relId) {
+            $releases = (gh api $endpoint | ConvertFrom-Json)
+            $draftRelease = @($releases | Where-Object { $_.tag_name -eq $tag -and $_.draft -eq $true }) | Select-Object -First 1
+            if ($draftRelease) {
+              $relId = $draftRelease.id
               $rel = gh api "repos/$repo/releases/$relId" | ConvertFrom-Json
               $setup = @($rel.assets | Where-Object { $_.name -like "*-setup.exe" })
               if ($setup.Count -ge 1) { break }
