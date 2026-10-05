@@ -120,9 +120,18 @@ jobs:
           # Compose latest.json from the POST-upload (GitHub-normalized) asset names:
           # GitHub uploads rename spaces to dots, so the local build name (with space)
           # would 404 in the updater. Read the draft's real asset list by release id.
-          $relId = gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\" and .draft == true) | .id"
-          $rel = gh api "repos/$repo/releases/$relId" | ConvertFrom-Json
-          $setup = @($rel.assets | Where-Object { $_.name -like "*-setup.exe" })
+          # Wait up to 30s for assets to become queryable via GitHub Releases API
+          $rel = $null
+          $setup = @()
+          for ($retry = 0; $retry -lt 10; $retry++) {
+            $relId = (gh api "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\" and .draft == true) | .id" | Select-Object -First 1)
+            if ($relId) {
+              $rel = gh api "repos/$repo/releases/$relId" | ConvertFrom-Json
+              $setup = @($rel.assets | Where-Object { $_.name -like "*-setup.exe" })
+              if ($setup.Count -ge 1) { break }
+            }
+            Start-Sleep -Seconds 3
+          }
           if ($setup.Count -ne 1) { throw "expected exactly one setup.exe asset, got $($setup.Count): $(($rel.assets.name) -join ', ')" }
           $asset = $setup[0].name
           $assetUrl = [uri]::EscapeDataString($asset)
