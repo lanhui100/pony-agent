@@ -225,6 +225,36 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
         violations.push(...findings);
       } catch {}
     }
+  } else if (mode === "all") {
+    let trackedFiles = [];
+    try {
+      const out = execSync("git ls-files", { encoding: "utf8" });
+      trackedFiles = out.split("\n").map(s => s.trim()).filter(Boolean);
+    } catch {
+      trackedFiles = [];
+    }
+
+    for (const file of trackedFiles) {
+      const fileErr = checkBlockedFilename(file);
+      if (fileErr) {
+        violations.push({ filename: file, rule: "Blocked Sensitive File", preview: fileErr });
+        continue;
+      }
+
+      // 仅检查小于 1MB 且存在的文件，避免扫描超大二进制或资源文件
+      try {
+        if (!fs.existsSync(file)) continue;
+        const stat = fs.statSync(file);
+        if (stat.size > 1024 * 1024) continue;
+        const ext = path.extname(file).toLowerCase();
+        const binaryExts = [".png", ".jpg", ".jpeg", ".ico", ".gif", ".webp", ".zip", ".tar", ".gz", ".exe", ".dll", ".dylib", ".so", ".sqlite", ".db"];
+        if (binaryExts.includes(ext)) continue;
+
+        const content = fs.readFileSync(file, "utf8");
+        const findings = scanTextContent(content, file);
+        violations.push(...findings);
+      } catch {}
+    }
   }
 
   return violations;
@@ -252,6 +282,8 @@ if (isDirectExecution) {
         targetRange = "HEAD";
       }
     }
+  } else if (args.includes("--all")) {
+    mode = "all";
   } else if (args.includes("--staged")) {
     mode = "staged";
   }

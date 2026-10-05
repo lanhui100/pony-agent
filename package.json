@@ -34,6 +34,7 @@
     "test:e2e": "npm run build && playwright test",
     "test:tauri:smoke": "node scripts/tauri-smoke.js",
     "secrets:check": "node scripts/check-secrets.mjs --staged",
+    "secrets:check:all": "node scripts/check-secrets.mjs --all",
     "verify": "npm run version:check && npm run secrets:check && npm run test:unit && npm run build && npm run cargo:check:shared",
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",

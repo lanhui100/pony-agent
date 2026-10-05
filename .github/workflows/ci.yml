@@ -37,6 +37,9 @@ jobs:
         shell: pwsh
         run: ./scripts/check-version-sync.ps1
 
+      - name: 敏感信息与脱敏扫描（全库纳管文件）
+        run: node scripts/check-secrets.mjs --all
+
       - name: 安装依赖
         run: npm ci
 

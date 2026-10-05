@@ -38,6 +38,11 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $pkg = (Get-Content package.json | ConvertFrom-Json).version
           if ($tag -notmatch "^v$([regex]::Escape($pkg))$") { throw "tag $tag does not match package version $pkg" }
+      - name: 决策记录校验
+        shell: pwsh
+        run: ./scripts/verify-decisions.ps1
+      - name: 敏感信息与脱敏扫描
+        run: npm run secrets:check:all
       - name: Version sync + frontend checks
         run: |
           npm run version:check
@@ -47,6 +52,8 @@ jobs:
         run: |
           npm run cargo:check
           cargo check --release -p pony-agent-core --bin non_tauri_harness
+      - name: Core 单元与集成测试
+        run: npm run cargo:test:shared -- --package=pony-agent-core
 
   build-release:
     needs: verify
@@ -60,6 +67,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
       - name: Install frontend dependencies
         run: npm ci
       - name: Build Windows desktop bundle with signed updater artifacts
@@ -120,12 +131,12 @@ jobs:
           # Compose latest.json from the POST-upload (GitHub-normalized) asset names:
           # GitHub uploads rename spaces to dots, so the local build name (with space)
           # would 404 in the updater. Read the draft's real asset list by release id.
-          # Wait up to 30s for assets to become queryable via GitHub Releases API
+          # Wait up to 45s for assets to become queryable via GitHub Releases API
           $rel = $null
           $setup = @()
           $endpoint = "repos/$repo/releases?per_page=100"
           $jqFilter = ".[] | select(.tag_name == `"$tag`" and .draft == true) | .id"
-          for ($retry = 0; $retry -lt 10; $retry++) {
+          for ($retry = 0; $retry -lt 15; $retry++) {
             $releases = (gh api $endpoint | ConvertFrom-Json)
             $draftRelease = @($releases | Where-Object { $_.tag_name -eq $tag -and $_.draft -eq $true }) | Select-Object -First 1
             if ($draftRelease) {
