@@ -419,15 +419,20 @@ impl PathPermissionChecker {
             }
         };
 
+        // 归一化 root / tmp_dir（Windows 去 \\?\ 前缀）：调用方可能传入 canonicalize 输出，
+        // 与 canonical（已去前缀）做组件级比较前必须对齐形式，否则 prefix 组件不匹配导致误判。
+        let root_normalized = normalize_win_prefix(root);
+        let tmp_dir_normalized = normalize_win_prefix(tmp_dir);
+
         // 组件级前缀判定（绝不整体字符串前缀比较）。
-        if components_within(root, &canonical) {
+        if components_within(&root_normalized, &canonical) {
             return Ok(PathPermission {
                 zone: PermissionZone::WorkspaceRoot,
                 canonical,
                 matched_authorization: None,
             });
         }
-        if components_within(tmp_dir, &canonical) {
+        if components_within(&tmp_dir_normalized, &canonical) {
             return Ok(PathPermission {
                 zone: PermissionZone::ControlledTmp,
                 canonical,
