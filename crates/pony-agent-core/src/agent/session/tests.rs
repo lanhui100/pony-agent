@@ -713,13 +713,13 @@ fn long_term_memory_entries_roundtrip_through_store() {
 /// 改造后本测试必须保持全绿（豁免差异走对拍豁免清单，不在此处）。
 #[test]
 fn append_turn_characterization_snapshot() {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = { let raw = std::env::temp_dir().join(format!(
         "pony-append-char-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos()
-    ));
+    )); raw.canonicalize().unwrap_or(raw) };
     fs::create_dir_all(&dir).expect("mkdir");
     let db_path = dir.join("sessions.db");
 
@@ -2405,7 +2405,7 @@ fn session_store_workspace_registry_default_and_crud() {
         crate::agent::workspace::DEFAULT_WORKSPACE_ID
     );
 
-    let root = std::env::temp_dir().join(format!("pa079-store-{}", std::process::id()));
+    let root = { let raw = std::env::temp_dir().join(format!("pa079-store-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&root).unwrap();
     let created = store
         .create_workspace("Docs", root.to_str().unwrap())
@@ -2431,7 +2431,7 @@ fn session_store_workspace_registry_default_and_crud() {
 #[test]
 fn session_store_stamps_workspace_id_only_once() {
     // PA-079：TurnInput.workspace_id 首次盖章；后续轮 no-op。
-    let root = std::env::temp_dir().join(format!("pa-stamp-{}", std::process::id()));
+    let root = { let raw = std::env::temp_dir().join(format!("pa-stamp-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&root).unwrap();
     let mut store = SessionStore::memory_only();
     let registered = store.create_workspace("Proj", &root.display().to_string()).unwrap();
@@ -2509,7 +2509,7 @@ fn legacy_session_without_workspace_id_projects_to_default() {
 #[test]
 fn corrupt_file_backend_falls_back_to_default_workspace() {
     // PA-079 P1-2：File backend 整文件损坏 → load_store None → 默认 workspace 重建。
-    let dir = std::env::temp_dir().join(format!("pa079-file-corrupt-{}", std::process::id()));
+    let dir = { let raw = std::env::temp_dir().join(format!("pa079-file-corrupt-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&dir).unwrap();
     let storage_path = dir.join("store.json");
     std::fs::write(&storage_path, "{bad json").unwrap();
@@ -4795,14 +4795,14 @@ fn collect_trace_union_merges_top_level_and_node_traces() {
 fn pa093_sqlite_store(tag: &str) -> (SessionStore, std::path::PathBuf, String) {
     use crate::agent::session::SeparateTraceTableMode;
     use crate::agent::sqlite_session::SqliteSessionBackend;
-    let dir = std::env::temp_dir().join(format!(
+    let dir = { let raw = std::env::temp_dir().join(format!(
         "pa093-{tag}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
+    )); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("test.db");
     let backend = Box::new(SqliteSessionBackend::new_with_trace_mode(
@@ -5462,7 +5462,7 @@ fn archive_is_idempotent_and_projects_flag() {
 
 #[test]
 fn workspace_delete_rewrites_member_sessions_to_default() {
-    let root = std::env::temp_dir().join(format!("pa-tree-del-{}", std::process::id()));
+    let root = { let raw = std::env::temp_dir().join(format!("pa-tree-del-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&root).unwrap();
     let mut store = SessionStore::memory_only();
     let record = store.create_workspace("Doomed", &root.display().to_string()).unwrap();
@@ -5588,7 +5588,7 @@ fn hydrate_backfill_is_neutralized_by_override() {
 #[test]
 fn workspace_rename_delete_survive_sqlite_restart() {
     // B6-T3：rename/delete 经真实 SQLite 后端跨重启持久（此前仅 memory_only 覆盖）。
-    let dir = std::env::temp_dir().join(format!("pa-tree-t3-{}", std::process::id()));
+    let dir = { let raw = std::env::temp_dir().join(format!("pa-tree-t3-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("store.db");
     let ws_root = dir.join("ws-root");
@@ -5660,7 +5660,7 @@ fn workspace_rename_delete_survive_sqlite_restart() {
 fn workspace_rename_delete_survive_sqlite_restart_write_separate() {
     // T3 生产模式变体：SessionStore::new 默认 WriteSeparate——同一生命周期
     // 在该模式下复跑，钉住 blob 剥离语义与注册表/归属重写的组合行为。
-    let dir = std::env::temp_dir().join(format!("pa-tree-t3-ws-{}", std::process::id()));
+    let dir = { let raw = std::env::temp_dir().join(format!("pa-tree-t3-ws-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("store.db");
     let ws_root = dir.join("ws-root");
@@ -5749,7 +5749,7 @@ impl SessionBackend for CorruptedEventBackend {
 
 #[test]
 fn append_turn_aborts_memory_mutation_on_backend_failure() {
-    let dir = std::env::temp_dir().join(format!("failing-command-{}", std::process::id()));
+    let dir = { let raw = std::env::temp_dir().join(format!("failing-command-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     let mut store = SessionStore::with_backend(Box::new(FailingCommandBackend {
         attachment_root: dir.clone(),
     }));
@@ -5776,7 +5776,7 @@ fn append_turn_aborts_memory_mutation_on_backend_failure() {
 
 #[test]
 fn append_turn_returns_error_when_event_stream_corrupted() {
-    let dir = std::env::temp_dir().join(format!("corrupted-event-{}", std::process::id()));
+    let dir = { let raw = std::env::temp_dir().join(format!("corrupted-event-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     let mut store = SessionStore::with_backend(Box::new(CorruptedEventBackend {
         attachment_root: dir.clone(),
     }));

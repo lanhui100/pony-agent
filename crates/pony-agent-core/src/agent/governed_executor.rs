@@ -258,10 +258,10 @@ mod tests {
     fn temp_workspace() -> PathBuf {
         // Unique per call so parallel tests in one process never share/race a fixture directory.
         let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
+        let root = { let raw = std::env::temp_dir().join(format!(
             "pony-governed-executor-test-{}-{seq}",
             std::process::id()
-        ));
+        )); raw.canonicalize().unwrap_or(raw) };
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("sub")).expect("create test workspace");
         root

@@ -430,10 +430,10 @@ mod tests {
 
     impl TempWorkspace {
         fn new(label: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
+            let root = { let raw = std::env::temp_dir().join(format!(
                 "pony-agent-image-artifact-{label}-{}",
                 std::process::id()
-            ));
+            )); raw.canonicalize().unwrap_or(raw) };
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).expect("temp workspace should create");
             Self { root }
@@ -599,10 +599,10 @@ mod tests {
 
     #[test]
     fn outside_workspace_paths_are_denied() {
-        let parent = std::env::temp_dir().join(format!(
+        let parent = { let raw = std::env::temp_dir().join(format!(
             "pony-agent-image-artifact-outside-{}",
             std::process::id()
-        ));
+        )); raw.canonicalize().unwrap_or(raw) };
         let _ = std::fs::remove_dir_all(&parent);
         let workspace_dir = parent.join("workspace");
         std::fs::create_dir_all(&workspace_dir).expect("workspace dir should create");

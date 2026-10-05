@@ -3360,7 +3360,7 @@ mod tests {
         assert!(err.contains("workspace 不存在"), "err={err}");
 
         // root_override 注入（测试接缝）仍生效
-        let root = std::env::temp_dir().join(format!("pa079-cp-{}", std::process::id()));
+        let root = { let raw = std::env::temp_dir().join(format!("pa079-cp-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let ok = control_plane.import_attachment(
@@ -3378,7 +3378,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         // 注册一个 workspace 后，import 落其 root
-        let ws_root = std::env::temp_dir().join(format!("pa079-ws-import-{}", std::process::id()));
+        let ws_root = { let raw = std::env::temp_dir().join(format!("pa079-ws-import-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
         std::fs::create_dir_all(&ws_root).unwrap();
         let created = control_plane
             .create_workspace("Import Target", ws_root.to_str().unwrap())
@@ -6701,7 +6701,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("pony-e2e-events-{stamp}"));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-e2e-events-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("create temp dir");
 
         let expected_types = [
@@ -6800,7 +6800,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("pony-mat-events-{stamp}"));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-mat-events-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("create temp dir");
 
         let mut snapshot_history: Option<Vec<(String, Option<String>)>> = None;

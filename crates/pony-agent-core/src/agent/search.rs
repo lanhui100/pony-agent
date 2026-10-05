@@ -460,7 +460,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("pony-agent-search-test-{}", unique));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-agent-search-test-{}", unique)); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("create temp workspace");
         dir
     }

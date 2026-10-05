@@ -2015,7 +2015,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("pony-agent-config-{label}-{stamp}"));
+        let root = { let raw = std::env::temp_dir().join(format!("pony-agent-config-{label}-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&root).expect("create temp registry root");
         root
     }

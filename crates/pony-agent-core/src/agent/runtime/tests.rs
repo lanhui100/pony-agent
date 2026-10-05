@@ -4092,7 +4092,7 @@ fn turn_input_workspace_id_stamps_first_turn_and_is_idempotent() {
         ),
     ]);
     // 三级树 stamp 纵深防御：先注册工作区，携带注册 id 的首轮才按原样盖章。
-    let ws_root = std::env::temp_dir().join(format!("pa-rt-stamp-{}", std::process::id()));
+    let ws_root = { let raw = std::env::temp_dir().join(format!("pa-rt-stamp-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
     std::fs::create_dir_all(&ws_root).unwrap();
     let mut sessions = SessionStore::memory_only();
     let registered = sessions
@@ -8802,11 +8802,11 @@ fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_o
 }
 
 fn temp_workspace_dir(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
+    let root = { let raw = std::env::temp_dir().join(format!(
         "pony-ask-runtime-test-{}-{}",
         name,
         std::process::id()
-    ));
+    )); raw.canonicalize().unwrap_or(raw) };
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("create temp workspace for ask test");
     root
@@ -8848,7 +8848,7 @@ mod parity {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("pony-parity-{name}-{stamp}"));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-parity-{name}-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("mkdir");
 
         let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> = None;
@@ -9244,7 +9244,7 @@ mod parity {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("pony-parity-multiturn-{stamp}"));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-parity-multiturn-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("mkdir");
 
         let mut pairs: Option<Vec<(String, TurnTraceRecord, TurnTraceRecord)>> = None;
@@ -9413,7 +9413,7 @@ mod parity {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("pony-history-tool-leak-{stamp}"));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-history-tool-leak-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("mkdir");
 
         const SESSION: &str = "history-tool-leak";
@@ -9536,7 +9536,7 @@ mod parity {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("pony-parity-cancel-{stamp}"));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-parity-cancel-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("mkdir");
 
         let mut outcome: Option<(Vec<crate::agent::turn_event::TurnEvent>, TurnTraceRecord)> = None;
@@ -9657,7 +9657,7 @@ mod parity {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("pony-parity-branch-{stamp}"));
+        let dir = { let raw = std::env::temp_dir().join(format!("pony-parity-branch-{stamp}")); raw.canonicalize().unwrap_or(raw) };
         fs::create_dir_all(&dir).expect("mkdir");
 
         struct BranchOutcome {

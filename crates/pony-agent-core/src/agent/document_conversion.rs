@@ -278,10 +278,10 @@ mod tests {
 
     fn temp_workspace() -> PathBuf {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
+        let root = { let raw = std::env::temp_dir().join(format!(
             "pony-doc-conversion-test-{}-{seq}",
             std::process::id()
-        ));
+        )); raw.canonicalize().unwrap_or(raw) };
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("sub")).expect("create test workspace");
         root

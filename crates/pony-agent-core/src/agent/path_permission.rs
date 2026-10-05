@@ -554,7 +554,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_root(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("pa080-{tag}-{}", std::process::id()))
+        let raw = std::env::temp_dir().join(format!("pa080-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&raw);
+        let root = raw.canonicalize().unwrap_or(raw);
+        normalize_win_prefix(&root)
     }
 
     fn prepare_root(root: &Path) {
