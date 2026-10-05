@@ -3378,8 +3378,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         // 注册一个 workspace 后，import 落其 root
-        let ws_root = { let raw = std::env::temp_dir().join(format!("pa079-ws-import-{}", std::process::id())); raw.canonicalize().unwrap_or(raw) };
-        std::fs::create_dir_all(&ws_root).unwrap();
+        let ws_root = {
+            let raw = std::env::temp_dir().join(format!("pa079-ws-import-{}", std::process::id()));
+            std::fs::create_dir_all(&raw).unwrap();
+            let canon = raw.canonicalize().unwrap_or(raw);
+            crate::agent::path_permission::normalize_canonical(&canon)
+        };
         let created = control_plane
             .create_workspace("Import Target", ws_root.to_str().unwrap())
             .unwrap();

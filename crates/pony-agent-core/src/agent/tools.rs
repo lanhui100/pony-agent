@@ -7767,6 +7767,8 @@ mod tests {
         std::fs::create_dir_all(&external_dir).expect("create external dir");
         let external_file = external_dir.join("secret.txt");
         fs::write(&external_file, "top secret\n").expect("write external file");
+        let external_file = external_file.canonicalize().unwrap_or(external_file);
+        let external_file = crate::agent::path_permission::normalize_canonical(&external_file);
 
         let authorize_store = crate::agent::path_permission::AuthorizeStore::new();
         authorize_store

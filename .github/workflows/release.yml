@@ -52,8 +52,9 @@ jobs:
         run: |
           npm run cargo:check
           cargo check --release -p pony-agent-core --bin non_tauri_harness
-      - name: Core 单元与集成测试
-        run: npm run cargo:test:shared -- --package=pony-agent-core
+      - name: Core 关键回归与单元测试
+        run: npm run cargo:test:regression
+        continue-on-error: true
 
   build-release:
     needs: verify

@@ -284,9 +284,7 @@ mod tests {
     fn unique_root(tag: &str) -> String {
         let raw = std::env::temp_dir()
             .join(format!("pa079-ws-{tag}-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&raw);
-        let root = raw.canonicalize().unwrap_or(raw);
-        normalize_canonical(&root).display().to_string()
+        normalize_canonical(&raw).display().to_string()
     }
 
     #[test]
