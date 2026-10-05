@@ -170,6 +170,7 @@ struct TerminalSession {
     is_alive: Arc<AtomicBool>,
     exit_code: Mutex<Option<i32>>,
     #[cfg(windows)]
+    #[allow(dead_code)]
     job: Option<std::os::windows::io::OwnedHandle>,
 }
 
@@ -251,6 +252,7 @@ impl TerminalSession {
     }
 
     fn close(&self, force: bool) -> Result<Option<i32>, String> {
+        let _ = force;
         // CONC-01: First send kill/term signal to process so any pending blocked stdin writes abort/unblock
         #[cfg(unix)]
         {
@@ -401,7 +403,7 @@ pub fn terminal_open(args: TerminalOpenArgs) -> Result<TerminalOpenResult, Strin
     #[cfg(windows)]
     let job = {
         use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+            CreateJobObjectW, SetInformationJobObject,
             JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };

@@ -153,6 +153,7 @@ struct JobSession {
     is_alive: Arc<AtomicBool>,
     deadline: Option<Instant>,
     #[cfg(windows)]
+    #[allow(dead_code)]
     job: Option<std::os::windows::io::OwnedHandle>,
 }
 
@@ -375,7 +376,7 @@ pub fn job_start(args: JobStartArgs) -> Result<JobStartResult, String> {
     #[cfg(windows)]
     let job = {
         use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+            CreateJobObjectW, SetInformationJobObject,
             JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
