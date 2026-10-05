@@ -19,9 +19,9 @@ app.use(pinia);
 app.use(MotionPlugin);
 app.mount("#app");
 
-// 优雅淡出 index.html 预加载启动屏
+// 优雅淡出 index.html 预加载启动屏（桌面端停留 3s，确保平滑展示不一闪而过）
 if (typeof window !== "undefined") {
-  requestAnimationFrame(() => {
+  setTimeout(() => {
     const splash = document.getElementById("app-loading-screen");
     if (splash) {
       splash.classList.add("fade-out");
@@ -29,7 +29,7 @@ if (typeof window !== "undefined") {
         splash.remove();
       }, 400);
     }
-  });
+  }, 3000);
 }
 
 if (import.meta.env.DEV && typeof window !== "undefined") {

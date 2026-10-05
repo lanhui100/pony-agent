@@ -245,7 +245,7 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     wrapper.unmount();
   });
 
-  it("工作区组行解剖：文件夹图标、名称、计数徽标、＋ 与 ⋯；无对话时不展示空组提示", () => {
+  it("工作区组行解剖：文件夹图标与名称颜色一致、计数徽标、＋ 与 ⋯；无对话时不展示空组提示", () => {
     seedTree({
       sessions: [createSession({ conversationId: "b1", title: "B 会话", workspaceId: "ws-b" })]
     });
@@ -256,6 +256,13 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     expect(groupA?.textContent).toContain("项目A");
     expect(groupA?.querySelector('[data-testid="workspace-row-new-ws-a"]')).toBeTruthy();
     expect(groupA?.querySelector('[data-testid="workspace-row-menu-ws-a"]')).toBeTruthy();
+    // 文件夹图标类应与名称颜色一致（text-stone-700）
+    const folderIcon = groupA?.querySelector("svg.lucide-folder");
+    expect(folderIcon?.getAttribute("class")).toContain("text-stone-700");
+    // 加号和菜单按钮容器具有 hover 显示类（opacity-0 group-hover/ws:opacity-100）
+    const actionsContainer = groupA?.querySelector('[data-testid="workspace-row-new-ws-a"]')?.parentElement;
+    expect(actionsContainer?.getAttribute("class")).toContain("opacity-0");
+    expect(actionsContainer?.getAttribute("class")).toContain("group-hover/ws:opacity-100");
     expect(document.body.querySelector('[data-testid="workspace-group-empty-ws-a"]')).toBeNull();
     const groupB = document.body.querySelector('[data-testid="workspace-group-ws-b"]');
     expect(groupB?.textContent).toContain("项目B");

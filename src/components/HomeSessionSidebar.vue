@@ -426,8 +426,8 @@ async function runConfirm(kind: ConfirmKind, target: ConfirmTarget) {
 
 // ── 其余 UI 状态 ──────────────────────────────────────────────────────────
 const menuInteractiveClass =
-  "rounded-[0.2rem] transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900";
-const menuSelectedClass = "rounded-[0.2rem] bg-[#f3c98d] text-stone-900";
+  "transition-colors cursor-pointer hover:bg-[#f6dfb8] hover:text-stone-900";
+const menuSelectedClass = "bg-[#f3c98d] text-stone-900";
 
 const hasPersistableMessages = (list: ChatMessage[]) =>
   list.some(
@@ -602,7 +602,7 @@ function confirmPopoverProps(
         <!-- 展开态：顶层新对话（恒落默认工作区平铺区） -->
         <div class="mt-4 flex items-center gap-1.5" data-testid="session-sidebar-actions">
           <button
-            class="flex h-8 min-w-0 flex-1 items-center gap-2 px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
+            class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-[0.2rem] px-1.5 text-[12px] font-medium text-stone-700 disabled:cursor-not-allowed disabled:text-stone-300"
             :class="menuInteractiveClass"
             type="button"
             :disabled="!canCreateSession"
@@ -653,11 +653,11 @@ function confirmPopoverProps(
             </p>
 
             <!-- 平铺区 -->
-            <div class="space-y-0.5 pt-1">
+            <div class="space-y-0.5 -mr-1.5 pt-1">
               <div
                 v-for="session in partitionPreview(tree.flatZone)"
                 :key="`flat-${session.conversationId}`"
-                class="group relative rounded-[0.2rem]"
+                class="group relative rounded-l-[0.2rem] rounded-r-none mr-0"
                 :class="session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass"
                 data-testid="flat-zone-session-row"
               >
@@ -717,9 +717,9 @@ function confirmPopoverProps(
               class="pt-1"
               :data-testid="`workspace-group-${group.key}`"
             >
-              <div class="relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1 hover:bg-[#f6dfb8]/60">
+              <div class="group/ws relative flex w-full items-center justify-between gap-2 rounded-[0.2rem] px-1.5 py-1 hover:bg-[#f6dfb8]/60">
                 <span class="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-stone-700">
-                  <Folder class="h-3.5 w-3.5 shrink-0 text-amber-700/70" />
+                  <Folder class="h-3.5 w-3.5 shrink-0 text-stone-700" />
                   <input
                     v-if="renamingKey === `ws:${group.key}`"
                     v-model="renameDraft"
@@ -733,7 +733,7 @@ function confirmPopoverProps(
                   <span v-else class="truncate">{{ group.name }}</span>
                   <span class="shrink-0 text-[10px] font-normal text-stone-400">{{ group.count }}</span>
                 </span>
-                <span v-if="renamingKey !== `ws:${group.key}`" class="flex shrink-0 items-center gap-0.5">
+                <span v-if="renamingKey !== `ws:${group.key}`" class="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/ws:opacity-100 group-focus-within/ws:opacity-100">
                   <button
                     v-if="isTauriRuntime"
                     class="inline-flex h-4 w-4 items-center justify-center rounded-[0.2rem] text-stone-400 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-40"
@@ -796,11 +796,11 @@ function confirmPopoverProps(
                 </ConfirmPopover>
               </div>
 
-              <div class="space-y-0.5 pl-3">
+              <div class="space-y-0.5 -mr-1.5 pl-3">
                 <div
                   v-for="session in partitionPreview(group.sessions)"
                   :key="session.conversationId"
-                  class="group relative rounded-[0.2rem]"
+                  class="group relative rounded-l-[0.2rem] rounded-r-none mr-0"
                   :class="session.conversationId === sessionId ? menuSelectedClass : menuInteractiveClass"
                   :data-testid="`workspace-session-row-${group.key}-${session.conversationId}`"
                 >
@@ -868,7 +868,7 @@ function confirmPopoverProps(
 
         <div class="mt-auto space-y-0.5 pt-2">
           <button
-            class="relative flex w-full items-center justify-start gap-2 px-1.5 py-2 text-left"
+            class="relative flex w-full items-center justify-start gap-2 rounded-[0.2rem] px-1.5 py-2 text-left"
             :class="props.currentPage === 'settings' ? menuSelectedClass : `${menuInteractiveClass} text-stone-800`"
             type="button"
             data-testid="session-sidebar-nav-settings"
