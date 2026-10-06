@@ -72,8 +72,9 @@ fn ask_dispatch_context() -> DispatchContext {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// B1-1：`builtin_tools()` 包含 `name == "ask_user"` 定义；schema 为 object，
-/// properties 含 question(string, required)、options(array<string>, optional)、
-/// defaultAnswer(string, optional)、timeoutMs(integer, optional)，additionalProperties=false。
+/// properties 含 question(string, required)、options(array<string>, optional)，
+/// additionalProperties=false；`defaultAnswer` / `timeoutMs` 为死参数（dispatcher 与
+/// 前端均不消费），必须不存在以免误导模型。
 #[test]
 fn test_b1_1_ask_user_builtin_definition_and_schema() {
     let definitions = builtin_tools();
@@ -104,8 +105,15 @@ fn test_b1_1_ask_user_builtin_definition_and_schema() {
     assert!(!required_strs.contains(&"timeoutMs"));
     assert_eq!(properties["options"]["type"], json!("array"));
     assert_eq!(properties["options"]["items"]["type"], json!("string"));
-    assert_eq!(properties["defaultAnswer"]["type"], json!("string"));
-    assert_eq!(properties["timeoutMs"]["type"], json!("integer"));
+    // PA-114 修复第二轮（Lead 裁决 B）：defaultAnswer/timeoutMs 是死参数，schema 不得再暴露。
+    assert!(
+        properties.get("defaultAnswer").is_none(),
+        "dead param `defaultAnswer` must not appear in the ask_user schema"
+    );
+    assert!(
+        properties.get("timeoutMs").is_none(),
+        "dead param `timeoutMs` must not appear in the ask_user schema"
+    );
     assert_eq!(
         schema["additionalProperties"],
         json!(false),

@@ -8113,8 +8113,8 @@ fn governed_ask_suspends_turn_and_binds_waiting_user_without_provider_followup()
         Box::new(executor),
         Box::new(ForcedToolPlanner {
             tool_name: "Ask".to_string(),
-            // `text` becomes the prompt surfaced in the persisted request (P2-9).
-            arguments: json!({ "text": "继续吗？", "description": "test" }),
+            // `question` becomes the prompt surfaced in the persisted request (P2-9).
+            arguments: json!({ "question": "继续吗？", "description": "test" }),
         }),
         Box::new(DefaultTurnContextBuilder),
         Box::new(DefaultTurnTelemetryBuilder),
@@ -8206,7 +8206,7 @@ fn governed_ask_host_answer_resumes_injects_unique_terminal_result_with_original
         Box::new(executor),
         Box::new(ForcedToolPlanner {
             tool_name: "Ask".to_string(),
-            arguments: json!({ "text": "确认？", "description": "test" }),
+            arguments: json!({ "question": "确认？", "description": "test" }),
         }),
         Box::new(DefaultTurnContextBuilder),
         Box::new(DefaultTurnTelemetryBuilder),
@@ -8319,7 +8319,7 @@ fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context()
         Box::new(executor),
         Box::new(AskOnceThenDeferPlanner {
             tool_name: "Ask".to_string(),
-            arguments: json!({ "text": "继续吗？", "description": "test" }),
+            arguments: json!({ "question": "继续吗？", "description": "test" }),
             ask_forced: std::sync::atomic::AtomicBool::new(false),
         }),
         Box::new(DefaultTurnContextBuilder),
@@ -8510,7 +8510,7 @@ fn governed_ask_host_and_runtime_share_same_dispatcher() {
             origin: InvocationOrigin::Model,
             descriptor_id: "Ask".to_string(),
             call_id: "call-shared".to_string(),
-            arguments: json!({ "text": "共享测试", "description": "test" }),
+            arguments: json!({ "question": "共享测试", "description": "test" }),
         },
         &DispatchContext {
             session_id: Some("session-shared".to_string()),
@@ -8571,7 +8571,7 @@ fn governed_ask_stream_suspends_turn_and_binds_waiting_user_without_provider_fol
         Box::new(executor),
         Box::new(ForcedToolPlanner {
             tool_name: "Ask".to_string(),
-            arguments: json!({ "text": "继续吗？", "description": "test" }),
+            arguments: json!({ "question": "继续吗？", "description": "test" }),
         }),
         Box::new(DefaultTurnContextBuilder),
         Box::new(DefaultTurnTelemetryBuilder),
@@ -8765,7 +8765,7 @@ fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_o
         Box::new(executor),
         Box::new(ForcedToolPlanner {
             tool_name: "Ask".to_string(),
-            arguments: json!({ "text": "确认？", "description": "test" }),
+            arguments: json!({ "question": "确认？", "description": "test" }),
         }),
         Box::new(DefaultTurnContextBuilder),
         Box::new(DefaultTurnTelemetryBuilder),
