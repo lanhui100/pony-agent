@@ -98,6 +98,10 @@ use url::Url;
 
 const TOOL_TIME_NOW: &str = "time_now";
 const TOOL_ECHO_INPUT: &str = "echo_input";
+/// First-class Ask tool (PA-114): product name `Ask` is owned by this primitive, replacing the
+/// legacy `echo_input` placeholder on the model surface. Host-mediated (WaitingHost), never a
+/// direct execution tool.
+pub(crate) const TOOL_ASK_USER: &str = "ask_user";
 const TOOL_WORKSPACE_LIST_FILES: &str = "workspace_list_files";
 const TOOL_WORKSPACE_READ_FILE: &str = "workspace_read_file";
 const TOOL_WORKSPACE_READ_FILE_SEGMENT: &str = "workspace_read_file_segment";
@@ -774,6 +778,8 @@ fn is_reserved_builtin_alias(alias: &str) -> bool {
             alias.trim(),
             "time_now"
                 | "echo_input"
+                | "ask_user"
+                | "ask.user"
                 | "web_fetch_url"
                 | "web_search_query"
                 | "mcp_resource_read"
@@ -1819,7 +1825,69 @@ impl ToolRouter {
         // Session-scoped process lifecycle (PA-076 tasks 5.3-5.5). Each legacy Run gets its own
         // opaque session id so handles can never be replayed across runs.
         let session_id = legacy_run_session_id();
-        let (program, arguments) = workspace_command_parts(command, &cwd);
+
+        // Bug A 修复：Windows 上先把命令逐字写入受控 tmp 目录（<root>/.tmp/，PA-080 布局）
+        // 的批处理文件（UTF-8 无 BOM，CRLF 换行；`fs::write` 写完即关闭句柄，spawn 前已完整
+        // 落盘），再经 `cmd /C <批处理文件>` 执行，绕开 `cmd /C "cd /d … && …"` 单参数内嵌
+        // 引号被 CommandLineToArgvW/cmd 双重剥离导致的引号损坏与 `|`/`&` 误切分。文件名用
+        // 本次 run 的唯一 session_id（pony-agent-run-{session_id}.cmd）；进程退出（含超时
+        // 被杀）后删除。
+        let batch_script_path = if cfg!(windows) {
+            let shell_cwd = windows_shell_path(&cwd.display().to_string());
+            // fail-closed：cwd 不应含 `"`（Windows 路径不可能含；若含，批处理内引号结构
+            // 会被破坏且无处转义）。
+            if shell_cwd.contains('"') {
+                return error_result(
+                    TOOL_WORKSPACE_RUN_COMMAND,
+                    "spawn_failed",
+                    "工作目录路径包含非法字符 `\"`。".to_string(),
+                    Some("请更换工作区路径后重试。".to_string()),
+                );
+            }
+            let tmp_dir = self.controlled_tmp_dir(&execution_root);
+            let batch_path = tmp_dir.join(format!("pony-agent-run-{session_id}.cmd"));
+            // spawn 前 fail-closed 检查批处理文件绝对路径（在写文件之前检查，避免残留）：
+            // 含 `" & | < > ( ) @ ^` 任一 cmd 元字符则无法安全放进 `cmd /C` 行（cmd 引号
+            // 剥离后会按 `&` 分裂 → 静默坏执行），拒绝执行并提示更换目录。含空格放行：
+            // std 以引号包裹该参数，cmd 的 /C 引号算法规则 1 按"可执行文件路径"保留引号。
+            // `cmd /C` 行只允许路径，命令体绝不允许回到 `/C` 行（不做 caret 转义）。
+            let path_text = batch_path.display().to_string();
+            let rejected = ['"', '&', '|', '<', '>', '(', ')', '@', '^']
+                .iter()
+                .any(|metachar| path_text.contains(*metachar));
+            if rejected {
+                return error_result(
+                    TOOL_WORKSPACE_RUN_COMMAND,
+                    "spawn_failed",
+                    format!("命令临时目录路径包含 cmd 无法安全引用的特殊字符：{path_text}。"),
+                    Some(
+                        "请将工作区移动到不含 & | < > ( ) @ ^ 的路径后重试。".to_string(),
+                    ),
+                );
+            }
+            if let Err(error) = fs::create_dir_all(&tmp_dir) {
+                return error_result(
+                    TOOL_WORKSPACE_RUN_COMMAND,
+                    "batch_script_write_failed",
+                    format!("创建命令临时目录失败：{}。", error),
+                    Some("请确认工作区可写，稍后重试。".to_string()),
+                );
+            }
+            let script = build_windows_batch_script(command, &shell_cwd);
+            if let Err(error) = fs::write(&batch_path, script.as_bytes()) {
+                return error_result(
+                    TOOL_WORKSPACE_RUN_COMMAND,
+                    "batch_script_write_failed",
+                    format!("写入命令批处理文件失败：{}。", error),
+                    Some("请确认工作区可写，稍后重试。".to_string()),
+                );
+            }
+            Some(batch_path)
+        } else {
+            None
+        };
+        let (program, arguments) =
+            workspace_command_parts_with_batch(command, &cwd, batch_script_path.as_deref());
         let handle = match self.process_manager.start(&ProcessStartRequest {
             session_id: session_id.clone(),
             program,
@@ -1828,6 +1896,7 @@ impl ToolRouter {
         }) {
             Ok(value) => value,
             Err(error) => {
+                remove_windows_batch_script(batch_script_path.as_deref());
                 return error_result(
                     TOOL_WORKSPACE_RUN_COMMAND,
                     "spawn_failed",
@@ -1877,6 +1946,7 @@ impl ToolRouter {
                         }
                         None => format!("轮询命令状态失败：{error}。"),
                     };
+                    remove_windows_batch_script(batch_script_path.as_deref());
                     return error_result(
                         TOOL_WORKSPACE_RUN_COMMAND,
                         "wait_failed",
@@ -1900,6 +1970,7 @@ impl ToolRouter {
                 ),
                 None => format!("命令执行超过超时上限 {} ms，已终止。", timeout_ms),
             };
+            remove_windows_batch_script(batch_script_path.as_deref());
             return error_result(
                 TOOL_WORKSPACE_RUN_COMMAND,
                 "timeout",
@@ -1911,6 +1982,7 @@ impl ToolRouter {
         // Exited: clean up the session entry (idempotent when already exited). A Job failure is
         // surfaced rather than silently turning a lifecycle cleanup failure into tool success.
         if let Err(error) = self.process_manager.kill(&session_id, &handle) {
+            remove_windows_batch_script(batch_script_path.as_deref());
             return error_result(
                 TOOL_WORKSPACE_RUN_COMMAND,
                 "cleanup_failed",
@@ -1918,6 +1990,9 @@ impl ToolRouter {
                 Some("请重试以完成进程树清理。".to_string()),
             );
         }
+
+        // Windows 批处理临时文件使命结束（Exited 分支）：删除（幂等，失败忽略不阻塞结果）。
+        remove_windows_batch_script(batch_script_path.as_deref());
 
         let succeeded = exit_code == Some(0);
         let error_payload = (!succeeded).then(|| {
@@ -4099,6 +4174,37 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
             })),
         },
         ToolDefinition {
+            name: TOOL_ASK_USER,
+            description:
+                "向用户提问并等待其回答，适合需要用户确认、选择或补充信息后才能继续的场景；返回用户的回答（options 提供可选快捷回答）。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "要向用户提出的问题"
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "可选的预设回答选项，用户可直接点选"
+                    },
+                    "defaultAnswer": {
+                        "type": "string",
+                        "description": "用户未回答时使用的默认回答"
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "等待用户回答的超时时间（毫秒）"
+                    }
+                },
+                "required": ["question"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
             name: TOOL_WORKSPACE_READ_FILE,
             description: "读取当前工作区内的文本文件内容预览，需要提供相对路径；大文件会被拒绝并引导改用分段读取。",
             input_schema: with_description(json!({
@@ -4802,6 +4908,10 @@ fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
     match view.execution_primitive.as_str() {
         TOOL_TIME_NOW => 10,
         TOOL_ECHO_INPUT => 100,
+        // PA-114: `ask_user` must outrank the legacy `echo_input` placeholder for the shared
+        // product name `Ask`, so the model surface winner switches to ask_user and echo_input
+        // drops to Internal exposure (winner logic in `from_builtin_definitions`).
+        TOOL_ASK_USER => 110,
         TOOL_WORKSPACE_LIST_FILES => 100,
         TOOL_WORKSPACE_SEARCH_TEXT => 100,
         TOOL_WORKSPACE_GLOB_FILES => 100,
@@ -5232,7 +5342,9 @@ mod contract_view_tests {
 pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
     match name {
         "Run" => Some(TOOL_WORKSPACE_RUN_COMMAND),
-        "Ask" => Some(TOOL_ECHO_INPUT),
+        // PA-114: the product name `Ask` is now owned by the first-class `ask_user` primitive.
+        // `echo_input` keeps resolving to itself below (legacy compat, B2-1).
+        "Ask" => Some(TOOL_ASK_USER),
         "List" => Some(TOOL_WORKSPACE_LIST_FILES),
         "Read" => Some(TOOL_WORKSPACE_GATHER_CONTEXT),
         "Search" => Some(TOOL_WORKSPACE_SEARCH_TEXT),
@@ -5248,6 +5360,7 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
         "ViewImage" => Some(TOOL_VIEW_IMAGE),
         TOOL_TIME_NOW | "time.now" => Some(TOOL_TIME_NOW),
         TOOL_ECHO_INPUT | "echo.input" => Some(TOOL_ECHO_INPUT),
+        TOOL_ASK_USER | "ask.user" => Some(TOOL_ASK_USER),
         TOOL_WORKSPACE_LIST_FILES | "workspace.list_files" => Some(TOOL_WORKSPACE_LIST_FILES),
         TOOL_WORKSPACE_READ_FILE | "workspace.read_file" => Some(TOOL_WORKSPACE_READ_FILE),
         TOOL_WORKSPACE_READ_FILE_SEGMENT | "workspace.read_file_segment" => {
@@ -5290,6 +5403,9 @@ fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
     match primitive {
         TOOL_TIME_NOW => vec![TOOL_TIME_NOW, "time.now"],
         TOOL_ECHO_INPUT => vec![TOOL_ECHO_INPUT, "echo.input"],
+        // PA-114: `Ask` is included explicitly so legacy/partner integrations that know the
+        // product spelling keep resolving even before the registry attaches the model name.
+        TOOL_ASK_USER => vec![TOOL_ASK_USER, "ask.user", "Ask"],
         TOOL_WORKSPACE_LIST_FILES => vec![TOOL_WORKSPACE_LIST_FILES, "workspace.list_files"],
         TOOL_WORKSPACE_READ_FILE => vec![TOOL_WORKSPACE_READ_FILE, "workspace.read_file"],
         TOOL_WORKSPACE_READ_FILE_SEGMENT => {
@@ -5412,6 +5528,7 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_WORKSPACE_RUN_COMMAND => "Run",
         TOOL_TIME_NOW => "Run",
         TOOL_ECHO_INPUT => "Ask",
+        TOOL_ASK_USER => "Ask",
         TOOL_WORKSPACE_LIST_FILES => "List",
         TOOL_WORKSPACE_READ_FILE | TOOL_WORKSPACE_READ_FILE_SEGMENT => "Read",
         TOOL_WORKSPACE_PATH_INFO => "List",
@@ -5464,7 +5581,7 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_WORKSPACE_WRITE_FILE | TOOL_WORKSPACE_EDIT_FILE => ToolKind::Write,
         TOOL_WORKSPACE_LIST_FILES => ToolKind::Read,
         TOOL_WORKSPACE_BATCH => ToolKind::Composite,
-        TOOL_ECHO_INPUT => ToolKind::Interactive,
+        TOOL_ECHO_INPUT | TOOL_ASK_USER => ToolKind::Interactive,
         // `time_now` is a pure clock read, not a side-effecting Execute (phase-4..7 review P2-10:
         // the dispatcher's sandbox gate keys off Execute kind, so misclassifying the clock made it
         // fail `sandbox_unavailable` through the governed path).
@@ -5501,6 +5618,7 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_WORKSPACE_EDIT_FILE
         | TOOL_WORKSPACE_RUN_COMMAND
         | TOOL_ECHO_INPUT
+        | TOOL_ASK_USER
         | TOOL_TIME_NOW => ToolExposure::ModelVisible,
         TOOL_TOOL_SEARCH => ToolExposure::Deferred,
         TOOL_WORKSPACE_PATH_INFO => ToolExposure::Deferred,
@@ -5560,15 +5678,19 @@ pub fn default_permission_facts_for_name(name: &str) -> ToolPermissionFacts {
         TOOL_TOOL_SEARCH => Some("capability.discovery".to_string()),
         TOOL_WORKSPACE_WRITE_FILE | TOOL_WORKSPACE_EDIT_FILE => Some("workspace.write".to_string()),
         TOOL_WORKSPACE_RUN_COMMAND => Some("workspace.execute".to_string()),
-        TOOL_TIME_NOW | TOOL_ECHO_INPUT | TOOL_PLAN_CONTROL => None,
+        TOOL_TIME_NOW | TOOL_ECHO_INPUT | TOOL_PLAN_CONTROL | TOOL_ASK_USER => None,
         TOOL_VIEW_IMAGE => Some("workspace.read".to_string()),
         TOOL_WORKSPACE_READ_DOCUMENT => Some("workspace.read".to_string()),
         _ => None,
     };
+    // PA-114: `ask_user` is host-mediated (WaitingHost) by declaration; every other builtin keeps
+    // the legacy non-mediated facts. `echo_input` stays unchanged (its host mediation is decided
+    // by the policy evaluator, not the declaration).
+    let host_mediated = canonical_tool_name(name).unwrap_or(name) == TOOL_ASK_USER;
     ToolPermissionFacts {
         requires_approval: Some(false),
         permission_scope: scope,
-        host_mediated: Some(false),
+        host_mediated: Some(host_mediated),
         permission_profile: Some("builtin".to_string()),
         approval_mode: Some("none".to_string()),
         decision_source: Some("runtime".to_string()),
@@ -6425,25 +6547,45 @@ fn legacy_run_session_id() -> String {
     format!("legacy-run-{nanos:016x}")
 }
 
-/// Build the `ProcessStartRequest` program/arguments for a shell command string. The child runs
-/// under the platform shell (`cmd /C` on Windows, `sh -lc` elsewhere) exactly like the legacy
+/// Two-argument convenience form of the `ProcessStartRequest` builder (A3 contract): delegates to
+/// [`workspace_command_parts_with_batch`] with no batch file, so on non-Windows it keeps the
+/// historical `("sh", ["-lc", "cd '<cwd>' && <command>"])` behavior byte-for-byte. Test-only:
+/// Windows production code must use [`workspace_command_parts_with_batch`] (the Windows branch
+/// panics if the batch-file path is absent).
+#[cfg(test)]
+fn workspace_command_parts(command: &str, cwd: &Path) -> (String, Vec<String>) {
+    workspace_command_parts_with_batch(command, cwd, None)
+}
+
+/// Core `ProcessStartRequest` builder for a shell command string. The child runs under the
+/// platform shell (`cmd` on Windows, `sh -lc` elsewhere) exactly like the legacy
 /// `spawn_workspace_command`, but `ProcessStartRequest` has no `cwd` field, so the resolved
 /// workspace directory is baked into the shell command with a leading `cd`.
 ///
-/// Windows note: `fs::canonicalize` yields `\\?\`-prefixed extended-length paths that cmd's `cd`
-/// builtin rejects, so the prefix is normalized away. The path is then caret-escaped
-/// (`cmd_escape_path`) rather than double-quoted because `std::process::Command` escapes embedded
-/// `"` as `\"`, which cmd mis-parses (a leading `\` corrupts the path) after it strips the outer
-/// quote pair.
-fn workspace_command_parts(command: &str, cwd: &Path) -> (String, Vec<String>) {
+/// Windows branch (Bug A 修复): the user command is executed via a temp batch file instead of
+/// being inlined into a `cmd /C "… && …"` single argument.
+///
+/// 损坏机理：`std::process::Command` 按 CommandLineToArgvW 规则把参数内嵌双引号转义为 `\"`，
+/// 而 cmd.exe 按自己的引号剥离规则解析（首尾引号剥离、`\"` 残留），于是含引号的命令
+/// （如 `powershell -NoProfile -Command "Get-CimInstance …"`）引号失衡、`|`/`&` 被误切分、
+/// 真实输出丢失（stdout 只剩命令文本回显）。把命令原样写入批处理文件再经 `cmd /C` 执行，
+/// `/C` 行只携带批处理文件路径（绝不允许命令体回到 `/C` 行），命令文本逐字保留，引号配对
+/// 与管道/`&` 切分完全由 cmd 按批处理原文解析。路径不做 caret 转义：含空格时 std 会用一对
+/// 引号包裹，cmd 的 `/C` 引号算法规则 1 按"可执行文件路径"保留引号；含 `" & | < > ( ) @ ^`
+/// 元字符的路径在 run_command 侧 spawn 前 fail-closed 拒绝。
+fn workspace_command_parts_with_batch(
+    command: &str,
+    cwd: &Path,
+    batch_script_path: Option<&Path>,
+) -> (String, Vec<String>) {
     if cfg!(windows) {
-        let escaped_cwd = cmd_escape_path(&windows_shell_path(&cwd.display().to_string()));
+        // run_command 在 Windows 上必定先写好批处理文件再传入其绝对路径。
+        let batch_script_path = batch_script_path.expect(
+            "workspace_command_parts_with_batch: Windows 分支必须提供批处理文件绝对路径",
+        );
         (
             "cmd".to_string(),
-            vec![
-                "/C".to_string(),
-                format!("cd /d {escaped_cwd} && {command}"),
-            ],
+            vec!["/C".to_string(), batch_script_path.display().to_string()],
         )
     } else {
         let quoted = format!("'{}'", cwd.display().to_string().replace('\'', "'\\''"));
@@ -6451,6 +6593,40 @@ fn workspace_command_parts(command: &str, cwd: &Path) -> (String, Vec<String>) {
             "sh".to_string(),
             vec!["-lc".to_string(), format!("cd {quoted} && {command}")],
         )
+    }
+}
+
+/// Bug A 修复：生成执行 `run_command` 命令的 Windows 批处理脚本文本（UTF-8 无 BOM，CRLF 换行）。
+/// 固定行序：
+/// ```text
+/// @echo off
+/// chcp 65001 >nul
+/// cd /d "<cwd>" || exit /b 1
+/// <command 原样>
+/// exit /b %errorlevel%
+/// ```
+/// - `chcp 65001 >nul`：在 zh-CN CP936 控制台下把活动代码页切到 UTF-8，避免批处理中的中文
+///   路径/输出在读取/回显时乱码（静默，不刷屏）。
+/// - `cd /d "<cwd>" || exit /b 1`：cwd 写入双引号（不再使用 `cmd_escape_path` 的 caret 转义），
+///   cd 失败必须短路退出，等价于旧 `&&` 语义——绝不在错误目录里继续执行（防止删除类命令
+///   落到错误路径）。cwd 中的 `%` 双写为 `%%` 防止被批处理当作环境变量展开；Windows 路径
+///   不可能含 `"`，若含由调用方 fail-closed。
+/// - `command` 逐字保留：不转义双引号、不做 caret 转义、不改写 `%`。`%VAR%` 环境变量展开与
+///   `cmd /C` 直跑一致；单 `%` 循环变量、`%%` 折叠与 `%1` 位置参数属于交互式批处理特例，
+///   与直跑 `cmd /C` 的语义差异被接受（记录于此处，不处理）。
+/// - `exit /b %errorlevel%` 把命令退出码原样传播给 cmd 进程，从而进入进程管理的 exit_code。
+fn build_windows_batch_script(command: &str, cwd: &str) -> String {
+    let escaped_cwd = cwd.replace('%', "%%");
+    format!(
+        "@echo off\r\nchcp 65001 >nul\r\ncd /d \"{escaped_cwd}\" || exit /b 1\r\n{command}\r\nexit /b %errorlevel%\r\n"
+    )
+}
+
+/// 幂等删除 Windows 批处理临时文件：NotFound 视为已删除忽略，其余失败忽略（不阻塞工具结果，
+/// 残留文件由系统 TEMP 清理兜底）。
+fn remove_windows_batch_script(path: Option<&Path>) {
+    if let Some(path) = path {
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -6465,21 +6641,6 @@ fn windows_shell_path(path: &str) -> String {
         return rest.to_string();
     }
     path.to_string()
-}
-
-/// Escape every cmd metacharacter in a path with `^` so `cd /d <path>` works without double
-/// quotes (which cannot survive `std::process::Command`'s `\"` escaping on Windows). Windows
-/// paths cannot contain `"`, and the `%VAR%` expansion pattern is left untouched (extremely rare
-/// in real workspace paths).
-fn cmd_escape_path(path: &str) -> String {
-    let mut escaped = String::with_capacity(path.len());
-    for character in path.chars() {
-        if " &|<>()@^\"".contains(character) {
-            escaped.push('^');
-        }
-        escaped.push(character);
-    }
-    escaped
 }
 
 fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
