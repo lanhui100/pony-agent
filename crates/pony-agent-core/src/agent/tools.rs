@@ -11005,4 +11005,54 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&workspace);
     }
+
+    /// CI windows-latest 集成测试（本机 Linux 不编译/不执行，需 CI 验证）：
+    /// 含空格的 workspace 根目录下，cmd /C 引号形态必须仍正确（Bug A 回归）——
+    /// Run 含双引号的 powershell 命令 exit 0、stdout 含 space-ws 且无命令文本回显。
+    #[cfg(windows)]
+    #[test]
+    fn windows_run_powershell_in_workspace_root_with_spaces_returns_real_stdout() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        // 目录名显式包含空格与连字符，锁定 `cd /d "<cwd>"` 引号包裹形态。
+        let workspace = std::env::temp_dir().join(format!("pony agent spaced ws {unique}"));
+        fs::create_dir_all(&workspace).expect("create spaced workspace");
+        let workspace = workspace.canonicalize().unwrap_or(workspace);
+
+        let router = ToolRouter::with_workspace_root(workspace.clone())
+            .with_sandbox_backend(crate::agent::sandbox::TestSandboxBackend::available());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "powershell -NoProfile -Command \"Write-Output 'space-ws'\"",
+                "cwd": ".",
+                "timeoutMs": 30000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(
+            result.status, "ok",
+            "含空格 workspace 下 Run 应成功；output: {}",
+            result.output
+        );
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("run output should be json");
+        assert_eq!(payload.get("exitCode").and_then(Value::as_i64), Some(0));
+        let stdout = payload.get("stdout").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            stdout.contains("space-ws"),
+            "stdout 必须包含真实输出 space-ws，实际: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("Write-Output"),
+            "stdout 不得回显命令文本（旧 bug 症状）: {stdout:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 }

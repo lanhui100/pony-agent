@@ -10023,4 +10023,27 @@ mod parity {
             Some(CapabilityFailureKind::InvocationFailed)
         );
     }
+
+    #[test]
+    fn bug_b_ok_with_empty_string_error_is_none() {
+        // B5（评审补测）：status="ok" 且 output 含 `"error": ""`（空串 error）→ None。
+        // 与 tool_error_from_output 对 status="ok" 恒 None 的读侧语义一致；修复应把空串
+        // error 视为无错误。当前实现下红或绿均记录实际（见 .dev-team/red-phase-b.md）。
+        let tool_result = ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "ok".to_string(),
+            output: json!({
+                "ok": true,
+                "exitCode": 0,
+                "error": ""
+            })
+            .to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(
+            tool_result_failure_kind(&tool_result),
+            None,
+            "status=ok 且 error 为空串的 Run 成功结果不应被分类为失败"
+        );
+    }
 }

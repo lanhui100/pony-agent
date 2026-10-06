@@ -17,6 +17,15 @@
 | A2 `windows_batch_script_preserves_cmd_metacharacters_verbatim` | `build_windows_batch_script` | `& | > "` 逐字保留；断言不含 `^&`/`^|`/`^>`、不含 `\"` |
 | A3 `workspace_command_parts_non_windows_branch_is_unchanged` | `workspace_command_parts(两参)` | 非 Windows 返回 `("sh", ["-lc", "cd '<cwd>' && <command>"])`（若 Executor 改三参签名，按新签名调整并记录） |
 | A4（`#[cfg(windows)]`，CI windows-latest 验证）`windows_run_powershell_command_with_quotes_returns_real_stdout_and_cleans_batch` | ToolRouter | exitCode==0 且 stdout 含 hello 且不含 "Write-Output"（无命令回显）；运行后 `.tmp/` 下无遗留 .cmd/.bat 临时文件 |
+| A5（`#[cfg(windows)]`，评审补测，CI windows-latest 验证）`windows_run_powershell_in_workspace_root_with_spaces_returns_real_stdout` | ToolRouter | workspace 根目录名含空格；`powershell -NoProfile -Command "Write-Output 'space-ws'"` exit 0 且 stdout 含 space-ws 且无命令文本回显（锁定含空格 workspace 下 cmd /C 引号形态） |
+
+## 红相/绿相演进记录
+1. 红相锚定（commit 5515533，实现前）：A1/A2 编译失败（`cannot find function build_windows_batch_script`，E0425），
+   完整输出见下节；A3 因编译门亦未执行（其断言按两参签名冻结，Executor 保留了两参便捷包装）。
+2. Executor 工作树落地实现（`build_windows_batch_script(command, cwd)` 与
+   `workspace_command_parts` 两参包装 → `workspace_command_parts_with_batch`）后本机验证：
+   `cargo test --lib windows_batch_` → A1/A2 绿；`cargo test --lib workspace_command_parts_non_windows` → A3 绿。
+3. A4/A5 为 `#[cfg(windows)]`，本机 Linux 不编译不执行，标注"待 CI windows-latest 验证"。
 
 ## 运行命令
 ```bash

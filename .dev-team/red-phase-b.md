@@ -16,6 +16,14 @@
 
 - B1 的 output 逐字段复刻 tools.rs run_command 成功路径形状（~L1942-1970）：
   `{"ok":true,...,"exitCode":0,"stdout":"hello\r\n","stderr":"","error":null,"summary":{...},"permission":{...}}`。
+- B5（评审补测）`bug_b_ok_with_empty_string_error_is_none`：status="ok" 且 `"error": ""`（空串）→ `None`，
+  与 tool_error_from_output 对 status="ok" 恒 None 的读侧语义一致。
+
+## 红相/绿相演进记录
+1. 红相锚定（commit 05e0576，修复前）：B1 红（实际 `Some(InvocationFailed)`，期望 `None`），B2/B3/B4 绿。
+2. Executor 提交 `2b63b39 fix(runtime): classifier treats error:null/empty-string success as no failure`
+   （error 为 null 或空串时视为无错误）后，本机 `cargo test --lib bug_b_`：B1-B5 全部通过（绿）。
+   B5 在修复落地后为绿（实现已含空串跳过）。
 
 ## 运行命令
 ```bash
