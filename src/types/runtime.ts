@@ -27,7 +27,9 @@ export type RuntimePhase =
   | "cancelled"
   | "calling_model"
   | "calling_tool"
-  | "failed";
+  | "failed"
+  | "waiting_user"
+  | "suspended";
 
 export type TurnLifecyclePhase =
   | "created"
@@ -38,6 +40,8 @@ export type TurnLifecyclePhase =
   | "executing_tool"
   | "tool_result_integrating"
   | "checkpointing"
+  | "suspended"
+  | "waiting_user"
   | "completed"
   | "failed"
   | "cancelled";
@@ -56,7 +60,8 @@ export type TurnLifecycleEventType =
   | "turn.checkpoint_persisted"
   | "turn.completed"
   | "turn.failed"
-  | "turn.cancelled";
+  | "turn.cancelled"
+  | "turn.suspended";
 
 export type AttachmentReference = {
   id: string;
@@ -1077,7 +1082,7 @@ export type TurnStreamEvent = {
   eventId?: string | null;
   sessionId?: string | null;
   turnId: string;
-  kind: "started" | "delta" | "trace" | "tool" | "output_end" | "completed" | "failed" | "cancelled";
+  kind: "started" | "delta" | "trace" | "tool" | "output_end" | "completed" | "failed" | "cancelled" | "suspended";
   eventType?: TurnLifecycleEventType | string | null;
   eventVersion?: string | null;
   sequence?: number | null;

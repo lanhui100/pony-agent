@@ -13,9 +13,11 @@
 //!   checks). The dispatcher's conservative default is intentionally overridden here so the switch
 //!   does not change today's tool-visible behavior. Real approval semantics land with the
 //!   permission-contract work (phase 4 / task 3.6 closeout).
-//! - Execute-scope tools (`workspace_run_command`) fail closed with `sandbox_unavailable` until a
-//!   real `SandboxBackend` is registered — the designed behavior (design.md Decision 7); the
-//!   process-lifecycle work (phase 5) supplies that backend.
+//! - Execute-scope tools (`workspace_run_command`) run behind the production sandbox
+//!   assembly below: `NativeSandboxBackend` when available, else
+//!   `HostApprovedUnsandboxedBackend` (DSH danger-full-access trust passthrough).
+//!   Fail-closed (`sandbox_unavailable`/`sandbox_denied`) is still enforced by both the
+//!   dispatcher preflight and the legacy handler when the backend rejects.
 //! - Legacy tool error codes that are not in the dispatcher's known-code set surface as
 //!   `handler_error`; status and message fidelity are preserved.
 
@@ -29,8 +31,10 @@ use crate::agent::dispatcher_composites::{
 use crate::agent::document_conversion::ReadDocumentHandler;
 use crate::agent::image_artifact::ViewImageHandler;
 use crate::agent::plan_state::{PlanControlHandler, PlanStore};
+use crate::agent::sandbox::{HostApprovedUnsandboxedBackend, NativeSandboxBackend};
 use crate::agent::tool_runtime::{
-    InvocationOrigin, PrimitiveToolHandler, PrimitiveToolHandlerRequest, RuntimeClock, SystemClock,
+    InvocationOrigin, PrimitiveToolHandler, PrimitiveToolHandlerRequest, RuntimeClock,
+    SandboxAvailability, SandboxBackend, SystemClock,
 };
 use crate::agent::tools::{
     ToolCall, ToolRegistrySnapshot, ToolRouter, TOOL_PLAN_CONTROL, TOOL_WORKSPACE_READ_DOCUMENT,
@@ -151,6 +155,16 @@ pub fn build_governed_executor(
     workspace_root: Option<PathBuf>,
     authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
 ) -> GovernedToolExecutor {
+    build_governed_executor_with_sandbox_backend(workspace_root, authorize_store, None)
+}
+
+/// 生产沙箱装配的显式 override 入口（测试注入用）：`Some(backend)` 时直接注册该后端；
+/// `None` 时走默认生产路径（Native 优先、fallback HostApprovedUnsandboxed）。
+pub fn build_governed_executor_with_sandbox_backend(
+    workspace_root: Option<PathBuf>,
+    authorize_store: Option<Arc<crate::agent::path_permission::AuthorizeStore>>,
+    sandbox_override: Option<Arc<dyn SandboxBackend>>,
+) -> GovernedToolExecutor {
     let registry = Arc::new(
         ToolRegistrySnapshot::builtin().expect("builtin registry must validate"),
     );
@@ -164,6 +178,25 @@ pub fn build_governed_executor(
         unbounded_output_and_deadline: true,
         ..Default::default()
     });
+    // 生产链路沙箱装配（design Decision 7 / DSH danger-full-access 信任透传语义）：
+    // Execute-scope（workspace_run_command）有 dispatcher 预检 + legacy handler 两层门禁，
+    // 两层必须装配同一决策的后端，否则 dispatcher 放行后 handler 仍 fail-closed。
+    // 优先级：显式 override > Native 可用 > HostApproved。
+    // override（测试注入）只替换 dispatcher 预检层；handler 层沿用生产默认，保证 Run 可执行。
+    let native_probe = NativeSandboxBackend::detect();
+    let native_available = native_probe.availability() == SandboxAvailability::Available;
+    match &sandbox_override {
+        Some(backend) => dispatcher.register_sandbox_backend(Arc::clone(backend)),
+        None => {
+            if native_available {
+                dispatcher.register_sandbox_backend(Arc::new(native_probe.clone()));
+            } else {
+                dispatcher.register_sandbox_backend(Arc::new(
+                    HostApprovedUnsandboxedBackend::new(),
+                ));
+            }
+        }
+    }
 
     // 默认工作区分叉收敛：None 兜底取 compute_default_workspace_root()
     //（Windows Documents/pony_agent，Unix ~/pony_agent），dirs 解析失败才回退 cwd。
@@ -175,9 +208,18 @@ pub fn build_governed_executor(
     // 缺省（测试/legacy 构造）时工具判定使用空授权清单（workspace 外读一律 requires_authorization）。
     let shared_authorizations = authorize_store
         .unwrap_or_else(|| Arc::new(crate::agent::path_permission::AuthorizeStore::new()));
-    let router = Arc::new(
-        ToolRouter::with_workspace_root(workspace.clone()).with_authorize_store(Arc::clone(&shared_authorizations)),
-    );
+    // handler 层（legacy ToolRouter.Run）与 dispatcher 预检层装配同一决策的后端：
+    // 否则预检放行后 handler 仍以 NoSandboxBackend 报 sandbox_denied。
+    let router = if native_available {
+        ToolRouter::with_workspace_root(workspace.clone())
+            .with_authorize_store(Arc::clone(&shared_authorizations))
+            .with_sandbox_backend(native_probe)
+    } else {
+        ToolRouter::with_workspace_root(workspace.clone())
+            .with_authorize_store(Arc::clone(&shared_authorizations))
+            .with_sandbox_backend(HostApprovedUnsandboxedBackend::new())
+    };
+    let router = Arc::new(router);
 
     // ── Plan state control: session-owned, revisioned create/replace/merge/complete-step.
     // Each runtime owns one PlanStore; session isolation is enforced by the store's
@@ -416,20 +458,36 @@ mod tests {
     }
 
     #[test]
-    fn governed_executor_fails_closed_for_run_without_sandbox_backend() {
+    fn governed_executor_registers_production_sandbox_backend_for_run() {
+        use crate::agent::sandbox::NoSandboxBackend;
+        use crate::agent::tool_runtime::SandboxBackend;
         let workspace = temp_workspace();
+        // 默认生产路径必须已注册后端：不再报 "no sandbox backend is registered" 指纹。
         let governed = build_governed_executor(Some(workspace), None);
         let result = governed.execute(&same_call(
             "Run",
             json!({ "command": "echo hi", "description": "test" }),
         ));
-        // Execute scope + no sandbox backend => designed fail-closed (design.md Decision 7);
-        // phase 5 supplies the real SandboxBackend.
-        assert_eq!(result.status, "error");
         assert!(
-            result.output.contains("sandbox_unavailable"),
-            "expected sandbox_unavailable, got: {}",
+            !result.output.contains("no sandbox backend is registered"),
+            "production path must register a sandbox backend, got: {}",
             result.output
+        );
+        // 显式 override 入口（测试注入）：NoSandboxBackend 恢复 fail-closed 预检。
+        let governed_override = build_governed_executor_with_sandbox_backend(
+            Some(temp_workspace()),
+            None,
+            Some(Arc::new(NoSandboxBackend) as Arc<dyn SandboxBackend>),
+        );
+        let denied = governed_override.execute(&same_call(
+            "Run",
+            json!({ "command": "echo hi", "description": "test" }),
+        ));
+        assert_eq!(denied.status, "error");
+        assert!(
+            denied.output.contains("sandbox_unavailable"),
+            "override backend must gate execute scope, got: {}",
+            denied.output
         );
     }
 

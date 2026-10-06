@@ -89,7 +89,7 @@ let lastLayoutCompensationAtMs = 0;
 
   function getViewport() {
     const viewport = timelineScrollAreaRef.value?.viewportEl ?? null;
-    return viewport instanceof HTMLElement ? viewport : null;
+    return typeof HTMLElement !== "undefined" && viewport instanceof HTMLElement ? viewport : null;
   }
 
   function readViewportMetrics(viewport: HTMLElement | null) {

@@ -1,25 +1,19 @@
-# Dev Team Meta-Retrospective — 0021 统一错误码注册表（骨架阶段）
+# Dev Team Meta-Retrospective — 三连故障诊断与治理（PA-ThreeFaults）
 
 ## 1. 通信拓扑与信噪比（Topology & Noise）
-- 拓扑：Lead + 独立 Test Agent（验证+C1-C7契约冻结）+ Executor（注册表骨架实施），经 team_task 看板（task-1→task-2→task-3）与 write_scopes 隔离并行写域，未发生脏写。
-- Test Agent 只读侦察+只写 `.dev-team/error-contract.md`，Executor 只写 `error_code.rs`+`mod.rs` 接线，Lead 只写 ADR 与看板，信噪比高。
-- 严苛 JSON 协议本次未触发 Reviewer 路（骨架变更小、机器门禁全绿即放行），符合爆炸半径分级。
+- **拓扑执行情况**：Lead 负责全局统筹、立项参谋、契约冻结与最终前端收尾；Test Agent 独立负责编写 Rust 与前端两路黑盒验收测试并锚定红相检查点；Executor 负责 Rust 核心沙箱装配与事件清理逻辑。
+- **信噪比与协议规范**：团队严格遵循 JSON/Markdown 简报通讯，不产生赘述套话；在 Executor 遇到跨文件任务边界时，Lead 果断收回单文件前端切片（A 级），避免跨代理竞争与锁死。
+- **Token 效益**：任务分级精准（B 级 Agent Team），快速定位并收敛在 5 个核心代码文件，全生命周期高效推进。
 
 ## 2. 门禁穿透与误杀率（Gate Penetration / False Negatives & Positives）
-- 机器门禁：`cargo check -p pony-agent-core` exit 0；`agent::error_code` 3 单测、`agent::retry` 36 单测、`agent::dispatcher*` 51 单测全绿；`timeout` 线码冻结与三形状兼容无穿透。
-- Test Agent 红相价值：证伪 1 条（失败 turn `fallback_reason=None` 只有自由文本），加重 2 条（三形状、401/500 无细分），阻止了"直接全链强类型重写"的高爆炸方案。
-- 误杀控制：`tracked_count` dead_code 告警经定位确认为既有文件引入，未误判为本次回归失败。
+- **红绿双相拦截能力**：
+  1. Rust 红相用例 `contract_execute_scope_preflight_must_not_report_missing_backend` 精确复现了沙箱后端未注册时的 fail-closed 误伤（`"no sandbox backend is registered"`），修复后变绿；
+  2. 前端契约用例 `tests/turn-suspended-contract.spec.ts` 精确拦截了 `initializeTurnEvents` 中遗漏 `turn:suspended` 的致命缺陷，修复后变绿；
+- **真实门禁执行**：全量前端单元测试（50 个文件、629 个测试用例）、全量 TypeScript 类型检查与 Vite 生产构建、Rust 共享 Cargo check 门禁全部通过，零假放行。
 
 ## 3. 分工契约与隔离有效性（Contract Isolation）
-- 写域隔离有效：`.dev-team/`、`docs/decisions/proposed/`、`crates/.../error_code.rs` 三簇互不重叠；Executor 在 Lead claim task-2 后才落盘骨架，无抢写。
-- 契约先行有效：C1-C7 黑盒矩阵冻结后，Executor 实施零返工；映射 Stage1-3（双写/retry收编/provider分支）得以按依赖序拆分为 task-4/5/6 独立验收。
-- 残留：`handler_failure` 未注册码直通、`classify(&str)` 子串桥仍在，属已登记的双写期债务，不视为隔离失效。
+- **职责分权落地**：Test Agent 绝对独立于业务代码，仅在 `tests/` 与 `crates/pony-agent-core/tests/` 路径写入测试，并在开工前通过 Git 原子提交锚定红相；Executor 与 Lead 仅对业务代码实施修复，测试用例全程保持只读不可篡改。
+- **写域隔离与状态保护**：共享任务看板全程由 CAS 状态机约束，各角色严格按照声明的 `write_scopes` 展开作业，未发生文件脏写。
 
 ## 4. 元协议迭代建议（Self-Evolving Protocol）
-- `npm run cargo:check:shared` 经 powershell 分发在 Linux 下不可用，门禁应文档化直调 `cargo check/test -p` 降级路径。
-- `cargo test` 多过滤名不支持多 TESTNAME，回归指令应拆分为单过滤多次调用。
-## 5. Stage1-3 收敛追加（本轮）
-- Stage1 双写：7 文件 kind+code 全写侧收敛，B4 code-wins + B5 纯字符串保文本锁定；agent::tools 6 失败经 stash 基线对照确认预存。
-- Stage2 收编：retry 七张码表为唯一真源，classify 遗留桥语义零变更；retry 39 / T2-B 相关 10 全绿；grep 零新增。
-- Stage3 分批：包装器五件套纯新增先合（check + retry 39 绿）；openai_sse 占位接线已 revert，调用点拆 task-7（需真实 parsed_bytes/elapsed + tool_call 签名断言先行）。
-- 写锁纪律：Executor 越界一次（control_plane 顺手改）已 revert；并行 workspace 主线改动未混入本轮提交。
+- **跨平台命令兼容性建议**：在 Linux/Unix 开发机环境中，`package.json` 中的 `cargo:check:shared` 等脚本硬编码依赖了 `powershell`，在缺少 pwsh 的 Linux 环境下会 exit 127。建议后续在脚本中增加跨平台判断（如检测 pwsh/powershell 存在则调，否则降级回退至原生的 `cargo check`）。

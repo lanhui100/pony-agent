@@ -756,6 +756,7 @@ fn resolve_canonical_event_type(
         "turn:completed" => "turn.completed".to_string(),
         "turn:failed" => "turn.failed".to_string(),
         "turn:cancelled" => "turn.cancelled".to_string(),
+        "turn:suspended" => "turn.suspended".to_string(),
         "turn:trace" => {
             if build_context_observation.is_some() && matches!(phase, Some("building_context")) {
                 "turn.context_built".to_string()
@@ -832,7 +833,10 @@ pub fn build_terminal_turn_event_envelope(
         emitted_at_ms: now_timestamp_ms(),
     };
 
-    if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+    if matches!(
+        name,
+        "turn:completed" | "turn:failed" | "turn:cancelled" | "turn:suspended"
+    ) {
         clear_turn_event_sequence(turn_id);
     }
 
@@ -964,7 +968,10 @@ pub fn emit_event(
         let session_id = payload.session_id.as_deref().unwrap_or("");
         dispatch_event_persist(session_id, &payload.turn_id, end_event, true);
     }
-    if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+    if matches!(
+        name,
+        "turn:completed" | "turn:failed" | "turn:cancelled" | "turn:suspended"
+    ) {
         clear_turn_event_sequence(&terminal_turn_id);
     }
     // PA-095：返回本次发射的信封（调用方可复用为 TurnResult 终态信封，

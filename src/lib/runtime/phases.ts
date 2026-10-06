@@ -27,6 +27,8 @@ export function normalizeRuntimePhaseValue(phase?: string | null): RuntimePhase 
     case "calling_model":
     case "calling_tool":
     case "failed":
+    case "suspended":
+    case "waiting_user":
       return normalized;
     default:
       return null;
@@ -55,6 +57,10 @@ export function mapLifecyclePhaseToRuntimePhase(phase?: string | null): RuntimeP
       return "failed";
     case "cancelled":
       return "cancelled";
+    case "suspended":
+      return "suspended";
+    case "waiting_user":
+      return "waiting_user";
     default:
       return normalizeRuntimePhaseValue(normalized);
   }
@@ -88,6 +94,8 @@ export function resolveRuntimePhaseFromEvent(
       return "failed";
     case "turn.cancelled":
       return "cancelled";
+    case "turn.suspended":
+      return "waiting_user";
     default:
       return fallback;
   }
@@ -121,6 +129,8 @@ export function resolveFallbackTimelineRuntimePhase(
       return "failed";
     case "turn.cancelled":
       return "cancelled";
+    case "turn.suspended":
+      return "waiting_user";
     default:
       return normalizeRuntimePhaseValue(phase) ?? "connecting";
   }

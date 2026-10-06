@@ -2373,7 +2373,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       payload: Pick<TurnStreamEvent, "turnId" | "eventId" | "sequence" | "emittedAtMs" | "kind">
     ) {
       const isTerminalEvent =
-        payload.kind === "completed" || payload.kind === "failed" || payload.kind === "cancelled";
+        payload.kind === "completed" || payload.kind === "failed" || payload.kind === "cancelled" || payload.kind === "suspended";
       if (isTerminalEvent) {
         // 终态事件：历史模式下仍处理（更新消息状态并解锁），且不被
         // "同 sequence 不同 eventId"的去重规则误杀（output_end 与 completed
@@ -4196,6 +4196,171 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         }, 0);
       });
 
+      const suspendedUnlisten = await safeListen<TurnStreamEvent>("turn:suspended", ({ payload }) => {
+        // Detect terminal event for a background session's turn
+        if (payload.sessionId) {
+          const bg = this.runningSessionMap[payload.sessionId];
+          if (bg && bg.turnId === payload.turnId) {
+            delete this.runningSessionMap[payload.sessionId];
+            return;
+          }
+        }
+
+        if (this.activeTurnId !== payload.turnId) {
+          return;
+        }
+        if (!this.shouldProcessTurnEvent(payload)) {
+          return;
+        }
+
+        // 历史模式下终态事件：仅解锁运行态，不污染历史视图（防止状态永久卡死）
+        if (isHistoricalMode(this.historyCursorMode)) {
+          this.clearSubmissionWatchdog();
+          this.$patch((state) => {
+            state.isSubmitting = false;
+            state.activeTurnId = null;
+            state.phase = "waiting_user";
+          });
+          return;
+        }
+
+        // ===== STAGE 1 (sync): Critical chat area mutations only =====
+        this.commitTurnEventCursor(payload);
+        this.flushBufferedStreamText(payload.turnId);
+        this.flushPendingTraceTimeline();
+
+        const suspendedTraceSteps = payload.traceSteps ?? this.traceSteps;
+        logCacheTelemetryContractViolations("suspended", payload);
+        const suspendedCacheHitInputTokens = resolveProviderReturnedCacheHitInputTokens(payload);
+        const suspendedReasoningTokens = resolveReasoningTokens(payload);
+        if (isDebugLoggingEnabled()) {
+          debugLog("cache-telemetry:terminal-payload", {
+            terminalEvent: "suspended",
+            ...buildCacheTelemetryDebugSnapshot(payload)
+          });
+        }
+
+        const assistantMessage = this.ensureAssistantMessage(
+          payload.turnId,
+          buildAssistantModelLabel(payload.providerName, payload.providerModel)
+        );
+
+        if (payload.text) {
+          assistantMessage.content = payload.text;
+        }
+        assistantMessage.reasoningContent = normalizeReasoningContent(payload.reasoningContent ?? assistantMessage.reasoningContent ?? null);
+        assistantMessage.status = "done";
+        assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
+
+        // Pre-compute values for later stages
+        const terminalToolActivities = resolveTerminalToolActivities(payload.toolActivities, this.toolActivities);
+        const cacheHitInputTokenPatch = suspendedCacheHitInputTokens != null ? { cacheHitInputTokens: suspendedCacheHitInputTokens } : {};
+        const reasoningTokenPatch = suspendedReasoningTokens != null ? { reasoningTokens: suspendedReasoningTokens } : {};
+        const turnDurationPatch = payload.turnDurationMs != null ? { turnDurationMs: payload.turnDurationMs } : {};
+        const suspendedSessionId = this.sessionId;
+        const suspendedRunId = this.activeRunId;
+        const suspendedNodeId = this.visibleNodeId;
+
+        // Apply token stats and sync tool messages inline (no deferred reactive cycle)
+        this.applyTurnTokenStats(payload.turnId, payload.inputTokens, payload.outputTokens, false);
+        this.syncToolMessages(payload.turnId, payload.toolActivities, false);
+
+        // Keep terminal UI state consistent: Ask paused the turn waiting for host answer
+        this.phase = resolveRuntimePhaseFromEvent(payload, "waiting_user");
+        this.error = null;
+        this.traceSteps = suspendedTraceSteps;
+        this.toolActivities = terminalToolActivities;
+        this.providerRequestedName = payload.providerRequestedName ?? this.providerRequestedName;
+        this.providerName = payload.providerName ?? this.providerName;
+        this.providerProtocol = payload.providerProtocol ?? this.providerProtocol;
+        this.providerModel = payload.providerModel ?? this.providerModel;
+        this.providerSource = payload.providerSource ?? this.providerSource;
+        this.providerMode = payload.providerMode ?? this.providerMode;
+        this.fallbackReason = payload.fallbackReason ?? this.fallbackReason;
+        this.clearSubmissionWatchdog();
+        this.isSubmitting = false;
+        this.activeTurnId = null;
+        this.activeRunId = null;
+
+        const suspendedTraceTimeline = resolveEventTraceTimeline(payload, () =>
+          buildFallbackRuntimeTraceTimeline({
+            turnId: payload.turnId,
+            eventType: payload.eventType,
+            messages: this.messages,
+            phase: "waiting_user",
+            assistantMessage,
+            toolActivities: terminalToolActivities,
+            providerPatch: {
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              providerSource: payload.providerSource ?? this.providerSource,
+              providerMode: payload.providerMode ?? this.providerMode
+            },
+            terminalState: null,
+            fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+            error: null,
+            inputTokens: payload.inputTokens ?? null,
+            cacheHitInputTokens: suspendedCacheHitInputTokens,
+            reasoningTokens: suspendedReasoningTokens,
+            outputTokens: payload.outputTokens ?? null,
+            totalTokens: payload.totalTokens ?? null,
+            firstTokenLatencyMs: payload.firstTokenLatencyMs ?? this.firstTokenLatencyMs,
+            turnDurationMs: payload.turnDurationMs ?? null
+          })
+        );
+
+        this.commitTurnTraceTimeline(payload.turnId, suspendedTraceTimeline, {
+          eventId: payload.eventId ?? null,
+          eventType: payload.eventType ?? null,
+          eventVersion: payload.eventVersion ?? null,
+          sequence: payload.sequence ?? null,
+          emittedAtMs: payload.emittedAtMs ?? null,
+          phase: "waiting_user",
+          traceSteps: suspendedTraceSteps,
+          toolActivities: terminalToolActivities,
+          providerCallRecords: cloneProviderCallRecords(payload.providerCallRecords),
+          providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+          providerName: payload.providerName ?? this.providerName,
+          providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+          providerModel: payload.providerModel ?? this.providerModel,
+          providerSource: payload.providerSource ?? this.providerSource,
+          providerMode: payload.providerMode ?? this.providerMode,
+          buildContextObservation: cloneBuildContextObservation(payload.buildContextObservation),
+          hookTraceRecords: cloneHookTraceRecords(payload.hookTraceRecords),
+          sessionSummary: payload.sessionSummary ?? this.sessionSummary,
+          fallbackReason: payload.fallbackReason ?? this.fallbackReason,
+          ...cacheHitInputTokenPatch,
+          ...reasoningTokenPatch,
+          ...turnDurationPatch,
+          error: null
+        }, false);
+
+        // Yield to browser
+        window.setTimeout(() => {
+          if (this.sessionId !== suspendedSessionId || isHistoricalMode(this.historyCursorMode)) {
+            return;
+          }
+
+          // ===== STAGE 2 (setTimeout 0): Non-urgent async work =====
+          runLowPriorityTurnWork(() => {
+            this.persistHistory();
+            void this.loadRetrievedContextState(suspendedSessionId, {
+              runId: suspendedRunId,
+              nodeId: suspendedNodeId
+            }).then((retrieved) => {
+              if (this.sessionId === suspendedSessionId) {
+                this.retrievedContext = retrieved;
+              }
+            });
+          });
+
+          debugLog("event:suspended", {
+            turnId: payload.turnId
+          });
+        }, 0);
+      });
+
       void startedUnlisten;
       void deltaUnlisten;
       void traceUnlisten;
@@ -4207,6 +4372,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       void completedUnlisten;
       void failedUnlisten;
       void cancelledUnlisten;
+      void suspendedUnlisten;
       this.eventsReady = true;
     },
     async runBrowserPreviewTurn(requestId: string) {
