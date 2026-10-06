@@ -4273,15 +4273,23 @@ fn provider_log(message: String) {
 
 /// Stage3 P1–P5 协议/上游可观测前缀（error_code 注册表线码，String wire 兼容）。
 /// P6 门禁：本文件内不新增 `lower.contains`/`to_ascii_lowercase`（分类仍走 retry 码表）。
+// Stage3 协议/上游可观测包装器五件套：本任务(P1-P5)仅落符号，调用点由 task-7 接线，
+// 故当前 crate 内未引用，临时 allow(dead_code) 通过 CI deny-warnings；task-7 接线后移除本标注。
+#[allow(dead_code)]
 pub(crate) const PROTOCOL_SSE_PARSE_CODE: &str = "protocol_sse_parse";
+#[allow(dead_code)]
 pub(crate) const PROTOCOL_TOOL_CALL_SCHEMA_CODE: &str = "protocol_tool_call_schema";
+#[allow(dead_code)]
 pub(crate) const PROTOCOL_MODEL_CATALOG_CODE: &str = "protocol_model_catalog";
+#[allow(dead_code)]
 pub(crate) const PROTOCOL_UNKNOWN_MODEL_CODE: &str = "protocol_unknown_model";
+#[allow(dead_code)]
 pub(crate) const PROTOCOL_REASONING_EFFORT_CODE: &str = "protocol_reasoning_effort";
 
 /// Stage3 P2：SSE 失败可观测包装——code=protocol_sse_parse，
 /// message 含原始错误 + endpoint/parsed_bytes/elapsed 证据。fallback 链不动
 /// （调用方仍按 `Err(String)` 走原有 sync/stream 回退）。
+#[allow(dead_code)]
 pub(crate) fn protocol_sse_parse_error(
     detail: &str,
     endpoint: &str,
@@ -4296,6 +4304,7 @@ pub(crate) fn protocol_sse_parse_error(
 
 /// Stage3 P3：tool_call schema 不匹配可观测包装——code=protocol_tool_call_schema。
 /// 消灭静默 default `{}`：坏 JSON / 多调 / 空输出一律显式错误，由调用方走既有回退链。
+#[allow(dead_code)]
 pub(crate) fn protocol_tool_call_schema_error(detail: &str, evidence: &str) -> String {
     format!(
         "{}: {}; evidence={}",
@@ -4306,6 +4315,7 @@ pub(crate) fn protocol_tool_call_schema_error(detail: &str, evidence: &str) -> S
 }
 
 /// Stage3 P4：model catalog 可观测包装——code=protocol_model_catalog。
+#[allow(dead_code)]
 pub(crate) fn protocol_model_catalog_error(detail: &str, evidence: &str) -> String {
     format!(
         "{}: {}; evidence={}",
@@ -4318,6 +4328,7 @@ pub(crate) fn protocol_model_catalog_error(detail: &str, evidence: &str) -> Stri
 /// Stage3 P4：选择期未知模型可观测包装——code=protocol_unknown_model。
 /// provider/ 内无选择期校验点（选择在 config 层），本函数为调用方预留构造器，
 /// 不改变现有选择流程。
+#[allow(dead_code)]
 pub(crate) fn protocol_unknown_model_error(model: &str, known_count: usize) -> String {
     format!(
         "{}: 未知模型 `{}`（已知 {} 个候选）；evidence=model={}",
@@ -4329,6 +4340,7 @@ pub(crate) fn protocol_unknown_model_error(model: &str, known_count: usize) -> S
 }
 
 /// Stage3 P5：reasoning effort 冲突本地报错构造器——code=protocol_reasoning_effort。
+#[allow(dead_code)]
 pub(crate) fn protocol_reasoning_effort_error(detail: &str, evidence: &str) -> String {
     format!(
         "{}: {}; evidence={}",
