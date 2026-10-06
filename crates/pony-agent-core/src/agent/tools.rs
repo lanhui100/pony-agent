@@ -935,6 +935,7 @@ impl ToolOutcome {
                 "ok": false,
                 "error": {
                     "code": "control_outcome_pending",
+                    "kind": "control_outcome_pending",
                     "message": "工具调用尚处于控制请求状态，尚未产生可供 provider 消费的终态结果。"
                 }
             })
@@ -1919,6 +1920,7 @@ impl ToolRouter {
         let error_payload = (!succeeded).then(|| {
             json!({
                 "code": "non_zero_exit",
+                "kind": "non_zero_exit",
                 "message": format!(
                     "命令执行完成，但退出码为 {}。",
                     exit_code.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
@@ -2067,6 +2069,7 @@ impl ToolRouter {
                 }),
                 "error": (!status.is_success()).then(|| json!({
                     "code": "http_error",
+                    "kind": "http_error",
                     "message": format!("抓取 URL 返回非成功状态码 {}。", status.as_u16()),
                     "hint": "请确认目标地址可访问，或检查服务端响应状态。"
                 })),
@@ -6311,6 +6314,7 @@ fn web_fetch_denied(url: &str, decision: &WebAccessDecision) -> ToolResult {
             "url": url,
             "error": {
                 "code": "web_access_denied",
+                "kind": "web_access_denied",
                 "message": message,
                 "hint": "请检查 URL 是否为公开的 http/https 地址，且未指向内网、回环或受限端口。",
                 "accessDecision": serde_json::to_value(decision).unwrap_or(Value::Null),
@@ -6483,7 +6487,9 @@ fn error_result(tool_name: &str, code: &str, message: String, hint: Option<Strin
             "ok": false,
             "tool": tool_name,
             "error": {
+                // Stage1 双写（A2）：kind 与 code 并存且值一致。
                 "code": code,
+                "kind": code,
                 "message": message,
                 "hint": hint,
             },
@@ -6501,10 +6507,27 @@ pub(crate) fn tool_error_from_output(status: &str, parsed: &Value) -> Option<Too
     }
 
     let error = parsed.get("error")?;
+    // B5：纯字符串 error 形状保文本：message 含原文，kind 落 unknown 标记
+    //（此前丢文本回默认句；码形 A4 要求 kind 保持 ^[a-z][a-z0-9_]{1,63}$，
+    // 故 kind 取 "unknown" 而非嵌入原文）。
+    if let Some(raw) = error.as_str() {
+        return Some(ToolError {
+            kind: "unknown".to_string(),
+            message: if raw.is_empty() {
+                "Tool execution failed.".to_string()
+            } else {
+                raw.to_string()
+            },
+            details: None,
+            retryable: None,
+            source: None,
+        });
+    }
     Some(ToolError {
         kind: error
-            .get("kind")
-            .or_else(|| error.get("code"))
+            // B4：冲突时 code 获胜（code 优先，唯一行为变更）。
+            .get("code")
+            .or_else(|| error.get("kind"))
             .and_then(Value::as_str)
             .unwrap_or("tool_error")
             .to_string(),
@@ -6531,7 +6554,9 @@ fn aborted_result(tool_name: &str, code: &str, message: String) -> ToolResult {
             "tool": tool_name,
             "status": "aborted",
             "error": {
+                // Stage1 双写：kind 与 code 并存且值一致。
                 "code": code,
+                "kind": code,
                 "message": message,
                 "hint": Option::<String>::None,
             }
@@ -10813,5 +10838,28 @@ mod tests {
         let client = build_pinned_web_client(&decision, "203.0.113.10", 5000)
             .expect("pinned client for literal IP must build");
         let _ = client;
+    }
+
+    // ── Stage1 B4/B5 锁定：tool_error_from_output 读侧契约 ──
+
+    #[test]
+    fn tool_error_code_wins_on_kind_code_conflict() {
+        // B4：冲突时 code 获胜（唯一行为变更）。
+        let parsed = json!({ "error": { "code": "code_a", "kind": "kind_b", "message": "m" } });
+        let error = tool_error_from_output("error", &parsed).expect("parsed");
+        assert_eq!(error.kind, "code_a");
+        assert_eq!(error.message, "m");
+    }
+
+    #[test]
+    fn tool_error_pure_string_preserves_text_with_unknown_kind() {
+        // B5：纯字符串 error 保文本，kind 落 unknown 标记。
+        let parsed = Value::String("upstream provider exploded".to_string());
+        // 注意：顶层纯字符串无 error 键 → None；error 键为纯字符串才进 B5 分支。
+        assert!(tool_error_from_output("error", &parsed).is_none());
+        let wrapped = json!({ "error": "upstream provider exploded" });
+        let error = tool_error_from_output("error", &wrapped).expect("parsed");
+        assert_eq!(error.kind, "unknown");
+        assert_eq!(error.message, "upstream provider exploded");
     }
 }

@@ -103,6 +103,16 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Stage1 双写小助手：写侧 `error.code` 取值。
+    pub fn dual_write_code(&self) -> String {
+        self.as_str()
+    }
+
+    /// Stage1 双写小助手：写侧 `error.kind` 取值（与 code 同值，A1–A3）。
+    pub fn dual_write_kind(&self) -> String {
+        self.as_str()
+    }
+
     /// 线码（wire `String` 取值）。
     pub fn as_str(&self) -> String {
         match self {

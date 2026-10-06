@@ -291,6 +291,7 @@ impl AgentRuntime {
                     "tool": tool_call.name,
                     "error": {
                         "code": "missing_capability_id",
+                        "kind": "missing_capability_id",
                         "message": "缺少必填参数 `capabilityId`。"
                     }
                 })
@@ -410,6 +411,7 @@ impl AgentRuntime {
                 "error": failure_kind.as_ref().map(|kind| {
                     json!({
                         "code": kind.as_str(),
+                        "kind": kind.as_str(),
                         "message": match kind {
                             CapabilityFailureKind::CapabilityNotFound => "未找到对应的 MCP resource capability。".to_string(),
                             CapabilityFailureKind::SourceUnavailable => "对应的 MCP resource source 当前不可用。".to_string(),

@@ -839,6 +839,7 @@ fn child_outcome_output(outcome: &ToolOutcome) -> Value {
             "ok": false,
             "error": {
                 "code": "control_outcome_pending",
+                "kind": "control_outcome_pending",
                 "message": "子调用处于控制请求状态，尚未产生可供 provider 消费的终态结果。",
             },
         }),
@@ -1180,6 +1181,7 @@ fn aborted_outcome(tool_name: &str, code: &str, message: String) -> ToolOutcome 
             "status": "aborted",
             "error": {
                 "code": code,
+                "kind": code,
                 "message": message,
                 "hint": Value::Null,
             },
@@ -1197,6 +1199,7 @@ fn error_result(tool_name: &str, code: &str, message: String) -> ToolResult {
             "tool": tool_name,
             "error": {
                 "code": code,
+                "kind": code,
                 "message": message,
                 "hint": Value::Null,
             },

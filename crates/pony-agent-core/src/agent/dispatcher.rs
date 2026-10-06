@@ -373,7 +373,9 @@ impl DispatchError {
             output: json!({
                 "ok": false,
                 "error": {
-                    "code": self.code,
+                    // Stage1 双写（A1）：kind 与 code 并存且值一致，message 语义不变。
+                    "code": self.code.clone(),
+                    "kind": self.code,
                     "message": self.message,
                 }
             })

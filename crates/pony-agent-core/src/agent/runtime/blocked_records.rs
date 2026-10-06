@@ -9,6 +9,7 @@ pub(super) fn blocked_tool_result(tool_call: &ToolCall, error: &str) -> crate::a
             "tool": tool_call.name,
             "error": {
                 "code": "hook_blocked",
+                "kind": "hook_blocked",
                 "message": error,
             },
             "summary": {

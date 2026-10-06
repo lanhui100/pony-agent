@@ -490,6 +490,7 @@ fn not_started_outcome(request: &ChildDispatchRequest) -> ToolOutcome {
             "ok": false,
             "error": {
                 "code": "not_started",
+                "kind": "not_started",
                 "message": "child not started because an earlier sibling entered a pending control state",
             }
         })
@@ -506,6 +507,7 @@ fn child_panic_outcome() -> ToolOutcome {
             "ok": false,
             "error": {
                 "code": "child_panic",
+                "kind": "child_panic",
                 "message": "child handler panicked during concurrent dispatch",
             }
         })
