@@ -18,6 +18,7 @@ import {
   traceReasoningContent,
   traceToolActivities
 } from "./trace";
+import { stripCancelledTurnSentinel } from "./cancelled-turn";
 
 export function cloneMessages(messages?: ChatMessage[] | null) {
   return (messages ?? []).map((message) => ({ ...message }));
@@ -476,7 +477,8 @@ export function hydrateMessagesFromHistory(
       id: restoredMessage?.id ?? `history-assistant-${turnIndex}`,
       turnId: currentTurnId,
       role: "assistant",
-      content: item.content,
+      // PA-118：取消回合哨兵句仅作展示层清洗（历史语义/分类不变）
+      content: stripCancelledTurnSentinel(item.content),
       attachments: [],
       status: hasErrorState ? "error" : "done",
       reasoningContent: item.reasoningContent ?? restoredMessage?.reasoningContent ?? traceReasoningContent(currentTrace),

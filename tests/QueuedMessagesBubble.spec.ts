@@ -57,12 +57,15 @@ describe("QueuedMessagesBubble.vue", () => {
     expect(wrapper.emitted("steer")![0]).toEqual(["msg-1"]);
   });
 
-  it("emits remove event when trash button clicked", async () => {
+  it("emits remove event when trash button clicked on expanded message", async () => {
     const wrapper = mount(QueuedMessagesBubble, {
       props: {
         messages: dummyMessages,
       },
     });
+
+    const container = wrapper.find("[data-testid='queued-messages-container']");
+    await container.trigger("mouseenter");
 
     const removeBtn = wrapper.find("[data-testid='queue-remove-btn-1']");
     expect(removeBtn.exists()).toBe(true);

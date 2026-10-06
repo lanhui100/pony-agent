@@ -921,7 +921,22 @@ function assistantAwaitingFirstSignal(turn: TurnBucket) {
 }
 
 function shouldShowAgentArticle(turn: TurnBucket) {
-  return Boolean(turn.assistant || turn.tools.length || assistantAwaitingFirstSignal(turn));
+  // PA-118：agent 文章仅在“有可见内容 / 有可见推理 / 错误态 / 有工具 / 等待首个信号”时渲染；
+  // 取消回合（内容空、无推理、无工具）不渲染空 agent 壳/复制按钮行。
+  if (assistantAwaitingFirstSignal(turn)) {
+    return true;
+  }
+  if (turn.tools.length > 0) {
+    return true;
+  }
+  if (!turn.assistant) {
+    return false;
+  }
+  return (
+    assistantHasVisibleContent(turn.assistant) ||
+    shouldShowReasoningBlock(turn.assistant) ||
+    shouldRenderAssistantAsError(turn)
+  );
 }
 
 function isAssistantStreaming(message: ChatMessage | null) {
@@ -1575,6 +1590,11 @@ watch(
         </div>
       </div>
     </Teleport>
+    <QueuedMessagesBubble
+      :messages="pendingQueuedMessages"
+      @steer="(id) => runtimeStore.promoteToSteer(id)"
+      @remove="(id) => runtimeStore.removeQueuedMessage(id)"
+    />
     <ScrollArea
       ref="timelineScrollAreaRef"
       class="min-h-0 flex-1 rounded-t-[0.6rem]"
@@ -1645,12 +1665,6 @@ watch(
         ]"
       ><span class="flex h-5 min-w-5 items-center justify-center rounded-full bg-stone-800 px-1.5 text-[10px] font-semibold text-white">{{ unreadCount > 99 ? '99+' : unreadCount }}</span></span>
     </button>
-
-    <QueuedMessagesBubble
-      :messages="pendingQueuedMessages"
-      @steer="(id) => runtimeStore.promoteToSteer(id)"
-      @remove="(id) => runtimeStore.removeQueuedMessage(id)"
-    />
 
     <WorkspaceComposer
       :show-reasoning-content="showReasoningContent"

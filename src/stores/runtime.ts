@@ -137,6 +137,7 @@ import {
   previewMessageStateDeltaMessages,
   reuseStableChatMessages
 } from "@/lib/runtime/messages";
+import { CANCELLED_TURN_MESSAGE } from "@/lib/runtime/cancelled-turn";
 import {
   attachmentDedupKey,
   bytesToDataUrl,
@@ -4084,7 +4085,13 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           buildAssistantModelLabel(payload.providerName, payload.providerModel)
         );
 
-        assistantMessage.content = payload.text ?? "本轮已停止。";
+        // PA-118：哨兵句（用户终止提示）为后端占位文本，不写入展示内容——
+        // 保留此前已流式内容（未流式则保持空串）；其他非空文本照旧使用；null 仍 fallback。
+        if (payload.text != null && payload.text.trim() !== CANCELLED_TURN_MESSAGE) {
+          assistantMessage.content = payload.text;
+        } else if (payload.text == null) {
+          assistantMessage.content = "本轮已停止。";
+        }
         assistantMessage.reasoningContent = normalizeReasoningContent(payload.reasoningContent ?? null);
         assistantMessage.status = "done";
         assistantMessage.modelName = buildAssistantModelLabel(payload.providerName, payload.providerModel);
