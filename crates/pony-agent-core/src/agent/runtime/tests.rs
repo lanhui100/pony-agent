@@ -9905,4 +9905,122 @@ mod parity {
         }
         assert_eq!(seen.len(), 2, "two turns across branches paired");
     }
+
+    // ── Stage1 红相验收：tool_result_failure_kind error:null 误分类（Bug B） ──
+    // 桌面 Windows 会话中，Run 工具成功时 output 含 `"error": null`。旧实现
+    // `parsed.get("error")` 对 `null` 返回 Some(Null)，被当成"有 error"→ 所有成功
+    // Run 都被分类为 CapabilityFailureKind::InvocationFailed（UI 误标"调用失败"）。
+    // 修复预期：error 为 JSON null 时按"无 error"处理。
+
+    #[test]
+    fn bug_b_ok_run_with_error_null_is_none_not_invocation_failed() {
+        // B1：status="ok"、error:null、exitCode:0、ok:true 的成功 Run → None。
+        // output 形状仿照 tools.rs run_command 成功路径（~L1942）逐字段复刻。
+        let tool_result = ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "ok".to_string(),
+            output: json!({
+                "ok": true,
+                "cwd": ".",
+                "absoluteCwd": "C:\\Users\\test\\work",
+                "command": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
+                "delegateTool": "run_shell",
+                "timeoutMs": 30000,
+                "exitCode": 0,
+                "stdout": "hello\r\n",
+                "stderr": "",
+                "stderrTruncated": false,
+                "stdoutTruncated": false,
+                "error": null,
+                "summary": { "text": "命令在 . 执行完成，退出码为 0。" },
+                "permission": {
+                    "requiresApproval": false,
+                    "permissionScope": "workspace.execute",
+                    "hostMediated": false,
+                    "permissionProfile": "builtin",
+                    "approvalMode": "none",
+                    "decisionSource": "runtime"
+                }
+            })
+            .to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(
+            tool_result_failure_kind(&tool_result),
+            None,
+            "status=ok 且 error:null 的 Run 成功结果不应被分类为失败（Bug B 红相）"
+        );
+    }
+
+    #[test]
+    fn bug_b_error_status_or_error_object_is_invocation_failed() {
+        // B2 回归：status="error"（无 error 字段）→ InvocationFailed。
+        let status_error = ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "error".to_string(),
+            output: json!({ "ok": false }).to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(
+            tool_result_failure_kind(&status_error),
+            Some(CapabilityFailureKind::InvocationFailed)
+        );
+
+        // B2 回归：error 为对象（含 kind/code/message）→ InvocationFailed。
+        let object_error = ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "error".to_string(),
+            output: json!({
+                "ok": false,
+                "exitCode": 1,
+                "error": {
+                    "code": "non_zero_exit",
+                    "kind": "non_zero_exit",
+                    "message": "命令执行完成，但退出码为 1。"
+                }
+            })
+            .to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(
+            tool_result_failure_kind(&object_error),
+            Some(CapabilityFailureKind::InvocationFailed)
+        );
+    }
+
+    #[test]
+    fn bug_b_ok_without_error_field_is_none() {
+        // B3 回归：status="ok" 且 output 无 error 字段 → None。
+        let tool_result = ToolResult {
+            tool_name: "workspace_read_file".to_string(),
+            status: "ok".to_string(),
+            output: json!({ "content": "hello" }).to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(tool_result_failure_kind(&tool_result), None);
+    }
+
+    #[test]
+    fn bug_b_ok_with_non_null_error_object_is_invocation_failed() {
+        // B4 回归：status="ok" 但 error 为非 null 对象 → InvocationFailed。
+        let tool_result = ToolResult {
+            tool_name: "workspace_run_command".to_string(),
+            status: "ok".to_string(),
+            output: json!({
+                "ok": false,
+                "exitCode": 1,
+                "error": {
+                    "code": "non_zero_exit",
+                    "kind": "non_zero_exit",
+                    "message": "命令执行完成，但退出码为 1。"
+                }
+            })
+            .to_string(),
+            duration_ms: 0,
+        };
+        assert_eq!(
+            tool_result_failure_kind(&tool_result),
+            Some(CapabilityFailureKind::InvocationFailed)
+        );
+    }
 }
