@@ -58,6 +58,7 @@
 - [0018 Windows Job Object 进程生命周期约束](0018-windows-job-object-containment.md)
 - [0019 本地契约优先的签名桌面更新](0019-signed-desktop-updater-local-contract.md)
 - [0020 侧边栏工作区会话折叠与选中高亮浅色化](0020-workspace-sidebar-collapsible-and-selection-tone.md)
+- [0022 桌面端默认工作区基座保持与兜底收敛注册表 default](0022-desktop-default-workspace-registry-convergence.md)
 
 ### 已接替
 
