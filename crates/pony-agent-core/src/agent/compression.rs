@@ -19,8 +19,14 @@ use crate::agent::session::TurnHistoryMessage;
 pub struct CompressionConfig {
     /// 触发压缩的阈值，占 context window 的比例（默认 0.8 = 80%）
     pub trigger_threshold: f64,
-    /// 保留原始消息的最近 turn 数（默认 10，业界研究表明 10 轮是最佳平衡点）
+    /// 预留净空 token 数量（DSH headroom_tokens，用于容纳输出与请求净空）
+    pub headroom_tokens: usize,
+    /// 预留完成输出 token 数量（DSH reserved_completion_tokens，默认 4096）
+    pub reserved_completion_tokens: usize,
+    /// 保留原始消息的最近 turn 数（默认 10）
     pub keep_recent_turns: usize,
+    /// 保留最近消息比例（DSH retain_ratio，默认 0.16）
+    pub retain_ratio: f64,
     /// 摘要消息在历史中占位的 role
     pub summary_role: String,
 }
@@ -29,10 +35,58 @@ impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
             trigger_threshold: 0.8,
+            headroom_tokens: 16_384,
+            reserved_completion_tokens: 4_096,
             keep_recent_turns: 10,
+            retain_ratio: 0.16,
             summary_role: "user".to_string(),
         }
     }
+}
+
+impl CompressionConfig {
+    /// 计算触发压缩的有效 token 水位阈值（对齐 DSH thresholdTokens 逻辑）
+    pub fn calculate_threshold_tokens(&self, context_window: usize) -> usize {
+        let message_budget = context_window.saturating_sub(self.reserved_completion_tokens);
+        let pressure_budget = message_budget.saturating_sub(self.headroom_tokens);
+        let ratio_threshold = (context_window as f64 * self.trigger_threshold) as usize;
+        std::cmp::min(ratio_threshold, pressure_budget)
+    }
+}
+
+/// 计算触发压缩的有效 token 水位阈值（对齐 DSH thresholdTokens 逻辑）
+pub fn calculate_threshold_tokens(
+    context_window: usize,
+    reserved_completion_tokens: usize,
+    config: &CompressionConfig,
+) -> usize {
+    let message_budget = context_window.saturating_sub(reserved_completion_tokens);
+    let pressure_budget = message_budget.saturating_sub(config.headroom_tokens);
+    let ratio_threshold = (context_window as f64 * config.trigger_threshold) as usize;
+    std::cmp::min(ratio_threshold, pressure_budget)
+}
+
+/// 估算整个历史消息的 token 总量
+pub fn estimate_history_tokens(history: &[TurnHistoryMessage]) -> usize {
+    history.iter().map(estimate_turn_message_tokens).sum()
+}
+
+/// 判断是否需要压缩
+///
+/// 当历史消息的估算 token 总数超过计算出的安全水位阈值时触发。
+pub fn should_compress(
+    history: &[TurnHistoryMessage],
+    provider: &ProviderManager,
+    config: &CompressionConfig,
+) -> bool {
+    let Some(context_window) = provider.context_window_tokens() else {
+        return false;
+    };
+    let reserved_completion_tokens = 2048;
+    let threshold_tokens =
+        calculate_threshold_tokens(context_window as usize, reserved_completion_tokens, config);
+    let total_tokens = estimate_history_tokens(history);
+    total_tokens > threshold_tokens
 }
 
 /// 压缩结果
@@ -44,22 +98,6 @@ pub struct CompressionResult {
     pub compressed_count: usize,
     /// 压缩后保留的原始消息数
     pub kept_count: usize,
-}
-
-/// 判断是否需要压缩
-///
-/// 当历史消息的估算 token 总数超过 `context_window * trigger_threshold` 时返回 true。
-pub fn should_compress(
-    history: &[TurnHistoryMessage],
-    provider: &ProviderManager,
-    config: &CompressionConfig,
-) -> bool {
-    let Some(context_window) = provider.context_window_tokens() else {
-        return false;
-    };
-    let threshold_tokens = (context_window as f64 * config.trigger_threshold) as usize;
-    let total_tokens: usize = history.iter().map(estimate_turn_message_tokens).sum();
-    total_tokens > threshold_tokens
 }
 
 /// 将历史拆分为"可压缩部分"和"保留原始部分"
@@ -291,6 +329,32 @@ mod tests {
         // 历史太短，全部保留
         assert!(to_compress.is_empty());
         assert_eq!(to_keep.len(), 6);
+    }
+
+    #[test]
+    fn test_calculate_threshold_tokens() {
+        let config = CompressionConfig {
+            trigger_threshold: 0.8,
+            headroom_tokens: 16_000,
+            ..Default::default()
+        };
+        // context_window = 100_000, reserved = 2_000
+        // ratio_threshold = 80_000
+        // message_budget = 98_000, pressure_budget = 98_000 - 16_000 = 82_000
+        // min(80_000, 82_000) = 80_000
+        let threshold = calculate_threshold_tokens(100_000, 2_000, &config);
+        assert_eq!(threshold, 80_000);
+
+        // 当 headroom 很大时受 pressure_budget 限制：
+        let high_headroom_config = CompressionConfig {
+            trigger_threshold: 0.8,
+            headroom_tokens: 30_000,
+            ..Default::default()
+        };
+        // message_budget = 98_000, pressure_budget = 68_000
+        // min(80_000, 68_000) = 68_000
+        let threshold2 = calculate_threshold_tokens(100_000, 2_000, &high_headroom_config);
+        assert_eq!(threshold2, 68_000);
     }
 
     #[test]

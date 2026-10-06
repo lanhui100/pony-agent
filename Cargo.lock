@@ -3471,7 +3471,7 @@ dependencies = [
 
 [[package]]
 name = "pony-agent"
-version = "0.1.102"
+version = "0.1.103"
 dependencies = [
  "pony-agent-core",
  "raw-window-handle",
@@ -3490,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "pony-agent-core"
-version = "0.1.95"
+version = "0.1.96"
 dependencies = [
  "anydoc",
  "base64 0.22.1",

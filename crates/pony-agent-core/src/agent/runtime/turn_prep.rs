@@ -73,6 +73,10 @@ impl AgentRuntime {
                                 summary_msg,
                                 &config,
                             );
+                            eprintln!(
+                                "[pony-agent] auto compaction completed: compressed {} messages, kept {}",
+                                result.compressed_count, result.kept_count
+                            );
                             sessions.replace_session_history(
                                 input.session_id.as_deref(),
                                 result.history,
