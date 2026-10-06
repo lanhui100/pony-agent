@@ -49,7 +49,9 @@ jobs:
       - name: 前端单元测试
         run: npm run test:unit
 
-      - name: Rust 检查（shared 槽位）
+      - name: Rust 检查（shared 槽位，deny-warnings 与发版构建对齐）
+        env:
+          RUSTFLAGS: -D warnings
         run: npm run cargo:check:shared
 
       - name: Core 单元与集成测试（含 Windows Job 生命周期）
@@ -69,6 +71,8 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libssl-dev pkg-config
-      - name: Core 非 Windows cfg 编译检查
+      - name: Core 非 Windows cfg 编译检查（deny-warnings 与发版构建对齐）
+        env:
+          RUSTFLAGS: -D warnings
         shell: pwsh
         run: ./scripts/invoke-rust-target.ps1 check check --package=pony-agent-core

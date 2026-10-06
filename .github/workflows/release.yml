@@ -48,7 +48,9 @@ jobs:
           npm run version:check
           npm run typecheck
           npm run test:unit
-      - name: Rust check (desktop)
+      - name: Rust check (desktop, deny-warnings aligned with build-release)
+        env:
+          RUSTFLAGS: -D warnings
         run: |
           npm run cargo:check
       - name: Core 关键回归与单元测试
