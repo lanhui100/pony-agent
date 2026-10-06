@@ -37,6 +37,33 @@ function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
   return left.turnId.localeCompare(right.turnId);
 }
 
+/** 单次模型调用生成速度（token/s）：优先按生成期（扣除首 token 延迟）计算。 */
+function entryTokenGenerationSpeed(entry: TraceTimelineEntry): number | null {
+  if (entry.outputTokens == null || entry.turnDurationMs == null) {
+    return null;
+  }
+
+  let durationMs: number;
+  if (entry.firstTokenLatencyMs != null && entry.turnDurationMs - entry.firstTokenLatencyMs > 0) {
+    durationMs = entry.turnDurationMs - entry.firstTokenLatencyMs;
+  } else {
+    durationMs = Math.max(entry.turnDurationMs, 1);
+  }
+
+  const speed = entry.outputTokens / (durationMs / 1000);
+  return Number.isFinite(speed) ? speed : null;
+}
+
+/** 整轮整体速度兜底（turn 级 outputTokens / turnDurationMs）。 */
+function turnTokenSpeed(turn: TurnTraceRecord): number | null {
+  if (turn.outputTokens == null || turn.turnDurationMs == null) {
+    return null;
+  }
+
+  const speed = turn.outputTokens / (Math.max(turn.turnDurationMs, 1) / 1000);
+  return Number.isFinite(speed) ? speed : null;
+}
+
 /** 剪贴板反馈：HomeSidebar（session-id 复制）与 TraceInspector（trace 复制）各自实例化。 */
 export function useCopyFeedback() {
   const copiedKey = ref("");
@@ -243,9 +270,32 @@ export function useTraceProjection(options: {
       return "";
     }
 
-    return `${((sessionCacheHitTokensTotal.value / sessionInputTokensTotal.value) * 100).toFixed(1)}%`;
+    return `${Math.round((sessionCacheHitTokensTotal.value / sessionInputTokensTotal.value) * 100)}%`;
   });
   const showContextUsage = computed(() => !!latestTurn.value);
+
+  // 当前模型生成速度（token/s）：取最近 turn 的最近一次模型调用生成速度，
+  // 缺失时回退到整轮整体速度。
+  const sessionTokenGenerationSpeed = computed<number | null>(() => {
+    const turn = latestTurn.value;
+    if (!turn) {
+      return null;
+    }
+
+    const entries = turnTimelineCache.value.get(turn.turnId) ?? [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (canonicalTraceTimelineKind(entry.kind) !== "call_model") {
+        continue;
+      }
+      const speed = entryTokenGenerationSpeed(entry);
+      if (speed != null) {
+        return speed;
+      }
+    }
+
+    return turnTokenSpeed(turn);
+  });
 
   return {
     orderedTurnTraces,
@@ -256,6 +306,7 @@ export function useTraceProjection(options: {
     sessionCacheHitTokensTotal,
     sessionOutputTokensTotal,
     sessionCacheHitRatio,
+    sessionTokenGenerationSpeed,
     contextDisplayTokens,
     currentContextWindowTokens,
     showContextUsage

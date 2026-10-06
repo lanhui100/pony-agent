@@ -487,10 +487,13 @@ describe("HomeSidebar", () => {
     expect(tooltipTexts).toContain("输入");
     expect(tooltipTexts).toContain("输出");
     expect(tooltipTexts).toContain("缓存读取");
-    // Visible panel shows "Token" label and compact values
+    expect(tooltipTexts).toContain("生成速度");
+    // Visible panel shows "Token" label and integer compact values (no decimals)
     expect(statusPanelText).toContain("Token");
-    expect(statusPanelText).toContain("8.4K");
-    expect(statusPanelText).toContain("1.4K");
+    expect(statusPanelText).toContain("8K");
+    expect(statusPanelText).toContain("1K");
+    expect(statusPanelText).toContain("t/s");
+    expect(statusPanelText).not.toMatch(/\d\.\dK/);
     // No "总计" suffix in labels
     expect(statusPanelText).not.toContain("输入总计");
     expect(statusPanelText).not.toContain("缓存读取总计");

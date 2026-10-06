@@ -6,6 +6,7 @@ import {
   Check,
   CircleDollarSign,
   Copy,
+  Gauge,
   Layout,
   MessageSquareMore,
   Orbit,
@@ -25,6 +26,7 @@ defineProps<{
   outputTokensTotal: number;
   cacheHitTokensTotal: number;
   cacheHitRatio: string;
+  tokenGenerationSpeed: number | null;
   showContextUsage: boolean;
   contextDisplayTokens: number | null;
   contextWindowTokens: number | null;
@@ -37,9 +39,14 @@ const emit = defineEmits<{ copySessionId: [] }>();
 
 function formatCompactInteger(value?: number | null) {
   if (value == null || !Number.isFinite(value)) { return ""; }
-  if (value >= 1_000_000) { return `${(value / 1_000_000).toFixed(1)}M`; }
-  if (value >= 1_000) { return `${(value / 1_000).toFixed(1)}K`; }
+  if (value >= 1_000_000) { return `${Math.round(value / 1_000_000)}M`; }
+  if (value >= 1_000) { return `${Math.round(value / 1_000)}K`; }
   return String(value);
+}
+
+function formatTokenSpeed(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) { return "—"; }
+  return `${Math.round(value)} t/s`;
 }
 
 function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: number | null) {
@@ -51,7 +58,7 @@ function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: n
     return formatCompactInteger(inputTokens);
   }
 
-  const percentage = ((inputTokens / contextWindowTokens) * 100).toFixed(1);
+  const percentage = Math.round((inputTokens / contextWindowTokens) * 100);
   return `${percentage}% · ${formatCompactInteger(inputTokens)} / ${formatCompactInteger(contextWindowTokens)}`;
 }
 </script>
@@ -123,6 +130,12 @@ function formatContextUsage(inputTokens?: number | null, contextWindowTokens?: n
                 <Zap class="h-3 w-3 text-stone-400" />
                 {{ formatCompactInteger(cacheHitTokensTotal) || "0" }}
                 <span v-if="cacheHitRatio" class="text-stone-400">· {{ cacheHitRatio }}</span>
+              </span>
+            </Tooltip>
+            <Tooltip text="生成速度">
+              <span class="inline-flex items-center gap-1">
+                <Gauge class="h-3 w-3 text-stone-400" />
+                {{ formatTokenSpeed(tokenGenerationSpeed) }}
               </span>
             </Tooltip>
           </span>
