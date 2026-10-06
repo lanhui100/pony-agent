@@ -42,7 +42,10 @@
 
 ## In Progress
 
-- 暂无
+- `PA-114` ask_user 工具与前端对应组件（P1，Complexity B）
+  状态：Review（实现、双门禁、对抗审查两轮收口完成；元复盘落盘后移入 Done）。
+  说明：后端一等公民 `ask_user`（schema: question required + options + description，产品名 "Ask" 模型面 winner 从 echo_input 占位符移交，host-mediated WaitingHost 复用 PA-076 交互控制平面）；前端 `AskUserToolCallCard` 按 callId 投影路由渲染（问题+选项+输入+回答/取消+终态），复用 ask store 闭环。红相 9/9 + spec 14/14 + 全量前端 651 passed + build/check 全绿；对抗审查 2 路（后端 FAIL：6 处 runtime 夹具 schema 升级 + 死参数剔除 + 保留字扩充，已修；前端 FAIL：callId 接线断链，已修）。任务卡：`03_TASKS/PA-114-ask-user-tool.md`；契约：`.dev-team/contract-matrix-ask-user.md`；提交：534bf94→4728c1e（红相）、466d028（实施）、08c28a8（契约升级）、c43d53a/09b6a04（前端修复轮）、0fa2da7/8c200df（后端修复轮）。
+  已知范围外（收口记录）：全量 --lib 的 7 个既存失败（path_permission×3、document_conversion×1、runtime hollow blank×2、sandbox 装配×1）基线可复现、属 PA-080/46040ae/b8cba07 域；tools.rs 的 ask_user 内容被外部 windows batch 提交 77fee3d 一并卷入（内容保全、归属错位，不重写共享历史）。
 
 ## Review
 

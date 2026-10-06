@@ -78,3 +78,31 @@
   仅产品面暴露权移交给 `ask_user`（模型面 winner）。
 - ask 的宿主应答/恢复链路（AskPanel、graph_resume_ask、take_pending_ask_injection、turn:suspended）
   属于既有基础设施，本次不改动其语义；`ask`/`Ask` 旧名字仍可解析到新工具。
+
+## 5. Lead 裁决补充（2026-10-07，红相冻结后）
+
+- **F1-2 语义裁定（契约矩阵 §2 与红相 spec 冲突处，以红相为准）**：卡片问题文本优先级为
+  **匹配 pending ask 的 prompt 优先**，其次 tool 参数 `question → text → prompt`，最终回退
+  `description`。红相 spec（stage-1-ask-user.spec.ts F1-2）冻结此顺序，Executor 已按此实现且
+  spec 全绿（10/10）。§2 原文"优先 tool 参数"表述废止。
+- **旧契约测试升级授权**：tools.rs/governed_executor.rs/dispatcher_matrix.rs 中冻结旧行为
+  （"Ask"→echo_input、echo_input ModelVisible、tools.len()==20）的 characterization 测试，
+  由 Test Agent 按本矩阵 B1-1/B1-3/B2-1 升级为新契约；Executor 不得改动测试。
+- **B 组既有失败**（list_files/read_file/path_info 的 path traversal 用例报
+  `requires_authorization` vs `invalid_path`）在基线 a8e9fd9 即可复现，属 PA-080 行为，
+  与 PA-114 无关，不在本次交付范围内。
+
+## 6. Lead 裁决补充 2（2026-10-07，后端对抗评审后）
+
+- **B1-1 schema 修订（死参数剔除）**：ask_user input_schema 删除 `defaultAnswer`、`timeoutMs`
+  两个参数——模型可见却全局无人消费（dispatcher 仅提取 text/question/prompt + options，
+  前端卡仅读 question/text/prompt/options），等待期由 `config.control_request_expiry_ms`
+  统一管辖。修订后 schema：`question`(string, required) + `options`(array<string>, optional)
+  + with_description 注入的 `description`(string, required)；additionalProperties=false。
+  红相 B1-1 断言同步：`defaultAnswer`/`timeoutMs` 必须**不存在**于 properties。
+- **保留字扩充**：`is_reserved_builtin_alias` 增小写 `"ask"`（防外部工具注册 `ask` 被前端
+  `isAskToolName` 误标为 Ask 卡片）。
+- **已知非对称（不采纳，记录）**：echo_input 的 `host_mediated` 声明仍为 false，
+  WaitingHost 仅由 `LegacyCompatiblePolicyEvaluator` 装配保证（B3-4）。生产 runtime 必装
+  该 evaluator，故当前不可达；强行对齐声明会破坏 dispatcher_matrix System-origin 语义与
+  legacy echo 契约，留后续卡跟进。
