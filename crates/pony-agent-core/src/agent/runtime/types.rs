@@ -250,8 +250,10 @@ pub(crate) struct GraphDecisionDispatchOutcome {
 
 
 pub(super) struct NormalizedToolDirective {
-    pub(super) tool_call: ToolCall,
+    /// `None` 表示上游空洞工具调用已被丢弃，本轮按纯文本继续。
+    pub(super) tool_call: Option<ToolCall>,
     pub(super) assistant_message: Option<Value>,
+    pub(super) output_text: String,
 }
 
 

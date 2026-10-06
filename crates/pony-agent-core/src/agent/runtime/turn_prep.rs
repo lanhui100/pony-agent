@@ -227,8 +227,14 @@ impl AgentRuntime {
                 first_decision.reasoning_content.as_deref(),
                 first_decision.reasoning_content_value.as_ref(),
             )?;
-            first_decision.tool_call = Some(normalized.tool_call);
+            first_decision.tool_call = normalized.tool_call;
             first_decision.assistant_message = normalized.assistant_message;
+            if first_decision.tool_call.is_none()
+                && first_decision.output_text.trim().is_empty()
+                && !normalized.output_text.trim().is_empty()
+            {
+                first_decision.output_text = normalized.output_text;
+            }
         }
 
         if let Some(error) = provider_failure_message(

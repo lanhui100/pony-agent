@@ -2741,7 +2741,13 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
         .filter(|id| !id.is_empty())
         .map(str::to_string);
     let function = tool_call.get("function")?;
-    let name = openai_original_tool_name(function.get("name").and_then(Value::as_str)?);
+    // 空洞防护：function.name 缺失/空白时按无工具调用处理（上游空洞 tool call），
+    // 避免构造 name="" 的 ToolCall 向 normalize 抛错整轮失败。
+    let raw_name = function.get("name").and_then(Value::as_str)?;
+    if raw_name.trim().is_empty() {
+        return None;
+    }
+    let name = openai_original_tool_name(raw_name);
     let arguments = function
         .get("arguments")
         .and_then(Value::as_str)

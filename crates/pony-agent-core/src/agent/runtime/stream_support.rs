@@ -11,8 +11,9 @@ pub(super) fn normalize_tool_directive(
 ) -> Result<NormalizedToolDirective, String> {
     if !tool_call.name.trim().is_empty() {
         return Ok(NormalizedToolDirective {
-            tool_call,
+            tool_call: Some(tool_call),
             assistant_message,
+            output_text: output_text.to_string(),
         });
     }
 
@@ -30,6 +31,32 @@ pub(super) fn normalize_tool_directive(
             "turn:tool-call-empty-name call_id={:?} arguments={} raw_assistant_message=none",
             tool_call.call_id, tool_call.arguments,
         ));
+    }
+
+    // 兜底：name 为空且 arguments 也是空对象（上游空洞 tool call，如
+    // PonyLlm/fledge-alpha-free 回 name="" arguments={}）时，直接丢弃该调用、
+    // 本轮按纯文本继续，而不是整轮 failed。非空参数仍走原有修复/报错路径。
+    if is_empty_tool_arguments(&tool_call.arguments) {
+        runtime_log(format!(
+            "turn:tool-call-empty-dropped call_id={:?} output_chars={}",
+            tool_call.call_id,
+            output_text.chars().count(),
+        ));
+        let dropped_message = match reasoning_content_value {
+            Some(raw_reasoning) => provider_native_assistant_message_with_reasoning_value(
+                &fallback_output_text(output_text),
+                Some(raw_reasoning),
+            ),
+            None => provider_native_assistant_message_with_reasoning(
+                &fallback_output_text(output_text),
+                reasoning_content,
+            ),
+        };
+        return Ok(NormalizedToolDirective {
+            tool_call: None,
+            assistant_message: Some(dropped_message),
+            output_text: fallback_output_text(output_text),
+        });
     }
 
     let repaired_name = infer_tool_name_from_arguments(&tool_call.arguments).ok_or_else(|| {
@@ -59,8 +86,29 @@ pub(super) fn normalize_tool_directive(
 
     Ok(NormalizedToolDirective {
         assistant_message: Some(rebuilt_message),
-        tool_call,
+        tool_call: Some(tool_call),
+        output_text: output_text.to_string(),
     })
+}
+
+pub(super) fn is_empty_tool_arguments(arguments: &Value) -> bool {
+    match arguments {
+        Value::Null => true,
+        Value::Object(map) => map.is_empty(),
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            trimmed.is_empty() || trimmed == "{}" || trimmed == "null"
+        }
+        _ => false,
+    }
+}
+
+fn fallback_output_text(output_text: &str) -> String {
+    if output_text.trim().is_empty() {
+        "已忽略上游返回的空工具调用（缺少工具名且无参数），请基于当前上下文继续作答或重试工具调用。".to_string()
+    } else {
+        output_text.to_string()
+    }
 }
 
 pub(super) fn infer_tool_name_from_arguments(arguments: &Value) -> Option<String> {

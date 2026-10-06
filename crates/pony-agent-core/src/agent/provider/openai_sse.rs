@@ -396,7 +396,13 @@ fn merge_openai_stream_tool_calls(
 }
 
 fn partial_openai_tool_call_to_tool_call(partial: PartialOpenAiToolCall) -> Option<ToolCall> {
-    let name = openai_original_tool_name(partial.name.as_deref()?);
+    // 空洞防护：name 为空（上游未发 function.name，如 PonyLlm 某些网关只发了空
+    // arguments）时直接按无工具调用处理，由 normalize_tool_directive 兜底丢弃，
+    // 避免构造出 name="" 的 ToolCall 向下游传播。
+    let name = openai_original_tool_name(partial.name.as_deref()?.trim());
+    if name.trim().is_empty() {
+        return None;
+    }
     let arguments = if partial.arguments.trim().is_empty() {
         json!({})
     } else {

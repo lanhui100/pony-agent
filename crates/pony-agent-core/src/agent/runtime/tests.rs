@@ -6926,6 +6926,70 @@ fn activity_error_text_truncates_at_300_chars_by_char_count() {
     assert!(over_text.ends_with('…'));
 }
 
+// ── 空洞 tool call 兜底：上游回 name="" arguments={} 时丢弃转纯文本，不整轮 failed ──
+
+#[test]
+fn empty_tool_call_with_empty_arguments_is_dropped_to_text() {
+    use crate::agent::runtime::stream_support::normalize_tool_directive;
+    use crate::agent::tools::ToolCall;
+
+    let normalized = normalize_tool_directive(
+        ToolCall {
+            call_id: None,
+            name: "".to_string(),
+            arguments: json!({}),
+            plan: None,
+        },
+        None,
+        "",
+        None,
+        None,
+    )
+    .expect("空洞 tool call 应被丢弃而非报错");
+    assert!(normalized.tool_call.is_none());
+    assert!(!normalized.output_text.trim().is_empty());
+}
+
+#[test]
+fn empty_tool_call_with_nonempty_arguments_still_repairable_or_error() {
+    use crate::agent::runtime::stream_support::normalize_tool_directive;
+    use crate::agent::tools::ToolCall;
+
+    // 可修复：带 path 参数应修名为 workspace_read_file。
+    let repaired = normalize_tool_directive(
+        ToolCall {
+            call_id: None,
+            name: "".to_string(),
+            arguments: json!({"path": "src/lib.rs"}),
+            plan: None,
+        },
+        None,
+        "",
+        None,
+        None,
+    )
+    .expect("带参数的空名调用应可修复");
+    assert_eq!(
+        repaired.tool_call.expect("应修复出工具名").name,
+        "workspace_read_file"
+    );
+
+    // 不可修复的非空参数仍报错（保持原有严格行为）。
+    assert!(normalize_tool_directive(
+        ToolCall {
+            call_id: None,
+            name: "".to_string(),
+            arguments: json!({"weird": 1}),
+            plan: None,
+        },
+        None,
+        "",
+        None,
+        None,
+    )
+    .is_err());
+}
+
 // ── PA-100：参数推断门——query+startLine 组合必须路由到 gather，而不是 segment ────────────
 
 #[test]

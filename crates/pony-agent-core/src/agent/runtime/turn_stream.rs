@@ -818,8 +818,15 @@ impl AgentRuntime {
                         return;
                     }
                 };
-                response.tool_call = Some(normalized.tool_call);
+                response.tool_call = normalized.tool_call;
                 response.assistant_message = normalized.assistant_message;
+                // 空洞 tool call 已丢弃时，用兜底文本继续本轮（不进工具执行）。
+                if response.tool_call.is_none()
+                    && response.output_text.trim().is_empty()
+                    && !normalized.output_text.trim().is_empty()
+                {
+                    response.output_text = normalized.output_text;
+                }
             }
 
             if let Some(next_tool_call) = response.tool_call.clone() {
@@ -1929,8 +1936,14 @@ impl AgentRuntime {
                     return;
                 }
             };
-            first_decision.tool_call = Some(normalized.tool_call);
+            first_decision.tool_call = normalized.tool_call;
             first_decision.assistant_message = normalized.assistant_message;
+            if first_decision.tool_call.is_none()
+                && first_decision.output_text.trim().is_empty()
+                && !normalized.output_text.trim().is_empty()
+            {
+                first_decision.output_text = normalized.output_text;
+            }
         }
         let resolved_tool_call = self.resolve_tool_call(
             &prepared.user_message,
