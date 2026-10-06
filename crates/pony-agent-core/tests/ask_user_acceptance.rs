@@ -24,7 +24,7 @@ use pony_agent_core::agent::tools::{
     builtin_tools, model_visible_tool_name, tool_display_metadata_for_name, ToolControlKind,
     ToolDescriptor, ToolExposure, ToolKind, ToolRegistrySnapshot,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// 契约约定的 ask_user 一等公民 descriptor id。
@@ -86,7 +86,22 @@ fn test_b1_1_ask_user_builtin_definition_and_schema() {
     assert_eq!(schema["type"], json!("object"), "input schema must be an object");
     let properties = &schema["properties"];
     assert_eq!(properties["question"]["type"], json!("string"));
-    assert_eq!(schema["required"], json!(["question"]), "question must be the only required property");
+    // `description` 由 builtin schema 的 with_description() 注入，因此 required 含
+    // question + description；断言只锁定 question 必须、其余可选参数不得必填。
+    let required = schema["required"]
+        .as_array()
+        .expect("required must be an array");
+    let required_strs = required
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        required_strs.contains(&"question"),
+        "question must be a required property"
+    );
+    assert!(!required_strs.contains(&"options"));
+    assert!(!required_strs.contains(&"defaultAnswer"));
+    assert!(!required_strs.contains(&"timeoutMs"));
     assert_eq!(properties["options"]["type"], json!("array"));
     assert_eq!(properties["options"]["items"]["type"], json!("string"));
     assert_eq!(properties["defaultAnswer"]["type"], json!("string"));
@@ -327,11 +342,10 @@ fn test_b3_4_compat_ask_and_echo_input_still_wait_for_host() {
             origin: InvocationOrigin::System,
             descriptor_id: "echo_input".to_string(),
             call_id: "call-echo".to_string(),
-            arguments: json!({ "text": "x" }),
+            arguments: json!({ "text": "x", "description": "兼容回显验证" }),
         },
         &ask_dispatch_context(),
     );
-    eprintln!("DEBUG by_echo outcome: {by_echo:?}");
     assert_eq!(
         by_echo.control_outcome.expect("echo_input must wait for host").kind,
         ToolControlKind::WaitingHost,
