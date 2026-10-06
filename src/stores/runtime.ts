@@ -2743,6 +2743,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         const nextDurationSeconds = tool.durationSeconds ?? null;
         const nextCanonicalToolName = tool.canonicalToolName ?? null;
         const nextDisplayNameZh = tool.displayNameZh ?? null;
+        const nextCallId = tool.id ?? null;
+        const nextArgumentsText = tool.argumentsText ?? null;
 
         if (existingMessage) {
           if (existingMessage.content !== nextContent) {
@@ -2773,6 +2775,14 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             existingMessage.durationSeconds = nextDurationSeconds;
             didMutate = true;
           }
+          if (existingMessage.callId !== nextCallId) {
+            existingMessage.callId = nextCallId;
+            didMutate = true;
+          }
+          if (existingMessage.argumentsText !== nextArgumentsText) {
+            existingMessage.argumentsText = nextArgumentsText;
+            didMutate = true;
+          }
           continue;
         }
 
@@ -2786,7 +2796,9 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           canonicalToolName: nextCanonicalToolName,
           displayNameZh: nextDisplayNameZh,
           detail: nextDetail,
-          durationSeconds: nextDurationSeconds
+          durationSeconds: nextDurationSeconds,
+          callId: nextCallId,
+          argumentsText: nextArgumentsText
         });
         didMutate = true;
       }

@@ -49,6 +49,10 @@ export type MergedToolCall = {
   status: ChatMessage["status"];
   durationSeconds: number | null;
   count: number;
+  /** PA-114: Ask 卡片精确绑定 pending ask 的调用 ID（后端 ToolActivity.id == call_id）。 */
+  callId?: string | null;
+  /** PA-114: 工具调用参数 JSON 字符串（ask_user 的 question/options 等）。 */
+  argumentsText?: string | null;
 };
 
 export type AgentTurnEvent =

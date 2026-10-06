@@ -520,6 +520,10 @@ export type ChatMessage = {
   detail?: string | null;
   durationSeconds?: number | null;
   errorDetail?: string | null;
+  /** PA-114: 后端 ToolActivity.id == call_id，透传用于 Ask 卡片精确绑定 pending ask。 */
+  callId?: string | null;
+  /** PA-114: 工具调用参数 JSON 字符串（如 ask_user 的 question/options）。 */
+  argumentsText?: string | null;
 };
 
 export type MessageStateEntry = {

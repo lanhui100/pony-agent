@@ -9,6 +9,7 @@ import { extractErrorMessage } from "@/lib/error-utils";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
 import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 import { isSimpleTextContent } from "@/lib/markdown";
+import { isAskToolName } from "@/lib/runtime/ask-tools";
 
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import WorkspaceTurnItem, {
@@ -348,7 +349,14 @@ function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
   for (const tool of tools) {
     const last = result[result.length - 1];
     const mergeKey = toolMergeKey(tool);
-    if (last && mergeKey && last.mergeKey === mergeKey && last.status !== "error") {
+    // PA-114: ask 行永不合并（每个 ask 调用独立成行，避免合并丢失 callId 导致卡片误绑定）。
+    if (
+      last &&
+      mergeKey &&
+      last.mergeKey === mergeKey &&
+      last.status !== "error" &&
+      !isAskToolName(tool.toolName ?? "")
+    ) {
       last.description = extractToolDescription(tool);
       last.status = tool.status ?? "done";
       last.durationSeconds = tool.durationSeconds ?? null;
@@ -365,6 +373,8 @@ function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
         status: tool.status ?? "done",
         durationSeconds: tool.durationSeconds ?? null,
         count: 1,
+        callId: tool.callId ?? null,
+        argumentsText: tool.argumentsText ?? null
       });
     }
   }

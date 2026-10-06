@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { LoaderCircle, MessageSquareWarning } from "lucide-vue-next";
+import { computed, ref, watch } from "vue";
+import { AlertTriangle, Check, LoaderCircle, MessageSquareWarning } from "lucide-vue-next";
 import { useAskStore } from "@/stores/ask";
 import type { PendingAsk } from "@/types/ask-plan";
 
@@ -8,8 +8,8 @@ import type { PendingAsk } from "@/types/ask-plan";
  * PA-114: 聊天/轨迹内 Ask 工具调用专属卡片。
  *
  * 结构化工具调用投影：WorkspaceTurnItem 的 merged 行只保证
- * toolName/canonicalToolName/displayNameZh/description，`callId`/`runId`/`arguments`
- * 来自 trace 投影时可能缺失，故全部可选。
+ * toolName/canonicalToolName/displayNameZh/description/status；`callId`/`runId`/
+ * `arguments`/`argumentsText` 来自 trace 投影时可能缺失，故全部可选。
  */
 export type AskUserToolCall = {
   id?: string;
@@ -20,6 +20,7 @@ export type AskUserToolCall = {
   callId?: string | null;
   runId?: string | null;
   arguments?: Record<string, unknown> | null;
+  argumentsText?: string | null;
   status?: string;
 };
 
@@ -28,32 +29,57 @@ const props = defineProps<{ tool: AskUserToolCall }>();
 const askStore = useAskStore();
 const typedAnswer = ref("");
 
-/** 按 callId/runId 匹配当前 pending ask（契约 F1-3）。两个标识都存在时必须全部相等，
- * 避免默认 runId 巧合造成误配（红相 waiting 用例：callId 不同即不算匹配）。 */
+/** 解析工具调用参数 JSON 字符串（后端 arguments_text），失败返回 null。 */
+function parseArgumentsText(text: string | null | undefined): Record<string, unknown> | null {
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 按 callId 精确绑定 pending ask（第二轮修复）：callId 缺失时不得通配——绝不命中
+ * pendingAsks[0]；`tool.runId` 非空时要求 `ask.runId === tool.runId`。
+ */
 const matchingPending = computed<PendingAsk | null>(() => {
   const callId = props.tool.callId ?? null;
   const runId = props.tool.runId ?? null;
+  if (callId == null || callId.trim() === "") {
+    return null;
+  }
   return (
     askStore.pendingAsks.find((ask) => {
-      if (callId != null && runId != null) {
-        return ask.callId === callId && ask.runId === runId;
+      if (ask.callId !== callId) {
+        return false;
       }
-      const callMatches = callId == null || ask.callId === callId;
-      const runMatches = runId == null || ask.runId === runId;
-      return callMatches && runMatches;
+      if (runId != null && runId.trim() !== "" && ask.runId !== runId) {
+        return false;
+      }
+      return true;
     }) ?? null
   );
 });
 
-/** 问题文本：存在匹配 pending ask 时以其 prompt 为准（红相 F1-2 用 pending prompt 覆盖
- * 工具参数）；否则按 tool 参数 question → text → prompt，最终回退 description。 */
+/** 问题文本：匹配 pending ask 的 prompt → tool.arguments 对象 → argumentsText JSON →
+ * 最终回退 description（红相 F1-2 全部用例 + 真实投影 arguments_text 双通道）。 */
 const questionText = computed(() => {
   const pendingPrompt = matchingPending.value?.prompt?.trim();
   if (pendingPrompt) {
     return pendingPrompt;
   }
-  const args = props.tool.arguments ?? null;
-  if (args) {
+  const argumentSources = [
+    props.tool.arguments ?? null,
+    parseArgumentsText(props.tool.argumentsText ?? null)
+  ];
+  for (const args of argumentSources) {
+    if (!args) {
+      continue;
+    }
     for (const key of ["question", "text", "prompt"] as const) {
       const value = args[key];
       if (typeof value === "string" && value.trim()) {
@@ -62,6 +88,24 @@ const questionText = computed(() => {
     }
   }
   return props.tool.description ?? "";
+});
+
+/**
+ * 无匹配 pending 时的终态分支：done → 静态"已回答/已完成"；error → 失败态；
+ * 其余（undefined/pending/running）→ ask-user-waiting 待命态（保留 spinner）。
+ */
+const terminalState = computed<"waiting" | "done" | "error" | null>(() => {
+  if (matchingPending.value) {
+    return null;
+  }
+  const status = props.tool.status;
+  if (status === "done") {
+    return "done";
+  }
+  if (status === "error") {
+    return "error";
+  }
+  return "waiting";
 });
 
 const optionValues = computed<string[]>(() => {
@@ -86,6 +130,14 @@ const busy = computed(() => {
     askStore.cancellingRequestId === pending.requestId
   );
 });
+
+/** 绑定 ask 变化（换 callId/新 pending）时清空脏输入，避免旧回答误提交（T4）。 */
+watch(
+  () => matchingPending.value?.requestId ?? null,
+  () => {
+    typedAnswer.value = "";
+  }
+);
 
 async function answerWithOption(value: string) {
   const pending = matchingPending.value;
@@ -188,13 +240,31 @@ async function cancelAsk() {
       </div>
     </template>
 
-    <div
-      v-else
-      class="mt-1 flex items-center gap-1.5 text-stone-400"
-      data-testid="ask-user-waiting"
-    >
-      <LoaderCircle class="h-3 w-3 animate-spin" />
-      <span>等待用户回答…</span>
-    </div>
+    <template v-else>
+      <div
+        v-if="terminalState === 'waiting'"
+        class="mt-1 flex items-center gap-1.5 text-stone-400"
+        data-testid="ask-user-waiting"
+      >
+        <LoaderCircle class="h-3 w-3 animate-spin" />
+        <span>等待用户回答…</span>
+      </div>
+      <div
+        v-else-if="terminalState === 'done'"
+        class="mt-1 flex items-center gap-1.5 text-stone-400"
+        data-testid="ask-user-done"
+      >
+        <Check class="h-3 w-3" />
+        <span>已回答 / 已完成</span>
+      </div>
+      <div
+        v-else
+        class="mt-1 flex items-center gap-1.5 text-rose-500"
+        data-testid="ask-user-error"
+      >
+        <AlertTriangle class="h-3 w-3 shrink-0" />
+        <span>提问失败</span>
+      </div>
+    </template>
   </div>
 </template>
