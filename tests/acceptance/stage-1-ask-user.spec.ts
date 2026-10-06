@@ -44,6 +44,7 @@ type AskToolCall = {
   callId: string | null;
   runId: string | null;
   arguments: Record<string, unknown> | null;
+  status?: string;
 };
 
 function createAskToolCall(partial: Partial<AskToolCall> = {}): AskToolCall {
@@ -51,9 +52,11 @@ function createAskToolCall(partial: Partial<AskToolCall> = {}): AskToolCall {
     id: partial.id ?? "tool-ask-1",
     toolName: partial.toolName ?? "ask_user",
     canonicalToolName: partial.canonicalToolName ?? "Ask",
-    callId: partial.callId ?? "call-1",
-    runId: partial.runId ?? "run-1",
-    arguments: partial.arguments ?? { question: "继续？" }
+    // 显式 null 必须保留（T2：无 callId 不绑定的探针输入）；`??` 会吞掉 null。
+    callId: partial.callId !== undefined ? partial.callId : "call-1",
+    runId: partial.runId !== undefined ? partial.runId : "run-1",
+    arguments: partial.arguments !== undefined ? partial.arguments : { question: "继续？" },
+    status: partial.status
   };
 }
 
@@ -301,6 +304,143 @@ describe("PA-114 Stage 1 ask_user acceptance (F1)", () => {
     // 非 ask 行保持原通用渲染。
     const genericNames = wrapper.findAll(".conversation-tool-name").map((node) => node.text());
     expect(genericNames).toContain("读取");
+    wrapper.unmount();
+  });
+
+  // ── 第二轮（PA-114 fix-round-2）：callId 投影绑定 + 终态 ────────────────────
+  // 契约依据：`.dev-team/fix-round2-ask-user-frontend.md` T1-T4。
+
+  it("T1 binds to the pending ask matching the tool callId among several", async () => {
+    const store = useAskStore();
+    store.pendingAsks = [
+      createPendingAsk({
+        requestId: "ask-first",
+        callId: "call-first",
+        runId: "run-1",
+        prompt: "第一问",
+        options: ["甲"]
+      }),
+      createPendingAsk({
+        requestId: "ask-second",
+        callId: "call-second",
+        runId: "run-1",
+        prompt: "第二问",
+        options: ["乙"]
+      })
+    ];
+    const tool = createAskToolCall({
+      callId: "call-second",
+      runId: "run-1",
+      arguments: null
+    });
+
+    const wrapper = mount(AskUserToolCallCard, { props: { tool } });
+    // 绑定第二个 ask：其选项/问题可见，第一个 ask 的选项/问题不可见。
+    expect(wrapper.text()).toContain("第二问");
+    expect(wrapper.text()).not.toContain("第一问");
+    const optionTexts = wrapper.findAll('[data-testid="ask-user-option"]').map((node) => node.text());
+    expect(optionTexts).toContain("乙");
+    expect(optionTexts).not.toContain("甲");
+
+    // 回答走绑定的那个 ask（requestId == ask-second）。
+    const answerSpy = vi.spyOn(store, "answer").mockResolvedValue(true);
+    await wrapper.get('[data-testid="ask-user-option"]').trigger("click");
+    await flushAsync();
+    expect(answerSpy).toHaveBeenCalled();
+    expect(answerSpy.mock.calls[0][0].requestId).toBe("ask-second");
+    wrapper.unmount();
+  });
+
+  it("T2 never binds any pending ask when the tool has no callId", () => {
+    const store = useAskStore();
+    store.pendingAsks = [
+      createPendingAsk({
+        requestId: "ask-1",
+        callId: "call-1",
+        runId: "run-1",
+        prompt: "第一问",
+        options: ["是"]
+      })
+    ];
+    const tool = createAskToolCall({ callId: null, runId: "run-1", arguments: null });
+
+    const wrapper = mount(AskUserToolCallCard, { props: { tool } });
+    // callId 缺失绝不命中 pendingAsks[0]：无交互控件、不显示其 prompt。
+    expect(wrapper.find('[data-testid="ask-user-option"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-typed-input"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-answer"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-cancel"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("第一问");
+    // 未完成态：待命。
+    expect(wrapper.get('[data-testid="ask-user-waiting"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("T3 renders a static terminal state when the tool is done and no pending ask matches", () => {
+    const store = useAskStore();
+    store.pendingAsks = [
+      createPendingAsk({
+        requestId: "ask-1",
+        callId: "call-1",
+        runId: "run-1",
+        prompt: "第一问"
+      })
+    ];
+    const tool = createAskToolCall({
+      callId: "call-other",
+      runId: "run-1",
+      status: "done",
+      arguments: null
+    });
+
+    const wrapper = mount(AskUserToolCallCard, { props: { tool } });
+    // 静态完成态：无 spinner、无交互控件、无待命态。
+    expect(wrapper.find(".animate-spin").exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-option"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-typed-input"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-answer"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-cancel"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="ask-user-waiting"]').exists()).toBe(false);
+    // 显示"已回答/已完成"完成态文案。
+    expect(wrapper.text()).toMatch(/已回答|已完成/);
+    wrapper.unmount();
+  });
+
+  it("T4 clears typedAnswer when the bound ask changes (callId switches)", async () => {
+    const store = useAskStore();
+    store.pendingAsks = [
+      createPendingAsk({
+        requestId: "ask-a",
+        callId: "call-a",
+        runId: "run-1",
+        prompt: "问A"
+      }),
+      createPendingAsk({
+        requestId: "ask-b",
+        callId: "call-b",
+        runId: "run-1",
+        prompt: "问B"
+      })
+    ];
+    const wrapper = mount(AskUserToolCallCard, {
+      props: {
+        tool: createAskToolCall({ callId: "call-a", runId: "run-1", arguments: null })
+      }
+    });
+
+    await wrapper.get('[data-testid="ask-user-typed-input"]').setValue("草稿答案");
+    expect(
+      (wrapper.get('[data-testid="ask-user-typed-input"]').element as HTMLInputElement).value
+    ).toBe("草稿答案");
+
+    // 同组件内绑定切换（call-a → call-b）：草稿必须清空。
+    await wrapper.setProps({
+      tool: createAskToolCall({ callId: "call-b", runId: "run-1", arguments: null })
+    });
+    await wrapper.vm.$nextTick();
+    expect(
+      (wrapper.get('[data-testid="ask-user-typed-input"]').element as HTMLInputElement).value
+    ).toBe("");
     wrapper.unmount();
   });
 });
