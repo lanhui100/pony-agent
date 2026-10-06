@@ -359,10 +359,10 @@ fn resolve_cwd_anchor(workspace_root: Option<&Path>) -> Result<(PathBuf, PathBuf
             .map_err(|e| format!("canonicalize workspace root: {e}"))?;
         return Ok((base, canonical));
     }
-    // Legacy/compat anchor: compute_default (ensured to exist) → process cwd (dirs total failure).
+    // Legacy/compat anchor (side-effect free): compute_default path is used as-is when it
+    // already exists; missing dir falls back to process cwd. Directory creation belongs
+    // solely to bootstrap_default_workspace — this path must never touch ~/pony_agent.
     if let Some(def) = crate::agent::workspace::compute_default_workspace_root() {
-        // Best-effort ensure: matches bootstrap "missing dir is created" behavior.
-        let _ = std::fs::create_dir_all(&def);
         if let Ok(canonical) = def.canonicalize() {
             return Ok((def, canonical));
         }

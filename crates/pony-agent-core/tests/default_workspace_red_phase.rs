@@ -31,9 +31,10 @@ use pony_agent_core::agent::runtime::AgentRuntime;
 use pony_agent_core::agent::session::{FileSessionBackend, SessionStore};
 use pony_agent_core::agent::telemetry::DefaultTurnTelemetryBuilder;
 use pony_agent_core::agent::tools::{
-    job_kill, job_output, job_start, terminal_close, terminal_open, terminal_read, terminal_send,
-    JobKillArgs, JobOutputArgs, JobStartArgs, TerminalCloseArgs, TerminalOpenArgs, TerminalReadArgs,
-    TerminalSendArgs, ToolCall, ToolExecutor, ToolRouter,
+    job_kill, job_output, job_start, job_start_with_workspace_root, terminal_close, terminal_open,
+    terminal_open_with_workspace_root, terminal_read, terminal_send, JobKillArgs, JobOutputArgs,
+    JobStartArgs, TerminalCloseArgs, TerminalOpenArgs, TerminalReadArgs, TerminalSendArgs,
+    ToolCall, ToolExecutor, ToolRouter,
 };
 use pony_agent_core::agent::workspace::compute_default_workspace_root;
 use serde_json::{json, Value};
@@ -330,5 +331,193 @@ fn red_terminal_cwd_none_must_default_to_session_workspace_root() {
         read.output.contains(&ws.display().to_string()),
         "terminal cwd 缺省必须为会话 workspace root；实际输出：{}",
         read.output
+    );
+}
+
+// ── task-4 补丁：Some(ws) 直接锚定用例（走新 with_workspace_root 入参） ───
+// 说明：旧签名红相 4 用例（red_job_*/red_terminal_*）继续保留；以下 4 个直接
+// 命中业务新 API。当前业务状态预期：4 个 Some(ws) 用例应绿（task-2 已接线）；
+// None 分支 create_dir_all 污染（terminal.rs/jobs.rs resolve_cwd_anchor None 分支）
+// 尚未移除——待 Executor 修，该条记为待修断言而非假绿（见本文件末尾注释用例）。
+
+#[test]
+fn patch4_job_some_ws_none_cwd_must_default_to_ws() {
+    let ws = make_temp_dir(&unique_tag("patch4-job-ws"));
+    let cwd = current_dir_canonical();
+    assert_ne!(ws, cwd, "前置条件失效：会话 workspace 与 cwd 重合，无区分度");
+
+    let started = job_start_with_workspace_root(
+        JobStartArgs {
+            command: "sh".to_string(),
+            args: Some(vec!["-c".to_string(), "pwd".to_string()]),
+            cwd: None,
+            timeout_ms: Some(10_000),
+        },
+        Some(ws.as_path()),
+    )
+    .expect("job_start_with_workspace_root should succeed");
+    let out = job_output(JobOutputArgs {
+        job_id: started.job_id.clone(),
+        wait: Some(true),
+        timeout_ms: Some(8_000),
+        offset: Some(0),
+    })
+    .expect("job_output should succeed");
+    let _ = job_kill(JobKillArgs {
+        job_id: started.job_id,
+        reason: Some("cleanup".to_string()),
+    });
+    let actual = out.output.trim().to_string();
+    let _ = std::fs::remove_dir_all(&ws);
+    assert_eq!(
+        canonicalize_lossy(&actual),
+        ws.display().to_string(),
+        "Some(ws)+cwd缺省必须返回 ws（会话锚定）"
+    );
+}
+
+#[test]
+fn patch4_job_some_ws_cross_boundary_cwd_must_be_rejected() {
+    let ws = make_temp_dir(&unique_tag("patch4-job-ws"));
+    let outside = current_dir_canonical().join(unique_tag("patch4-job-outside"));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).expect("create outside dir");
+    assert!(
+        !outside.starts_with(&ws),
+        "前置条件失效：outside 落在会话 workspace 内"
+    );
+
+    let attempt = job_start_with_workspace_root(
+        JobStartArgs {
+            command: "sh".to_string(),
+            args: Some(vec!["-c".to_string(), "exit 0".to_string()]),
+            cwd: Some(outside.display().to_string()),
+            timeout_ms: Some(10_000),
+        },
+        Some(ws.as_path()),
+    );
+    match attempt {
+        Err(_) => {}
+        Ok(started) => {
+            let _ = job_kill(JobKillArgs {
+                job_id: started.job_id,
+                reason: Some("cleanup".to_string()),
+            });
+            panic!(
+                "Some(ws)+跨界 cwd 必须被拒绝，当前被放行：{}",
+                outside.display()
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn patch4_terminal_some_ws_none_cwd_must_default_to_ws() {
+    let ws = make_temp_dir(&unique_tag("patch4-term-ws"));
+    let cwd = current_dir_canonical();
+    assert_ne!(ws, cwd, "前置条件失效：会话 workspace 与 cwd 重合，无区分度");
+
+    let opened = terminal_open_with_workspace_root(
+        TerminalOpenArgs {
+            command: Some("sh".to_string()),
+            args: None,
+            cwd: None,
+            cols: Some(80),
+            rows: Some(24),
+            env: None,
+        },
+        Some(ws.as_path()),
+    )
+    .expect("terminal_open_with_workspace_root should succeed");
+    let send_ok = terminal_send(TerminalSendArgs {
+        terminal_id: opened.terminal_id.clone(),
+        input: "pwd\n".to_string(),
+    });
+    assert!(send_ok.is_ok(), "terminal_send should succeed: {send_ok:?}");
+    let read = terminal_read(TerminalReadArgs {
+        terminal_id: opened.terminal_id.clone(),
+        timeout_ms: Some(5_000),
+        offset: Some(0),
+    })
+    .expect("terminal_read should succeed");
+    let _ = terminal_close(TerminalCloseArgs {
+        terminal_id: opened.terminal_id,
+        force: Some(true),
+    });
+    let _ = std::fs::remove_dir_all(&ws);
+    assert!(
+        read.output.contains(&ws.display().to_string()),
+        "Some(ws)+cwd缺省必须为 ws；实际输出：{}",
+        read.output
+    );
+}
+
+#[test]
+fn patch4_terminal_some_ws_cross_boundary_cwd_must_be_rejected() {
+    let ws = make_temp_dir(&unique_tag("patch4-term-ws"));
+    let outside = current_dir_canonical().join(unique_tag("patch4-term-outside"));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).expect("create outside dir");
+    assert!(
+        !outside.starts_with(&ws),
+        "前置条件失效：outside 落在会话 workspace 内"
+    );
+
+    let attempt = terminal_open_with_workspace_root(
+        TerminalOpenArgs {
+            command: Some("sh".to_string()),
+            args: None,
+            cwd: Some(outside.display().to_string()),
+            cols: Some(80),
+            rows: Some(24),
+            env: None,
+        },
+        Some(ws.as_path()),
+    );
+    match attempt {
+        Err(_) => {}
+        Ok(opened) => {
+            let _ = terminal_close(TerminalCloseArgs {
+                terminal_id: opened.terminal_id,
+                force: Some(true),
+            });
+            panic!(
+                "Some(ws)+跨界 cwd 必须被拒绝，当前被放行：{}",
+                outside.display()
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+// 待修断言（非假绿声明）：resolve_cwd_anchor 的 None 分支当前含
+// `create_dir_all(compute_default_workspace_root())` 副作用（terminal.rs L369 /
+// jobs.rs L365），task-4 要求改为"缺失时回退而非主动建目录"。以下用例在该副作用
+// 未移除前必然失败——Executor 修完业务后它应转绿；当前跑 cargo test 时请把它的
+// 失败解读为"待修"，不要解读为回归。
+#[test]
+fn patch4_none_branch_must_not_create_default_dir_as_side_effect() {
+    let def = compute_default_workspace_root().expect("compute default must resolve");
+    // 前置：若真实 ~/pony_agent 已存在则跳过（不删用户目录，只做存在性旁证）。
+    if def.exists() {
+        eprintln!(
+            "SKIP-SIDEEFFECT-PROBE: {} 已存在，无法做缺失旁证；待 Executor 修后 code-review 确认",
+            def.display()
+        );
+        return;
+    }
+    let _ = job_start(JobStartArgs {
+        command: "sh".to_string(),
+        args: Some(vec!["-c".to_string(), "exit 0".to_string()]),
+        cwd: None,
+        timeout_ms: Some(10_000),
+    });
+    assert!(
+        !def.exists(),
+        "None 分支不得以 create_dir_all 副作用创建 {}",
+        def.display()
     );
 }
