@@ -2061,6 +2061,8 @@ fn build_streaming_http_client(
 }
 
 fn format_request_error(prefix: &str, error: &reqwest::Error, elapsed: Duration) -> String {
+    // Stage3 P1：加 endpoint/elapsed 证据；type=timeout/connect 等 flags 与分类映射不变
+    //（classify 仍走 retry 码表子串桥，本函数只做证据增强）。
     let mut flags = Vec::new();
     if error.is_timeout() {
         flags.push("timeout");
@@ -4267,6 +4269,73 @@ fn looks_like_dynamic_prefix_content(content: &str) -> bool {
 
 fn provider_log(message: String) {
     eprintln!("[pony-provider] {}", message);
+}
+
+/// Stage3 P1–P5 协议/上游可观测前缀（error_code 注册表线码，String wire 兼容）。
+/// P6 门禁：本文件内不新增 `lower.contains`/`to_ascii_lowercase`（分类仍走 retry 码表）。
+pub(crate) const PROTOCOL_SSE_PARSE_CODE: &str = "protocol_sse_parse";
+pub(crate) const PROTOCOL_TOOL_CALL_SCHEMA_CODE: &str = "protocol_tool_call_schema";
+pub(crate) const PROTOCOL_MODEL_CATALOG_CODE: &str = "protocol_model_catalog";
+pub(crate) const PROTOCOL_UNKNOWN_MODEL_CODE: &str = "protocol_unknown_model";
+pub(crate) const PROTOCOL_REASONING_EFFORT_CODE: &str = "protocol_reasoning_effort";
+
+/// Stage3 P2：SSE 失败可观测包装——code=protocol_sse_parse，
+/// message 含原始错误 + endpoint/parsed_bytes/elapsed 证据。fallback 链不动
+/// （调用方仍按 `Err(String)` 走原有 sync/stream 回退）。
+pub(crate) fn protocol_sse_parse_error(
+    detail: &str,
+    endpoint: &str,
+    parsed_bytes: usize,
+    elapsed_ms: u64,
+) -> String {
+    format!(
+        "{}: {}; endpoint={}; parsed_bytes={}; elapsed={}ms",
+        PROTOCOL_SSE_PARSE_CODE, detail, endpoint, parsed_bytes, elapsed_ms
+    )
+}
+
+/// Stage3 P3：tool_call schema 不匹配可观测包装——code=protocol_tool_call_schema。
+/// 消灭静默 default `{}`：坏 JSON / 多调 / 空输出一律显式错误，由调用方走既有回退链。
+pub(crate) fn protocol_tool_call_schema_error(detail: &str, evidence: &str) -> String {
+    format!(
+        "{}: {}; evidence={}",
+        PROTOCOL_TOOL_CALL_SCHEMA_CODE,
+        detail,
+        preview_text(evidence, 400)
+    )
+}
+
+/// Stage3 P4：model catalog 可观测包装——code=protocol_model_catalog。
+pub(crate) fn protocol_model_catalog_error(detail: &str, evidence: &str) -> String {
+    format!(
+        "{}: {}; evidence={}",
+        PROTOCOL_MODEL_CATALOG_CODE,
+        detail,
+        preview_text(evidence, 400)
+    )
+}
+
+/// Stage3 P4：选择期未知模型可观测包装——code=protocol_unknown_model。
+/// provider/ 内无选择期校验点（选择在 config 层），本函数为调用方预留构造器，
+/// 不改变现有选择流程。
+pub(crate) fn protocol_unknown_model_error(model: &str, known_count: usize) -> String {
+    format!(
+        "{}: 未知模型 `{}`（已知 {} 个候选）；evidence=model={}",
+        PROTOCOL_UNKNOWN_MODEL_CODE,
+        preview_text(model, 120),
+        known_count,
+        preview_text(model, 120)
+    )
+}
+
+/// Stage3 P5：reasoning effort 冲突本地报错构造器——code=protocol_reasoning_effort。
+pub(crate) fn protocol_reasoning_effort_error(detail: &str, evidence: &str) -> String {
+    format!(
+        "{}: {}; evidence={}",
+        PROTOCOL_REASONING_EFFORT_CODE,
+        detail,
+        preview_text(evidence, 200)
+    )
 }
 
 fn provider_log_token_usage(context: &str, usage: &TokenUsage) {
