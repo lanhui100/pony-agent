@@ -7059,7 +7059,8 @@ describe("runtime session resilience", () => {
     expect(store.phase).toBe("cancelled");
     expect(store.isSubmitting).toBe(false);
     expect(store.activeTurnId).toBeNull();
-    expect(store.messages[1]?.content).toBe("用户终止，发送消息可继续。");
+    // 依据 PA-118 契约：用户终止且未产生流式内容时，assistant message content 为空串（不再展示哨兵句）
+    expect(store.messages[1]?.content).toBe("");
     expect(store.turnTraceHistory[0]?.phase).toBe("cancelled");
     expect(store.turnTraceHistory[0]?.error).toBe("stopped_by_user");
     expect(store.traceSteps.map((step) => step.state)).toEqual([
