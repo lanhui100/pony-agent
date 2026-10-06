@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onBeforeUnmount, ref } from "vue";
 import type { ComponentPublicInstance } from "vue";
 import { storeToRefs } from "pinia";
 import {
@@ -88,6 +88,59 @@ const { isSubmitting, sessionOperation, turnTraceHistory } = storeToRefs(runtime
 
 const copiedErrorDetail = ref(false);
 const copiedAssistantResponse = ref(false);
+const copiedUserMessage = ref(false);
+
+/** 选中即复制：光标选中消息文本后自动写入剪贴板，并在指针附近短暂提示 */
+const autoCopyPill = ref<{ x: number; y: number } | null>(null);
+let autoCopyPillTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showAutoCopyPill(event: MouseEvent) {
+  autoCopyPill.value = { x: event.clientX, y: event.clientY };
+  if (autoCopyPillTimer !== null) {
+    window.clearTimeout(autoCopyPillTimer);
+  }
+  autoCopyPillTimer = window.setTimeout(() => {
+    autoCopyPill.value = null;
+    autoCopyPillTimer = null;
+  }, 1600);
+}
+
+function handleSelectionAutoCopy(event: MouseEvent) {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return;
+  const selection = window.getSelection();
+  const container = event.currentTarget as HTMLElement | null;
+  if (!selection || !container) return;
+  if (selection.isCollapsed || selection.rangeCount === 0) return;
+
+  // 仅当选中区整体落在消息内容容器内时自动复制，避免把旁侧文本一并带走
+  const anchorEl =
+    selection.anchorNode?.nodeType === Node.ELEMENT_NODE
+      ? (selection.anchorNode as Element)
+      : (selection.anchorNode?.parentElement ?? null);
+  const focusEl =
+    selection.focusNode?.nodeType === Node.ELEMENT_NODE
+      ? (selection.focusNode as Element)
+      : (selection.focusNode?.parentElement ?? null);
+  if (!container.contains(anchorEl) || !container.contains(focusEl)) return;
+
+  const text = selection.toString().trim();
+  if (!text) return;
+  if (!navigator.clipboard?.writeText) return;
+
+  void navigator.clipboard
+    .writeText(text)
+    .then(() => {
+      showAutoCopyPill(event);
+    })
+    .catch(() => {});
+}
+
+onBeforeUnmount(() => {
+  if (autoCopyPillTimer !== null) {
+    window.clearTimeout(autoCopyPillTimer);
+    autoCopyPillTimer = null;
+  }
+});
 
 // 整块释放后的字符错落延时：每个字符相对前一个字符延迟一步开始淡入，
 // 形成"波浪式"逐字浮现效果；超过窗口后封顶，避免长文本总动画时长失控。
@@ -172,6 +225,20 @@ function copyAssistantResponse(_turnId: string, content: string) {
   }
 }
 
+function copyUserMessage(_turnId: string, content: string) {
+  copiedUserMessage.value = true;
+
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(content);
+  }
+
+  if (typeof window !== "undefined") {
+    window.setTimeout(() => {
+      copiedUserMessage.value = false;
+    }, 1200);
+  }
+}
+
 const toolIconByCanonicalName: Record<string, any> = {
   Run: Terminal,
   Ask: MessageSquareMore,
@@ -202,7 +269,10 @@ const toolIconByCanonicalName: Record<string, any> = {
           <UserRound class="h-3.5 w-3.5" />
         </div>
         <div :class="userShellClass()">
-          <div class="text-left whitespace-pre-wrap text-sm leading-6">
+          <div
+            class="text-left whitespace-pre-wrap text-sm leading-6 select-text"
+            @mouseup="handleSelectionAutoCopy"
+          >
             {{ turn.user.content }}
           </div>
         </div>
@@ -260,6 +330,16 @@ const toolIconByCanonicalName: Record<string, any> = {
               </PopoverContent>
             </PopoverPortal>
           </PopoverRoot>
+          <button
+            class="checkpoint-icon-button"
+            type="button"
+            :data-testid="`workspace-user-copy-${turn.turnId}`"
+            :title="copiedUserMessage ? '已复制' : '复制消息'"
+            @click="copyUserMessage(turn.turnId, turn.user?.content ?? '')"
+          >
+            <component :is="copiedUserMessage ? Check : Copy" class="h-3.5 w-3.5" />
+            <span class="sr-only">复制消息</span>
+          </button>
         </div>
       </div>
     </article>
@@ -361,9 +441,10 @@ const toolIconByCanonicalName: Record<string, any> = {
         >
           <!-- 统一 shell：流式/完成共享同一外容器，避免 v-if/v-else 导致的 DOM 子树替换 -->
           <div
-            class="assistant-plain-text text-sm"
+            class="assistant-plain-text text-sm select-text"
             :class="assistantTone(event.assistant)"
             :data-streaming="event.streaming ? 'true' : undefined"
+            @mouseup="handleSelectionAutoCopy"
           >
             <div
               v-if="shouldUseMarkdownAssistantRendering(event.assistant, event.content)"
@@ -452,6 +533,21 @@ const toolIconByCanonicalName: Record<string, any> = {
       </div>
     </article>
   </section>
+
+  <Teleport to="body">
+    <Transition name="auto-copy-pill-fade">
+      <div
+        v-if="autoCopyPill"
+        class="auto-copy-pill-position pointer-events-none fixed z-[200] flex items-center gap-1 rounded-full bg-stone-800/92 px-2.5 py-1 text-[11px] leading-none text-stone-50 shadow-lg backdrop-blur-sm"
+        :style="{ left: `${autoCopyPill.x}px`, top: `${autoCopyPill.y}px` }"
+        role="status"
+        data-testid="auto-copy-feedback"
+      >
+        <Check class="h-3 w-3" />
+        已复制
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -892,5 +988,22 @@ const toolIconByCanonicalName: Record<string, any> = {
 
 .reasoning-italic {
   font-style: italic !important;
+}
+
+.auto-copy-pill-position {
+  transform: translate(-50%, -160%);
+}
+
+.auto-copy-pill-fade-enter-active,
+.auto-copy-pill-fade-leave-active {
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.auto-copy-pill-fade-enter-from,
+.auto-copy-pill-fade-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -120%) scale(0.92);
 }
 </style>

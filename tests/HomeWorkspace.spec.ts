@@ -558,6 +558,7 @@ function createRunControlAuditSummary(
 function mountWorkspace(options?: {
   registry?: ProviderRegistry | null;
   selectedReasoningEffort?: ProviderReasoningEffort | null;
+  attachToBody?: boolean;
 }) {
   const providerStore = useProviderStore();
   providerStore.$patch({
@@ -572,6 +573,7 @@ function mountWorkspace(options?: {
       });
     }
   }, {
+    ...(options?.attachToBody ? { attachTo: document.body } : {}),
     global: {
       directives: {
         motion: {
@@ -4234,10 +4236,11 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
     const oldTurnButtons = actionBars[0]!.findAll("button");
     const headTurnButtons = actionBars[1]!.findAll("button");
 
-    expect(oldTurnButtons).toHaveLength(2);
+    expect(oldTurnButtons).toHaveLength(3);
     expect(oldTurnButtons[0]!.attributes("title")).toContain("仅撤回对话");
     expect(oldTurnButtons[1]!.attributes("title")).toContain("撤回对话和修改");
-    expect(headTurnButtons).toHaveLength(2);
+    expect(oldTurnButtons[2]!.attributes("title")).toContain("复制消息");
+    expect(headTurnButtons).toHaveLength(3);
 
     await oldTurnButtons[0]!.trigger("click");
     await nextTick();
@@ -4260,6 +4263,112 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
 
     expect(checkoutSpy).toHaveBeenNthCalledWith(1, "node-root", "transcript_only", "turn-old");
     expect(checkoutSpy).toHaveBeenNthCalledWith(2, "node-root", "transcript_and_workspace", "turn-old");
+  });
+
+  it("copies the user message content via the icon-only copy button", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    if (!navigator.clipboard) {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText }
+      });
+    } else {
+      vi.spyOn(navigator.clipboard, "writeText").mockImplementation(writeText);
+    }
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      historyCursorMode: "live",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-1", role: "user", content: "可以复制我" }),
+        createMessage({ id: "assistant-1", turnId: "turn-1", role: "assistant", content: "回复", status: "done", modelName: "OpenAI/GPT-5" })
+      ]
+    });
+
+    const wrapper = mountWorkspace();
+    await nextTick();
+
+    const copyButton = wrapper.get('[data-testid="workspace-user-copy-turn-1"]');
+    expect(copyButton.attributes("title")).toBe("复制消息");
+
+    await copyButton.trigger("click");
+    await nextTick();
+
+    expect(writeText).toHaveBeenCalledWith("可以复制我");
+    expect(copyButton.attributes("title")).toBe("已复制");
+  });
+
+  it("auto-copies the selected text when a selection ends inside a message", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    if (!navigator.clipboard) {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText }
+      });
+    } else {
+      vi.spyOn(navigator.clipboard, "writeText").mockImplementation(writeText);
+    }
+
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({
+      sessionId: "session-current",
+      sessionOperation: null,
+      phase: "ready",
+      error: null,
+      activeBranchId: "branch-main",
+      visibleNodeId: "node-head",
+      branchHeadNodeId: "node-head",
+      historyCursorMode: "live",
+      messages: [
+        createMessage({ id: "user-1", turnId: "turn-1", role: "user", content: "可复制的用户内容" }),
+        createMessage({ id: "assistant-1", turnId: "turn-1", role: "assistant", content: "可复制的助手回复", status: "done", modelName: "OpenAI/GPT-5" })
+      ]
+    });
+
+    const wrapper = mountWorkspace({ attachToBody: true });
+    await nextTick();
+
+    const selection = window.getSelection()!;
+    const selectAndRelease = (element: HTMLElement) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 120, clientY: 140 }));
+    };
+
+    // 用户消息内容：选中即复制
+    const userContent = wrapper.get(".conversation-user-message .select-text").element as HTMLElement;
+    selectAndRelease(userContent);
+    expect(writeText).toHaveBeenCalledWith("可复制的用户内容");
+
+    // 复制成功后弹出"已复制"浮标
+    await flushAsyncUiWork();
+    await nextTick();
+    const pill = document.body.querySelector('[data-testid="auto-copy-feedback"]');
+    expect(pill).not.toBeNull();
+    expect(pill?.textContent).toContain("已复制");
+
+    // 助手回复内容：选中即复制
+    writeText.mockClear();
+    const assistantContent = wrapper.get(".assistant-plain-text.select-text").element as HTMLElement;
+    selectAndRelease(assistantContent);
+    expect(writeText).toHaveBeenCalledWith("可复制的助手回复");
+
+    // 折叠选择（纯点击）不应触发复制
+    writeText.mockClear();
+    selection.removeAllRanges();
+    userContent.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    expect(writeText).not.toHaveBeenCalled();
+
+    wrapper.unmount();
   });
 
   it("undo button rolls back to the previous checkpoint", async () => {
