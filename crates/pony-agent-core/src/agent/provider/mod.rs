@@ -4306,6 +4306,61 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn test_reasoning_model_omits_temperature() {
+        let reasoning_config = ResolvedProviderSelection {
+            requested_name: "test-reasoning".to_string(),
+            provider_name: "openai".to_string(),
+            protocol: ProviderProtocol::OpenAiCompletions,
+            base_url: "https://api.openai.com/v1".to_string(),
+            auth_type: ProviderAuthType::Bearer,
+            api_key_env_var: "OPENAI_API_KEY".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: "o1".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                supports_reasoning: true,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::None,
+        };
+
+        let non_reasoning_config = ResolvedProviderSelection {
+            capabilities: ProviderModelCapabilities {
+                supports_reasoning: false,
+                ..Default::default()
+            },
+            ..reasoning_config.clone()
+        };
+
+        let initial_body = json!({
+            "model": "test-model",
+            "messages": [],
+            "temperature": 0.2,
+            "max_tokens": 1024,
+        });
+
+        let reasoning_body = with_openai_request_options(initial_body.clone(), &reasoning_config);
+        assert!(
+            reasoning_body.get("temperature").is_none(),
+            "Expected 'temperature' to be omitted when supports_reasoning is true, but got: {:?}",
+            reasoning_body.get("temperature")
+        );
+
+        let non_reasoning_body = with_openai_request_options(initial_body, &non_reasoning_config);
+        assert!(
+            non_reasoning_body.get("temperature").is_some(),
+            "Expected 'temperature' to be present when supports_reasoning is false"
+        );
+        assert_eq!(
+            non_reasoning_body.get("temperature").and_then(Value::as_f64),
+            Some(0.2)
+        );
+    }
+
+    #[test]
     fn openai_request_messages_encode_image_blocks_for_last_user_message() {
         let request = ProviderRequest {
             model: "gpt-5.4".to_string(),
