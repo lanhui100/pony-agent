@@ -778,6 +778,9 @@ fn is_reserved_builtin_alias(alias: &str) -> bool {
             alias.trim(),
             "time_now"
                 | "echo_input"
+                // 小写 `ask` 一并保留：外部 MCP/skill 注册名为 `ask` 的工具会被前端
+                // isAskToolName 误标为 Ask 卡片，故从注册源头拒绝（PA-114 评审裁决）。
+                | "ask"
                 | "ask_user"
                 | "ask.user"
                 | "web_fetch_url"
@@ -4190,14 +4193,6 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                             "type": "string"
                         },
                         "description": "可选的预设回答选项，用户可直接点选"
-                    },
-                    "defaultAnswer": {
-                        "type": "string",
-                        "description": "用户未回答时使用的默认回答"
-                    },
-                    "timeoutMs": {
-                        "type": "integer",
-                        "description": "等待用户回答的超时时间（毫秒）"
                     }
                 },
                 "required": ["question"],
