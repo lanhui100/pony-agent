@@ -314,12 +314,14 @@ fn registry() -> &'static Mutex<JobRegistry> {
     REGISTRY.get_or_init(|| Mutex::new(JobRegistry::new()))
 }
 
-/// Resolves and checks cwd permissions, failing closed on path traversal or outside workspace.
-fn validate_and_resolve_cwd(cwd_opt: Option<&str>) -> Result<PathBuf, String> {
-    let current_dir = std::env::current_dir().map_err(|e| format!("current_dir failed: {e}"))?;
-    let canonical_workspace = current_dir
-        .canonicalize()
-        .map_err(|e| format!("canonicalize current dir: {e}"))?;
+/// Session-anchored cwd validator (fail-closed on traversal / outside-anchor).
+/// `workspace_root=Some(ws)` pins resolution to the session workspace;
+/// `None` falls back to `compute_default_workspace_root()` → process cwd (legacy/compat path).
+fn validate_and_resolve_cwd_with_root(
+    cwd_opt: Option<&str>,
+    workspace_root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let (join_base, canonical_workspace) = resolve_cwd_anchor(workspace_root)?;
 
     let path_str = match cwd_opt {
         Some(s) if !s.trim().is_empty() => s.trim(),
@@ -330,7 +332,7 @@ fn validate_and_resolve_cwd(cwd_opt: Option<&str>) -> Result<PathBuf, String> {
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        current_dir.join(path)
+        join_base.join(path)
     };
 
     if !candidate.exists() || !candidate.is_dir() {
@@ -348,8 +350,41 @@ fn validate_and_resolve_cwd(cwd_opt: Option<&str>) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// Resolves the cwd anchor: returns `(join_base, canonical_anchor)`.
+fn resolve_cwd_anchor(workspace_root: Option<&Path>) -> Result<(PathBuf, PathBuf), String> {
+    if let Some(ws) = workspace_root {
+        let base = ws.to_path_buf();
+        let canonical = base
+            .canonicalize()
+            .map_err(|e| format!("canonicalize workspace root: {e}"))?;
+        return Ok((base, canonical));
+    }
+    // Legacy/compat anchor: compute_default (ensured to exist) → process cwd (dirs total failure).
+    if let Some(def) = crate::agent::workspace::compute_default_workspace_root() {
+        // Best-effort ensure: matches bootstrap "missing dir is created" behavior.
+        let _ = std::fs::create_dir_all(&def);
+        if let Ok(canonical) = def.canonicalize() {
+            return Ok((def, canonical));
+        }
+    }
+    let current_dir = std::env::current_dir().map_err(|e| format!("current_dir failed: {e}"))?;
+    let canonical_workspace = current_dir
+        .canonicalize()
+        .map_err(|e| format!("canonicalize current dir: {e}"))?;
+    Ok((current_dir, canonical_workspace))
+}
+
 pub fn job_start(args: JobStartArgs) -> Result<JobStartResult, String> {
-    let cwd = validate_and_resolve_cwd(args.cwd.as_deref())?;
+    job_start_with_workspace_root(args, None)
+}
+
+/// Session-anchored variant (TASK-2-WIRE target): `workspace_root=Some(ws)` pins the default
+/// cwd and the boundary check to the session workspace root.
+pub fn job_start_with_workspace_root(
+    args: JobStartArgs,
+    workspace_root: Option<&Path>,
+) -> Result<JobStartResult, String> {
+    let cwd = validate_and_resolve_cwd_with_root(args.cwd.as_deref(), workspace_root)?;
 
     let mut command = Command::new(&args.command);
     let command_line = if let Some(ref cmd_args) = args.args {

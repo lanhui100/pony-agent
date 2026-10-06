@@ -26,13 +26,13 @@
 
 use crate::agent::process::ProcessManager;
 pub use crate::agent::jobs::{
-    job_kill, job_list, job_output, job_start,
+    job_kill, job_list, job_output, job_start, job_start_with_workspace_root,
     JobKillArgs, JobKillResult, JobListArgs, JobListItem, JobListResult,
     JobOutputArgs, JobOutputResult, JobStartArgs, JobStartResult,
     JOB_BUFFER_CAP, MAX_HISTORY_JOBS,
 };
 pub use crate::agent::terminal::{
-    terminal_close, terminal_open, terminal_read, terminal_send, terminal_signal,
+    terminal_close, terminal_open, terminal_open_with_workspace_root, terminal_read, terminal_send, terminal_signal,
     MAX_ACTIVE_TERMINALS, TERMINAL_BUFFER_CAP,
     TerminalCloseArgs, TerminalCloseResult, TerminalOpenArgs, TerminalOpenResult,
     TerminalReadArgs, TerminalReadResult, TerminalSendArgs, TerminalSendResult,
@@ -1009,7 +1009,10 @@ pub struct ToolRouter {
 impl ToolRouter {
     pub fn new() -> Self {
         Self {
-            workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            // 默认工作区分叉收敛：兜底取 compute_default_workspace_root()
+            //（Windows Documents/pony_agent，Unix ~/pony_agent），dirs 解析失败才回退 cwd。
+            workspace_root: crate::agent::workspace::compute_default_workspace_root()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             process_manager: ProcessManager::new(),
             sandbox_backend: None,
             web_resolver: Arc::new(FailClosedResolver),

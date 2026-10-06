@@ -57,8 +57,12 @@ mod query_commands;
 mod trace_commands;
 mod workspace_commands;
 
-/// 默认 workspace root：进程当前目录（与 `ToolRouter::new()` 默认一致）。
+/// 默认 workspace root：`compute_default_workspace_root()`（Windows Documents/pony_agent，
+/// Unix ~/pony_agent）；dirs 解析失败才回退进程 cwd（与 `ToolRouter::new()` 默认一致）。
 fn default_workspace_root() -> String {
+    if let Some(path) = crate::agent::workspace::compute_default_workspace_root() {
+        return path.display().to_string();
+    }
     std::env::current_dir()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| ".".to_string())
@@ -1224,12 +1228,27 @@ impl HostControlPlane {
 
     /// 当前 workspace root（PA-078 附件导入/前端获取根路径；PA-079 注册表落地后改由
     /// 会话 `workspace_id` 解析，此处保留为默认回退）。
+    /// 优先读注册表 default（`sessions.resolve_workspace_root(None)`），失败才回退
+    /// `compute_default_workspace_root()`（dirs 失败再回退 cwd）；既有 default 登记永不迁移。
     pub fn get_workspace_root(&self) -> String {
-        let runtime = self.runtime.read().expect("runtime lock poisoned");
-        runtime
-            .workspace_root()
-            .map(|value| value.to_string())
-            .unwrap_or_else(default_workspace_root)
+        // 毒锁恢复（与本文件其他 sessions 读取点一致）：poison 时取内部 guard 继续读注册表。
+        let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        if let Ok(root) = sessions.resolve_workspace_root(None) {
+            return root;
+        }
+        drop(sessions);
+        // 注册表未初始化：保留 runtime 显式 root（builder 注入）作为次级回退，
+        // 否则走 compute_default（与 ToolRouter::new() 默认一致）。
+        {
+            let runtime = self.runtime.read().expect("runtime lock poisoned");
+            if let Some(value) = runtime.workspace_root() {
+                return value.to_string();
+            }
+        }
+        default_workspace_root()
     }
 
     /// 附件导入（PA-078/PA-079）：base64 解码后由 `attachment_import` 写入受控导入目录。

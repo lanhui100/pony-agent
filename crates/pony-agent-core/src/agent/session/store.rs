@@ -4930,8 +4930,11 @@ fn default_storage_path() -> PathBuf {
 
     #[cfg(not(test))]
     {
+        // 默认工作区分叉收敛：dirs 全失败才回退 cwd；中间加 compute_default_workspace_root
+        //（Windows Documents/pony_agent，Unix ~/pony_agent）一跳。
         dirs::data_local_dir()
             .or_else(dirs::home_dir)
+            .or_else(crate::agent::workspace::compute_default_workspace_root)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
             .join("PonyAgent")

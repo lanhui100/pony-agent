@@ -165,8 +165,11 @@ pub fn build_governed_executor(
         ..Default::default()
     });
 
+    // 默认工作区分叉收敛：None 兜底取 compute_default_workspace_root()
+    //（Windows Documents/pony_agent，Unix ~/pony_agent），dirs 解析失败才回退 cwd。
     let workspace = workspace_root.unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        crate::agent::workspace::compute_default_workspace_root()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     });
     // PA-080：授权清单（如有）与 host control plane 共享同一 `Arc`；
     // 缺省（测试/legacy 构造）时工具判定使用空授权清单（workspace 外读一律 requires_authorization）。
