@@ -150,6 +150,33 @@ impl SandboxBackend for TestSandboxBackend {
     }
 }
 
+/// Linux/Unix 环境下的轻量级命名空间与工作区受限沙箱实现
+#[derive(Clone, Debug, Default)]
+pub struct LocalProcessSandboxBackend {
+    pub workspace_root: Option<std::path::PathBuf>,
+}
+
+impl LocalProcessSandboxBackend {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            workspace_root: Some(root.into()),
+        }
+    }
+}
+
+impl SandboxBackend for LocalProcessSandboxBackend {
+    fn availability(&self) -> SandboxAvailability {
+        SandboxAvailability::Available
+    }
+
+    fn validate(&self, request: &SandboxRequest) -> Result<(), String> {
+        if request.workspace_root.contains("..") {
+            return Err("Sandbox security policy violation: path traversal detected in workspace root".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

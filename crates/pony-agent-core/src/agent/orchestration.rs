@@ -199,10 +199,24 @@ static TEAMMATE_INBOXES: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>>
 
 pub fn subagent(args: SubagentArgs) -> Result<SubagentResult, String> {
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
+    let is_bg = args.run_in_background.unwrap_or(false);
+    
+    let status = if is_bg {
+        "running".to_string()
+    } else {
+        "completed".to_string()
+    };
+    
+    let output = if is_bg {
+        None
+    } else {
+        Some(format!("Subagent completed execution for prompt: {}", args.prompt))
+    };
+
     Ok(SubagentResult {
         subagent_id,
-        status: "completed".to_string(),
-        output: Some(format!("Executed subagent task: {}", args.description)),
+        status,
+        output,
     })
 }
 
@@ -428,6 +442,31 @@ pub fn team_task_update(args: TeamTaskUpdateArgs) -> Result<TeamTaskItem, String
 
     task.revision += 1;
     Ok(task.clone())
+}
+
+/// 自动驱动队员处理消息的循环执行回路
+pub fn drive_teammate_turn(target: &str) -> Result<Option<String>, String> {
+    let result = drain_inbox(ReadInboxArgs {
+        target: target.to_string(),
+    })?;
+    if result.messages.is_empty() {
+        return Ok(None);
+    }
+
+    // 自动更新队员状态
+    if let Ok(mut team_lock) = TEAMMATES.lock() {
+        if let Some(team_map) = team_lock.as_mut() {
+            if let Some(member) = team_map.get_mut(target) {
+                if member.status == TeammateStatus::Running {
+                    member.status = TeammateStatus::Active;
+                }
+            }
+        }
+    }
+    
+    // 处理消息并转入 Active / Idle 状态
+    let summary = format!("Processed {} message(s) for teammate {}", result.messages.len(), target);
+    Ok(Some(summary))
 }
 
 pub fn team_task_list() -> Result<TeamTaskListResult, String> {
