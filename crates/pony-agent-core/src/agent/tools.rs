@@ -4973,14 +4973,24 @@ mod contract_view_tests {
                 "Edit",
                 "BatchExecute",
                 "Plan",
-                "ViewImage"
+                "ViewImage",
+                "subagent",
+                "workflow",
+                "spawn_teammate",
+                "list_agents",
+                "send_message",
+                "interrupt_agent",
+                "drain_inbox",
+                "team_task_create",
+                "team_task_update",
+                "team_task_list"
             ]
         );
         assert_eq!(
             primitives,
             vec![
                 "workspace_run_command",
-                "echo_input",
+                "ask_user",
                 "workspace_gather_context",
                 "workspace_read_document",
                 "workspace_list_files",
@@ -4994,7 +5004,17 @@ mod contract_view_tests {
                 "workspace_edit_file",
                 "workspace_batch",
                 "plan_control",
-                "view_image"
+                "view_image",
+                "subagent",
+                "workflow",
+                "spawn_teammate",
+                "list_agents",
+                "send_message",
+                "interrupt_agent",
+                "drain_inbox",
+                "team_task_create",
+                "team_task_update",
+                "team_task_list"
             ]
         );
     }
@@ -5018,8 +5038,8 @@ mod contract_view_tests {
             .map(|view| view.name.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(tools.len(), 20, "baseline internal primitive count");
-        assert_eq!(names.len(), 16, "baseline product tool count");
+        assert_eq!(tools.len(), 31, "baseline internal primitive count");
+        assert_eq!(names.len(), 26, "baseline product tool count");
         assert_eq!(
             names,
             vec![
@@ -5039,6 +5059,16 @@ mod contract_view_tests {
                 "BatchExecute",
                 "Plan",
                 "ViewImage",
+                "subagent",
+                "workflow",
+                "spawn_teammate",
+                "list_agents",
+                "send_message",
+                "interrupt_agent",
+                "drain_inbox",
+                "team_task_create",
+                "team_task_update",
+                "team_task_list"
             ]
         );
         for view in views {
@@ -5078,7 +5108,7 @@ mod contract_view_tests {
     fn characterization_aliases_resolve_to_the_current_internal_primitives() {
         let aliases = [
             ("Run", "workspace_run_command"),
-            ("Ask", "echo_input"),
+            ("Ask", "ask_user"),
             ("Read", "workspace_gather_context"),
             ("List", "workspace_list_files"),
             ("Search", "workspace_search_text"),
@@ -5103,9 +5133,10 @@ mod contract_view_tests {
 
     #[test]
     fn characterization_legacy_ask_and_plan_mappings_are_migration_removal_baselines() {
-        // These assertions document the behavior being replaced by PA-076. They are not a
-        // target product contract: Ask must stop echoing and Plan must stop dispatching batches.
-        assert_eq!(canonical_tool_name("Ask"), Some("echo_input"));
+        // These assertions document the behavior replaced by PA-076/PA-114. Ask is now the
+        // first-class `ask_user` primitive (not the legacy echo placeholder), and Plan must
+        // stop dispatching batches.
+        assert_eq!(canonical_tool_name("Ask"), Some("ask_user"));
         assert_eq!(canonical_tool_name("BatchExecute"), Some("workspace_batch"));
         // PA-076: Plan now resolves to its own state-control handler rather than workspace_batch.
         assert_eq!(canonical_tool_name("Plan"), Some("plan_control"));
@@ -5185,7 +5216,7 @@ mod contract_view_tests {
             .collect::<Vec<_>>();
 
         assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 26);
         assert!(registry.resolve("Run").is_some());
         assert!(registry.resolve("workspace.run_command").is_some());
         assert!(registry.resolve("workspace_path_info").is_some());
@@ -9673,12 +9704,14 @@ mod tests {
         assert_eq!(result.status, "error");
         let payload: Value =
             serde_json::from_str(&result.output).expect("error output should be json");
+        // PA-080 统一路径判定：逃逸工作区的路径先命中 path_permission 边界 →
+        // `requires_authorization`（宿主审批语义），不再走 canonicalize 失败的 `invalid_path`。
         assert_eq!(
             payload
                 .get("error")
                 .and_then(|e| e.get("code"))
                 .and_then(Value::as_str),
-            Some("invalid_path")
+            Some("requires_authorization")
         );
     }
 
@@ -9832,12 +9865,14 @@ mod tests {
         assert_eq!(result.status, "error");
         let payload: Value =
             serde_json::from_str(&result.output).expect("error output should be json");
+        // PA-080 统一路径判定：逃逸工作区的路径先命中 path_permission 边界 →
+        // `requires_authorization`（宿主审批语义），不再走 canonicalize 失败的 `invalid_path`。
         assert_eq!(
             payload
                 .get("error")
                 .and_then(|e| e.get("code"))
                 .and_then(Value::as_str),
-            Some("invalid_path")
+            Some("requires_authorization")
         );
     }
 
@@ -9897,12 +9932,14 @@ mod tests {
         assert_eq!(result.status, "error");
         let payload: Value =
             serde_json::from_str(&result.output).expect("error output should be json");
+        // PA-080 统一路径判定：逃逸工作区的路径先命中 path_permission 边界 →
+        // `requires_authorization`（宿主审批语义），不再走 canonicalize 失败的 `invalid_path`。
         assert_eq!(
             payload
                 .get("error")
                 .and_then(|e| e.get("code"))
                 .and_then(Value::as_str),
-            Some("invalid_path")
+            Some("requires_authorization")
         );
     }
 

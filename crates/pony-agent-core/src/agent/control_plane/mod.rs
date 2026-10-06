@@ -9030,7 +9030,7 @@ mod tests {
             )),
             Box::new(ForcedToolPlanner {
                 tool_name: "Ask".to_string(),
-                arguments: json!({ "text": "继续吗？", "description": "test" }),
+                arguments: json!({ "question": "继续吗？", "description": "test" }),
             }),
             Box::new(DefaultTurnContextBuilder),
             Box::new(DefaultTurnTelemetryBuilder),

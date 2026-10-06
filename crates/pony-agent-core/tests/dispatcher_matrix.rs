@@ -700,26 +700,47 @@ fn matrix_dispatcher_fails_closed_for_unknown_descriptor() {
 
 /// 4. Dispatcher: a registered primitive handler runs and echoes its result; the same descriptor
 /// without a handler fails closed. Builtin schemas require the injected `description` argument.
+/// PA-114 (B1-3): `echo_input` is no longer model-visible — the `Ask` product slot is won by
+/// `ask_user` — so a Model origin is denied the internal echo_input descriptor before handler
+/// lookup, and the handler semantics are exercised through the trusted System origin (which may
+/// reach internal descriptors).
 #[test]
 fn matrix_dispatcher_runs_registered_handler_and_missing_handler_fails_closed() {
     let registry = Arc::new(ToolRegistrySnapshot::builtin().expect("builtin registry should build"));
     let dispatcher = GovernedDispatcher::new(registry.clone(), Arc::new(FakeClock::new(0)));
     let arguments = json!({ "description": "test", "text": "hi" });
 
-    // No handler registered yet -> fail closed with a structured code.
-    let missing = dispatcher.dispatch(request(
+    // Internal descriptor is not model-reachable (PA-114 B1-3): model origin denied first.
+    let internal_denied = dispatcher.dispatch(request(
         InvocationOrigin::Model,
+        "echo_input",
+        "call-0",
+        arguments.clone(),
+    ));
+    assert_eq!(internal_denied.execution_status, ToolExecutionStatus::Error);
+    assert_eq!(
+        outcome_error_code(&internal_denied).as_deref(),
+        Some("origin_not_authorized")
+    );
+
+    // No handler registered yet -> fail closed with a structured code (System origin can reach
+    // the internal descriptor).
+    let missing = dispatcher.dispatch(request(
+        InvocationOrigin::System,
         "echo_input",
         "call-1",
         arguments.clone(),
     ));
     assert_eq!(missing.execution_status, ToolExecutionStatus::Error);
-    assert_eq!(outcome_error_code(&missing).as_deref(), Some("no_handler_registered"));
+    assert_eq!(
+        outcome_error_code(&missing).as_deref(),
+        Some("no_handler_registered")
+    );
 
     // Registered handler (under the canonical descriptor id) -> echoed ok outcome.
     dispatcher.register_handler("builtin:echo_input", Arc::new(EchoHandler));
     let ok = dispatcher.dispatch(request(
-        InvocationOrigin::Model,
+        InvocationOrigin::System,
         "echo_input",
         "call-2",
         arguments.clone(),
@@ -738,11 +759,12 @@ fn matrix_dispatcher_runs_registered_handler_and_missing_handler_fails_closed() 
 #[test]
 fn matrix_dispatcher_maps_handler_failure_to_error_outcome() {
     let dispatcher = test_dispatcher();
-    // `echo_input` is the model-visible winner of the `Ask` product slot; `time_now` loses the
-    // `Run` slot to `workspace_run_command` and is internal in the builtin registry.
+    // PA-114 (B1-3): `echo_input` is internal now (the `Ask` product slot is won by `ask_user`;
+    // `time_now` loses the `Run` slot to `workspace_run_command` and stays internal). The trusted
+    // System origin reaches internal descriptors, so the handler failure maps to `handler_error`.
     dispatcher.register_handler("builtin:echo_input", Arc::new(FailingHandler));
     let outcome = dispatcher.dispatch(request(
-        InvocationOrigin::Model,
+        InvocationOrigin::System,
         "echo_input",
         "call-1",
         json!({ "description": "test", "text": "hi" }),
@@ -857,15 +879,38 @@ fn matrix_origin_model_can_only_call_model_visible_or_elevated() {
     let registry = Arc::new(ToolRegistrySnapshot::builtin().expect("builtin registry should build"));
     let dispatcher = GovernedDispatcher::new(registry.clone(), Arc::new(FakeClock::new(0)));
 
-    // Model-visible direct descriptor -> allowed.
-    dispatcher.register_handler("builtin:echo_input", Arc::new(EchoHandler));
+    // Model-visible direct descriptor -> allowed. (PA-114 B1-3: `echo_input` is internal now, so
+    // the `List` product winner `workspace_list_files` stands in as the model-visible probe.)
+    dispatcher.register_handler("builtin:workspace_list_files", Arc::new(EchoHandler));
     let allowed = dispatcher.dispatch(request(
         InvocationOrigin::Model,
-        "echo_input",
+        "workspace_list_files",
         "call-1",
-        json!({ "description": "test", "text": "hi" }),
+        json!({ "description": "test", "path": "." }),
     ));
     assert_eq!(allowed.execution_status, ToolExecutionStatus::Ok);
+
+    // Internal descriptor (PA-114 B1-3: `echo_input`) is not model-reachable -> denied origin.
+    dispatcher.register_handler("builtin:echo_input", Arc::new(EchoHandler));
+    let internal_denied = dispatcher.dispatch(request(
+        InvocationOrigin::Model,
+        "echo_input",
+        "call-1b",
+        json!({ "description": "test", "text": "hi" }),
+    ));
+    assert_eq!(internal_denied.execution_status, ToolExecutionStatus::Error);
+    assert_eq!(
+        outcome_error_code(&internal_denied).as_deref(),
+        Some("origin_not_authorized")
+    );
+    // ...but the trusted System origin can reach the internal descriptor.
+    let system_reaches = dispatcher.dispatch(request(
+        InvocationOrigin::System,
+        "echo_input",
+        "call-1c",
+        json!({ "description": "test", "text": "hi" }),
+    ));
+    assert_eq!(system_reaches.execution_status, ToolExecutionStatus::Ok);
 
     // Deferred, not elevated -> denied origin.
     dispatcher.register_handler("builtin:workspace_path_info", Arc::new(EchoHandler));

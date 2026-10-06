@@ -375,7 +375,7 @@ mod tests {
         });
         let result = governed.execute(&same_call(
             "Ask",
-            json!({ "text": "继续吗？", "description": "test" }),
+            json!({ "question": "继续吗？", "description": "test" }),
         ));
         // Pending control outcome surfaces as the legacy `control_outcome_pending` marker, which
         // the runtime detects to suspend the run (design Decision 5, P1-1 wiring).
