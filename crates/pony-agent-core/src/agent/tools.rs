@@ -10865,4 +10865,144 @@ mod tests {
         assert_eq!(error.kind, "unknown");
         assert_eq!(error.message, "upstream provider exploded");
     }
+
+    // ── Stage2 红相验收：Windows 批处理执行契约（Bug A） ──
+    // 根因：workspace_command_parts 的 Windows 分支把含双引号的命令原样拼进 cmd /C 单参数，
+    // std::process::Command 按 CommandLineToArgvW 将内嵌 `"` 转义成 `\"`，cmd.exe 不按该规则
+    // 解析 → 引号失衡/管道误切、stdout 只回显命令文本、真实输出丢失。
+    // 修复方向（Executor 实现）：Windows 分支写入受控 tmp（<root>/.tmp/）下的临时 .cmd 批处理
+    // 文件（内容 @echo off / cd /d "<cwd>" / <命令原样> / exit /b %errorlevel%），以
+    // `cmd /C <批处理文件路径>` 执行后删除。
+    // A1/A2 依赖 Executor 新增的平台无关纯函数 `build_windows_batch_script(command, cwd)`
+    // （注：若 Executor 采用等价命名，请同步调整下列测试引用；测试契约本身以本函数签名冻结）。
+    // 当前实现下函数不存在 → 应编译失败（红相证据）。
+
+    #[test]
+    fn windows_batch_script_emits_expected_lines_verbatim() {
+        // A1：纯函数生成内容含 @echo off（首行）、cd /d "<cwd>"、命令原文（双引号原样保留）、
+        // exit /b %errorlevel%。
+        let script = build_windows_batch_script(
+            "powershell -NoProfile -Command \"Write-Output 'hello'\"",
+            r"C:\Users\test\work",
+        );
+        let lines: Vec<&str> = script.lines().collect();
+        assert!(!lines.is_empty(), "脚本不能为空: {script:?}");
+        assert_eq!(lines[0], "@echo off", "首行必须是 @echo off: {script:?}");
+        assert!(
+            script.contains("cd /d \"C:\\Users\\test\\work\""),
+            "必须包含双引号包裹的 cd /d: {script:?}"
+        );
+        assert!(
+            script.contains("powershell -NoProfile -Command \"Write-Output 'hello'\""),
+            "命令必须原样保留（含双引号，不得改写为 \\\"）: {script:?}"
+        );
+        assert!(
+            !script.contains("\\\""),
+            "内嵌双引号不得被改写为 \\\"（CommandLineToArgvW 转义会损坏 cmd 解析）: {script:?}"
+        );
+        assert!(
+            script.contains("exit /b %errorlevel%"),
+            "末行必须为 exit /b %errorlevel%: {script:?}"
+        );
+    }
+
+    #[test]
+    fn windows_batch_script_preserves_cmd_metacharacters_verbatim() {
+        // A2：含 & | > " 的命令逐字保留（不做 cmd 转义、不 caret 转义、不改写引号）。
+        let command = "dir \"C:\\My Dir\" & echo %ERRORLEVEL% | findstr /v \"x\" > out.txt";
+        let script = build_windows_batch_script(command, r"C:\w");
+        assert!(
+            script.contains(command),
+            "& | > \" 等元字符必须逐字保留: {script:?}"
+        );
+        assert!(!script.contains("^&"), "& 不得被 ^ 转义: {script:?}");
+        assert!(!script.contains("^|"), "| 不得被 ^ 转义: {script:?}");
+        assert!(!script.contains("^>"), "> 不得被 ^ 转义: {script:?}");
+        assert!(!script.contains("\\\""), "\" 不得被改写为 \\\": {script:?}");
+        assert!(
+            script.contains("cd /d \"C:\\w\""),
+            "cwd 保持双引号包裹: {script:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_command_parts_non_windows_branch_is_unchanged() {
+        // A3 回归：非 Windows 平台（Linux/macOS sh -lc 分支）行为不变——
+        // ("sh", ["-lc", "cd '<cwd>' && <command>"])。Windows 上本分支不生效，跳过。
+        if cfg!(windows) {
+            return;
+        }
+        let cwd = PathBuf::from("/tmp/pony-agent-some-workspace");
+        let (program, args) = workspace_command_parts("echo hello", &cwd);
+        assert_eq!(program, "sh");
+        assert_eq!(
+            args,
+            vec![
+                "-lc".to_string(),
+                "cd '/tmp/pony-agent-some-workspace' && echo hello".to_string()
+            ]
+        );
+    }
+
+    /// CI windows-latest 集成测试（本机 Linux 不编译/不执行，需 CI 验证）：
+    /// Run 执行含双引号的 powershell 命令后，exitCode==0、stdout 为真实输出（含 hello）
+    /// 且不包含命令文本回显（不含 "Write-Output"）；临时 .cmd 批处理文件运行后被删除。
+    #[cfg(windows)]
+    #[test]
+    fn windows_run_powershell_command_with_quotes_returns_real_stdout_and_cleans_batch() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace.clone())
+            .with_sandbox_backend(crate::agent::sandbox::TestSandboxBackend::available());
+
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
+                "cwd": ".",
+                "timeoutMs": 30000
+            }),
+            plan: None,
+        });
+
+        assert_eq!(
+            result.status, "ok",
+            "Run 应成功；output: {}",
+            result.output
+        );
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("run output should be json");
+        assert_eq!(payload.get("exitCode").and_then(Value::as_i64), Some(0));
+        let stdout = payload.get("stdout").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            stdout.contains("hello"),
+            "stdout 必须包含真实输出 hello，实际: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("Write-Output"),
+            "stdout 不得回显命令文本（旧 bug 症状）: {stdout:?}"
+        );
+
+        // 临时 .cmd 批处理文件运行结束后必须被删除（受控 tmp <root>/.tmp/ 下）。
+        let tmp_dir = workspace.join(".tmp");
+        let leftovers: Vec<String> = if tmp_dir.exists() {
+            std::fs::read_dir(&tmp_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.file_name().to_string_lossy().to_string())
+                        .filter(|name| name.ends_with(".cmd") || name.ends_with(".bat"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        assert!(
+            leftovers.is_empty(),
+            "临时批处理文件必须在运行结束后被删除: {leftovers:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 }
