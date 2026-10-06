@@ -29,6 +29,8 @@ import {
 import type { ChatMessage } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
 import MarkdownRenderer from "@/components/MarkdownRenderer.vue";
+import AskUserToolCallCard from "@/components/ask/AskUserToolCallCard.vue";
+import { isAskToolName } from "@/lib/runtime/ask-tools";
 import {
   PopoverClose,
   PopoverContent,
@@ -404,35 +406,35 @@ const toolIconByCanonicalName: Record<string, any> = {
           v-else-if="event.kind === 'tools'"
           class="conversation-tool-panel space-y-0.5"
         >
-          <div
-            v-for="tool in event.tools"
-            :key="tool.id"
-            class="flex flex-col py-0.5 text-[12px] leading-5"
-          >
-            <div class="flex items-center gap-2">
-              <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
-              <span
-                v-if="tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description"
-                class="conversation-tool-name shrink-0 text-stone-400"
-              >
-                {{ tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description }}
-              </span>
-              <span
-                v-if="tool.description && tool.description !== (tool.displayNameZh || tool.canonicalToolName || tool.toolName)"
-                class="conversation-tool-detail min-w-0 truncate text-stone-400"
-                :title="tool.description"
-              >
-                {{ tool.description }}
-              </span>
-              <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
-              <span class="conversation-tool-status flex shrink-0 items-center gap-1 leading-none">
-                <span class="text-[11px] text-stone-400" :class="tool.durationSeconds != null ? 'visible' : 'invisible'">{{ tool.durationSeconds != null ? (tool.durationSeconds).toFixed(1) + 's' : '0.0s' }}</span>
-                <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
-                <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
-                <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
-              </span>
+          <template v-for="tool in event.tools" :key="tool.id">
+            <!-- PA-114: Ask 工具行渲染专属交互卡片，其余行保持通用渲染（F1-4）。 -->
+            <AskUserToolCallCard v-if="isAskToolName(tool.toolName)" :tool="tool" />
+            <div v-else class="flex flex-col py-0.5 text-[12px] leading-5">
+              <div class="flex items-center gap-2">
+                <component :is="toolIconByCanonicalName[tool.canonicalToolName ?? ''] ?? Wrench" class="h-3 w-3 shrink-0 text-stone-400" />
+                <span
+                  v-if="tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description"
+                  class="conversation-tool-name shrink-0 text-stone-400"
+                >
+                  {{ tool.displayNameZh || tool.canonicalToolName || tool.toolName || tool.description }}
+                </span>
+                <span
+                  v-if="tool.description && tool.description !== (tool.displayNameZh || tool.canonicalToolName || tool.toolName)"
+                  class="conversation-tool-detail min-w-0 truncate text-stone-400"
+                  :title="tool.description"
+                >
+                  {{ tool.description }}
+                </span>
+                <span v-if="tool.count > 1" class="shrink-0 text-[11px] text-stone-300">({{ tool.count }}x)</span>
+                <span class="conversation-tool-status flex shrink-0 items-center gap-1 leading-none">
+                  <span class="text-[11px] text-stone-400" :class="tool.durationSeconds != null ? 'visible' : 'invisible'">{{ tool.durationSeconds != null ? (tool.durationSeconds).toFixed(1) + 's' : '0.0s' }}</span>
+                  <LoaderCircle v-if="tool.status === 'pending'" class="h-3 w-3 animate-spin text-stone-400" />
+                  <Check v-else-if="tool.status === 'done'" class="h-3 w-3 text-stone-400" />
+                  <AlertTriangle v-else-if="tool.status === 'error'" class="h-3 w-3 shrink-0 text-rose-400" aria-label="工具调用失败" :aria-hidden="false" />
+                </span>
+              </div>
             </div>
-          </div>
+          </template>
         </div>
 
         <div

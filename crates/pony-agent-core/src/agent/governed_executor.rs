@@ -37,8 +37,8 @@ use crate::agent::tool_runtime::{
     SandboxAvailability, SandboxBackend, SystemClock,
 };
 use crate::agent::tools::{
-    ToolCall, ToolRegistrySnapshot, ToolRouter, TOOL_PLAN_CONTROL, TOOL_WORKSPACE_READ_DOCUMENT,
-    TOOL_VIEW_IMAGE,
+    ToolCall, ToolRegistrySnapshot, ToolRouter, TOOL_ASK_USER, TOOL_PLAN_CONTROL,
+    TOOL_WORKSPACE_READ_DOCUMENT, TOOL_VIEW_IMAGE,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -76,7 +76,8 @@ impl ToolPolicyEvaluator for LegacyCompatiblePolicyEvaluator {
         // `Interaction` `PendingControlRequest` (WaitingHost) instead of echoing, which is the
         // design Decision 5 behavior that replaces the legacy echo placeholder (P1-1 wiring).
         let is_ask = descriptor.identity.model_name == "Ask"
-            || descriptor.identity.primitive_name == "echo_input";
+            || descriptor.identity.primitive_name == "echo_input"
+            || descriptor.identity.primitive_name == TOOL_ASK_USER;
         if is_ask {
             PermissionDecision {
                 verdict: PermissionVerdict::WaitingHost,
