@@ -19,15 +19,22 @@ pub(super) fn tool_result_failure_kind(
 ) -> Option<CapabilityFailureKind> {
     let parsed = serde_json::from_str::<Value>(&tool_result.output).unwrap_or(Value::Null);
     if let Some(error) = parsed.get("error") {
-        let kind = error
-            .get("kind")
-            .or_else(|| error.get("code"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if kind == "out_of_scope" {
-            return Some(CapabilityFailureKind::OutOfScope);
+        // Bug B 修复：成功 ToolResult 的 output JSON 出厂即带 `"error": null` 占位，
+        // `parsed.get("error")` 对 null 值同样返回 Some(Value::Null)；个别调用方还可能
+        // 输出 `"error": ""` 空串。二者都视为"无错误"，跳过失败归类继续走 status 判定，
+        // 避免成功调用被误分类为 InvocationFailed（UI 显示"调用失败"并误导模型重试）。
+        // 仅当 error 为真实对象时才进入失败归类；out_of_scope 特判保持原逻辑。
+        if !error.is_null() && error.as_str() != Some("") {
+            let kind = error
+                .get("kind")
+                .or_else(|| error.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if kind == "out_of_scope" {
+                return Some(CapabilityFailureKind::OutOfScope);
+            }
+            return Some(CapabilityFailureKind::InvocationFailed);
         }
-        return Some(CapabilityFailureKind::InvocationFailed);
     }
 
     if tool_result.status == "ok" {
