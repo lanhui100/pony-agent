@@ -18,4 +18,8 @@
 ## 4. 元协议迭代建议（Self-Evolving Protocol）
 - `npm run cargo:check:shared` 经 powershell 分发在 Linux 下不可用，门禁应文档化直调 `cargo check/test -p` 降级路径。
 - `cargo test` 多过滤名不支持多 TESTNAME，回归指令应拆分为单过滤多次调用。
-- 后续映射 Stage 应坚持"单文件簇+单测全绿再进下一项"（1双写→2retry→3provider），每 Stage 配 Test Agent 断言先行。
+## 5. Stage1-3 收敛追加（本轮）
+- Stage1 双写：7 文件 kind+code 全写侧收敛，B4 code-wins + B5 纯字符串保文本锁定；agent::tools 6 失败经 stash 基线对照确认预存。
+- Stage2 收编：retry 七张码表为唯一真源，classify 遗留桥语义零变更；retry 39 / T2-B 相关 10 全绿；grep 零新增。
+- Stage3 分批：包装器五件套纯新增先合（check + retry 39 绿）；openai_sse 占位接线已 revert，调用点拆 task-7（需真实 parsed_bytes/elapsed + tool_call 签名断言先行）。
+- 写锁纪律：Executor 越界一次（control_plane 顺手改）已 revert；并行 workspace 主线改动未混入本轮提交。
