@@ -1,0 +1,89 @@
+{
+  "verdict": "PASS",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6582,
+      "rule": "F1 核验(PASS)：cmd /C <bat> 引号形态——最终实现为裸路径 vec![\"/C\", path](无 /S、无内嵌引号)，含空格路径由 std 自动包裹引号并命中 cmd 规则1(可执行文件名)保留引号；含 `\" & | < > ( ) @ ^` 的路径在写文件前 fail-closed 拒绝(1854-1866)；文件名 session_id 纯 ASCII。A5 空格 workspace Windows 集成测试已补(11175)",
+      "counterexample": "证伪尝试：若仍用中间态的 /S + format!(\"\\\"{}\\\"\", path)(内嵌引号)形态，CommandLineToArgvW 会把引号转义为 \\\"，cmd 剥离后前导反斜杠致 `not recognized`(openai/codex#32402 同机理)——最终提交已弃用该形态。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6620,
+      "rule": "F2 核验(PASS)：cd 短路——批处理 cd 行为 `cd /d \"<cwd>\" || exit /b 1`，cd 失败立即退出，等价旧 && 语义，杜绝在错误目录继续执行删除类命令",
+      "counterexample": "证伪尝试：cd 失败后命令继续执行 → 会在 cmd 启动目录运行 `rm *`——实现已短路，不成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6617,
+      "rule": "F3 核验(PASS，按 Lead 裁决\"接受差异+文档化\")：命令逐字保留；%VAR% 展开与 /C 直跑一致；单%/%%/%1 交互式特例差异已在该函数 doc 注释显式记录，未拒执",
+      "counterexample": "for %i / echo 50%% / echo %1 在批处理与交互语义不同——属已裁决接受的记录差异，红线 A1/A2 冻结命令不含此类形态，无契约冲突。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6618,
+      "rule": "F4 核验(PASS)：编码/行尾——UTF-8 无 BOM 写入 + `chcp 65001 >nul`(第2行，兼容红线 lines[0]==\"@echo off\") + CRLF(\\r\\n)；中文 cwd 在 CP936 控制台不再乱码；chcp 使命令 stdout 字节变为 UTF-8(改善 from_utf8_lossy 保真度，行为变化已注释记录)",
+      "counterexample": "证伪尝试：不写 chcp 直接 UTF-8 → zh-CN 控制台按 GBK 解码中文 cwd 乱码 cd 失败——实现已加 chcp，不成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1991,
+      "rule": "F5 核验(PASS)：唯一/落盘/清理——文件名含每-run 唯一 session_id(pony-agent-run-legacy-run-{nanos:016x}.cmd)；fs::write 先完整落盘后 spawn；清理覆盖全部 5 条退出路径(spawn_failed 1896 / wait_failed 1946 / timeout 1970 / cleanup_failed 1982 / Exited 1991 各一处 remove_windows_batch_script，幂等忽略 NotFound)",
+      "counterexample": "证伪尝试：成功/超时路径残留文件于用户工作区 <root>/.tmp/(A4 断言 leftovers.is_empty())——两条路径均已补删除，不成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/types.rs",
+      "line": 21,
+      "rule": "F6 核验(PASS)：Bug B——`!error.is_null() && error.as_str() != Some(\"\")` 时 null 与空串均跳过失败归类，走 status 判定；status=error + error:null 落底部兜底仍 InvocationFailed(fail-closed 不回归)；B1(null+ok→None)/B2(status=error 与对象→InvocationFailed)/B3(缺省→None)/B4(ok+对象→InvocationFailed)/B5(空串→None) 5/5 绿",
+      "counterexample": "证伪尝试：`\"error\": \"\"` 仍被 InvocationFailed(与 tool_error_from_output(status=ok→恒None) 不一致)——实现显式跳过空串，不成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6621,
+      "rule": "F7 核验(PASS)：cd 行 % 转义——`cwd.replace('%', \"%%\")` 防止批处理把 cwd 中的 %VAR% 误展开(%% 折叠为字面 % 不二次展开)",
+      "counterexample": "证伪尝试：cwd=C:\\a%VAR%b(VAR 未设) → 展开为空 → cd 静默进错目录——cd 行已 %% 双写，不成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1853,
+      "rule": "F8 核验(PASS)：回声根治——/C 行只含批处理路径(命令体绝不回 /C 行)，@echo off 抑制批处理行回声；A4 断言 stdout 不含 \"Write-Output\" 命令文本回显",
+      "counterexample": "证伪尝试：命令文本回 /C 行则 @echo off 无法消除回显——实现结构上杜绝，不成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 11111,
+      "rule": "F9 核验(PASS+CI 附注)：Windows 集成测试 A4/A5 为 #[cfg(windows)]，本机 Linux 不编译不执行，待 windows-latest CI 验证(red-phase-a.md 已标注)；Linux 侧 A1/A2/A3 纯函数测试绿(2/2、1/1)；Windows-only 代码在 Linux -D warnings 门禁(ci.yml 非 Windows cfg 槽位)不被编译，故 cmd 真实行为依赖 A4/A5 在 CI 把关",
+      "counterexample": "证伪尝试：Linux 全绿但 Windows 引号形态错误——A5 空格用例与 A4 引号命令用例在 windows-latest 会红；当前实现形态符合 cmd 规则1与代码x#32402 实证，预期绿，但最终确认依赖 CI 运行结果。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6556,
+      "rule": "F10 核验(PASS)：回归零改动——sh -lc 分支字节级不变(A3 绿、run_command_ 9/9 绿)；error_result/tool_error_from_output 零改动(commit diff 确认)；tool_exec.rs:74-82/608 retry 判定调用点零改动，仅 tool_result_failure_kind 返回值按契约变化；集成测试全目标 --no-run 编译通过(exit 0)",
+      "counterexample": "证伪尝试：Linux 分支被顺手改写 → A3 断言(('sh',['-lc','cd \'<cwd>\' && <command>'])) 红——实测绿，不成立。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 98,
+      "rule": "MINOR-1(提交卫生)：commit 77fee3d 混入 PA-114 ask_user 实现(TOOL_ASK_USER 常量/builtin_tools 定义/别名映射/contract_priority=110/default_permission_facts host_mediated 切换，约百行)，与 Bug A 单职责不符；且 ask_user 后端(governed_executor.rs M)与前端(src/components/ask/、ask-tools.ts M/未跟踪、WorkspaceTurnItem.vue M)改动未随\"实现与测试已全部提交\"落盘(工作树仍脏)。不影响 Bug A/B 验收，但违反提交隔离与提交完整性声明，需后续拆分/补交",
+      "counterexample": "该 commit 的消息为 fix(run): windows cmd /C quoting corruption，而内容同时改动了 model 面工具注册表(ask_user)——评审无法从提交粒度独立回滚 Bug A 而不连带 ask_user。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1855,
+      "rule": "MINOR-2：批处理路径特殊字符拒绝集未含 `%`——workspace 路径含 %VAR% 片段时 cmd /C 命令行会做环境变量展开致路径损坏(极罕见，与旧实现行为一致，未引入回归)；建议后续将 % 纳入拒绝集或补注释",
+      "counterexample": "workspace=C:\\100%work%ws → /C 行 C:\\100%work%ws\\...\\x.cmd 中 %work% 展开为空 → cmd 找不到批处理(若 work 变量恰存在则指向错误文件)。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 1842,
+      "rule": "MINOR-3：cwd 含 `\"` 的校验失败分支复用错误码 \"spawn_failed\"(参数校验类失败语义为 spawn 失败)，且新错误码 \"batch_script_write_failed\" 未按 error-contract.md C7.2 门禁同提交登记 ADR/注册表——码形符合 C1.1(^[a-z][a-z0-9_]{1,63}$)，属流程性缺口，建议补 ADR 或注册表行",
+      "counterexample": "C7.2 门禁：'新增/变更任一码必须同提交附 ADR'——本次 77fee3d 新增 batch_script_write_failed 码未附 ADR(docs/decisions/ 无新增)。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools.rs",
+      "line": 6618,
+      "rule": "MINOR-4(信息)：chcp 65001 使命令 stdout 字节从 OEM 码页(GBK/CP437)变为 UTF-8——对 from_utf8_lossy 中文保真是净改进，但属用户可见行为变化；已在 build_windows_batch_script 注释记录，建议纳入 ADR 备查(与 MINOR-3 同批处理)",
+      "counterexample": "修复前 `cmd /C` 直跑下中文 stdout 为 GBK 字节(经 lossy 变乱码)；修复后为 UTF-8 字节(正确解码)——行为差异需文档化，已注释，未入 ADR。"
+    }
+  ]
+}
