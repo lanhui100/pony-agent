@@ -2417,6 +2417,12 @@ fn with_openai_request_options(mut body: Value, config: &ResolvedProviderSelecti
         ThinkingParamPattern::None | ThinkingParamPattern::ThinkingToggle => {}
     }
 
+    if config.capabilities.supports_reasoning {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("temperature");
+        }
+    }
+
     body
 }
 
