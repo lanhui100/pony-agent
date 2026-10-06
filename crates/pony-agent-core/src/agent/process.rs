@@ -916,11 +916,16 @@ mod tests {
         std::env::set_var("PA076_SENTINEL_SECRET", "should-not-leak");
         let manager = ProcessManager::new();
         let session = "session-min-env";
+        let (program, arguments) = if cfg!(windows) {
+            ("cmd".to_string(), vec!["/c".to_string(), "set".to_string()])
+        } else {
+            ("sh".to_string(), vec!["-c".to_string(), "env".to_string()])
+        };
         let handle = manager
             .start(&ProcessStartRequest {
                 session_id: session.to_string(),
-                program: "cmd".to_string(),
-                arguments: vec!["/c".to_string(), "set".to_string()],
+                program,
+                arguments,
                 sandbox: SandboxRequest {
                     workspace_root: ".".to_string(),
                     allow_network: false,
@@ -949,11 +954,16 @@ mod tests {
         std::env::set_var("PA_SANDBOX_LEAK_SENTINEL", "should-not-leak");
         let manager = ProcessManager::new();
         let session = "session-isolate-min";
+        let (program, arguments) = if cfg!(windows) {
+            ("cmd".to_string(), vec!["/c".to_string(), "set".to_string()])
+        } else {
+            ("sh".to_string(), vec!["-c".to_string(), "env".to_string()])
+        };
         let handle = manager
             .start(&ProcessStartRequest {
                 session_id: session.to_string(),
-                program: "cmd".to_string(),
-                arguments: vec!["/c".to_string(), "set".to_string()],
+                program,
+                arguments,
                 sandbox: SandboxRequest {
                     workspace_root: ".".to_string(),
                     allow_network: false,

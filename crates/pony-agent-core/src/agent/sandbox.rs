@@ -150,6 +150,96 @@ impl SandboxBackend for TestSandboxBackend {
     }
 }
 
+/// 信任透传后端，对齐 DSH danger-full-access / bash-local，报告 HostApprovedUnsandboxed 且放行命令
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostApprovedUnsandboxedBackend;
+
+impl HostApprovedUnsandboxedBackend {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl SandboxBackend for HostApprovedUnsandboxedBackend {
+    fn availability(&self) -> SandboxAvailability {
+        SandboxAvailability::HostApprovedUnsandboxed
+    }
+
+    fn validate(&self, _request: &SandboxRequest) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 平台原生沙箱探活与门禁后端
+#[derive(Clone, Debug)]
+pub struct NativeSandboxBackend {
+    availability: SandboxAvailability,
+}
+
+impl NativeSandboxBackend {
+    /// 依据当前平台支持能力与系统工具探活
+    pub fn detect() -> Self {
+        let availability = if cfg!(target_os = "linux") {
+            // Linux: 探活 bwrap (Bubblewrap) 或 landlock 能力
+            if Self::has_command("bwrap") {
+                SandboxAvailability::Available
+            } else {
+                SandboxAvailability::Unavailable
+            }
+        } else if cfg!(target_os = "macos") {
+            // macOS: 探活 sandbox-exec
+            if Self::has_command("sandbox-exec") {
+                SandboxAvailability::Available
+            } else {
+                SandboxAvailability::Unavailable
+            }
+        } else if cfg!(target_os = "windows") {
+            // Windows: 支持 Windows Job Object 隔离
+            SandboxAvailability::Available
+        } else {
+            SandboxAvailability::Unavailable
+        };
+
+        Self { availability }
+    }
+
+    fn has_command(cmd: &str) -> bool {
+        if let Ok(path) = std::env::var("PATH") {
+            for dir in std::env::split_paths(&path) {
+                let candidate = dir.join(cmd);
+                if candidate.is_file() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+impl SandboxBackend for NativeSandboxBackend {
+    fn availability(&self) -> SandboxAvailability {
+        self.availability.clone()
+    }
+
+    fn validate(&self, request: &SandboxRequest) -> Result<(), String> {
+        match self.availability {
+            SandboxAvailability::Available => {
+                if request.workspace_root.contains("..") {
+                    return Err(
+                        "Sandbox security policy violation: path traversal detected in workspace root"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SandboxAvailability::Unavailable => {
+                Err("Native sandbox backend is unavailable on this host system".to_string())
+            }
+            SandboxAvailability::HostApprovedUnsandboxed => Ok(()),
+        }
+    }
+}
+
 /// Linux/Unix 环境下的轻量级命名空间与工作区受限沙箱实现
 #[derive(Clone, Debug, Default)]
 pub struct LocalProcessSandboxBackend {
