@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::agent::error_code::ErrorCode;
+
 /// Backoff configuration for retry policies.
 #[derive(Debug, Clone, Copy)]
 pub struct BackoffConfig {
@@ -291,6 +293,82 @@ impl RetryAfter {
     }
 }
 
+/// Stage2（task-5 R1/R2.4/R3.1）：关键词表收编为注册表单一来源。
+/// 七张码表常量即 R1 八分组①–⑥ + R2.4 七词的唯一真源；`classify` / `is_rate_limit_error`
+/// 只消费这些常量做 `contains` 判定，不再内联字面量。全仓 `lower.contains` /
+/// `to_ascii_lowercase` 零新增：本文件内 lowering 仍仅两处（classify / is_rate_limit_error）。
+///
+/// 分组→注册表映射（R1）：
+/// ① timeout 四词 → [`ErrorCode::UpstreamTimeout`]；② 429 三词 → `UpstreamRateLimited`；
+/// ③ 5xx/408 四码 → `UpstreamServerError`；④ 连接三词 → `UpstreamNetwork`
+/// （禁扩 `connect` 泛词）；⑤ 400 系七码 → `UpstreamBadRequest`/`UpstreamAuth`
+/// （401 与 400 不区分冻结，同落 NonRetryable）；⑥ context 四词 → `UpstreamContextOverflow`；
+/// ⑦ 其余默认 Abort；⑧ decide/budget/RetryAfter/StreamState 语义冻结（本 Stage 不动）。
+///
+/// R2.4 七词（`is_rate_limit_error` 冻结）：429/rate limit/rate_limit/ratelimit/
+/// too many requests/tpm/quota → `UpstreamRateLimited` 候选（quota-only 因 classify
+/// 先判 NonRetryable 而 Abort，quota+429 混合才切 RL 长退避；PA-100 残余原样保留）。
+pub(crate) const UPSTREAM_TIMEOUT_HINTS: &[&str] = &[
+    "type=timeout",
+    "timeout",
+    "timed out",
+    "deadline has elapsed",
+];
+pub(crate) const UPSTREAM_RATE_LIMITED_HINTS: &[&str] = &["429", "rate limit", "rate_limit"];
+pub(crate) const UPSTREAM_SERVER_ERROR_HINTS: &[&str] = &["502", "503", "504", "408"];
+pub(crate) const UPSTREAM_NETWORK_HINTS: &[&str] =
+    &["connection reset", "connection refused", "dns"];
+pub(crate) const UPSTREAM_BAD_REQUEST_HINTS: &[&str] =
+    &["400", "401", "403", "404", "422", "407", "413"];
+pub(crate) const UPSTREAM_CONTEXT_OVERFLOW_HINTS: &[&str] = &[
+    "context too large",
+    "context_length",
+    "max_tokens",
+    "payload too large",
+];
+pub(crate) const UPSTREAM_AUTH_HINTS: &[&str] = &["401", "403"];
+pub(crate) const RATE_LIMIT_LONG_BACKOFF_HINTS: &[&str] = &[
+    "429",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "tpm",
+    "quota",
+];
+
+fn hints_match(lower: &str, hints: &[&str]) -> bool {
+    hints.iter().any(|hint| lower.contains(hint))
+}
+
+/// 码表分组 → 注册表码（R1 映射的唯一出口；classify 经此归一后再定 FailureKind）。
+/// 返回 `None` = ⑦其余默认（NonRetryable Abort）。
+pub(crate) fn upstream_code_for_hints(lower: &str) -> Option<ErrorCode> {
+    if hints_match(lower, UPSTREAM_TIMEOUT_HINTS) {
+        return Some(ErrorCode::UpstreamTimeout);
+    }
+    if hints_match(lower, UPSTREAM_RATE_LIMITED_HINTS) {
+        return Some(ErrorCode::UpstreamRateLimited);
+    }
+    if hints_match(lower, UPSTREAM_SERVER_ERROR_HINTS) {
+        return Some(ErrorCode::UpstreamServerError);
+    }
+    if hints_match(lower, UPSTREAM_NETWORK_HINTS) {
+        return Some(ErrorCode::UpstreamNetwork);
+    }
+    if hints_match(lower, UPSTREAM_BAD_REQUEST_HINTS) {
+        // 401 与 400 不区分冻结：同落 NonRetryable（R1⑤）。
+        if hints_match(lower, UPSTREAM_AUTH_HINTS) {
+            return Some(ErrorCode::UpstreamAuth);
+        }
+        return Some(ErrorCode::UpstreamBadRequest);
+    }
+    if hints_match(lower, UPSTREAM_CONTEXT_OVERFLOW_HINTS) {
+        return Some(ErrorCode::UpstreamContextOverflow);
+    }
+    None
+}
+
 /// Provider-specific retry policy combining config, classification, and budget.
 pub struct ProviderRetryPolicy {
     pub config: BackoffConfig,
@@ -311,62 +389,34 @@ impl ProviderRetryPolicy {
 
     /// Classify a provider error based on its message content.
     /// This does NOT consider stream state; stream safety is handled by `decide`.
+    ///
+    /// Stage2 遗留桥：判定语义与 R1 八分组逐项一致，仅关键词来源收编为上方码表常量。
     pub fn classify(&self, err: &str) -> FailureKind {
         let lower = err.to_ascii_lowercase();
-        if lower.contains("type=timeout")
-            || lower.contains("timeout")
-            || lower.contains("timed out")
-            || lower.contains("deadline has elapsed")
-        {
-            return FailureKind::TransientRetryable {
+        match upstream_code_for_hints(&lower) {
+            // ①–④ → TransientRetryable（R1①②③④）。
+            Some(
+                ErrorCode::UpstreamTimeout
+                | ErrorCode::UpstreamRateLimited
+                | ErrorCode::UpstreamServerError
+                | ErrorCode::UpstreamNetwork,
+            ) => FailureKind::TransientRetryable {
                 details: err.to_string(),
-            };
-        }
-        if lower.contains("429") || lower.contains("rate limit") || lower.contains("rate_limit") {
-            return FailureKind::TransientRetryable {
+            },
+            // ⑥ → RequiresRequestMutation（R1⑥）。
+            Some(ErrorCode::UpstreamContextOverflow) => FailureKind::RequiresRequestMutation {
                 details: err.to_string(),
-            };
-        }
-        if lower.contains("502")
-            || lower.contains("503")
-            || lower.contains("504")
-            || lower.contains("408")
-        {
-            return FailureKind::TransientRetryable {
+            },
+            // ⑤⑦ → NonRetryable（R1⑤⑦；401/403 同落此分支，不区分冻结）。
+            Some(ErrorCode::UpstreamAuth)
+            | Some(ErrorCode::UpstreamBadRequest)
+            | None => FailureKind::NonRetryable {
                 details: err.to_string(),
-            };
-        }
-        if lower.contains("connection reset")
-            || lower.contains("connection refused")
-            || lower.contains("dns")
-        {
-            return FailureKind::TransientRetryable {
-                details: err.to_string(),
-            };
-        }
-        if lower.contains("400")
-            || lower.contains("401")
-            || lower.contains("403")
-            || lower.contains("404")
-            || lower.contains("422")
-            || lower.contains("407")
-            || lower.contains("413")
-        {
-            return FailureKind::NonRetryable {
-                details: err.to_string(),
-            };
-        }
-        if lower.contains("context too large")
-            || lower.contains("context_length")
-            || lower.contains("max_tokens")
-            || lower.contains("payload too large")
-        {
-            return FailureKind::RequiresRequestMutation {
-                details: err.to_string(),
-            };
-        }
-        FailureKind::NonRetryable {
-            details: err.to_string(),
+            },
+            // 码表唯一出口仅产出上述七码；兜底永不可达（穷尽即契约）。
+            Some(other) => FailureKind::NonRetryable {
+                details: format!("{}: {}", other.as_str(), err),
+            },
         }
     }
 
@@ -465,14 +515,9 @@ impl FailureKind {
 /// 429 包装成超时文案），按 rate-limit 处理——长退避对两类瞬时故障都安全，
 /// 反向（短退避撞限流窗口）则必然失败。
 pub fn is_rate_limit_error(err: &str) -> bool {
+    // R2.4 七词冻结：唯一来源 RATE_LIMIT_LONG_BACKOFF_HINTS。
     let lower = err.to_ascii_lowercase();
-    lower.contains("429")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
-        || lower.contains("ratelimit")
-        || lower.contains("too many requests")
-        || lower.contains("tpm")
-        || lower.contains("quota")
+    hints_match(&lower, RATE_LIMIT_LONG_BACKOFF_HINTS)
 }
 
 /// Convenience function: run a full retry loop with the given policy.
@@ -1029,5 +1074,123 @@ mod tests {
         assert_eq!(compute_delay(1, &cfg, 0.0).as_millis(), 500);
         // jitter_sample=1.0 → base = 1000ms
         assert_eq!(compute_delay(1, &cfg, 1.0).as_millis(), 1000);
+    }
+
+    // ── Stage2 R1 锁定：八分组逐项一致 + 码表唯一来源 ──
+
+    #[test]
+    fn stage2_upstream_code_for_hints_covers_r1_groups() {
+        use crate::agent::error_code::ErrorCode::*;
+        // ① timeout 四词
+        for probe in [
+            "type=timeout",
+            "operation timeout",
+            "timed out waiting",
+            "deadline has elapsed",
+        ] {
+            assert_eq!(
+                upstream_code_for_hints(probe),
+                Some(UpstreamTimeout),
+                "{probe}"
+            );
+        }
+        // ② 429 三词
+        for probe in ["429", "rate limit hit", "rate_limit hit"] {
+            assert_eq!(
+                upstream_code_for_hints(probe),
+                Some(UpstreamRateLimited),
+                "{probe}"
+            );
+        }
+        // ③ 5xx/408
+        for probe in ["502", "503", "504", "408"] {
+            assert_eq!(
+                upstream_code_for_hints(probe),
+                Some(UpstreamServerError),
+                "{probe}"
+            );
+        }
+        // ④ 连接三词（禁扩 connect 泛词："connect" 不命中）
+        for probe in ["connection reset", "connection refused", "dns failure"] {
+            assert_eq!(
+                upstream_code_for_hints(probe),
+                Some(UpstreamNetwork),
+                "{probe}"
+            );
+        }
+        assert_eq!(upstream_code_for_hints("connect"), None);
+        // ⑤ 400 系七码（401/403 走 UpstreamAuth，同落 NonRetryable）
+        for probe in ["400", "404", "422", "407", "413"] {
+            assert_eq!(
+                upstream_code_for_hints(probe),
+                Some(UpstreamBadRequest),
+                "{probe}"
+            );
+        }
+        for probe in ["401", "403"] {
+            assert_eq!(
+                upstream_code_for_hints(probe),
+                Some(UpstreamAuth),
+                "{probe}"
+            );
+        }
+        // ⑥ context 四词
+        for probe in [
+            "context too large",
+            "context_length exceeded",
+            "max_tokens hit",
+            "payload too large",
+        ] {
+            assert_eq!(
+                upstream_code_for_hints(probe),
+                Some(UpstreamContextOverflow),
+                "{probe}"
+            );
+        }
+        // ⑦ 其余默认 None
+        assert_eq!(upstream_code_for_hints("provider returned 500"), None);
+    }
+
+    #[test]
+    fn stage2_classify_matches_r1_outcomes_via_registry() {
+        let policy = ProviderRetryPolicy::new(BackoffConfig::default());
+        // ①–④ 可重试
+        for probe in [
+            "timeout",
+            "HTTP 429",
+            "503 Service Unavailable",
+            "connection reset",
+        ] {
+            assert!(policy.classify(probe).is_retryable(), "{probe}");
+        }
+        // ⑤⑦ 不可重试（含 401 不区分冻结）
+        for probe in ["HTTP 400", "HTTP 401", "HTTP 403", "provider returned 500"] {
+            let kind = policy.classify(probe);
+            assert!(!kind.is_retryable(), "{probe}");
+            assert!(!kind.requires_request_mutation(), "{probe}");
+        }
+        // ⑥ 需请求变更
+        let kind = policy.classify("context too large");
+        assert!(kind.requires_request_mutation());
+    }
+
+    #[test]
+    fn stage2_rate_limit_hints_are_frozen_seven() {
+        // R2.4 七词冻结：常量即断言。
+        assert_eq!(
+            RATE_LIMIT_LONG_BACKOFF_HINTS,
+            &[
+                "429",
+                "rate limit",
+                "rate_limit",
+                "ratelimit",
+                "too many requests",
+                "tpm",
+                "quota"
+            ]
+        );
+        assert!(is_rate_limit_error("HTTP 429 quota exceeded"));
+        assert!(is_rate_limit_error("monthly quota exhausted"));
+        assert!(!is_rate_limit_error("operation timed out"));
     }
 }
