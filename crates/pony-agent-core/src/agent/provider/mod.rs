@@ -2741,12 +2741,11 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
         .filter(|id| !id.is_empty())
         .map(str::to_string);
     let function = tool_call.get("function")?;
-    // 空洞防护：function.name 缺失/空白时按无工具调用处理（上游空洞 tool call），
-    // 避免构造 name="" 的 ToolCall 向 normalize 抛错整轮失败。
-    let raw_name = function.get("name").and_then(Value::as_str)?;
-    if raw_name.trim().is_empty() {
-        return None;
-    }
+    // 空洞防护（46040ae 意图收窄）：仅"空名 + 空参数"的上游空洞 tool call 按无工具调用
+    // 处理，避免构造 name="" 的 ToolCall 向 normalize 抛错整轮失败；空名但参数非空时
+    // 必须保留 name="" 的 ToolCall，交给 normalize_tool_directive 的修复路径
+    // （infer_tool_name_from_arguments）收编，不得在此丢弃（否则修复路径不可达）。
+    let raw_name = function.get("name").and_then(Value::as_str).unwrap_or("");
     let name = openai_original_tool_name(raw_name);
     let arguments = function
         .get("arguments")
@@ -2754,6 +2753,9 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .map(|v| if v.is_null() { json!({}) } else { v })
         .unwrap_or_else(|| json!({}));
+    if name.trim().is_empty() && is_hollow_tool_arguments(&arguments) {
+        return None;
+    }
 
     Some(ToolCall {
         call_id: id,
@@ -2761,6 +2763,20 @@ fn extract_openai_tool_call(message: &Value) -> Option<ToolCall> {
         arguments,
         plan: None,
     })
+}
+
+/// 空洞参数判定：与 runtime/stream_support.rs 的 `is_empty_tool_arguments` 语义一致
+/// （空名 tool call 是否因"无参数"而判定为空洞、应被丢弃）。
+fn is_hollow_tool_arguments(arguments: &Value) -> bool {
+    match arguments {
+        Value::Null => true,
+        Value::Object(map) => map.is_empty(),
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            trimmed.is_empty() || trimmed == "{}" || trimmed == "null"
+        }
+        _ => false,
+    }
 }
 
 fn text_if_present(text: &str) -> Option<&str> {

@@ -396,13 +396,14 @@ fn merge_openai_stream_tool_calls(
 }
 
 fn partial_openai_tool_call_to_tool_call(partial: PartialOpenAiToolCall) -> Option<ToolCall> {
-    // 空洞防护：name 为空（上游未发 function.name，如 PonyLlm 某些网关只发了空
-    // arguments）时直接按无工具调用处理，由 normalize_tool_directive 兜底丢弃，
-    // 避免构造出 name="" 的 ToolCall 向下游传播。
-    let name = openai_original_tool_name(partial.name.as_deref()?.trim());
-    if name.trim().is_empty() {
-        return None;
-    }
+    // 空洞防护（46040ae 意图收窄，与 provider/mod.rs extract_openai_tool_call 同构）：
+    // 仅"空名 + 空参数"的上游空洞 tool call（如 PonyLlm 某些网关只发了空 arguments）
+    // 按无工具调用处理，交给 normalize_tool_directive 兜底丢弃，避免构造 name=""
+    // 的 ToolCall 向下游传播；空名但参数非空时保留 name="" 的 ToolCall，交给
+    // normalize_tool_directive 的修复路径（infer_tool_name_from_arguments）收编，
+    // 不得在此丢弃（否则 SSE 流里"仅 reasoning + 空名非空参数 tool call、无 content"
+    // 会被 finish() 误判为"未提取到文本内容"而整体失败）。
+    let name = openai_original_tool_name(partial.name.as_deref().unwrap_or("").trim());
     let arguments = if partial.arguments.trim().is_empty() {
         json!({})
     } else {
@@ -410,6 +411,9 @@ fn partial_openai_tool_call_to_tool_call(partial: PartialOpenAiToolCall) -> Opti
             .map(|v| if v.is_null() { json!({}) } else { v })
             .unwrap_or_else(|_| json!({}))
     };
+    if name.trim().is_empty() && is_hollow_tool_arguments(&arguments) {
+        return None;
+    }
 
     Some(ToolCall {
         call_id: partial.id,

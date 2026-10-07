@@ -88,7 +88,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -3915,12 +3915,29 @@ impl ToolRouter {
             let base_root = self.resolved_workspace_root(context, ws_id)?;
             base_root.join(raw_path)
         };
-        let canonical = candidate.canonicalize().map_err(|error| {
-            (
-                "invalid_path".to_string(),
-                format!("无法解析路径 {}：{}", raw_path, error),
-            )
-        })?;
+        let canonical = match candidate.canonicalize() {
+            Ok(value) => value,
+            Err(error) => {
+                // PA-080（Windows B 类修复）：`..` 越过 root 的逃逸路径在 Windows 上
+                // canonicalize 直接失败（越过卷根或逃逸目标不存在），使下方逃逸判定分支
+                // 不可达而误落 invalid_path。先做词法逃逸判定：词法折叠后已不在 root 内 →
+                // 按 PA-080 意图返回 requires_authorization（宿主审批语义），不吞成 invalid_path。
+                if !lexically_within_root(&root, &candidate) {
+                    let display = candidate.display().to_string();
+                    return Err((
+                        "requires_authorization".to_string(),
+                        format!(
+                            "读取路径 {} 位于工作区之外且未获得授权，需要用户显式授权后才能读取。",
+                            display
+                        ),
+                    ));
+                }
+                return Err((
+                    "invalid_path".to_string(),
+                    format!("无法解析路径 {}：{}", raw_path, error),
+                ));
+            }
+        };
 
         if !is_within_root(&root, &canonical) {
             // PA-080：workspace 外读 → 授权清单命中放行（classify_path(Read) 判定），
@@ -5742,6 +5759,71 @@ fn is_within_root(root: &Path, path: &Path) -> bool {
     path.starts_with(root)
 }
 
+/// 词法逃逸判定（Windows B 类修复）：canonicalize 失败时（如相对路径 `..` 越过卷根或
+/// 逃逸目标不存在），Windows 上无法像 Linux 那样解析出 canonical 再做 `is_within_root`，
+/// 导致逃逸判定分支不可达、误落 `invalid_path`。这里在 IO 失败分支用词法折叠兜底：
+/// 折叠 `..` / `.` 组件（卷根之上钳制：`C:\..` 语义仍是 `C:\`），再做组件级前缀判定。
+/// 判定前统一剥 `\\?\` 前缀（与 `canonical_resolved_root` 的 root 形式一致），避免
+/// Prefix 组件（`\\?\C:` vs `C:`）不一致造成误判。
+fn lexically_within_root(root: &Path, candidate: &Path) -> bool {
+    use crate::agent::path_permission::normalize_canonical;
+
+    #[derive(Clone, PartialEq, Debug)]
+    enum FoldComponent {
+        Prefix(String),
+        RootDir,
+        Normal(String),
+    }
+
+    fn fold_lexically(path: &Path) -> Vec<FoldComponent> {
+        let mut folded: Vec<FoldComponent> = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    // 只折叠 Normal 组件；Prefix/RootDir 之上的 `..` 钳制
+                    //（卷根之上不可再逃逸，`C:\..` 仍是 `C:\`）。
+                    if let Some(FoldComponent::Normal(_)) = folded.last() {
+                        folded.pop();
+                    }
+                }
+                Component::Prefix(prefix) => folded.push(FoldComponent::Prefix(
+                    prefix.as_os_str().to_string_lossy().to_string(),
+                )),
+                Component::RootDir => folded.push(FoldComponent::RootDir),
+                Component::Normal(part) => folded.push(FoldComponent::Normal(
+                    part.to_string_lossy().to_string(),
+                )),
+            }
+        }
+        folded
+    }
+
+    let root_folded = fold_lexically(&normalize_canonical(root));
+    let candidate_folded = fold_lexically(&normalize_canonical(candidate));
+    if candidate_folded.len() < root_folded.len() {
+        return false;
+    }
+    for (index, root_part) in root_folded.iter().enumerate() {
+        let candidate_part = &candidate_folded[index];
+        let equal = match (root_part, candidate_part) {
+            (FoldComponent::Prefix(left), FoldComponent::Prefix(right))
+            | (FoldComponent::Normal(left), FoldComponent::Normal(right)) => {
+                if cfg!(windows) {
+                    left.eq_ignore_ascii_case(right)
+                } else {
+                    left == right
+                }
+            }
+            (left, right) => left == right,
+        };
+        if !equal {
+            return false;
+        }
+    }
+    true
+}
+
 fn preview_text(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars {
@@ -6612,9 +6694,15 @@ fn workspace_command_parts_with_batch(
         let batch_script_path = batch_script_path.expect(
             "workspace_command_parts_with_batch: Windows 分支必须提供批处理文件绝对路径",
         );
+        // 批处理文件自身路径同样需要剥 `\\?\` 前缀：批处理内容中的 cwd 已由
+        // run_command 经 windows_shell_path 归一化，但 spawn 行 `/C <路径>` 中的
+        // 路径此前未处理——canonicalize 产物 `\\?\C:\...` 前缀 cmd.exe 无法执行
+        // （无空格 ws 报 "The system cannot find the path specified."，含空格 ws 被
+        // cmd 引号算法在空格处截断），导致 Windows 上 Run 整体失败。
+        let batch_shell_path = windows_shell_path(&batch_script_path.display().to_string());
         (
             "cmd".to_string(),
-            vec!["/C".to_string(), batch_script_path.display().to_string()],
+            vec!["/C".to_string(), batch_shell_path],
         )
     } else {
         let quoted = format!("'{}'", cwd.display().to_string().replace('\'', "'\\''"));
