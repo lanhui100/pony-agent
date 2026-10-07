@@ -5,6 +5,7 @@ use crate::agent::hooks::{
 };
 use crate::agent::provider::BuildContextObservation;
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
+use crate::agent::workspace::{DEFAULT_WORKSPACE_ID, WorkspaceRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -429,6 +430,61 @@ pub fn collect_env_info() -> EnvironmentInfo {
         is_git_repo,
         git_branch,
     }
+}
+
+/// Collects environment information scoped to a specific workspace root.
+/// `cwd` 被固定为 `root`（会话实际执行目录），`is_git_repo`/`git_branch` 也基于 `root` 判定
+/// 而非进程工作目录；其余字段（platform/shell/date/timezone）与 [`collect_env_info`] 一致。
+/// 供 env note 使用，避免"进程启动目录(AppData) ≠ 会话工作区"的误导。
+pub fn collect_env_info_for_workspace(root: &Path) -> EnvironmentInfo {
+    let mut info = collect_env_info();
+    let cwd = root.display().to_string();
+    let is_git_repo = {
+        let git_dir = root.join(".git");
+        git_dir.is_dir() || git_dir.is_file()
+    };
+    info.cwd = cwd;
+    info.is_git_repo = is_git_repo;
+    info.git_branch = if is_git_repo {
+        read_git_branch(&info.cwd)
+    } else {
+        None
+    };
+    info
+}
+
+/// R1 纯函数（E1-E3 可测）：解析"会话应在 env note 中展示的工作目录"。死 id 归一——未知/
+/// 已注销的显式 workspace_id 不 panic、不回退到进程 cwd，而是与"无 id"一致走默认解析。
+/// 解析链：
+/// 1. `session_workspace_id` 为显式非空且已注册 → 该记录 `root_path`；
+/// 2. 其余（无 id / 未知 id 死引用）→ 默认注册项（`DEFAULT_WORKSPACE_ID`）的 `root_path`;
+/// 3. → `default_root`（`compute_default_workspace_root()` 的系统 dirs 解析结果）；
+/// 4. → `fallback_cwd`（进程 cwd，瞬时兜底；由调用方决定如何兜底）。
+pub fn session_workspace_cwd(
+    workspaces: &[WorkspaceRecord],
+    session_workspace_id: Option<&str>,
+    default_root: Option<&str>,
+    fallback_cwd: String,
+) -> String {
+    let explicit_id = session_workspace_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(id) = explicit_id {
+        if let Some(record) = workspaces.iter().find(|record| record.id == id) {
+            return record.root_path.clone();
+        }
+        // 未知/死 id：落入默认解析。
+    }
+    if let Some(record) = workspaces
+        .iter()
+        .find(|record| record.id == DEFAULT_WORKSPACE_ID)
+    {
+        return record.root_path.clone();
+    }
+    if let Some(root) = default_root {
+        return root.to_string();
+    }
+    fallback_cwd
 }
 
 /// Reads git branch name from `.git/HEAD` without spawning a git process.

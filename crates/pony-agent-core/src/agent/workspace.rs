@@ -2,7 +2,7 @@
 //! 持久化由调用方（SessionStore）经 PersistedStore / store_metadata 完成，本模块保持纯数据 + 校验。
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 默认 workspace id（保留字，豁免 `ws-<slug>` 规则；PA-081 前端消费同一常量）。
 pub const DEFAULT_WORKSPACE_ID: &str = "default";
@@ -94,16 +94,53 @@ pub fn default_workspace_exists(records: &[WorkspaceRecord]) -> bool {
     records.iter().any(|record| record.id == DEFAULT_WORKSPACE_ID)
 }
 
+/// 解析默认工作区基目录（纯逻辑，无 IO，可注入 `windows` 与 `path_exists` 便于确定性测试）。
+/// 返回的 base 最终由调用方 `join("pony_agent")` 得到默认工作区根目录。
+///
+/// `windows == true`（Windows 形态）：
+/// - `document_dir Some` → `Some(document_dir)`
+/// - 否则 `home_dir Some` 且 `path_exists(home_dir/Documents)` → `Some(home_dir/Documents)`
+/// - 否则 `home_dir Some` → `Some(home_dir)`
+/// - 全 None → `None`
+/// `windows == false`（Unix 形态）：`home_dir Some → Some(home_dir)`；`None → None`。
+///
+/// R2-1：以参数而非 `cfg!(windows)` 表达平台分支，使 Windows 分支可在 Linux 上编译与测。
+pub fn resolve_default_workspace_base(
+    document_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+    windows: bool,
+    path_exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if !windows {
+        return home_dir.map(Path::to_path_buf);
+    }
+    if let Some(document) = document_dir {
+        return Some(document.to_path_buf());
+    }
+    if let Some(home) = home_dir {
+        let documents = home.join("Documents");
+        // 仅当 home/Documents 实际存在时才采用该形态（存在性由 path_exists 注入判定）；
+        // 否则回退到 home 本身。
+        if path_exists(&documents) {
+            return Some(documents);
+        }
+        return Some(home.to_path_buf());
+    }
+    None
+}
+
 /// 默认工作区根目录（三级树安装期行为）：
-/// - Windows：`%USERPROFILE%\Documents\pony_agent`（Known-Folder 解析，尊重 OneDrive 重定向）
+/// - Windows：`...\Documents\pony_agent`（Known-Folder 解析，尊重 OneDrive 重定向）
 /// - macOS/Linux：`$HOME/pony_agent`
-/// 目录不存在时自动创建。解析失败返回 None，由调用方回退进程 cwd。
+/// 纯逻辑解析（复用 `resolve_default_workspace_base`），目录创建由 `bootstrap` 负责；
+/// dirs 全失败返回 None，由调用方决定兜底策略（不再静默回退进程 cwd）。
 pub fn compute_default_workspace_root() -> Option<PathBuf> {
-    let base = if cfg!(windows) {
-        dirs::document_dir()
-    } else {
-        dirs::home_dir()
-    }?;
+    let base = resolve_default_workspace_base(
+        dirs::document_dir().as_deref(),
+        dirs::home_dir().as_deref(),
+        cfg!(windows),
+        &|candidate| candidate.is_dir(),
+    )?;
     Some(base.join("pony_agent"))
 }
 
@@ -114,39 +151,50 @@ pub fn bootstrap_default_workspace(records: &mut Vec<WorkspaceRecord>) -> bool {
     bootstrap_default_workspace_with_base(records, None)
 }
 
-/// 测试/注入变体：base 显式给定时跳过系统 Known-Folder 解析（不触碰真实用户目录）。
+/// 测试/注入变体：`base_override` 显式给定时跳过系统 Known-Folder 解析（不触碰真实用户目录）。
+///
+/// R2 修复：base 解析失败（系统 dirs 全 None）→ 传入 `None` 给 inner → 返回 false 且不登记
+/// （删除旧的"回退进程 cwd 并持久化"分支——安装包进程 cwd=AppData 会产生错误默认工作区）。
 pub fn bootstrap_default_workspace_with_base(
     records: &mut Vec<WorkspaceRecord>,
     base_override: Option<PathBuf>,
 ) -> bool {
+    let resolved_base = match base_override {
+        Some(base) => Some(base),
+        None => resolve_default_workspace_base(
+            dirs::document_dir().as_deref(),
+            dirs::home_dir().as_deref(),
+            cfg!(windows),
+            &|candidate| candidate.is_dir(),
+        ),
+    };
+    bootstrap_default_workspace_inner(records, resolved_base)
+}
+
+/// 内部登记层（R2-2/R2-5）：`resolved_base: None`（解析失败）→ 返回 false 且不注册、无任何
+/// 回退；`Some(base)` → 创建 `base/pony_agent`，创建失败 → false（记日志），成功 → 注册 default
+/// 记录并返回 true。幂等：已有 default 记录时返回 false 且不动注册表。
+pub fn bootstrap_default_workspace_inner(
+    records: &mut Vec<WorkspaceRecord>,
+    resolved_base: Option<PathBuf>,
+) -> bool {
     if default_workspace_exists(records) {
         return false;
     }
-    let fallback = || -> String {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .display()
-            .to_string()
+    let Some(base) = resolved_base else {
+        return false;
     };
-    let raw_root = match base_override
-        .map(|base| base.join("pony_agent"))
-        .or_else(|| compute_default_workspace_root())
-    {
-        Some(path) => {
-            if let Err(error) = std::fs::create_dir_all(&path) {
-                eprintln!(
-                    "[pony-agent] 默认工作区目录创建失败，回退进程 cwd：{error}"
-                );
-                fallback()
-            } else {
-                path.display().to_string()
-            }
-        }
-        None => fallback(),
-    };
+    let root = base.join("pony_agent");
+    if let Err(error) = std::fs::create_dir_all(&root) {
+        eprintln!(
+            "[pony-agent] 默认工作区目录创建失败，不注册默认工作区：{error}"
+        );
+        return false;
+    }
     // P2-6：默认 root 走与 create 相同的规范化（canonicalize + 去 \\?\ 前缀），
     // 避免与 create_workspace_entry 存储形式不一致导致 PA-080 前缀比较失配。
-    let canonical = normalize_workspace_root(&raw_root).unwrap_or_else(|_| raw_root.clone());
+    let canonical = normalize_workspace_root(&root.display().to_string())
+        .unwrap_or_else(|_| root.display().to_string());
     records.push(WorkspaceRecord {
         id: DEFAULT_WORKSPACE_ID.to_string(),
         name: "默认工作区".to_string(),
@@ -509,14 +557,45 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_falls_back_to_process_cwd_when_base_unresolvable() {
-        // Windows 下 document_dir 极少为 None；此处直接验证 base=None 分支走回退
-        // 且仍产出合法注册项（不触碰真实用户目录）。
+    fn resolve_default_workspace_base_matrix() {
+        let doc = Path::new("/custom/documents");
+        let home = Path::new("/custom/home");
+
+        // Windows = true
+        // 1. document_dir Some
+        let res = resolve_default_workspace_base(Some(doc), Some(home), true, &|_| false);
+        assert_eq!(res, Some(doc.to_path_buf()));
+
+        // 2. document_dir None, home Some, home/Documents exists
+        let res = resolve_default_workspace_base(None, Some(home), true, &|p| {
+            p == home.join("Documents")
+        });
+        assert_eq!(res, Some(home.join("Documents")));
+
+        // 3. document_dir None, home Some, home/Documents does NOT exist
+        let res = resolve_default_workspace_base(None, Some(home), true, &|_| false);
+        assert_eq!(res, Some(home.to_path_buf()));
+
+        // 4. all None
+        let res = resolve_default_workspace_base(None, None, true, &|_| false);
+        assert_eq!(res, None);
+
+        // Windows = false (Unix)
+        // 1. home Some
+        let res = resolve_default_workspace_base(Some(doc), Some(home), false, &|_| true);
+        assert_eq!(res, Some(home.to_path_buf()));
+
+        // 2. home None
+        let res = resolve_default_workspace_base(Some(doc), None, false, &|_| true);
+        assert_eq!(res, None);
+    }
+
+    #[test]
+    fn bootstrap_inner_refuses_registration_when_base_unresolvable() {
         let mut records = Vec::new();
-        assert!(bootstrap_default_workspace_with_base(&mut records, None));
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].id, DEFAULT_WORKSPACE_ID);
-        assert!(!records[0].root_path.is_empty());
+        // R2-2: base None -> false, no record
+        assert!(!bootstrap_default_workspace_inner(&mut records, None));
+        assert!(records.is_empty());
     }
 
     #[test]

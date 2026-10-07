@@ -57,12 +57,16 @@ mod query_commands;
 mod trace_commands;
 mod workspace_commands;
 
-/// 默认 workspace root：`compute_default_workspace_root()`（Windows Documents/pony_agent，
-/// Unix ~/pony_agent）；dirs 解析失败才回退进程 cwd（与 `ToolRouter::new()` 默认一致）。
+/// 默认 workspace root：`compute_default_workspace_root()`（Windows Documents~/pony_agent，
+/// Unix ~/pony_agent）为优先；dirs 全解析失败时才以**进程 cwd** 作最后一级**瞬时**兜底
+/// （仅用于展示/占位，绝不持久化为"默认工作区"——安装包进程 cwd=AppData，决不可落库）。
 fn default_workspace_root() -> String {
     if let Some(path) = crate::agent::workspace::compute_default_workspace_root() {
         return path.display().to_string();
     }
+    eprintln!(
+        "[pony-agent] 默认工作区无法解析，使用进程 cwd 作为瞬时兜底（不持久化为默认工作区）"
+    );
     std::env::current_dir()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| ".".to_string())

@@ -6,8 +6,10 @@ use super::backend::{
 #[cfg(test)]
 use super::file_backend::MemorySessionBackend;
 use super::types::{
-    collect_env_info, AttachmentAsset, AttachmentAssetMap, AttachmentAssetQuery,
-    AttachmentCleanupRequest, AttachmentCleanupResult, AttachmentLifecycleStatus, HistoryBranch,
+    collect_env_info, collect_env_info_for_workspace, session_workspace_cwd, AttachmentAsset,
+    AttachmentAssetMap, AttachmentAssetQuery,
+    AttachmentCleanupRequest, AttachmentCleanupResult, AttachmentLifecycleStatus, EnvironmentInfo,
+    HistoryBranch,
     HistoryCheckoutMode, HistoryCheckoutStatus, HistoryCursor, HistoryCursorMode, HistoryNode,
     HistoryNodeKind, HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext,
     HistoryStateAuditSummary, LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
@@ -321,6 +323,29 @@ impl SessionStore {
         snapshot
     }
 
+    /// 解析会话 workspace root 作为 env note 的真实 cwd（R1）。
+    /// 复用纯函数 `session_workspace_cwd`：注册表（显式 id → 默认注册项）→
+    /// `compute_default_workspace_root()` → 进程 cwd（瞬时兜底）。返回 None 仅当解析结果
+    /// 为空（进程 cwd 亦不可得），此时 snapshot 侧走 `collect_env_info()` 兜底。
+    fn workspace_env_cwd(&self, session_workspace_id: Option<&str>) -> Option<String> {
+        let default_root = crate::agent::workspace::compute_default_workspace_root()
+            .map(|path| path.display().to_string());
+        let fallback_cwd = std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let resolved = session_workspace_cwd(
+            &self.workspaces,
+            session_workspace_id,
+            default_root.as_deref(),
+            fallback_cwd,
+        );
+        if resolved.is_empty() {
+            None
+        } else {
+            Some(resolved)
+        }
+    }
+
     /// 只读快照：不创建 session、不修正数据、不触发任何落盘。
     /// 供可观测性/展示类查询使用（读锁即可），避免 trace 面板等
     /// 查询路径占用写锁或意外触发全量写库而阻塞主对话执行路径。
@@ -332,7 +357,12 @@ impl SessionStore {
     ) -> SessionSnapshot {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
         let Some(session) = self.sessions.get(session_key) else {
-            return default_snapshot_for_session(session_key, node_id);
+            // 会话尚不存在：默认归属（workspace_id=None）解析默认工作区 root。
+            return default_snapshot_for_session(
+                session_key,
+                node_id,
+                self.workspace_env_cwd(None),
+            );
         };
         let attachment_assets = attachment_assets_for_query(
             &self.sessions,
@@ -345,7 +375,12 @@ impl SessionStore {
             },
             now_timestamp_ms(),
         );
-        let mut snapshot = snapshot_from_state(session, attachment_assets, node_id);
+        let mut snapshot = snapshot_from_state(
+            session,
+            attachment_assets,
+            node_id,
+            self.workspace_env_cwd(session.workspace_id.as_deref()),
+        );
         if snapshot.history.is_empty() && !fallback_history.is_empty() {
             snapshot.history = fallback_history.to_vec();
         }
@@ -2554,6 +2589,8 @@ impl SessionStore {
             .sessions
             .get(session_id)
             .expect("session must exist before snapshot");
+        // R1：env note 的 cwd 取会话 workspace root（注册表 → 默认计算 → 进程 cwd 瞬时兜底）。
+        let workspace_cwd = self.workspace_env_cwd(session.workspace_id.as_deref());
         let attachment_assets = attachment_assets_for_query(
             &self.sessions,
             &self.attachment_assets,
@@ -2604,10 +2641,10 @@ impl SessionStore {
                     };
                 view.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
                 view.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
-                return snapshot_from_state(&view, attachment_assets, None);
+                return snapshot_from_state(&view, attachment_assets, None, workspace_cwd.clone());
             }
         }
-        snapshot_from_state(session, attachment_assets, node_id)
+        snapshot_from_state(session, attachment_assets, node_id, workspace_cwd)
     }
 
     pub(super) fn refresh_attachment_catalog(&mut self) {
@@ -2689,7 +2726,11 @@ pub(super) fn enrich_history_from_traces(
 }
 
 /// 会话尚不存在时的只读默认快照（与 ensure_session 默认结构一致，但不创建、不落盘）。
-fn default_snapshot_for_session(session_key: &str, node_id: Option<&str>) -> SessionSnapshot {
+fn default_snapshot_for_session(
+    session_key: &str,
+    node_id: Option<&str>,
+    workspace_cwd: Option<String>,
+) -> SessionSnapshot {
     let session = SessionState {
         conversation_id: session_key.to_string(),
         title: default_session_title(),
@@ -2718,13 +2759,24 @@ fn default_snapshot_for_session(session_key: &str, node_id: Option<&str>) -> Ses
         title_override: None,
         archived: false,
     };
-    snapshot_from_state(&session, Vec::new(), node_id)
+    snapshot_from_state(&session, Vec::new(), node_id, workspace_cwd)
+}
+
+/// env note 的 env_info（R1）：`workspace_cwd` 可用 → 基于该工作区 root 收集
+/// （cwd=会话实际工作目录，git 判定也基于 root）；None（解析全失败且进程 cwd 不可得）
+/// → 原 `collect_env_info()` 兜底（进程 cwd，不 panic）。
+fn snapshot_env_info(workspace_cwd: Option<&str>) -> EnvironmentInfo {
+    match workspace_cwd {
+        Some(cwd) => collect_env_info_for_workspace(Path::new(cwd)),
+        None => collect_env_info(),
+    }
 }
 
 fn snapshot_from_state(
     session: &SessionState,
     attachment_assets: Vec<AttachmentAsset>,
     node_id: Option<&str>,
+    workspace_cwd: Option<String>,
 ) -> SessionSnapshot {
     let latest_node_id = session
         .history_branches
@@ -2805,7 +2857,7 @@ fn snapshot_from_state(
             history_cursor,
             resolved_node_id: Some(selected_node.node_id.clone()),
             latest_node_id,
-            env_info: Some(collect_env_info()),
+            env_info: Some(snapshot_env_info(workspace_cwd.as_deref())),
             workspace_id: session.workspace_id.clone(),
         };
     }
@@ -2838,7 +2890,7 @@ fn snapshot_from_state(
         history_cursor: session.history_cursor.clone(),
         resolved_node_id: session.history_cursor.visible_node_id.clone(),
         latest_node_id,
-        env_info: Some(collect_env_info()),
+        env_info: Some(snapshot_env_info(workspace_cwd.as_deref())),
         workspace_id: session.workspace_id.clone(),
     }
 }

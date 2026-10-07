@@ -2455,6 +2455,86 @@ fn session_store_stamps_workspace_id_only_once() {
 }
 
 #[test]
+fn session_snapshot_env_info_cwd_aligns_with_workspace_root() {
+    let mut store = SessionStore::memory_only();
+    let root = {
+        let raw = std::env::temp_dir().join(format!("pa-env-align-{}", std::process::id()));
+        raw.canonicalize().unwrap_or(raw)
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    let registered = store
+        .create_workspace("CustomWS", &root.display().to_string())
+        .unwrap();
+
+    // E1: 自定义 workspace 的 session，snapshot 的 env_info.cwd 等于其 workspace root
+    store.ensure_session("custom-session");
+    store.stamp_workspace_id("custom-session", &registered.id);
+    let snap_custom = store.snapshot_for_session("custom-session");
+    assert_eq!(
+        snap_custom.env_info.as_ref().unwrap().cwd,
+        registered.root_path
+    );
+
+    // E2: 未盖章/无 workspace_id 的 session，snapshot 的 env_info.cwd 等于默认工作区 root
+    store.ensure_session("default-session");
+    let default_root = store.resolve_workspace_root(None).unwrap();
+    let snap_default = store.snapshot_for_session("default-session");
+    assert_eq!(
+        snap_default.env_info.as_ref().unwrap().cwd,
+        default_root
+    );
+
+    // E8: 未知/已失效的 workspace_id，死 id 归一，env_info.cwd 回退默认工作区 root
+    store.ensure_session("dead-id-session");
+    store.sessions.get_mut("dead-id-session").unwrap().workspace_id = Some("ws-non-existent".to_string());
+    let snap_dead = store.snapshot_for_session("dead-id-session");
+    assert_eq!(
+        snap_dead.env_info.as_ref().unwrap().cwd,
+        default_root
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn session_workspace_cwd_pure_chain() {
+    use crate::agent::session::types::session_workspace_cwd;
+    use crate::agent::workspace::WorkspaceRecord;
+
+    let default_rec = WorkspaceRecord {
+        id: "default".to_string(),
+        name: "默认".to_string(),
+        root_path: "/canonical/default".to_string(),
+    };
+    let custom_rec = WorkspaceRecord {
+        id: "ws-custom".to_string(),
+        name: "自定义".to_string(),
+        root_path: "/canonical/custom".to_string(),
+    };
+    let workspaces = vec![default_rec.clone(), custom_rec.clone()];
+
+    // 1. 显式命中自定义
+    let cwd = session_workspace_cwd(&workspaces, Some("ws-custom"), Some("/sys/default"), "/proc/cwd".into());
+    assert_eq!(cwd, "/canonical/custom");
+
+    // 2. 无 workspace_id -> 默认注册项
+    let cwd = session_workspace_cwd(&workspaces, None, Some("/sys/default"), "/proc/cwd".into());
+    assert_eq!(cwd, "/canonical/default");
+
+    // 3. 死 id -> 默认注册项
+    let cwd = session_workspace_cwd(&workspaces, Some("ws-deleted"), Some("/sys/default"), "/proc/cwd".into());
+    assert_eq!(cwd, "/canonical/default");
+
+    // 4. E3: 注册表为空 -> 默认系统计算 root (default_root)
+    let cwd = session_workspace_cwd(&[], None, Some("/sys/default"), "/proc/cwd".into());
+    assert_eq!(cwd, "/sys/default");
+
+    // 5. 注册表为空且 default_root 为 None -> fallback_cwd
+    let cwd = session_workspace_cwd(&[], None, None, "/proc/cwd".into());
+    assert_eq!(cwd, "/proc/cwd");
+}
+
+#[test]
 fn stamp_normalizes_unregistered_workspace_to_default() {
     // 三级树纵深防御（裁决②）：已注销/未知 id 盖章一律归一 default——
     // 陈旧提交不得把会话重新盖成死 id（附件硬失败 vs 工具根软回退的分叉）。
