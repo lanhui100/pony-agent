@@ -793,4 +793,84 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base_root);
     }
+
+    // ── PA-114 workspace-cwd 第二轮（fix-round2-workspace-cwd）红相验收 ─────────
+    // 契约：`.dev-team/fix-round2-workspace-cwd.md` §3 F1/F2/F6。
+    // 红相说明：`normalize_session_workspace_id`（W1）与 `default_root_or_cwd_with_warning`
+    // （W2 seam）当前均不存在 → 本模块编译失败即红相证据（Lead 认可编译失败作为红相）。
+
+    /// F1：`normalize_session_workspace_id` 纯函数矩阵（W1 契约）——default 原样、
+    /// 已注册原样、死 id/空白/控制字符/超长 → default，且不依赖注册表解析 default 保留字。
+    #[test]
+    fn f1_normalize_session_workspace_id_matrix() {
+        let mut records = Vec::new();
+        records.push(WorkspaceRecord {
+            id: DEFAULT_WORKSPACE_ID.to_string(),
+            name: "默认工作区".to_string(),
+            root_path: "/canonical/default".to_string(),
+        });
+        records.push(WorkspaceRecord {
+            id: "ws-custom".to_string(),
+            name: "Custom".to_string(),
+            root_path: "/canonical/custom".to_string(),
+        });
+
+        // default id 原样。
+        assert_eq!(
+            normalize_session_workspace_id(&records, DEFAULT_WORKSPACE_ID),
+            DEFAULT_WORKSPACE_ID
+        );
+        // 已注册 id 原样。
+        assert_eq!(
+            normalize_session_workspace_id(&records, "ws-custom"),
+            "ws-custom"
+        );
+        // 死 id → default。
+        assert_eq!(
+            normalize_session_workspace_id(&records, "ws-deleted-long-ago"),
+            DEFAULT_WORKSPACE_ID
+        );
+        // 空白 id → default。
+        assert_eq!(
+            normalize_session_workspace_id(&records, "   "),
+            DEFAULT_WORKSPACE_ID
+        );
+        assert_eq!(
+            normalize_session_workspace_id(&records, ""),
+            DEFAULT_WORKSPACE_ID
+        );
+        // 控制字符 id → default（W1 日志口径：控制字符压平、80 字符截断）。
+        assert_eq!(
+            normalize_session_workspace_id(&records, "ws-\n\t-1"),
+            DEFAULT_WORKSPACE_ID
+        );
+        // 超长 id → default。
+        let long_id = format!("ws-{}", "x".repeat(300));
+        assert_eq!(
+            normalize_session_workspace_id(&records, &long_id),
+            DEFAULT_WORKSPACE_ID
+        );
+        // 空注册表下 default 保留字仍原样（不依赖注册表）。
+        assert_eq!(
+            normalize_session_workspace_id(&[], DEFAULT_WORKSPACE_ID),
+            DEFAULT_WORKSPACE_ID
+        );
+    }
+
+    /// F2（session 侧，见 session/tests.rs `f2_session_cwd_agrees_with_normalized_id_resolution`）：
+    /// 跨函数一致性由 session/tests.rs 持有（`session_workspace_cwd` 在 session 模块内可见）。
+
+    /// F6：ToolRouter::new 兜底告警 seam（W2 契约，可注入判定）。
+    /// `computed=None` → 与 control_plane 对齐的瞬时兜底告警 + 进程 cwd 兜底；
+    /// `computed=Some` → computed 优先。红相：seam 不存在 → 编译失败。
+    #[test]
+    fn f6_tool_router_fallback_seam_warns_and_uses_cwd() {
+        let fallback_cwd = PathBuf::from("/fallback/cwd");
+        let fallback = default_root_or_cwd_with_warning(None, || fallback_cwd.clone());
+        assert_eq!(fallback, fallback_cwd, "computed=None must fall back to cwd");
+        let computed = PathBuf::from("/computed/pony_agent");
+        let resolved =
+            default_root_or_cwd_with_warning(Some(computed.clone()), || fallback_cwd.clone());
+        assert_eq!(resolved, computed, "computed=Some must win over the cwd fallback");
+    }
 }

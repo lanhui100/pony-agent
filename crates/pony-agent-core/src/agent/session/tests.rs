@@ -6350,3 +6350,97 @@ fn time_travel_history_command_atomic_watermark_sync_test() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ── PA-114 workspace-cwd 第二轮（fix-round2-workspace-cwd）红相验收 F2/F3 ─────────
+// 契约：`.dev-team/fix-round2-workspace-cwd.md` §3 F2/F3（W1）。
+// 红相说明：`normalize_session_workspace_id` 当前不存在 → F2 编译失败即红相证据；
+// `stamp_workspace_id` 现状仅对 `workspace_id == None` 盖章（store.rs:2012），
+// 已存在死 id 的会话是 no-op → F3 自愈断言失败即红相证据（被 F2 编译失败遮蔽时，
+// 以本注释与 F3 断言语义为准）。
+
+/// F2（W1 单一真相源）：`session_workspace_cwd`（env note 链）对死 id 的解析结果
+/// == `normalize_session_workspace_id` 归一后的 default 解析结果（归属链）。
+#[test]
+fn f2_session_cwd_agrees_with_normalized_id_resolution() {
+    use crate::agent::session::types::session_workspace_cwd;
+    use crate::agent::workspace::{normalize_session_workspace_id, WorkspaceRecord};
+    let records = vec![
+        WorkspaceRecord {
+            id: crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string(),
+            name: "默认工作区".to_string(),
+            root_path: "/canonical/default".to_string(),
+        },
+        WorkspaceRecord {
+            id: "ws-custom".to_string(),
+            name: "Custom".to_string(),
+            root_path: "/canonical/custom".to_string(),
+        },
+    ];
+    let dead_id = "ws-deleted-long-ago";
+    // 死 id 直接解析（env note 链）。
+    let direct = session_workspace_cwd(&records, Some(dead_id), None, "/proc/cwd".to_string());
+    // 归一后的 default 解析（归属链）。
+    let normalized = normalize_session_workspace_id(&records, dead_id);
+    assert_eq!(normalized, crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+    let via_normalized =
+        session_workspace_cwd(&records, Some(&normalized), None, "/proc/cwd".to_string());
+    assert_eq!(
+        direct, via_normalized,
+        "dead id must resolve identically in the env-note and ownership chains"
+    );
+    assert_eq!(via_normalized, "/canonical/default");
+    // 已注册 id：两条链都命中注册项。
+    let direct_custom =
+        session_workspace_cwd(&records, Some("ws-custom"), None, "/proc/cwd".to_string());
+    let via_custom = session_workspace_cwd(
+        &records,
+        Some(normalize_session_workspace_id(&records, "ws-custom").as_str()),
+        None,
+        "/proc/cwd".to_string(),
+    );
+    assert_eq!(direct_custom, via_custom);
+}
+
+/// F3（W1 自愈）：对已存在死 id 会话执行 stamp → 写回归一值（default）并落盘。
+#[test]
+fn f3_stamp_self_heals_existing_dead_workspace_id_and_persists() {
+    let path = temp_sessions_path();
+    let mut store = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+    store.ensure_session("heal");
+    // 模拟旧持久化遗留：会话已被盖上死 id（已注销工作区）。
+    store
+        .sessions
+        .get_mut("heal")
+        .expect("session must exist")
+        .workspace_id = Some("ws-deleted-long-ago".to_string());
+    store.save_to_backend();
+
+    store.stamp_workspace_id("heal", "ws-deleted-long-ago");
+    assert_eq!(
+        store.sessions["heal"].workspace_id.as_deref(),
+        Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID),
+        "dead id must self-heal to the normalized default"
+    );
+
+    let reloaded = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
+    assert_eq!(
+        reloaded.sessions["heal"].workspace_id.as_deref(),
+        Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID),
+        "self-heal must be persisted"
+    );
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+/// F3（幂等）：已注册 id（default）会话再盖章同一 id → no-op，值不变。
+#[test]
+fn f3_stamp_is_idempotent_noop_for_registered_default_id() {
+    let mut store = SessionStore::memory_only();
+    store.ensure_session("stable");
+    store.sessions.get_mut("stable").expect("session must exist").workspace_id =
+        Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string());
+    store.stamp_workspace_id("stable", crate::agent::workspace::DEFAULT_WORKSPACE_ID);
+    assert_eq!(
+        store.sessions["stable"].workspace_id.as_deref(),
+        Some(crate::agent::workspace::DEFAULT_WORKSPACE_ID)
+    );
+}

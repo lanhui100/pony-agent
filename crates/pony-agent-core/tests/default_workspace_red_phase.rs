@@ -521,3 +521,88 @@ fn patch4_none_branch_must_not_create_default_dir_as_side_effect() {
         def.display()
     );
 }
+
+// ── PA-114 workspace-cwd 第二轮（fix-round2-workspace-cwd）红相验收 F4/F5/F6A ──
+// 契约：`.dev-team/fix-round2-workspace-cwd.md` §3 F4/F5/F6。
+// 红相走查：F4/F5/F6A 目标均为已实现函数（bootstrap_default_workspace_inner、
+// resolve_default_workspace_base 参数化、ToolRouter::new 兜底语义）→ 预期本轮即绿，
+// 如实记录 PASS。
+
+/// F4（E5/R2-2）：`bootstrap_default_workspace_inner(&mut records, None)` → false
+/// 且注册表保持空（base 解析失败不得注册、不得回退）。
+#[test]
+fn f4_bootstrap_default_workspace_inner_none_is_noop() {
+    use pony_agent_core::agent::workspace::bootstrap_default_workspace_inner;
+    let mut records = Vec::new();
+    let registered = bootstrap_default_workspace_inner(&mut records, None);
+    assert!(!registered, "None base must not register a default workspace");
+    assert!(records.is_empty(), "records must stay empty on the None branch");
+}
+
+/// F5（R2-1）：`resolve_default_workspace_base` Windows 形态在 Linux 可测
+/// （windows=true 参数化，path_exists 注入）——doc/存在性/兜底/全 None 矩阵。
+#[test]
+fn f5_resolve_default_workspace_base_windows_forms_are_testable_on_linux() {
+    use pony_agent_core::agent::workspace::resolve_default_workspace_base;
+    use std::path::Path;
+    let exists = |_p: &Path| true;
+    let missing = |_p: &Path| false;
+
+    // windows=true：doc Some → doc（Known-Folder 优先，不落到 Documents）。
+    assert_eq!(
+        resolve_default_workspace_base(
+            Some(Path::new("/doc")),
+            Some(Path::new("/home")),
+            true,
+            &exists,
+        ),
+        Some(PathBuf::from("/doc"))
+    );
+    // doc None + home/Documents 存在 → home/Documents。
+    assert_eq!(
+        resolve_default_workspace_base(None, Some(Path::new("/home")), true, &exists),
+        Some(PathBuf::from("/home/Documents"))
+    );
+    // doc None + Documents 不存在 → home（R2-3）。
+    assert_eq!(
+        resolve_default_workspace_base(None, Some(Path::new("/home")), true, &missing),
+        Some(PathBuf::from("/home"))
+    );
+    // 全 None → None（任一存在性判定下）。
+    assert_eq!(resolve_default_workspace_base(None, None, true, &exists), None);
+    assert_eq!(resolve_default_workspace_base(None, None, true, &missing), None);
+    // windows=false（Unix 形态）：home Some → home；全 None → None。
+    assert_eq!(
+        resolve_default_workspace_base(None, Some(Path::new("/home")), false, &exists),
+        Some(PathBuf::from("/home"))
+    );
+    assert_eq!(resolve_default_workspace_base(None, None, false, &exists), None);
+}
+
+/// F6A（W2 语义锁定，可观测部分）：`ToolRouter::new` 默认 root = compute 结果
+/// （compute 可解析时进程 cwd 兜底分支不可达；None 分支告警见 F6 seam 测试）。
+#[test]
+fn f6a_tool_router_new_fallback_priority_is_computed_then_cwd() {
+    let expected_raw =
+        compute_default_workspace_root().expect("compute_default_workspace_root must resolve");
+    let expected = canonicalize_lossy(&expected_raw.display().to_string());
+
+    let router = ToolRouter::new();
+    let res = router.execute(&ToolCall {
+        call_id: None,
+        name: "workspace_path_info".to_string(),
+        arguments: json!({ "path": "." }),
+        plan: None,
+    });
+    assert_eq!(res.status, "ok", "path_info probe failed: {}", res.output);
+    let payload: Value = serde_json::from_str(&res.output).expect("path_info json output");
+    let absolute = payload
+        .get("absolutePath")
+        .and_then(Value::as_str)
+        .expect("absolutePath present");
+    assert_eq!(
+        canonicalize_lossy(absolute),
+        expected,
+        "ToolRouter::new fallback priority must be compute_default_workspace_root() → cwd"
+    );
+}
