@@ -135,7 +135,12 @@ pub fn apply_window_style(window: &tauri::WebviewWindow) {
 
 /// Hosts permitted for external browser opening (exact match, lowercase).
 /// A new call site MUST extend this list in sync.
-const ALLOWED_OPEN_HOSTS: [&str; 3] = ["github.com", "api.github.com", "exa.ai"];
+const ALLOWED_OPEN_HOSTS: [&str; 4] = [
+    "github.com",
+    "api.github.com",
+    "exa.ai",
+    "s3.local.ponyjob.top",
+];
 
 /// Pure allowlist check for URLs opened in the system browser.
 ///
@@ -585,6 +590,7 @@ mod tests {
             "https://api.github.com/repos/owner/repo/releases/latest"
         ));
         assert!(is_allowed_open_url("https://exa.ai/search?q=pony"));
+        assert!(is_allowed_open_url("https://s3.local.ponyjob.top/releases/latest.json"));
     }
 
     #[test]

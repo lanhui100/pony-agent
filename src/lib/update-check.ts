@@ -28,6 +28,69 @@ export interface FallbackReleasePayload {
   published_at?: string | null;
 }
 
+/**
+ * MinIO / S3 fallback 拉取与校验。
+ */
+export async function fetchFallbackRelease(): Promise<AppReleaseInfo> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FALLBACK_PROBE_TIMEOUT_MS);
+
+  try {
+    let response: Response;
+    try {
+      response = await fetch(FALLBACK_RELEASE_LATEST_URL, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        credentials: "omit",
+        cache: "no-store",
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new UpdateCheckError("timeout", "fallback update check aborted by timeout");
+      }
+      throw new UpdateCheckError("network", `fallback update check fetch failed: ${String(error)}`);
+    }
+
+    if (response.status === 404) {
+      throw new UpdateCheckError("unpublished", "fallback storage has no releases");
+    }
+    if (!response.ok) {
+      throw new UpdateCheckError("http-error", `fallback unexpected status ${response.status}`);
+    }
+
+    let payload: FallbackReleasePayload;
+    try {
+      payload = (await response.json()) as FallbackReleasePayload;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new UpdateCheckError("timeout", "fallback release body read aborted by timeout");
+      }
+      if (error instanceof TypeError) {
+        throw new UpdateCheckError("network", `fallback release body read failed: ${String(error)}`);
+      }
+      throw new UpdateCheckError("malformed", `fallback release payload is not json: ${String(error)}`);
+    }
+
+    if (payload === null || typeof payload !== "object") {
+      throw new UpdateCheckError("malformed", `fallback release payload is not an object: ${String(payload)}`);
+    }
+
+    const tagName = typeof payload.tag_name === "string" ? payload.tag_name : null;
+    if (!tagName || parseVersionTag(tagName) === null) {
+      throw new UpdateCheckError("malformed", `fallback release tag is missing or malformed: ${String(payload.tag_name)}`);
+    }
+
+    return {
+      tagName,
+      name: typeof payload.name === "string" && payload.name.trim().length > 0 ? payload.name : null,
+      publishedAtMs: toFiniteMs(payload.published_at)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 自动检查最小间隔；手动检查恒绕过该节流。 */
 export const UPDATE_CHECK_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** 单次请求超时（弱网下防止 checking 永久死锁）。 */
@@ -141,6 +204,29 @@ function toFiniteMs(value: unknown): number | null {
  * 失败以 UpdateCheckError 分类抛出，调用方决定 UI 呈现路径。
  */
 export async function fetchLatestRelease(): Promise<AppReleaseInfo> {
+  let primaryError: unknown;
+  try {
+    return await fetchGitHubLatestRelease();
+  } catch (error) {
+    primaryError = error;
+    if (
+      error instanceof UpdateCheckError &&
+      (error.code === "network" || error.code === "timeout" || error.code === "http-error")
+    ) {
+      try {
+        return await fetchFallbackRelease();
+      } catch (fallbackError) {
+        if (fallbackError instanceof UpdateCheckError && fallbackError.code === "malformed") {
+          throw fallbackError;
+        }
+        throw primaryError;
+      }
+    }
+    throw error;
+  }
+}
+
+async function fetchGitHubLatestRelease(): Promise<AppReleaseInfo> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
 

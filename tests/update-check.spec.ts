@@ -298,7 +298,7 @@ describe("fetchLatestRelease", () => {
 
       const pending = fetchLatestRelease();
       const assertion = expect(pending).rejects.toMatchObject({ code: "timeout" });
-      vi.advanceTimersByTime(8_000);
+      await vi.advanceTimersByTimeAsync(8_000 + 3_000);
       await assertion;
     } finally {
       vi.useRealTimers();
@@ -333,7 +333,7 @@ describe("fetchLatestRelease", () => {
 
       const pending = fetchLatestRelease();
       const assertion = expect(pending).rejects.toMatchObject({ code: "timeout" });
-      vi.advanceTimersByTime(8_000);
+      await vi.advanceTimersByTimeAsync(8_000 + 3_000);
       await assertion;
     } finally {
       vi.useRealTimers();
