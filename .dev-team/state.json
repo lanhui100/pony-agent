@@ -1,29 +1,32 @@
 {
-  "wave": 1,
+  "wave": 2,
   "status": "closed",
-  "baseline_commit": "805541e",
-  "final_commit": "97b301b",
-  "checkpoints": { "red_anchor": "20d31be", "green": "2f9eae0", "stabilize": "90de197", "closure": "97b301b" },
-  "ci": { "final_run": 37607978026, "result": "green", "core_lib": "1003/1003 passed", "integration": "all green" },
+  "baseline_commit": "7691ab0",
+  "final_commit": "f79d11c",
+  "checkpoints": { "red_anchor": "7691ab0", "green": "f79d11c", "closure": "f79d11c" },
+  "ci": { "result": "green", "frontend": "661 passed / runtime-store 117 passed", "tauri_full": "all green", "core_control_plane": "66 passed", "fail_turn_for_watchdog": "3 passed" },
   "members": {
     "lead": { "role": "lead", "tasks": [] },
-    "wave1-tester": { "role": "test", "tasks": ["task-1", "task-3", "task-5"] },
-    "wave1-executor": { "role": "executor", "tasks": ["task-2", "task-4"] }
+    "protocol-agent": { "role": "protocol", "tasks": ["contract-watchdog-fix"] },
+    "test-agent": { "role": "test", "tasks": ["task-2"] },
+    "executor-frontend": { "role": "executor", "tasks": ["task-3-frontend"] },
+    "executor-backend": { "role": "executor", "tasks": ["task-3-backend", "l3-o1-o2"] }
   },
   "tasks": {
-    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "status": "completed", "red_commit": "20d31be" },
-    "task-2": { "subject": "product-bug 用例最小产品修复", "status": "completed", "green_commit": "2f9eae0" },
-    "task-3": { "subject": "并发遗留未提交改动分诊", "status": "completed", "green_commit": "11159f7" },
-    "task-4": { "subject": "Run close_stdin 打破 PS 无控制台挂起", "status": "completed", "green_commit": "fa52bc6" },
-    "task-5": { "subject": "CI 测试稳定化 + 红相契约收口", "status": "completed", "green_commit": "97b301b" }
+    "task-5": { "subject": "wave-2: watchdog 根因修复（rearm 续期 + fail_turn_for_watchdog + 兜底消息）", "status": "completed", "green_commit": "f79d11c" }
+  },
+  "root_causes_fixed": [
+    "RC1: watchdog 一次性 120s 计时器不随事件续期 → 240s + rearmSubmissionWatchdog 8 非终态处理器续期，仅静默超时触发",
+    "RC2: watchdog 触发仅前端本地收敛，后端 trace 权威未落盘 → 新增 fail_turn_for_watchdog 幂等 upsert failed trace + checkpoint failed + request_stop",
+    "RC3: assistant 消息缺失错误丢失 → ensureAssistantMessage 兜底 + error/errorDetail/content 进入 buildTurnHistory"
+  ],
+  "l3_review": {
+    "verdict": "PASS",
+    "fixed_before_merge": ["O1: 终态 turn 不覆盖 completed trace", "O2: checkpoint.session_id 权威优先"],
+    "known_boundaries": ["O3: 历史模式 + 运行中 turn >240s 静默盲区", "lock contention delay", "stop idempotency redundancy"]
   },
   "follow_ups": [
-    "P1: name=\"\"+非对象JSON参数([]等) 空洞判定缺口（相对46040ae窗口），建议公共判定纳入非对象可解析值",
-    "本地Linux全量挂起: start_turn_stream_completes_after_multi_hop_followup_stream (MockHttpServer 超量请求无兜底)",
-    "P2: extract/partial/is_hollow 直接单测覆盖缺口",
-    "P2: lexically_within_root junction/8.3短名根假阳性 requires_authorization",
-    "P3: cmd /C 元字符 fail-closed 清单缺 %",
-    "④(b): followup-sync 收 SSE 包装响应时纯 JSON 解析失败（graceful 降级），建议 SSE 载荷重建"
+    "已知挂起: start_turn_stream_completes_after_multi_hop_followup_stream (MockHttpServer 超量请求无兜底) — 与本次改动无关"
   ],
-  "meta_retrospective": "docs at .dev-team/meta-retrospective.md (wave-1)"
+  "meta_retrospective": "docs at .dev-team/meta-retrospective-watchdog.md (wave-2)"
 }
