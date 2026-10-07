@@ -214,12 +214,13 @@ fn transcode_from_windows_code_page(bytes: &[u8]) -> Option<String> {
     };
     for code_page in [CP_ACP, CP_OEMCP] {
         // SAFETY: 输入/输出缓冲区均有效且大小由 Windows 先导调用确定；MB_ERR_INVALID_CHARS
-        // 使非法序列返回 0 而非静默替换，循环随之结束，不会越界写。
+        // 使非法序列返回 0 而非静默替换，循环随之结束，不会越界写。windows-sys 0.61 中
+        // PCSTR 为 *const u8，bytes.as_ptr() 原生匹配，无需（也不可）转 i8。
         let wide_len = unsafe {
             MultiByteToWideChar(
                 code_page,
                 MB_ERR_INVALID_CHARS,
-                bytes.as_ptr().cast::<i8>(),
+                bytes.as_ptr(),
                 bytes.len() as i32,
                 std::ptr::null_mut(),
                 0,
@@ -233,7 +234,7 @@ fn transcode_from_windows_code_page(bytes: &[u8]) -> Option<String> {
             MultiByteToWideChar(
                 code_page,
                 MB_ERR_INVALID_CHARS,
-                bytes.as_ptr().cast::<i8>(),
+                bytes.as_ptr(),
                 bytes.len() as i32,
                 wide.as_mut_ptr(),
                 wide_len,
