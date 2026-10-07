@@ -1912,6 +1912,12 @@ impl ToolRouter {
             }
         };
 
+        // 启动后立即关闭 stdin 管道（Run 从不写 stdin）：无控制台（CREATE_NO_WINDOW）下的
+        // 控制台程序（如 Windows PowerShell 5.1）会在交互输入句柄上永久阻塞等待输入，
+        // 管道保持开启是唯一挂起源——EOF 打破阻塞，命令正常执行退出。错误忽略：
+        // 无管道/已退出属正常竞态（幂等容忍由调用方决定）。
+        let _ = self.process_manager.close_stdin(&session_id, &handle);
+
         // Arm the kill timer as a safety net and run a bounded poll loop until `Exited`. The
         // loop accumulates per-poll output; truncation flags are sticky per stream.
         self.process_manager

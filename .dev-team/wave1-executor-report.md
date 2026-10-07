@@ -68,3 +68,31 @@
 - crates/pony-agent-core/src/agent/tools.rs（① + ②，+104/-6）
 - crates/pony-agent-core/src/agent/provider/mod.rs（③，+28/-4）
 - crates/pony-agent-core/src/agent/provider/openai_sse.rs（④a，+18/-7）
+
+---
+
+# Wave 1 T4（⑤）：Run 启动后关闭 stdin（Windows PS 无控制台挂起修复）
+
+> 依据：Lead CI 复跑结论——14 失败降至 2（1001 passed），剩余 #13/#14 从"批处理无法执行"变为 30s 超时挂起；诊断：PS 5.1 在 CREATE_NO_WINDOW + 未关闭 stdin 管道下 ConsoleHost 阻塞等待输入。写域：tools.rs + process.rs（Lead 账本批准）。
+
+## 改动（2 文件，22+）
+
+1. **process.rs**：ProcessManager 新增固有方法
+   `pub fn close_stdin(&self, session_id: &str, handle: &str) -> Result<(), String>`：
+   `lookup` 后 `take()` 掉 `entry.stdin`（drop ChildStdin → 子进程 stdin 收 EOF）；已无管道时 Err
+   （幂等容忍由调用方决定）；锁与错误风格参照 `write_stdin_inner`（process.rs:804 一带）。
+2. **tools.rs run_command**：`process_manager.start` 成功后、`kill_after` 之前立即
+   `let _ = self.process_manager.close_stdin(&session_id, &handle);`（错误忽略），中文注释说明动机：
+   Run 从不写 stdin；无控制台控制台程序等待输入会挂起，EOF 打破阻塞。
+
+## 本地机器证据（Linux）
+
+- `RUSTFLAGS="-D warnings" cargo check -p pony-agent-core --target-dir target-check --tests`：exit 0
+- `cargo test -p pony-agent-core --target-dir target-test -- run_command 系列`：9 passed
+- `agent::process::tests`：14 passed（write_stdin 用例不受影响）
+- `agent::tools::tests` 全模块回归：118 passed
+
+## 静态推演（Windows）
+
+stdin EOF 后 PS 5.1 ConsoleHost 不再等待交互输入 → `-Command` 正常执行退出 → #13/#14 转绿；
+顺带覆盖任何读 stdin 的用户命令的潜在挂起（Run 本就该给 EOF）。需 CI 复跑验证。

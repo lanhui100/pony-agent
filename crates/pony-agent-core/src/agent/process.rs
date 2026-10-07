@@ -822,6 +822,22 @@ impl ProcessManager {
             .map_err(|error| format!("stdin write failed for `{handle}`: {error}"))
     }
 
+    /// Close the child's stdin pipe: `take()` drops the `ChildStdin` handle so the child sees
+    /// EOF on stdin. Run never writes stdin; under `CREATE_NO_WINDOW` (no console) a console
+    /// program such as Windows PowerShell 5.1 blocks forever waiting for interactive input on
+    /// that pipe, so Run closes stdin right after spawn to break the wait. Errors when there is
+    /// already no pipe to close; idempotency tolerance is left to the caller.
+    pub fn close_stdin(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        let entry = self.lookup(session_id, handle)?;
+        let mut stdin_guard = entry.stdin.lock().expect("process stdin poisoned");
+        let stdin = stdin_guard.take();
+        if stdin.is_none() {
+            return Err(format!("process `{handle}` has no stdin pipe"));
+        }
+        drop(stdin);
+        Ok(())
+    }
+
     /// Kill and best-effort reap a process. The entry is retained so a subsequent `poll` can
     /// report the final `Exited` state; entry removal is handled by `kill` (idempotent cleanup)
     /// and `shutdown`.
