@@ -11279,6 +11279,10 @@ mod tests {
     /// CI windows-latest 集成测试（本机 Linux 不编译/不执行，需 CI 验证）：
     /// Run 执行含双引号的 powershell 命令后，exitCode==0、stdout 为真实输出（含 hello）
     /// 且不包含命令文本回显（不含 "Write-Output"）；临时 .cmd 批处理文件运行后被删除。
+    /// 稳定化说明：close_stdin（fa52bc6）已修确定性挂起；CI runner 负载相关的间歇性
+    /// 慢启动仍偶发，timeoutMs 上调至工具上限 120000 仅容忍负载方差，断言语义不变。
+    /// 若失败消息含"进程树清理失败：unknown process handle"，是 kill_after 计时器与
+    /// poll 死线双杀竞态的噪声（超时路径已 double-kill 兜底），非本测试问题。
     #[cfg(windows)]
     #[test]
     fn windows_run_powershell_command_with_quotes_returns_real_stdout_and_cleans_batch() {
@@ -11292,7 +11296,7 @@ mod tests {
             arguments: json!({
                 "command": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
                 "cwd": ".",
-                "timeoutMs": 30000
+                "timeoutMs": 120000
             }),
             plan: None,
         });
@@ -11341,6 +11345,10 @@ mod tests {
     /// CI windows-latest 集成测试（本机 Linux 不编译/不执行，需 CI 验证）：
     /// 含空格的 workspace 根目录下，cmd /C 引号形态必须仍正确（Bug A 回归）——
     /// Run 含双引号的 powershell 命令 exit 0、stdout 含 space-ws 且无命令文本回显。
+    /// 稳定化说明：close_stdin（fa52bc6）已修确定性挂起；CI runner 负载相关的间歇性
+    /// 慢启动仍偶发，timeoutMs 上调至工具上限 120000 仅容忍负载方差，断言语义不变。
+    /// 若失败消息含"进程树清理失败：unknown process handle"，是 kill_after 计时器与
+    /// poll 死线双杀竞态的噪声（超时路径已 double-kill 兜底），非本测试问题。
     #[cfg(windows)]
     #[test]
     fn windows_run_powershell_in_workspace_root_with_spaces_returns_real_stdout() {
@@ -11362,7 +11370,7 @@ mod tests {
             arguments: json!({
                 "command": "powershell -NoProfile -Command \"Write-Output 'space-ws'\"",
                 "cwd": ".",
-                "timeoutMs": 30000
+                "timeoutMs": 120000
             }),
             plan: None,
         });

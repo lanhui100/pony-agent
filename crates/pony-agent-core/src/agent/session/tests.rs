@@ -5882,30 +5882,54 @@ fn append_turn_returns_error_when_event_stream_corrupted() {
 fn event_flush_registry_recovers_from_poisoned_lock() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // 并行安全重构（wave-1 CI 复跑暴露）：旧实现在子线程把 panic 闭包注册进
+    // **全局** EVENT_FLUSH_REGISTRY 后立即触发 flush panic 毒化锁，panic 闭包在
+    // 主线程覆盖写回之前一直驻留全局注册表——并行跑序下其他测试（如
+    // multibranch_append_turn_does_not_collide_on_ordinal）同一窗口调用
+    // flush_session_buffered_events 会取出该闭包执行而携带
+    // "Intentional panic to poison mutex" 载荷复 panic。
+    // 修复：毒化/恢复全程走会话绑定通道（bind_event_flush_session）并使用本测试
+    // 私有的进程内唯一 session key——panic 闭包只挂在唯一 key 下，其他测试用各自
+    // key 查询永远命中不到；绑定表锁的短时毒化由产品 unwrap_or_else(into_inner)
+    // 自愈兜底（锁被持有期间其他测试仅阻塞微秒），全局注册表完全不被触碰，
+    // 因此毒化/恢复窗口对并行测试不可见。守卫（Drop 解绑）保证 panic 闭包在
+    // 子线程 unwind 时即被移除，不留残留。
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let poison_session = format!("poison-test-{unique}");
+    let healed_session = format!("healed-session-{unique}");
 
     // 1. 制造真实的 Mutex 锁中毒（子线程持锁 panic）
-    let handle = std::thread::spawn(|| {
-        crate::agent::turn_flow::register_event_flush(Arc::new(|_| {
-            panic!("Intentional panic to poison mutex");
-        }));
-        let _ = crate::agent::turn_flow::flush_session_buffered_events("poison-test");
+    let handle = std::thread::spawn(move || {
+        let _poison_guard = crate::agent::turn_flow::bind_event_flush_session(
+            &poison_session,
+            Arc::new(|_| {
+                panic!("Intentional panic to poison mutex");
+            }),
+        );
+        let _ = crate::agent::turn_flow::flush_session_buffered_events(&poison_session);
     });
-    let _ = handle.join(); // 线程 panic 导致内部 Mutex 中毒
+    let _ = handle.join(); // 线程 panic 导致内部 Mutex 中毒（守卫 unwind 时经 into_inner 解绑）
 
-    // 2. 验证注册与 flush 能自愈并正常工作，绝不 panic 或静默丢事件
+    // 2. 验证绑定与 flush 能自愈并正常工作，绝不 panic 或静默丢事件
     let healed_flag = Arc::new(AtomicBool::new(false));
     let healed_flag_clone = Arc::clone(&healed_flag);
-    crate::agent::turn_flow::register_event_flush(Arc::new(move |_| {
-        healed_flag_clone.store(true, Ordering::SeqCst);
-        Ok(42)
-    }));
+    let _healed_guard = crate::agent::turn_flow::bind_event_flush_session(
+        &healed_session,
+        Arc::new(move |_| {
+            healed_flag_clone.store(true, Ordering::SeqCst);
+            Ok(42)
+        }),
+    );
 
-    let flush_res = crate::agent::turn_flow::flush_session_buffered_events("healed-session");
+    let flush_res = crate::agent::turn_flow::flush_session_buffered_events(&healed_session);
     assert!(flush_res.is_ok(), "Flush succeeds after recovering from poisoned lock");
     assert_eq!(flush_res.unwrap(), 42, "Healed handler executed and returned correct count");
     assert!(healed_flag.load(Ordering::SeqCst), "Healed handler was actually invoked");
-
-    crate::agent::turn_flow::clear_event_flush();
 }
 
 #[test]
