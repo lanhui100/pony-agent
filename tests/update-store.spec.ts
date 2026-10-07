@@ -255,7 +255,7 @@ describe("useUpdateStore", () => {
 
     const store = useUpdateStore();
     const pending = store.checkForUpdates(true);
-    vi.advanceTimersByTime(8_000);
+    await vi.advanceTimersByTimeAsync(8_000 + 3_000);
     await pending;
 
     expect(store.status).toBe("error");
