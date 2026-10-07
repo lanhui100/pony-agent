@@ -514,7 +514,7 @@ impl ProcessManager {
         entry.job.handle_flags()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn tracked_count(&self) -> usize {
         self.inner.processes.lock().unwrap().len()
     }
