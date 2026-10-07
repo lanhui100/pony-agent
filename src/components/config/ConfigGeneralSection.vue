@@ -271,26 +271,26 @@ function openExa() {
               </div>
             </template>
             <template v-else-if="availableRelease">
-              <div class="flex items-start gap-1.5 text-stone-800">
-                <ArrowUpCircle class="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              <div class="flex items-center gap-1.5 flex-wrap text-stone-800">
+                <ArrowUpCircle class="h-4 w-4 shrink-0 text-amber-600" />
                 <span>
                   发现新版本
                   <span class="font-medium">{{ availableRelease.tagName }}</span>
-                  <span v-if="availableRelease.name"> · {{ availableRelease.name }}</span>
+                  <span v-if="availableRelease.name && availableRelease.name !== availableRelease.tagName"> · {{ availableRelease.name }}</span>
                   <span v-if="formatTimestamp(availableRelease.publishedAtMs)">
                     （发布于 {{ formatTimestamp(availableRelease.publishedAtMs) }}）
                   </span>
                 </span>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-0.5 text-[11px] text-stone-500 transition hover:text-stone-800"
+                  data-testid="config-update-release-link"
+                  @click="openReleasePage()"
+                >
+                  查看发布页
+                  <ExternalLink class="h-3 w-3" />
+                </button>
               </div>
-              <button
-                type="button"
-                class="inline-flex items-center gap-0.5 text-[11px] text-stone-500 transition hover:text-stone-800"
-                data-testid="config-update-release-link"
-                @click="openReleasePage()"
-              >
-                查看发布页
-                <ExternalLink class="h-3 w-3" />
-              </button>
             </template>
              <template v-else-if="updateStore.status === 'up-to-date'">
               <div class="flex items-center gap-1.5 text-stone-600">

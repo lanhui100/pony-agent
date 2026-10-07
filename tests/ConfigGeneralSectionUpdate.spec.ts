@@ -81,6 +81,24 @@ describe("ConfigGeneralSection 软件更新卡片", () => {
     );
   });
 
+  it("当 release.name 与 tagName 相同或重复时，不重复渲染名称", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ tag_name: "v99.0.0", name: "v99.0.0", published_at: "2026-10-07T00:00:00Z" }))
+    );
+    const wrapper = mountSection();
+
+    await wrapper.get('[data-testid="config-update-check-button"]').trigger("click");
+    await flushPromises();
+
+    const statusText = wrapper.get('[data-testid="config-update-status"]').text();
+    expect(statusText).toContain("发现新版本");
+    expect(statusText).toContain("v99.0.0");
+    // 不应出现 "v99.0.0 · v99.0.0"
+    expect(statusText).not.toContain("· v99.0.0");
+    expect(wrapper.find('[data-testid="config-update-release-link"]').exists()).toBe(true);
+  });
+
   it("弹窗被拦截（window.open 返回空）时记录告警而非静默", async () => {
     const wrapper = mountSection();
     await wrapper.get('[data-testid="config-update-check-button"]').trigger("click");
