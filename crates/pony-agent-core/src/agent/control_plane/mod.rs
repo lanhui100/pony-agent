@@ -39,7 +39,7 @@ use crate::agent::session::{
 };
 use crate::agent::tool_runtime::{RuntimeClock, SystemClock};
 use crate::agent::tools::ToolRegistrySnapshot;
-use crate::agent::turn_flow::TurnEventSink;
+use crate::agent::turn_flow::{ProviderEventMeta, TurnEventSink};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
@@ -69,6 +69,9 @@ fn default_workspace_root() -> String {
     .display()
     .to_string()
 }
+
+/// watchdog 兜底 failed trace 拿不到历史 user 消息时的占位（契约允许占位）。
+const WATCHDOG_USER_MESSAGE_PLACEHOLDER: &str = "[watchdog-timeout]";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,6 +143,17 @@ pub struct StopTurnCommand {
 #[derive(Clone)]
 pub struct StopGraphRunCommand {
     pub run_id: String,
+}
+
+/// watchdog 兜底命令（契约 watchdog-fix backend）：前端 watchdog 触发时携带 turn_id
+/// 调用，后端立即幂等落盘 failed trace + checkpoint failed + request_stop。
+#[derive(Clone)]
+pub struct FailTurnForWatchdogCommand {
+    pub turn_id: String,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub error: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1868,6 +1882,154 @@ impl HostControlPlane {
 
     pub fn stop_turn(&self, command: StopTurnCommand) -> StopTurnResponse {
         self.execution_control.request_stop(&command.turn_id)
+    }
+
+    /// watchdog 兜底（契约 watchdog-fix backend）：前端 watchdog 触发时立即按 turn_id
+    /// 幂等落盘 failed trace + checkpoint failed + request_stop，可选同步 stop_graph_run。
+    /// 与阻塞 provider 读解耦——不依赖流式任务内部 TurnEventSink（命令行无活 sink），
+    /// 由 AgentRuntime::persist_watchdog_failed_turn（record_turn_trace 幂等 upsert +
+    /// update_execution_checkpoint）+ execution_control.request_stop 组合完成。
+    pub fn fail_turn_for_watchdog(&self, command: FailTurnForWatchdogCommand) -> StopTurnResponse {
+        let error = if command.error.trim().is_empty() {
+            "submission_watchdog_timeout".to_string()
+        } else {
+            command.error
+        };
+        if let Some(reason) = &command.reason {
+            eprintln!(
+                "[pony-agent][watchdog] fail_turn_for_watchdog turn_id={} reason={reason}",
+                command.turn_id
+            );
+        }
+        // checkpoint 优先取 provider 元数据 / session / run / 已有 trace 步。
+        // O2：session_id 以 checkpoint 为权威（前台易传与会话切换残留的 session），
+        // checkpoint 缺失时回退命令参数。
+        let checkpoint = self
+            .execution_control
+            .load_checkpoint(Some(&command.turn_id), None);
+        let session_id = checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.session_id.clone())
+            .or(command.session_id.clone());
+        let run_id = command
+            .run_id
+            .clone()
+            .or_else(|| checkpoint.as_ref().and_then(|checkpoint| checkpoint.run_id.clone()));
+        let provider_meta = checkpoint.as_ref().map(|checkpoint| ProviderEventMeta {
+            requested_name: checkpoint
+                .provider_requested_name
+                .clone()
+                .unwrap_or_else(|| checkpoint.provider_name.clone().unwrap_or_default()),
+            provider_name: checkpoint.provider_name.clone().unwrap_or_default(),
+            protocol: checkpoint.provider_protocol.clone().unwrap_or_default(),
+            model: checkpoint.provider_model.clone().unwrap_or_default(),
+        });
+        let trace_steps = checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.trace_steps.clone())
+            .unwrap_or_default();
+        let tool_activities = checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.tool_activities.clone())
+            .unwrap_or_default();
+        let provider_source = checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.provider_source.clone());
+        let provider_mode = checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.provider_mode.clone());
+        let completed_hops = checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.completed_hops)
+            .unwrap_or(0);
+        let user_message = self.watchdog_user_message(session_id.as_deref(), &command.turn_id);
+
+        // 必需行为 3：request_stop（返回接受结果）。在 mark-failed 之前调用——
+        // update_execution_checkpoint 会把 status 置 'failed'，若先置 failed 则
+        // request_stop 的 "already_terminal" 守卫会让首次触发误返回 accepted=false；
+        // 且尽早下发停止位，让仍阻塞在 provider 读的任务尽快感知停止。
+        let response = self.execution_control.request_stop(&command.turn_id);
+
+        // O1（RACE_DOUBLE_WRITE_TERMINAL）：watchdog 与自然完成竞态——request_stop
+        // 拒绝（already_terminal）或当前 checkpoint 已是终态（phase/status 属
+        // completed/failed/cancelled）时，不得用 failed trace 覆盖已落盘的终态结果
+        // （如正常 completed trace），仅返回响应。判断发生在 update_execution_checkpoint
+        // 把 status 置 'failed' 之前，基于当前 checkpoint 状态。
+        let checkpoint_after_stop = self
+            .execution_control
+            .load_checkpoint(Some(&command.turn_id), None);
+        let turn_already_terminal = response.state == "already_terminal"
+            || Self::checkpoint_is_terminal(checkpoint_after_stop.as_ref());
+
+        if !turn_already_terminal {
+            // 必需行为 1+2：幂等 upsert failed trace + checkpoint 置 failed。
+            let runtime = self.runtime.read().expect("runtime lock poisoned");
+            runtime.persist_watchdog_failed_turn(
+                &self.execution_control,
+                session_id.as_deref(),
+                &command.turn_id,
+                &user_message,
+                provider_meta.as_ref(),
+                trace_steps,
+                tool_activities,
+                provider_source,
+                provider_mode,
+                completed_hops,
+                error,
+            );
+            drop(runtime);
+        }
+
+        // 必需行为 4：runId 存在时同步 stop_graph_run。
+        if let Some(run_id) = run_id {
+            let _ = self.stop_graph_run(StopGraphRunCommand { run_id });
+        }
+        response
+    }
+
+    /// 从会话历史提取 failed trace 的 user_message（契约允许占位）：
+    /// 1) 优先按 turnId 关联——若该 session 的 turn_trace_history 中已有本 turn 的
+    ///    trace（其 title 由 user_message 派生），用之；
+    /// 2) 回退最近一条 user 消息；
+    /// 3) 最后用占位符。
+    fn watchdog_user_message(&self, session_id: Option<&str>, turn_id: &str) -> String {
+        let Some(session_id) = session_id else {
+            return WATCHDOG_USER_MESSAGE_PLACEHOLDER.to_string();
+        };
+        let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let snapshot = sessions.snapshot_at_readonly(Some(session_id), None, &[]);
+        if let Some(title) = snapshot
+            .turn_trace_history
+            .iter()
+            .find(|trace| trace.turn_id == turn_id)
+            .map(|trace| trace.title.trim().to_string())
+            .filter(|title| !title.is_empty() && title != "空白输入")
+        {
+            return title;
+        }
+        snapshot
+            .history
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| {
+                let content = message.content.trim();
+                (!content.is_empty()).then(|| content.to_string())
+            })
+            .unwrap_or_else(|| WATCHDOG_USER_MESSAGE_PLACEHOLDER.to_string())
+    }
+
+    /// phase/status 是否已是终态（O1 竞态保护：watchdog 不覆盖终态结果）。
+    fn checkpoint_is_terminal(checkpoint: Option<&ExecutionCheckpoint>) -> bool {
+        checkpoint.is_some_and(|checkpoint| {
+            let phase = checkpoint.phase.trim().to_lowercase();
+            let status = checkpoint.status.trim().to_lowercase();
+            matches!(phase.as_str(), "completed" | "failed" | "cancelled")
+                || matches!(status.as_str(), "completed" | "failed" | "cancelled")
+        })
     }
 
     pub fn stop_graph_run(
@@ -4149,6 +4311,174 @@ mod tests {
         assert!(!checkpoint.replayable);
         assert!(stop.accepted);
         assert_eq!(stop.state, "running");
+    }
+
+    #[test]
+    fn fail_turn_for_watchdog_persists_failed_trace_idempotently() {
+        // 契约 watchdog-fix backend：按 turn_id 幂等落盘 failed trace + checkpoint failed
+        // + request_stop；重复触发不得重复 append 同 turn。
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
+        let session_id = "watchdog-session".to_string();
+        let turn_id = "watchdog-turn-1".to_string();
+
+        // 模拟 start_turn_stream 的 register_turn + 运行中 provider 元数据。
+        control_plane
+            .execution_control
+            .register_turn(&turn_id, Some(&session_id), None);
+        control_plane
+            .execution_control
+            .update(&turn_id, |checkpoint| {
+                checkpoint.phase = "calling_model".to_string();
+                checkpoint.status = "running".to_string();
+                checkpoint.provider_requested_name = Some("test-openai".to_string());
+                checkpoint.provider_name = Some("test-openai".to_string());
+                checkpoint.provider_protocol = Some("openai".to_string());
+                checkpoint.provider_model = Some("gpt-5.4".to_string());
+                checkpoint.provider_source = Some("provider_decision".to_string());
+                checkpoint.provider_mode = Some("live".to_string());
+            });
+
+        let command = || FailTurnForWatchdogCommand {
+            turn_id: turn_id.clone(),
+            session_id: Some(session_id.clone()),
+            run_id: None,
+            error: "submission_watchdog_timeout".to_string(),
+            reason: None,
+        };
+        let first = control_plane.fail_turn_for_watchdog(command());
+        assert!(first.accepted, "首次触发应接受（turn 仍 running）: {first:?}");
+        let second = control_plane.fail_turn_for_watchdog(command());
+        // 幂等重复触发：turn 已 terminal（failed），request_stop 拒绝重复接受。
+        assert!(!second.accepted, "重复触发应已 terminal: {second:?}");
+        assert_eq!(second.state, "already_terminal");
+
+        // 幂等：重复触发不得重复 append 同 turn。
+        let traces = control_plane.load_session_traces(&session_id);
+        assert_eq!(traces.len(), 1, "重复触发不得重复 append 同 turn: {traces:?}");
+        let trace = &traces[0];
+        assert_eq!(trace.turn_id, turn_id);
+        assert_eq!(trace.phase, "failed");
+        assert_eq!(trace.error.as_deref(), Some("submission_watchdog_timeout"));
+        // provider 元数据从 checkpoint 尽量提取。
+        assert_eq!(trace.provider_requested_name.as_deref(), Some("test-openai"));
+        assert_eq!(trace.provider_name.as_deref(), Some("test-openai"));
+        assert_eq!(trace.provider_model.as_deref(), Some("gpt-5.4"));
+
+        // checkpoint 置 failed + request_stop 生效。
+        let checkpoint = control_plane
+            .execution_control
+            .load_checkpoint(Some(&turn_id), None)
+            .expect("checkpoint exists");
+        assert_eq!(checkpoint.phase, "failed");
+        assert_eq!(checkpoint.status, "failed");
+        assert_eq!(checkpoint.error.as_deref(), Some("submission_watchdog_timeout"));
+        assert!(
+            control_plane.execution_control.is_stop_requested(&turn_id),
+            "watchdog 后 request_stop 应已置位"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn fail_turn_for_watchdog_does_not_overwrite_completed_trace() {
+        // O1（RACE_DOUBLE_WRITE_TERMINAL）：turn 在 watchdog 边界已自然完成时，
+        // 触发 watchdog 不得用 failed trace 覆盖 completed trace，也不得翻回 failed checkpoint。
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
+        let session_id = "watchdog-completed-session".to_string();
+        let turn_id = "watchdog-completed-turn".to_string();
+
+        control_plane
+            .execution_control
+            .register_turn(&turn_id, Some(&session_id), None);
+        control_plane
+            .execution_control
+            .update(&turn_id, |checkpoint| {
+                checkpoint.phase = "completed".to_string();
+                checkpoint.status = "completed".to_string();
+            });
+        // 已落盘的 completed trace（模拟正常完成路径）。
+        control_plane
+            .sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_turn_trace(
+                Some(&session_id),
+                TurnTraceRecord {
+                    turn_id: turn_id.clone(),
+                    session_id: Some(session_id.clone()),
+                    title: "initial prompt".to_string(),
+                    phase: "completed".to_string(),
+                    ..Default::default()
+                },
+            );
+
+        let response = control_plane.fail_turn_for_watchdog(FailTurnForWatchdogCommand {
+            turn_id: turn_id.clone(),
+            session_id: Some(session_id.clone()),
+            run_id: None,
+            error: "submission_watchdog_timeout".to_string(),
+            reason: None,
+        });
+        assert_eq!(response.state, "already_terminal", "{response:?}");
+
+        let traces = control_plane.load_session_traces(&session_id);
+        assert_eq!(traces.len(), 1, "不得追加/覆盖 trace: {traces:?}");
+        assert_eq!(traces[0].phase, "completed", "watchdog 不得覆盖 completed trace");
+        assert!(traces[0].error.is_none(), "completed trace 不得被写入 error");
+
+        let checkpoint = control_plane
+            .execution_control
+            .load_checkpoint(Some(&turn_id), None)
+            .expect("checkpoint exists");
+        assert_eq!(checkpoint.phase, "completed");
+        assert_eq!(checkpoint.status, "completed");
+        assert_eq!(checkpoint.error, None);
+        server.finish();
+    }
+
+    #[test]
+    fn fail_turn_for_watchdog_prefers_checkpoint_session_id() {
+        // O2（RACE_SESSION_ID）：checkpoint 内 session_id 为权威；前台传入的 session
+        // （如会话切换残留）仅作 fallback，不得遮蔽 checkpoint 归属。
+        let (control_plane, server, _rt_guard) = build_test_control_plane(vec![]);
+        let turn_id = "watchdog-session-priority".to_string();
+        control_plane
+            .execution_control
+            .register_turn(&turn_id, Some("checkpoint-authoritative-session"), None);
+        control_plane
+            .execution_control
+            .update(&turn_id, |checkpoint| {
+                checkpoint.phase = "calling_model".to_string();
+                checkpoint.status = "running".to_string();
+                checkpoint.provider_requested_name = Some("test-openai".to_string());
+                checkpoint.provider_name = Some("test-openai".to_string());
+            });
+
+        let response = control_plane.fail_turn_for_watchdog(FailTurnForWatchdogCommand {
+            turn_id: turn_id.clone(),
+            session_id: Some("frontend-stale-session".to_string()),
+            run_id: None,
+            error: "submission_watchdog_timeout".to_string(),
+            reason: None,
+        });
+        assert!(response.accepted, "{response:?}");
+
+        let traces = control_plane.load_session_traces("checkpoint-authoritative-session");
+        assert_eq!(traces.len(), 1, "trace 应落盘到 checkpoint 权威 session: {traces:?}");
+        assert_eq!(traces[0].turn_id, turn_id);
+        assert_eq!(
+            traces[0].session_id.as_deref(),
+            Some("checkpoint-authoritative-session")
+        );
+        assert_eq!(
+            traces[0].provider_requested_name.as_deref(),
+            Some("test-openai")
+        );
+        assert!(
+            control_plane.load_session_traces("frontend-stale-session").is_empty(),
+            "前台传入的 session 仅作 fallback，不得成为落盘点"
+        );
+        server.finish();
     }
 
     #[test]

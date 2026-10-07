@@ -1,0 +1,112 @@
+{
+  "contract_name": "watchdog-fix",
+  "contract_version": "1.0.0",
+  "frozen_at": "recon-pass",
+  "status": "frozen-readonly",
+  "rearm_semantics": "每次收到 activeTurnId 匹配的流式事件时重置 watchdog 计时器（clear + 重设同一 turnId 的 setTimeout），仅当连续静默超过阈值且 isSubmitting && activeTurnId===turnId 时触发；终态事件（completed/failed/cancelled/suspended）必须 clear 而非 rearm",
+  "root_causes_frozen": [
+    "RC1: startSubmissionWatchdog 为一次性 120s 定时器（runtime.ts:633-728, SUBMISSION_WATCHDOG_TIMEOUT_MS=120_000@226），不随流式事件续期；正常长任务（多工具链/长输出 >120s 但事件活跃）被静默误杀",
+    "RC2: watchdog 触发仅改前端本地状态并 fire-and-forget stop_graph_run/stop_turn（runtime.ts:701-719）；后端 trace 权威数据在持久化层（persistHistory 明确排除 turnTraceHistory，runtime.ts:753），后端可能仍阻塞在 provider 180s 读超时内（provider/mod.rs:1364-1368 build_streaming_http_client 15s/180s/180s）；stop_turn 仅置 request_stop 标志（execution_control.rs:133 request_stop），不能中断阻塞读，trace 永卡 calling_model 进行态、无 failed trace 落盘",
+    "RC3: watchdog 回调只收敛已存在的 assistant 消息（runtime.ts:645-656 find 到 undefined 则跳过）；后端从未 emit turn:started 时 assistant 消息不存在，错误完全丢失、不进上下文（buildTurnHistory 过滤 pending/空 content，messages.ts:333-357）"
+  ],
+  "frontend_contract": {
+    "rearm_points": [
+      "turn:started (runtime.ts:3196, guard 3197)",
+      "turn:delta (runtime.ts:3252, guard 3253)",
+      "turn:trace (runtime.ts:3314, guard 3315)",
+      "turn:phase_changed (runtime.ts:3355, guard 3356)",
+      "turn:checkpoint_persisted (runtime.ts:3391, guard 3392)",
+      "turn:tool (runtime.ts:3427, guard 3428)",
+      "turn:output_end (runtime.ts:3473, guard 3501)",
+      "turn:hop_complete (runtime.ts:3517, guard 3518)"
+    ],
+    "clear_points": [
+      "turn:completed (runtime.ts:3537, clear@3634)",
+      "turn:failed (runtime.ts:3926, clear@4035)",
+      "turn:cancelled (runtime.ts:4119, clear@4204)",
+      "turn:suspended (runtime.ts:4286, clear@4367) 以及各终态历史模式分支 clear@3576/3965/4138/4305"
+    ],
+    "guard_pattern": "每个前台事件处理器入口先执行 `if (this.activeTurnId !== payload.turnId) return;`，再经 shouldProcessTurnEvent 事件去重门（runtime.ts:2441）",
+    "exact_guard_lines": {
+      "turn:started": "3197-3201",
+      "turn:delta": "3253-3273 (含后台会话 buffer 分支 3254-3269)",
+      "turn:trace": "3315-3319",
+      "turn:phase_changed": "3356-3360",
+      "turn:checkpoint_persisted": "3392-3396",
+      "turn:tool": "3428-3432",
+      "turn:output_end": "3501-3505 (后台分支 3474-3500)",
+      "turn:hop_complete": "3518-3522",
+      "turn:completed": "3567-3571 (后台分支 3539-3566)",
+      "turn:failed": "3956-3960 (后台分支 3927-3955)",
+      "turn:cancelled": "4129-4133 (后台分支 4121-4127)",
+      "turn:suspended": "4296-4300 (后台分支 4288-4294)"
+    },
+    "watchdog_signatures_frozen": {
+      "startSubmissionWatchdog(turnId: string)": "runtime.ts:633-728，一处 clear + 一处 setTimeout(SUBMISSION_WATCHDOG_TIMEOUT_MS)，回调内守卫 isSubmitting && activeTurnId===turnId",
+      "clearSubmissionWatchdog()": "runtime.ts:729-734",
+      "submitTurn": "runtime.ts:4586；startSubmissionWatchdog(requestId) 在 4692；正常路径不创建 assistant 消息（创建时机延后到 turn:started@3211/delta@3276/终态@3593/3979/4163/4330），仅重试路径 4735 与错误路径 4851 调用 ensureAssistantMessage",
+      "ensureAssistantMessage(turnId, modelName?)": "runtime.ts:2761-2789，id=`assistant-${turnId}`，status='pending'，content=''；不存在则创建"
+    },
+    "timeout_ms": 240000,
+    "timeout_ms_rationale": "必须 > 后端 provider 单次阻塞读超时 180s（provider/mod.rs:1366-1367）+ 连接 15s 余量；rearm 语义下阈值只约束'连续静默'，240s 保证合法长任务即使临时卡读也不会被误杀，同时 > 后端最大单次静默窗口，真正死链仍能被兜底",
+    "message_fallback": "watchdog 触发时先用 ensureAssistantMessage 确保 assistant 消息存在，若 content 为空则置兜底文本并 status='error' + errorDetail='submission_watchdog_timeout'，使消息通过 buildTurnHistory 过滤（status!=='pending' && content.trim().length>0，messages.ts:336-340）进入历史与上下文；并同时调用后端 fail_turn_for_watchdog 命令使后端 failed trace 落盘（不可仅本地收敛）",
+    "backend_invoke_frozen": "watchdog 回调中由 fire-and-forget stop_graph_run/stop_turn（runtime.ts:701-719，当前仅 request_stop）升级为必须 await/sequentially 调用 fail_turn_for_watchdog 命令，携带 turnId（+runId/sessionId）"
+  },
+  "backend_contract": {
+    "command_name": "fail_turn_for_watchdog",
+    "params": [
+      "turnId: String (必填)",
+      "sessionId: String|null (可选,用于 trace 落盘定位)",
+      "runId: String|null (可选,存在时同步 stop_graph_run)",
+      "error: String (可选,默认 'submission_watchdog_timeout')",
+      "reason: String|null (可选,透传 debug 信息)"
+    ],
+    "return": "StopTurnResponse 等价结构 { turnId, accepted, state } (execution_control.rs:42-48)",
+    "required_behavior": "立即 (1) 按 turn_id 幂等 upsert 持久化 failed trace（复用 SessionStore::record_turn_trace store.rs:713 或 append_failed_turn store.rs:630；重复触发不得重复 append 同 turn），(2) update_execution_checkpoint phase='failed'/status='failed'/error 写入（turn_persist.rs:555-591），(3) execution_control.request_stop(turn_id)（execution_control.rs:133），(4) runId 存在时同步 stop_graph_run；返回接受结果",
+    "reusable_entries_visibility": {
+      "persist_failed_sync_turn_trace_with_hooks": "pub(crate) AgentRuntime 方法, turn_persist.rs:437-524, 15 参数(session_id,turn_id,user_message,provider_meta,trace_steps,tool_activities,provider_call_records,hook_trace_records,provider_source,provider_mode,build_context_observation,fallback_reason,first_token_latency_ms,turn_duration_ms,error), 内部调 sessions.append_failed_turn 立即落盘",
+      "append_failed_turn": "pub SessionStore 方法, store.rs:630-644, 4 参数(session_id,user_message,assistant_message,trace), push 历史 user+assistant 对 + 追加 trace 并持久化; fallible 变体 578-628",
+      "record_turn_trace": "pub SessionStore 方法, store.rs:713-722, 按 turn_id upsert 单条 trace 并持久化(防重复)",
+      "fail_stream_turn_with_hook_dispatch": "pub(crate) AgentRuntime, turn_persist.rs:280-355, 需要 TurnEventSink 参数(仅流式任务内部持有) —— 命令行无活 sink, 不可直接复用; 建议新命令改用 record_turn_trace/append_failed_turn + update_execution_checkpoint 组合",
+      "update_execution_checkpoint": "pub(crate) AgentRuntime, turn_persist.rs:555-591, 更新 checkpoint phase/status/error/trace_steps/tool_activities",
+      "control_plane.stop_turn": "pub ctrl 方法 mod.rs:1869-1871 → execution_control.request_stop(execution_control.rs:133), 仅置 stop_requested_at_ms, 不落 trace、不改 checkpoint —— 不是完整失败落盘入口"
+    },
+    "registration_contract": "新增 #[tauri::command] fn fail_turn_for_watchdog(State<'_,HostControlPlane>) 注册进 lib.rs:994-1072 invoke_handler(generate_handler![...]) 列表；HostControlPlane 已在 lib.rs:978 manage; 访问模式同 stop_turn(lib.rs:152-155)/stop_graph_run(lib.rs:157-163)",
+    "existing_failed_turn_command_face": "无现成'记录失败 turn'命令面; 现有最近面: load_session_traces(lib.rs:590-596, 只读), stop_turn(lib.rs:152-155), stop_graph_run(lib.rs:157-163), run_turn(lib.rs:54-57), start_graph_run_stream(lib.rs:74-91)/continue(lib.rs:103-118)/resume, start_turn_stream(lib.rs:147-150)"
+  },
+  "call_sites": [
+    "src/stores/runtime.ts:226 SUBMISSION_WATCHDOG_TIMEOUT_MS=120_000",
+    "src/stores/runtime.ts:633-728 startSubmissionWatchdog 一次性计时器",
+    "src/stores/runtime.ts:729-734 clearSubmissionWatchdog",
+    "src/stores/runtime.ts:701-719 watchdog 触发时 fire-and-forget stop_graph_run/stop_turn（需升级为 fail_turn_for_watchdog）",
+    "src/stores/runtime.ts:645-656 assistant 消息守卫（undefined 时错误丢失 = RC3）",
+    "src/stores/runtime.ts:4692 submitTurn 中 startSubmissionWatchdog(requestId)",
+    "src/stores/runtime.ts:1840 会话切换恢复后台 turn 时 startSubmissionWatchdog(bgTurn.turnId)",
+    "src/stores/runtime.ts:2761-2789 ensureAssistantMessage",
+    "src/stores/runtime.ts:3196/3252/3314/3355/3391/3427/3473/3517 rearm 候选处理器入口",
+    "src/stores/runtime.ts:3537/3926/4119/4286 终态 clear 处理器入口",
+    "src/stores/runtime.ts:2441-2510 shouldProcessTurnEvent 事件去重门",
+    "src/stores/runtime.ts:753 persistHistory 明确排除 turnTraceHistory（后端权威证据）",
+    "src/lib/runtime/messages.ts:333-357 buildTurnHistory 过滤 pending/空 content + slice(-8)",
+    "src/lib/tauri.ts:19/27 safeInvoke/safeListen 封装",
+    "crates/pony-agent-core/src/agent/provider/mod.rs:1364-1368 build_streaming_http_client(15s/180s/180s) 阻塞读超时根因",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs:437-524 persist_failed_sync_turn_trace_with_hooks",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs:555-591 update_execution_checkpoint",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs:280-355 fail_stream_turn_with_hook_dispatch(需 sink, 命令行不可复用)",
+    "crates/pony-agent-core/src/agent/session/store.rs:578-644 append_failed_turn_fallible/append_failed_turn",
+    "crates/pony-agent-core/src/agent/session/store.rs:713-722 record_turn_trace(upsert by turn_id)",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs:1869-1871 stop_turn",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs:1873+ stop_graph_run",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs:1820-1867 start_turn_stream(记录 sink 路径)",
+    "crates/pony-agent-core/src/agent/execution_control.rs:133-175 request_stop(标识位, 不能中断阻塞读)",
+    "crates/pony-agent-core/src/agent/execution_control.rs:42-48 StopTurnResponse",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs:187 sessions_handle() 暴露 Arc<RwLock<SessionStore>>",
+    "src-tauri/src/lib.rs:994-1072 invoke_handler(generate_handler![...]) 注册列表",
+    "src-tauri/src/lib.rs:152-155 stop_turn 命令, 157-163 stop_graph_run 命令, 590-596 load_session_traces 命令, 978 HostControlPlane manage"
+  ],
+  "non_goal_boundaries": [
+    "不改 transform 后端 180s 读超时本身（超时值非本契约范围）",
+    "不更改 buildTurnHistory 过滤规则（仅保证 watchdog 兜底消息满足现有规则）",
+    "不停用现有 stop_turn/stop_graph_run 命令（fail_turn_for_watchdog 为新增命令, 现有命令保持兼容）"
+  ]
+}

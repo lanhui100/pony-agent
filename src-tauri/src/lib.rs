@@ -24,7 +24,7 @@ use agent::control_plane::{
     ResumeGraphRunStreamCommand, RetrievedContextQuery, RunTurnCommand, SessionRuntimeView,
     SessionRuntimeViewQuery, SkillInspectionQuery, SkillListQuery, StartGraphRunCommand,
     StartGraphRunStreamCommand, StartTurnStreamCommand, StopGraphRunCommand, StopTurnCommand,
-    SwitchHistoryBranchCommand, SwitchHistoryBranchResponse,
+    SwitchHistoryBranchCommand, SwitchHistoryBranchResponse, FailTurnForWatchdogCommand,
 };
 use agent::execution_control::{ExecutionCheckpoint, StopTurnResponse};
 use agent::frontend_diagnostics::{
@@ -160,6 +160,26 @@ fn stop_graph_run(
     run_id: String,
 ) -> Result<GraphRunControlResponse, String> {
     control_plane.stop_graph_run(StopGraphRunCommand { run_id })
+}
+
+/// 契约 watchdog-fix backend：前端 watchdog 触发时调用，后端立即幂等落盘 failed trace
+/// + checkpoint failed + request_stop（可选 stop_graph_run），返回 StopTurnResponse 等价结构。
+#[tauri::command]
+fn fail_turn_for_watchdog(
+    control_plane: State<'_, HostControlPlane>,
+    turn_id: String,
+    session_id: Option<String>,
+    run_id: Option<String>,
+    error: Option<String>,
+    reason: Option<String>,
+) -> StopTurnResponse {
+    control_plane.fail_turn_for_watchdog(FailTurnForWatchdogCommand {
+        turn_id,
+        session_id,
+        run_id,
+        error: error.unwrap_or_else(|| "submission_watchdog_timeout".to_string()),
+        reason,
+    })
 }
 
 // ── Ask control surface (PA-076 task 4.4) ──────────────────────────────────────────────────
@@ -1038,6 +1058,7 @@ pub fn run() {
             start_turn_stream,
             stop_turn,
             stop_graph_run,
+            fail_turn_for_watchdog,
             ask_list_pending,
             ask_answer,
             ask_cancel,

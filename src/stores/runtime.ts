@@ -223,7 +223,9 @@ import {
 } from "@/lib/runtime/browser-preview";
 // 运行态看门狗：isSubmitting 置位后若在超时窗口内未收到任何终态事件
 // （completed/failed/cancelled），强制解锁，杜绝"终态事件被丢弃 → 永久卡死"。
-const SUBMISSION_WATCHDOG_TIMEOUT_MS = 120_000;
+// 阈值 240s > 后端 provider 阻塞读超时 180s + 连接 15s 余量（契约冻结值）；
+// 在 rearm 语义下只约束"连续静默窗口"，长任务只要持续有流式事件即不会误杀。
+const SUBMISSION_WATCHDOG_TIMEOUT_MS = 240_000;
 
 // PA-081：激活 Workspace 初值——localStorage 单一真相源，缺失/异常回退 default
 // （注册表加载后若不在列表内会再次归一并清理残留 key）。
@@ -633,98 +635,132 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     startSubmissionWatchdog(turnId: string) {
       this.clearSubmissionWatchdog();
       this.submissionWatchdogTimerId = window.setTimeout(() => {
-        this.submissionWatchdogTimerId = null;
-        if (!this.isSubmitting || this.activeTurnId !== turnId) {
-          return;
-        }
-        debugLog("watchdog:submission-timeout", {
-          turnId,
-          timeoutMs: SUBMISSION_WATCHDOG_TIMEOUT_MS
-        });
-        // 兜底：把仍卡 pending 的 assistant 消息收敛为 error，停止逐字渲染续跑。
-        const assistantMessage = this.messages.find(
-          (message) => message.turnId === turnId && message.role === "assistant"
-        );
-        if (assistantMessage && assistantMessage.status === "pending") {
-          assistantMessage.status = "error";
-          assistantMessage.errorDetail = "submission_watchdog_timeout";
-          // 确保 content 非空，以便进入历史与模型上下文（buildTurnHistory 过滤空 content）
-          if (!assistantMessage.content || assistantMessage.content.trim().length === 0) {
-            assistantMessage.content = "运行超时：长时间未收到终态事件，已强制解锁。";
-          }
-          this.messageRevision = null;
-        }
-
-        // Trace 终态收敛：收敛 traceSteps 与 traceTimeline，将进行态标记为 error
-        this.traceSteps = createSubmitFailureTraceSteps();
-        const baseFailureTimeline = this.traceTimeline && this.traceTimeline.length > 0
-          ? cloneTraceTimeline(this.traceTimeline)
-          : createSubmitFailureTraceTimeline();
-
-        let updatedCallModel = false;
-        for (let i = baseFailureTimeline.length - 1; i >= 0; i--) {
-          const entry = baseFailureTimeline[i];
-          if (entry && (entry.kind === "call_model" || entry.kind === "call_tool")) {
-            if (entry.state === "active" || entry.state === "pending") {
-              entry.state = "error";
-              entry.error = "submission_watchdog_timeout";
-              updatedCallModel = true;
-            }
-          }
-        }
-        if (!updatedCallModel && baseFailureTimeline.length > 0) {
-          const lastEntry = baseFailureTimeline[baseFailureTimeline.length - 1];
-          if (lastEntry) {
-            lastEntry.state = "error";
-            lastEntry.error = "submission_watchdog_timeout";
-          }
-        }
-
-        const failurePatch = {
-          providerName: this.providerName || null,
-          providerProtocol: this.providerProtocol || null,
-          providerModel: this.providerModel || null
-        };
-        const patchedTimeline = applyProviderPatchToTraceTimeline(baseFailureTimeline, failurePatch);
-        this.publishTraceTimeline(patchedTimeline);
-        this.commitTurnTraceTimeline(turnId, this.traceTimeline, {
-          phase: "failed",
-          traceSteps: this.traceSteps,
-          toolActivities: this.toolActivities,
-          providerRequestedName: this.providerRequestedName,
-          providerName: this.providerName,
-          providerProtocol: this.providerProtocol,
-          providerModel: this.providerModel,
-          error: "submission_watchdog_timeout"
-        });
-
-        // 尝试向后端发出取消/停止指令，避免后端孤儿任务持续占用
-        const activeRunIdToStop = this.activeRunId;
-        if (isTauriAvailable()) {
-          try {
-            if (activeRunIdToStop) {
-              const res = safeInvoke("stop_graph_run", { runId: activeRunIdToStop });
-              if (res && typeof (res as Promise<unknown>).catch === "function") {
-                void (res as Promise<unknown>).catch(() => {});
-              }
-            } else {
-              const res = safeInvoke("stop_turn", { turnId });
-              if (res && typeof (res as Promise<unknown>).catch === "function") {
-                void (res as Promise<unknown>).catch(() => {});
-              }
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        this.isSubmitting = false;
-        this.activeTurnId = null;
-        this.activeRunId = null;
-        this.phase = "failed";
-        this.error = "运行超时：长时间未收到终态事件，已强制解锁。";
-        this.persistHistory();
+        this.handleSubmissionWatchdogTimeout(turnId);
       }, SUBMISSION_WATCHDOG_TIMEOUT_MS);
+    },
+    // 续期看门狗：收到 activeTurnId 匹配的流式事件（且已通过事件去重门）时，
+    // clear + 重设同一 turnId 的计时器，使 watchdog 只约束"连续静默窗口"。
+    rearmSubmissionWatchdog(turnId: string) {
+      if (!this.isSubmitting || this.activeTurnId !== turnId) {
+        return;
+      }
+      this.clearSubmissionWatchdog();
+      this.submissionWatchdogTimerId = window.setTimeout(() => {
+        this.handleSubmissionWatchdogTimeout(turnId);
+      }, SUBMISSION_WATCHDOG_TIMEOUT_MS);
+    },
+    handleSubmissionWatchdogTimeout(turnId: string) {
+      this.submissionWatchdogTimerId = null;
+      if (!this.isSubmitting || this.activeTurnId !== turnId) {
+        return;
+      }
+      debugLog("watchdog:submission-timeout", {
+        turnId,
+        timeoutMs: SUBMISSION_WATCHDOG_TIMEOUT_MS
+      });
+      // 兜底（RC3）：优先收敛同一 turn 下已存在的 assistant 消息（兼容既有消息 id
+      // 命名，如 `${turnId}-assistant`）；不存在时用 ensureAssistantMessage 创建兜底消息
+      // （后端从未 emit turn:started 的场景），再统一收敛为 error + 兜底文本，使其通过
+      // buildTurnHistory 过滤（status!=='pending' && content 非空）进入历史与模型上下文。
+      const assistantMessage =
+        this.messages.find((message) => message.turnId === turnId && message.role === "assistant") ??
+        this.ensureAssistantMessage(
+          turnId,
+          buildAssistantModelLabel(this.providerName, this.providerModel)
+        );
+      assistantMessage.status = "error";
+      assistantMessage.errorDetail = "submission_watchdog_timeout";
+      // 确保 content 非空，以便进入历史与模型上下文（buildTurnHistory 过滤空 content）
+      if (!assistantMessage.content || assistantMessage.content.trim().length === 0) {
+        assistantMessage.content = "运行超时：长时间未收到终态事件，已强制解锁。";
+      }
+      this.messageRevision = null;
+
+      // Trace 终态收敛：收敛 traceSteps 与 traceTimeline，将进行态标记为 error
+      this.traceSteps = createSubmitFailureTraceSteps();
+      const baseFailureTimeline = this.traceTimeline && this.traceTimeline.length > 0
+        ? cloneTraceTimeline(this.traceTimeline)
+        : createSubmitFailureTraceTimeline();
+
+      let updatedCallModel = false;
+      for (let i = baseFailureTimeline.length - 1; i >= 0; i--) {
+        const entry = baseFailureTimeline[i];
+        if (entry && (entry.kind === "call_model" || entry.kind === "call_tool")) {
+          if (entry.state === "active" || entry.state === "pending") {
+            entry.state = "error";
+            entry.error = "submission_watchdog_timeout";
+            updatedCallModel = true;
+          }
+        }
+      }
+      if (!updatedCallModel && baseFailureTimeline.length > 0) {
+        const lastEntry = baseFailureTimeline[baseFailureTimeline.length - 1];
+        if (lastEntry) {
+          lastEntry.state = "error";
+          lastEntry.error = "submission_watchdog_timeout";
+        }
+      }
+
+      const failurePatch = {
+        providerName: this.providerName || null,
+        providerProtocol: this.providerProtocol || null,
+        providerModel: this.providerModel || null
+      };
+      const patchedTimeline = applyProviderPatchToTraceTimeline(baseFailureTimeline, failurePatch);
+      this.publishTraceTimeline(patchedTimeline);
+      this.commitTurnTraceTimeline(turnId, this.traceTimeline, {
+        phase: "failed",
+        traceSteps: this.traceSteps,
+        toolActivities: this.toolActivities,
+        providerRequestedName: this.providerRequestedName,
+        providerName: this.providerName,
+        providerProtocol: this.providerProtocol,
+        providerModel: this.providerModel,
+        error: "submission_watchdog_timeout"
+      });
+
+      // 尝试向后端发出取消/停止指令，避免后端孤儿任务持续占用。
+      // 先做调用时点快照，避免下方状态复位后取到 null。
+      const activeRunIdToStop = this.activeRunId;
+      const watchdogSessionId = this.sessionId ?? null;
+      const watchdogRunId = this.activeRunId ?? null;
+      if (isTauriAvailable()) {
+        try {
+          // RC2：fire-and-forget 调用后端 fail_turn_for_watchdog 命令，使后端持久化 failed
+          // trace（后端权威 trace 落盘）。后端不可用/失败不得影响前端解锁；保留既有
+          // stop_graph_run/stop_turn 调用不变（契约边界：不停用旧命令）。
+          const failRes = safeInvoke("fail_turn_for_watchdog", {
+            turnId,
+            sessionId: watchdogSessionId,
+            runId: watchdogRunId,
+            error: "submission_watchdog_timeout"
+          });
+          if (failRes && typeof (failRes as Promise<unknown>).catch === "function") {
+            void (failRes as Promise<unknown>).catch(() => {});
+          }
+
+          if (activeRunIdToStop) {
+            const res = safeInvoke("stop_graph_run", { runId: activeRunIdToStop });
+            if (res && typeof (res as Promise<unknown>).catch === "function") {
+              void (res as Promise<unknown>).catch(() => {});
+            }
+          } else {
+            const res = safeInvoke("stop_turn", { turnId });
+            if (res && typeof (res as Promise<unknown>).catch === "function") {
+              void (res as Promise<unknown>).catch(() => {});
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      this.isSubmitting = false;
+      this.activeTurnId = null;
+      this.activeRunId = null;
+      this.phase = "failed";
+      this.error = "运行超时：长时间未收到终态事件，已强制解锁。";
+      this.persistHistory();
     },
     clearSubmissionWatchdog() {
       if (this.submissionWatchdogTimerId != null) {
@@ -3201,6 +3237,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
         this.cancelStreamFlush();
         this.streamBufferTurnId = null;
         this.streamBufferText = "";
@@ -3272,6 +3309,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
 
         this.ensureAssistantMessage(
           payload.turnId,
@@ -3319,6 +3357,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
         // 低频语义事件：先冲刷节流挂起的 timeline，保证基于最新 timeline 推导
         this.flushPendingTraceTimeline();
@@ -3360,6 +3399,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
         this.flushPendingTraceTimeline();
 
@@ -3396,6 +3436,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
         this.flushPendingTraceTimeline();
 
@@ -3432,6 +3473,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
         this.flushPendingTraceTimeline();
 
@@ -3505,6 +3547,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
         this.applyOutputEnd(payload);
         debugLog("event:output_end", {
           turnId: payload.turnId,
@@ -3522,6 +3565,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           return;
         }
         this.commitTurnEventCursor(payload);
+        this.rearmSubmissionWatchdog(payload.turnId);
         this.flushBufferedStreamText(payload.turnId);
         this.inputTokens = payload.inputTokens ?? this.inputTokens;
         this.outputTokens = payload.outputTokens ?? this.outputTokens;

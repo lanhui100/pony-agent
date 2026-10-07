@@ -523,6 +523,119 @@ impl AgentRuntime {
             );
     }
 
+    /// watchdog 兜底失败落盘（契约 watchdog-fix backend 必需行为 1+2）：
+    /// 命令面无活 TurnEventSink（命令行拿不到、不可复用 fail_stream_turn_with_hook_dispatch），
+    /// 改用 SessionStore::record_turn_trace（按 turn_id 幂等 upsert，重复触发不会重复
+    /// append 同 turn）+ update_execution_checkpoint（phase/status='failed'，写入 error）。
+    /// 该路径与阻塞 provider 读（provider/mod.rs build_streaming_http_client 15s/180s/180s）
+    /// 解耦，前端 watchdog 触发时后端可立即落盘 failed trace。
+    ///
+    /// trace_steps 为空时用现有 failed 步 `telemetry_builder.failed_trace_before_tool()`。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn persist_watchdog_failed_turn(
+        &self,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_source: Option<String>,
+        provider_mode: Option<String>,
+        completed_hops: usize,
+        error: String,
+    ) {
+        let trace_steps = if trace_steps.is_empty() {
+            self.telemetry_builder.failed_trace_before_tool()
+        } else {
+            trace_steps
+        };
+        let trace_timeline = build_persisted_trace_timeline(
+            user_message,
+            "failed",
+            provider_meta,
+            provider_source.as_deref(),
+            provider_mode.as_deref(),
+            None,
+            &tool_activities,
+            &[],
+            None,
+            None,
+            None,
+            Some(error.as_str()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        // 必需行为 1：按 turn_id 幂等 upsert 持久化 failed trace。
+        self.sessions
+            .write()
+            .unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            })
+            .record_turn_trace(
+                session_id,
+                TurnTraceRecord {
+                    turn_id: turn_id.to_string(),
+                    session_id: session_id.map(str::to_string),
+                    event_id: None,
+                    event_type: None,
+                    event_version: None,
+                    sequence: None,
+                    emitted_at_ms: None,
+                    title: build_turn_trace_title(user_message),
+                    phase: "failed".to_string(),
+                    trace_steps: trace_steps.clone(),
+                    trace_timeline,
+                    tool_activities: tool_activities.clone(),
+                    provider_call_records: Vec::new(),
+                    hook_trace_records: Vec::new(),
+                    provider_requested_name: provider_meta
+                        .map(|meta| meta.requested_name.clone()),
+                    provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+                    provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+                    provider_model: provider_meta.map(|meta| meta.model.clone()),
+                    provider_source: provider_source.clone(),
+                    provider_mode: provider_mode.clone(),
+                    build_context_observation: None,
+                    build_context_observation_ref: None,
+                    session_summary: Some(error.clone()),
+                    fallback_reason: None,
+                    error: Some(error.clone()),
+                    input_tokens: None,
+                    cache_hit_input_tokens: None,
+                    reasoning_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                    first_token_latency_ms: None,
+                    turn_duration_ms: None,
+                    updated_at: 0,
+                },
+            );
+        // 必需行为 2：checkpoint phase='failed' / status='failed' / error 写入。
+        self.update_execution_checkpoint(
+            control,
+            turn_id,
+            "failed",
+            provider_meta,
+            completed_hops,
+            None,
+            &trace_steps,
+            &tool_activities,
+            provider_source.as_deref(),
+            provider_mode.as_deref(),
+            None,
+            Some("failed"),
+            Some(&error),
+        );
+    }
+
     pub(crate) fn annotate_sync_terminal_trace_with_envelope(
         &self,
         session_id: Option<&str>,

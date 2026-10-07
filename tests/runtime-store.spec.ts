@@ -21,6 +21,7 @@ import type {
 } from "@/types/runtime";
 import { __resetFrontendFlightRecorderForTests, getFrontendRecorderCapabilitySnapshot as getFrontendRecorderCapability, getFrontendRecorderStats } from "@/lib/frontend-flight-recorder";
 import { DEFAULT_WORKSPACE_ID } from "@/lib/runtime/workspace-constants";
+import { buildTurnHistory } from "@/lib/runtime/messages";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useProviderStore } from "@/stores/providers";
 import { useSettingsStore } from "@/stores/settings";
@@ -5611,7 +5612,7 @@ describe("runtime session resilience", () => {
       store.startSubmissionWatchdog("turn-watch");
       expect(store.isSubmitting).toBe(true);
 
-      vi.advanceTimersByTime(120_000 + 1);
+      vi.advanceTimersByTime(240_000 + 1);
 
       expect(store.isSubmitting).toBe(false);
       expect(store.activeTurnId).toBeNull();
@@ -8950,5 +8951,197 @@ describe("workspace delete normalization (three-level tree)", () => {
 
     catalogSpy.mockRestore();
     normalizeSpy.mockRestore();
+  });
+});
+
+// ── submission_watchdog 红相验收（T1–T4）────────────────────────────────────────
+// 背景（submission_watchdog_timeout 两个问题）：
+//   1. startSubmissionWatchdog 是"一次性计时器"，不随流式事件续期 → 正常长任务（>120s 持续有
+//      delta 事件）也会被误杀；期望"仅静默超时才触发"（收到事件重置计时器）。
+//   2. watchdog 触发后缺少错误兜底：assistant 消息不存在时错误完全丢失，且未向后端发
+//      fail_turn_for_watchdog 类命令落 trace；期望触发时确保 assistant error + content
+//      兜底（进入 buildTurnHistory），并 fire-and-forget 通知后端且不抛异常。
+// 红相约定：当前一次性计时器实现下 T1/T3/T4 必须失败（红）；T2 为"静默超时仍需触发"
+// 回归护栏（当前实现下应保持通过/绿）。
+describe("submission watchdog acceptance (red-phase)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetFrontendFlightRecorderForTests();
+    window.localStorage.clear();
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    tauriMocks.mockSafeListen.mockResolvedValue(() => {});
+    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    setActivePinia(createPinia());
+  });
+
+  function createWatchdogTurnStore(args: {
+    turnId: string;
+    withAssistantMessage?: boolean;
+    activeRunId?: string | null;
+  }) {
+    const store = useRuntimeStore();
+    const eventHandlers = new Map<string, (event: { payload: TurnStreamEvent }) => void>();
+    tauriMocks.mockSafeListen.mockImplementation(async (eventName: string, handler: unknown) => {
+      eventHandlers.set(eventName, handler as (event: { payload: TurnStreamEvent }) => void);
+      return () => {};
+    });
+    const messages: ChatMessage[] = [
+      createMessage({ id: `${args.turnId}-user`, turnId: args.turnId, role: "user", content: "question" })
+    ];
+    if (args.withAssistantMessage !== false) {
+      messages.push(
+        createMessage({
+          id: `${args.turnId}-assistant`,
+          turnId: args.turnId,
+          role: "assistant",
+          content: "",
+          status: "pending"
+        })
+      );
+    }
+    store.$patch({
+      sessionId: "watchdog-red-session",
+      historyCursorMode: "live",
+      activeTurnId: args.turnId,
+      activeRunId: args.activeRunId ?? null,
+      isSubmitting: true,
+      phase: "calling_model",
+      messages
+    });
+    return { store, eventHandlers };
+  }
+
+  it("T1 renews the submission watchdog on streaming events, so long-running turns are not falsely killed", async () => {
+    vi.useFakeTimers();
+    try {
+      const { store, eventHandlers } = createWatchdogTurnStore({
+        turnId: "turn-watch-t1",
+        activeRunId: "run-watch-t1"
+      });
+      await store.initializeTurnEvents();
+      store.startSubmissionWatchdog("turn-watch-t1");
+      expect(store.isSubmitting).toBe(true);
+
+      // 模拟长任务：每 50s(<120s) 收到一次 delta，3 次后总时长 150s(>120s)。
+      // 修复实现下每次收到流式事件都应续期 watchdog；当前一次性计时器不续期。
+      const dispatchDelta = (sequence: number) => {
+        eventHandlers.get("turn:delta")?.({
+          payload: {
+            turnId: "turn-watch-t1",
+            kind: "delta",
+            eventId: `t1-delta-${sequence}`,
+            eventType: "turn.delta",
+            eventVersion: "1.0",
+            sequence,
+            emittedAtMs: sequence * 50_000,
+            text: `chunk-${sequence}`
+          }
+        });
+      };
+
+      for (let i = 1; i <= 3; i += 1) {
+        vi.advanceTimersByTime(50_000);
+        dispatchDelta(i);
+      }
+
+      // 红点①：持续有事件的正常长任务不得被 watchdog 误杀（每次间隔均 < 120s）。
+      // 当前一次性计时器实现：总时长 150s > 120s → 120s 处误杀 → 此断言失败（红）。
+      expect(store.isSubmitting).toBe(true);
+      expect(store.phase).toBe("calling_model");
+      expect(store.messages.find((m) => m.id === "turn-watch-t1-assistant")?.status).toBe("pending");
+
+      // 停止续期后真正静默 240s+ 才应触发
+      vi.advanceTimersByTime(240_000 + 1);
+      expect(store.isSubmitting).toBe(false);
+      expect(store.phase).toBe("failed");
+      const assistant = store.messages.find((m) => m.id === "turn-watch-t1-assistant");
+      expect(assistant?.status).toBe("error");
+      expect(assistant?.errorDetail).toBe("submission_watchdog_timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("T2 still fires on a silent timeout with no streaming events (regression guard)", () => {
+    vi.useFakeTimers();
+    try {
+      const { store } = createWatchdogTurnStore({ turnId: "turn-watch-t2" });
+      store.startSubmissionWatchdog("turn-watch-t2");
+      vi.advanceTimersByTime(240_000 + 1);
+
+      expect(store.isSubmitting).toBe(false);
+      expect(store.phase).toBe("failed");
+      const assistant = store.messages.find((m) => m.id === "turn-watch-t2-assistant");
+      expect(assistant?.status).toBe("error");
+      expect(assistant?.errorDetail).toBe("submission_watchdog_timeout");
+      expect(assistant?.content).toBeTruthy();
+      expect(assistant?.content).toContain("超时");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("T3 creates a fallback assistant error message when none exists, so the error enters buildTurnHistory", () => {
+    vi.useFakeTimers();
+    try {
+      const { store } = createWatchdogTurnStore({
+        turnId: "turn-watch-t3",
+        withAssistantMessage: false
+      });
+      expect(store.messages.some((m) => m.role === "assistant")).toBe(false);
+      store.startSubmissionWatchdog("turn-watch-t3");
+      vi.advanceTimersByTime(240_000 + 1);
+
+      // 红点：assistant 消息缺失时，当前实现不创建兜底消息 → 错误完全丢失 → 此断言失败（红）。
+      const fallback = store.messages.find((m) => m.turnId === "turn-watch-t3" && m.role === "assistant");
+      expect(fallback).toBeDefined();
+      expect(fallback?.status).toBe("error");
+      expect(fallback?.errorDetail).toBe("submission_watchdog_timeout");
+      expect(fallback?.content).toBeTruthy();
+      expect(fallback?.content).toContain("超时");
+
+      expect(store.isSubmitting).toBe(false);
+      expect(store.phase).toBe("failed");
+
+      // 错误必须随 buildTurnHistory 进入模型上下文（issue：assistant 缺失时错误完全丢失）
+      const history = buildTurnHistory(store.messages);
+      expect(
+        history.some((m) => m.role === "assistant" && m.status === "error" && m.content.includes("超时"))
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("T4 notifies the backend with a watchdog failure command (fire-and-forget, no throw)", () => {
+    vi.useFakeTimers();
+    try {
+      const invokedCommands: string[] = [];
+      tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+        invokedCommands.push(command);
+        throw new Error("backend unavailable"); // 后端失败也不得影响前端解锁（fire-and-forget）
+      });
+
+      const { store } = createWatchdogTurnStore({
+        turnId: "turn-watch-t4",
+        activeRunId: "run-watch-t4"
+      });
+      store.startSubmissionWatchdog("turn-watch-t4");
+      vi.advanceTimersByTime(240_000 + 1);
+
+      // 前端解锁不得受后端调用失败影响（不抛异常）
+      expect(store.isSubmitting).toBe(false);
+      expect(store.phase).toBe("failed");
+
+      // 红点：修复应调用 fail_turn_for_watchdog 类命令（命令名未定，按含 "watchdog" 语义匹配）；
+      // 当前实现只发 stop_graph_run / stop_turn → 无 watchdog 命令 → 此断言失败（红）。
+      expect(invokedCommands.length).toBeGreaterThan(0);
+      const watchdogCommand = invokedCommands.find((command) =>
+        command.toLowerCase().includes("watchdog")
+      );
+      expect(watchdogCommand).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
