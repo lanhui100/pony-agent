@@ -19,7 +19,7 @@
   },
   "endpoints": {
     "primary": "https://api.github.com/repos/lanhui100/pony-agent/releases/latest",
-    "fallback": "https://minio.example.com/pony-agent-releases/latest.json"
+    "fallback": "https://s3.local.ponyjob.top/pony-agent-releases/latest.json"
   },
   "payload_schema": {
     "type": "object",

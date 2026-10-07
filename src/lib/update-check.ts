@@ -17,7 +17,7 @@ export const GITHUB_REPO = "pony-agent";
 export const RELEASES_LATEST_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 
 /** MinIO / S3 fallback endpoint for release latest metadata. */
-export const FALLBACK_RELEASE_LATEST_URL = "https://minio.example.com/pony-agent-releases/latest.json";
+export const FALLBACK_RELEASE_LATEST_URL = "https://s3.local.ponyjob.top/pony-agent-releases/latest.json";
 /** Fallback probe timeout (NFR: <= 3000ms). */
 export const FALLBACK_PROBE_TIMEOUT_MS = 3_000;
 
@@ -30,8 +30,13 @@ export interface FallbackReleasePayload {
 
 /**
  * MinIO / S3 fallback 拉取与校验。
+ * 防御性契约：强制运行时校验 URL scheme 恒为 https，防止非安全协议降级。
  */
 export async function fetchFallbackRelease(): Promise<AppReleaseInfo> {
+  if (!FALLBACK_RELEASE_LATEST_URL.startsWith("https://")) {
+    throw new UpdateCheckError("network", "fallback endpoint must use HTTPS");
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FALLBACK_PROBE_TIMEOUT_MS);
 
