@@ -648,8 +648,76 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (assistantMessage && assistantMessage.status === "pending") {
           assistantMessage.status = "error";
           assistantMessage.errorDetail = "submission_watchdog_timeout";
+          // 确保 content 非空，以便进入历史与模型上下文（buildTurnHistory 过滤空 content）
+          if (!assistantMessage.content || assistantMessage.content.trim().length === 0) {
+            assistantMessage.content = "运行超时：长时间未收到终态事件，已强制解锁。";
+          }
           this.messageRevision = null;
         }
+
+        // Trace 终态收敛：收敛 traceSteps 与 traceTimeline，将进行态标记为 error
+        this.traceSteps = createSubmitFailureTraceSteps();
+        const baseFailureTimeline = this.traceTimeline && this.traceTimeline.length > 0
+          ? cloneTraceTimeline(this.traceTimeline)
+          : createSubmitFailureTraceTimeline();
+
+        let updatedCallModel = false;
+        for (let i = baseFailureTimeline.length - 1; i >= 0; i--) {
+          const entry = baseFailureTimeline[i];
+          if (entry && (entry.kind === "call_model" || entry.kind === "call_tool")) {
+            if (entry.state === "active" || entry.state === "pending") {
+              entry.state = "error";
+              entry.error = "submission_watchdog_timeout";
+              updatedCallModel = true;
+            }
+          }
+        }
+        if (!updatedCallModel && baseFailureTimeline.length > 0) {
+          const lastEntry = baseFailureTimeline[baseFailureTimeline.length - 1];
+          if (lastEntry) {
+            lastEntry.state = "error";
+            lastEntry.error = "submission_watchdog_timeout";
+          }
+        }
+
+        const failurePatch = {
+          providerName: this.providerName || null,
+          providerProtocol: this.providerProtocol || null,
+          providerModel: this.providerModel || null
+        };
+        const patchedTimeline = applyProviderPatchToTraceTimeline(baseFailureTimeline, failurePatch);
+        this.publishTraceTimeline(patchedTimeline);
+        this.commitTurnTraceTimeline(turnId, this.traceTimeline, {
+          phase: "failed",
+          traceSteps: this.traceSteps,
+          toolActivities: this.toolActivities,
+          providerRequestedName: this.providerRequestedName,
+          providerName: this.providerName,
+          providerProtocol: this.providerProtocol,
+          providerModel: this.providerModel,
+          error: "submission_watchdog_timeout"
+        });
+
+        // 尝试向后端发出取消/停止指令，避免后端孤儿任务持续占用
+        const activeRunIdToStop = this.activeRunId;
+        if (isTauriAvailable()) {
+          try {
+            if (activeRunIdToStop) {
+              const res = safeInvoke("stop_graph_run", { runId: activeRunIdToStop });
+              if (res && typeof (res as Promise<unknown>).catch === "function") {
+                void (res as Promise<unknown>).catch(() => {});
+              }
+            } else {
+              const res = safeInvoke("stop_turn", { turnId });
+              if (res && typeof (res as Promise<unknown>).catch === "function") {
+                void (res as Promise<unknown>).catch(() => {});
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
         this.isSubmitting = false;
         this.activeTurnId = null;
         this.activeRunId = null;

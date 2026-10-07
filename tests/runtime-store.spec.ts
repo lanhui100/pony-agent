@@ -5602,7 +5602,7 @@ describe("runtime session resilience", () => {
             id: "assistant-watch",
             turnId: "turn-watch",
             role: "assistant",
-            content: "partial",
+            content: "",
             status: "pending"
           })
         ]
@@ -5616,10 +5616,15 @@ describe("runtime session resilience", () => {
       expect(store.isSubmitting).toBe(false);
       expect(store.activeTurnId).toBeNull();
       expect(store.phase).toBe("failed");
-      expect(store.messages.find((message) => message.id === "assistant-watch")?.status).toBe("error");
-      expect(store.messages.find((message) => message.id === "assistant-watch")?.errorDetail).toBe(
-        "submission_watchdog_timeout"
-      );
+      const assistant = store.messages.find((message) => message.id === "assistant-watch");
+      expect(assistant?.status).toBe("error");
+      expect(assistant?.errorDetail).toBe("submission_watchdog_timeout");
+      // 核心断言 1：content 为空时必须填入兜底错误提示，确保后续 buildTurnHistory 不被过滤而进入上下文
+      expect(assistant?.content).toContain("超时");
+      // 核心断言 2：traceTimeline 必须被终态收敛，call_model 不能悬挂在 active/calling_model 状态
+      const callModel = store.traceTimeline.find((entry) => entry.kind === "call_model");
+      expect(callModel?.state).toBe("error");
+      expect(callModel?.error).toBe("submission_watchdog_timeout");
     } finally {
       vi.useRealTimers();
     }
