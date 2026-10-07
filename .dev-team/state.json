@@ -1,0 +1,16 @@
+{
+  "wave": 1,
+  "baseline_commit": "805541e",
+  "created": "2026-10-07T16:00:00+08:00",
+  "members": {
+    "lead": { "role": "lead", "tasks": [] },
+    "wave1-tester": { "role": "test", "tasks": ["task-1", "task-3"] },
+    "wave1-executor": { "role": "executor", "tasks": ["task-2"] }
+  },
+  "tasks": {
+    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "owner": "wave1-tester", "status": "pending", "red_commit": null, "green_commit": null },
+    "task-2": { "subject": "product-bug 用例最小产品修复", "owner": "wave1-executor", "status": "pending", "blocked_by": ["task-1"], "red_commit": null, "green_commit": null },
+    "task-3": { "subject": "并发遗留未提交改动分诊（只读）", "owner": "wave1-tester", "status": "pending", "red_commit": null, "green_commit": null }
+  },
+  "notes": "工作区存在并发遗留未提交改动（process.rs tracked_count cfg、3 个 Vue 文件删除），属 task-3 调查范围，团队成员严禁触碰与提交。"
+}

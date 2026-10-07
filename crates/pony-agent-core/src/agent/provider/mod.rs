@@ -4602,7 +4602,19 @@ mod tests {
                 "Edit".to_string(),
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
-                "ViewImage".to_string()
+                "ViewImage".to_string(),
+                // PA-110/PA-109 team & orchestration 工具追加（2ce5d1c wire subagent and
+                // agent team tools）：product tool surface 现止于 team 工具，不再止于 ViewImage。
+                "subagent".to_string(),
+                "workflow".to_string(),
+                "spawn_teammate".to_string(),
+                "list_agents".to_string(),
+                "send_message".to_string(),
+                "interrupt_agent".to_string(),
+                "drain_inbox".to_string(),
+                "team_task_create".to_string(),
+                "team_task_update".to_string(),
+                "team_task_list".to_string()
             ]
         );
     }
@@ -4638,7 +4650,19 @@ mod tests {
                 "Edit".to_string(),
                 "BatchExecute".to_string(),
                 "Plan".to_string(),
-                "ViewImage".to_string()
+                "ViewImage".to_string(),
+                // PA-110/PA-109 team & orchestration 工具追加（2ce5d1c wire subagent and
+                // agent team tools）：product tool surface 现止于 team 工具，不再止于 ViewImage。
+                "subagent".to_string(),
+                "workflow".to_string(),
+                "spawn_teammate".to_string(),
+                "list_agents".to_string(),
+                "send_message".to_string(),
+                "interrupt_agent".to_string(),
+                "drain_inbox".to_string(),
+                "team_task_create".to_string(),
+                "team_task_update".to_string(),
+                "team_task_list".to_string()
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -4646,10 +4670,14 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|description| !description.trim().is_empty())
         }));
-        // PA-076 P2-6: Plan and ViewImage are appended; the existing 13-tool prefix is
-        // preserved (cache-friendly stable prefix invariant from design Decision 10).
+        // PA-076 P2-6: Plan and ViewImage 在既有 13-tool 前缀后追加；PA-110 起 team 工具
+        // 再追加于 ViewImage 之后（cache-friendly stable prefix invariant from design
+        // Decision 10 仍保持：前缀顺序不变，仅尾部增长）。
         let last_two = &names[names.len() - 2..];
-        assert_eq!(last_two, &["Plan".to_string(), "ViewImage".to_string()]);
+        assert_eq!(
+            last_two,
+            &["team_task_update".to_string(), "team_task_list".to_string()]
+        );
     }
 
     #[test]

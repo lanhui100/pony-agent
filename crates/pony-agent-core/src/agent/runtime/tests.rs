@@ -3448,7 +3448,21 @@ fn runtime_default_tool_executor_routes_read_tools_through_governed_dispatcher()
 fn runtime_default_tool_executor_fails_closed_for_run_without_sandbox() {
     // Execute scope + no `SandboxBackend` on the governed dispatcher => designed fail-closed
     // (design.md Decision 7 / task 5.5), surfaced through the runtime's default executor.
-    let runtime = AgentRuntime::new();
+    // 注：`AgentRuntime::new()`（DesktopRuntimePreset）自 b8cba07 起总是装配生产沙箱后端
+    // （Native 可用优先，否则 HostApprovedUnsandboxed），"无沙箱"状态只能经显式 override
+    // 注入（与 governed_executor 的 `governed_executor_registers_production_sandbox_backend_for_run`
+    // 同一验证入口），故此处用 builder + NoSandboxBackend override 构造 runtime 而非 new()。
+    use crate::agent::governed_executor::build_governed_executor_with_sandbox_backend;
+    use crate::agent::sandbox::NoSandboxBackend;
+    use crate::agent::tool_runtime::SandboxBackend;
+    let executor = build_governed_executor_with_sandbox_backend(
+        None,
+        None,
+        Some(Arc::new(NoSandboxBackend) as Arc<dyn SandboxBackend>),
+    );
+    let runtime = AgentRuntimeBuilder::desktop()
+        .tool_executor(Box::new(executor))
+        .build();
     let (result, _record, _traces) = runtime.execute_registered_tool_call(&ToolCall {
         call_id: Some("call-gov-run".to_string()),
         name: "Run".to_string(),
