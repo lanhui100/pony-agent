@@ -174,7 +174,7 @@ let lastLayoutCompensationAtMs = 0;
       latestAgentTop,
       targetDelta: metrics != null ? programmaticScrollTargetTop - metrics.scrollTop : null,
       latestVisibleTurnLayoutSignature: latestVisibleTurnLayoutSignature.value,
-      viewportResolved: viewport instanceof HTMLElement,
+      viewportResolved: typeof HTMLElement !== "undefined" && viewport instanceof HTMLElement,
       viewportMetricsValid: metrics != null
     };
   }
