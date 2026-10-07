@@ -3,16 +3,29 @@
   "baseline_commit": "805541e",
   "red_anchor": "20d31be",
   "hygiene_commit": "11159f7",
-  "updated": "2026-10-07T16:30:00+08:00",
+  "green_commit": "2f9eae0",
+  "updated": "2026-10-07T17:20:00+08:00",
   "members": {
     "lead": { "role": "lead", "tasks": [] },
     "wave1-tester": { "role": "test", "tasks": ["task-1", "task-3"] },
     "wave1-executor": { "role": "executor", "tasks": ["task-2"] }
   },
   "tasks": {
-    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "owner": "wave1-tester", "status": "in_progress", "red_commit": "20d31be", "green_commit": null },
-    "task-2": { "subject": "product-bug 用例最小产品修复", "owner": "wave1-executor", "status": "pending", "blocked_by": ["task-1"], "red_commit": null, "green_commit": null },
+    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "owner": "wave1-tester", "status": "completed", "red_commit": "20d31be", "green_commit": null },
+    "task-2": { "subject": "product-bug 用例最小产品修复", "owner": "wave1-executor", "status": "completed", "blocked_by": ["task-1"], "red_commit": "20d31be", "green_commit": "2f9eae0" },
     "task-3": { "subject": "并发遗留未提交改动分诊（只读）", "owner": "wave1-tester", "status": "completed", "red_commit": null, "green_commit": "11159f7" }
   },
-  "notes": "T1 红相锚定 20d31be；T3 处置完成（hygiene 11159f7）。T2 待 Executor 修复 11 个 product-bug。"
+  "reviews": {
+    "L3-A-tools.rs": { "verdict": "PASS", "findings_p2_p3": 5 },
+    "L3-B-provider": { "verdict": "PASS", "findings_p1": 2, "findings_p2_p3": 4 }
+  },
+  "follow_ups": [
+    "P1: name=\"\"+非对象JSON参数([]等) 判非空洞→normalize Err→整轮失败；相对46040ae窗口的优雅降级缺口（相对更早基线无回归）。建议 is_empty/is_hollow 公共判定纳入 []/原始值。",
+    "P2: extract/partial/is_hollow 零直接单测；建议补 name=\"\"×各参数形态矩阵测试。",
+    "P2: lexically_within_root 在 junction/8.3 短名根下假阳性 requires_authorization（fail-closed 方向）。",
+    "P2: Windows 词法逃逸目标的授权 grant 需 canonicalize 成功，审批不可兑现（平台不一致，符合测试意图）。",
+    "P3: cmd /C 元字符清单缺 %（前存在边界）。",
+    "本地 Linux 全量 lib 测试挂起：start_turn_stream_completes_after_multi_hop_followup_stream（MockHttpServer 超量请求无兜底）；建议 mock fail-fast 或确定性时钟，独立处理。"
+  ],
+  "notes": "绿相 2f9eae0 提交；待 push 后 CI（windows core 测试）复跑验证 9 条 [WINDOWS-CI-ONLY]。"
 }
