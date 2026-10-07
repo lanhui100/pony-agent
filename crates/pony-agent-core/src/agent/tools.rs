@@ -6629,13 +6629,15 @@ fn workspace_command_parts_with_batch(
 /// 固定行序：
 /// ```text
 /// @echo off
-/// chcp 65001 >nul
+/// chcp 65001 >nul 2>&1
 /// cd /d "<cwd>" || exit /b 1
 /// <command 原样>
 /// exit /b %errorlevel%
 /// ```
-/// - `chcp 65001 >nul`：在 zh-CN CP936 控制台下把活动代码页切到 UTF-8，避免批处理中的中文
-///   路径/输出在读取/回显时乱码（静默，不刷屏）。
+/// - `chcp 65001 >nul 2>&1`：在 zh-CN CP936 控制台下把活动代码页切到 UTF-8，避免批处理中的
+///   中文路径/输出在读取/回显时乱码（静默，不刷屏）。`2>&1` 兜底"无控制台"场景
+///   （子进程经 CREATE_NO_WINDOW 隐藏窗口后不再有控制台句柄，chcp 会失败并写 stderr，
+///   重定向后不污染工具输出）。
 /// - `cd /d "<cwd>" || exit /b 1`：cwd 写入双引号（不再使用 `cmd_escape_path` 的 caret 转义），
 ///   cd 失败必须短路退出，等价于旧 `&&` 语义——绝不在错误目录里继续执行（防止删除类命令
 ///   落到错误路径）。cwd 中的 `%` 双写为 `%%` 防止被批处理当作环境变量展开；Windows 路径
@@ -6647,7 +6649,7 @@ fn workspace_command_parts_with_batch(
 fn build_windows_batch_script(command: &str, cwd: &str) -> String {
     let escaped_cwd = cwd.replace('%', "%%");
     format!(
-        "@echo off\r\nchcp 65001 >nul\r\ncd /d \"{escaped_cwd}\" || exit /b 1\r\n{command}\r\nexit /b %errorlevel%\r\n"
+        "@echo off\r\nchcp 65001 >nul 2>&1\r\ncd /d \"{escaped_cwd}\" || exit /b 1\r\n{command}\r\nexit /b %errorlevel%\r\n"
     )
 }
 
@@ -11099,6 +11101,46 @@ mod tests {
         assert!(
             script.contains("exit /b %errorlevel%"),
             "末行必须为 exit /b %errorlevel%: {script:?}"
+        );
+    }
+
+    #[test]
+    fn windows_batch_script_tolerates_consoleless_chcp() {
+        // 弹窗修复配套：子进程经 CREATE_NO_WINDOW 隐藏后无控制台，chcp 失败会写 stderr；
+        // 必须 `>nul 2>&1` 静默吞掉，避免污染工具输出（"chcp" 报错混进 stderr）。
+        let script = build_windows_batch_script("echo ok", r"C:\w");
+        assert!(
+            script.contains("chcp 65001 >nul 2>&1"),
+            "chcp 必须同时重定向 stderr: {script:?}"
+        );
+    }
+
+    #[test]
+    fn windows_batch_script_keeps_real_world_powershell_cpu_mem_command_verbatim() {
+        // 真实事故回归（2026-10-07）：用户用 Run 查询主机 CPU/内存的 PowerShell 命令。
+        // 旧实现（cmd /C "cd /d … && <command>" 单参数内联）下，CommandLineToArgvW 把内嵌
+        // 双引号转义为 \"，cmd 按自己的规则剥离 → 引号失衡、`|`/`&`/`;` 被 cmd 误切分：
+        // PowerShell 收到残缺命令退出码 1（第一次调用），或等待 stdin 输入挂起到超时
+        // （第二次调用）。批处理方案必须逐字保留该命令——含引号、管道、`%`、中文全部原样。
+        let command = "powershell -NoProfile -Command \"$cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average; $os = Get-CimInstance Win32_OperatingSystem; $totalMem = $os.TotalVisibleMemorySize / 1MB; $freeMem = $os.FreePhysicalMemory / 1MB; $usedMem = $totalMem - $freeMem; $usedPct = [math]::Round(($usedMem / $totalMem) * 100, 2); Write-Output ('CPU使用率: {0}%' -f $cpu); Write-Output ('内存: 总计 {0} GB, 已用 {1} GB, 空闲 {2} GB, 使用率 {3}%' -f [math]::Round($totalMem,2), [math]::Round($usedMem,2), [math]::Round($freeMem,2), $usedPct)\"";
+        let script = build_windows_batch_script(command, r"D:\Documents\pony-agent\src-tauri");
+        assert!(
+            script.contains(command),
+            "事故命令必须逐字保留（含引号/管道/中文/% 不变形）: {script:?}"
+        );
+        assert!(
+            !script.contains("\\\""),
+            "内嵌双引号不得被改写为 \\\"（CommandLineToArgvW 转义会损坏 cmd 解析）: {script:?}"
+        );
+        assert!(
+            script.contains("cd /d \"D:\\Documents\\pony-agent\\src-tauri\" || exit /b 1"),
+            "cwd 必须保持双引号包裹且 cd 失败短路退出: {script:?}"
+        );
+        // 行结构锁定：@echo off / chcp / cd / 命令 / exit —— 命令体绝不回到 cmd /C 行。
+        assert_eq!(
+            script.lines().count(),
+            5,
+            "批处理必须恰好 5 行（命令体只在批处理文件内）: {script:?}"
         );
     }
 

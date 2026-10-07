@@ -44,6 +44,16 @@ mod windows_job;
 #[cfg(windows)]
 use windows_job::Job;
 
+/// Windows: 让 GUI 宿主（Tauri 无控制台）派生的控制台子进程（cmd/powershell/git 等）
+/// 不弹出可见控制台窗口。父进程无控制台时，Windows 默认会为控制台子进程分配一个新的
+/// 控制台窗口（用户可见的"闪窗/弹 PowerShell 窗口"）；`CREATE_NO_WINDOW` 抑制该窗口。
+/// 子进程 stderr/stdout 已走管道，去掉窗口不影响输出采集。
+#[cfg(windows)]
+pub(crate) fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+}
+
 /// Default per-stream output cap (64 KiB).
 const DEFAULT_BUFFER_CAP: usize = 64 * 1024;
 /// How long `poll` waits for drain threads to flush after the child has exited.
@@ -159,10 +169,10 @@ impl BoundedBuffer {
         }
     }
 
-    /// Take the accumulated bytes (converted lossily to UTF-8) and clear the buffer. The
+    /// Take the accumulated bytes (decoded to UTF-8 text) and clear the buffer. The
     /// truncated flag and dropped-bytes counter are cumulative over the process lifetime.
     fn drain(&mut self) -> (String, bool, u64) {
-        let text = String::from_utf8_lossy(&self.data).into_owned();
+        let text = decode_process_output(&self.data);
         self.data.clear();
         (text, self.truncated, self.dropped)
     }
@@ -170,6 +180,72 @@ impl BoundedBuffer {
     fn dropped_bytes(&self) -> u64 {
         self.dropped
     }
+}
+
+/// 解码子进程输出字节为 UTF-8 文本。
+/// - 优先严格 UTF-8：现代工具与批处理链路（`chcp 65001` + 可见控制台）输出 UTF-8，
+///   此分支逐字节直通，对现有行为零改动。
+/// - Windows 无控制台（`CREATE_NO_WINDOW`）下，控制台程序（PowerShell 5.1、cmd 等）的
+///   中文输出会退化为系统 ANSI/OEM 代码页（如 zh-CN 的 GBK）；UTF-8 校验失败时按代码页
+///   转码，避免出现 U+FFFD 乱码——保证"隐藏弹窗"修复不引入中文输出回归。
+pub(crate) fn decode_process_output(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(valid) => valid.to_string(),
+        Err(_) => {
+            #[cfg(windows)]
+            {
+                transcode_from_windows_code_page(bytes)
+                    .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+            }
+            #[cfg(not(windows))]
+            {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+        }
+    }
+}
+
+/// Windows: 按系统 ANSI 代码页（zh-CN 为 GBK）转码，失败时再试 OEM 代码页。两个代码页
+/// 均转码失败返回 `None`（调用方回退 lossy UTF-8）。
+#[cfg(windows)]
+fn transcode_from_windows_code_page(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{
+        MultiByteToWideChar, CP_ACP, CP_OEMCP, MB_ERR_INVALID_CHARS,
+    };
+    for code_page in [CP_ACP, CP_OEMCP] {
+        // SAFETY: 输入/输出缓冲区均有效且大小由 Windows 先导调用确定；MB_ERR_INVALID_CHARS
+        // 使非法序列返回 0 而非静默替换，循环随之结束，不会越界写。
+        let wide_len = unsafe {
+            MultiByteToWideChar(
+                code_page,
+                MB_ERR_INVALID_CHARS,
+                bytes.as_ptr().cast::<i8>(),
+                bytes.len() as i32,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if wide_len <= 0 {
+            continue;
+        }
+        let mut wide = vec![0u16; wide_len as usize];
+        let written = unsafe {
+            MultiByteToWideChar(
+                code_page,
+                MB_ERR_INVALID_CHARS,
+                bytes.as_ptr().cast::<i8>(),
+                bytes.len() as i32,
+                wide.as_mut_ptr(),
+                wide_len,
+            )
+        };
+        if written <= 0 {
+            continue;
+        }
+        wide.truncate(written as usize);
+        return Some(String::from_utf16_lossy(&wide));
+    }
+    None
 }
 
 /// Reads a child stream until EOF and feeds a bounded buffer. Runs on its own thread so a child
@@ -454,6 +530,9 @@ impl ProcessManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Windows 弹窗修复：控制台子进程（cmd/powershell）不得弹出可见控制台窗口。
+        #[cfg(windows)]
+        hide_console_window(&mut command);
         // Design Decision 7: sandboxed children run with a minimal environment and must not
         // inherit provider keys, session secrets, or ambient proxy env vars. A child whose
         // `SandboxRequest` sets `isolate_environment` gets a minimal env (`env_clear` plus the
@@ -883,6 +962,16 @@ fn describe_command(program: &str, arguments: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::agent::tool_runtime::SandboxRequest;
+
+    #[test]
+    fn decode_process_output_utf8_passthrough_and_never_panics() {
+        // 严格 UTF-8 直通（现有行为零改动），非法字节不得 panic
+        // （Windows 走系统代码页转码，非 Windows 走 lossy 回退）。
+        assert_eq!(decode_process_output(b"hello"), "hello");
+        assert_eq!(decode_process_output("中文输出".as_bytes()), "中文输出");
+        let _ = decode_process_output(b"\x81\x40\x82\x60");
+        let _ = decode_process_output(b"ascii \xFF\xFE tail");
+    }
 
     fn sandbox() -> SandboxRequest {
         SandboxRequest {

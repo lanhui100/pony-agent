@@ -413,6 +413,10 @@ pub fn terminal_open_with_workspace_root(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
+    // Windows 弹窗修复：虚拟终端子进程（powershell 等）不得弹出可见控制台窗口。
+    #[cfg(windows)]
+    crate::agent::process::hide_console_window(&mut command);
+
     if let Some(env_map) = &args.env {
         for (k, v) in env_map {
             command.env(k, v);
@@ -599,7 +603,7 @@ pub fn terminal_read(args: TerminalReadArgs) -> Result<TerminalReadResult, Strin
         let is_alive = session.check_alive();
 
         if !output_bytes.is_empty() || !is_alive || start.elapsed() >= timeout {
-            let output = String::from_utf8_lossy(&output_bytes).to_string();
+            let output = crate::agent::process::decode_process_output(&output_bytes);
             let total = session.buffer.lock().unwrap().total_written();
             return Ok(TerminalReadResult {
                 output,

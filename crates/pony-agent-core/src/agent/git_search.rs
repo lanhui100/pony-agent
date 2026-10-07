@@ -111,11 +111,13 @@ pub fn git_diff_remote(args: GitDiffRemoteArgs) -> Result<GitDiffRemoteResult, S
         return Err("Invalid target_ref parameter".to_string());
     }
 
-    let output = Command::new("git")
-        .arg("diff")
-        .arg(&target_ref)
-        .current_dir(&ws_root)
-        .output();
+    let mut command = Command::new("git");
+    command.arg("diff").arg(&target_ref).current_dir(&ws_root);
+    // Windows 弹窗修复：git 为控制台程序，直接 spawn 会闪一个控制台窗口。
+    #[cfg(windows)]
+    crate::agent::process::hide_console_window(&mut command);
+
+    let output = command.output();
 
     match output {
         Ok(out) => {

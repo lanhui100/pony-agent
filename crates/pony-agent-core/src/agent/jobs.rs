@@ -399,6 +399,10 @@ pub fn job_start_with_workspace_root(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
+    // Windows 弹窗修复：控制台子进程不得弹出可见控制台窗口（与 Run/ProcessManager 一致）。
+    #[cfg(windows)]
+    crate::agent::process::hide_console_window(&mut command);
+
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
@@ -547,7 +551,7 @@ pub fn job_output(args: JobOutputArgs) -> Result<JobOutputResult, String> {
         if !should_wait || !is_running || start.elapsed() >= timeout {
             // Drain output
             let (slice, new_cursor) = session.buffer.lock().unwrap().read_from(offset);
-            let output = String::from_utf8_lossy(&slice).to_string();
+            let output = crate::agent::process::decode_process_output(&slice);
 
             return Ok(JobOutputResult {
                 job_id: session.job_id.clone(),
