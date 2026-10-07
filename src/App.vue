@@ -192,12 +192,12 @@ watch(rightSidebarPreferredOpen, (value) => {
       class="relative flex flex-col h-screen overflow-hidden bg-transparent text-stone-900 select-none"
       :class="{ resizing: isResizing }"
     >
-      <!-- 全平台无边框：去除独立顶部状态栏，窗口控制按钮轻量浮动于右上角，支持原生拖拽 -->
+      <!-- 全平台无边框：顶部原生拖拽区域贯穿全宽，窗口控制按钮轻量浮动于右上角 -->
       <div
-        class="absolute top-0 right-0 z-50 flex h-9 items-center pr-3"
+        class="absolute top-0 left-0 right-0 z-40 flex h-9 items-center justify-end pr-3"
         data-tauri-drag-region
       >
-        <WindowControls />
+        <WindowControls class="z-50" />
       </div>
 
       <section
