@@ -3,6 +3,7 @@ import {
   buildReleasePageUrl,
   describeUpdateCheckError,
   fetchLatestRelease,
+  FALLBACK_RELEASE_LATEST_URL,
   isNewerVersion,
   loadUpdateCache,
   loadUpdatePrefs,
@@ -192,6 +193,92 @@ describe("fetchLatestRelease", () => {
     }));
 
     await expect(fetchLatestRelease()).rejects.toMatchObject({ code: "network" });
+  });
+
+  describe("MinIO Fallback (acceptance)", () => {
+    it("GitHub fetch 失败（DNS/TLS/network）时应自动回退到 MinIO endpoint 成功解析", async () => {
+      const fetchMock = stubFetch(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes("api.github.com")) {
+          throw new TypeError("GitHub fetch failed");
+        }
+        if (url === FALLBACK_RELEASE_LATEST_URL) {
+          return jsonResponse({
+            tag_name: "v0.3.0",
+            name: "Fallback Release v0.3.0",
+            published_at: "2026-08-25T00:00:00Z"
+          });
+        }
+        return new Response("not found", { status: 404 });
+      });
+
+      const release = await fetchLatestRelease();
+
+      expect(release).toEqual({
+        tagName: "v0.3.0",
+        name: "Fallback Release v0.3.0",
+        publishedAtMs: Date.parse("2026-08-25T00:00:00Z")
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(String(fetchMock.mock.calls[1]?.[0])).toBe(FALLBACK_RELEASE_LATEST_URL);
+    });
+
+    it("GitHub 超时时应触发 MinIO 回退并成功获取版本", async () => {
+      const fetchMock = stubFetch(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes("api.github.com")) {
+          // 模拟 GitHub 超时 AbortError
+          throw new DOMException("GitHub request timed out", "AbortError");
+        }
+        if (url === FALLBACK_RELEASE_LATEST_URL) {
+          return jsonResponse({
+            tag_name: "v0.2.5",
+            name: "MinIO Release",
+            published_at: "2026-08-24T12:00:00Z"
+          });
+        }
+        return new Response("not found", { status: 404 });
+      });
+
+      const release = await fetchLatestRelease();
+
+      expect(release.tagName).toBe("v0.2.5");
+      expect(release.name).toBe("MinIO Release");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("GitHub 失败后 MinIO 也失败（网络/非 2xx），最终抛出 UpdateCheckError", async () => {
+      stubFetch(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes("api.github.com")) {
+          throw new TypeError("GitHub unreachable");
+        }
+        if (url === FALLBACK_RELEASE_LATEST_URL) {
+          return new Response("Internal Server Error", { status: 500 });
+        }
+        return new Response("not found", { status: 404 });
+      });
+
+      await expect(fetchLatestRelease()).rejects.toThrow(UpdateCheckError);
+    });
+
+    it("GitHub 失败后 MinIO 返回 malformed 数据（tag_name 缺失或非合法格式），应抛出 malformed UpdateCheckError", async () => {
+      stubFetch(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes("api.github.com")) {
+          throw new TypeError("GitHub unreachable");
+        }
+        if (url === FALLBACK_RELEASE_LATEST_URL) {
+          return jsonResponse({
+            tag_name: "invalid_format_tag",
+            name: "Malformed Release"
+          });
+        }
+        return new Response("not found", { status: 404 });
+      });
+
+      await expect(fetchLatestRelease()).rejects.toMatchObject({ code: "malformed" });
+    });
   });
 
   it("8s 超时 → timeout（AbortController 触发）", async () => {
