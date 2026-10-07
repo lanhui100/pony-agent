@@ -1,0 +1,33 @@
+{
+  "nfr_version": "1.0.0",
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_retries": 0,
+    "backoff_ms": 0
+  },
+  "concurrency_lock": {
+    "required": false,
+    "mechanism": "none"
+  },
+  "logging": {
+    "format": "json",
+    "require_trace_id": false
+  },
+  "resource_release": {
+    "abort_controller": true,
+    "clear_timer": true
+  },
+  "endpoints": {
+    "primary": "https://api.github.com/repos/lanhui100/pony-agent/releases/latest",
+    "fallback": "https://minio.example.com/pony-agent-releases/latest.json"
+  },
+  "payload_schema": {
+    "type": "object",
+    "required": ["tag_name"],
+    "properties": {
+      "tag_name": { "type": "string" },
+      "name": { "type": ["string", "null"] },
+      "published_at": { "type": ["string", "null"] }
+    }
+  }
+}

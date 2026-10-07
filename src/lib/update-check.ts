@@ -16,6 +16,18 @@ export const GITHUB_REPO = "pony-agent";
 /** GitHub REST v3 latest release（语义上排除 draft/prerelease），无鉴权。 */
 export const RELEASES_LATEST_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 
+/** MinIO / S3 fallback endpoint for release latest metadata. */
+export const FALLBACK_RELEASE_LATEST_URL = "https://minio.example.com/pony-agent-releases/latest.json";
+/** Fallback probe timeout (NFR: <= 3000ms). */
+export const FALLBACK_PROBE_TIMEOUT_MS = 3_000;
+
+/** MinIO / S3 fallback release metadata JSON payload schema. */
+export interface FallbackReleasePayload {
+  tag_name: string;
+  name?: string | null;
+  published_at?: string | null;
+}
+
 /** 自动检查最小间隔；手动检查恒绕过该节流。 */
 export const UPDATE_CHECK_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** 单次请求超时（弱网下防止 checking 永久死锁）。 */
