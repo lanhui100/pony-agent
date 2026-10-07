@@ -64,4 +64,32 @@ product-bug 红相保留确认（修改后未动，仍红）：
 
 ## 四、附带调查：本地全量 --lib 测试挂起（只调查不修复）
 
-详见下节（挂起定位结果）。
+### 挂起测试定位（二分收敛）
+`agent::runtime::tests::start_turn_stream_completes_after_multi_hop_followup_stream`（runtime/tests.rs:5050）。
+
+### 复现矩阵（cargo test -p pony-agent-core --target-dir target-test）
+| 运行方式 | 结果 |
+|---|---|
+| 单独运行该测试 | ok，0.19s |
+| `agent::runtime::tests::start_turn_stream` 前缀 20 个（单线程） | 19 ok + 1 红相，0.77s |
+| `agent::runtime::tests::run_turn` 前缀 17 个（单线程） | 16 ok + 1 红相，0.76s |
+| `agent::provider` / `agent::tools` / `agent::process` 模块 | 全部快速完成，不挂 |
+| **`agent::runtime` 模块全集（单线程 --test-threads=1）** | **completes 测试 60s+ 挂起**（libtest "has been running for over 60 seconds"，timeout 180 杀，exit 124） |
+| **`agent::runtime` 模块全集（默认并行）** | **completes 测试 60s+ 挂起**（timeout 150 杀） |
+| 全量 `--lib`（任务给定事实） | 挂起（45 分钟未结束） |
+
+### 根因推测（顺序依赖 / 跨测试状态污染）
+该测试在干净顺序（单独或同前缀小集合）下 0.19-0.77s 通过；仅在**前面执行过 100+ 个 runtime 测试后**才挂起，
+与线程数无关（单线程/并行均复现）→ 结论为跨测试顺序依赖污染，而非并行资源竞争。
+
+最可能机制：provider 在异常/污染环境下对某个 followup 请求触发重试，产生超出 mock 响应数目的额外 HTTP 请求；
+`MockHttpServer`（tests.rs:608）是**单线程 accept 循环且只 accept 预置响应次数**，对超量请求既不 accept 也不拒绝、
+无超时兜底 → provider 客户端永久阻塞在读取响应 → 测试挂起。结构弱点：mock 基建对"请求数 > 响应数"无 fail-fast。
+
+污染源候选（未确认，需后续专项排查）：前面的测试向共享静态状态写入副作用（provider 重试/超时/backoff 相关全局配置、
+tokio 共享 Runtime（TestRuntimeGuard）状态等）；具体污染链留待专项调查，本任务只定位不修复。
+
+### 处置建议（不执行）
+- MockHttpServer 增加超量请求兜底（accept 后写 5xx 或直接关闭连接，或设置 accept 超时）。
+- 或为 completes 测试注入确定性时钟/关闭 provider 重试。
+- 交给 Lead/后续专项；不影响本批 14 个失败的分诊与修正。
