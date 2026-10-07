@@ -6406,7 +6406,13 @@ fn f2_session_cwd_agrees_with_normalized_id_resolution() {
 fn f3_stamp_self_heals_existing_dead_workspace_id_and_persists() {
     let path = temp_sessions_path();
     let mut store = SessionStore::with_backend(Box::new(FileSessionBackend::new(path.clone())));
-    store.ensure_session("heal");
+    let session = store.ensure_session("heal");
+    session.history.push(TurnHistoryMessage {
+        role: "user".to_string(),
+        content: "hello".to_string(),
+        attachments: Vec::new(),
+        ..Default::default()
+    });
     // 模拟旧持久化遗留：会话已被盖上死 id（已注销工作区）。
     store
         .sessions
