@@ -1,16 +1,18 @@
 {
   "wave": 1,
   "baseline_commit": "805541e",
-  "created": "2026-10-07T16:00:00+08:00",
+  "red_anchor": "20d31be",
+  "hygiene_commit": "11159f7",
+  "updated": "2026-10-07T16:30:00+08:00",
   "members": {
     "lead": { "role": "lead", "tasks": [] },
     "wave1-tester": { "role": "test", "tasks": ["task-1", "task-3"] },
     "wave1-executor": { "role": "executor", "tasks": ["task-2"] }
   },
   "tasks": {
-    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "owner": "wave1-tester", "status": "pending", "red_commit": null, "green_commit": null },
+    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "owner": "wave1-tester", "status": "in_progress", "red_commit": "20d31be", "green_commit": null },
     "task-2": { "subject": "product-bug 用例最小产品修复", "owner": "wave1-executor", "status": "pending", "blocked_by": ["task-1"], "red_commit": null, "green_commit": null },
-    "task-3": { "subject": "并发遗留未提交改动分诊（只读）", "owner": "wave1-tester", "status": "pending", "red_commit": null, "green_commit": null }
+    "task-3": { "subject": "并发遗留未提交改动分诊（只读）", "owner": "wave1-tester", "status": "completed", "red_commit": null, "green_commit": "11159f7" }
   },
-  "notes": "工作区存在并发遗留未提交改动（process.rs tracked_count cfg、3 个 Vue 文件删除），属 task-3 调查范围，团队成员严禁触碰与提交。"
+  "notes": "T1 红相锚定 20d31be；T3 处置完成（hygiene 11159f7）。T2 待 Executor 修复 11 个 product-bug。"
 }
