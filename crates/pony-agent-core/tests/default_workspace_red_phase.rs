@@ -68,6 +68,105 @@ fn canonicalize_lossy(raw: &str) -> String {
         .to_string()
 }
 
+/// Windows 路径形态归一化核心（平台参数化纯函数，供平台包装与 Linux 形态测试复用）：
+/// `windows_forms=true` 时执行以下转换（否则恒等）：
+/// - MSYS/Cygwin 盘符根 `/x/...` → `X:\...`（斜杠转反斜杠，盘符大写）；
+/// - 剥 Win32 扩展长度前缀 `\\?\`（含 `\\?\UNC\` → `\\share`）；
+/// - 统一小写（Windows 路径比较大小写不敏感）。
+fn normalize_path_forms(s: &str, windows_forms: bool) -> String {
+    if !windows_forms {
+        return s.to_string();
+    }
+    let mut s = s.to_string();
+    let bytes = s.as_bytes();
+    // MSYS 根形态：/x/...（x 为盘符字母）。Unix 绝对路径如 /home/... 的第三字符
+    // 不是 '/'，不会误命中。
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b'/' && bytes[1].is_ascii_alphabetic() {
+        let drive = (bytes[1] as char).to_ascii_uppercase();
+        s = format!("{drive}:{}", s[2..].replace('/', "\\"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        s = format!(r"\\{rest}");
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        s = rest.to_string();
+    }
+    s.to_lowercase()
+}
+
+/// Windows 路径形态归一化（跨形态断言比较辅助；非 Windows 恒等）。
+///
+/// 背景：CI windows-latest 上子进程 `pwd` 输出是 MSYS 根形态（`/c/Users/...`），
+/// 而会话 workspace 是 `make_temp_dir`/canonicalize 后的 Win32 扩展形态
+/// （`\\?\C:\Users\...`）——两者指向同一目录，直接字符串比较必然形态错配假红。
+/// 处理：先 canonicalize（失败原样透传——MSYS 形态在 Win32 API 下不可解析）；
+/// Windows 下对**多行输出逐行**归一化（MSYS 根形态只作用于每行行首，terminal
+/// 输出中的 pwd 行可能在多行文本中部），Linux 恒等。
+fn normalize_path_for_compare(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let canonical = canonicalize_lossy(trimmed);
+    #[cfg(windows)]
+    {
+        canonical
+            .lines()
+            .map(|line| normalize_path_forms(line.trim(), true))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    #[cfg(not(windows))]
+    {
+        normalize_path_forms(&canonical, false)
+    }
+}
+
+/// 路径断言辅助：双方经 `normalize_path_for_compare` 归一化后比较
+/// （Windows 形态统一 + 大小写不敏感；Linux 恒等走 canonicalize 后字符串相等）。
+fn assert_paths_equal_for_platform(actual: &str, expected: &str, message: &str) {
+    let norm_actual = normalize_path_for_compare(actual);
+    let norm_expected = normalize_path_for_compare(expected);
+    assert_eq!(
+        norm_actual, norm_expected,
+        "{message}\nactual={actual}\nexpected={expected}"
+    );
+}
+
+/// 路径包含断言辅助：`output` 归一化后必须包含归一化的 `expected` 路径
+/// （terminal 输出含换行/回显等额外文本，故用包含而非相等）。
+fn assert_output_contains_path_for_platform(output: &str, expected: &str, message: &str) {
+    let norm_output = normalize_path_for_compare(output);
+    let norm_expected = normalize_path_for_compare(expected);
+    assert!(
+        norm_output.contains(&norm_expected),
+        "{message}\noutput={output}\nexpected={expected}"
+    );
+}
+
+/// Windows 形态转换逻辑的 Linux 可测镜像（复现 CI 实际值，见 ci_final.log）：
+/// MSYS 根形态与 `\\?\` 扩展形态必须归一为同一字形，避免 windows-latest 形态假红。
+#[test]
+fn normalize_path_forms_windows_shapes_are_testable_on_linux() {
+    // CI 实测对：patch4_job_some_ws_none_cwd_must_default_to_ws 的 left（MSYS pwd）
+    // 与 right（canonicalize 后 \\?\ 形态）归一后必须相等。
+    let msys = r"/c/Users/runneradmin/AppData/Local/Temp/patch4-job-ws-9172-1791368094212710700";
+    let extended = r"\\?\C:\Users\runneradmin\AppData\Local\Temp\patch4-job-ws-9172-1791368094212710700";
+    assert_eq!(
+        normalize_path_forms(msys, true),
+        normalize_path_forms(extended, true),
+        "MSYS 根形态与 \\?\\ 扩展形态必须归一为同一字形"
+    );
+    // 常规 Win32 形态（无前缀、盘符大写）也与前两者一致。
+    let plain = r"C:\Users\runneradmin\AppData\Local\Temp\patch4-job-ws-9172-1791368094212710700";
+    assert_eq!(normalize_path_forms(plain, true), normalize_path_forms(msys, true));
+    // UNC 扩展形态 → 常规 UNC。
+    assert_eq!(
+        normalize_path_forms(r"\\?\UNC\server\share\dir\file", true),
+        r"\\server\share\dir\file"
+    );
+    // Unix 绝对路径不得被 MSYS 分支误转换（第三字符非 '/'）。
+    assert_eq!(normalize_path_forms("/home/user/pony", true), "/home/user/pony");
+    // 恒等分支。
+    assert_eq!(normalize_path_forms("/tmp/a/b", false), "/tmp/a/b");
+}
+
 // ── 契约 1：get_workspace_root 读注册表 default ──────────────────────────
 
 #[test]
@@ -189,18 +288,22 @@ fn red_governed_executor_none_fallback_must_equal_compute_default_workspace_root
 
 #[test]
 fn red_job_cwd_none_must_default_to_session_workspace_root() {
-    // TASK-2-WIRE：新签名应为 job_start(args, session_workspace_root=Some(&ws))。
+    // TASK-2-WIRE 完成：task-2 已给 job_start 接入会话 workspace root 入参，
+    // 本用例按约定走新签名 job_start_with_workspace_root(..., Some(&ws)) 转绿。
     let ws = make_temp_dir(&unique_tag("red-phase-ws"));
     let cwd = current_dir_canonical();
     assert_ne!(ws, cwd, "前置条件失效：会话 workspace 与 cwd 重合，红相无区分度");
 
-    let started = job_start(JobStartArgs {
-        command: "sh".to_string(),
-        args: Some(vec!["-c".to_string(), "pwd".to_string()]),
-        cwd: None,
-        timeout_ms: Some(10_000),
-    })
-    .expect("job_start should succeed");
+    let started = job_start_with_workspace_root(
+        JobStartArgs {
+            command: "sh".to_string(),
+            args: Some(vec!["-c".to_string(), "pwd".to_string()]),
+            cwd: None,
+            timeout_ms: Some(10_000),
+        },
+        Some(ws.as_path()),
+    )
+    .expect("job_start_with_workspace_root should succeed");
     let out = job_output(JobOutputArgs {
         job_id: started.job_id.clone(),
         wait: Some(true),
@@ -214,10 +317,12 @@ fn red_job_cwd_none_must_default_to_session_workspace_root() {
     });
     let actual = out.output.trim().to_string();
     let _ = std::fs::remove_dir_all(&ws);
-    assert_eq!(
-        canonicalize_lossy(&actual),
-        ws.display().to_string(),
-        "job cwd 缺省必须返回会话 workspace root，而非 current_dir"
+    // 归一化比较：Windows 下 pwd 为 MSYS 形态（/c/...）、ws 为 \\?\ 形态，
+    // 归一后大小写不敏感相等；Linux 恒等。
+    assert_paths_equal_for_platform(
+        &actual,
+        &ws.display().to_string(),
+        "job cwd 缺省必须返回会话 workspace root，而非 current_dir",
     );
 }
 
@@ -297,20 +402,24 @@ fn red_terminal_cwd_outside_session_workspace_must_be_rejected() {
 
 #[test]
 fn red_terminal_cwd_none_must_default_to_session_workspace_root() {
-    // TASK-2-WIRE：新签名应为 terminal_open(args, session_workspace_root=Some(&ws))。
+    // TASK-2-WIRE 完成：task-2 已给 terminal_open 接入会话 workspace root 入参，
+    // 本用例按约定走新签名 terminal_open_with_workspace_root(..., Some(&ws)) 转绿。
     let ws = make_temp_dir(&unique_tag("red-phase-ws"));
     let cwd = current_dir_canonical();
     assert_ne!(ws, cwd, "前置条件失效：会话 workspace 与 cwd 重合，红相无区分度");
 
-    let opened = terminal_open(TerminalOpenArgs {
-        command: Some("sh".to_string()),
-        args: None,
-        cwd: None,
-        cols: Some(80),
-        rows: Some(24),
-        env: None,
-    })
-    .expect("terminal_open should succeed");
+    let opened = terminal_open_with_workspace_root(
+        TerminalOpenArgs {
+            command: Some("sh".to_string()),
+            args: None,
+            cwd: None,
+            cols: Some(80),
+            rows: Some(24),
+            env: None,
+        },
+        Some(ws.as_path()),
+    )
+    .expect("terminal_open_with_workspace_root should succeed");
     let send_ok = terminal_send(TerminalSendArgs {
         terminal_id: opened.terminal_id.clone(),
         input: "pwd\n".to_string(),
@@ -327,10 +436,11 @@ fn red_terminal_cwd_none_must_default_to_session_workspace_root() {
         force: Some(true),
     });
     let _ = std::fs::remove_dir_all(&ws);
-    assert!(
-        read.output.contains(&ws.display().to_string()),
-        "terminal cwd 缺省必须为会话 workspace root；实际输出：{}",
-        read.output
+    // 归一化包含比较：Windows 下 pwd 为 MSYS 形态（/c/...）、ws 为 \\?\ 形态。
+    assert_output_contains_path_for_platform(
+        &read.output,
+        &ws.display().to_string(),
+        "terminal cwd 缺省必须为会话 workspace root",
     );
 }
 
@@ -369,10 +479,12 @@ fn patch4_job_some_ws_none_cwd_must_default_to_ws() {
     });
     let actual = out.output.trim().to_string();
     let _ = std::fs::remove_dir_all(&ws);
-    assert_eq!(
-        canonicalize_lossy(&actual),
-        ws.display().to_string(),
-        "Some(ws)+cwd缺省必须返回 ws（会话锚定）"
+    // 归一化比较：Windows 下 pwd 为 MSYS 形态（/c/...）、ws 为 \\?\ 形态；
+    // 实现已生效（job 落在会话 ws），仅形态错配，归一后相等。
+    assert_paths_equal_for_platform(
+        &actual,
+        &ws.display().to_string(),
+        "Some(ws)+cwd缺省必须返回 ws（会话锚定）",
     );
 }
 
@@ -447,10 +559,12 @@ fn patch4_terminal_some_ws_none_cwd_must_default_to_ws() {
         force: Some(true),
     });
     let _ = std::fs::remove_dir_all(&ws);
-    assert!(
-        read.output.contains(&ws.display().to_string()),
-        "Some(ws)+cwd缺省必须为 ws；实际输出：{}",
-        read.output
+    // 归一化包含比较：Windows 下 pwd 为 MSYS 形态（/c/...）、ws 为 \\?\ 形态；
+    // 实现已生效（terminal 落在会话 ws），仅形态错配，归一后包含命中。
+    assert_output_contains_path_for_platform(
+        &read.output,
+        &ws.display().to_string(),
+        "Some(ws)+cwd缺省必须为 ws",
     );
 }
 
