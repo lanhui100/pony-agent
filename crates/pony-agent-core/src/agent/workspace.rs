@@ -324,6 +324,43 @@ pub fn resolve_workspace_root(records: &[WorkspaceRecord], workspace_id: Option<
         .ok_or_else(|| format!("workspace 不存在：{id}"))
 }
 
+/// PA-114 workspace-cwd 第二轮（W1/R1-2）：会话归属 workspace id 归一为单一真相源。
+/// `id == DEFAULT_WORKSPACE_ID` 或已注册 → 原样返回；否则（死 id/空白/超长/控制字符）→
+/// `DEFAULT_WORKSPACE_ID`。保持 stamp 既有日志口径：控制字符压平 + 80 字符截断。
+/// 本函数不触碰 PA-080 的显式调用边界——工具链 `resolved_workspace_root` 对调用方显式传入
+/// 的未注册 id 依旧 fail-closed `invalid_workspace`；归一只统一**会话归属**链。
+pub fn normalize_session_workspace_id(workspaces: &[WorkspaceRecord], id: &str) -> String {
+    if id == DEFAULT_WORKSPACE_ID || workspaces.iter().any(|record| record.id == id) {
+        return id.to_string();
+    }
+    // L-C（ADR 0015）：id 来自外部输入——压平换行并截断，防日志伪造。
+    let safe_echo: String = id
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take(80)
+        .collect();
+    eprintln!(
+        "[pony-agent] normalize_session_workspace_id: 未注册的 workspace '{safe_echo}'，归一为 default"
+    );
+    DEFAULT_WORKSPACE_ID.to_string()
+}
+
+/// PA-114 workspace-cwd 第二轮（W2/R2-4）：默认工作区 root 兜底 seam——`computed` 可解析则
+/// 原样返回；为 `None` 时输出与 control_plane 对齐的瞬时兜底告警并返回 `cwd()`（进程 cwd，
+/// 不持久化为默认工作区）。`cwd` 以闭包传入使告警分支不会急切求值。
+pub fn default_root_or_cwd_with_warning(
+    computed: Option<PathBuf>,
+    cwd: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    if let Some(root) = computed {
+        return root;
+    }
+    eprintln!(
+        "[pony-agent] 默认工作区无法解析，使用进程 cwd 作为瞬时兜底（不持久化为默认工作区）"
+    );
+    cwd()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

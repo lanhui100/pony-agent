@@ -436,6 +436,10 @@ pub fn collect_env_info() -> EnvironmentInfo {
 /// `cwd` 被固定为 `root`（会话实际执行目录），`is_git_repo`/`git_branch` 也基于 `root` 判定
 /// 而非进程工作目录；其余字段（platform/shell/date/timezone）与 [`collect_env_info`] 一致。
 /// 供 env note 使用，避免"进程启动目录(AppData) ≠ 会话工作区"的误导。
+///
+/// 已知语义（PA-114 workspace-cwd 第二轮 W3/R1-3）：git 判定为 workspace root 浅查——
+/// 仅检查 `root/.git`，不向上寻仓；仓库子目录作为 workspace 时 env note 显示
+/// not a git repo 属已知语义（与 DSH SessionHeader.cwd 粒度对齐）。
 pub fn collect_env_info_for_workspace(root: &Path) -> EnvironmentInfo {
     let mut info = collect_env_info();
     let cwd = root.display().to_string();

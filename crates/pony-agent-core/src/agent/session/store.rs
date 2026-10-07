@@ -2005,40 +2005,36 @@ impl SessionStore {
             .and_then(|session| session.workspace_id.clone())
     }
 
-    /// 首次持久化盖章 workspace_id（PA-079）：会话 workspace_id 为 None 时写入并落盘；
-    /// 已盖章则 no-op（幂等，不影响既有会话的后续轮）。
+    /// 会话 workspace 归属盖章（W1，PA-114 workspace-cwd 第二轮）：统一走
+    /// [`crate::agent::workspace::normalize_session_workspace_id`] 归一（死 id/空白/超长/控制
+    /// 字符 → default，日志口径压平+截断），消除内联重复。
+    /// 触发条件放宽：归一后与当前归属不同（含 None → 首次盖章、已存在死 id → 自愈写回）→
+    /// 写回并落盘；已注册 id 幂等 no-op。
     /// **先 `ensure_session` 再盖章**：turn 提交时全新会话尚未被 `prepare_turn` 创建，
     /// 若只对已存在会话盖章，首轮 workspace_id 会丢失。
     pub fn stamp_workspace_id(&mut self, session_id: &str, workspace_id: &str) {
-        // 纵深防御（三级树裁决②）：非 default 且未注册的 id 一律归一为
-        // default——工作区删除后，携带死 id 的陈旧/竞态提交不得把会话重新
-        // 盖成孤儿（附件导入硬失败 vs 工具根软回退的分叉随之不可达）。
-        let normalized = if workspace_id == crate::agent::workspace::DEFAULT_WORKSPACE_ID
-            || self.workspaces.iter().any(|record| record.id == workspace_id)
-        {
-            workspace_id.to_string()
-        } else {
-            // L-C（ADR 0015）：id 来自外部输入——压平换行并截断，防日志伪造。
-            let safe_echo: String = workspace_id
-                .chars()
-                .map(|ch| if ch.is_control() { ' ' } else { ch })
-                .take(80)
-                .collect();
-            eprintln!(
-                "[pony-agent] stamp_workspace_id: 未注册的 workspace '{safe_echo}'，归一为 default"
-            );
-            crate::agent::workspace::DEFAULT_WORKSPACE_ID.to_string()
-        };
-        let changed = {
-            let session = self.ensure_session(session_id);
-            if session.workspace_id.is_none() {
-                session.workspace_id = Some(normalized);
-                true
-            } else {
-                false
+        let normalized = crate::agent::workspace::normalize_session_workspace_id(
+            &self.workspaces,
+            workspace_id,
+        );
+        // 现有归属快照（可变更借用前取值，避免与 ensure_session 的 &mut self 冲突）。
+        let current_workspace_id = self
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.workspace_id.clone());
+        let should_write = match current_workspace_id.as_deref() {
+            None => true,
+            Some(current) if current == normalized => false,
+            Some(current) => {
+                // 当前归属是死 id（归一为其他值）→ 自愈写回归一值并落盘；已注册的不同 id
+                // → 保持首次盖章优先（既有 only-once 语义，不因后续轮输入漂移覆盖）。
+                crate::agent::workspace::normalize_session_workspace_id(&self.workspaces, current)
+                    != current
             }
         };
-        if changed {
+        if should_write {
+            let session = self.ensure_session(session_id);
+            session.workspace_id = Some(normalized);
             self.save_to_backend();
         }
     }

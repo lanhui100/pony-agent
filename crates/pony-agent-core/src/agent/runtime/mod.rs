@@ -274,7 +274,14 @@ impl AgentRuntime {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             });
-            match sessions.resolve_workspace_root(Some(owner)) {
+            // W1（PA-114 workspace-cwd 第二轮）：死 id 归属按归一后的 default id 解析 root
+            // （与 env note 的 session_workspace_cwd 同源），不再 fail-closed；仅当 default
+            // 本身也未注册时保持既有 fail-closed（None → 工具层阻断，PA-080 边界不变）。
+            let normalized_owner = crate::agent::workspace::normalize_session_workspace_id(
+                &sessions.list_workspaces(),
+                owner,
+            );
+            match sessions.resolve_workspace_root(Some(&normalized_owner)) {
                 Ok(root) => Some(root),
                 Err(error) => {
                     eprintln!("[pony-agent] workspace root 解析失败（Fail-closed 禁止回退默认 root）：{error}");

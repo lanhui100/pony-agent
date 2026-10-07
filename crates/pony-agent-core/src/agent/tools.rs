@@ -1018,10 +1018,13 @@ pub struct ToolRouter {
 impl ToolRouter {
     pub fn new() -> Self {
         Self {
-            // 默认工作区分叉收敛：兜底取 compute_default_workspace_root()
-            //（Windows Documents/pony_agent，Unix ~/pony_agent），dirs 解析失败才回退 cwd。
-            workspace_root: crate::agent::workspace::compute_default_workspace_root()
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            // 默认工作区分叉收敛：compute_default_workspace_root()
+            //（Windows Documents~/pony_agent，Unix ~/pony_agent）优先；解析失败 → seam
+            // 输出与 control_plane 对齐的瞬时兜底告警并以进程 cwd 兜底（W2/R2-4）。
+            workspace_root: crate::agent::workspace::default_root_or_cwd_with_warning(
+                crate::agent::workspace::compute_default_workspace_root(),
+                || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
             process_manager: ProcessManager::new(),
             sandbox_backend: None,
             web_resolver: Arc::new(FailClosedResolver),
