@@ -1,31 +1,29 @@
 {
   "wave": 1,
+  "status": "closed",
   "baseline_commit": "805541e",
-  "red_anchor": "20d31be",
-  "hygiene_commit": "11159f7",
-  "green_commit": "2f9eae0",
-  "updated": "2026-10-07T17:20:00+08:00",
+  "final_commit": "97b301b",
+  "checkpoints": { "red_anchor": "20d31be", "green": "2f9eae0", "stabilize": "90de197", "closure": "97b301b" },
+  "ci": { "final_run": 37607978026, "result": "green", "core_lib": "1003/1003 passed", "integration": "all green" },
   "members": {
     "lead": { "role": "lead", "tasks": [] },
-    "wave1-tester": { "role": "test", "tasks": ["task-1", "task-3"] },
-    "wave1-executor": { "role": "executor", "tasks": ["task-2"] }
+    "wave1-tester": { "role": "test", "tasks": ["task-1", "task-3", "task-5"] },
+    "wave1-executor": { "role": "executor", "tasks": ["task-2", "task-4"] }
   },
   "tasks": {
-    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "owner": "wave1-tester", "status": "completed", "red_commit": "20d31be", "green_commit": null },
-    "task-2": { "subject": "product-bug 用例最小产品修复", "owner": "wave1-executor", "status": "completed", "blocked_by": ["task-1"], "red_commit": "20d31be", "green_commit": "2f9eae0" },
-    "task-3": { "subject": "并发遗留未提交改动分诊（只读）", "owner": "wave1-tester", "status": "completed", "red_commit": null, "green_commit": "11159f7" }
-  },
-  "reviews": {
-    "L3-A-tools.rs": { "verdict": "PASS", "findings_p2_p3": 5 },
-    "L3-B-provider": { "verdict": "PASS", "findings_p1": 2, "findings_p2_p3": 4 }
+    "task-1": { "subject": "14 个 CI 失败 core 测试分诊 + 测试侧修正冻结", "status": "completed", "red_commit": "20d31be" },
+    "task-2": { "subject": "product-bug 用例最小产品修复", "status": "completed", "green_commit": "2f9eae0" },
+    "task-3": { "subject": "并发遗留未提交改动分诊", "status": "completed", "green_commit": "11159f7" },
+    "task-4": { "subject": "Run close_stdin 打破 PS 无控制台挂起", "status": "completed", "green_commit": "fa52bc6" },
+    "task-5": { "subject": "CI 测试稳定化 + 红相契约收口", "status": "completed", "green_commit": "97b301b" }
   },
   "follow_ups": [
-    "P1: name=\"\"+非对象JSON参数([]等) 判非空洞→normalize Err→整轮失败；相对46040ae窗口的优雅降级缺口（相对更早基线无回归）。建议 is_empty/is_hollow 公共判定纳入 []/原始值。",
-    "P2: extract/partial/is_hollow 零直接单测；建议补 name=\"\"×各参数形态矩阵测试。",
-    "P2: lexically_within_root 在 junction/8.3 短名根下假阳性 requires_authorization（fail-closed 方向）。",
-    "P2: Windows 词法逃逸目标的授权 grant 需 canonicalize 成功，审批不可兑现（平台不一致，符合测试意图）。",
-    "P3: cmd /C 元字符清单缺 %（前存在边界）。",
-    "本地 Linux 全量 lib 测试挂起：start_turn_stream_completes_after_multi_hop_followup_stream（MockHttpServer 超量请求无兜底）；建议 mock fail-fast 或确定性时钟，独立处理。"
+    "P1: name=\"\"+非对象JSON参数([]等) 空洞判定缺口（相对46040ae窗口），建议公共判定纳入非对象可解析值",
+    "本地Linux全量挂起: start_turn_stream_completes_after_multi_hop_followup_stream (MockHttpServer 超量请求无兜底)",
+    "P2: extract/partial/is_hollow 直接单测覆盖缺口",
+    "P2: lexically_within_root junction/8.3短名根假阳性 requires_authorization",
+    "P3: cmd /C 元字符 fail-closed 清单缺 %",
+    "④(b): followup-sync 收 SSE 包装响应时纯 JSON 解析失败（graceful 降级），建议 SSE 载荷重建"
   ],
-  "notes": "绿相 2f9eae0 提交；待 push 后 CI（windows core 测试）复跑验证 9 条 [WINDOWS-CI-ONLY]。"
+  "meta_retrospective": "docs at .dev-team/meta-retrospective.md (wave-1)"
 }
