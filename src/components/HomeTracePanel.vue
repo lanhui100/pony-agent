@@ -1493,7 +1493,7 @@ function resolveBuildContextObservation(
       <ScrollArea
         ref="traceBodyScrollRef"
         :class="bodyScrollClass"
-        viewport-class="trace-body-viewport"
+        viewport-class="trace-body-viewport px-3.5 py-2.5"
         @vue:mounted="onTraceBodyMounted"
         @vue:unmounted="onTraceBodyUnmounted"
       >

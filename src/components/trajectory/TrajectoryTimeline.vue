@@ -80,69 +80,89 @@ function getSpanCoreInitial(span: TrajectoryTimelineSpan): string {
 
 <template>
   <div
-    class="relative select-none border-b border-stone-200/70 bg-[#faf6ef] p-2 text-xs"
+    class="relative select-none border-b border-stone-200/70 bg-[#faf6ef] px-3.5 py-3 text-xs"
     role="region"
     aria-label="轨迹时间轴"
     data-testid="trajectory-timeline"
   >
-    <!-- Turn Boundaries Vertical Rules -->
-    <div class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+    <div class="relative z-10 flex gap-2">
+      <!-- 字段名栏 (Dedicated Lane Labels) -->
       <div
-        v-for="boundary in model.turnBoundaries"
-        :key="boundary.turnId"
-        class="absolute top-0 bottom-0 border-l border-dashed border-stone-300/80"
-        :style="{ left: `${getTurnBoundaryLeftPercent(boundary.time)}%` }"
+        class="flex flex-col space-y-1.5 w-[6.8rem] shrink-0 border-r border-stone-200/70 pr-2 pt-4"
+        data-testid="trajectory-lane-labels"
       >
-        <span
-          class="sticky top-0 ml-1 inline-block rounded bg-[#f6f0e8] px-1 py-0.5 text-[9px] font-semibold text-stone-600 shadow-xs"
+        <div
+          v-for="(label, laneIndex) in laneLabels"
+          :key="laneIndex"
+          class="flex h-6 items-center"
         >
-          {{ boundary.title }}
-        </span>
+          <span
+            class="truncate text-[10px] font-medium tracking-tight text-stone-500 select-none"
+            :title="label"
+          >
+            {{ label }}
+          </span>
+        </div>
       </div>
-    </div>
 
-    <!-- 3 Swimlanes -->
-    <div class="relative z-10 space-y-1.5 pt-4">
+      <!-- 轨道区域 (Dedicated Lane Track) -->
       <div
-        v-for="(label, laneIndex) in laneLabels"
-        :key="laneIndex"
-        class="relative flex h-6 items-center rounded-[0.35rem] bg-[#f6f0e8] px-1"
+        class="relative min-w-0 flex-1"
+        data-testid="trajectory-lane-track"
       >
-        <!-- Lane Label -->
-        <span
-          class="pointer-events-none absolute left-1.5 z-20 text-[10px] font-medium tracking-tight text-stone-400 select-none opacity-70"
-        >
-          {{ label }}
-        </span>
-
-        <!-- Spans in this lane -->
-        <div class="relative h-full w-full">
-          <template v-for="span in model.spans" :key="span.id">
-            <Tooltip
-              v-if="span.lane === laneIndex"
-              :text="`${span.label} (${span.durationMs > 0 ? span.durationMs + 'ms' : 'seq'})`"
+        <!-- Turn Boundaries Vertical Rules (仅在轨道区) -->
+        <div class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+          <div
+            v-for="boundary in model.turnBoundaries"
+            :key="boundary.turnId"
+            class="absolute top-0 bottom-0 border-l border-dashed border-stone-300/80"
+            :style="{ left: `${getTurnBoundaryLeftPercent(boundary.time)}%` }"
+          >
+            <span
+              class="sticky top-0 ml-1 inline-block rounded bg-[#f6f0e8] px-1 py-0.5 text-[9px] font-semibold text-stone-600 shadow-xs"
             >
-              <button
-                type="button"
-                class="absolute top-1 bottom-1 flex items-center justify-center truncate rounded-[3px] px-1 text-[10px] font-medium leading-none transition shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 cursor-pointer"
-                :class="[
-                  getSpanColorClasses(span),
-                  selectedSpanId === span.id
-                    ? 'ring-2 ring-amber-500 ring-offset-1 z-30 font-bold scale-[1.02]'
-                    : 'z-10'
-                ]"
-                :style="{
-                  left: `${getSpanLeftPercent(span)}%`,
-                  width: `${getSpanWidthPercent(span)}%`
-                }"
-                :aria-label="span.label"
-                :data-testid="`trajectory-span-${span.id}`"
-                @click="emit('select-span', span)"
-              >
-                <span>{{ getSpanCoreInitial(span) }}</span>
-              </button>
-            </Tooltip>
-          </template>
+              {{ boundary.title }}
+            </span>
+          </div>
+        </div>
+
+        <!-- 3条泳道轨道 -->
+        <div class="relative z-10 space-y-1.5 pt-4">
+          <div
+            v-for="(_, laneIndex) in laneLabels"
+            :key="laneIndex"
+            class="relative flex h-6 items-center rounded-[0.35rem] bg-[#f6f0e8] px-1"
+          >
+            <!-- Spans in this lane -->
+            <div class="relative h-full w-full">
+              <template v-for="span in model.spans" :key="span.id">
+                <Tooltip
+                  v-if="span.lane === laneIndex"
+                  :text="`${span.label} (${span.durationMs > 0 ? span.durationMs + 'ms' : 'seq'})`"
+                >
+                  <button
+                    type="button"
+                    class="absolute top-1 bottom-1 flex items-center justify-center truncate rounded-[3px] px-1 text-[10px] font-medium leading-none transition shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 cursor-pointer"
+                    :class="[
+                      getSpanColorClasses(span),
+                      selectedSpanId === span.id
+                        ? 'ring-2 ring-amber-500 ring-offset-1 z-30 font-bold scale-[1.02]'
+                        : 'z-10'
+                    ]"
+                    :style="{
+                      left: `${getSpanLeftPercent(span)}%`,
+                      width: `${getSpanWidthPercent(span)}%`
+                    }"
+                    :aria-label="span.label"
+                    :data-testid="`trajectory-span-${span.id}`"
+                    @click="emit('select-span', span)"
+                  >
+                    <span>{{ getSpanCoreInitial(span) }}</span>
+                  </button>
+                </Tooltip>
+              </template>
+            </div>
+          </div>
         </div>
       </div>
     </div>

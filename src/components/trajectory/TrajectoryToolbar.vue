@@ -18,7 +18,7 @@ const emit = defineEmits<{
 
 <template>
   <header
-    class="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200/70 bg-[#faf6ef] px-3 py-2 text-xs"
+    class="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200/70 bg-[#faf6ef] px-3.5 py-2 text-xs"
     role="toolbar"
     aria-label="轨迹控制工具栏"
   >

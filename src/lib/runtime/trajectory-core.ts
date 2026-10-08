@@ -146,6 +146,25 @@ function mapTraceStepStateToStatus(
   return "completed";
 }
 
+export function resolveEntryEffectiveDurationMs(entry: TraceTimelineEntry): number {
+  if (entry.durationMs != null && Number.isFinite(entry.durationMs) && entry.durationMs > 0) {
+    return entry.durationMs;
+  }
+  if (entry.durationSeconds != null && Number.isFinite(entry.durationSeconds) && entry.durationSeconds > 0) {
+    return Math.round(entry.durationSeconds * 1000);
+  }
+  if (entry.toolActivities && entry.toolActivities.length > 0) {
+    const totalToolSec = entry.toolActivities.reduce((acc, act) => acc + (act.durationSeconds ?? 0), 0);
+    if (totalToolSec > 0) {
+      return Math.round(totalToolSec * 1000);
+    }
+  }
+  if (entry.turnDurationMs != null && Number.isFinite(entry.turnDurationMs) && entry.turnDurationMs > 0) {
+    return entry.turnDurationMs;
+  }
+  return 0;
+}
+
 /**
  * deriveTrajectoryTimeline
  * Projects TurnTraceRecord array into a normalized timeline model with 3 lanes and boundaries.
@@ -177,11 +196,12 @@ export function deriveTrajectoryTimeline(
         Boolean(entry.error) ||
         (turn.phase === "failed" && entry === entries[entries.length - 1]);
 
+      const resolvedDurationMs = resolveEntryEffectiveDurationMs(entry);
       let duration = 0;
       if (mode === "sequence") {
         duration = 1;
       } else {
-        duration = Math.max(1, entry.durationMs || 10);
+        duration = resolvedDurationMs > 0 ? resolvedDurationMs : 100;
       }
 
       const start = currentTime;
@@ -197,7 +217,7 @@ export function deriveTrajectoryTimeline(
         lane,
         start,
         end,
-        durationMs: entry.durationMs || (mode === "sequence" ? 0 : duration),
+        durationMs: resolvedDurationMs > 0 ? resolvedDurationMs : (mode === "sequence" ? 0 : duration),
         isError,
       });
     }
@@ -254,6 +274,7 @@ export function deriveTrajectoryRecords(
           preview = entry.label || entry.kind;
         }
 
+        const resolvedDurationMs = resolveEntryEffectiveDurationMs(entry);
         cells.push({
           id: entry.id,
           turnId: turn.turnId,
@@ -263,7 +284,7 @@ export function deriveTrajectoryRecords(
           title: entry.label || entry.kind,
           preview,
           status,
-          durationMs: entry.durationMs || 0,
+          durationMs: resolvedDurationMs > 0 ? resolvedDurationMs : (entry.durationMs || 0),
           inputTokens: entry.inputTokens ?? undefined,
           outputTokens: entry.outputTokens ?? undefined,
           reasoningTokens: entry.reasoningTokens ?? undefined,

@@ -644,8 +644,15 @@ function modelEntryContent(
   return "";
 }
 
-function modelEventKey(prefix: "reasoning" | "content", assistant: ChatMessage, _entry: TraceTimelineEntry) {
-  return `${prefix}-${assistant.id}`;
+function modelEventKey(
+  prefix: "reasoning" | "content",
+  assistant: ChatMessage,
+  entry: TraceTimelineEntry,
+  index = 0
+) {
+  return index === 0
+    ? `${prefix}-${assistant.id}`
+    : `${prefix}-${assistant.id}-hop-${index}-${entry.id}`;
 }
 
 function streamingReasoningFade(reasoningContent: string, assistant: ChatMessage) {
@@ -669,6 +676,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   const events: AgentTurnEvent[] = [];
 
   if (turn.assistant && modelEntries.length > 0) {
+    let entryIndex = 0;
     for (const entry of modelEntries) {
       const streaming = isStreamingModelEntry(turn, entry, modelEntries);
       const reasoningContent = showReasoningContent.value
@@ -677,7 +685,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       if (reasoningContent) {
         events.push({
           kind: "reasoning",
-          key: modelEventKey("reasoning", turn.assistant, entry),
+          key: modelEventKey("reasoning", turn.assistant, entry, entryIndex),
           order: entry.sequence - 0.2,
           assistant: turn.assistant,
           reasoningContent,
@@ -689,13 +697,14 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       if (content && !shouldRenderAssistantAsError(turn)) {
         events.push({
           kind: "content",
-          key: modelEventKey("content", turn.assistant, entry),
+          key: modelEventKey("content", turn.assistant, entry, entryIndex),
           order: entry.sequence,
           assistant: turn.assistant,
           content,
           streaming
         });
       }
+      entryIndex++;
     }
   } else if (turn.assistant && shouldShowReasoningBlock(turn.assistant)) {
     events.push({
@@ -716,8 +725,8 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
         ? modelOrder + (fallbackOrder - assistantOrder)
         : fallbackOrder;
     const streamFallbackOrder =
-      isActiveStreamingTurn && modelEntry && tool.status === "done"
-        ? modelOrder - 0.1
+      isActiveStreamingTurn && modelEntry
+        ? (tool.status === "pending" ? modelOrder + 0.1 : modelOrder - 0.1)
         : normalizedFallbackOrder;
     events.push({
       kind: "tools",

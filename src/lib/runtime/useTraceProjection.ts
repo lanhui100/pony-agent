@@ -39,15 +39,21 @@ function compareTurnTraceOrder(left: TurnTraceRecord, right: TurnTraceRecord) {
 
 /** 单次模型调用生成速度（token/s）：优先按生成期（扣除首 token 延迟）计算。 */
 function entryTokenGenerationSpeed(entry: TraceTimelineEntry): number | null {
-  if (entry.outputTokens == null || entry.turnDurationMs == null) {
+  const durationValue =
+    (entry.durationMs != null && entry.durationMs > 0 ? entry.durationMs : null) ??
+    (entry.durationSeconds != null && entry.durationSeconds > 0 ? Math.round(entry.durationSeconds * 1000) : null) ??
+    (entry.turnDurationMs != null && entry.turnDurationMs > 0 ? entry.turnDurationMs : null) ??
+    null;
+
+  if (entry.outputTokens == null || durationValue == null || durationValue <= 0) {
     return null;
   }
 
   let durationMs: number;
-  if (entry.firstTokenLatencyMs != null && entry.turnDurationMs - entry.firstTokenLatencyMs > 0) {
-    durationMs = entry.turnDurationMs - entry.firstTokenLatencyMs;
+  if (entry.firstTokenLatencyMs != null && durationValue - entry.firstTokenLatencyMs > 0) {
+    durationMs = durationValue - entry.firstTokenLatencyMs;
   } else {
-    durationMs = Math.max(entry.turnDurationMs, 1);
+    durationMs = Math.max(durationValue, 1);
   }
 
   const speed = entry.outputTokens / (durationMs / 1000);
@@ -56,7 +62,7 @@ function entryTokenGenerationSpeed(entry: TraceTimelineEntry): number | null {
 
 /** 整轮整体速度兜底（turn 级 outputTokens / turnDurationMs）。 */
 function turnTokenSpeed(turn: TurnTraceRecord): number | null {
-  if (turn.outputTokens == null || turn.turnDurationMs == null) {
+  if (turn.outputTokens == null || turn.turnDurationMs == null || turn.turnDurationMs <= 0) {
     return null;
   }
 

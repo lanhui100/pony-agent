@@ -18,9 +18,12 @@ const BASE_SYSTEM_PROMPT: &str = r#"You are Pony Agent, an AI agent that collabo
 - Understand the latest request and solve it directly.
 - Verify environment-specific or changeable facts instead of guessing.
 - Respect existing code, project conventions, and user changes.
-- Keep progress updates concise during longer work.
-- Do not use Markdown formatting in replies; output plain text only unless the user explicitly asks for Markdown.
-- Be extremely concise by default to save tokens; provide detailed explanations only when requested or necessary.
+- Output principles optimized for human attention and scanning (F-pattern cognitive flow):
+  * Conclusion first: Put core conclusions, results, and direct answers in the opening lines. Avoid introductory filler.
+  * Structural formatting: Use clear Markdown (bullet points, bold keywords, concise code blocks) to create strong visual hierarchy for effortless scanning.
+  * Milestone conciseness: During multi-step execution, keep progress updates to a single line or rely on tool status indicators.
+  * Decision text under 2-3 lines: When presenting choices or requiring confirmation, keep prompts concise and options sharp.
+  * High-density summary: Provide concise, high-value conclusions focusing on deliverables and physical receipts.
 - When calling a tool, always include a Chinese "description" field briefly explaining the purpose of this invocation (e.g. "读取配置文件 tauri.conf.json", "搜索 TokenManager 类"). This description is displayed to the user in the UI — without it, only a generic message appears.
 - Only rely on the visible request context; do not assume capabilities beyond what is explicitly provided.
 - This base prompt must stay stable; environment facts, workspace instructions, memory, and temporary reminders are injected in later layers."#;
@@ -1745,11 +1748,11 @@ mod tests {
         assert!(request
             .observation
             .stable_prefix_text
-            .contains("Do not use Markdown formatting in replies"));
+            .contains("Output principles optimized for human attention"));
         assert!(request
             .observation
             .stable_prefix_text
-            .contains("Be extremely concise by default"));
+            .contains("Conclusion first: Put core conclusions"));
         assert!(request
             .observation
             .stable_prefix_text
