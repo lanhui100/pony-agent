@@ -1,32 +1,38 @@
 {
-  "wave": 2,
+  "wave": 3,
   "status": "closed",
-  "baseline_commit": "7691ab0",
-  "final_commit": "f79d11c",
-  "checkpoints": { "red_anchor": "7691ab0", "green": "f79d11c", "closure": "f79d11c" },
-  "ci": { "result": "green", "frontend": "661 passed / runtime-store 117 passed", "tauri_full": "all green", "core_control_plane": "66 passed", "fail_turn_for_watchdog": "3 passed" },
+  "baseline_commit": "6d3ea12",
+  "final_commit": "055fa6d",
+  "checkpoints": {
+    "red_anchor": "6d3ea12",
+    "green": "055fa6d",
+    "closure": "055fa6d"
+  },
+  "ci": {
+    "result": "green",
+    "frontend": "661 passed / runtime-store 117 passed",
+    "core_acceptance": "7 passed (ponysentry_telemetry_test)",
+    "workspace_check": "all green"
+  },
   "members": {
-    "lead": { "role": "lead", "tasks": [] },
-    "protocol-agent": { "role": "protocol", "tasks": ["contract-watchdog-fix"] },
+    "lead": { "role": "lead", "tasks": ["task-5"] },
+    "protocol-agent": { "role": "protocol", "tasks": ["task-1"] },
     "test-agent": { "role": "test", "tasks": ["task-2"] },
-    "executor-frontend": { "role": "executor", "tasks": ["task-3-frontend"] },
-    "executor-backend": { "role": "executor", "tasks": ["task-3-backend", "l3-o1-o2"] }
+    "executor-runtime": { "role": "executor", "tasks": ["task-3"] },
+    "executor-desktop": { "role": "executor", "tasks": ["task-4"] }
   },
   "tasks": {
-    "task-5": { "subject": "wave-2: watchdog 根因修复（rearm 续期 + fail_turn_for_watchdog + 兜底消息）", "status": "completed", "green_commit": "f79d11c" }
+    "task-1": { "subject": "Phase 1: 制定 PonySentry 协议契约、NFR 基准与架构接入报告", "status": "completed" },
+    "task-2": { "subject": "Phase 2: Test Agent 编写红相独立验收测试并冻结", "status": "completed", "red_commit": "6d3ea12" },
+    "task-3": { "subject": "Phase 3: Executor Runtime 实现 Core 客户端及 Agent 运行时错误埋点", "status": "completed", "green_commit": "055fa6d" },
+    "task-4": { "subject": "Phase 4: Executor Desktop 实现桌面端与前端错误埋点", "status": "completed", "green_commit": "055fa6d" },
+    "task-5": { "subject": "Phase 5: Join Barrier, 门禁回归, 生产态冒烟与元复盘", "status": "completed", "closure_commit": "055fa6d" }
   },
-  "root_causes_fixed": [
-    "RC1: watchdog 一次性 120s 计时器不随事件续期 → 240s + rearmSubmissionWatchdog 8 非终态处理器续期，仅静默超时触发",
-    "RC2: watchdog 触发仅前端本地收敛，后端 trace 权威未落盘 → 新增 fail_turn_for_watchdog 幂等 upsert failed trace + checkpoint failed + request_stop",
-    "RC3: assistant 消息缺失错误丢失 → ensureAssistantMessage 兜底 + error/errorDetail/content 进入 buildTurnHistory"
-  ],
-  "l3_review": {
-    "verdict": "PASS",
-    "fixed_before_merge": ["O1: 终态 turn 不覆盖 completed trace", "O2: checkpoint.session_id 权威优先"],
-    "known_boundaries": ["O3: 历史模式 + 运行中 turn >240s 静默盲区", "lock contention delay", "stop idempotency redundancy"]
+  "telemetry_verification": {
+    "service_url": "http://10.43.94.160:3000",
+    "test_issue_id": "4c85497a-677e-4ebb-8a3a-8fdcda031299",
+    "test_fingerprint": "5b288d84fc32e6e09984a8f194ce1ab841867455c810c52cdb63839b58e3a6d0",
+    "status": "verified"
   },
-  "follow_ups": [
-    "已知挂起: start_turn_stream_completes_after_multi_hop_followup_stream (MockHttpServer 超量请求无兜底) — 与本次改动无关"
-  ],
-  "meta_retrospective": "docs at .dev-team/meta-retrospective-watchdog.md (wave-2)"
+  "meta_retrospective": ".dev-team/meta-retrospective.md"
 }
