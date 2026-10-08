@@ -1,5 +1,5 @@
 use super::config::PonySentryConfig;
-use super::models::{Breadcrumb, Exception, Frame, IngestPayload};
+use super::models::{AgentTracePayload, Breadcrumb, Exception, Frame, IngestPayload};
 use super::sanitizer::{sanitize, sanitize_json};
 use std::collections::{HashMap, VecDeque};
 use std::panic::PanicHookInfo;
@@ -12,10 +12,16 @@ const MAX_BREADCRUMBS: usize = 64;
 const QUEUE_CAPACITY: usize = 1024;
 const REQUEST_TIMEOUT_SECS: u64 = 3;
 
+#[derive(Debug)]
+enum SentryEvent {
+    Ingest(IngestPayload),
+    Trace(AgentTracePayload),
+}
+
 #[derive(Clone)]
 pub struct PonySentryClient {
     pub config: PonySentryConfig,
-    sender: Option<SyncSender<IngestPayload>>,
+    sender: Option<SyncSender<SentryEvent>>,
     breadcrumbs: Arc<Mutex<VecDeque<Breadcrumb>>>,
 }
 
@@ -24,7 +30,7 @@ impl PonySentryClient {
         let breadcrumbs = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BREADCRUMBS)));
 
         let sender = if config.enabled {
-            let (tx, rx) = mpsc::sync_channel::<IngestPayload>(QUEUE_CAPACITY);
+            let (tx, rx) = mpsc::sync_channel::<SentryEvent>(QUEUE_CAPACITY);
             let worker_cfg = config.clone();
             let _handle: Option<JoinHandle<()>> = thread::Builder::new()
                 .name("ponysentry-worker".to_string())
@@ -165,10 +171,61 @@ impl PonySentryClient {
         }
 
         if let Some(ref tx) = self.sender {
-            match tx.try_send(payload) {
+            match tx.try_send(SentryEvent::Ingest(payload)) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     eprintln!("[ponysentry] queue full (1024), dropping event to protect runtime");
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    eprintln!("[ponysentry] worker disconnected");
+                }
+            }
+        }
+    }
+
+    pub fn capture_agent_trace(&self, mut trace: AgentTracePayload) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // 零信任脱敏管道处理
+        trace.session_id = sanitize(&trace.session_id);
+        trace.run_id = trace.run_id.take().map(|r| sanitize(&r));
+        trace.turn_id = trace.turn_id.take().map(|t| sanitize(&t));
+
+        if let Some(tags) = trace.tags.take() {
+            trace.tags = Some(
+                tags.into_iter()
+                    .map(|(k, v)| (sanitize(&k), sanitize(&v)))
+                    .collect(),
+            );
+        }
+
+        if let Some(extra) = trace.extra.take() {
+            trace.extra = Some(sanitize_json(&extra));
+        }
+
+        for turn in &mut trace.turns {
+            turn.turn_id = sanitize(&turn.turn_id);
+            turn.phase = turn.phase.take().map(|p| sanitize(&p));
+            turn.provider = turn.provider.take().map(|p| sanitize(&p));
+            turn.model = turn.model.take().map(|m| sanitize(&m));
+            turn.error = turn.error.take().map(|e| sanitize(&e));
+            for tool_call in &mut turn.tool_calls {
+                tool_call.call_id = tool_call.call_id.take().map(|c| sanitize(&c));
+                tool_call.tool_name = sanitize(&tool_call.tool_name);
+                tool_call.arguments_summary =
+                    tool_call.arguments_summary.take().map(|a| sanitize(&a));
+                tool_call.status = sanitize(&tool_call.status);
+                tool_call.error = tool_call.error.take().map(|e| sanitize(&e));
+            }
+        }
+
+        if let Some(ref tx) = self.sender {
+            match tx.try_send(SentryEvent::Trace(trace)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    eprintln!("[ponysentry] queue full (1024), dropping trace to protect runtime");
                 }
                 Err(TrySendError::Disconnected(_)) => {
                     eprintln!("[ponysentry] worker disconnected");
@@ -182,7 +239,7 @@ impl PonySentryClient {
     }
 }
 
-fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<IngestPayload>) {
+fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -205,18 +262,33 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<IngestPayload>
         }
     };
 
-    let ingest_url = format!("{}/api/v1/ingest", config.endpoint.trim_end_matches('/'));
+    let base_url = config.endpoint.trim_end_matches('/');
+    let ingest_url = format!("{base_url}/api/v1/ingest");
+    let trace_url = format!("{base_url}/api/v1/traces");
 
-    while let Ok(payload) = receiver.recv() {
+    while let Ok(event) = receiver.recv() {
+        let (url, body_json) = match event {
+            SentryEvent::Ingest(payload) => (ingest_url.clone(), serde_json::to_value(&payload)),
+            SentryEvent::Trace(trace) => (trace_url.clone(), serde_json::to_value(&trace)),
+        };
+
+        let body = match body_json {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[ponysentry] Failed to serialize event: {e}");
+                continue;
+            }
+        };
+
         let mut req = client
-            .post(&ingest_url)
+            .post(&url)
             .header("Content-Type", "application/json");
 
         if let Some(ref token) = config.client_token {
             req = req.header("X-Client-Token", token);
         }
 
-        let send_fut = req.json(&payload).send();
+        let send_fut = req.json(&body).send();
 
         rt.block_on(async {
             match send_fut.await {
@@ -226,7 +298,7 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<IngestPayload>
                     }
                 }
                 Err(e) => {
-                    eprintln!("[ponysentry] Failed to send event to {ingest_url}: {e}");
+                    eprintln!("[ponysentry] Failed to send event to {url}: {e}");
                 }
             }
         });

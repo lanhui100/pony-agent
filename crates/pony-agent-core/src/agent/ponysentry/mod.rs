@@ -47,6 +47,12 @@ pub fn capture_payload(payload: IngestPayload) {
     }
 }
 
+pub fn capture_agent_trace(trace: AgentTracePayload) {
+    if let Ok(client) = get_global().read() {
+        client.capture_agent_trace(trace);
+    }
+}
+
 pub fn capture_panic(info: &PanicHookInfo) {
     if let Ok(client) = get_global().read() {
         client.capture_panic(info);
