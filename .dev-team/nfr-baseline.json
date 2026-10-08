@@ -1,33 +1,19 @@
 {
-  "nfr_version": "1.0.0",
-  "external_call_timeout_ms": 3000,
-  "retry": {
-    "max_retries": 0,
-    "backoff_ms": 0
-  },
   "concurrency_lock": {
-    "required": false,
-    "mechanism": "none"
+    "mechanism": "mutex",
+    "required": true
   },
+  "external_call_timeout_ms": 3000,
   "logging": {
     "format": "json",
-    "require_trace_id": false
+    "trace_id": true
   },
   "resource_release": {
-    "abort_controller": true,
-    "clear_timer": true
+    "bounded_queue": true,
+    "fire_and_forget": true
   },
-  "endpoints": {
-    "primary": "https://api.github.com/repos/lanhui100/pony-agent/releases/latest",
-    "fallback": "https://s3.local.ponyjob.top/pony-agent-releases/latest.json"
-  },
-  "payload_schema": {
-    "type": "object",
-    "required": ["tag_name"],
-    "properties": {
-      "tag_name": { "type": "string" },
-      "name": { "type": ["string", "null"] },
-      "published_at": { "type": ["string", "null"] }
-    }
+  "retry": {
+    "backoff_ms": 1000,
+    "max_retries": 1
   }
 }

@@ -28,6 +28,7 @@ pub mod mcp_resources;
 pub mod orchestration;
 pub mod planner;
 pub mod plan_state;
+pub mod ponysentry;
 pub mod path_permission;
 pub mod present;
 pub mod process;
