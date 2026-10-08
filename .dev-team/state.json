@@ -1,37 +1,38 @@
 {
-  "wave": 3,
-  "status": "closed",
-  "baseline_commit": "6d3ea12",
-  "final_commit": "055fa6d",
+  "wave": 4,
+  "status": "completed",
+  "baseline_commit": "82c86ea",
+  "final_commit": "afa2a79",
   "checkpoints": {
-    "red_anchor": "6d3ea12",
-    "green": "055fa6d",
-    "closure": "055fa6d"
+    "red_anchor": "82c86ea",
+    "green": "afa2a79",
+    "closure": "afa2a79"
   },
   "ci": {
     "result": "green",
-    "frontend": "661 passed / runtime-store 117 passed",
-    "core_acceptance": "7 passed (ponysentry_telemetry_test)",
-    "workspace_check": "all green"
+    "ponysentry_trace_test": "7 passed",
+    "ponysentry_telemetry_test": "7 passed",
+    "core_check": "exit code 0"
   },
   "members": {
-    "lead": { "role": "lead", "tasks": ["task-5"] },
+    "lead": { "role": "lead", "tasks": ["task-6", "task-7"] },
     "protocol-agent": { "role": "protocol", "tasks": ["task-1"] },
-    "test-agent": { "role": "test", "tasks": ["task-2"] },
-    "executor-runtime": { "role": "executor", "tasks": ["task-3"] },
-    "executor-desktop": { "role": "executor", "tasks": ["task-4"] }
+    "test-agent": { "role": "test", "tasks": ["task-2", "task-3", "task-4"] },
+    "executor": { "role": "executor", "tasks": ["task-5"] }
   },
   "tasks": {
-    "task-1": { "subject": "Phase 1: 制定 PonySentry 协议契约、NFR 基准与架构接入报告", "status": "completed" },
-    "task-2": { "subject": "Phase 2: Test Agent 编写红相独立验收测试并冻结", "status": "completed", "red_commit": "6d3ea12" },
-    "task-3": { "subject": "Phase 3: Executor Runtime 实现 Core 客户端及 Agent 运行时错误埋点", "status": "completed", "green_commit": "055fa6d" },
-    "task-4": { "subject": "Phase 4: Executor Desktop 实现桌面端与前端错误埋点", "status": "completed", "green_commit": "055fa6d" },
-    "task-5": { "subject": "Phase 5: Join Barrier, 门禁回归, 生产态冒烟与元复盘", "status": "completed", "closure_commit": "055fa6d" }
+    "task-1": { "subject": "Phase 1: 制定 Trace Schema、状态机规范与 NFR 基线契约", "status": "completed" },
+    "task-2": { "subject": "Phase 2: Test Agent 编写独立红相验收与对抗测试用例", "status": "completed", "red_commit": "82c86ea" },
+    "task-3": { "subject": "Fix test token placeholders to pass pre-commit hook", "status": "completed" },
+    "task-4": { "subject": "Align test token prefix with check-secrets whitelist", "status": "completed" },
+    "task-5": { "subject": "Phase 3: Executor 实现 Agent Trace 异步上报客户端与脱敏管线", "status": "completed", "green_commit": "afa2a79" },
+    "task-6": { "subject": "Phase 4: Join Barrier 汇聚审查与全量回归验证", "status": "completed" },
+    "task-7": { "subject": "Phase 5: 交付归档、元框架复盘与工作区清理", "status": "completed" }
   },
-  "telemetry_verification": {
-    "service_url": "http://10.43.94.160:3000",
-    "test_issue_id": "4c85497a-677e-4ebb-8a3a-8fdcda031299",
-    "test_fingerprint": "5b288d84fc32e6e09984a8f194ce1ab841867455c810c52cdb63839b58e3a6d0",
+  "nfr_compliance": {
+    "external_call_timeout_ms": 3000,
+    "max_queue_capacity": 1024,
+    "sanitization_zero_trust": true,
     "status": "verified"
   },
   "meta_retrospective": ".dev-team/meta-retrospective.md"

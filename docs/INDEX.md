@@ -51,6 +51,7 @@
 
 - [决策记录索引](decisions/README.md)
 - [0008 会话数据架构向事件溯源演进（分阶段落地）](decisions/0008-event-sourcing-evolution.md)
+- [0024 PonySentry Agent Trace 上报契约与生命周期状态机](decisions/0024-ponysentry-agent-trace-ingest.md)
 
 ## 4. 开发指南
 
