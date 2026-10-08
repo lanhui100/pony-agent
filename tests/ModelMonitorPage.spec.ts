@@ -912,4 +912,55 @@ describe("ModelMonitorPage", () => {
     );
     wrapper.unmount();
   });
+
+  it("支持视角分组切换与会话搜索过滤（Redesign 核心交互断言）", async () => {
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      const capabilityPayload = mockCapabilityCommand(command, args);
+      if (capabilityPayload !== undefined) {
+        return capabilityPayload;
+      }
+      if (command === "load_model_monitor_summary") {
+        return createSummaryView();
+      }
+      if (command === "load_model_monitor_session_drilldown") {
+        return createDrilldownView();
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(ModelMonitorPage);
+    await flushPromises();
+
+    // 视角导航断言
+    const tabsNav = wrapper.get('[data-testid="model-monitor-perspective-tabs"]');
+    expect(tabsNav.exists()).toBe(true);
+    expect(tabsNav.text()).toContain("会话与下钻");
+    expect(tabsNav.text()).toContain("模型与供应商");
+    expect(tabsNav.text()).toContain("工具与扩展");
+    expect(tabsNav.text()).toContain("治理与Hooks");
+
+    // 切换到模型视角
+    const modelTab = wrapper.get('[data-testid="model-monitor-tab-models"]');
+    await modelTab.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="model-monitor-models"]').isVisible()).toBe(true);
+    expect(wrapper.get('[data-testid="model-monitor-providers"]').isVisible()).toBe(true);
+
+    // 切换到会话视角并测试会话过滤搜索
+    const sessionTab = wrapper.get('[data-testid="model-monitor-tab-sessions"]');
+    await sessionTab.trigger("click");
+    await flushPromises();
+
+    const searchInput = wrapper.get('[data-testid="model-monitor-session-search"]');
+    expect(searchInput.exists()).toBe(true);
+
+    await searchInput.setValue("Beta");
+    await flushPromises();
+
+    // 此时只应展示 Beta 会话，Alpha 应该被过滤掉
+    expect(wrapper.find('[data-testid="model-monitor-session-session-beta"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="model-monitor-session-session-alpha"]').exists()).toBe(false);
+
+    wrapper.unmount();
+  });
 });

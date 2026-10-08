@@ -57,6 +57,23 @@ const selectedCapabilitySourceId = ref<string | null>(null);
 const selectedCapabilityId = ref<string | null>(null);
 const selectedCapability = ref<CapabilityView | null>(null);
 
+type PerspectiveTab = "all" | "sessions" | "models" | "tools" | "hooks";
+const currentPerspective = ref<PerspectiveTab>("all");
+const sessionSearchQuery = ref("");
+
+const filteredSessions = computed(() => {
+  const list = summary.value?.sessions ?? [];
+  const q = sessionSearchQuery.value.trim().toLowerCase();
+  if (!q) {
+    return list;
+  }
+  return list.filter((s) =>
+    (s.title || "").toLowerCase().includes(q) ||
+    (s.sessionId || "").toLowerCase().includes(q) ||
+    (s.summary || "").toLowerCase().includes(q)
+  );
+});
+
 const overviewCards = computed(() => {
   const overview = summary.value?.overview;
   if (!overview) {
@@ -475,19 +492,86 @@ onMounted(() => {
     </div>
 
     <div v-else-if="summary" :class="contentPadClass" class="flex min-h-0 flex-1 flex-col">
-      <div class="mt-5 grid gap-4 lg:grid-cols-5" data-testid="model-monitor-overview">
+      <!-- 黄金信号卡片 -->
+      <div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5" data-testid="model-monitor-overview">
         <section
           v-for="card in overviewCards"
           :key="card.key"
-          class="rounded-[0.85rem] border border-stone-200/70 bg-[#faf6ef] px-4 py-4"
+          class="rounded-[0.75rem] border border-stone-200/80 bg-[#faf6ef]/90 p-3.5 transition hover:border-stone-300"
         >
-          <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">{{ card.label }}</div>
-          <div class="mt-3 text-[1.8rem] font-semibold tracking-[-0.04em] text-stone-950">{{ card.value }}</div>
-          <p class="mt-2 text-[12px] leading-5 text-stone-500">{{ card.detail }}</p>
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">{{ card.label }}</span>
+            <span class="h-1.5 w-1.5 rounded-full bg-emerald-500/80" />
+          </div>
+          <div class="mt-2 text-[1.65rem] font-semibold tracking-[-0.03em] text-stone-900">{{ card.value }}</div>
+          <p class="mt-1.5 text-[11px] leading-4 text-stone-500">{{ card.detail }}</p>
         </section>
       </div>
 
-      <div class="mt-5 grid gap-4 xl:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.2fr)]">
+      <!-- 视角选择分段条 -->
+      <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-b border-stone-200/80 pb-3" data-testid="model-monitor-perspective-tabs">
+        <div class="flex items-center gap-1 rounded-[0.55rem] bg-[#f5ede3] p-1">
+          <button
+            type="button"
+            class="rounded-[0.4rem] px-3 py-1.5 text-[12px] font-medium transition"
+            :class="currentPerspective === 'all' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-600 hover:text-stone-900'"
+            data-testid="model-monitor-tab-all"
+            @click="currentPerspective = 'all'"
+          >
+            全景大盘
+          </button>
+          <button
+            type="button"
+            class="rounded-[0.4rem] px-3 py-1.5 text-[12px] font-medium transition"
+            :class="currentPerspective === 'sessions' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-600 hover:text-stone-900'"
+            data-testid="model-monitor-tab-sessions"
+            @click="currentPerspective = 'sessions'"
+          >
+            会话与下钻
+          </button>
+          <button
+            type="button"
+            class="rounded-[0.4rem] px-3 py-1.5 text-[12px] font-medium transition"
+            :class="currentPerspective === 'models' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-600 hover:text-stone-900'"
+            data-testid="model-monitor-tab-models"
+            @click="currentPerspective = 'models'"
+          >
+            模型与供应商
+          </button>
+          <button
+            type="button"
+            class="rounded-[0.4rem] px-3 py-1.5 text-[12px] font-medium transition"
+            :class="currentPerspective === 'tools' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-600 hover:text-stone-900'"
+            data-testid="model-monitor-tab-tools"
+            @click="currentPerspective = 'tools'"
+          >
+            工具与扩展
+          </button>
+          <button
+            type="button"
+            class="rounded-[0.4rem] px-3 py-1.5 text-[12px] font-medium transition"
+            :class="currentPerspective === 'hooks' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-600 hover:text-stone-900'"
+            data-testid="model-monitor-tab-hooks"
+            @click="currentPerspective = 'hooks'"
+          >
+            治理与Hooks
+          </button>
+        </div>
+
+        <!-- 会话视角下的快速搜索框 -->
+        <div v-if="currentPerspective === 'sessions' || currentPerspective === 'all'" class="flex items-center gap-2">
+          <input
+            v-model="sessionSearchQuery"
+            type="text"
+            placeholder="搜索会话标题、摘要或ID..."
+            class="h-8 w-64 rounded-[0.45rem] border border-stone-200 bg-white px-2.5 text-[12px] text-stone-900 placeholder:text-stone-400 focus:border-stone-400 focus:outline-none"
+            data-testid="model-monitor-session-search"
+          />
+        </div>
+      </div>
+
+      <!-- Capability Sources & Capabilities 扩展生态区 -->
+      <div v-show="currentPerspective === 'all' || currentPerspective === 'tools'" class="mt-4 grid gap-4 xl:grid-cols-[minmax(240px,0.8fr)_minmax(0,1.2fr)]">
         <section class="rounded-[0.85rem] border border-stone-200/70 bg-white/75">
           <div class="flex items-center justify-between gap-3 border-b border-stone-200/70 px-4 py-4">
             <div>
@@ -647,7 +731,11 @@ onMounted(() => {
           </div>
 
           <div class="grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4 lg:grid-cols-2 hide-scrollbar">
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-providers">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'models'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-providers"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Providers</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.providers" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -667,7 +755,7 @@ onMounted(() => {
                 <div v-if="summary.providers.length === 0" class="text-[12px] text-stone-400">暂无 provider 聚合数据。</div>
               </div>
 
-              <div class="mt-3 rounded-[0.7rem] bg-black/10 px-3 py-3" data-testid="model-monitor-capability-activity">
+              <div class="mt-3 rounded-[0.7rem] bg-stone-900/90 text-stone-100 px-3 py-3" data-testid="model-monitor-capability-activity">
                 <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Capability Activity</div>
                 <div v-if="selectedCapabilityActivities.length === 0" class="mt-2 text-[12px] text-stone-400">
                   当前 trace 没有记录 capability 活动。
@@ -723,7 +811,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-models">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'models'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-models"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Models</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.models" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -744,7 +836,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-tools">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'tools'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-tools"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Tools</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.tools" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -765,7 +861,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-hook-classes-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'hooks'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-hook-classes-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Hook Classes</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.hookClasses" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -786,7 +886,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-hooks-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'hooks'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-hooks-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Hooks</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.hooks" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -807,7 +911,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-capability-sources-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'tools'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-capability-sources-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Capability Sources</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.capabilitySources" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -828,7 +936,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-capability-invocation-modes-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'tools'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-capability-invocation-modes-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Capability Invocation Modes</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.capabilityInvocationModes" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -849,7 +961,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-capability-failure-classes-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'tools'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-capability-failure-classes-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Capability Failure Classes</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summary.capabilityFailureClasses" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -870,7 +986,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-skill-selections-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'tools'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-skill-selections-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Skill Selections</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summarySkillSelections" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -891,7 +1011,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-skill-sources-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'tools'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-skill-sources-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Skill Sources</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summarySkillSources" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -912,7 +1036,11 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-skill-failure-layers-summary">
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'tools'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-skill-failure-layers-summary"
+            >
               <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Skill Failure Layers</div>
               <div class="mt-3 space-y-2">
                 <div v-for="row in summarySkillFailureLayers" :key="row.key" class="rounded-[0.7rem] bg-white px-3 py-3">
@@ -933,15 +1061,22 @@ onMounted(() => {
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3" data-testid="model-monitor-sessions">
-              <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Sessions</div>
+            <section
+              v-show="currentPerspective === 'all' || currentPerspective === 'sessions'"
+              class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 p-3"
+              data-testid="model-monitor-sessions"
+            >
+              <div class="flex items-center justify-between">
+                <div class="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Sessions</div>
+                <span class="rounded bg-stone-200/70 px-1.5 py-0.5 text-[10px] text-stone-600">{{ filteredSessions.length }} 条</span>
+              </div>
               <div class="mt-3 space-y-2">
                 <button
-                  v-for="row in summary.sessions"
+                  v-for="row in filteredSessions"
                   :key="row.sessionId"
                   type="button"
                   class="block w-full rounded-[0.7rem] border px-3 py-3 text-left transition"
-                  :class="selectedSessionId === row.sessionId ? 'border-stone-900 bg-stone-900 text-white' : 'border-transparent bg-white hover:border-stone-300'"
+                  :class="selectedSessionId === row.sessionId ? 'border-stone-900 bg-stone-900 text-white' : 'border-stone-200/60 bg-white hover:border-stone-400'"
                   :data-testid="`model-monitor-session-${row.sessionId}`"
                   @click="loadDrilldown(row.sessionId)"
                 >
@@ -959,76 +1094,82 @@ onMounted(() => {
                     </div>
                   </div>
                 </button>
-                <div v-if="summary.sessions.length === 0" class="text-[12px] text-stone-400">当前没有可展示的会话 telemetry。</div>
+                <div v-if="filteredSessions.length === 0" class="text-[12px] text-stone-400">未找到匹配的会话 telemetry。</div>
               </div>
             </section>
           </div>
         </section>
 
-        <section class="flex min-h-0 flex-col rounded-[0.85rem] border border-stone-200/70 bg-stone-950 text-stone-100">
-          <div class="border-b border-stone-800 px-4 py-4">
-            <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Session Drill-down</div>
-            <div class="mt-2 text-lg font-medium text-white" data-testid="model-monitor-drilldown-title">
+        <section class="flex min-h-0 flex-col rounded-[0.85rem] border border-stone-200/80 bg-white/95 text-stone-900 shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+          <div class="border-b border-stone-200/70 bg-[#faf6ef]/70 px-4 py-3.5">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-medium uppercase tracking-[0.14em] text-stone-500">Session Drill-down</span>
+              <span class="inline-flex items-center gap-1.5 rounded-full bg-stone-200/60 px-2 py-0.5 text-[11px] font-medium text-stone-700">
+                <span class="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                会话级全真 Trace
+              </span>
+            </div>
+            <div class="mt-2 truncate text-base font-semibold text-stone-900" data-testid="model-monitor-drilldown-title">
               {{ selectedSessionMetrics?.title || selectedSessionId || "选择一个会话" }}
             </div>
-            <p class="mt-2 text-[12px] leading-5 text-stone-300">
+            <p class="mt-1 line-clamp-2 text-[12px] leading-5 text-stone-600">
               {{ selectedSessionMetrics?.summary || "下钻会展示会话级指标、turn trace 以及 build-context 证据。" }}
             </p>
           </div>
 
-          <div v-if="drilldownError" class="mx-4 mt-4 rounded-[0.75rem] border border-rose-500/40 bg-rose-500/10 px-3 py-3 text-sm text-rose-200" data-testid="model-monitor-drilldown-error">
+          <div v-if="drilldownError" class="mx-4 mt-4 rounded-[0.75rem] border border-rose-200 bg-rose-50 px-3 py-3 text-sm text-rose-700" data-testid="model-monitor-drilldown-error">
             {{ drilldownError }}
           </div>
 
-          <div v-else-if="loadingDrilldown && !drilldown" class="flex flex-1 items-center justify-center px-4 text-sm text-stone-400" data-testid="model-monitor-drilldown-loading">
+          <div v-else-if="loadingDrilldown && !drilldown" class="flex flex-1 items-center justify-center px-4 text-sm text-stone-500" data-testid="model-monitor-drilldown-loading">
             正在加载会话下钻...
           </div>
 
           <div v-else-if="drilldown && selectedSessionMetrics" class="grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4 hide-scrollbar">
             <section class="grid gap-3 sm:grid-cols-3" data-testid="model-monitor-drilldown-metrics">
-              <div class="rounded-[0.75rem] bg-white/5 px-3 py-3">
-                <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">成本与负载</div>
-                <div class="mt-2 text-sm text-white">
+              <div class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 px-3 py-3">
+                <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">成本与负载</div>
+                <div class="mt-1.5 text-sm font-semibold text-stone-900">
                   {{ formatInteger(selectedSessionMetrics.totalTokens) }} tokens
                 </div>
-                <div class="mt-1 text-[12px] text-stone-300">
+                <div class="mt-1 text-[11px] text-stone-600">
                   请求 {{ formatInteger(selectedSessionMetrics.requestCount) }} · 模型 {{ formatInteger(selectedSessionMetrics.modelCallCount) }} · 工具 {{ formatInteger(selectedSessionMetrics.toolCallCount) }}
                 </div>
               </div>
-              <div class="rounded-[0.75rem] bg-white/5 px-3 py-3">
-                <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">稳定性与检索</div>
-                <div class="mt-2 text-sm text-white">
+              <div class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 px-3 py-3">
+                <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">稳定性与检索</div>
+                <div class="mt-1.5 text-sm font-semibold text-stone-900">
                   首 Token {{ formatDurationMs(selectedSessionMetrics.avgFirstTokenLatencyMs) }}
                 </div>
-                <div class="mt-1 text-[12px] text-stone-300">
+                <div class="mt-1 text-[11px] text-stone-600">
                   检索参与 {{ formatInteger(selectedSessionMetrics.retrievalParticipationCount) }} · 失败 {{ formatInteger(selectedSessionMetrics.failedRequestCount) }}
                 </div>
               </div>
-              <div class="rounded-[0.75rem] bg-white/5 px-3 py-3">
-                <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Hooks 与阻断</div>
-                <div class="mt-2 text-sm text-white">
+              <div class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/70 px-3 py-3">
+                <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">Hooks 与阻断</div>
+                <div class="mt-1.5 text-sm font-semibold text-stone-900">
                   {{ formatInteger(selectedSessionMetrics.hookCallCount) }} calls
                 </div>
-                <div class="mt-1 text-[12px] text-stone-300">
+                <div class="mt-1 text-[11px] text-stone-600">
                   阻断 {{ formatInteger(selectedSessionMetrics.blockedHookCount) }} · 均值 {{ formatDurationMs(selectedSessionMetrics.avgHookDurationMs) }}
                 </div>
               </div>
             </section>
 
-            <section class="rounded-[0.75rem] bg-white/5 px-3 py-3" data-testid="model-monitor-turn-list">
-              <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Turns</div>
-              <div class="mt-3 space-y-2">
+            <section class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/60 px-3 py-3" data-testid="model-monitor-turn-list">
+              <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">Turns</div>
+              <div class="mt-2.5 space-y-2">
                 <button
                   v-for="trace in drilldown.runtimeView.session.turnTraceHistory ?? []"
                   :key="trace.turnId"
                   type="button"
-                  class="block w-full rounded-[0.7rem] border px-3 py-3 text-left transition"
-                  :class="selectedTurnId === trace.turnId ? 'border-white/30 bg-white/10' : 'border-transparent bg-black/10 hover:border-white/20'"
+                  class="block w-full rounded-[0.7rem] border px-3 py-2.5 text-left transition"
+                  :class="selectedTurnId === trace.turnId ? 'border-stone-900 bg-stone-900 text-white shadow-sm' : 'border-stone-200/80 bg-white hover:border-stone-400 text-stone-900'"
                   :data-testid="`model-monitor-turn-${trace.turnId}`"
                   @click="selectTurn(trace.turnId)"
                 >
-                  <div class="text-sm font-medium text-white">{{ trace.title || trace.turnId }}</div>
-                  <div class="mt-1 text-[12px] text-stone-300">{{ summarizeTrace(trace) }}</div>
+                  <div class="text-sm font-medium">{{ trace.title || trace.turnId }}</div>
+                  <div class="mt-1 text-[12px]" :class="selectedTurnId === trace.turnId ? 'text-stone-300' : 'text-stone-500'">{{ summarizeTrace(trace) }}</div>
                 </button>
                 <div v-if="(drilldown.runtimeView.session.turnTraceHistory ?? []).length === 0" class="text-[12px] text-stone-400">
                   当前会话没有 trace 记录。
@@ -1036,45 +1177,45 @@ onMounted(() => {
               </div>
             </section>
 
-            <section v-if="selectedTrace" class="rounded-[0.75rem] bg-white/5 px-3 py-3" data-testid="model-monitor-selected-trace">
-              <div class="flex items-start justify-between gap-3">
+            <section v-if="selectedTrace" class="rounded-[0.75rem] border border-stone-200/70 bg-stone-50/60 px-3.5 py-3.5" data-testid="model-monitor-selected-trace">
+              <div class="flex items-start justify-between gap-3 border-b border-stone-200/70 pb-3">
                 <div>
-                  <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Selected Trace</div>
-                  <div class="mt-2 text-sm font-medium text-white">{{ selectedTrace.title || selectedTrace.turnId }}</div>
+                  <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">Selected Trace</div>
+                  <div class="mt-1 text-sm font-semibold text-stone-900">{{ selectedTrace.title || selectedTrace.turnId }}</div>
                 </div>
-                <div class="text-right text-[12px] text-stone-300">
-                  <div>{{ selectedTrace.providerName || selectedTrace.providerRequestedName || "unknown-provider" }}</div>
-                  <div class="mt-1">{{ selectedTrace.providerModel || "unknown-model" }}</div>
+                <div class="text-right text-[12px] text-stone-600">
+                  <div class="font-medium text-stone-900">{{ selectedTrace.providerName || selectedTrace.providerRequestedName || "unknown-provider" }}</div>
+                  <div class="mt-0.5 text-stone-500">{{ selectedTrace.providerModel || "unknown-model" }}</div>
                 </div>
               </div>
 
               <div
                 v-if="!selectedTraceHasCanonicalTerminalEnvelope"
-                class="mt-3 rounded-[0.7rem] border border-amber-400/30 bg-amber-300/10 px-3 py-3 text-[12px] leading-6 text-amber-100"
+                class="mt-3 rounded-[0.7rem] border border-amber-300 bg-amber-50 px-3 py-2.5 text-[12px] leading-5 text-amber-800"
                 data-testid="model-monitor-raw-trace-warning"
               >
                 当前 trace 缺少 canonical terminal envelope，下面只展示原始 trace 证据，不计入 canonical metrics。
               </div>
 
               <div class="mt-3 grid gap-3 md:grid-cols-2">
-                <div class="rounded-[0.7rem] bg-black/10 px-3 py-3">
-                  <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Build Context</div>
-                  <div class="mt-2 text-[12px] leading-6 text-stone-300">
-                    消息数 {{ selectedTrace.buildContextObservation?.messageCount ?? 0 }} · 工具数
-                    {{ selectedTrace.buildContextObservation?.toolCount ?? 0 }} · 图片数
+                <div class="rounded-[0.7rem] border border-stone-200/70 bg-white p-3">
+                  <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">Build Context</div>
+                  <div class="mt-1.5 text-[12px] font-medium text-stone-800">
+                    消息 {{ selectedTrace.buildContextObservation?.messageCount ?? 0 }} · 工具
+                    {{ selectedTrace.buildContextObservation?.toolCount ?? 0 }} · 图片
                     {{ selectedTrace.buildContextObservation?.imageCount ?? 0 }}
                   </div>
-                  <div class="mt-2 text-[12px] leading-6 text-stone-300">
+                  <div class="mt-1 text-[12px] leading-5 text-stone-600">
                     {{ selectedTrace.buildContextObservation?.semiStableContextText || "暂无 build-context 摘要。" }}
                   </div>
                 </div>
 
-                <div class="rounded-[0.7rem] bg-black/10 px-3 py-3">
-                  <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Return Summary</div>
-                  <div class="mt-2 text-[12px] leading-6 text-stone-300">
+                <div class="rounded-[0.7rem] border border-stone-200/70 bg-white p-3">
+                  <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">Return Summary</div>
+                  <div class="mt-1.5 text-[12px] leading-5 text-stone-700">
                     {{ selectedTrace.sessionSummary || selectedTrace.fallbackReason || "暂无会话摘要。" }}
                   </div>
-                  <div v-if="selectedTrace.error" class="mt-2 text-[12px] leading-6 text-rose-200">
+                  <div v-if="selectedTrace.error" class="mt-2 text-[12px] leading-5 text-rose-600">
                     错误: {{ selectedTrace.error }}
                   </div>
                 </div>
@@ -1084,16 +1225,16 @@ onMounted(() => {
                 <div
                   v-for="entry in selectedTimeline"
                   :key="entry.id"
-                  class="rounded-[0.7rem] border border-white/10 bg-black/10 px-3 py-3"
+                  class="rounded-[0.7rem] border border-stone-200/70 bg-white p-3"
                 >
                   <div class="flex items-start justify-between gap-3">
                     <div>
-                      <div class="text-sm font-medium text-white">{{ entry.label }}</div>
-                      <div class="mt-1 text-[12px] text-stone-300">{{ timelineSummary(entry) }}</div>
+                      <div class="text-sm font-medium text-stone-900">{{ entry.label }}</div>
+                      <div class="mt-0.5 text-[12px] text-stone-500">{{ timelineSummary(entry) }}</div>
                     </div>
-                    <div class="text-[11px] uppercase tracking-[0.12em] text-stone-400">{{ entry.state }}</div>
+                    <div class="rounded bg-stone-100 px-2 py-0.5 text-[11px] uppercase tracking-[0.1em] text-stone-600">{{ entry.state }}</div>
                   </div>
-                  <div v-if="entry.text || entry.reasoningContent || entry.error" class="mt-2 text-[12px] leading-6 text-stone-300">
+                  <div v-if="entry.text || entry.reasoningContent || entry.error" class="mt-2 rounded bg-stone-50 p-2 text-[12px] leading-5 text-stone-700">
                     {{ entry.text || entry.reasoningContent || entry.error }}
                   </div>
                 </div>
@@ -1101,28 +1242,28 @@ onMounted(() => {
               </div>
 
               <div v-if="selectedHookTraceRecords.length > 0" class="mt-3 space-y-2" data-testid="model-monitor-hook-trace">
-                <div class="text-[11px] uppercase tracking-[0.16em] text-stone-400">Hook Trace</div>
+                <div class="text-[11px] font-medium uppercase tracking-[0.12em] text-stone-500">Hook Trace</div>
                 <div
                   v-for="record in selectedHookTraceRecords"
                   :key="`${record.hookName}-${record.hookOrder}`"
-                  class="rounded-[0.7rem] border border-white/10 bg-black/10 px-3 py-3"
+                  class="rounded-[0.7rem] border border-stone-200/70 bg-white p-3"
                 >
                   <div class="flex items-start justify-between gap-3">
                     <div>
-                      <div class="text-sm font-medium text-white">{{ record.hookName }}</div>
-                      <div class="mt-1 text-[12px] text-stone-300">{{ hookResultSummary(record) }}</div>
+                      <div class="text-sm font-medium text-stone-900">{{ record.hookName }}</div>
+                      <div class="mt-0.5 text-[12px] text-stone-500">{{ hookResultSummary(record) }}</div>
                     </div>
-                    <div class="text-right text-[11px] uppercase tracking-[0.12em] text-stone-400">
+                    <div class="text-right text-[11px] uppercase tracking-[0.1em] text-stone-500">
                       <div>{{ record.hookPoint }}</div>
                     </div>
                   </div>
-                  <div class="mt-2 text-[12px] leading-6 text-stone-300">{{ record.summary }}</div>
+                  <div class="mt-1.5 text-[12px] leading-5 text-stone-600">{{ record.summary }}</div>
                 </div>
               </div>
             </section>
           </div>
 
-          <div v-else class="flex flex-1 items-center justify-center px-4 text-center text-sm text-stone-400" data-testid="model-monitor-empty-drilldown">
+          <div v-else class="flex flex-1 items-center justify-center px-4 text-center text-sm text-stone-500" data-testid="model-monitor-empty-drilldown">
             选择一个 session 行，查看该会话的 trace timeline 与 build-context 证据。
           </div>
         </section>
