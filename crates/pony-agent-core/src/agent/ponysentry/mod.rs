@@ -5,7 +5,10 @@ pub mod sanitizer;
 
 pub use client::PonySentryClient;
 pub use config::PonySentryConfig;
-pub use models::{Breadcrumb, Exception, Frame, IngestPayload};
+pub use models::{
+    AgentTracePayload, Breadcrumb, EvalStatus, Exception, Frame, IngestPayload, ToolCallTraceItem,
+    TurnTraceItem,
+};
 pub use sanitizer::{sanitize, sanitize_json};
 
 use std::collections::HashMap;

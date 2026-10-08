@@ -6,11 +6,20 @@
   "external_call_timeout_ms": 3000,
   "logging": {
     "format": "json",
-    "trace_id": true
+    "trace_id": true,
+    "structured": true
+  },
+  "sanitization": {
+    "zero_trust": true,
+    "redact_tokens": true,
+    "redact_user_home": true,
+    "max_depth": 32
   },
   "resource_release": {
     "bounded_queue": true,
-    "fire_and_forget": true
+    "max_queue_capacity": 1024,
+    "fire_and_forget": true,
+    "worker_thread": true
   },
   "retry": {
     "backoff_ms": 1000,
