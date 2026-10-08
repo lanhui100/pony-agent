@@ -546,6 +546,16 @@ impl AgentRuntime {
         completed_hops: usize,
         error: String,
     ) {
+        crate::agent::ponysentry::capture_error(
+            "WatchdogTimeout",
+            &error,
+            Some(serde_json::json!({
+                "turn_id": turn_id,
+                "session_id": session_id,
+                "completed_hops": completed_hops,
+                "source": "submission_watchdog",
+            })),
+        );
         let trace_steps = if trace_steps.is_empty() {
             self.telemetry_builder.failed_trace_before_tool()
         } else {

@@ -493,6 +493,17 @@ pub fn emit_stream_failed(
     error: String,
     session_id: Option<String>,
 ) -> TurnEventEnvelope {
+    crate::agent::ponysentry::capture_error(
+        "TurnFailed",
+        &error,
+        Some(serde_json::json!({
+            "turn_id": &turn_id,
+            "session_id": &session_id,
+            "provider": provider_meta.map(|m| &m.provider_name),
+            "model": provider_meta.map(|m| &m.model),
+            "duration_ms": turn_duration_ms,
+        })),
+    );
     emit_event(
         sink,
         "turn:failed",

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { addBreadcrumb, reportError } from "./telemetry";
 
 declare global {
   interface Window {
@@ -21,7 +22,32 @@ export async function safeInvoke<T>(command: string, args?: Record<string, unkno
     throw new Error("当前运行在浏览器预览模式，Tauri 后端不可用。");
   }
 
-  return invoke<T>(command, args);
+  if (command !== "ponysentry_capture") {
+    addBreadcrumb("ipc", `safeInvoke:${command}`);
+  }
+
+  try {
+    return await invoke<T>(command, args);
+  } catch (err) {
+    if (command !== "ponysentry_capture") {
+      addBreadcrumb("ipc", `safeInvoke:${command} failed`, { error: String(err) });
+      // 捕获 IPC 失败异常到 PonySentry (fire-and-forget)
+      reportError({
+        errorType: "IpcCommandError",
+        message: `IPC command "${command}" failed: ${String(err)}`,
+        extra: {
+          command,
+          args,
+          error: String(err),
+        },
+        tags: {
+          source: "tauri_safe_invoke",
+          command,
+        },
+      });
+    }
+    throw err;
+  }
 }
 
 export async function safeListen<T>(

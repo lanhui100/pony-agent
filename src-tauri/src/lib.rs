@@ -444,6 +444,26 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn ponysentry_capture(payload: serde_json::Value) -> Result<(), String> {
+    if let Ok(ingest_payload) = serde_json::from_value::<agent::ponysentry::IngestPayload>(payload.clone()) {
+        agent::ponysentry::capture_payload(ingest_payload);
+    } else {
+        let msg = payload
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Frontend error");
+        let err_type = payload
+            .get("exception")
+            .and_then(|e| e.get("error_type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("FrontendError");
+        let extra = payload.get("extra").cloned();
+        agent::ponysentry::capture_error(err_type, msg, extra);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn list_sessions(control_plane: State<'_, HostControlPlane>) -> Vec<SessionOverview> {
     control_plane.list_sessions()
 }
@@ -1089,7 +1109,8 @@ pub fn run() {
             fetch_provider_models,
             get_service_api_key,
             set_service_api_key,
-            open_url
+            open_url,
+            ponysentry_capture
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

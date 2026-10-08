@@ -10,25 +10,44 @@ pub use sanitizer::{sanitize, sanitize_json};
 
 use std::collections::HashMap;
 use std::panic::PanicHookInfo;
+use std::sync::{OnceLock, RwLock};
+
+static GLOBAL_CLIENT: OnceLock<RwLock<PonySentryClient>> = OnceLock::new();
+
+fn get_global() -> &'static RwLock<PonySentryClient> {
+    GLOBAL_CLIENT.get_or_init(|| {
+        let cfg = PonySentryConfig::from_env();
+        RwLock::new(PonySentryClient::new(cfg))
+    })
+}
 
 pub fn init(config: PonySentryConfig) {
-    let _ = config;
-    unimplemented!()
+    let client = PonySentryClient::new(config);
+    if let Some(lock) = GLOBAL_CLIENT.get() {
+        if let Ok(mut write_guard) = lock.write() {
+            *write_guard = client;
+            return;
+        }
+    }
+    let _ = GLOBAL_CLIENT.set(RwLock::new(client));
 }
 
 pub fn capture_error(error_type: &str, message: &str, extra: Option<serde_json::Value>) {
-    let _ = (error_type, message, extra);
-    unimplemented!()
+    if let Ok(client) = get_global().read() {
+        client.capture_error(error_type, message, extra);
+    }
 }
 
 pub fn capture_payload(payload: IngestPayload) {
-    let _ = payload;
-    unimplemented!()
+    if let Ok(client) = get_global().read() {
+        client.capture_payload(payload);
+    }
 }
 
 pub fn capture_panic(info: &PanicHookInfo) {
-    let _ = info;
-    unimplemented!()
+    if let Ok(client) = get_global().read() {
+        client.capture_panic(info);
+    }
 }
 
 pub fn add_breadcrumb(
@@ -36,10 +55,15 @@ pub fn add_breadcrumb(
     message: &str,
     data: Option<HashMap<String, String>>,
 ) {
-    let _ = (category, message, data);
-    unimplemented!()
+    if let Ok(client) = get_global().read() {
+        client.add_breadcrumb(category, message, data);
+    }
 }
 
 pub fn install_panic_hook() {
-    unimplemented!()
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        capture_panic(info);
+        prev(info);
+    }));
 }
