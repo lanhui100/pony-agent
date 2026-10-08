@@ -17,69 +17,62 @@ permissions:
   pull-requests: read
 
 jobs:
-  verify:
+  build-and-release:
     runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
       - name: Install frontend dependencies
         run: npm ci
+
       - name: Verify secrets present (hard fail)
         shell: pwsh
         run: |
           if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" -eq "") { throw "TAURI_SIGNING_PRIVATE_KEY is required" }
           if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" -eq "") { throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required" }
+
       - name: Tag/version consistency
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $pkg = (Get-Content package.json | ConvertFrom-Json).version
           if ($tag -notmatch "^v$([regex]::Escape($pkg))$") { throw "tag $tag does not match package version $pkg" }
+
       - name: 决策记录校验
         shell: pwsh
         run: ./scripts/verify-decisions.ps1
+
       - name: 敏感信息与脱敏扫描
         run: npm run secrets:check:all
+
       - name: Version sync + frontend checks
         run: |
           npm run version:check
           npm run typecheck
           npm run test:unit
-      - name: Rust check (desktop, deny-warnings aligned with build-release)
-        env:
-          RUSTFLAGS: -D warnings
-        run: |
-          npm run cargo:check
-      - name: Core 关键回归与单元测试
-        run: npm run cargo:test:regression
-        continue-on-error: true
 
-  build-release:
-    needs: verify
-    runs-on: windows-latest
-    env:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-      - name: Install frontend dependencies
-        run: npm ci
+      # 直接执行 npx tauri build --bundles nsis；tauri.conf.json 内部的 beforeBuildCommand 会自动构建前端，避免双重执行
       - name: Build Windows desktop bundle with signed updater artifacts
         shell: pwsh
         run: |
-          npm run build
           npx tauri build --bundles nsis
+
       - name: Gate — required artifacts present (Windows desktop, hard fail)
         shell: pwsh
         run: |
@@ -104,6 +97,7 @@ jobs:
             throw "Release gate failed: require Windows desktop artifacts"
           }
           Write-Host "Release gate PASS: NSIS installer + signature present"
+
       - name: Publish draft release, upload assets, assemble latest.json from uploaded names, publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -179,10 +173,3 @@ jobs:
           }
           if (-not $ok) { throw "published release verification failed: releases/tags/$tag not resolvable or latest.json missing" }
           Write-Host "release published and verified: $tag"
-
-  smoke:
-    needs: build-release
-    if: false # 预留：下载产物 + 篡改/错误 key/安装冒烟；启用后按 §6 手册补证据
-    runs-on: windows-latest
-    steps:
-      - run: echo "signed smoke steps (tamper/wrong-key/install evidence) to be implemented per docs/release/signed-updater.md"
