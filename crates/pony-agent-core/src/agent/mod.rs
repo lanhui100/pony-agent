@@ -54,3 +54,4 @@ pub mod turn_event;
 pub mod turn_flow;
 pub mod web_access;
 pub mod workspace;
+pub mod workspace_hotloader;
