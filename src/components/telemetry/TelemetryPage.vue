@@ -80,8 +80,8 @@ async function uploadSessionTrace() {
       showToast("当前会话暂无已完成的持久化 Trace 数据可上传", "info");
     } else {
       uploadState.value = "done";
-      uploadFeedback.value = `已成功上传 ${count} 条 Trace`;
-      showToast(`已成功上传 ${count} 条 Trace 数据至 PonySentry`, "success");
+      uploadFeedback.value = `已成功上传该会话 Trace（共 ${count} 轮对话）`;
+      showToast(`已成功上传会话 Trace（包含 ${count} 轮对话链路）至 PonySentry`, "success");
     }
   } catch (err) {
     uploadState.value = "error";

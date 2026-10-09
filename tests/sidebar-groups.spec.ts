@@ -8,6 +8,7 @@ import {
   isVisibleSession,
   type SidebarWorkspaceInput
 } from "@/lib/runtime/sidebar-groups";
+import { createNextSessionId } from "@/lib/runtime/sessions";
 import type { SessionOverview } from "@/types/runtime";
 
 function session(
@@ -114,5 +115,15 @@ describe("deriveSidebarTree", () => {
     const tree = deriveSidebarTree([], registry.filter((w) => w.id !== DEFAULT_WORKSPACE_ID));
     expect(tree.workspaces).toHaveLength(2);
     expect(tree.workspaces.every((g) => g.count === 0)).toBe(true);
+  });
+
+  it("createNextSessionId generates unique ids with pa_ prefix and UUIDv7 format", () => {
+    const existing = new Set<string>();
+    const id1 = createNextSessionId(existing);
+    expect(id1).toMatch(/^pa_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    existing.add(id1);
+    const id2 = createNextSessionId(existing);
+    expect(id2).toMatch(/^pa_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(id1).not.toBe(id2);
   });
 });

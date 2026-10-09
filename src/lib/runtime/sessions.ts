@@ -721,13 +721,46 @@ export function ensureUniqueSessionList(sessions: SessionOverview[]): SessionOve
   return deduped;
 }
 
+/**
+ * 生成遵循 RFC 9562 的 UUIDv7 字符串（时序递增 + 全局唯一）。
+ * 前 48 位为当前毫秒时间戳，后 74 位为随机数，带有 version=7 和 variant=10xx。
+ */
+export function generateUuidV7(): string {
+  const timestamp = Date.now();
+  const bytes = new Uint8Array(16);
+
+  // 1. 填充随机字节
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 16; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  // 2. 前 48 位写入毫秒时间戳（big-endian）
+  bytes[0] = (timestamp / 0x10000000000) & 0xff;
+  bytes[1] = (timestamp / 0x100000000) & 0xff;
+  bytes[2] = (timestamp / 0x1000000) & 0xff;
+  bytes[3] = (timestamp / 0x10000) & 0xff;
+  bytes[4] = (timestamp / 0x100) & 0xff;
+  bytes[5] = timestamp & 0xff;
+
+  // 3. 设置 version = 7 (0b0111_xxxx)
+  bytes[6] = 0x70 | (bytes[6]! & 0x0f);
+  // 4. 设置 variant = RFC 4122 / 9562 (0b10xx_xxxx)
+  bytes[8] = 0x80 | (bytes[8]! & 0x3f);
+
+  // 5. 格式化为 8-4-4-4-12 字符串
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function createNextSessionId(existingSessionIds: Iterable<string>): string {
   const existing = new Set(existingSessionIds);
-  let candidate = `session-${Date.now()}`;
-  let counter = 1;
+  let candidate = `pa_${generateUuidV7()}`;
   while (existing.has(candidate)) {
-    candidate = `session-${Date.now()}-${counter}`;
-    counter += 1;
+    candidate = `pa_${generateUuidV7()}`;
   }
   return candidate;
 }

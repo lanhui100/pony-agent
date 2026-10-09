@@ -216,17 +216,26 @@ pub fn maybe_report_turn_trace(payload: &crate::agent::runtime::TurnStreamEvent)
     }
 }
 
-/// 从会话的持久化 TurnTraceRecord 列表手动构造上报 Payload 列表。
-/// 每个 turn 映射为一个独立的 `AgentTracePayload`（turn 粒度上报，totals 仅汇总
-/// 该 turn 自身数据）；空列表返回空 Vec，不产生半成品 payload。
-pub fn build_agent_trace_payloads_from_turns(
+/// 从会话的持久化 TurnTraceRecord 列表构造单个聚合 Session Trace Payload。
+/// 符合业界标准（Session 级 Trace + 时序 turns 列表）：
+/// - 将多轮对话按时序汇总进同一个 `AgentTracePayload` 的 `turns` 列表中；
+/// - 自动汇总全局 `total_input_tokens`, `total_output_tokens`, `total_duration_ms`；
+/// - 空会话无有效 turn 时返回 None。
+pub fn build_session_aggregated_trace_payload(
     session_id: &str,
-    traces: Vec<crate::agent::session::TurnTraceRecord>,
-) -> Vec<AgentTracePayload> {
+    mut traces: Vec<crate::agent::session::TurnTraceRecord>,
+) -> Option<AgentTracePayload> {
+    if traces.is_empty() {
+        return None;
+    }
+
+    // 按 sequence 与 emitted_at_ms 进行确定性时序排序
+    traces.sort_by_key(|t| (t.sequence.unwrap_or(0), t.emitted_at_ms.unwrap_or(0)));
+
     let (environment, release) = if let Ok(client) = get_global().read() {
         (client.config.environment.clone(), client.config.release.clone())
     } else {
-        ("dev".to_string(), "0.1.109".to_string())
+        ("dev".to_string(), "0.1.116".to_string())
     };
 
     let reported_at_ms = std::time::SystemTime::now()
@@ -234,62 +243,84 @@ pub fn build_agent_trace_payloads_from_turns(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    traces
-        .into_iter()
-        .filter_map(|trace| {
-            let turn_id = trace.turn_id.trim();
-            if turn_id.is_empty() {
-                return None;
-            }
+    let mut turn_items = Vec::new();
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
+    let mut total_duration_ms: u64 = 0;
+    let mut latest_turn_id: Option<String> = None;
 
-            let tool_calls: Vec<ToolCallTraceItem> = trace
-                .tool_activities
-                .into_iter()
-                .map(|act| ToolCallTraceItem {
-                    call_id: Some(act.id.clone()),
-                    tool_name: act.name.clone(),
-                    arguments_summary: act.arguments_text.clone(),
-                    status: act.status.clone(),
-                    duration_ms: act.duration_seconds.map(|d| (d * 1000.0) as u64),
-                    error: act.error.as_ref().map(|e| match e {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    }),
-                })
-                .collect();
+    for trace in traces {
+        let turn_id = trace.turn_id.trim();
+        if turn_id.is_empty() {
+            continue;
+        }
 
-            let turn_item = TurnTraceItem {
-                turn_id: turn_id.to_string(),
-                sequence: trace.sequence,
-                phase: Some(trace.phase.clone()),
-                provider: trace.provider_name.clone(),
-                model: trace.provider_model.clone(),
-                input_tokens: trace.input_tokens,
-                output_tokens: trace.output_tokens,
-                cache_hit_tokens: trace.cache_hit_input_tokens,
-                duration_ms: trace.turn_duration_ms,
-                error: trace.error.clone(),
-                tool_calls,
-                started_at_ms: None,
-                completed_at_ms: trace.emitted_at_ms,
-            };
+        latest_turn_id = Some(turn_id.to_string());
+        total_input_tokens = total_input_tokens.saturating_add(trace.input_tokens.unwrap_or(0));
+        total_output_tokens = total_output_tokens.saturating_add(trace.output_tokens.unwrap_or(0));
+        total_duration_ms = total_duration_ms.saturating_add(trace.turn_duration_ms.unwrap_or(0));
 
-            Some(AgentTracePayload {
-                session_id: session_id.to_string(),
-                run_id: None,
-                turn_id: Some(turn_id.to_string()),
-                environment: environment.clone(),
-                release: release.clone(),
-                eval_status: EvalStatus::Unreviewed,
-                turns: vec![turn_item],
-                tags: None,
-                extra: None,
-                total_input_tokens: trace.input_tokens,
-                total_output_tokens: trace.output_tokens,
-                total_duration_ms: trace.turn_duration_ms,
-                reported_at_ms,
+        let tool_calls: Vec<ToolCallTraceItem> = trace
+            .tool_activities
+            .into_iter()
+            .map(|act| ToolCallTraceItem {
+                call_id: Some(act.id.clone()),
+                tool_name: act.name.clone(),
+                arguments_summary: act.arguments_text.clone(),
+                status: act.status.clone(),
+                duration_ms: act.duration_seconds.map(|d| (d * 1000.0) as u64),
+                error: act.error.as_ref().map(|e| match e {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                }),
             })
-        })
-        .collect()
+            .collect();
+
+        turn_items.push(TurnTraceItem {
+            turn_id: turn_id.to_string(),
+            sequence: trace.sequence,
+            phase: Some(trace.phase.clone()),
+            provider: trace.provider_name.clone(),
+            model: trace.provider_model.clone(),
+            input_tokens: trace.input_tokens,
+            output_tokens: trace.output_tokens,
+            cache_hit_tokens: trace.cache_hit_input_tokens,
+            duration_ms: trace.turn_duration_ms,
+            error: trace.error.clone(),
+            tool_calls,
+            started_at_ms: None,
+            completed_at_ms: trace.emitted_at_ms,
+        });
+    }
+
+    if turn_items.is_empty() {
+        return None;
+    }
+
+    Some(AgentTracePayload {
+        session_id: session_id.to_string(),
+        run_id: None,
+        turn_id: latest_turn_id,
+        environment,
+        release,
+        eval_status: EvalStatus::Unreviewed,
+        turns: turn_items,
+        tags: None,
+        extra: None,
+        total_input_tokens: Some(total_input_tokens),
+        total_output_tokens: Some(total_output_tokens),
+        total_duration_ms: Some(total_duration_ms),
+        reported_at_ms,
+    })
+}
+
+/// 兼容老接口
+pub fn build_agent_trace_payloads_from_turns(
+    session_id: &str,
+    traces: Vec<crate::agent::session::TurnTraceRecord>,
+) -> Vec<AgentTracePayload> {
+    build_session_aggregated_trace_payload(session_id, traces)
+        .map(|p| vec![p])
+        .unwrap_or_default()
 }
 

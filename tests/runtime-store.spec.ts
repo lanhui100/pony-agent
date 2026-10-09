@@ -2941,14 +2941,14 @@ describe("runtime session resilience", () => {
 
     await store.createSession();
 
-    expect(store.sessionId).toBe("session-4242");
+    expect(store.sessionId).toMatch(/^pa_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
     expect(store.phase).toBe("idle");
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionError).toBeNull();
     expect(store.messages).toEqual([]);
     expect(store.sessionList).toEqual([
       {
-        conversationId: "session-4242",
+        conversationId: store.sessionId,
         title: "新对话",
         summary: "发送第一条消息后保存到历史",
         turnCount: 0,
@@ -3011,12 +3011,12 @@ describe("runtime session resilience", () => {
 
     await store.createSession();
 
-    expect(store.sessionId).toBe("session-5151");
+    expect(store.sessionId).toMatch(/^pa_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
     expect(store.phase).toBe("idle");
     expect(store.messages).toEqual([]);
     expect(store.sessionOperation).toBeNull();
     expect(store.sessionList.map((session) => session.conversationId)).toEqual([
-      "session-5151",
+      store.sessionId,
       "session-existing"
     ]);
     expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalled();

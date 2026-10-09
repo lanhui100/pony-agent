@@ -50,24 +50,20 @@ impl HostControlPlane {
     }
 
     /// 手动上传指定会话的 trace 至 PonySentry（Trace tab 一键上传）。
-    /// 读取会话全部持久化 turn trace，构造 AgentTracePayload 列表后逐个上报；
-    /// 若无任何 trace 返回 Ok(0)；若有 trace 则严格校验上报网络响应，返回实际成功数量。
+    /// 读取会话全部持久化 turn trace，按 Session 维度聚合为包含完整时序 turns 的单条 Trace 记录；
+    /// 若无任何 trace 返回 Ok(0)；若有则上报并返回会话内的 turn 数量（方便前端提示"已上传包含 N 轮对话的 Trace"）。
     pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String> {
         let traces = self.load_session_traces(session_id);
-        let payloads = crate::agent::ponysentry::build_agent_trace_payloads_from_turns(
+        let turn_count = traces.len();
+        if let Some(payload) = crate::agent::ponysentry::build_session_aggregated_trace_payload(
             session_id,
             traces,
-        );
-        if payloads.is_empty() {
-            return Ok(0);
-        }
-
-        let mut success_count = 0;
-        for payload in payloads {
+        ) {
             crate::agent::ponysentry::send_agent_trace_direct(payload).await?;
-            success_count += 1;
+            Ok(turn_count)
+        } else {
+            Ok(0)
         }
-        Ok(success_count)
     }
 
     /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。

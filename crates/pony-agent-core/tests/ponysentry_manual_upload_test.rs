@@ -105,12 +105,13 @@ fn test_build_agent_trace_payloads_from_single_turn_mapping() {
 fn test_build_agent_trace_payloads_multi_turn_totals_per_payload() {
     let traces = vec![sample_turn(), sample_turn()];
     let payloads = build_agent_trace_payloads_from_turns("sess-multi", traces);
-    assert_eq!(payloads.len(), 2);
-    // 每个 payload 的 totals 只汇总自身 turn 的数据（turn 粒度上报）
-    for p in &payloads {
-        assert_eq!(p.total_input_tokens, Some(120));
-        assert_eq!(p.turns.len(), 1);
-    }
+    // 升级为业界标准 Session 聚合 Trace：整个 Session 生成 1 个 Payload，包含多轮时序 turns 且全局累加
+    assert_eq!(payloads.len(), 1, "同一 Session 必须聚合为单个 Trace Payload");
+    let p = &payloads[0];
+    assert_eq!(p.turns.len(), 2, "Payload 内部承载全部 2 轮 turns");
+    assert_eq!(p.total_input_tokens, Some(240), "全局 input tokens 累加");
+    assert_eq!(p.total_output_tokens, Some(90), "全局 output tokens 累加");
+    assert_eq!(p.total_duration_ms, Some(1640), "全局 duration 累加");
 }
 
 #[test]

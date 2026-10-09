@@ -163,7 +163,7 @@ describe("TelemetryPage", () => {
   it("点击上传 Trace：支持 loading 状态与成功/空/失败的交互反馈及 Toast", async () => {
     const wrapper = await mountTelemetry();
 
-    // 1. 成功上传 N 条
+    // 1. 成功上传 N 轮对话聚合 Trace
     tauriMocks.mockSafeInvoke.mockResolvedValueOnce(3);
     const uploadBtn = wrapper.get('[data-testid="telemetry-upload-trace"]');
     await uploadBtn.trigger("click");
@@ -172,8 +172,8 @@ describe("TelemetryPage", () => {
       sessionId: expect.any(String)
     });
     await Promise.resolve();
-    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("已成功上传 3 条 Trace");
-    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("已成功上传 3 条 Trace 数据至 PonySentry");
+    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("已成功上传该会话 Trace（共 3 轮对话）");
+    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("已成功上传会话 Trace（包含 3 轮对话链路）至 PonySentry");
 
     // 2. 0 条数据友好提示
     tauriMocks.mockSafeInvoke.mockResolvedValueOnce(0);
