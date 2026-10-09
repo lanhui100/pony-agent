@@ -2447,16 +2447,34 @@
           "segment": "patch"
         }
       ]
+    },
+    {
+      "commit": "",
+      "timestamp": "2026-10-09T08:40:39.564Z",
+      "bumps": [
+        {
+          "from": "0.1.107",
+          "to": "0.1.108",
+          "component": "core",
+          "segment": "patch"
+        },
+        {
+          "from": "0.1.115",
+          "to": "0.1.116",
+          "component": "tauri",
+          "segment": "patch"
+        }
+      ]
     }
   ],
-  "lastBump": "2026-10-09T05:52:53.067Z",
+  "lastBump": "2026-10-09T08:40:39.564Z",
   "tauri": {
     "major": 0,
     "minor": 1,
-    "patch": 115
+    "patch": 116
   },
   "core": {
-    "patch": 107,
+    "patch": 108,
     "minor": 1,
     "major": 0
   }
