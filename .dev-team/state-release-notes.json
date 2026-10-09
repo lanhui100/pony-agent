@@ -1,0 +1,40 @@
+{
+  "wave": "wave-release-notes",
+  "status": "completed",
+  "grade": "B",
+  "grade_triggers": ["CI workflow external GitHub API", "cross-file multi-module", "Ops/Infra pipeline"],
+  "baseline_commit": "0096667",
+  "checkpoints": {
+    "protocol_freeze": "d216bc7",
+    "red_anchor": "4dafafa",
+    "green": "ce3e232",
+    "closure": "pending"
+  },
+  "members": {
+    "lead": { "role": "lead", "tasks": ["task-1-review", "task-3-review", "task-4-assembly"] },
+    "protocol-agent": { "role": "protocol", "tasks": ["task-1"] },
+    "test-agent": { "role": "test", "tasks": ["task-2"] },
+    "executor": { "role": "executor", "tasks": ["task-3"], "note": "teammate 上下文超限中断，实现由契约冻结后的确定性投影转交 subagent 完成；测试独立分权未受影响" }
+  },
+  "tasks": {
+    "task-1": { "subject": "wave-rn Protocol: 冻结 release-notes 生成器契约/空桩/ADR", "status": "completed", "red_commit": "d216bc7" },
+    "task-2": { "subject": "wave-rn Test: 红相冻结验收测试（L2-T 功能 + Ops 静态前置断言）", "status": "completed", "red_commit": "4dafafa", "evidence": ".dev-team/red-phase-release-notes.log", "red_result": "28 failed | 5 passed" },
+    "task-3": { "subject": "wave-rn Executor: 实现 release-notes 生成器并接入 release.yml", "status": "completed", "green_commit": "ce3e232", "green_result": "vitest 36 passed, 全量回归 702 passed | 10 skipped, node --check 0" },
+    "task-4": { "subject": "wave-rn L3: 对抗审查（≥2 路互补视角）", "status": "completed", "review_files": [".dev-team/review-release-notes.json", ".dev-team/review-release-notes-cli.json"], "verdict": "PASS (view-B) / PASS (view-C after fetch-depth fix)" }
+  },
+  "l3_findings_closed": [
+    "checkout fetch-depth:0 + fetch-tags:true（致命：CI 浅克隆致 notes 恒为占位）",
+    "Generate 步骤显式 $LASTEXITCODE 判退",
+    "parseCommit 空 description 契约漂移（feat: → type:null）",
+    "pre-flight 断言补 §6.4 三处路径同源 + checkout 深度前置",
+    "CLI 黑盒 4 用例（exit code/空区间/缺参/--out 写文件）"
+  ],
+  "nfr_cli": {
+    "git_exec_timeout_ms": 60000,
+    "zero_network": true,
+    "deterministic_output": true,
+    "encoding": "utf8",
+    "exit_code_contract": "0 success / non-0 failure with stderr diagnostics"
+  },
+  "meta_retrospective": ".dev-team/meta-retrospective-release-notes.md"
+}
