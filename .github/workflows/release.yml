@@ -26,6 +26,9 @@ jobs:
       RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-node@v4
         with:
@@ -98,6 +101,12 @@ jobs:
           }
           Write-Host "Release gate PASS: NSIS installer + signature present"
 
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          node scripts/release-notes.mjs --repo-root . --to "${{ github.ref_name }}" --out "target/release/bundle/nsis/release-notes.md"
+          if ($LASTEXITCODE -ne 0) { throw "release notes generation failed with exit code $LASTEXITCODE" }
+
       - name: Publish draft release, upload assets, assemble latest.json from uploaded names, publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -108,7 +117,7 @@ jobs:
           # NOTE: GitHub keeps draft releases UNTAGGED ("untagged-…" html_url) until they
           # are published, so releases/tags/<tag> 404s on drafts. Resolve drafts by the
           # tag_name FIELD via the releases list endpoint instead.
-          gh release create "$tag" --draft --title "$tag" --notes "Automated signed release (Windows desktop)"
+          gh release create "$tag" --draft --title "$tag" --notes-file "target/release/bundle/nsis/release-notes.md"
           $nsis = "target/release/bundle/nsis"
           # Windows desktop assets: NSIS installer + its updater signature
           Get-ChildItem $nsis -Filter "*-setup.exe" | ForEach-Object { gh release upload "$tag" $_.FullName --clobber }
@@ -142,7 +151,6 @@ jobs:
           $ver = (Get-Content package.json | ConvertFrom-Json).version
           $manifest = [ordered]@{
             version = $ver
-            notes   = ""
             pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             platforms = [ordered]@{
               "windows-x86_64" = [ordered]@{
@@ -151,6 +159,7 @@ jobs:
               }
             }
           }
+          $manifest.notes = (Get-Content "target/release/bundle/nsis/release-notes.md" -Raw)
           $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$nsis/latest.json" -Encoding utf8
           Write-Host "latest.json references uploaded asset: $asset"
           # latest.json last so /releases/latest/download/latest.json points to the new manifest

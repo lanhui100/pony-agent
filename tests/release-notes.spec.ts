@@ -3,13 +3,10 @@
  * .dev-team/contract-matrix-release-notes.md 第 1/2/3/8 节）。
  *
  * 结构：
- * 1) RED PHASE 门禁（矩阵 §8.2）：await import 后从 globalThis 取四个函数，
- *    断言调用即抛 Error("NotImplemented") —— 证明功能未实现（红相）。
- *    ⚠ 该 describe 为红相临时门禁，绿相（正式 ESM 导出替换空桩后）随红相锚定
- *    一并移除，由下方 L2-T 验收契约段接管。
- * 2) L2-T 验收契约段（矩阵 §1/§2/§3）：parseCommit / groupCommits /
- *    buildReleaseNotes 的正式行为断言。当前空桩无 ESM 导出，mod.* 为 undefined，
- *    调用抛 TypeError —— 全部必然 FAIL（红相成立）。
+ * 1) L2-T 验收契约段（矩阵 §1/§2/§3）：parseCommit / groupCommits /
+ *    buildReleaseNotes 的正式行为断言（绿相冻结；红相期临时 "RED PHASE 门禁"
+ *    describe 段——矩阵 §8 空桩 globalThis 断言——已在绿相迁移时移除，红相证据
+ *    见 .dev-team/red-phase-release-notes.log 与 git commit 4dafafa）。
  *
  * 契约解读说明（已提请协议方复核）：
  * - 矩阵 §1 `ReleaseNotesInput = { subjects, from, to }` 未含 repoName，但 §3
@@ -20,6 +17,10 @@
  *   （`FEAT(x): y` → type:"feat"），以保证 §2 分组映射（小写键）成立。
  */
 import { beforeAll, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 
 /* ------------------------------------------------------------------ */
 /* 冻结类型（与矩阵 §1 对齐）                                          */
@@ -47,8 +48,6 @@ interface ReleaseNotesModule {
 /* ------------------------------------------------------------------ */
 /* 共享夹具                                                           */
 /* ------------------------------------------------------------------ */
-
-const STUB_GLOBAL_FN_NAMES = ["parseCommit", "groupCommits", "buildReleaseNotes", "main"] as const;
 
 /** 矩阵 §2 分组标题（冻结，含前缀空格与 emoji） */
 const SECTION_HEADERS: Record<GroupKey, string> = {
@@ -85,27 +84,7 @@ beforeAll(async () => {
 });
 
 /* ================================================================== */
-/* 1) RED PHASE 门禁（矩阵 §8.1/§8.2；绿相移除）                       */
-/* ================================================================== */
-
-describe("RED PHASE — 空桩红相门禁（契约矩阵 §8，绿相移除）", () => {
-  it("modules/release-notes.mjs 可被副作用导入（polyglot 空桩不抛错）", async () => {
-    await expect(import("../scripts/release-notes.mjs")).resolves.toBeDefined();
-  });
-
-  it.each(STUB_GLOBAL_FN_NAMES)(
-    'globalThis.%s 为可调用函数且任何调用抛 Error("NotImplemented")',
-    async (name) => {
-      await import("../scripts/release-notes.mjs");
-      const fn = (globalThis as Record<string, unknown>)[name];
-      expect(typeof fn).toBe("function");
-      expect(() => (fn as (...args: unknown[]) => unknown)("probe")).toThrow("NotImplemented");
-    }
-  );
-});
-
-/* ================================================================== */
-/* 2) L2-T 验收契约段（矩阵 §1/§2/§3）                                 */
+/* L2-T 验收契约段（矩阵 §1/§2/§3）                                    */
 /* ================================================================== */
 
 describe("parseCommit（矩阵 §1 解析规则）", () => {
@@ -147,6 +126,10 @@ describe("parseCommit（矩阵 §1 解析规则）", () => {
       scope: null,
       description: "unknown-type: whatever",
     });
+  });
+
+  it("无 description（`feat:`）→ 不匹配 {type:null, scope:null, description:''}（L3-B 契约角落漂移闭环，矩阵 §1 无 description → 不匹配）", () => {
+    expect(mod.parseCommit("feat:")).toEqual({ type: null, scope: null, description: "" });
   });
 
   it("breaking 后缀（feat!:) → 不匹配（Non-Goal §0，落入 maintenance 由 group 承接）", () => {
@@ -350,5 +333,65 @@ describe("buildReleaseNotes（矩阵 §3 输出格式）", () => {
         to: "v0.1.114",
       })
     );
+  });
+});
+
+/* ================================================================== */
+/* main / CLI 黑盒（矩阵 §4；L3 视角 C 审查补测）                      */
+/* 纯本地 git 调用（git log / git tag / git rev-parse，零网络），      */
+/* 经 spawnSync("node", ["scripts/release-notes.mjs", ...]) 执行正式    */
+/* 实现的可执行入口。依赖仓库真实 tag：v0.1.113 / v0.1.114 存在。      */
+/* ================================================================== */
+
+describe("main / CLI 黑盒（矩阵 §4，纯本地 git 零网络）", () => {
+  const REPO_ROOT = process.cwd(); // vitest run 自仓库根启动（cwd === 仓库根）
+
+  function runCli(args: string[]): { status: number | null; stdout: string; stderr: string } {
+    const res = spawnSync("node", ["scripts/release-notes.mjs", ...args], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  }
+
+  it("① 区间模式：--repo-root . --to v0.1.114 --from v0.1.113 → exit 0 且 stdout 含区间标题", () => {
+    const res = runCli(["--repo-root", ".", "--to", "v0.1.114", "--from", "v0.1.113"]);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("# pony-agent release notes (v0.1.113 → v0.1.114)");
+  });
+
+  it("② 缺 --to（参数缺失）→ exit 非 0 且 stderr 可诊断（矩阵 §4 失败契约）", () => {
+    const res = runCli(["--repo-root", "."]);
+    expect(res.status).not.toBe(0);
+    expect(res.stderr).toMatch(/missing required --to/);
+  });
+
+  it("③ 空区间（--from 与 --to 相同 tag，git log 无提交）→ exit 0 且输出占位行", () => {
+    const res = runCli(["--repo-root", ".", "--to", "v0.1.114", "--from", "v0.1.114"]);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("本版本无用户可见变更");
+  });
+
+  it("④ --out 写文件：文件存在且非空（矩阵 §4 --out 契约）", () => {
+    const outFile = join(tmpdir(), `rn-cli-out-${process.pid}-${Date.now()}.md`);
+    try {
+      const res = runCli([
+        "--repo-root",
+        ".",
+        "--to",
+        "v0.1.114",
+        "--from",
+        "v0.1.113",
+        "--out",
+        outFile,
+      ]);
+      expect(res.status).toBe(0);
+      expect(existsSync(outFile)).toBe(true);
+      expect(readFileSync(outFile, "utf8").trim().length).toBeGreaterThan(0);
+    } finally {
+      // 谁创建谁清理（test-expert：测试数据生命周期）
+      rmSync(outFile, { force: true });
+    }
   });
 });
