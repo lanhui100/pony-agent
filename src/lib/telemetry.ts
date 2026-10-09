@@ -5,6 +5,8 @@
 
 import { isTauriAvailable, safeInvoke } from "./tauri";
 
+import packageJson from "../../package.json";
+
 export const INGEST_URL =
   (import.meta.env?.VITE_PONYSENTRY_INGEST_URL as string) ||
   "https://sentry.ponyjob.top";
@@ -12,7 +14,7 @@ export const CLIENT_TOKEN =
   (import.meta.env?.VITE_PONYSENTRY_CLIENT_TOKEN as string) ||
   "6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24";
 export const APP_RELEASE =
-  (import.meta.env?.VITE_APP_RELEASE as string) || "0.1.109";
+  (import.meta.env?.VITE_APP_RELEASE as string) || packageJson.version || "0.1.118";
 export const APP_ENV =
   (import.meta.env?.VITE_APP_ENV as string) ||
   (import.meta.env?.DEV ? "dev" : "production");

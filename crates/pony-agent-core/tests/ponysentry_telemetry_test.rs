@@ -178,7 +178,7 @@ fn test_config_contract() {
     let default_cfg = PonySentryConfig::default();
     assert_eq!(default_cfg.endpoint, "https://sentry.ponyjob.top");
     assert_eq!(default_cfg.environment, "dev");
-    assert_eq!(default_cfg.release, "0.1.109");
+    assert_eq!(default_cfg.release, env!("CARGO_PKG_VERSION"));
     assert_eq!(
         default_cfg.client_token.as_deref(),
         Some("6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24")

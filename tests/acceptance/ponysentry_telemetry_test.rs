@@ -178,7 +178,7 @@ fn test_config_contract() {
     let default_cfg = PonySentryConfig::default();
     assert_eq!(default_cfg.endpoint, "https://sentry.ponyjob.top");
     assert_eq!(default_cfg.environment, "dev");
-    assert_eq!(default_cfg.release, "0.1.109");
+    assert_eq!(default_cfg.release, env!("CARGO_PKG_VERSION"));
     assert!(default_cfg.enabled);
 
     std::env::set_var("PONYSENTRY_INGEST_URL", "http://10.43.94.160:3000");

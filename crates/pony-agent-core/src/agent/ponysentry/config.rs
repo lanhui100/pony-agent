@@ -16,7 +16,7 @@ impl Default for PonySentryConfig {
             client_token: Some("6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24".to_string()),
             enabled: true,
             environment: "dev".to_string(),
-            release: "0.1.109".to_string(),
+            release: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 }
@@ -45,7 +45,7 @@ impl PonySentryConfig {
         let release = std::env::var("APP_RELEASE")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "0.1.109".to_string());
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
         Self {
             endpoint,

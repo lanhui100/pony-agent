@@ -181,7 +181,7 @@ pub fn build_agent_trace_from_event(
     let (environment, release) = if let Ok(client) = get_global().read() {
         (client.config.environment.clone(), client.config.release.clone())
     } else {
-        ("dev".to_string(), "0.1.109".to_string())
+        ("dev".to_string(), env!("CARGO_PKG_VERSION").to_string())
     };
 
     let reported_at_ms = std::time::SystemTime::now()
@@ -249,7 +249,7 @@ pub fn build_session_aggregated_trace_payload(
     let (environment, release) = if let Ok(client) = get_global().read() {
         (client.config.environment.clone(), client.config.release.clone())
     } else {
-        ("dev".to_string(), "0.1.116".to_string())
+        ("dev".to_string(), env!("CARGO_PKG_VERSION").to_string())
     };
 
     let reported_at_ms = std::time::SystemTime::now()
