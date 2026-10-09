@@ -13,7 +13,7 @@ impl Default for PonySentryConfig {
     fn default() -> Self {
         Self {
             endpoint: "https://sentry.ponyjob.top".to_string(),
-            client_token: None,
+            client_token: Some("6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24".to_string()),
             enabled: true,
             environment: "dev".to_string(),
             release: "0.1.109".to_string(),
@@ -30,7 +30,8 @@ impl PonySentryConfig {
 
         let client_token = std::env::var("PONYSENTRY_CLIENT_TOKEN")
             .ok()
-            .filter(|s| !s.trim().is_empty());
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| Some("6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24".to_string()));
 
         let enabled = std::env::var("PONYSENTRY_ENABLED")
             .map(|s| s.trim().to_lowercase() != "false" && s.trim() != "0")

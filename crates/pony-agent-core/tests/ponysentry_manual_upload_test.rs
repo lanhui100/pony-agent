@@ -137,3 +137,59 @@ fn test_upload_session_trace_contract_shape() {
     let _contract: fn(&str) -> Result<usize, String> = |_: &str| Ok(0);
     let _ = _contract;
 }
+
+#[test]
+fn test_upload_trace_to_live_sentry_contract() {
+    let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
+    rt.block_on(async {
+        // 验证向生产或测试 Ingest 上报 Trace 时的网络契约：带上默认 token 时能成功通过鉴权
+        let config = pony_agent_core::agent::ponysentry::PonySentryConfig::default();
+        assert!(config.client_token.is_some(), "Default config must provide client token for sentry auth");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let trace_url = format!("{}/api/v1/traces", config.endpoint.trim_end_matches('/'));
+        let trace_payload = serde_json::json!({
+            "session_id": "test-contract-session",
+            "turn_id": "test-turn-contract",
+            "environment": "test",
+            "release": "0.1.107"
+        });
+
+        let mut req = client.post(&trace_url).header("Content-Type", "application/json");
+        if let Some(ref token) = config.client_token {
+            req = req.header("X-Client-Token", token);
+        }
+
+        let resp = req.json(&trace_payload).send().await;
+        if let Ok(response) = resp {
+            assert_ne!(
+                response.status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "Trace upload must not be unauthorized with default client token"
+            );
+            assert_ne!(
+                response.status(),
+                reqwest::StatusCode::NOT_FOUND,
+                "Trace route /api/v1/traces must not return 404 Not Found"
+            );
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::CREATED,
+                "Trace upload should return 201 Created on live sentry"
+            );
+            // 谁创建谁清理：清理测试上报生成的临时 trace 记录
+            let created_body: serde_json::Value = response.json().await.unwrap();
+            if let Some(trace_id) = created_body.get("id").and_then(|v| v.as_str()) {
+                let _ = std::process::Command::new("psql")
+                    .arg("postgresql://job_copilot:8siud3siDW9s02k33edsFAGDDFSDFllidsk9987sddj@127.0.0.1:30543/ponysentry")
+                    .arg("-c")
+                    .arg(format!("DELETE FROM traces WHERE id = '{trace_id}';"))
+                    .output();
+            }
+        }
+    });
+}

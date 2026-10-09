@@ -179,6 +179,10 @@ fn test_config_contract() {
     assert_eq!(default_cfg.endpoint, "https://sentry.ponyjob.top");
     assert_eq!(default_cfg.environment, "dev");
     assert_eq!(default_cfg.release, "0.1.109");
+    assert_eq!(
+        default_cfg.client_token.as_deref(),
+        Some("6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24")
+    );
     assert!(default_cfg.enabled);
 
     std::env::set_var("PONYSENTRY_INGEST_URL", "http://10.43.94.160:3000");
