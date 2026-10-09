@@ -1,1 +1,23 @@
-{"verdict":"PASS","findings":[]}
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+      "line": 93,
+      "rule": "kind-gate-mismatch",
+      "counterexample": "is_trace_reportable_terminal 只匹配带前缀的事件名 \"turn:completed\"|\"turn:failed\"|\"turn:cancelled\"，而真实 TurnStreamEvent 的 payload.kind 全部是不带前缀的短名：turn:completed 由 emit_stream_event(...,\"turn:completed\",...,\"completed\",...) 构造（crates/pony-agent-core/src/agent/runtime/turn_stream.rs:1180-1182、2608-2613），turn:failed 的 kind=\"failed\"（crates/pony-agent-core/src/agent/turn_flow.rs:514），turn:cancelled 的 kind=\"cancelled\"（turn_flow.rs:571），emit_event（turn_flow.rs:901）也不改写 payload.kind。因此 maybe_report_turn_trace（mod.rs:182）内部的 is_trace_reportable_terminal(&payload.kind) 对一切真实终态事件恒为 false，提前 return，生产路径（RecordingTurnEventSink::emit 的 name 匹配正确，但内部门控把它拦死）自动上报 0 触发。冻结测试使用 kind: \"turn:completed\"（trace_auto_report_test.rs:83、211），与运行时真实 payload 的 kind=\"completed\" 不符，掩盖了该缺陷，4 个测试全绿但功能在生产环境完全失效。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1325,
+      "rule": "sync-path-bypass",
+      "counterexample": "自动上报只接在 RecordingTurnEventSink::emit（streaming 路径）上；同步入口 run_turn（control_plane/mod.rs:1325 -> runtime.run_turn -> turn_sync.rs run_turn_inner）的终态事件全部经 NoopTurnEventSink 发射（turn_sync.rs:391 emit_sync_turn_failed、457、872 同步 completed），RecordingTurnEventSink 完全不参与，即使修复 kind 门控，run_turn（已注册的 tauri 命令 src-tauri/src/lib.rs:55，及 non_tauri_harness）路径仍然零上报——接线覆盖不对称，同步入口的真实会话 trace 永远缺失。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/ponysentry/mod.rs",
+      "line": 128,
+      "rule": "error-json-double-encode",
+      "counterexample": "act.error 是 Option<serde_json::Value>，e.to_string() 对 Value::String 输出的是带引号/转义的紧凑 JSON（如 error=\"boom\" 会变成 \"\\\"boom\\\"\"，对象/数字同理），而 turn.error 用的是 payload.error 裸字符串 clone；同一 payload 内两处 error 序列化形式不一致，上报到 PonySentry 的 tool_call.error 会带多余引号与转义，且冻结测试的 error 字段均为 None，未覆盖此映射。建议对 Value::String 用 as_str() 取出裸文本，其它类型再降级为 to_string()。"
+    }
+  ]
+}

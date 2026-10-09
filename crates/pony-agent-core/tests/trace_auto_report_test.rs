@@ -249,3 +249,148 @@ fn test_maybe_report_turn_trace_entrypoint() {
     let _ = is_enabled();
     maybe_report_turn_trace(&event);
 }
+
+// ==========================================
+// 4. L3 FAIL 修复固化：短名 kind 与 error 编码契约（防回归）
+// ==========================================
+
+#[test]
+fn test_is_trace_reportable_terminal_short_kind_contract() {
+    // 运行时真实 TurnStreamEvent.payload.kind 是短名（turn_stream.rs:1182 kind="completed",
+    // turn_flow.rs:571 kind="cancelled"），L3 审查确认此前门控对真实终态恒 false 导致
+    // 生产零上报；修复后短名必须全部判定为可上报。
+    assert!(is_trace_reportable_terminal("completed"));
+    assert!(is_trace_reportable_terminal("failed"));
+    assert!(is_trace_reportable_terminal("cancelled"));
+    // 短名非终态仍不可上报
+    assert!(!is_trace_reportable_terminal("suspended"));
+    assert!(!is_trace_reportable_terminal("delta"));
+}
+
+#[test]
+fn test_build_agent_trace_from_event_short_kind_mapping() {
+    // 用真实运行时形态（kind="completed" 短名）构造终态事件，映射必须成功
+    let event = TurnStreamEvent {
+        event_id: Some("evt-short-001".to_string()),
+        session_id: Some("sess-short-001".to_string()),
+        turn_id: "turn-short-001".to_string(),
+        kind: "completed".to_string(),
+        event_type: Some("completed".into()),
+        event_version: None,
+        sequence: Some(7),
+        emitted_at_ms: Some(1710000000000),
+        phase: Some("act".to_string()),
+        text: Some("done".to_string()),
+        reasoning_content: None,
+        error: None,
+        provider_requested_name: None,
+        provider_name: Some("deepseek".to_string()),
+        provider_protocol: None,
+        provider_model: Some("deepseek-chat".to_string()),
+        provider_source: None,
+        provider_mode: None,
+        fallback_reason: None,
+        build_context_observation: None,
+        input_tokens: Some(200),
+        cache_hit_input_tokens: Some(50),
+        reasoning_tokens: None,
+        output_tokens: Some(80),
+        total_tokens: Some(280),
+        first_token_latency_ms: None,
+        turn_duration_ms: Some(1500),
+        trace_steps: None,
+        trace_timeline: None,
+        tool_activities: Some(vec![TurnToolActivity {
+            id: "act-short-1".into(),
+            name: "bash".into(),
+            canonical_tool_name: Some("bash".into()),
+            display_name_zh: None,
+            status: "success".into(),
+            description: "run test".into(),
+            arguments_text: Some("cargo test".into()),
+            result_text: None,
+            duration_seconds: Some(0.5),
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }]),
+        provider_call_records: None,
+        hook_trace_records: None,
+        session_summary: Some("short".into()),
+        step: Some(0),
+    };
+
+    let trace = build_agent_trace_from_event(&event).expect("短名 completed 终态必须可构造");
+    assert_eq!(trace.session_id, "sess-short-001");
+    assert_eq!(trace.turns.len(), 1);
+    assert_eq!(trace.turns[0].model.as_deref(), Some("deepseek-chat"));
+    assert_eq!(trace.turns[0].tool_calls.len(), 1);
+    assert_eq!(trace.turns[0].tool_calls[0].tool_name, "bash");
+    assert_eq!(trace.turns[0].tool_calls[0].duration_ms, Some(500));
+}
+
+#[test]
+fn test_tool_error_string_is_bare_text_not_json_encoded() {
+    // L3 审查 finding F3：act.error 为 Value::String 时 to_string() 会输出带引号/转义的
+    // JSON（"boom" -> "\"boom\""）；修复后字符串必须取裸文本。
+    let event = TurnStreamEvent {
+        event_id: Some("evt-err-001".to_string()),
+        session_id: Some("sess-err-001".to_string()),
+        turn_id: "turn-err-001".to_string(),
+        kind: "completed".to_string(),
+        event_type: Some("completed".into()),
+        event_version: None,
+        sequence: Some(1),
+        emitted_at_ms: Some(1710000000000),
+        phase: Some("act".to_string()),
+        text: Some("boom".to_string()),
+        reasoning_content: None,
+        error: None,
+        provider_requested_name: None,
+        provider_name: Some("deepseek".to_string()),
+        provider_protocol: None,
+        provider_model: Some("deepseek-chat".to_string()),
+        provider_source: None,
+        provider_mode: None,
+        fallback_reason: None,
+        build_context_observation: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+        trace_steps: None,
+        trace_timeline: None,
+        tool_activities: Some(vec![TurnToolActivity {
+            id: "act-err-1".into(),
+            name: "bash".into(),
+            canonical_tool_name: Some("bash".into()),
+            display_name_zh: None,
+            status: "error".into(),
+            description: "boom".into(),
+            arguments_text: None,
+            result_text: None,
+            duration_seconds: None,
+            parent_activity_id: None,
+            artifacts: None,
+            error: Some(serde_json::Value::String("boom".to_string())),
+            capability_invocation: None,
+        }]),
+        provider_call_records: None,
+        hook_trace_records: None,
+        session_summary: None,
+        step: None,
+    };
+
+    let trace = build_agent_trace_from_event(&event).expect("error 事件必须可构造");
+    let tool_error = trace.turns[0].tool_calls[0].error.clone();
+    assert_eq!(
+        tool_error.as_deref(),
+        Some("boom"),
+        "字符串 error 必须是裸文本，不得带 JSON 引号转义"
+    );
+    assert!(!tool_error.unwrap_or_default().contains('"'));
+}

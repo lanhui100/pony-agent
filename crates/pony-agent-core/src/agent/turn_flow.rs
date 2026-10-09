@@ -932,6 +932,10 @@ pub fn emit_event(
             .unwrap_or(0)
     );
     sink.emit(name, payload.clone());
+    // Trace 自动上报（统一底点）：emit_event 是 stream 与 sync 两条路径的公共出口，
+    // 在此挂载可覆盖全部终态事件（turn:completed/failed/cancelled）；内部按 payload.kind
+    // 短名终态与 enabled 开关过滤，suspended 等非终态零开销跳过。
+    crate::agent::ponysentry::maybe_report_turn_trace(&payload);
     // PA-091：事件溯源——构造 TurnEvent 经全局注册表持久化（缓冲 + turn 终态 flush）。
     // 构造失败 fail loud（数据完整性错误）；持久化失败由注册通道 contained。
     // 审核 P0：turn:completed 的 assistant/message 不标记 terminal——由额外发射的

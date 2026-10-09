@@ -86,11 +86,15 @@ pub fn is_enabled() -> bool {
     }
 }
 
-/// 判定事件是否为可上报 Trace 的终态事件
-/// 仅 "turn:completed", "turn:failed", "turn:cancelled" 返回 true；
-/// 其余事件（包括 "turn:suspended"、"turn:trace"、"turn:step" 等）返回 false。
+/// 判定事件是否为可上报 Trace 的终态事件。
+/// 兼容两种事件命名：运行时 `TurnStreamEvent.kind` 为短名（"completed"/"failed"/"cancelled"），
+/// 事件发射名（emit name）为带前缀（"turn:completed" 等）。两者均视为可上报终态；
+/// 其余事件（含 "turn:suspended"、"turn:trace"、"turn:step" 等）返回 false。
 pub fn is_trace_reportable_terminal(name: &str) -> bool {
-    matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled")
+    matches!(
+        name,
+        "turn:completed" | "turn:failed" | "turn:cancelled" | "completed" | "failed" | "cancelled"
+    )
 }
 
 /// 从终态 TurnStreamEvent 映射并构建 AgentTracePayload
@@ -125,7 +129,12 @@ pub fn build_agent_trace_from_event(
                     arguments_summary: act.arguments_text.clone(),
                     status: act.status.clone(),
                     duration_ms: act.duration_seconds.map(|d| (d * 1000.0) as u64),
-                    error: act.error.as_ref().map(|e| e.to_string()),
+                    // act.error 是 Option<serde_json::Value>：字符串取裸文本（as_str），
+                    // 避免 to_string() 产生带引号/转义的 JSON 二次编码；其他类型降级为 to_string。
+                    error: act.error.as_ref().map(|e| match e {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    }),
                 })
                 .collect()
         })
