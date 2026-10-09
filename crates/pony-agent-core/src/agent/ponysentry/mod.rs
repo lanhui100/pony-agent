@@ -53,6 +53,26 @@ pub fn capture_agent_trace(trace: AgentTracePayload) {
     }
 }
 
+/// 直接异步上报单个 AgentTracePayload 并等待结果（手动上传用）
+pub async fn send_agent_trace_direct(trace: AgentTracePayload) -> Result<(), String> {
+    let (endpoint, client_token, enabled) = {
+        let client = get_global()
+            .read()
+            .map_err(|e| format!("client lock poisoned: {e}"))?;
+        (
+            client.config.endpoint.clone(),
+            client.config.client_token.clone(),
+            client.config.enabled,
+        )
+    };
+
+    if !enabled {
+        return Err("PonySentry is disabled".to_string());
+    }
+
+    client::send_trace_direct_http(&endpoint, client_token.as_deref(), trace).await
+}
+
 pub fn capture_panic(info: &PanicHookInfo) {
     if let Ok(client) = get_global().read() {
         client.capture_panic(info);

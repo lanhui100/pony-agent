@@ -131,11 +131,8 @@ fn test_auto_report_removed_from_emit_event() {
 
 #[test]
 fn test_upload_session_trace_contract_shape() {
-    // 契约：控制面 upload_session_trace 返回 Result<usize, String>（上报 turn 数量）。
-    // 该入口在 tauri 命令层（src-tauri/src/lib.rs upload_session_trace）暴露，
-    // 由实现与冒烟验证覆盖；此处仅作类型契约文档化断言（编译期由命令签名保证）。
-    let _contract: fn(&str) -> Result<usize, String> = |_: &str| Ok(0);
-    let _ = _contract;
+    // 契约：控制面 upload_session_trace 返回 async fn(&str) -> Result<usize, String>（上报 turn 数量）。
+    // 该入口在 tauri 命令层（src-tauri/src/lib.rs upload_session_trace）暴露。
 }
 
 #[test]

@@ -471,11 +471,11 @@ fn list_sessions(control_plane: State<'_, HostControlPlane>) -> Vec<SessionOverv
 /// Trace tab 一键上传：手动上报指定会话的持久化 trace 至 PonySentry。
 /// 返回实际上报的 turn 数量（空会话返回 0）。
 #[tauri::command]
-fn upload_session_trace(
+async fn upload_session_trace(
     control_plane: State<'_, HostControlPlane>,
     session_id: String,
 ) -> Result<usize, String> {
-    control_plane.upload_session_trace(&session_id)
+    control_plane.upload_session_trace(&session_id).await
 }
 
 #[derive(serde::Serialize)]

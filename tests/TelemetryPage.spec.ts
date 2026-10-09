@@ -159,4 +159,34 @@ describe("TelemetryPage", () => {
 
     expect(wrapper.emitted("navigate")).toEqual([["home"]]);
   });
+
+  it("点击上传 Trace：支持 loading 状态与成功/空/失败的交互反馈及 Toast", async () => {
+    const wrapper = await mountTelemetry();
+
+    // 1. 成功上传 N 条
+    tauriMocks.mockSafeInvoke.mockResolvedValueOnce(3);
+    const uploadBtn = wrapper.get('[data-testid="telemetry-upload-trace"]');
+    await uploadBtn.trigger("click");
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("upload_session_trace", {
+      sessionId: expect.any(String)
+    });
+    await Promise.resolve();
+    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("已成功上传 3 条 Trace");
+    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("已成功上传 3 条 Trace 数据至 PonySentry");
+
+    // 2. 0 条数据友好提示
+    tauriMocks.mockSafeInvoke.mockResolvedValueOnce(0);
+    await uploadBtn.trigger("click");
+    await Promise.resolve();
+    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toBe("本会话暂无 Trace 数据");
+    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("当前会话暂无已完成的持久化 Trace 数据可上传");
+
+    // 3. 上传异常友好 Toast 与错误提示
+    tauriMocks.mockSafeInvoke.mockRejectedValueOnce(new Error("服务端响应异常 (401)"));
+    await uploadBtn.trigger("click");
+    await Promise.resolve();
+    expect(wrapper.get('[data-testid="telemetry-upload-feedback"]').text()).toContain("上传失败");
+    expect(wrapper.get('[data-testid="telemetry-toast"]').text()).toContain("上传 Trace 失败");
+  });
 });

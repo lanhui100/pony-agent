@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { TooltipProvider } from "reka-ui";
-import { ArrowLeft, UploadCloud } from "lucide-vue-next";
+import { ArrowLeft, CheckCircle2, LoaderCircle, UploadCloud, XCircle } from "lucide-vue-next";
 import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
 import TraceInspector from "@/components/TraceInspector.vue";
 import Tooltip from "@/components/ui/Tooltip.vue";
@@ -36,31 +36,67 @@ const isCoding = computed(() => workspaceMode.value === "coding");
 const runtimeStore = useRuntimeStore();
 const uploadState = ref<"idle" | "uploading" | "done" | "error">("idle");
 const uploadFeedback = ref("");
+const toastMessage = ref<string | null>(null);
+const toastType = ref<"success" | "error" | "info">("info");
 let uploadTimer: ReturnType<typeof setTimeout> | null = null;
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(message: string, type: "success" | "error" | "info" = "info", duration = 4000) {
+  toastMessage.value = message;
+  toastType.value = type;
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+  }
+  toastTimer = setTimeout(() => {
+    toastMessage.value = null;
+    toastTimer = null;
+  }, duration);
+}
 
 async function uploadSessionTrace() {
-  if (uploadState.value === "uploading" || !isTauriAvailable()) {
+  if (uploadState.value === "uploading") {
     return;
   }
+  if (!isTauriAvailable()) {
+    showToast("当前环境不支持与本地客户端通信", "error");
+    return;
+  }
+  if (!runtimeStore.sessionId?.trim()) {
+    showToast("未找到当前活跃会话 ID", "error");
+    return;
+  }
+
   uploadState.value = "uploading";
-  uploadFeedback.value = "";
+  uploadFeedback.value = "上传中…";
+
   try {
     const count = await safeInvoke<number>("upload_session_trace", {
       sessionId: runtimeStore.sessionId
     });
-    uploadState.value = "done";
-    uploadFeedback.value = `已上传 ${count} 条 Trace`;
+
+    if (count === 0) {
+      uploadState.value = "done";
+      uploadFeedback.value = "本会话暂无 Trace 数据";
+      showToast("当前会话暂无已完成的持久化 Trace 数据可上传", "info");
+    } else {
+      uploadState.value = "done";
+      uploadFeedback.value = `已成功上传 ${count} 条 Trace`;
+      showToast(`已成功上传 ${count} 条 Trace 数据至 PonySentry`, "success");
+    }
   } catch (err) {
     uploadState.value = "error";
-    uploadFeedback.value = `上传失败: ${String(err)}`;
+    const errMsg = String(err);
+    uploadFeedback.value = `上传失败: ${errMsg}`;
+    showToast(`上传 Trace 失败: ${errMsg}`, "error", 5000);
   }
+
   if (uploadTimer) {
     clearTimeout(uploadTimer);
   }
   uploadTimer = setTimeout(() => {
     uploadState.value = "idle";
     uploadFeedback.value = "";
-  }, 3000);
+  }, 4000);
 }
 
 onMounted(() => {
@@ -199,9 +235,13 @@ onMounted(() => {
               :disabled="uploadState === 'uploading'"
               @click="uploadSessionTrace"
             >
+              <LoaderCircle
+                v-if="uploadState === 'uploading'"
+                class="h-4 w-4 animate-spin text-amber-600"
+              />
               <UploadCloud
+                v-else
                 class="h-4 w-4"
-                :class="{ 'animate-pulse': uploadState === 'uploading' }"
               />
             </button>
           </Tooltip>
@@ -262,5 +302,30 @@ onMounted(() => {
         <ModelMonitorPage :embedded="true" class="min-h-0 flex-1" />
       </div>
     </div>
+
+    <!-- 浮动 Toast 反馈：为用户操作提供明确的状态、成功与错误感知 -->
+    <transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="translate-y-2 opacity-0"
+      enter-to-class="translate-y-0 opacity-100"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="translate-y-0 opacity-100"
+      leave-to-class="translate-y-2 opacity-0"
+    >
+      <div
+        v-if="toastMessage"
+        class="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-[0.45rem] px-3.5 py-2.5 text-xs text-white shadow-lg backdrop-blur"
+        :class="{
+          'bg-stone-900/90': toastType === 'info',
+          'bg-emerald-900/90 border border-emerald-600/40': toastType === 'success',
+          'bg-rose-900/90 border border-rose-600/40': toastType === 'error'
+        }"
+        data-testid="telemetry-toast"
+      >
+        <CheckCircle2 v-if="toastType === 'success'" class="h-4 w-4 text-emerald-400 shrink-0" />
+        <XCircle v-else-if="toastType === 'error'" class="h-4 w-4 text-rose-400 shrink-0" />
+        <span>{{ toastMessage }}</span>
+      </div>
+    </transition>
   </section>
 </template>
