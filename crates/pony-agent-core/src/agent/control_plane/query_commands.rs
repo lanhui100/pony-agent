@@ -49,6 +49,21 @@ impl HostControlPlane {
             .load_turn_traces(session_id)
     }
 
+    /// 手动上传指定会话的 trace 至 PonySentry（Trace tab 一键上传）。
+    /// 读取会话全部持久化 turn trace，构造 AgentTracePayload 列表后逐个异步上报；
+    /// 返回实际上报的 turn 数量（空会话/无数据返回 0）。
+    pub fn upload_session_trace(&self, session_id: &str) -> Result<usize, String> {
+        let traces = self.load_session_traces(session_id);
+        let payloads = crate::agent::ponysentry::build_agent_trace_payloads_from_turns(
+            session_id,
+            traces,
+        );
+        for payload in &payloads {
+            crate::agent::ponysentry::capture_agent_trace(payload.clone());
+        }
+        Ok(payloads.len())
+    }
+
     /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。
     /// 引用格式 `bco:<turn_id>:<seq>`；未命中返回 None（legacy 内嵌数据走 trace 字段）。
     pub fn load_build_context_observation(

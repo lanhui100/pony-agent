@@ -196,3 +196,80 @@ pub fn maybe_report_turn_trace(payload: &crate::agent::runtime::TurnStreamEvent)
     }
 }
 
+/// 从会话的持久化 TurnTraceRecord 列表手动构造上报 Payload 列表。
+/// 每个 turn 映射为一个独立的 `AgentTracePayload`（turn 粒度上报，totals 仅汇总
+/// 该 turn 自身数据）；空列表返回空 Vec，不产生半成品 payload。
+pub fn build_agent_trace_payloads_from_turns(
+    session_id: &str,
+    traces: Vec<crate::agent::session::TurnTraceRecord>,
+) -> Vec<AgentTracePayload> {
+    let (environment, release) = if let Ok(client) = get_global().read() {
+        (client.config.environment.clone(), client.config.release.clone())
+    } else {
+        ("dev".to_string(), "0.1.109".to_string())
+    };
+
+    let reported_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    traces
+        .into_iter()
+        .filter_map(|trace| {
+            let turn_id = trace.turn_id.trim();
+            if turn_id.is_empty() {
+                return None;
+            }
+
+            let tool_calls: Vec<ToolCallTraceItem> = trace
+                .tool_activities
+                .into_iter()
+                .map(|act| ToolCallTraceItem {
+                    call_id: Some(act.id.clone()),
+                    tool_name: act.name.clone(),
+                    arguments_summary: act.arguments_text.clone(),
+                    status: act.status.clone(),
+                    duration_ms: act.duration_seconds.map(|d| (d * 1000.0) as u64),
+                    error: act.error.as_ref().map(|e| match e {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    }),
+                })
+                .collect();
+
+            let turn_item = TurnTraceItem {
+                turn_id: turn_id.to_string(),
+                sequence: trace.sequence,
+                phase: Some(trace.phase.clone()),
+                provider: trace.provider_name.clone(),
+                model: trace.provider_model.clone(),
+                input_tokens: trace.input_tokens,
+                output_tokens: trace.output_tokens,
+                cache_hit_tokens: trace.cache_hit_input_tokens,
+                duration_ms: trace.turn_duration_ms,
+                error: trace.error.clone(),
+                tool_calls,
+                started_at_ms: None,
+                completed_at_ms: trace.emitted_at_ms,
+            };
+
+            Some(AgentTracePayload {
+                session_id: session_id.to_string(),
+                run_id: None,
+                turn_id: Some(turn_id.to_string()),
+                environment: environment.clone(),
+                release: release.clone(),
+                eval_status: EvalStatus::Unreviewed,
+                turns: vec![turn_item],
+                tags: None,
+                extra: None,
+                total_input_tokens: trace.input_tokens,
+                total_output_tokens: trace.output_tokens,
+                total_duration_ms: trace.turn_duration_ms,
+                reported_at_ms,
+            })
+        })
+        .collect()
+}
+

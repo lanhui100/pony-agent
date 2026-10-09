@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ArrowLeft } from "lucide-vue-next";
+import { TooltipProvider } from "reka-ui";
+import { ArrowLeft, UploadCloud } from "lucide-vue-next";
 import ModelMonitorPage from "@/components/ModelMonitorPage.vue";
 import TraceInspector from "@/components/TraceInspector.vue";
+import Tooltip from "@/components/ui/Tooltip.vue";
 import { useSettingsStore } from "@/stores/settings";
+import { useRuntimeStore } from "@/stores/runtime";
+import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
 
 /**
  * PA-096：二级观测页（原"遥测"，ADR 0013 更名）。
@@ -27,6 +31,41 @@ const settingsStore = useSettingsStore();
 const { workspaceMode } = storeToRefs(settingsStore);
 
 const isCoding = computed(() => workspaceMode.value === "coding");
+
+// Trace 一键上传至 PonySentry（纯手动触发，上传当前会话全部持久化 trace）
+const runtimeStore = useRuntimeStore();
+const uploadState = ref<"idle" | "uploading" | "done" | "error">("idle");
+const uploadFeedback = ref("");
+let uploadTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function uploadSessionTrace() {
+  if (uploadState.value === "uploading" || !isTauriAvailable()) {
+    return;
+  }
+  uploadState.value = "uploading";
+  uploadFeedback.value = "";
+  try {
+    const count = await safeInvoke<number>("upload_session_trace", {
+      sessionId: runtimeStore.sessionId
+    });
+    uploadState.value = "done";
+    uploadFeedback.value = `已上传 ${count} 条 Trace`;
+  } catch (err) {
+    uploadState.value = "error";
+    uploadFeedback.value = `上传失败: ${String(err)}`;
+  }
+  if (uploadTimer) {
+    clearTimeout(uploadTimer);
+  }
+  uploadTimer = setTimeout(() => {
+    uploadState.value = "idle";
+    uploadFeedback.value = "";
+  }, 3000);
+}
+
+onMounted(() => {
+  headingRef.value?.focus();
+});
 
 interface TelemetryTabItem {
   id: TelemetryTab;
@@ -137,13 +176,44 @@ onMounted(() => {
         </span>
       </div>
 
-      <div
-        class="flex items-center gap-1 rounded-[0.5rem] bg-[#f6f0e8] p-1"
-        role="tablist"
-        aria-label="观测视图切换"
-        data-testid="telemetry-tablist"
-        @keydown="handleTablistKeydown"
-      >
+      <div class="flex items-center gap-2">
+        <div
+          v-if="uploadFeedback"
+          class="text-[11px] leading-5 text-stone-500"
+          data-testid="telemetry-upload-feedback"
+        >
+          {{ uploadFeedback }}
+        </div>
+
+        <TooltipProvider :delay-duration="200">
+          <Tooltip
+            v-if="isCoding && activeTab === 'trace'"
+            :text="uploadState === 'uploading' ? '上传中…' : '上传本会话 Trace 至 PonySentry'"
+            side="bottom"
+          >
+            <button
+              type="button"
+              class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[0.35rem] text-stone-500 transition hover:bg-[#f7e3bf] hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="上传本会话 Trace 至 PonySentry"
+              data-testid="telemetry-upload-trace"
+              :disabled="uploadState === 'uploading'"
+              @click="uploadSessionTrace"
+            >
+              <UploadCloud
+                class="h-4 w-4"
+                :class="{ 'animate-pulse': uploadState === 'uploading' }"
+              />
+            </button>
+          </Tooltip>
+        </TooltipProvider>
+
+        <div
+          class="flex items-center gap-1 rounded-[0.5rem] bg-[#f6f0e8] p-1"
+          role="tablist"
+          aria-label="观测视图切换"
+          data-testid="telemetry-tablist"
+          @keydown="handleTablistKeydown"
+        >
         <button
           v-for="(tab, index) in availableTabs"
           :id="`telemetry-tab-${tab.id}`"
@@ -165,6 +235,7 @@ onMounted(() => {
         >
           {{ tab.label }}
         </button>
+      </div>
       </div>
     </div>
 
