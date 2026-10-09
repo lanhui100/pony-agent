@@ -28,21 +28,22 @@
 |---|---|---|---|
 | `parseCommit` | `(subject: string) => { type: string \| null, scope: string \| null, description: string }` | 结构化提交对象 | 解析单条 conventional commit subject |
 | `groupCommits` | `(subjects: CommitSubject[]) => GroupedCommits` | 五组有序对象 | 按分组规则分组，排除规则先行 |
-| `buildReleaseNotes` | `({ subjects, from, to }: ReleaseNotesInput) => string` | markdown 全文 | 不写文件、不打日志，纯字符串返回 |
+| `buildReleaseNotes` | `({ subjects, from, to, repoName }: ReleaseNotesInput) => string` | markdown 全文 | 不写文件、不打日志，纯字符串返回 |
 | `main` | `(argv: string[]) => number` | 0=成功 | CLI 入口；失败抛异常（stderr 可诊断 + 非 0 退出） |
 
 类型定义（冻结，`//` 为文档注释，运行时以形状校验为准）：
 
 ```ts
 type CommitSubject = { subject: string; sha: string }; // sha 为 git %h 缩写（原样，不截断）
-type ReleaseNotesInput = { subjects: CommitSubject[]; from: string | null; to: string }; // from=null 表示全量历史
+type ReleaseNotesInput = { subjects: CommitSubject[]; from: string | null; to: string; repoName: string }; // from=null 表示全量历史；repoName 由调用方显式入参（CLI 读取 package.json.name），buildReleaseNotes 保持纯函数
 type GroupKey = "features" | "bugFixes" | "performance" | "docs" | "maintenance";
 type GroupedCommits = Record<GroupKey, CommitSubject[]>; // 键序固定：features→bugFixes→performance→docs→maintenance
 ```
 
 **parseCommit 解析规则（冻结）**：
 
-- 匹配 `type(scope): description`（大小写不敏感匹配 type），type 限定 `[a-z]+`，scope 可为空：
+- 匹配 `type(scope): description`（type 大小写不敏感识别，**识别后归一化为小写**：
+  `FEAT(x): y` → `type: "feat"`），归一化后 type 限定 `[a-z]+`，scope 可为空：
   `feat: x` → `{ type: "feat", scope: null, description: "x" }`；
   `fix(ui): handle null` → `{ type: "fix", scope: "ui", description: "handle null" }`。
 - 不匹配（无冒号、无 description、type 含非法字符、breaking `!` 后缀等）→
