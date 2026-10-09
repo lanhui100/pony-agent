@@ -174,6 +174,8 @@ pub fn build_agent_trace_from_event(
         tool_calls,
         started_at_ms: None,
         completed_at_ms: payload.emitted_at_ms,
+        input_text: None,
+        output_text: None,
     };
 
     let (environment, release) = if let Ok(client) = get_global().read() {
@@ -200,6 +202,10 @@ pub fn build_agent_trace_from_event(
         total_input_tokens: payload.input_tokens,
         total_output_tokens: payload.output_tokens,
         total_duration_ms: payload.turn_duration_ms,
+        project: None,
+        stats_incomplete: false,
+        wall_clock_ms: None,
+        inter_turn_pause_ms: None,
         reported_at_ms,
     })
 }
@@ -219,18 +225,26 @@ pub fn maybe_report_turn_trace(payload: &crate::agent::runtime::TurnStreamEvent)
 /// 从会话的持久化 TurnTraceRecord 列表构造单个聚合 Session Trace Payload。
 /// 符合业界标准（Session 级 Trace + 时序 turns 列表）：
 /// - 将多轮对话按时序汇总进同一个 `AgentTracePayload` 的 `turns` 列表中；
+/// - 排序键为 `(emitted_at_ms, sequence)`（先时间戳、后 sequence，缺失按 0 兜底）；
 /// - 自动汇总全局 `total_input_tokens`, `total_output_tokens`, `total_duration_ms`；
+///   若任一 turn 的 input/output tokens 缺失则 `stats_incomplete = true`；
+/// - `wall_clock_ms` = max(completed_at_ms) - min(emitted_at_ms)（以 emitted_at 充当
+///   起止时间；存在缺失时 None）；`inter_turn_pause_ms` = 相邻 turn emitted_at 间隔的均值
+///   （不足 2 轮或存在缺失时 None）；
+/// - turn 的 `input_text` / `output_text` 经 `sanitize` 脱敏后写入；
+/// - `project` 透传为会话级元数据；
 /// - 空会话无有效 turn 时返回 None。
 pub fn build_session_aggregated_trace_payload(
     session_id: &str,
+    project: Option<String>,
     mut traces: Vec<crate::agent::session::TurnTraceRecord>,
 ) -> Option<AgentTracePayload> {
     if traces.is_empty() {
         return None;
     }
 
-    // 按 sequence 与 emitted_at_ms 进行确定性时序排序
-    traces.sort_by_key(|t| (t.sequence.unwrap_or(0), t.emitted_at_ms.unwrap_or(0)));
+    // 先时间戳、后 sequence 的确定性时序排序（时间戳为主键，sequence 兜底）。
+    traces.sort_by_key(|t| (t.emitted_at_ms.unwrap_or(0), t.sequence.unwrap_or(0)));
 
     let (environment, release) = if let Ok(client) = get_global().read() {
         (client.config.environment.clone(), client.config.release.clone())
@@ -248,6 +262,11 @@ pub fn build_session_aggregated_trace_payload(
     let mut total_output_tokens: u64 = 0;
     let mut total_duration_ms: u64 = 0;
     let mut latest_turn_id: Option<String> = None;
+    // 任一 turn 的 input/output tokens 缺失即视为统计不完整。
+    let mut stats_incomplete = false;
+    // 已纳入 payload 的 turn 数与其 emitted_at_ms（排序后；用于 wall_clock 与间隔统计）。
+    let mut included_count: usize = 0;
+    let mut emitted_ats: Vec<u64> = Vec::new();
 
     for trace in traces {
         let turn_id = trace.turn_id.trim();
@@ -259,6 +278,13 @@ pub fn build_session_aggregated_trace_payload(
         total_input_tokens = total_input_tokens.saturating_add(trace.input_tokens.unwrap_or(0));
         total_output_tokens = total_output_tokens.saturating_add(trace.output_tokens.unwrap_or(0));
         total_duration_ms = total_duration_ms.saturating_add(trace.turn_duration_ms.unwrap_or(0));
+        if trace.input_tokens.is_none() || trace.output_tokens.is_none() {
+            stats_incomplete = true;
+        }
+        included_count += 1;
+        if let Some(ts) = trace.emitted_at_ms {
+            emitted_ats.push(ts);
+        }
 
         let tool_calls: Vec<ToolCallTraceItem> = trace
             .tool_activities
@@ -290,12 +316,35 @@ pub fn build_session_aggregated_trace_payload(
             tool_calls,
             started_at_ms: None,
             completed_at_ms: trace.emitted_at_ms,
+            // 对话文本经 PonySentry 脱敏管线处理后写入，避免路径/密钥泄漏。
+            input_text: trace.input_text.as_deref().map(sanitize),
+            output_text: trace.output_text.as_deref().map(sanitize),
         });
     }
 
     if turn_items.is_empty() {
         return None;
     }
+
+    // 全部纳入 turn 均有 emitted_at 时方可计算 wall_clock 与间隔均值，否则 None。
+    let all_timestamps_present = emitted_ats.len() == included_count;
+    let wall_clock_ms = if all_timestamps_present && !emitted_ats.is_empty() {
+        Some(
+            emitted_ats.iter().max().copied().unwrap_or(0)
+                - emitted_ats.iter().min().copied().unwrap_or(0),
+        )
+    } else {
+        None
+    };
+    let inter_turn_pause_ms = if all_timestamps_present && emitted_ats.len() >= 2 {
+        let total_gap: u64 = emitted_ats
+            .windows(2)
+            .map(|w| w[1].saturating_sub(w[0]))
+            .sum();
+        Some(total_gap / (emitted_ats.len() as u64 - 1))
+    } else {
+        None
+    };
 
     Some(AgentTracePayload {
         session_id: session_id.to_string(),
@@ -310,8 +359,112 @@ pub fn build_session_aggregated_trace_payload(
         total_input_tokens: Some(total_input_tokens),
         total_output_tokens: Some(total_output_tokens),
         total_duration_ms: Some(total_duration_ms),
+        project,
+        stats_incomplete,
+        wall_clock_ms,
+        inter_turn_pause_ms,
         reported_at_ms,
     })
+}
+
+/// 构造单个分片 AgentTracePayload。
+/// `is_first`：首个分片携带聚合汇总元数据（继承 base 的所有会话级字段）；
+/// 其余分片仅携带 turns 子集与 session_id（其余字段置默认/None，仅保留上报必需字段）。
+#[allow(clippy::too_many_arguments)]
+fn build_shard_payload(
+    session_id: &str,
+    is_first: bool,
+    turns: Vec<TurnTraceItem>,
+    base: &AgentTracePayload,
+) -> AgentTracePayload {
+    if is_first {
+        let mut payload = base.clone();
+        payload.turns = turns;
+        return payload;
+    }
+    AgentTracePayload {
+        session_id: session_id.to_string(),
+        run_id: None,
+        turn_id: None,
+        environment: base.environment.clone(),
+        release: base.release.clone(),
+        eval_status: EvalStatus::Unreviewed,
+        turns,
+        tags: None,
+        extra: None,
+        total_input_tokens: None,
+        total_output_tokens: None,
+        total_duration_ms: None,
+        project: None,
+        stats_incomplete: false,
+        wall_clock_ms: None,
+        inter_turn_pause_ms: None,
+        reported_at_ms: base.reported_at_ms,
+    }
+}
+
+/// 将会话全部持久化 TurnTraceRecord 聚合并按时序切分为多个 AgentTracePayload 分片。
+/// 每个分片携带同一 session_id 的 turns 连续子集，且分片本身序列化后
+/// （`serde_json::to_vec` 长度）不超过 `max_bytes`；首个分片携带聚合汇总元数据
+/// （project/stats_incomplete/wall_clock_ms/inter_turn_pause_ms/全局 tokens），
+/// 其余分片仅 turns 与 session_id 语义字段。
+/// 空会话（无有效 turn）返回空 Vec；单个 turn 超过 max_bytes 时仍独立成片（尽力约束）。
+pub fn build_session_trace_payloads_sharded(
+    session_id: &str,
+    project: Option<&str>,
+    traces: Vec<crate::agent::session::TurnTraceRecord>,
+    max_bytes: usize,
+) -> Vec<AgentTracePayload> {
+    let Some(mut aggregated) =
+        build_session_aggregated_trace_payload(session_id, project.map(str::to_string), traces)
+    else {
+        return Vec::new();
+    };
+    let all_turns = std::mem::take(&mut aggregated.turns);
+
+    // serde_json 为紧凑输出：分片大小 = 空 turns 基座长度 + Σ(turn 长度) + n - 1（逗号分隔）。
+    // 先一次性测量基座与每个 turn 的序列化长度，贪心切分为 O(n) 精确计算。
+    let first_base_len = serde_json::to_vec(&build_shard_payload(session_id, true, Vec::new(), &aggregated))
+        .map(|b| b.len())
+        .unwrap_or(0);
+    let minimal_base_len = serde_json::to_vec(&build_shard_payload(session_id, false, Vec::new(), &aggregated))
+        .map(|b| b.len())
+        .unwrap_or(0);
+
+    let mut chunks: Vec<Vec<TurnTraceItem>> = Vec::new();
+    let mut current_start = 0usize;
+    let mut current_sum = 0usize; // 当前片内 turn 序列化长度之和
+    let mut current_count = 0usize;
+
+    for (index, turn) in all_turns.iter().enumerate() {
+        let turn_len = serde_json::to_vec(turn).map(|b| b.len()).unwrap_or(0);
+        // 候选片（current + 本 turn）的精确长度：base + Σ + n' - 1（n' = current_count + 1）。
+        // 首个分片携带汇总元数据（基座更大）；未 flush 前当前片始终按首个分片计量。
+        let is_first_candidate = chunks.is_empty();
+        let base_len = if is_first_candidate {
+            first_base_len
+        } else {
+            minimal_base_len
+        };
+        let candidate_len = base_len + current_sum + turn_len + current_count;
+        if current_count > 0 && candidate_len > max_bytes {
+            chunks.push(all_turns[current_start..index].to_vec());
+            current_start = index;
+            current_sum = 0;
+            current_count = 0;
+        }
+        current_sum += turn_len;
+        current_count += 1;
+    }
+    if current_count > 0 {
+        chunks.push(all_turns[current_start..].to_vec());
+    }
+
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, turns)| build_shard_payload(session_id, index == 0, turns, &aggregated))
+        .collect()
 }
 
 /// 兼容老接口
@@ -319,7 +472,7 @@ pub fn build_agent_trace_payloads_from_turns(
     session_id: &str,
     traces: Vec<crate::agent::session::TurnTraceRecord>,
 ) -> Vec<AgentTracePayload> {
-    build_session_aggregated_trace_payload(session_id, traces)
+    build_session_aggregated_trace_payload(session_id, None, traces)
         .map(|p| vec![p])
         .unwrap_or_default()
 }

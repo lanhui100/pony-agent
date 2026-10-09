@@ -80,12 +80,18 @@ fn test_agent_trace_payload_serialization_contract() {
             }],
             started_at_ms: Some(1700000000000),
             completed_at_ms: Some(1700000000850),
+            input_text: None,
+            output_text: None,
         }],
         tags: Some(tags),
         extra: Some(json!({"task_id": "task-2", "prompt_length": 42})),
         total_input_tokens: Some(1200),
         total_output_tokens: Some(300),
         total_duration_ms: Some(850),
+        project: None,
+        stats_incomplete: false,
+        wall_clock_ms: None,
+        inter_turn_pause_ms: None,
         reported_at_ms: 1700000001000,
     };
 
@@ -217,6 +223,10 @@ fn test_client_capture_agent_trace_api_red_phase() {
         total_input_tokens: None,
         total_output_tokens: None,
         total_duration_ms: None,
+        project: None,
+        stats_incomplete: false,
+        wall_clock_ms: None,
+        inter_turn_pause_ms: None,
         reported_at_ms: 1700000000000,
     };
 
@@ -257,6 +267,10 @@ fn test_queue_overflow_and_avalanche_defense() {
             total_input_tokens: None,
             total_output_tokens: None,
             total_duration_ms: None,
+            project: None,
+            stats_incomplete: false,
+            wall_clock_ms: None,
+            inter_turn_pause_ms: None,
             reported_at_ms: 1700000000000,
         };
         client.capture_agent_trace(trace);
@@ -302,6 +316,8 @@ fn test_large_payload_limit_handling() {
             tool_calls,
             started_at_ms: Some(1700000000000 + (t as u64 * 1000)),
             completed_at_ms: Some(1700000000300 + (t as u64 * 1000)),
+            input_text: None,
+            output_text: None,
         });
     }
 
@@ -318,6 +334,10 @@ fn test_large_payload_limit_handling() {
         total_input_tokens: Some(500000),
         total_output_tokens: Some(80000),
         total_duration_ms: Some(30000),
+        project: None,
+        stats_incomplete: false,
+        wall_clock_ms: None,
+        inter_turn_pause_ms: None,
         reported_at_ms: 1700000030000,
     };
 

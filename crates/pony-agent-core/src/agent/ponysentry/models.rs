@@ -89,6 +89,10 @@ pub struct TurnTraceItem {
     pub tool_calls: Vec<ToolCallTraceItem>,
     pub started_at_ms: Option<u64>,
     pub completed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_text: Option<String>,
 }
 
 /// 上报至 PonySentry 的 Agent 运行完整链路 Trace Payload
@@ -107,6 +111,14 @@ pub struct AgentTracePayload {
     pub total_input_tokens: Option<u64>,
     pub total_output_tokens: Option<u64>,
     pub total_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub stats_incomplete: bool,
+    #[serde(default)]
+    pub wall_clock_ms: Option<u64>,
+    #[serde(default)]
+    pub inter_turn_pause_ms: Option<u64>,
     pub reported_at_ms: u64,
 }
 

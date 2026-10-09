@@ -214,6 +214,8 @@ impl AgentRuntime {
                     total_tokens,
                     first_token_latency_ms,
                     turn_duration_ms,
+                    input_text: Some(user_message.to_string()),
+                    output_text: return_text.as_deref().map(str::to_string),
                     updated_at: 0,
                 },
             );
@@ -518,6 +520,8 @@ impl AgentRuntime {
                     total_tokens: None,
                     first_token_latency_ms,
                     turn_duration_ms,
+                    input_text: Some(user_message.to_string()),
+                    output_text: None,
                     updated_at: 0,
                 },
             );
@@ -625,6 +629,8 @@ impl AgentRuntime {
                     total_tokens: None,
                     first_token_latency_ms: None,
                     turn_duration_ms: None,
+                    input_text: Some(user_message.to_string()),
+                    output_text: None,
                     updated_at: 0,
                 },
             );

@@ -3444,6 +3444,8 @@ mod tests {
             total_tokens: None,
             first_token_latency_ms: None,
             turn_duration_ms: None,
+            input_text: None,
+            output_text: None,
             updated_at,
         }
     }

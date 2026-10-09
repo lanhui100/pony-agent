@@ -3856,6 +3856,8 @@ mod tests {
                     total_tokens: Some(22),
                     first_token_latency_ms: Some(100),
                     turn_duration_ms: Some(500),
+                    input_text: None,
+                    output_text: None,
                     updated_at: 0,
                 },
             );
@@ -3982,6 +3984,8 @@ mod tests {
                     total_tokens: Some(14),
                     first_token_latency_ms: Some(140),
                     turn_duration_ms: Some(880),
+                    input_text: None,
+                    output_text: None,
                     updated_at: 0,
                 },
             );
@@ -4071,6 +4075,8 @@ mod tests {
                     total_tokens: Some(10),
                     first_token_latency_ms: Some(90),
                     turn_duration_ms: Some(510),
+                    input_text: None,
+                    output_text: None,
                     updated_at: 0,
                 },
             );

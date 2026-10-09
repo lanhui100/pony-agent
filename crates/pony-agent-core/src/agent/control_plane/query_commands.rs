@@ -50,20 +50,26 @@ impl HostControlPlane {
     }
 
     /// 手动上传指定会话的 trace 至 PonySentry（Trace tab 一键上传）。
-    /// 读取会话全部持久化 turn trace，按 Session 维度聚合为包含完整时序 turns 的单条 Trace 记录；
-    /// 若无任何 trace 返回 Ok(0)；若有则上报并返回会话内的 turn 数量（方便前端提示"已上传包含 N 轮对话的 Trace"）。
+    /// 读取会话全部持久化 turn trace，聚合后按分片序列化上限（1_500_000 bytes）切分为
+    /// 多个 Session 级 Trace 记录并逐个上报；`project` 取 workspace root 的 basename。
+    /// 若无任何 trace 返回 Ok(0)；若有则上报并返回全部 turns 数量（成功数，方便前端提示
+    /// "已上传包含 N 轮对话的 Trace"）。
     pub async fn upload_session_trace(&self, session_id: &str) -> Result<usize, String> {
         let traces = self.load_session_traces(session_id);
-        let turn_count = traces.len();
-        if let Some(payload) = crate::agent::ponysentry::build_session_aggregated_trace_payload(
+        let project = std::path::Path::new(&self.get_workspace_root())
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        let payloads = crate::agent::ponysentry::build_session_trace_payloads_sharded(
             session_id,
+            project.as_deref(),
             traces,
-        ) {
+            1_500_000,
+        );
+        let total_turns: usize = payloads.iter().map(|payload| payload.turns.len()).sum();
+        for payload in payloads {
             crate::agent::ponysentry::send_agent_trace_direct(payload).await?;
-            Ok(turn_count)
-        } else {
-            Ok(0)
         }
+        Ok(total_turns)
     }
 
     /// PA-094：按引用加载 build_context_observation 全量 payload（大字段外置）。

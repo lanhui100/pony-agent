@@ -726,6 +726,10 @@ pub struct TurnTraceRecord {
     pub first_token_latency_ms: Option<u64>,
     pub turn_duration_ms: Option<u64>,
     #[serde(default)]
+    pub input_text: Option<String>,
+    #[serde(default)]
+    pub output_text: Option<String>,
+    #[serde(default)]
     pub updated_at: u64,
 }
 

@@ -3382,6 +3382,8 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
             total_tokens: Some(46),
             first_token_latency_ms: Some(180),
             turn_duration_ms: Some(920),
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );
@@ -3526,6 +3528,8 @@ fn file_backend_roundtrip_restores_runtime_generated_multi_boundary_hook_traces(
             total_tokens: Some(46),
             first_token_latency_ms: Some(180),
             turn_duration_ms: Some(920),
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );
@@ -3632,6 +3636,8 @@ fn file_backend_roundtrip_restores_terminal_event_annotation_after_trace_update(
             total_tokens: Some(21),
             first_token_latency_ms: Some(90),
             turn_duration_ms: Some(420),
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );
@@ -3744,6 +3750,8 @@ fn append_turn_trace_hook_records_updates_existing_trace_and_roundtrips() {
             total_tokens: None,
             first_token_latency_ms: None,
             turn_duration_ms: None,
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );
@@ -4012,6 +4020,8 @@ fn file_backend_roundtrip_restores_checkpoint_persist_evidence() {
             total_tokens: Some(30),
             first_token_latency_ms: Some(120),
             turn_duration_ms: Some(860),
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );
@@ -4169,6 +4179,8 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
             total_tokens: Some(13),
             first_token_latency_ms: Some(120),
             turn_duration_ms: Some(640),
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );
@@ -4277,6 +4289,8 @@ fn file_backend_roundtrip_persists_failed_turn_into_visible_history() {
             total_tokens: None,
             first_token_latency_ms: None,
             turn_duration_ms: None,
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );
@@ -4431,6 +4445,8 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
             total_tokens: Some(10),
             first_token_latency_ms: Some(90),
             turn_duration_ms: Some(510),
+            input_text: None,
+            output_text: None,
             updated_at: 0,
         },
     );

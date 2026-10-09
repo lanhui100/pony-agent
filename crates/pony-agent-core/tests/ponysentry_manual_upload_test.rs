@@ -10,7 +10,8 @@
 //! 红相阶段：上述映射函数未实现、自动调用未移除，编译或断言失败。
 
 use pony_agent_core::agent::ponysentry::{
-    build_agent_trace_payloads_from_turns, AgentTracePayload, EvalStatus,
+    build_agent_trace_payloads_from_turns, build_session_aggregated_trace_payload,
+    build_session_trace_payloads_sharded, AgentTracePayload, EvalStatus,
 };
 use pony_agent_core::agent::session::TurnTraceRecord;
 use pony_agent_core::agent::telemetry::TurnToolActivity;
@@ -63,6 +64,8 @@ fn sample_turn() -> TurnTraceRecord {
         total_tokens: Some(235),
         first_token_latency_ms: Some(300),
         turn_duration_ms: Some(820),
+        input_text: None,
+        output_text: None,
         updated_at: 1710000000001,
     }
 }
@@ -190,4 +193,178 @@ fn test_upload_trace_to_live_sentry_contract() {
             }
         }
     });
+}
+
+#[test]
+fn test_build_session_trace_payloads_sharded_greedy_split() {
+    let session_id = "sess-shard-test-001";
+    let project = Some("pony-agent");
+
+    // 构造 12 个 turns，每个 turn 包含较大的 input_text 和 output_text（约 800+ 字节）
+    let mut turns = Vec::new();
+    for i in 1..=12 {
+        let mut turn = sample_turn();
+        turn.turn_id = format!("turn-shard-{:03}", i);
+        turn.sequence = Some(i as u64);
+        turn.emitted_at_ms = Some(1710000000000 + i as u64 * 1000);
+        turn.input_text = Some(format!("User query {:03}: {}", i, "A".repeat(500)));
+        turn.output_text = Some(format!("Agent answer {:03}: {}", i, "B".repeat(500)));
+        turns.push(turn);
+    }
+
+    // 设置 max_bytes = 5000 字节，迫使 12 个 turn 被贪心切分为多个分片
+    let payloads = build_session_trace_payloads_sharded(session_id, project, turns.clone(), 5000);
+
+    // 断言产出分片数 > 1
+    assert!(
+        payloads.len() > 1,
+        "预期分片数 > 1，实际分片数: {}",
+        payloads.len()
+    );
+
+    // 收集所有分片的 turns
+    let mut collected_turns = Vec::new();
+    for (idx, payload) in payloads.iter().enumerate() {
+        // 断言各分片的 session_id 严格一致
+        assert_eq!(
+            payload.session_id, session_id,
+            "分片 {} 的 session_id 不匹配",
+            idx
+        );
+
+        if idx == 0 {
+            // 首个分片 carries total_tokens/stats_incomplete/wall_clock/project 元数据
+            assert_eq!(payload.project.as_deref(), Some("pony-agent"));
+            assert_eq!(payload.total_input_tokens, Some(120 * 12));
+            assert_eq!(payload.total_output_tokens, Some(45 * 12));
+            assert_eq!(payload.stats_incomplete, false);
+            assert!(
+                payload.wall_clock_ms.is_some(),
+                "首分片应包含 wall_clock_ms"
+            );
+            assert_eq!(payload.wall_clock_ms, Some(11000)); // 12000 - 1000
+        } else {
+            // 后续分片无冗余全局元数据
+            assert!(
+                payload.project.is_none(),
+                "后续分片 {} 不应冗余携带 project",
+                idx
+            );
+            assert!(
+                payload.total_input_tokens.is_none(),
+                "后续分片 {} 不应冗余携带 total_input_tokens",
+                idx
+            );
+            assert!(
+                payload.total_output_tokens.is_none(),
+                "后续分片 {} 不应冗余携带 total_output_tokens",
+                idx
+            );
+            assert!(
+                payload.wall_clock_ms.is_none(),
+                "后续分片 {} 不应冗余携带 wall_clock_ms",
+                idx
+            );
+            assert_eq!(payload.stats_incomplete, false);
+        }
+
+        for turn in &payload.turns {
+            collected_turns.push(turn.clone());
+        }
+    }
+
+    // 所有分片的 turns 总和与输入相同
+    assert_eq!(
+        collected_turns.len(),
+        turns.len(),
+        "分片 turns 总数与输入不一致"
+    );
+
+    // 且严格按时间戳递增保序
+    for (i, turn) in collected_turns.iter().enumerate() {
+        assert_eq!(turn.turn_id, format!("turn-shard-{:03}", i + 1));
+        assert_eq!(turn.completed_at_ms, Some(1710000000000 + (i as u64 + 1) * 1000));
+    }
+}
+
+#[test]
+fn test_build_session_aggregated_trace_payload_timestamp_sorting() {
+    let session_id = "sess-sort-test";
+    // 输入若干 turn，其 emitted_at_ms 分别为 [3000, 1000, 2000]，sequence 为相反顺序
+    let mut t1 = sample_turn();
+    t1.turn_id = "turn-3000".to_string();
+    t1.emitted_at_ms = Some(3000);
+    t1.sequence = Some(1);
+
+    let mut t2 = sample_turn();
+    t2.turn_id = "turn-1000".to_string();
+    t2.emitted_at_ms = Some(1000);
+    t2.sequence = Some(3);
+
+    let mut t3 = sample_turn();
+    t3.turn_id = "turn-2000".to_string();
+    t3.emitted_at_ms = Some(2000);
+    t3.sequence = Some(2);
+
+    let input_traces = vec![t1, t2, t3];
+    let payload = build_session_aggregated_trace_payload(session_id, None, input_traces)
+        .expect("payload should be generated");
+
+    // 断言最终 payload.turns 严格按 [1000, 2000, 3000] 递增排序
+    assert_eq!(payload.turns.len(), 3);
+    assert_eq!(payload.turns[0].completed_at_ms, Some(1000));
+    assert_eq!(payload.turns[0].turn_id, "turn-1000");
+    assert_eq!(payload.turns[1].completed_at_ms, Some(2000));
+    assert_eq!(payload.turns[1].turn_id, "turn-2000");
+    assert_eq!(payload.turns[2].completed_at_ms, Some(3000));
+    assert_eq!(payload.turns[2].turn_id, "turn-3000");
+}
+
+#[test]
+fn test_trace_text_zero_trust_redaction() {
+    let session_id = "sess-redact-test";
+    let mut turn = sample_turn();
+    // 构造 input_text 含敏感路径与 token
+    turn.input_text = Some("Deploy key at /home/developer/secrets/api_key.pem with Bearer secret-token-1234567890".to_string());
+    turn.output_text = Some("Checking /Users/alice/projects for auth".to_string());
+
+    let payload = build_session_aggregated_trace_payload(session_id, None, vec![turn])
+        .expect("payload should be generated");
+
+    assert_eq!(payload.turns.len(), 1);
+    let redacted_turn = &payload.turns[0];
+
+    let input = redacted_turn.input_text.as_deref().expect("input_text should exist");
+    assert!(
+        !input.contains("/home/developer"),
+        "敏感绝对路径 /home/developer 必须被脱敏，实际值: {}",
+        input
+    );
+    assert!(
+        input.contains("[USER_HOME]/secrets/api_key.pem"),
+        "主目录部分必须被替换为 [USER_HOME]，实际值: {}",
+        input
+    );
+    assert!(
+        !input.contains("secret-token-1234567890"),
+        "Bearer Token 必须被脱敏，实际值: {}",
+        input
+    );
+    assert!(
+        input.contains("Bearer [REDACTED_SECRET]"),
+        "Bearer Token 必须脱敏为 Bearer [REDACTED_SECRET]，实际值: {}",
+        input
+    );
+
+    let output = redacted_turn.output_text.as_deref().expect("output_text should exist");
+    assert!(
+        !output.contains("/Users/alice"),
+        "敏感主目录 /Users/alice 必须被脱敏，实际值: {}",
+        output
+    );
+    assert!(
+        output.contains("[USER_HOME]/projects"),
+        "Mac 主目录部分必须被替换为 [USER_HOME]，实际值: {}",
+        output
+    );
 }
