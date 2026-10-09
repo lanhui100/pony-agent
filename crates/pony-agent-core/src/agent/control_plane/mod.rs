@@ -862,6 +862,11 @@ impl<'a, S: TurnEventSink> TurnEventSink for RecordingTurnEventSink<'a, S> {
         ) {
             self.record_terminal_payload(&payload);
         }
+        // Trace 自动上报：仅可上报终态（completed/failed/cancelled）触发；
+        // suspended 由 maybe_report_turn_trace 内部终态检查过滤，防重复上报。
+        if matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+            crate::agent::ponysentry::maybe_report_turn_trace(&payload);
+        }
     }
 }
 
