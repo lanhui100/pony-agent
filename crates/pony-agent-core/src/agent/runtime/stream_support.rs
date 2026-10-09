@@ -381,13 +381,16 @@ pub(super) fn tool_result_control_outcome_pending(tool_result: &ToolResult) -> b
         == Some("control_outcome_pending")
 }
 
-/// Extract the consecutive-failure signal for a tool result: `(tool name, error code)`.
+/// Extract the consecutive-failure signal for a tool result:
+/// `(tool name, argument fingerprint, error code)`.
 /// `ok`/`partial` results, aborted executions, and pending control outcomes (`Ask` waits) never
 /// count as failures, so they reset the consecutive counter.
+/// Using the argument fingerprint ensures that trying different arguments (e.g. `pnpm test` then `pnpm build`)
+/// does not trigger a false-positive consecutive failure loop break.
 pub(super) fn tool_failure_signal(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
-) -> Option<(String, String)> {
+) -> Option<(String, String, String)> {
     if tool_result.status != "error" || tool_result_control_outcome_pending(tool_result) {
         return None;
     }
@@ -399,14 +402,15 @@ pub(super) fn tool_failure_signal(
         .get("kind")
         .or_else(|| error.get("code"))
         .and_then(Value::as_str)?;
-    Some((tool_call.name.clone(), code.to_string()))
+    let arg_fingerprint = tool_call.arguments.to_string();
+    Some((tool_call.name.clone(), arg_fingerprint, code.to_string()))
 }
 
-/// Tracks how many consecutive failures share the same `(tool name, error code)` signal.
+/// Tracks how many consecutive failures share the same `(tool name, argument fingerprint, error code)` signal.
 /// A success, an unclassifiable result, or a different signal resets the run.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ConsecutiveFailureTracker {
-    pub(super) signal: Option<(String, String)>,
+    pub(super) signal: Option<(String, String, String)>,
     pub(super) count: usize,
 }
 
@@ -457,7 +461,7 @@ impl ConsecutiveFailureTracker {
     }
 
     /// Record one tool outcome signal; returns the updated consecutive-failure count.
-    pub(super) fn record(&mut self, signal: Option<(String, String)>) -> usize {
+    pub(super) fn record(&mut self, signal: Option<(String, String, String)>) -> usize {
         match signal {
             Some(next) if self.signal.as_ref() == Some(&next) => {
                 self.count += 1;

@@ -487,6 +487,8 @@ fn chat_messages_to_responses_input(messages: &[Value]) -> Option<Vec<Value>> {
     }
 
     let mut items: Vec<Value> = Vec::new();
+    let mut function_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut function_call_output_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for message in messages {
         let role = message.get("role").and_then(Value::as_str).unwrap_or("");
         match role {
@@ -519,12 +521,15 @@ fn chat_messages_to_responses_input(messages: &[Value]) -> Option<Vec<Value>> {
                         .and_then(Value::as_str)
                         .filter(|value| !value.is_empty())
                         .unwrap_or("tool_call_local");
-                    items.push(json!({
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": name,
-                        "arguments": arguments
-                    }));
+                    // 幂等去重：同一 call_id 的 function_call 只允许出现一次
+                    if function_call_ids.insert(call_id.to_string()) {
+                        items.push(json!({
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": arguments
+                        }));
+                    }
                 }
             }
             "tool" => {
@@ -534,11 +539,15 @@ fn chat_messages_to_responses_input(messages: &[Value]) -> Option<Vec<Value>> {
                     .filter(|value| !value.is_empty())
                     .unwrap_or("tool_call_local");
                 let output = message.get("content").and_then(Value::as_str).unwrap_or("");
-                items.push(json!({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": output
-                }));
+                // 幂等去重：同一 call_id 的 function_call_output 只允许出现一次，
+                // 防止 'Duplicate function_call_output for call_id' 400 报错
+                if function_call_output_ids.insert(call_id.to_string()) {
+                    items.push(json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output
+                    }));
+                }
             }
             "user" | "system" | "developer" => {
                 if let Some(text) = message.get("content").and_then(Value::as_str) {
@@ -902,6 +911,77 @@ mod tests {
         assert_eq!(items[3]["type"], "function_call_output");
         assert_eq!(items[3]["call_id"], "call_list");
         assert_eq!(items[3]["output"], "Cargo.toml\nsrc");
+    }
+
+    #[test]
+    fn duplicate_function_call_output_is_deduplicated() {
+        let messages = vec![
+            json!({ "role": "user", "content": "列出文件" }),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_list",
+                    "type": "function",
+                    "function": { "name": "List", "arguments": "{\"path\":\".\"}" }
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_list",
+                "content": "Cargo.toml\nsrc"
+            }),
+            // 重复的 function_call_output：历史重试或流中断恢复导致
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_list",
+                "content": "Cargo.toml\nsrc"
+            }),
+        ];
+
+        let items = chat_messages_to_responses_input(&messages).expect("chat form converts");
+
+        let outputs: Vec<_> = items
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .collect();
+        assert_eq!(
+            outputs.len(),
+            1,
+            "重复 call_id 的 function_call_output 必须去重，防止 400 Duplicate function_call_output"
+        );
+        assert_eq!(outputs[0]["call_id"], "call_list");
+    }
+
+    #[test]
+    fn duplicate_function_call_id_is_deduplicated() {
+        let messages = vec![
+            json!({ "role": "user", "content": "列出文件" }),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_list",
+                        "type": "function",
+                        "function": { "name": "List", "arguments": "{\"path\":\".\"}" }
+                    },
+                    {
+                        "id": "call_list",
+                        "type": "function",
+                        "function": { "name": "List", "arguments": "{\"path\":\".\"}" }
+                    }
+                ]
+            }),
+        ];
+
+        let items = chat_messages_to_responses_input(&messages).expect("chat form converts");
+
+        let calls: Vec<_> = items
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect();
+        assert_eq!(calls.len(), 1, "同一 call_id 的 function_call 必须去重");
     }
 
     #[test]

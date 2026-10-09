@@ -175,7 +175,11 @@ fn test_zero_trust_redaction_for_trace_and_secrets() {
         "sk_token": "sk-mock-dummy-key-sample-1234567890",
         "authorization": "Bearer mock-test-super-secret-key-12345",
         "normal_field": "safe content",
-        "nested": {"api_key": "mock-draft-hidden_key_123"}
+        "nested": {"api_key": "mock-draft-hidden_key_123"},
+        "input_tokens": 1234,
+        "output_tokens": 5678,
+        "cache_hit_tokens": 90,
+        "total_tokens": 6912
     });
     let sanitized_val = sanitize_json(&json_with_secret);
 
@@ -191,6 +195,10 @@ fn test_zero_trust_redaction_for_trace_and_secrets() {
         "nested api_key must be fully redacted"
     );
     assert_eq!(sanitized_val["normal_field"], "safe content");
+    assert_eq!(sanitized_val["input_tokens"], 1234, "input_tokens 必须保真保留数值");
+    assert_eq!(sanitized_val["output_tokens"], 5678, "output_tokens 必须保真保留数值");
+    assert_eq!(sanitized_val["cache_hit_tokens"], 90, "cache_hit_tokens 必须保真保留数值");
+    assert_eq!(sanitized_val["total_tokens"], 6912, "total_tokens 必须保真保留数值");
 }
 
 // ==========================================

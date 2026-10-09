@@ -22,6 +22,12 @@ static RE_KEY_VALUE_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)"(token|password|passwd|secret|api_key|apikey|access_token|refresh_token|authorization|credential)"\s*:\s*"[^"]+""#).unwrap()
 });
 
+#[inline]
+fn is_metric_or_token_count_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.ends_with("tokens") || lower.contains("token_count") || lower.contains("tokencount")
+}
+
 pub fn sanitize(input: &str) -> String {
     let mut s = input.to_string();
 
@@ -58,7 +64,10 @@ fn sanitize_json_depth(value: &Value, depth: usize) -> Value {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (k, v) in map {
-                if SENSITIVE_KEY_PATTERN.is_match(k) {
+                if is_metric_or_token_count_key(k) {
+                    // 数值型与计量 tokens 字段白名单直通，严禁脱敏
+                    out.insert(k.clone(), sanitize_json_depth(v, depth + 1));
+                } else if SENSITIVE_KEY_PATTERN.is_match(k) {
                     out.insert(k.clone(), Value::String("[REDACTED_SECRET]".to_string()));
                 } else {
                     out.insert(k.clone(), sanitize_json_depth(v, depth + 1));

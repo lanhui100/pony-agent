@@ -4793,21 +4793,30 @@ fn consecutive_failure_tracker_counts_same_signal_and_resets_otherwise() {
     let mut tracker = ConsecutiveFailureTracker::new();
     let signal = Some((
         "workspace_read_file".to_string(),
+        "{}".to_string(),
         "invalid_path".to_string(),
     ));
     assert_eq!(tracker.record(signal.clone()), 1);
     assert_eq!(tracker.record(signal.clone()), 2);
     assert_eq!(tracker.record(signal.clone()), 3);
-    // 同一工具、不同错误码：重新计数
+    // 同一工具、相同入参、不同错误码：重新计数
     assert_eq!(
         tracker.record(Some((
             "workspace_read_file".to_string(),
+            "{}".to_string(),
             "not_found".to_string()
         ))),
         1
     );
-    // 不同工具、同一错误码：重新计数
-    assert_eq!(tracker.record(signal.clone()), 1);
+    // 同一工具、不同入参、相同错误码：重新计数（防止误伤不同命令）
+    assert_eq!(
+        tracker.record(Some((
+            "workspace_read_file".to_string(),
+            "{\"path\":\"different\"}".to_string(),
+            "invalid_path".to_string()
+        ))),
+        1
+    );
     // 成功/无法分类的结果：清零
     assert_eq!(tracker.record(None), 0);
     assert_eq!(tracker.record(signal), 1);
@@ -4834,7 +4843,7 @@ fn tool_failure_signal_skips_success_and_pending_control() {
         ),
         None
     );
-    // error + code → Some((tool, code))
+    // error + code → Some((tool, arg_fingerprint, code))
     let failing = ToolResult {
         tool_name: "workspace_read_file".to_string(),
         status: "error".to_string(),
@@ -4848,6 +4857,7 @@ fn tool_failure_signal_skips_success_and_pending_control() {
         tool_failure_signal(&call, &failing),
         Some((
             "workspace_read_file".to_string(),
+            "{}".to_string(),
             "invalid_path".to_string()
         ))
     );
@@ -4875,6 +4885,20 @@ fn tool_failure_signal_skips_success_and_pending_control() {
         ),
         None
     );
+
+    // 测试 ConsecutiveFailureTracker 指纹判定
+    let mut tracker = ConsecutiveFailureTracker::new();
+    let different_arg_call = ToolCall {
+        call_id: None,
+        name: "workspace_read_file".to_string(),
+        arguments: json!({"path": "other.txt"}),
+        plan: None,
+    };
+    // 相同入参连续 2 次，达到计数 2
+    assert_eq!(tracker.record(tool_failure_signal(&call, &failing)), 1);
+    assert_eq!(tracker.record(tool_failure_signal(&call, &failing)), 2);
+    // 换了不同入参的相同错误，指纹变化，重置并从 1 重新计数（防误伤不同命令）
+    assert_eq!(tracker.record(tool_failure_signal(&different_arg_call, &failing)), 1);
 }
 
 #[test]

@@ -1791,12 +1791,23 @@ impl ToolRouter {
                 return error_result(TOOL_WORKSPACE_RUN_COMMAND, &code, message, None)
             }
         };
+        let default_timeout = if command.contains("build")
+            || command.contains("test")
+            || command.contains("cargo")
+            || command.contains("check")
+            || command.contains("install")
+        {
+            // 编译/构建/测试类长耗时命令自适应默认 60s
+            60_000
+        } else {
+            DEFAULT_RUN_TIMEOUT_MS
+        };
         let timeout_ms = call
             .arguments
             .get("timeoutMs")
             .and_then(Value::as_u64)
             .map(|value| value.clamp(1, MAX_RUN_TIMEOUT_MS))
-            .unwrap_or(DEFAULT_RUN_TIMEOUT_MS);
+            .unwrap_or(default_timeout);
 
         // Sandbox gate (design Decision 7, PA-076 task 5.5, phase-5 review P1-2): the legacy
         // Run always runs `enforce_sandbox`. With no backend registered it fails closed via
@@ -1933,7 +1944,7 @@ impl ToolRouter {
 
         loop {
             if Instant::now() >= deadline {
-                if let Err(error) = self.process_manager.kill(&session_id, &handle) {
+                if let Err(error) = self.process_manager.kill_if_exists(&session_id, &handle) {
                     timeout_cleanup_error = Some(error);
                 }
                 timed_out = true;
@@ -1951,7 +1962,7 @@ impl ToolRouter {
                     }
                 }
                 Err(error) => {
-                    let cleanup = self.process_manager.kill(&session_id, &handle).err();
+                    let cleanup = self.process_manager.kill_if_exists(&session_id, &handle).err();
                     let message = match cleanup {
                         Some(cleanup) => {
                             format!("轮询命令状态失败：{error}；清理进程树失败：{cleanup}。")
@@ -1974,7 +1985,7 @@ impl ToolRouter {
             // The deadline branch already attempted cleanup; retry for idempotent timer races and
             // retain any native Job/child cleanup error instead of reporting a false termination.
             let cleanup_error = timeout_cleanup_error
-                .or_else(|| self.process_manager.kill(&session_id, &handle).err());
+                .or_else(|| self.process_manager.kill_if_exists(&session_id, &handle).err());
             let message = match cleanup_error {
                 Some(error) => format!(
                     "命令执行超过超时上限 {} ms；进程树清理失败：{}。",
@@ -1993,7 +2004,7 @@ impl ToolRouter {
 
         // Exited: clean up the session entry (idempotent when already exited). A Job failure is
         // surfaced rather than silently turning a lifecycle cleanup failure into tool success.
-        if let Err(error) = self.process_manager.kill(&session_id, &handle) {
+        if let Err(error) = self.process_manager.kill_if_exists(&session_id, &handle) {
             remove_windows_batch_script(batch_script_path.as_deref());
             return error_result(
                 TOOL_WORKSPACE_RUN_COMMAND,
@@ -4519,7 +4530,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_WORKSPACE_RUN_COMMAND,
-            description: "在当前工作区内受控执行命令，返回 cwd、timeout、exitCode、stdout 和 stderr。",
+            description: "在当前工作区内受控执行命令，返回 cwd、timeout、exitCode、stdout 和 stderr。提示：严禁执行 rmdir /s、remove-item 或 rm -rf；清理工作区临时文件时优先使用 git clean 或修改 .gitignore；在 Windows 下避免使用 ';' 复合多条命令，请使用 '&&'。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
@@ -4533,7 +4544,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     },
                     "timeoutMs": {
                         "type": "integer",
-                        "description": "命令超时毫秒数，默认 10000，最大 120000"
+                        "description": "命令超时毫秒数，默认 10000（构建/测试/检查类命令自适应为 60000），最大 120000"
                     }
                 },
                 "required": ["command"],

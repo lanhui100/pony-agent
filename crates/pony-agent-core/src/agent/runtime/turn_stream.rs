@@ -459,7 +459,7 @@ impl AgentRuntime {
                         &current_tool_call.name,
                         failure_signal
                             .as_ref()
-                            .map(|(_, code)| code.as_str())
+                            .map(|(_, _, code)| code.as_str())
                             .unwrap_or("unknown"),
                         tool_result.output.as_str(),
                     ),

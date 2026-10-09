@@ -346,7 +346,25 @@ impl ProcessManager {
     /// up. For a running process the entry is retained so the final state remains pollable;
     /// calling `kill` again after the process has exited removes the entry (idempotent, safe).
     pub fn kill(&self, session_id: &str, handle: &str) -> Result<(), String> {
-        let entry = self.lookup(session_id, handle)?;
+        self.kill_inner(session_id, handle, false)
+    }
+
+    /// Idempotent kill variant: if the process handle has already been cleaned up or does not exist,
+    /// returns Ok(()) instead of returning an `unknown process handle` error.
+    pub fn kill_if_exists(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        self.kill_inner(session_id, handle, true)
+    }
+
+    fn kill_inner(&self, session_id: &str, handle: &str, idempotent_missing: bool) -> Result<(), String> {
+        let entry = match self.lookup(session_id, handle) {
+            Ok(entry) => entry,
+            Err(e) => {
+                if idempotent_missing && e.contains("unknown process handle") {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
         let already_exited = matches!(
             *entry.state.lock().expect("process state poisoned"),
             ExitState::Exited { .. }
@@ -385,7 +403,7 @@ impl ProcessManager {
         let handle = handle.to_string();
         std::thread::spawn(move || {
             std::thread::sleep(duration);
-            if let Err(error) = this.kill(&session_id, &handle) {
+            if let Err(error) = this.kill_if_exists(&session_id, &handle) {
                 eprintln!("[process] kill_after cleanup failed for `{handle}`: {error}");
             }
         });
@@ -979,6 +997,15 @@ fn describe_command(program: &str, arguments: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::agent::tool_runtime::SandboxRequest;
+
+    #[test]
+    fn test_kill_if_exists_idempotent_on_missing_handle() {
+        let manager = ProcessManager::new();
+        // 普通 kill 在 handle 不存在时返回错误
+        assert!(manager.kill("session-a", "proc-nonexistent").is_err());
+        // kill_if_exists 在 handle 不存在时幂等安全返回 Ok(())
+        assert!(manager.kill_if_exists("session-a", "proc-nonexistent").is_ok());
+    }
 
     #[test]
     fn decode_process_output_utf8_passthrough_and_never_panics() {
