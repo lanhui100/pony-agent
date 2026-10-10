@@ -43,6 +43,16 @@ impl TurnTaskRegistry {
         tasks.remove(session_id);
     }
 
+    pub fn abort_session(&self, session_id: &str) -> bool {
+        let mut tasks = self.tasks.lock().expect("turn task registry lock poisoned");
+        if let Some(handle) = tasks.remove(session_id) {
+            handle.abort();
+            true
+        } else {
+            false
+        }
+    }
+
     #[allow(dead_code)]
     pub fn abort_all(&self) {
         let mut tasks = self.tasks.lock().expect("turn task registry lock poisoned");

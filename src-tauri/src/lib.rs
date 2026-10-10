@@ -150,7 +150,21 @@ fn start_turn_stream(app: AppHandle, turn_id: String, input: TurnInput) -> Resul
 }
 
 #[tauri::command]
-fn stop_turn(control_plane: State<'_, HostControlPlane>, turn_id: String) -> StopTurnResponse {
+fn stop_turn(
+    control_plane: State<'_, HostControlPlane>,
+    task_registry: State<'_, TurnTaskRegistry>,
+    turn_id: String,
+) -> StopTurnResponse {
+    let checkpoint = control_plane.load_execution_checkpoint(ExecutionCheckpointQuery {
+        turn_id: Some(turn_id.clone()),
+        session_id: None,
+    });
+    if let Some(ref cp) = checkpoint {
+        if let Some(ref session_id) = cp.session_id {
+            task_registry.abort_session(session_id);
+        }
+    }
+    task_registry.abort_session(&turn_id);
     control_plane.stop_turn(StopTurnCommand { turn_id })
 }
 

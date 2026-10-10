@@ -142,6 +142,8 @@ pub(crate) const TOOL_DRAIN_INBOX: &str = "drain_inbox";
 pub(crate) const TOOL_TEAM_TASK_CREATE: &str = "team_task_create";
 pub(crate) const TOOL_TEAM_TASK_UPDATE: &str = "team_task_update";
 pub(crate) const TOOL_TEAM_TASK_LIST: &str = "team_task_list";
+pub(crate) const TOOL_TODO_WRITE: &str = "todo_write";
+pub(crate) const TOOL_TODO_LIST: &str = "todo_list";
 
 const MAX_FULL_READ_BYTES: u64 = 120_000;
 const MAX_PATH_REPAIR_SEARCH_FILES: usize = 2_000;
@@ -1183,6 +1185,8 @@ impl ToolRouter {
             Some(TOOL_TEAM_TASK_CREATE) => self.execute_team_task_create(call),
             Some(TOOL_TEAM_TASK_UPDATE) => self.execute_team_task_update(call),
             Some(TOOL_TEAM_TASK_LIST) => self.execute_team_task_list(call),
+            Some(TOOL_TODO_WRITE) => self.execute_todo_write(call),
+            Some(TOOL_TODO_LIST) => self.execute_todo_list(call),
             _ => error_result(
                 &call.name,
                 "unsupported_tool",
@@ -1421,6 +1425,56 @@ impl ToolRouter {
                 duration_ms: 0,
             },
             Err(err) => error_result(TOOL_TEAM_TASK_LIST, "task_list_failed", err, None),
+        }
+    }
+
+    fn execute_todo_write(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<TodoWriteArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match todo_write(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_TODO_WRITE.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_TODO_WRITE,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_TODO_WRITE, "todo_write_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_TODO_WRITE,
+                "invalid_arguments",
+                format!("Failed to parse todo_write arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_todo_list(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<TodoListArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match todo_list(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_TODO_LIST.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_TODO_LIST,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_TODO_LIST, "todo_list_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_TODO_LIST,
+                "invalid_arguments",
+                format!("Failed to parse todo_list arguments: {}", err),
+                None,
+            ),
         }
     }
 
@@ -4933,6 +4987,54 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             })),
         },
+        ToolDefinition {
+            name: TOOL_TODO_WRITE,
+            description: "记录并全量覆写当前任务列表以规划多步工作并展示进度；单步简单任务可跳过。在开始前为每个具体步骤添加一条 todo；当仍有工作剩余时，将正在执行的任务置为 in_progress（支持并发多个）；某个步骤经物理验证完成后，立即更新置为 completed。参数直接传入全量 todos 列表。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "全量任务列表，替换之前的列表",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "description": "任务内容，简短的祈使句描述"
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "pending (未开始) | in_progress (进行中) | completed (已完成)"
+                                }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "可选 session id，默认当前 session"
+                    }
+                },
+                "required": ["todos"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_TODO_LIST,
+            description: "获取当前 session 记录的 todo 任务列表及状态。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "可选 session id"
+                    }
+                },
+                "additionalProperties": false
+            })),
+        },
     ]
 }
 
@@ -5458,6 +5560,8 @@ pub(crate) fn canonical_tool_name(name: &str) -> Option<&'static str> {
         TOOL_TEAM_TASK_CREATE => Some(TOOL_TEAM_TASK_CREATE),
         TOOL_TEAM_TASK_UPDATE => Some(TOOL_TEAM_TASK_UPDATE),
         TOOL_TEAM_TASK_LIST => Some(TOOL_TEAM_TASK_LIST),
+        TOOL_TODO_WRITE => Some(TOOL_TODO_WRITE),
+        TOOL_TODO_LIST => Some(TOOL_TODO_LIST),
         _ => None,
     }
 }
@@ -5506,6 +5610,8 @@ fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str> {
         TOOL_TEAM_TASK_CREATE => vec![TOOL_TEAM_TASK_CREATE],
         TOOL_TEAM_TASK_UPDATE => vec![TOOL_TEAM_TASK_UPDATE],
         TOOL_TEAM_TASK_LIST => vec![TOOL_TEAM_TASK_LIST],
+        TOOL_TODO_WRITE => vec![TOOL_TODO_WRITE],
+        TOOL_TODO_LIST => vec![TOOL_TODO_LIST],
         _ => Vec::new(),
     }
 }
@@ -5608,6 +5714,8 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_PLAN_CONTROL => "Plan",
         TOOL_VIEW_IMAGE => "ViewImage",
         TOOL_WORKSPACE_READ_DOCUMENT => "ReadDocument",
+        TOOL_TODO_WRITE => "TodoWrite",
+        TOOL_TODO_LIST => "TodoList",
         _ => return None,
     };
     Some(mapped)
@@ -5661,6 +5769,8 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         | TOOL_DRAIN_INBOX => ToolKind::Interactive,
         TOOL_TEAM_TASK_CREATE | TOOL_TEAM_TASK_UPDATE => ToolKind::Write,
         TOOL_TEAM_TASK_LIST => ToolKind::Read,
+        TOOL_TODO_WRITE => ToolKind::Write,
+        TOOL_TODO_LIST => ToolKind::Read,
         _ => ToolKind::External,
     }
 }
@@ -5697,7 +5807,9 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_DRAIN_INBOX
         | TOOL_TEAM_TASK_CREATE
         | TOOL_TEAM_TASK_UPDATE
-        | TOOL_TEAM_TASK_LIST => ToolExposure::ModelVisible,
+        | TOOL_TEAM_TASK_LIST
+        | TOOL_TODO_WRITE
+        | TOOL_TODO_LIST => ToolExposure::ModelVisible,
         _ => ToolExposure::Internal,
     }
 }
@@ -11403,6 +11515,69 @@ mod tests {
             !stdout.contains("Write-Output"),
             "stdout 不得回显命令文本（旧 bug 症状）: {stdout:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn tool_router_executes_todo_write_and_todo_list_lifecycle() {
+        let workspace = temp_workspace();
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        // 1. Initial write: two items
+        let write_call = ToolCall {
+            call_id: None,
+            name: "todo_write".to_string(),
+            arguments: json!({
+                "session_id": "test-session-todo",
+                "todos": [
+                    { "content": "Step 1: Inspect code", "status": "in_progress" },
+                    { "content": "Step 2: Add tests", "status": "pending" }
+                ]
+            }),
+            plan: None,
+        };
+        let write_res = router.execute(&write_call);
+        assert_eq!(write_res.status, "ok");
+        let write_payload: Value = serde_json::from_str(&write_res.output).unwrap();
+        assert_eq!(write_payload["ok"], true);
+        assert_eq!(write_payload["result"]["count"], 2);
+        assert_eq!(write_payload["result"]["in_progress_count"], 1);
+        assert_eq!(write_payload["result"]["completed_count"], 0);
+
+        // 2. Read list
+        let list_call = ToolCall {
+            call_id: None,
+            name: "todo_list".to_string(),
+            arguments: json!({
+                "session_id": "test-session-todo"
+            }),
+            plan: None,
+        };
+        let list_res = router.execute(&list_call);
+        assert_eq!(list_res.status, "ok");
+        let list_payload: Value = serde_json::from_str(&list_res.output).unwrap();
+        assert_eq!(list_payload["result"]["todos"].as_array().unwrap().len(), 2);
+        assert_eq!(list_payload["result"]["todos"][0]["status"], "in_progress");
+
+        // 3. Overwrite / mark completed
+        let update_call = ToolCall {
+            call_id: None,
+            name: "todo_write".to_string(),
+            arguments: json!({
+                "session_id": "test-session-todo",
+                "todos": [
+                    { "content": "Step 1: Inspect code", "status": "completed" },
+                    { "content": "Step 2: Add tests", "status": "in_progress" }
+                ]
+            }),
+            plan: None,
+        };
+        let update_res = router.execute(&update_call);
+        assert_eq!(update_res.status, "ok");
+        let update_payload: Value = serde_json::from_str(&update_res.output).unwrap();
+        assert_eq!(update_payload["result"]["completed_count"], 1);
+        assert_eq!(update_payload["result"]["in_progress_count"], 1);
 
         let _ = std::fs::remove_dir_all(&workspace);
     }

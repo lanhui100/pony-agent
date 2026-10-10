@@ -21,7 +21,21 @@ pub(crate) fn sse_data_line_reader<F>(
 where
     F: FnMut(&str) -> Result<bool, String>,
 {
-    read_sse_data_lines(
+    sse_data_line_reader_with_stop_checker(response, started_at, endpoint, on_data_line, || false)
+}
+
+pub(crate) fn sse_data_line_reader_with_stop_checker<F, S>(
+    response: reqwest::Response,
+    started_at: Instant,
+    endpoint: &str,
+    on_data_line: F,
+    is_stop_requested: S,
+) -> Result<(), String>
+where
+    F: FnMut(&str) -> Result<bool, String>,
+    S: FnMut() -> bool,
+{
+    read_sse_data_lines_with_stop_checker(
         BlockingChunks {
             stream: response.bytes_stream(),
             _marker: std::marker::PhantomData,
@@ -29,6 +43,7 @@ where
         started_at,
         endpoint,
         on_data_line,
+        is_stop_requested,
     )
 }
 
@@ -55,11 +70,12 @@ where
 
 /// 帧循环核心：对任意「chunk 字节序列 + 可 Display 错误」的迭代器工作，
 /// 供生产（reqwest 流）与单测（内存分片，含 CRLF/跨包/无尾换行/超限）共用。
+#[allow(dead_code)]
 fn read_sse_data_lines<I, B, E, F>(
-    mut chunks: I,
+    chunks: I,
     started_at: Instant,
     endpoint: &str,
-    mut on_data_line: F,
+    on_data_line: F,
 ) -> Result<(), String>
 where
     I: Iterator<Item = Result<B, E>>,
@@ -67,10 +83,36 @@ where
     E: std::fmt::Display,
     F: FnMut(&str) -> Result<bool, String>,
 {
+    read_sse_data_lines_with_stop_checker(chunks, started_at, endpoint, on_data_line, || false)
+}
+
+fn read_sse_data_lines_with_stop_checker<I, B, E, F, S>(
+    mut chunks: I,
+    started_at: Instant,
+    endpoint: &str,
+    mut on_data_line: F,
+    mut is_stop_requested: S,
+) -> Result<(), String>
+where
+    I: Iterator<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+    F: FnMut(&str) -> Result<bool, String>,
+    S: FnMut() -> bool,
+{
     let mut line_buf: Vec<u8> = Vec::new();
     let mut total_bytes: usize = 0;
 
     loop {
+        if is_stop_requested() {
+            return Err(format!(
+                "SSE 流已按请求中止 (stop_requested); elapsed={}ms; parsed_bytes={}; endpoint={}",
+                started_at.elapsed().as_millis(),
+                total_bytes,
+                endpoint,
+            ));
+        }
+
         match chunks.next() {
             Some(Ok(bytes)) => {
                 let chunk_len = bytes.as_ref().len();
@@ -1257,6 +1299,34 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(lines, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn sse_reader_aborts_immediately_when_stop_requested() {
+        let mut lines = Vec::new();
+        let chunks: Vec<Result<Vec<u8>, String>> = vec![
+            Ok(b"data: one\n".to_vec()),
+            Ok(b"data: two\n".to_vec()),
+            Ok(b"data: three\n".to_vec()),
+        ];
+        let mut count = 0;
+        let result = read_sse_data_lines_with_stop_checker(
+            chunks.into_iter(),
+            Instant::now(),
+            "https://unit.test/v1/responses",
+            |line| {
+                lines.push(line.to_string());
+                Ok(false)
+            },
+            || {
+                count += 1;
+                count >= 2
+            },
+        );
+
+        let err = result.expect_err("should abort on stop requested");
+        assert!(err.contains("stop_requested"));
+        assert_eq!(lines, vec!["one"]);
     }
 
     #[test]
