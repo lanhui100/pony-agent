@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { AlertTriangle, Check, CheckCircle2, ChevronRight, Circle, ListChecks, LoaderCircle } from "lucide-vue-next";
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  ChevronRight,
+  Circle,
+  ListChecks,
+  LoaderCircle
+} from "lucide-vue-next";
 import { usePlanStore } from "@/stores/plan";
-import type { Plan, PlanStep } from "@/types/ask-plan";
+import type { Plan, PlanStep, TodoItem } from "@/types/ask-plan";
 import Button from "@/components/ui/Button.vue";
 import Badge from "@/components/ui/Badge.vue";
 
@@ -15,7 +23,8 @@ const props = defineProps<{
 const emit = defineEmits<{ toggle: [] }>();
 
 const planStore = usePlanStore();
-const { plans, selectedPlan, loading, error, completingStepKey } = storeToRefs(planStore);
+const { plans, todos, selectedPlan, loading, todosLoading, error, completingStepKey, todoProgress } =
+  storeToRefs(planStore);
 
 function lifecycleLabel(lifecycle: string) {
   switch (lifecycle) {
@@ -69,6 +78,28 @@ function stepStatusIcon(status: string) {
   return Circle;
 }
 
+function todoStatusLabel(status: TodoItem["status"]) {
+  switch (status) {
+    case "completed":
+      return "已完成";
+    case "in_progress":
+      return "进行中";
+    default:
+      return "待处理";
+  }
+}
+
+function todoDotClass(status: TodoItem["status"]) {
+  switch (status) {
+    case "completed":
+      return "bg-emerald-500";
+    case "in_progress":
+      return "bg-amber-500";
+    default:
+      return "bg-stone-300";
+  }
+}
+
 function stepBusy(plan: Plan, step: PlanStep) {
   return planStore.isCompletingStep(plan.planId, step.stepId);
 }
@@ -76,6 +107,7 @@ function stepBusy(plan: Plan, step: PlanStep) {
 async function refreshPlans() {
   if (props.sessionId?.trim()) {
     await planStore.list(props.sessionId);
+    await planStore.listTodos(props.sessionId);
   }
 }
 
@@ -99,6 +131,15 @@ const completedCount = computed(() =>
     ? selectedPlan.value.steps.filter((step) => step.status === "completed").length
     : 0
 );
+
+const todoSummary = computed(() => {
+  const { completed, inProgress, pending } = todoProgress.value;
+  const parts: string[] = [];
+  if (completed > 0) parts.push(`${completed} 已完成`);
+  if (inProgress > 0) parts.push(`${inProgress} 进行中`);
+  if (pending > 0) parts.push(`${pending} 待处理`);
+  return parts.join(" · ") || "暂无任务";
+});
 </script>
 
 <template>
@@ -111,10 +152,12 @@ const completedCount = computed(() =>
     >
       <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
         <ListChecks class="h-3.5 w-3.5" />
-        <span>计划</span>
+        <span>计划与任务</span>
       </div>
       <div class="flex items-center gap-2">
-        <span class="text-[10px] leading-[1.2] text-stone-400">{{ plans.length }}</span>
+        <span class="text-[10px] leading-[1.2] text-stone-400">
+          {{ plans.length + todos.length }}
+        </span>
         <ChevronRight
           class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200"
           :class="{ 'rotate-90': open }"
@@ -129,13 +172,26 @@ const completedCount = computed(() =>
           <span>{{ error }}</span>
         </div>
 
-        <div v-if="loading && plans.length === 0" class="flex items-center gap-1.5 px-1 text-[10px] leading-5 text-stone-400">
+        <div
+          v-if="loading && plans.length === 0"
+          class="flex items-center gap-1.5 px-1 text-[10px] leading-5 text-stone-400"
+        >
           <LoaderCircle class="h-3 w-3 animate-spin" />
           正在加载计划…
         </div>
 
-        <div v-if="plans.length === 0 && !loading" class="px-1 text-[10px] leading-5 text-stone-400">
+        <div
+          v-if="plans.length === 0 && !loading && todos.length > 0"
+          class="px-1 text-[10px] leading-5 text-stone-400"
+        >
           暂无计划
+        </div>
+
+        <div
+          v-if="plans.length === 0 && todos.length === 0 && !loading && !todosLoading"
+          class="px-1 text-[10px] leading-5 text-stone-400"
+        >
+          暂无计划与任务
         </div>
 
         <div
@@ -198,11 +254,59 @@ const completedCount = computed(() =>
               暂无步骤
             </div>
 
-            <div class="flex items-center justify-between px-1 pt-1 text-[9px] uppercase tracking-[0.12em] text-stone-400">
+            <div
+              class="flex items-center justify-between px-1 pt-1 text-[9px] uppercase tracking-[0.12em] text-stone-400"
+            >
               <span>revision {{ plan.revision }}</span>
               <span>{{ completedCount }} / {{ plan.steps.length }} 完成</span>
             </div>
           </div>
+        </div>
+
+        <div
+          v-if="todos.length > 0"
+          class="rounded-[0.55rem] border border-stone-200/80 bg-[#fbf8f3] px-3 py-2"
+          data-testid="todo-panel"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-1.5 text-[12px] font-medium text-stone-800">
+              <ListChecks class="h-3.5 w-3.5 text-stone-400" />
+              <span>任务</span>
+            </div>
+            <span
+              class="shrink-0 text-[10px] leading-[1.2] text-stone-400"
+              data-testid="todo-summary"
+            >
+              {{ todoSummary }}
+            </span>
+          </div>
+          <ul class="mt-1.5 space-y-1" data-testid="todo-list">
+            <li
+              v-for="(item, index) in todos"
+              :key="`${index}-${item.content}`"
+              class="flex items-center gap-1.5 px-1 py-0.5"
+              :data-testid="`todo-item-${index}`"
+            >
+              <span
+                class="h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-200"
+                :class="todoDotClass(item.status)"
+                role="img"
+                :aria-label="todoStatusLabel(item.status)"
+              />
+              <span
+                class="min-w-0 flex-1 truncate text-[11px] leading-4"
+                :class="item.status === 'completed' ? 'text-stone-400 line-through' : 'text-stone-700'"
+              >
+                {{ item.content }}
+              </span>
+              <span
+                class="shrink-0 text-[9px] uppercase tracking-[0.1em]"
+                :class="item.status === 'completed' ? 'text-emerald-500' : 'text-stone-400'"
+              >
+                {{ todoStatusLabel(item.status) }}
+              </span>
+            </li>
+          </ul>
         </div>
       </div>
     </div>

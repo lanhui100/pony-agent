@@ -246,4 +246,31 @@ describe("PlanPanel", () => {
     expect(store.selectedPlan?.steps[0]?.status).toBe("completed");
     wrapper.unmount();
   });
+
+  it("renders todo tasks when present in session", async () => {
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "plan_list") {
+        return Promise.resolve([]);
+      }
+      if (command === "todo_list") {
+        return Promise.resolve([
+          { content: "编写单元测试", status: "completed" },
+          { content: "实现任务面板", status: "in_progress" },
+          { content: "验证样式表现", status: "pending" }
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+
+    const wrapper = mount(PlanPanel, { props: { sessionId: "session-1", open: true } });
+    await flushAsync();
+
+    expect(wrapper.get('[data-testid="todo-panel"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="todo-summary"]').text()).toContain("1 已完成 · 1 进行中 · 1 待处理");
+    expect(wrapper.get('[data-testid="todo-item-0"]').text()).toContain("编写单元测试");
+    expect(wrapper.get('[data-testid="todo-item-1"]').text()).toContain("实现任务面板");
+    expect(wrapper.get('[data-testid="todo-item-2"]').text()).toContain("验证样式表现");
+
+    wrapper.unmount();
+  });
 });

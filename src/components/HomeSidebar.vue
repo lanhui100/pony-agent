@@ -20,7 +20,7 @@ import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProje
 
 const runtimeStore = useRuntimeStore();
 const planStore = usePlanStore();
-const hasPlans = computed(() => planStore.plans.length > 0);
+const hasPlanOrTasks = computed(() => planStore.plans.length > 0 || planStore.todos.length > 0);
 
 const {
   error,
@@ -116,7 +116,7 @@ onBeforeUnmount(() => {
         />
 
         <PlanPanel
-          v-if="hasPlans"
+          v-if="hasPlanOrTasks"
           :session-id="sessionId"
           :open="activePanel === 'plan'"
           @toggle="togglePlan()"

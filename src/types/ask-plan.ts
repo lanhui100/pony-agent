@@ -24,6 +24,13 @@ export type PendingAsk = {
   options?: unknown[] | null;
 };
 
+export type TodoItemStatus = "pending" | "in_progress" | "completed";
+
+export type TodoItem = {
+  content: string;
+  status: TodoItemStatus;
+};
+
 export type PlanStepStatus = "pending" | "inProgress" | "completed" | "failed" | string;
 export type PlanLifecycle = "draft" | "executing" | "completed" | "aborted" | string;
 

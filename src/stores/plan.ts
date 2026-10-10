@@ -1,10 +1,12 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
-import type { Plan, PlanPayload, PlanStepSpec } from "@/types/ask-plan";
+import type { Plan, PlanPayload, PlanStepSpec, TodoItem } from "@/types/ask-plan";
 
 type PlanState = {
   plans: Plan[];
+  todos: TodoItem[];
   loading: boolean;
+  todosLoading: boolean;
   error: string | null;
   selectedPlanId: string | null;
   /** `${planId}:${stepId}` while a step completion is in flight. */
@@ -14,7 +16,9 @@ type PlanState = {
 export const usePlanStore = defineStore("plan", {
   state: (): PlanState => ({
     plans: [],
+    todos: [],
     loading: false,
+    todosLoading: false,
     error: null,
     selectedPlanId: null,
     completingStepKey: null
@@ -30,6 +34,12 @@ export const usePlanStore = defineStore("plan", {
     isCompletingStep(state) {
       return (planId: string, stepId: string) =>
         state.completingStepKey === `${planId}:${stepId}`;
+    },
+    todoProgress(state): { completed: number; inProgress: number; pending: number; total: number } {
+      const completed = state.todos.filter((t) => t.status === "completed").length;
+      const inProgress = state.todos.filter((t) => t.status === "in_progress").length;
+      const pending = state.todos.filter((t) => t.status === "pending").length;
+      return { completed, inProgress, pending, total: state.todos.length };
     }
   },
   actions: {
@@ -51,6 +61,25 @@ export const usePlanStore = defineStore("plan", {
         return [];
       } finally {
         this.loading = false;
+      }
+    },
+
+    /** List todos for a session. */
+    async listTodos(sessionId: string): Promise<TodoItem[]> {
+      if (!isTauriAvailable() || !sessionId.trim()) {
+        return [];
+      }
+
+      this.todosLoading = true;
+      try {
+        const todos = await safeInvoke<TodoItem[] | null>("todo_list", { sessionId });
+        this.todos = Array.isArray(todos) ? todos : [];
+        return this.todos;
+      } catch (error) {
+        console.warn("Failed to load todos for session:", error);
+        return [];
+      } finally {
+        this.todosLoading = false;
       }
     },
 
@@ -221,7 +250,9 @@ export const usePlanStore = defineStore("plan", {
 
     reset(): void {
       this.plans = [];
+      this.todos = [];
       this.loading = false;
+      this.todosLoading = false;
       this.error = null;
       this.selectedPlanId = null;
       this.completingStepKey = null;

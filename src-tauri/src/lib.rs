@@ -303,6 +303,18 @@ fn plan_get(
     control_plane.plan_get(&session_id, &plan_id)
 }
 
+/// List todos for a session.
+#[tauri::command]
+fn todo_list(
+    session_id: String,
+) -> Result<Value, String> {
+    let args = pony_agent_core::agent::todo::TodoListArgs {
+        session_id: Some(session_id),
+    };
+    let res = pony_agent_core::agent::todo::todo_list(args)?;
+    serde_json::to_value(res.todos).map_err(|e| e.to_string())
+}
+
 // ── graph Ask wait surface (PA-076 task 4.4) ───────────────────────────────────────────────
 
 /// Snapshot of every Ask wait bound to a graph run.
@@ -1114,6 +1126,7 @@ pub fn run() {
             plan_complete_step,
             plan_list,
             plan_get,
+            todo_list,
             graph_list_ask_waits,
             graph_bind_ask_wait,
             graph_resume_ask,

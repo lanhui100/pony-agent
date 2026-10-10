@@ -154,6 +154,10 @@ import {
   type ImportAttachmentOptions
 } from "@/lib/runtime/file-attachments";
 import {
+  resolveAgentRuntimeStatus,
+  type AgentRuntimeStatus
+} from "@/lib/runtime/status";
+import {
   buildConversationCheckpointEntries,
   cloneHistoryBranches,
   cloneHistoryNodes,
@@ -410,6 +414,19 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     },
     isSessionRunning(state): (sessionId: string) => boolean {
       return (sessionId: string) => sessionId in state.runningSessionMap;
+    },
+    agentRuntimeStatus(state): AgentRuntimeStatus | null {
+      const activeMessage = state.activeTurnId
+        ? state.messages.find((m) => m.turnId === state.activeTurnId)
+        : null;
+      const isStreamingReasoning = Boolean(state.streamBufferReasoning);
+      return resolveAgentRuntimeStatus({
+        isSubmitting: state.isSubmitting,
+        phase: state.phase,
+        toolActivities: state.toolActivities,
+        turnStartedAt: activeMessage ? Date.now() : null,
+        streamingReasoning: isStreamingReasoning
+      });
     }
   },
   actions: {

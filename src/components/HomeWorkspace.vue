@@ -21,6 +21,7 @@ import WorkspaceTurnItem, {
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
 import QueuedMessagesBubble from "@/components/chat/QueuedMessagesBubble.vue";
 import AskPanel from "@/components/AskPanel.vue";
+import AgentRuntimeStatusBar from "@/components/chat/AgentRuntimeStatusBar.vue";
 
 const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
 
@@ -34,6 +35,7 @@ const {
   isSubmitting,
   messages,
   pendingQueuedMessages,
+  agentRuntimeStatus,
   sessionOperation,
   traceTimeline,
   turnTraceHistory
@@ -1650,6 +1652,9 @@ watch(
             :assistant-displayed-reasoning-fade-key="assistantDisplayedReasoningFadeKey"
           />
         </TransitionGroup>
+        <div v-if="agentRuntimeStatus" class="pt-2 pb-1" data-testid="workspace-runtime-status-slot">
+          <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
+        </div>
         <AskPanel />
         <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
         <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
