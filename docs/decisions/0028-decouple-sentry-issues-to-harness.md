@@ -1,6 +1,16 @@
-# 0025 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦
+# 0028 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦
 
-Status: proposed
+Status: implemented
+
+## 候选方案
+
+### 方案 A：维持 Agent Core 内置 capture_error
+- **描述**：继续在 Agent Core 的关键失败处直接调用 Sentry Issue 上报。
+- **落选原因**：将基础设施异常与智能体业务语义失败混淆，导致核心调度逻辑直接耦合外部监控 SDK，违反关注点分离。
+
+### 方案 B：解耦至 Harness 宿主层并将 Sentry 模块纯粹化为 Trace 导出器（选定）
+- **描述**：Agent Core 仅吐出结构化 Trace 与业务事件，宿主层统一捕获未处理崩溃或严重系统异常上报 Sentry。
+- **选定原因**：职责边界清晰，核心调度无侵入依赖，符合分层架构设计。
 
 ## 背景
 

@@ -52,7 +52,10 @@
 - [决策记录索引](decisions/README.md)
 - [0008 会话数据架构向事件溯源演进（分阶段落地）](decisions/0008-event-sourcing-evolution.md)
 - [0024 PonySentry Agent Trace 上报契约与生命周期状态机](decisions/0024-ponysentry-agent-trace-ingest.md)
-- [0025 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦](decisions/0025-decouple-sentry-issues-to-harness.md)
+- [0025 基于 Conventional Commits 的发布说明生成器](decisions/0025-release-notes-from-conventional-commits.md)
+- [0026 基础工具体系加固（CAS 乐观并发写守卫与富语义错误自愈协议）](decisions/0026-tool-cas-and-recovery-hint.md)
+- [0027 端到端全链路 EventBus 架构设计](decisions/0027-end-to-end-event-bus-architecture.md)
+- [0028 将 Sentry 问题收集下沉至 Harness 宿主层与 Agent Trace 解耦](decisions/0028-decouple-sentry-issues-to-harness.md)
 
 ## 4. 开发指南
 
