@@ -3,13 +3,14 @@
 //! 契约依据：`management/task-system/03_TASKS/PA-109-long-running-goal-tools.md`
 
 use pony_agent_core::agent::tools::{
-    create_goal, get_goal, update_goal, CreateGoalArgs, GetGoalResult, UpdateGoalAction,
-    UpdateGoalArgs,
+    create_goal, get_goal, update_goal, CreateGoalArgs, GetGoalArgs, GetGoalResult,
+    UpdateGoalAction, UpdateGoalArgs,
 };
 
 #[test]
 fn test_ac01_create_and_get_goal() {
     let create_args = CreateGoalArgs {
+        session_id: None,
         objective: "Build payment module".to_string(),
         max_goal_rounds: Some(50),
     };
@@ -18,13 +19,14 @@ fn test_ac01_create_and_get_goal() {
     assert_eq!(created.goal.revision, 1);
     assert_eq!(created.goal.phase, "active");
 
-    let fetched: GetGoalResult = get_goal().expect("get_goal should succeed");
+    let fetched: GetGoalResult = get_goal(GetGoalArgs::default()).expect("get_goal should succeed");
     assert!(fetched.goal.is_some());
 }
 
 #[test]
 fn test_ac02_update_goal_cas_and_lifecycle() {
     let create_args = CreateGoalArgs {
+        session_id: None,
         objective: "Multi-turn task".to_string(),
         max_goal_rounds: Some(20),
     };
@@ -32,6 +34,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 暂停
     let pause_args = UpdateGoalArgs {
+        session_id: None,
         goal_id: created.goal.id.clone(),
         revision: created.goal.revision,
         action: UpdateGoalAction::Pause,
@@ -45,6 +48,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 尝试用旧版本号更新应失败 (CAS guard)
     let stale_args = UpdateGoalArgs {
+        session_id: None,
         goal_id: created.goal.id.clone(),
         revision: 1,
         action: UpdateGoalAction::Resume,
@@ -56,6 +60,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 正确 resume
     let resume_args = UpdateGoalArgs {
+        session_id: None,
         goal_id: created.goal.id.clone(),
         revision: 2,
         action: UpdateGoalAction::Resume,
@@ -69,6 +74,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 完成
     let complete_args = UpdateGoalArgs {
+        session_id: None,
         goal_id: created.goal.id.clone(),
         revision: 3,
         action: UpdateGoalAction::Complete,
@@ -83,12 +89,14 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 #[test]
 fn test_ac03_blocked_requires_reason() {
     let create_args = CreateGoalArgs {
+        session_id: None,
         objective: "Test blocked".to_string(),
         max_goal_rounds: Some(10),
     };
     let created = create_goal(create_args).unwrap();
 
     let invalid_block = UpdateGoalArgs {
+        session_id: None,
         goal_id: created.goal.id.clone(),
         revision: created.goal.revision,
         action: UpdateGoalAction::Blocked,
@@ -99,6 +107,7 @@ fn test_ac03_blocked_requires_reason() {
     assert!(update_goal(invalid_block).is_err(), "Blocked without reason must fail");
 
     let valid_block = UpdateGoalArgs {
+        session_id: None,
         goal_id: created.goal.id.clone(),
         revision: created.goal.revision,
         action: UpdateGoalAction::Blocked,

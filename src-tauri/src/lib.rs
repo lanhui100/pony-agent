@@ -315,6 +315,66 @@ fn todo_list(
     serde_json::to_value(res.todos).map_err(|e| e.to_string())
 }
 
+/// Get current goal for a session.
+#[tauri::command]
+fn goal_get(
+    session_id: String,
+) -> Result<Value, String> {
+    let args = pony_agent_core::agent::goal::GetGoalArgs {
+        session_id: Some(session_id),
+    };
+    let res = pony_agent_core::agent::goal::get_goal(args)?;
+    serde_json::to_value(res.goal).map_err(|e| e.to_string())
+}
+
+/// Create a goal for a session.
+#[tauri::command]
+fn goal_create(
+    session_id: String,
+    objective: String,
+    max_goal_rounds: Option<u32>,
+) -> Result<Value, String> {
+    let args = pony_agent_core::agent::goal::CreateGoalArgs {
+        session_id: Some(session_id),
+        objective,
+        max_goal_rounds,
+    };
+    let res = pony_agent_core::agent::goal::create_goal(args)?;
+    serde_json::to_value(res.goal).map_err(|e| e.to_string())
+}
+
+/// Update a goal for a session using CAS.
+#[tauri::command]
+fn goal_update(
+    session_id: String,
+    goal_id: String,
+    revision: u64,
+    action: String,
+    objective: Option<String>,
+    blocked_reason: Option<String>,
+    max_goal_rounds: Option<u32>,
+) -> Result<Value, String> {
+    let update_action = match action.to_lowercase().as_str() {
+        "complete" => pony_agent_core::agent::goal::UpdateGoalAction::Complete,
+        "pause" => pony_agent_core::agent::goal::UpdateGoalAction::Pause,
+        "resume" => pony_agent_core::agent::goal::UpdateGoalAction::Resume,
+        "edit" => pony_agent_core::agent::goal::UpdateGoalAction::Edit,
+        "blocked" => pony_agent_core::agent::goal::UpdateGoalAction::Blocked,
+        other => return Err(format!("Unsupported goal action: {}", other)),
+    };
+    let args = pony_agent_core::agent::goal::UpdateGoalArgs {
+        session_id: Some(session_id),
+        goal_id,
+        revision,
+        action: update_action,
+        objective,
+        blocked_reason,
+        max_goal_rounds,
+    };
+    let res = pony_agent_core::agent::goal::update_goal(args)?;
+    serde_json::to_value(res.goal).map_err(|e| e.to_string())
+}
+
 // ── graph Ask wait surface (PA-076 task 4.4) ───────────────────────────────────────────────
 
 /// Snapshot of every Ask wait bound to a graph run.
@@ -1127,6 +1187,9 @@ pub fn run() {
             plan_list,
             plan_get,
             todo_list,
+            goal_get,
+            goal_create,
+            goal_update,
             graph_list_ask_waits,
             graph_bind_ask_wait,
             graph_resume_ask,

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRuntimeStore } from "@/stores/runtime";
 import { usePlanStore } from "@/stores/plan";
+import { useGoalStore } from "@/stores/goal";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import DebugPanel from "@/components/DebugPanel.vue";
@@ -20,7 +21,10 @@ import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProje
 
 const runtimeStore = useRuntimeStore();
 const planStore = usePlanStore();
-const hasPlanOrTasks = computed(() => planStore.plans.length > 0 || planStore.todos.length > 0);
+const goalStore = useGoalStore();
+const hasPlanOrTasks = computed(
+  () => planStore.plans.length > 0 || planStore.todos.length > 0 || goalStore.hasGoal
+);
 
 const {
   error,

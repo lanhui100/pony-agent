@@ -22,6 +22,7 @@ import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
 import QueuedMessagesBubble from "@/components/chat/QueuedMessagesBubble.vue";
 import AskPanel from "@/components/AskPanel.vue";
 import AgentRuntimeStatusBar from "@/components/chat/AgentRuntimeStatusBar.vue";
+import GoalBar from "@/components/GoalBar.vue";
 
 const SYNTHETIC_KEEP_NODE_PREFIX = "synthetic-keep-";
 
@@ -36,6 +37,7 @@ const {
   messages,
   pendingQueuedMessages,
   agentRuntimeStatus,
+  sessionId,
   sessionOperation,
   traceTimeline,
   turnTraceHistory
@@ -1598,6 +1600,7 @@ watch(
 
 <template>
   <section class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-[0.6rem]">
+    <GoalBar :session-id="sessionId" />
     <Teleport to="body">
       <div
         v-if="rollbackInFlight"

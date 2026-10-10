@@ -50,8 +50,8 @@ pub use crate::agent::git_search::{
     FuzzyMatchItem, GitDiffRemoteArgs, GitDiffRemoteResult,
 };
 pub use crate::agent::goal::{
-    create_goal, get_goal, update_goal, CreateGoalArgs, CreateGoalResult, GetGoalResult,
-    GoalData, UpdateGoalAction, UpdateGoalArgs, UpdateGoalResult,
+    create_goal, get_goal, update_goal, CreateGoalArgs, CreateGoalResult, GetGoalArgs, GetGoalResult,
+    GoalActivation, GoalData, UpdateGoalAction, UpdateGoalArgs, UpdateGoalResult,
 };
 pub use crate::agent::orchestration::{
     drain_inbox, interrupt_agent, list_agents, send_message, spawn_teammate, subagent,
@@ -144,6 +144,9 @@ pub(crate) const TOOL_TEAM_TASK_UPDATE: &str = "team_task_update";
 pub(crate) const TOOL_TEAM_TASK_LIST: &str = "team_task_list";
 pub(crate) const TOOL_TODO_WRITE: &str = "todo_write";
 pub(crate) const TOOL_TODO_LIST: &str = "todo_list";
+pub(crate) const TOOL_CREATE_GOAL: &str = "create_goal";
+pub(crate) const TOOL_GET_GOAL: &str = "get_goal";
+pub(crate) const TOOL_UPDATE_GOAL: &str = "update_goal";
 
 const MAX_FULL_READ_BYTES: u64 = 120_000;
 const MAX_PATH_REPAIR_SEARCH_FILES: usize = 2_000;
@@ -1187,6 +1190,9 @@ impl ToolRouter {
             Some(TOOL_TEAM_TASK_LIST) => self.execute_team_task_list(call),
             Some(TOOL_TODO_WRITE) => self.execute_todo_write(call),
             Some(TOOL_TODO_LIST) => self.execute_todo_list(call),
+            Some(TOOL_CREATE_GOAL) => self.execute_create_goal(call),
+            Some(TOOL_GET_GOAL) => self.execute_get_goal(call),
+            Some(TOOL_UPDATE_GOAL) => self.execute_update_goal(call),
             _ => error_result(
                 &call.name,
                 "unsupported_tool",
@@ -1473,6 +1479,81 @@ impl ToolRouter {
                 TOOL_TODO_LIST,
                 "invalid_arguments",
                 format!("Failed to parse todo_list arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_create_goal(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<CreateGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match create_goal(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_CREATE_GOAL.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_CREATE_GOAL,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_CREATE_GOAL, "create_goal_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_CREATE_GOAL,
+                "invalid_arguments",
+                format!("Failed to parse create_goal arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_get_goal(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<GetGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match get_goal(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_GET_GOAL.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_GET_GOAL,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_GET_GOAL, "get_goal_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_GET_GOAL,
+                "invalid_arguments",
+                format!("Failed to parse get_goal arguments: {}", err),
+                None,
+            ),
+        }
+    }
+
+    fn execute_update_goal(&self, call: &ToolCall) -> ToolResult {
+        let args: Result<UpdateGoalArgs, _> = serde_json::from_value(call.arguments.clone());
+        match args {
+            Ok(args) => match update_goal(args) {
+                Ok(res) => ToolResult {
+                    tool_name: TOOL_UPDATE_GOAL.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(json!({
+                        "ok": true,
+                        "tool": TOOL_UPDATE_GOAL,
+                        "result": res,
+                    })),
+                    duration_ms: 0,
+                },
+                Err(err) => error_result(TOOL_UPDATE_GOAL, "update_goal_failed", err, None),
+            },
+            Err(err) => error_result(
+                TOOL_UPDATE_GOAL,
+                "invalid_arguments",
+                format!("Failed to parse update_goal arguments: {}", err),
                 None,
             ),
         }
@@ -5032,6 +5113,83 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                         "description": "可选 session id"
                     }
                 },
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_CREATE_GOAL,
+            description: "创建会话目标，使 Agent 在同会话内支持跨多轮自动续行追求持久目标。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "目标的具体描述与验收要求"
+                    },
+                    "max_goal_rounds": {
+                        "type": "integer",
+                        "description": "允许的最大续行轮次上限，默认 50"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "可选 session id，默认当前 session"
+                    }
+                },
+                "required": ["objective"],
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_GET_GOAL,
+            description: "获取当前会话的持久目标信息、当前阶段 phase 与修订号 revision。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "可选 session id"
+                    }
+                },
+                "additionalProperties": false
+            })),
+        },
+        ToolDefinition {
+            name: TOOL_UPDATE_GOAL,
+            description: "使用 CAS 乐观锁机制更新当前会话的持久目标状态（complete, pause, resume, edit, blocked）。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "goal_id": {
+                        "type": "string",
+                        "description": "目标 ID"
+                    },
+                    "revision": {
+                        "type": "integer",
+                        "description": "当前目标版本号，必须与服务端一致"
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["complete", "pause", "resume", "edit", "blocked"],
+                        "description": "更新动作"
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "编辑时的全新目标描述"
+                    },
+                    "blocked_reason": {
+                        "type": "string",
+                        "description": "阻断时的具体原因说明（action 为 blocked 时必填）"
+                    },
+                    "max_goal_rounds": {
+                        "type": "integer",
+                        "description": "编辑时的全新轮次上限"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "可选 session id"
+                    }
+                },
+                "required": ["goal_id", "revision", "action"],
                 "additionalProperties": false
             })),
         },

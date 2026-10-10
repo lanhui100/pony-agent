@@ -11,6 +11,7 @@ import {
   LoaderCircle
 } from "lucide-vue-next";
 import { usePlanStore } from "@/stores/plan";
+import { useGoalStore } from "@/stores/goal";
 import type { Plan, PlanStep, TodoItem } from "@/types/ask-plan";
 import Button from "@/components/ui/Button.vue";
 import Badge from "@/components/ui/Badge.vue";
@@ -23,6 +24,7 @@ const props = defineProps<{
 const emit = defineEmits<{ toggle: [] }>();
 
 const planStore = usePlanStore();
+const goalStore = useGoalStore();
 const { plans, todos, selectedPlan, loading, todosLoading, error, completingStepKey, todoProgress } =
   storeToRefs(planStore);
 
@@ -106,8 +108,11 @@ function stepBusy(plan: Plan, step: PlanStep) {
 
 async function refreshPlans() {
   if (props.sessionId?.trim()) {
-    await planStore.list(props.sessionId);
-    await planStore.listTodos(props.sessionId);
+    await Promise.all([
+      planStore.list(props.sessionId),
+      planStore.listTodos(props.sessionId),
+      goalStore.fetchGoal(props.sessionId),
+    ]);
   }
 }
 
