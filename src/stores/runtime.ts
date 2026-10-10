@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke, safeListen } from "@/lib/tauri";
+import { reportError } from "@/lib/telemetry";
 import {
   bindFrontendRecorderSession,
   bindFrontendRecorderTurn,
@@ -4173,6 +4174,28 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           debugLog("event:failed", {
             turnId: payload.turnId,
             error: this.error
+          });
+
+          // 宿主层/Harness 捕获 Agent 失败事件上报 PonySentry (ADR 0028)
+          void reportError({
+            errorType: "TurnExecutionFailed",
+            message: payload.error || this.error || DEFAULT_FAILED_TURN_ERROR,
+            tags: {
+              source: "turn_failed_event",
+              session_id: failedSessionId || "unknown",
+              turn_id: payload.turnId,
+              provider: payload.providerName || this.providerName || "unknown",
+              model: payload.providerModel || this.providerModel || "unknown"
+            },
+            extra: {
+              turnId: payload.turnId,
+              sessionId: failedSessionId,
+              providerRequestedName: payload.providerRequestedName ?? this.providerRequestedName,
+              providerName: payload.providerName ?? this.providerName,
+              providerProtocol: payload.providerProtocol ?? this.providerProtocol,
+              providerModel: payload.providerModel ?? this.providerModel,
+              errorDetail: payload.error ?? this.error
+            }
           });
         }, 0);
       });
