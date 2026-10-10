@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use tokio::sync::broadcast;
 use serde::{Deserialize, Serialize};
 
@@ -19,15 +18,26 @@ pub struct AgentEventBus {
 }
 
 impl AgentEventBus {
-    pub fn new(_capacity: usize) -> Self {
-        unimplemented!("Stub: AgentEventBus::new")
+    pub fn new(capacity: usize) -> Self {
+        let (sender, _) = broadcast::channel(capacity.max(1));
+        Self { sender }
     }
 
-    pub fn publish(&self, _event: AgentEvent) -> Result<usize, broadcast::error::SendError<AgentEvent>> {
-        unimplemented!("Stub: AgentEventBus::publish")
+    pub fn publish(&self, event: AgentEvent) -> Result<usize, broadcast::error::SendError<AgentEvent>> {
+        self.sender.send(event)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
-        unimplemented!("Stub: AgentEventBus::subscribe")
+        self.sender.subscribe()
+    }
+
+    pub fn receiver_count(&self) -> usize {
+        self.sender.receiver_count()
+    }
+}
+
+impl Default for AgentEventBus {
+    fn default() -> Self {
+        Self::new(1024)
     }
 }
