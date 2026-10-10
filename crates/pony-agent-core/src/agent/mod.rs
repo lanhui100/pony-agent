@@ -36,6 +36,7 @@ pub mod present;
 pub mod process;
 pub mod projection;
 pub mod provider;
+pub mod recovery;
 pub mod retry;
 pub mod runtime;
 pub mod runtime_helper;
