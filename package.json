@@ -1,9 +1,12 @@
 {
   "name": "pony-agent",
-  "version": "0.1.121",
+  "version": "0.1.122",
   "private": true,
   "type": "module",
   "scripts": {
+    "cli:build": "cargo build --release --bin pony --bin ponycli --manifest-path crates/pony-agent-core/Cargo.toml && cp target/release/pony ~/.local/bin/pony && cp target/release/ponycli ~/.local/bin/ponycli",
+    "cli:install": "npm run cli:build",
+    "tui": "pony",
     "dev": "vite --configLoader native",
     "dev:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-tauri-dev.ps1",
     "dev:tauri:full": "npm run dev:tauri",
