@@ -93,6 +93,21 @@ fn test_wide_padding_wrap_width_budget() {
 }
 
 #[test]
+fn test_matching_commands_filter() {
+    let mut state = TuiState::default();
+    assert!(state.matching_commands().is_empty());
+
+    state.input_buffer = "/".to_string();
+    let all = state.matching_commands();
+    assert_eq!(all.len(), 5);
+
+    state.input_buffer = "/re".to_string();
+    let re = state.matching_commands();
+    assert_eq!(re.len(), 1);
+    assert_eq!(re[0].0, "/resume");
+}
+
+#[test]
 fn test_history_messages_projection_integrity() {
     let mut state = TuiState::default();
 
@@ -147,7 +162,13 @@ fn test_tool_display_formatting() {
 fn test_markdown_line_rendering_spans() {
     let heading_spans = tui::render_markdown_line("### 核心架构说明");
     assert!(!heading_spans.is_empty());
+    assert!(!heading_spans[0].content.contains('#'));
     assert!(heading_spans.iter().any(|s| s.content.contains("核心架构说明")));
+
+    let h4_spans = tui::render_markdown_line("#### 1. 根级别字段");
+    assert!(!h4_spans.is_empty());
+    assert!(!h4_spans[0].content.contains('#'));
+    assert!(h4_spans.iter().any(|s| s.content.contains("根级别字段")));
 
     let bold_spans = tui::render_markdown_line("这是一个 **重要特性** 说明");
     assert!(bold_spans.iter().any(|s| s.content == "重要特性"));
@@ -155,3 +176,215 @@ fn test_markdown_line_rendering_spans() {
     let code_spans = tui::render_markdown_line("请查看 `src/main.rs` 文件");
     assert!(code_spans.iter().any(|s| s.content.contains("src/main.rs")));
 }
+
+#[test]
+fn test_provider_and_models_commands_matching() {
+    let mut state = TuiState::default();
+
+    // 1. 验证 AVAILABLE_COMMANDS 包含 /provider 和 /models
+    assert!(tui::AVAILABLE_COMMANDS.iter().any(|(cmd, _)| *cmd == "/provider"));
+    assert!(tui::AVAILABLE_COMMANDS.iter().any(|(cmd, _)| *cmd == "/models"));
+
+    // 2. 验证 /p 匹配到 /provider
+    state.input_buffer = "/p".to_string();
+    let p_cmds = state.matching_commands();
+    assert!(p_cmds.iter().any(|(cmd, _)| *cmd == "/provider"));
+
+    // 3. 验证 /m 匹配到 /models
+    state.input_buffer = "/m".to_string();
+    let m_cmds = state.matching_commands();
+    assert!(m_cmds.iter().any(|(cmd, _)| *cmd == "/models"));
+
+    // 4. 验证完整命令匹配
+    state.input_buffer = "/provider".to_string();
+    let full_p = state.matching_commands();
+    assert_eq!(full_p.len(), 1);
+    assert_eq!(full_p[0].0, "/provider");
+
+    state.input_buffer = "/models".to_string();
+    let full_m = state.matching_commands();
+    assert_eq!(full_m.len(), 1);
+    assert_eq!(full_m[0].0, "/models");
+}
+
+#[test]
+fn test_provider_selector_state_logic() {
+    let mut state = TuiState::default();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+
+    let providers = vec![
+        tui::ProviderItem {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+        },
+        tui::ProviderItem {
+            id: "anthropic".to_string(),
+            name: "Anthropic".to_string(),
+            protocol: "anthropic".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+        },
+        tui::ProviderItem {
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            protocol: "openai".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
+        },
+    ];
+
+    // 打开 provider 选择器
+    state.open_provider_selector(providers);
+    assert_eq!(state.mode, tui::InteractionMode::SelectingProvider);
+    assert_eq!(state.provider_list.len(), 3);
+    assert_eq!(state.selected_provider_index, 0);
+
+    // 下移与边界检查
+    state.next_provider();
+    assert_eq!(state.selected_provider_index, 1);
+    state.next_provider();
+    assert_eq!(state.selected_provider_index, 2);
+    state.next_provider(); // 到底不越界
+    assert_eq!(state.selected_provider_index, 2);
+
+    // 上移与边界检查
+    state.prev_provider();
+    assert_eq!(state.selected_provider_index, 1);
+    state.prev_provider();
+    assert_eq!(state.selected_provider_index, 0);
+    state.prev_provider(); // 到顶不越界
+    assert_eq!(state.selected_provider_index, 0);
+
+    // 选择 provider
+    state.select_current_provider();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+    assert_eq!(state.current_provider_id, "openai");
+
+    // 取消选择器
+    state.open_provider_selector(vec![tui::ProviderItem {
+        id: "temp".to_string(),
+        name: "Temp".to_string(),
+        protocol: "openai".to_string(),
+        base_url: "https://temp.com".to_string(),
+    }]);
+    assert_eq!(state.mode, tui::InteractionMode::SelectingProvider);
+    state.cancel_provider_selector();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+    assert!(state.provider_list.is_empty());
+}
+
+#[test]
+fn test_model_selector_state_logic() {
+    let mut state = TuiState::default();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+
+    let models = vec![
+        tui::ModelItem {
+            id: "gpt-4o".to_string(),
+            name: "GPT-4o".to_string(),
+        },
+        tui::ModelItem {
+            id: "claude-3-7-sonnet".to_string(),
+            name: "Claude 3.7 Sonnet".to_string(),
+        },
+        tui::ModelItem {
+            id: "deepseek-reasoner".to_string(),
+            name: "DeepSeek R1".to_string(),
+        },
+    ];
+
+    // 打开 model 选择器
+    state.open_model_selector(models);
+    assert_eq!(state.mode, tui::InteractionMode::SelectingModel);
+    assert_eq!(state.model_list.len(), 3);
+    assert_eq!(state.selected_model_index, 0);
+
+    // 下移与边界检查
+    state.next_model();
+    assert_eq!(state.selected_model_index, 1);
+    state.next_model();
+    assert_eq!(state.selected_model_index, 2);
+    state.next_model(); // 到底不越界
+    assert_eq!(state.selected_model_index, 2);
+
+    // 上移与边界检查
+    state.prev_model();
+    assert_eq!(state.selected_model_index, 1);
+    state.prev_model();
+    assert_eq!(state.selected_model_index, 0);
+    state.prev_model(); // 到顶不越界
+    assert_eq!(state.selected_model_index, 0);
+
+    // 选择 model 切换当前模型
+    state.select_current_model();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+    assert_eq!(state.model, "gpt-4o");
+
+    // 取消选择器
+    state.open_model_selector(vec![tui::ModelItem {
+        id: "temp-model".to_string(),
+        name: "Temp Model".to_string(),
+    }]);
+    assert_eq!(state.mode, tui::InteractionMode::SelectingModel);
+    state.cancel_model_selector();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+    assert!(state.model_list.is_empty());
+}
+
+#[test]
+fn test_add_provider_data_flow_and_validation() {
+    // 1. 合法 payload 校验通过
+    let valid_payload = tui::AddProviderPayload {
+        id: "custom-ollama".to_string(),
+        name: "Custom Ollama".to_string(),
+        protocol: "openai".to_string(),
+        base_url: "http://localhost:11434/v1".to_string(),
+        api_key: None,
+    };
+    assert!(valid_payload.validate().is_ok());
+
+    // 2. 空 id 校验失败
+    let empty_id = tui::AddProviderPayload {
+        id: "   ".to_string(),
+        name: "Ollama".to_string(),
+        protocol: "openai".to_string(),
+        base_url: "http://localhost:11434/v1".to_string(),
+        api_key: None,
+    };
+    assert!(empty_id.validate().is_err());
+    assert_eq!(empty_id.validate().unwrap_err(), "Provider ID 不能为空");
+
+    // 3. 空 name 校验失败
+    let empty_name = tui::AddProviderPayload {
+        id: "ollama".to_string(),
+        name: "".to_string(),
+        protocol: "openai".to_string(),
+        base_url: "http://localhost:11434/v1".to_string(),
+        api_key: None,
+    };
+    assert!(empty_name.validate().is_err());
+    assert_eq!(empty_name.validate().unwrap_err(), "Provider 名称不能为空");
+
+    // 4. 非法 URL 校验失败
+    let invalid_url = tui::AddProviderPayload {
+        id: "ollama".to_string(),
+        name: "Ollama".to_string(),
+        protocol: "openai".to_string(),
+        base_url: "not-a-valid-url".to_string(),
+        api_key: None,
+    };
+    assert!(invalid_url.validate().is_err());
+    assert_eq!(invalid_url.validate().unwrap_err(), "Base URL 必须是以 http:// 或 https:// 开头的合法地址");
+
+    // 5. 不支持的协议校验失败
+    let invalid_protocol = tui::AddProviderPayload {
+        id: "ollama".to_string(),
+        name: "Ollama".to_string(),
+        protocol: "unsupported-protocol".to_string(),
+        base_url: "http://localhost:11434/v1".to_string(),
+        api_key: None,
+    };
+    assert!(invalid_protocol.validate().is_err());
+    assert_eq!(invalid_protocol.validate().unwrap_err(), "不支持的协议类型");
+}
+
