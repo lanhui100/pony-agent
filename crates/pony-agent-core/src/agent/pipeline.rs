@@ -210,17 +210,31 @@ impl PipelineMiddleware for NoopPipelineMiddleware {
     }
 }
 
-/// A pure no-op stub implementation of `Pipeline`.
-#[derive(Default)]
+/// A robust Onion-model execution engine for `Pipeline`.
+#[derive(Clone, Default)]
 pub struct PipelineStub {
     middlewares: Vec<Arc<dyn PipelineMiddleware>>,
+    max_depth: usize,
+    default_timeout: Option<Duration>,
 }
 
 impl PipelineStub {
     pub fn new() -> Self {
         Self {
             middlewares: Vec::new(),
+            max_depth: 64,
+            default_timeout: Some(Duration::from_millis(25)),
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.default_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
+        self
     }
 }
 
@@ -229,8 +243,82 @@ impl Pipeline for PipelineStub {
         self.middlewares.push(middleware);
     }
 
-    fn execute(&self, _cx: &mut PipelineContext) -> Result<InterceptDecision, PipelineError> {
-        Ok(InterceptDecision::Pass)
+    fn execute(&self, cx: &mut PipelineContext) -> Result<InterceptDecision, PipelineError> {
+        let matching: Vec<Arc<dyn PipelineMiddleware>> = self
+            .middlewares
+            .iter()
+            .filter(|m| m.supported_phases().contains(&cx.phase))
+            .cloned()
+            .collect();
+
+        if matching.is_empty() {
+            return Ok(InterceptDecision::Pass);
+        }
+
+        // Apply timeout if configured
+        let timeout_opt = self.default_timeout;
+        let start_time = std::time::Instant::now();
+
+        fn run_chain<'a>(
+            index: usize,
+            middlewares: &'a [Arc<dyn PipelineMiddleware>],
+            cx: &'a mut PipelineContext,
+            depth: usize,
+            max_depth: usize,
+            timeout: Option<Duration>,
+            start_time: std::time::Instant,
+        ) -> Result<InterceptDecision, PipelineError> {
+            if depth > max_depth {
+                return Err(PipelineError::RecursionLimitExceeded(format!(
+                    "Pipeline stack depth {} exceeded maximum allowed {}",
+                    depth, max_depth
+                )));
+            }
+
+            if let Some(limit) = timeout {
+                if start_time.elapsed() >= limit {
+                    return Err(PipelineError::Timeout(limit));
+                }
+            }
+
+            if index >= middlewares.len() {
+                return Ok(InterceptDecision::Pass);
+            }
+
+            let current = &middlewares[index];
+
+            let next: NextFn<'a> = Box::new(move |next_cx| {
+                run_chain(
+                    index + 1,
+                    middlewares,
+                    next_cx,
+                    depth + 1,
+                    max_depth,
+                    timeout,
+                    start_time,
+                )
+            });
+
+            let res = current.handle(cx, next);
+
+            if let Some(limit) = timeout {
+                if start_time.elapsed() >= limit && res.is_ok() {
+                    return Err(PipelineError::Timeout(limit));
+                }
+            }
+
+            res
+        }
+
+        run_chain(
+            0,
+            &matching,
+            cx,
+            0,
+            self.max_depth,
+            timeout_opt,
+            start_time,
+        )
     }
 }
 
