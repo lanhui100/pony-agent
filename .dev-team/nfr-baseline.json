@@ -24,5 +24,17 @@
   "retry": {
     "backoff_ms": 1000,
     "max_retries": 1
+  },
+  "pipeline_guardrails": {
+    "max_middleware_timeout_ms": 3000,
+    "max_recursion_depth": 16,
+    "zero_business_logic_in_contracts": true,
+    "fail_safe_on_panic": true,
+    "supported_decisions": [
+      "pass",
+      "block",
+      "mutate",
+      "approval_required"
+    ]
   }
 }

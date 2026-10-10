@@ -24,6 +24,7 @@ pub mod input;
 pub mod jobs;
 pub mod lsp;
 pub mod patch;
+pub mod pipeline;
 pub mod mcp_resources;
 pub mod orchestration;
 pub mod planner;
