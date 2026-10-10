@@ -428,3 +428,41 @@ fn test_l2_at03_adversarial_payload_tampering_integrity() {
         other => panic!("Expected InvalidMutation error, got {:?}", other),
     }
 }
+
+/// L2-AT-04: 对抗破坏注入——中间件显式错误阻断与传播 (Middleware Error Propagation)
+#[test]
+fn test_l2_at04_adversarial_middleware_error_propagation() {
+    struct FailingMiddleware;
+    impl PipelineMiddleware for FailingMiddleware {
+        fn name(&self) -> &str {
+            "failing_mw"
+        }
+        fn supported_phases(&self) -> &[PipelinePhase] {
+            &[PipelinePhase::TurnStart]
+        }
+        fn handle<'a>(
+            &self,
+            _cx: &'a mut PipelineContext,
+            _next: NextFn<'a>,
+        ) -> Result<InterceptDecision, PipelineError> {
+            Err(PipelineError::MiddlewareExecutionFailed {
+                name: "failing_mw".to_string(),
+                message: "deterministic failure injection".to_string(),
+            })
+        }
+    }
+
+    let mut pipeline = PipelineStub::new();
+    pipeline.use_middleware(Arc::new(FailingMiddleware));
+    let mut cx = PipelineContext::new("s_fail", "t_fail", PipelinePhase::TurnStart, json!({}));
+    let result = pipeline.execute(&mut cx);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        PipelineError::MiddlewareExecutionFailed { name, message } => {
+            assert_eq!(name, "failing_mw");
+            assert_eq!(message, "deterministic failure injection");
+        }
+        other => panic!("Expected MiddlewareExecutionFailed, got {:?}", other),
+    }
+}
+
