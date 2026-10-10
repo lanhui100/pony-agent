@@ -53,3 +53,22 @@
 1. **teammate 失效快速熔断阈值**：连续 2 轮"运行中无落盘产物"即触发降级评估（现行"连败 3 次"适用于测试失败，不适用于无产出型失效）。
 2. **Test-as-Contract 必须携带运行时形态样例**：冻结测试应包含一个"从真实代码路径捕获的事件样例"（如运行时短名 kind、真实 session_id 形态），防契约冻结在错误前提上。
 3. **L3 双视角审查高价值确认**：独立审查确实捕获了功能测试盲区外的生产失效，纳入 B 级任务的强制门禁。
+
+---
+
+# Wave 6 元框架复盘（2026-10-10：基础工具体系 CAS 守卫与错误自愈加固）
+
+> 交付：工具体系对标 DSH/Claude Code，落地 CAS 乐观写守卫与 Actionable Recovery Hint 自愈协议
+
+## 1. 通信拓扑与信噪比
+- 采用专家参谋逆向对抗（3 视角），杜绝繁复参数，最终收敛为轻量 `expectedHash`。
+
+## 2. 门禁穿透与误杀率
+- 契约与对抗测试：`write_file_cas_success_and_conflict_rebase_hint` 和 `edit_file_cas_guards_against_stale_modification` 均通过。
+- 真实机器物理收据：`cargo test -p pony-agent-core cas_` 运行结果 Exit Code 0。
+
+## 3. 分工契约与隔离有效性
+- 落盘 ADR-0026，NFR 基线增加 content_hash_cas 声明。旧写调用完全兼容无破损。
+
+## 4. 元协议迭代建议
+- 建议后续前端工具卡片对 `recoveryHint` 结构提供交互式快速重试支持。

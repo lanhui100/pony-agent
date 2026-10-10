@@ -1,7 +1,10 @@
 {
   "concurrency_lock": {
     "mechanism": "mutex",
-    "required": true
+    "required": true,
+    "strategy": "content_hash_cas",
+    "hash_algorithm": "sha256",
+    "atomic_swap": true
   },
   "external_call_timeout_ms": 3000,
   "logging": {

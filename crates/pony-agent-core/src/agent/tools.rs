@@ -94,7 +94,14 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
+use sha2::{Digest, Sha256};
 use url::Url;
+
+pub(crate) fn compute_content_sha256(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 const TOOL_TIME_NOW: &str = "time_now";
 const TOOL_ECHO_INPUT: &str = "echo_input";
@@ -1684,16 +1691,78 @@ impl ToolRouter {
         };
 
         let existed_before = target.exists();
-        if existed_before && !overwrite {
-            return error_result(
-                TOOL_WORKSPACE_WRITE_FILE,
-                "file_exists",
-                format!(
-                    "目标文件已存在：{}。",
-                    self.display_resolved_workspace_relative(&target, context, ws_id)
-                ),
-                Some("如需覆盖，请显式传入 {\"overwrite\": true}。".to_string()),
-            );
+        let expected_hash = call.arguments.get("expectedHash").or_else(|| call.arguments.get("expected_hash")).and_then(Value::as_str);
+
+        if existed_before {
+            if let Some(expected) = expected_hash {
+                let current_content = match fs::read_to_string(&target) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return error_result(
+                            TOOL_WORKSPACE_WRITE_FILE,
+                            "read_for_cas_failed",
+                            format!("无法读取现有文件以执行 CAS 校验：{}。", e),
+                            None,
+                        )
+                    }
+                };
+                let actual_hash = compute_content_sha256(&current_content);
+                if actual_hash != expected {
+                    return ToolResult {
+                        tool_name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+                        status: "error".to_string(),
+                        output: json_string(json!({
+                            "ok": false,
+                            "code": "cas_conflict",
+                            "message": "文件已被外部修改（CAS 校验失败）。",
+                            "details": {
+                                "path": self.display_resolved_workspace_relative(&target, context, ws_id),
+                                "expectedHash": expected,
+                                "actualHash": actual_hash,
+                                "recoveryHint": {
+                                    "action": "rebase_and_retry",
+                                    "instruction": "请先调用 workspace_read_file 重新拉取最新内容，在最新版本基础上重试写入。",
+                                    "nextSuggestedCall": {
+                                        "name": "workspace_read_file",
+                                        "arguments": { "path": self.display_resolved_workspace_relative(&target, context, ws_id) }
+                                    }
+                                }
+                            }
+                        })),
+                        duration_ms: 0,
+                    };
+                }
+            } else if !overwrite {
+                return error_result(
+                    TOOL_WORKSPACE_WRITE_FILE,
+                    "file_exists",
+                    format!(
+                        "目标文件已存在：{}。",
+                        self.display_resolved_workspace_relative(&target, context, ws_id)
+                    ),
+                    Some("如需覆盖，请显式传入 {\"overwrite\": true}。".to_string()),
+                );
+            }
+        } else if let Some(expected) = expected_hash {
+            return ToolResult {
+                tool_name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+                status: "error".to_string(),
+                output: json_string(json!({
+                    "ok": false,
+                    "code": "cas_conflict",
+                    "message": "CAS 校验指定了 expectedHash，但目标文件不存在。",
+                    "details": {
+                        "path": self.display_resolved_workspace_relative(&target, context, ws_id),
+                        "expectedHash": expected,
+                        "actualHash": null,
+                        "recoveryHint": {
+                            "action": "remove_hash_for_new_file",
+                            "instruction": "新建文件无需传入 expectedHash，请移除后重试。"
+                        }
+                    }
+                })),
+                duration_ms: 0,
+            };
         }
 
         if let Some(parent) = target.parent() {
@@ -1716,6 +1785,8 @@ impl ToolRouter {
             );
         }
 
+        let content_hash = compute_content_sha256(content);
+
         ToolResult {
             tool_name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
             status: "ok".to_string(),
@@ -1723,6 +1794,7 @@ impl ToolRouter {
                 "ok": true,
                 "path": self.display_resolved_workspace_relative(&target, context, ws_id),
                 "absolutePath": target.display().to_string(),
+                "contentHash": content_hash,
                 "bytesWritten": content.len(),
                 "overwroteExisting": existed_before,
                 "summary": {
@@ -1814,6 +1886,36 @@ impl ToolRouter {
             }
         };
 
+        let expected_hash = call.arguments.get("expectedHash").or_else(|| call.arguments.get("expected_hash")).and_then(Value::as_str);
+        if let Some(expected) = expected_hash {
+            let actual_hash = compute_content_sha256(&original);
+            if actual_hash != expected {
+                return ToolResult {
+                    tool_name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+                    status: "error".to_string(),
+                    output: json_string(json!({
+                        "ok": false,
+                        "code": "cas_conflict",
+                        "message": "文件已被外部修改（CAS 校验失败）。",
+                        "details": {
+                            "path": self.display_workspace_relative(&target),
+                            "expectedHash": expected,
+                            "actualHash": actual_hash,
+                            "recoveryHint": {
+                                "action": "rebase_and_retry",
+                                "instruction": "请先调用 workspace_read_file 重新拉取最新内容，在最新版本基础上重新计算 oldText 与 newText 后重试。",
+                                "nextSuggestedCall": {
+                                    "name": "workspace_read_file",
+                                    "arguments": { "path": self.display_workspace_relative(&target) }
+                                }
+                            }
+                        }
+                    })),
+                    duration_ms: 0,
+                };
+            }
+        }
+
         let match_count = original.matches(old_text).count();
         if match_count == 0 {
             return error_result(
@@ -1854,6 +1956,8 @@ impl ToolRouter {
             );
         }
 
+        let content_hash = compute_content_sha256(&updated);
+
         ToolResult {
             tool_name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
             status: "ok".to_string(),
@@ -1861,6 +1965,7 @@ impl ToolRouter {
                 "ok": true,
                 "path": self.display_workspace_relative(&target),
                 "absolutePath": target.display().to_string(),
+                "contentHash": content_hash,
                 "matchCount": match_count,
                 "replacedCount": if replace_all { match_count } else { 1 },
                 "replaceAll": replace_all,
@@ -2545,16 +2650,20 @@ impl ToolRouter {
         }
 
         match fs::read_to_string(&resolved) {
-            Ok(content) => ToolResult {
-                tool_name: TOOL_WORKSPACE_READ_FILE.to_string(),
-                status: "ok".to_string(),
-                output: format!(
-                    "文件 {} 读取成功。\n\n{}",
-                    self.display_resolved_workspace_relative(&resolved, context, ws_id),
-                    truncate_preview(&content, 4000)
-                ),
-                duration_ms: 0,
-            },
+            Ok(content) => {
+                let content_hash = compute_content_sha256(&content);
+                ToolResult {
+                    tool_name: TOOL_WORKSPACE_READ_FILE.to_string(),
+                    status: "ok".to_string(),
+                    output: format!(
+                        "文件 {} 读取成功 (content_hash: {})。\n\n{}",
+                        self.display_resolved_workspace_relative(&resolved, context, ws_id),
+                        content_hash,
+                        truncate_preview(&content, 4000)
+                    ),
+                    duration_ms: 0,
+                }
+            }
             Err(error) => error_result(
                 TOOL_WORKSPACE_READ_FILE,
                 "read_failed",
@@ -4630,6 +4739,10 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     "overwrite": {
                         "type": "boolean",
                         "description": "是否允许覆盖已存在文件，默认 true"
+                    },
+                    "expectedHash": {
+                        "type": "string",
+                        "description": "可选。CAS 乐观并发守卫：当前文件的预期 SHA-256 哈希值。若磁盘文件哈希不匹配，则拒绝写入并提供自愈指引。"
                     }
                 },
                 "required": ["path", "content"],
@@ -4657,6 +4770,10 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                     "replaceAll": {
                         "type": "boolean",
                         "description": "是否允许替换全部匹配，默认 false"
+                    },
+                    "expectedHash": {
+                        "type": "string",
+                        "description": "可选。CAS 乐观并发守卫：当前文件的预期 SHA-256 哈希值。若磁盘文件哈希不匹配，则拒绝编辑并提供自愈指引。"
                     }
                 },
                 "required": ["path", "oldText", "newText"],
@@ -8794,6 +8911,80 @@ mod tests {
             fs::read_to_string(workspace.join("demo.txt")).expect("read original"),
             "original"
         );
+    }
+
+    #[test]
+    fn write_file_cas_success_and_conflict_rebase_hint() {
+        let workspace = temp_workspace();
+        let demo = workspace.join("cas_demo.txt");
+        fs::write(&demo, "version 1").expect("write initial");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let initial_hash = compute_content_sha256("version 1");
+
+        // 1. 成功 CAS 写入
+        let res_ok = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+            arguments: json!({
+                "path": "cas_demo.txt",
+                "content": "version 2",
+                "expectedHash": initial_hash
+            }),
+            plan: None,
+        });
+        assert_eq!(res_ok.status, "ok");
+        let ok_payload = serde_json::from_str::<Value>(&res_ok.output).unwrap();
+        assert_eq!(ok_payload.get("ok").and_then(Value::as_bool), Some(true));
+        let new_hash = ok_payload.get("contentHash").and_then(Value::as_str).unwrap();
+        assert_eq!(new_hash, compute_content_sha256("version 2"));
+
+        // 2. 冲突对抗：使用陈旧 hash 再次写入，必须返回 cas_conflict 并提供自愈提示
+        let res_conflict = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_WRITE_FILE.to_string(),
+            arguments: json!({
+                "path": "cas_demo.txt",
+                "content": "version 3 - race",
+                "expectedHash": initial_hash
+            }),
+            plan: None,
+        });
+        assert_eq!(res_conflict.status, "error");
+        let conflict_payload = serde_json::from_str::<Value>(&res_conflict.output).unwrap();
+        assert_eq!(conflict_payload.get("code").and_then(Value::as_str), Some("cas_conflict"));
+        let details = conflict_payload.get("details").unwrap();
+        assert_eq!(details.get("actualHash").and_then(Value::as_str), Some(new_hash));
+        assert_eq!(details.get("recoveryHint").and_then(|h| h.get("action")).and_then(Value::as_str), Some("rebase_and_retry"));
+    }
+
+    #[test]
+    fn edit_file_cas_guards_against_stale_modification() {
+        let workspace = temp_workspace();
+        let demo = workspace.join("cas_edit.txt");
+        fs::write(&demo, "hello world").expect("write initial");
+        let router = ToolRouter::with_workspace_root(workspace.clone());
+
+        let initial_hash = compute_content_sha256("hello world");
+
+        // 模拟外部并发修改
+        fs::write(&demo, "hello universe").expect("external write");
+
+        let res = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_EDIT_FILE.to_string(),
+            arguments: json!({
+                "path": "cas_edit.txt",
+                "oldText": "hello",
+                "newText": "hi",
+                "expectedHash": initial_hash
+            }),
+            plan: None,
+        });
+        assert_eq!(res.status, "error");
+        let payload = serde_json::from_str::<Value>(&res.output).unwrap();
+        assert_eq!(payload.get("code").and_then(Value::as_str), Some("cas_conflict"));
+        assert_eq!(payload.get("details").and_then(|d| d.get("recoveryHint")).and_then(|h| h.get("action")).and_then(Value::as_str), Some("rebase_and_retry"));
     }
 
     #[test]
