@@ -1,37 +1,14 @@
 {
-  "wave": 5,
-  "status": "completed",
-  "baseline_commit": "13c564d",
-  "final_commit": "a912c9e",
-  "checkpoints": {
-    "red_anchor": "13c564d",
-    "green": "eed8ab9",
-    "closure": "a912c9e"
-  },
-  "ci": {
-    "result": "green",
-    "trace_auto_report_test": "4 passed",
-    "ponysentry_trace_test": "7 passed",
-    "ponysentry_telemetry_test": "7 passed",
-    "terminal_regression": "27 passed",
-    "core_check": "exit code 0"
-  },
-  "members": {
-    "lead": { "role": "lead", "tasks": ["task-15-assembly", "task-16"] },
-    "protocol-agent": { "role": "protocol", "tasks": ["task-14-attempted-failed"] },
-    "test-agent": { "role": "test", "tasks": ["task-14"] },
-    "executor": { "role": "executor", "tasks": ["task-15-attempted-failed"] }
-  },
-  "tasks": {
-    "task-14": { "subject": "红相契约冻结：Trace 自动上报纯函数与触发策略测试 (Test as Contract)", "status": "completed", "red_commit": "13c564d" },
-    "task-15": { "subject": "Lead Join Barrier 装配收口：补齐终态检查与挂载点接线", "status": "completed", "green_commit": "eed8ab9", "note": "executor/protocol-agent 连续失败，Lead 装配例外完成；L3 双视角审查 PASS 弥补分权" },
-    "task-16": { "subject": "L3 双视角靶向审查：Trace 自动上报接线", "status": "completed", "review_file": ".dev-team/review-trace-report.json", "verdict": "PASS" }
-  },
+  "wave": 7,
+  "status": "in_progress",
+  "task_classification": "B",
+  "reason": "涉及跨模块、跨语言(Rust Core + TS 前端)端到端全链路 EventBus 架构落地，命中事件流转与并发通道",
+  "baseline_commit": "76ef6d4",
+  "checkpoints": {},
   "nfr_compliance": {
     "external_call_timeout_ms": 3000,
     "max_queue_capacity": 1024,
     "sanitization_zero_trust": true,
-    "status": "verified"
-  },
-  "meta_retrospective": ".dev-team/meta-retrospective.md"
+    "status": "pending"
+  }
 }

@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NFRBaseline",
+  "type": "object",
+  "properties": {
+    "external_call_timeout_ms": {
+      "type": "integer",
+      "maximum": 3000
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "max_attempts": { "type": "integer" },
+        "backoff_cap_ms": { "type": "integer" }
+      },
+      "required": ["max_attempts", "backoff_cap_ms"],
+      "additionalProperties": false
+    },
+    "concurrency_lock": {
+      "type": "string"
+    },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "format": { "type": "string", "enum": ["json"] },
+        "trace_id_required": { "type": "boolean" }
+      },
+      "required": ["format", "trace_id_required"],
+      "additionalProperties": false
+    },
+    "resource_release": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "external_call_timeout_ms",
+    "retry",
+    "concurrency_lock",
+    "logging",
+    "resource_release"
+  ],
+  "additionalProperties": false
+}
