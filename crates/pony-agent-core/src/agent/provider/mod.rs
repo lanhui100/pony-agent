@@ -3528,17 +3528,6 @@ where
                     }
                     _ => {
                         let outcome = report(&budget, attempts_total, slept_ms, rl_active);
-                        crate::agent::ponysentry::capture_error(
-                            "ProviderRetryExhausted",
-                            &last_error,
-                            Some(serde_json::json!({
-                                "label": label,
-                                "attempts_total": attempts_total,
-                                "slept_ms": slept_ms,
-                                "failure": format!("{failure:?}"),
-                                "scope": format!("{scope:?}"),
-                            })),
-                        );
                         return (Err(last_error), outcome);
                     }
                 }
