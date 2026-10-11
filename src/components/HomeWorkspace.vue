@@ -9,7 +9,6 @@ import { extractErrorMessage } from "@/lib/error-utils";
 import { useTimelineAutoScroll } from "@/lib/useTimelineAutoScroll";
 import { useStreamingPresentationState } from "@/lib/useStreamingPresentationState";
 import { isSimpleTextContent } from "@/lib/markdown";
-import { isAskToolName } from "@/lib/runtime/ask-tools";
 
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import WorkspaceTurnItem, {
@@ -349,40 +348,19 @@ function toolMergeKey(tool: Pick<ChatMessage, "canonicalToolName" | "toolName" |
 }
 
 function mergeToolCalls(tools: ChatMessage[]): MergedToolCall[] {
-  const result: MergedToolCall[] = [];
-  for (const tool of tools) {
-    const last = result[result.length - 1];
-    const mergeKey = toolMergeKey(tool);
-    // PA-114: ask 行永不合并（每个 ask 调用独立成行，避免合并丢失 callId 导致卡片误绑定）。
-    if (
-      last &&
-      mergeKey &&
-      last.mergeKey === mergeKey &&
-      last.status !== "error" &&
-      !isAskToolName(tool.toolName ?? "")
-    ) {
-      last.description = extractToolDescription(tool);
-      last.status = tool.status ?? "done";
-      last.durationSeconds = tool.durationSeconds ?? null;
-      last.count++;
-      last.id = tool.id;
-    } else {
-      result.push({
-        id: tool.id,
-        toolName: tool.toolName ?? "",
-        canonicalToolName: tool.canonicalToolName ?? null,
-        displayNameZh: tool.displayNameZh ?? null,
-        mergeKey,
-        description: extractToolDescription(tool),
-        status: tool.status ?? "done",
-        durationSeconds: tool.durationSeconds ?? null,
-        count: 1,
-        callId: tool.callId ?? null,
-        argumentsText: tool.argumentsText ?? null
-      });
-    }
-  }
-  return result;
+  return tools.map((tool) => ({
+    id: tool.id,
+    toolName: tool.toolName ?? "",
+    canonicalToolName: tool.canonicalToolName ?? null,
+    displayNameZh: tool.displayNameZh ?? null,
+    mergeKey: toolMergeKey(tool),
+    description: extractToolDescription(tool),
+    status: tool.status ?? "done",
+    durationSeconds: tool.durationSeconds ?? null,
+    count: 1,
+    callId: tool.callId ?? null,
+    argumentsText: tool.argumentsText ?? null
+  }));
 }
 
 function messageIndexInTurn(message: ChatMessage | null) {
@@ -556,13 +534,16 @@ function currentModelHopContent(
   if (cumulativeContent.startsWith(completedPrefix)) {
     return cumulativeContent.slice(completedPrefix.length);
   }
+  if (cumulativeContent.length <= completedPrefix.length) {
+    return "";
+  }
   if (
     completeCumulativeContent.startsWith(completedPrefix) &&
     completedPrefix.startsWith(cumulativeContent)
   ) {
     return "";
   }
-  return cumulativeContent;
+  return cumulativeContent.slice(completedPrefix.length);
 }
 
 // 查找 content 以"从某 index 开始的连续拼接"为前缀的 index（与 findIndex + slice(index).join("")
@@ -675,7 +656,6 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
   const modelEntries = modelTraceEntries(turnTraceTimeline);
   const assistantOrder = messageIndexInTurn(turn.assistant);
   const modelOrder = modelEntry?.sequence ?? assistantOrder;
-  const isActiveStreamingTurn = runtimeStore.activeTurnId === turn.turnId && turn.assistant?.status === "pending";
   const toolTraceSequenceByMessageId = traceSequencesForToolMessages(turn.tools, turnTraceTimeline);
   const events: AgentTurnEvent[] = [];
 
@@ -686,7 +666,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       const reasoningContent = showReasoningContent.value
         ? modelEntryReasoningContent(turn, entry, modelEntries)
         : "";
-      if (reasoningContent) {
+      if (reasoningContent.trim()) {
         events.push({
           kind: "reasoning",
           key: modelEventKey("reasoning", turn.assistant, entry, entryIndex),
@@ -698,7 +678,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       }
 
       const content = modelEntryContent(turn, entry, modelEntries);
-      if (content && !shouldRenderAssistantAsError(turn)) {
+      if (content.trim() && !shouldRenderAssistantAsError(turn)) {
         events.push({
           kind: "content",
           key: modelEventKey("content", turn.assistant, entry, entryIndex),
@@ -711,31 +691,41 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       entryIndex++;
     }
   } else if (turn.assistant && shouldShowReasoningBlock(turn.assistant)) {
-    events.push({
-      kind: "reasoning",
-      key: `reasoning-${turn.assistant.id}`,
-      order: Number.isFinite(modelOrder) ? modelOrder - 0.2 : assistantOrder - 0.2,
-      assistant: turn.assistant,
-      reasoningContent: assistantDisplayedReasoning(turn.assistant).trim(),
-      streaming: isAssistantReasoningStreaming(turn.assistant)
-    });
+    const fallbackReasoning = assistantDisplayedReasoning(turn.assistant).trim();
+    if (fallbackReasoning) {
+      events.push({
+        kind: "reasoning",
+        key: `reasoning-${turn.assistant.id}`,
+        order: Number.isFinite(modelOrder) ? modelOrder - 0.2 : assistantOrder - 0.2,
+        assistant: turn.assistant,
+        reasoningContent: fallbackReasoning,
+        streaming: isAssistantReasoningStreaming(turn.assistant)
+      });
+    }
   }
 
-  for (const tool of turn.tools) {
+  for (let toolIdx = 0; toolIdx < turn.tools.length; toolIdx++) {
+    const tool = turn.tools[toolIdx]!;
     const traceSequence = toolTraceSequenceByMessageId.get(tool.id) ?? null;
-    const fallbackOrder = messageIndexInTurn(tool);
-    const normalizedFallbackOrder =
-      modelEntry && Number.isFinite(assistantOrder) && Number.isFinite(fallbackOrder)
-        ? modelOrder + (fallbackOrder - assistantOrder)
-        : fallbackOrder;
-    const streamFallbackOrder =
-      isActiveStreamingTurn && modelEntry
-        ? (tool.status === "pending" ? modelOrder + 0.1 : modelOrder - 0.1)
-        : normalizedFallbackOrder;
+    let toolOrder: number;
+
+    if (traceSequence != null) {
+      toolOrder = traceSequence + toolIdx * 0.001;
+    } else if (modelEntries.length > 0) {
+      if (toolIdx < modelEntries.length) {
+        toolOrder = modelEntries[toolIdx]!.sequence + 0.1 + toolIdx * 0.001;
+      } else {
+        toolOrder = (modelEntry?.sequence ?? assistantOrder) + 0.1 + toolIdx * 0.001;
+      }
+    } else {
+      const fallbackOrder = messageIndexInTurn(tool);
+      toolOrder = Number.isFinite(fallbackOrder) ? fallbackOrder : assistantOrder + 0.1 + toolIdx * 0.001;
+    }
+
     events.push({
       kind: "tools",
       key: `tools-${tool.id}`,
-      order: modelEntry ? traceSequence ?? streamFallbackOrder : fallbackOrder,
+      order: toolOrder,
       tools: mergeToolCalls([tool])
     });
   }
@@ -754,16 +744,19 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     assistantHasVisibleContent(turn.assistant) &&
     !shouldRenderAssistantAsError(turn)
   ) {
-    events.push({
-      kind: "content",
-      key: `content-${turn.assistant.id}`,
-      order: modelOrder,
-      assistant: turn.assistant,
-      content: shouldUseOptimizedAssistantStreaming(turn.assistant)
-        ? assistantDisplayContent(turn.assistant)
-        : turn.assistant.content,
-      streaming: isAssistantStreaming(turn.assistant)
-    });
+    const rawContent = shouldUseOptimizedAssistantStreaming(turn.assistant)
+      ? assistantDisplayContent(turn.assistant)
+      : turn.assistant.content;
+    if (rawContent.trim()) {
+      events.push({
+        kind: "content",
+        key: `content-${turn.assistant.id}`,
+        order: modelOrder,
+        assistant: turn.assistant,
+        content: rawContent,
+        streaming: isAssistantStreaming(turn.assistant)
+      });
+    }
   }
 
   if (shouldRenderAssistantAsError(turn) && assistantErrorDetail(turn)) {
@@ -781,49 +774,7 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
     return left.key.localeCompare(right.key);
   });
 
-  const mergedEvents: AgentTurnEvent[] = [];
-  for (const event of orderedEvents) {
-    const last = mergedEvents[mergedEvents.length - 1];
-    if (event.kind === "tools" && last?.kind === "tools") {
-      const tail = last.tools[last.tools.length - 1];
-      const head = event.tools[0];
-      if (tail && head && tail.mergeKey && tail.mergeKey === head.mergeKey && tail.status !== "error") {
-        tail.id = head.id;
-        tail.description = head.description;
-        tail.status = head.status;
-        tail.durationSeconds = head.durationSeconds;
-        tail.count += head.count;
-      } else {
-        last.tools.push(...event.tools);
-      }
-      continue;
-    }
-    if (event.kind === "reasoning" && last?.kind === "reasoning") {
-      const sep = last.reasoningContent.endsWith("\n\n")
-        ? ""
-        : last.reasoningContent.endsWith("\n")
-          ? "\n"
-          : "\n\n";
-      last.reasoningContent += sep + event.reasoningContent;
-      last.streaming = last.streaming || event.streaming;
-      continue;
-    }
-    // 合并 content 事件：多 hop 内容累积到同一个 content 事件中，
-    // 确保 key 始终为 content-${assistant.id}，避免 DOM 重建闪烁。
-    if (event.kind === "content" && last?.kind === "content") {
-      const sep = last.content.endsWith("\n\n")
-        ? ""
-        : last.content.endsWith("\n")
-          ? "\n"
-          : "\n\n";
-      last.content += sep + event.content;
-      last.streaming = last.streaming || event.streaming;
-      continue;
-    }
-    mergedEvents.push(event);
-  }
-
-  return mergedEvents;
+  return orderedEvents;
 }
 
 // 主对话渲染与 trace 渲染解耦：agentTurnEvents 的推导结果按 turn 缓存，

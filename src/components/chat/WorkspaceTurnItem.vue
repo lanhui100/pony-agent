@@ -491,7 +491,7 @@ const toolIconByCanonicalName: Record<string, any> = {
         <!-- Error detail panel (raw error for debugging) -->
         <details
           v-else-if="event.kind === 'error'"
-          class="conversation-disclosure conversation-error-panel mt-1 group"
+          class="conversation-disclosure conversation-error-panel group"
         >
           <summary class="conversation-disclosure-summary text-rose-700">
             <div class="flex min-w-0 items-center gap-2">
@@ -524,7 +524,7 @@ const toolIconByCanonicalName: Record<string, any> = {
 
       <div
         v-if="turn.assistant && !isAssistantStreaming(turn.assistant)"
-        class="agent-action-bar ml-auto mt-2 flex flex-wrap items-center justify-end gap-2"
+        class="agent-action-bar ml-auto flex flex-wrap items-center justify-end gap-2"
         data-testid="workspace-agent-actions"
       >
         <button
