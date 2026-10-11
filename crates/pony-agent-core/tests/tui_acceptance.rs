@@ -99,7 +99,7 @@ fn test_matching_commands_filter() {
 
     state.input_buffer = "/".to_string();
     let all = state.matching_commands();
-    assert_eq!(all.len(), 5);
+    assert_eq!(all.len(), 7);
 
     state.input_buffer = "/re".to_string();
     let re = state.matching_commands();
@@ -387,4 +387,122 @@ fn test_add_provider_data_flow_and_validation() {
     assert!(invalid_protocol.validate().is_err());
     assert_eq!(invalid_protocol.validate().unwrap_err(), "不支持的协议类型");
 }
+
+#[test]
+fn test_add_provider_step_state_machine() {
+    let mut state = TuiState::default();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+
+    // 1. 触发进入添加 Provider 流程
+    state.start_add_provider();
+    assert_eq!(state.mode, tui::InteractionMode::AddingProvider);
+    assert_eq!(state.add_provider_step, tui::AddingProviderStep::Name);
+    assert!(state.add_provider_form.name.is_empty());
+
+    // 2. Step 1: 输入 Name 并提交
+    state.add_provider_input("My Ollama");
+    let next_res = state.advance_add_provider_step();
+    assert!(next_res.is_ok());
+    assert_eq!(state.add_provider_step, tui::AddingProviderStep::BaseUrl);
+    assert_eq!(state.add_provider_form.name, "My Ollama");
+
+    // 校验：若此时在 BaseUrl 步骤输入空或非法 url 并尝试推进，应该报错且不前移状态
+    state.add_provider_input("");
+    let err_empty_url = state.advance_add_provider_step();
+    assert!(err_empty_url.is_err());
+    assert_eq!(state.add_provider_step, tui::AddingProviderStep::BaseUrl);
+
+    state.add_provider_input("ftp://invalid.com");
+    let err_invalid_url = state.advance_add_provider_step();
+    assert!(err_invalid_url.is_err());
+    assert_eq!(state.add_provider_step, tui::AddingProviderStep::BaseUrl);
+
+    // 3. Step 2: 输入合法 BaseUrl 并提交
+    state.add_provider_input("http://127.0.0.1:11434/v1");
+    let next_res2 = state.advance_add_provider_step();
+    assert!(next_res2.is_ok());
+    assert_eq!(state.add_provider_step, tui::AddingProviderStep::ApiKey);
+    assert_eq!(state.add_provider_form.base_url, "http://127.0.0.1:11434/v1");
+
+    // 4. Step 3: 输入 ApiKey (可选或支持输入) 并提交完成
+    state.add_provider_input("sk-test-ollama-key");
+    let commit_res = state.advance_add_provider_step();
+    assert!(commit_res.is_ok());
+    assert_eq!(state.add_provider_step, tui::AddingProviderStep::Commit);
+    assert_eq!(state.add_provider_form.api_key.as_deref(), Some("sk-test-ollama-key"));
+
+    // 5. 完成并提交表单 -> 恢复 Normal 模式并生成有效的 payload
+    let payload = state.finalize_add_provider();
+    assert!(payload.is_some());
+    let p = payload.unwrap();
+    assert_eq!(p.name, "My Ollama");
+    assert_eq!(p.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(p.api_key.as_deref(), Some("sk-test-ollama-key"));
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+
+    // 6. 测试中途取消 (Esc)
+    state.start_add_provider();
+    assert_eq!(state.mode, tui::InteractionMode::AddingProvider);
+    state.cancel_add_provider();
+    assert_eq!(state.mode, tui::InteractionMode::Normal);
+}
+
+#[test]
+fn test_add_provider_persistence_to_registry_store() {
+    let temp_dir = std::env::temp_dir().join(format!("pony-tui-test-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let providers_file = temp_dir.join("providers.json");
+
+    let store = pony_agent_core::agent::config::ProviderRegistryStore::with_path(&providers_file);
+
+    // 初始状态读取 view
+    let initial_view = store.load_view();
+    let initial_count = initial_view.providers.len();
+
+    // 构造新 provider
+    let new_provider_id = "test-custom-provider";
+    let new_provider = pony_agent_core::agent::config::ProviderConfigView {
+        id: new_provider_id.to_string(),
+        name: "Test Custom".to_string(),
+        protocol: pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions,
+        base_url: "http://localhost:8000/v1".to_string(),
+        auth_type: pony_agent_core::agent::provider::ProviderAuthType::Auto,
+        api_key_env_var: "TEST_CUSTOM_API_KEY".to_string(),
+        api_key_value: "sk-my-custom-key".to_string(),
+        api_key_present: true,
+        supported_protocols: vec![pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions],
+        endpoints: vec![],
+        models: vec![],
+        selected_model_id: None,
+    };
+
+    let mut updated_view = initial_view.clone();
+    updated_view.providers.push(new_provider);
+    updated_view.selected_provider_id = Some(new_provider_id.to_string());
+
+    // 保存到持久化存储
+    let save_res = store.save_view(updated_view);
+    assert!(save_res.is_ok());
+
+    // 验证物理文件已落地
+    assert!(providers_file.exists());
+
+    // 重新创建 store 实例以验证持久化回读
+    let reloaded_store = pony_agent_core::agent::config::ProviderRegistryStore::with_path(&providers_file);
+    let reloaded_view = reloaded_store.load_view();
+    assert_eq!(reloaded_view.providers.len(), initial_count + 1);
+    assert_eq!(reloaded_view.selected_provider_id.as_deref(), Some(new_provider_id));
+
+    let saved_provider = reloaded_view.providers.iter().find(|p| p.id == new_provider_id);
+    assert!(saved_provider.is_some());
+    let sp = saved_provider.unwrap();
+    assert_eq!(sp.name, "Test Custom");
+    assert_eq!(sp.base_url, "http://localhost:8000/v1");
+
+    // 验证密钥读取隔离与安全性
+    assert_eq!(reloaded_store.provider_api_key(Some(new_provider_id)).as_deref(), Some("sk-my-custom-key"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 
