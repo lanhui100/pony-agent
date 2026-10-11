@@ -523,7 +523,7 @@ onBeforeUnmount(() => {
   <div class="absolute bottom-0 left-0 right-0 z-30 px-4 py-3 sm:px-5 pointer-events-none">
     <div
       :ref="setComposerShellRef"
-      class="relative mx-auto w-full max-w-[38.4rem] rounded-[0.6rem] bg-white/76 px-4 py-3 shadow-[0_-4px_20px_-2px_rgba(60,40,20,0.06)] backdrop-blur-[8px]"
+      class="relative mx-auto w-full max-w-[46.4rem] rounded-[0.6rem] bg-white/76 px-4 py-3 shadow-[0_-4px_20px_-2px_rgba(60,40,20,0.06)] backdrop-blur-[8px]"
       data-testid="workspace-composer-shell"
       style="pointer-events: auto;"
     >

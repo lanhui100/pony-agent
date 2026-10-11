@@ -35,4 +35,26 @@ describe("AgentRuntimeStatusBar", () => {
     expect(wrapper.find('[data-testid="agent-runtime-status-label"]').text()).toBe("执行工具: bash...");
     expect(wrapper.find('[data-testid="agent-runtime-status-elapsed"]').exists()).toBe(false);
   });
+
+  it("removes background, border, and animate-pulse for a gentle, unobtrusive appearance", () => {
+    const status: AgentRuntimeStatus = {
+      mode: "connecting",
+      label: "准备就绪中...",
+      startTime: null,
+    };
+
+    const wrapper = mount(AgentRuntimeStatusBar, {
+      props: { status },
+    });
+
+    const bar = wrapper.find('[data-testid="agent-runtime-status-bar"]');
+    const classList = bar.classes();
+    // 验证去除背景与边框
+    const hasBackground = classList.some((c) => c.startsWith("bg-"));
+    const hasBorder = classList.some((c) => c === "border" || c.startsWith("border-"));
+    expect(hasBackground).toBe(false);
+    expect(hasBorder).toBe(false);
+    // 验证去除 animate-pulse
+    expect(classList).not.toContain("animate-pulse");
+  });
 });

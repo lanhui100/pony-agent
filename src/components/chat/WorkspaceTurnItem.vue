@@ -373,7 +373,7 @@ const toolIconByCanonicalName: Record<string, any> = {
             </div>
             <ChevronDown class="conversation-disclosure-chevron h-3.5 w-3.5 shrink-0 text-stone-400" />
           </summary>
-          <div class="mt-1 pl-5 whitespace-pre-wrap break-words text-[13px] leading-[1.4] text-stone-400">
+          <div class="conversation-reasoning-body mt-1.5 ml-1 border-l-2 border-stone-200/80 pl-3 whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-stone-500/90">
             <template v-if="event.reasoningContent">
               <span class="reasoning-italic">{{ event.streaming ? streamingReasoningStable(event.reasoningContent, event.assistant) : event.reasoningContent }}</span>
               <span
@@ -491,7 +491,7 @@ const toolIconByCanonicalName: Record<string, any> = {
         <!-- Error detail panel (raw error for debugging) -->
         <details
           v-else-if="event.kind === 'error'"
-          class="conversation-disclosure conversation-error-panel mt-3 group"
+          class="conversation-disclosure conversation-error-panel mt-1 group"
         >
           <summary class="conversation-disclosure-summary text-rose-700">
             <div class="flex min-w-0 items-center gap-2">
@@ -524,7 +524,7 @@ const toolIconByCanonicalName: Record<string, any> = {
 
       <div
         v-if="turn.assistant && !isAssistantStreaming(turn.assistant)"
-        class="agent-action-bar ml-auto mt-3 flex flex-wrap items-center justify-end gap-2"
+        class="agent-action-bar ml-auto mt-2 flex flex-wrap items-center justify-end gap-2"
         data-testid="workspace-agent-actions"
       >
         <button
@@ -565,12 +565,14 @@ const toolIconByCanonicalName: Record<string, any> = {
   color: #3d342d;
 }
 
-:deep(.assistant-markdown > :first-child) {
-  margin-top: 0;
+:deep(.assistant-markdown > :first-child),
+:deep(.assistant-markdown .markdown-body > :first-child) {
+  margin-top: 0 !important;
 }
 
-:deep(.assistant-markdown > :last-child) {
-  margin-bottom: 0;
+:deep(.assistant-markdown > :last-child),
+:deep(.assistant-markdown .markdown-body > :last-child) {
+  margin-bottom: 0 !important;
 }
 
 :deep(.assistant-markdown p) {
@@ -578,8 +580,13 @@ const toolIconByCanonicalName: Record<string, any> = {
   color: inherit;
 }
 
-:deep(.assistant-markdown p:last-child) {
-  margin-bottom: 0;
+:deep(.assistant-markdown p:last-child),
+:deep(.assistant-markdown pre:last-child),
+:deep(.assistant-markdown .table-scroll-wrapper:last-child),
+:deep(.assistant-markdown blockquote:last-child),
+:deep(.assistant-markdown ul:last-child),
+:deep(.assistant-markdown ol:last-child) {
+  margin-bottom: 0 !important;
 }
 
 :deep(.assistant-markdown h1),
@@ -993,7 +1000,7 @@ const toolIconByCanonicalName: Record<string, any> = {
 }
 
 .reasoning-italic {
-  font-style: italic !important;
+  font-style: normal;
 }
 
 .auto-copy-pill-position {

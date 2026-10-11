@@ -1089,7 +1089,7 @@ it.skip("skips the initial auto-scroll work for an empty workspace", async () =>
     expect(wrapper.get('[data-testid="workspace-content-column"]').classes()).toContain("max-w-[46.4rem]");
 
     const composerShell = wrapper.get('[data-testid="workspace-composer-shell"]');
-    expect(composerShell.classes()).toContain("max-w-[38.4rem]");
+    expect(composerShell.classes()).toContain("max-w-[46.4rem]");
     expect(composerShell.classes()).toContain("rounded-[0.6rem]");
     expect(composerShell.classes()).toContain("bg-white/76");
     expect(composerShell.classes()).not.toContain("border-t");

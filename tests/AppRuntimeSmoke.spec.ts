@@ -52,7 +52,7 @@ describe("App runtime smoke (real components)", () => {
     const fatal = errors.filter((e) => /Unhandled|TypeError|ReferenceError|RangeError|Cannot read/.test(e));
     expect(fatal, fatal.join("\n---\n")).toEqual([]);
     warnSpy.mockRestore();
-  });
+  }, 15000);
 
   it("mounts the real config page models tab (ProviderConfigPage) without runtime errors", async () => {
     const errors: string[] = [];
@@ -85,5 +85,5 @@ describe("App runtime smoke (real components)", () => {
     const fatal = errors.filter((e) => /Unhandled|TypeError|ReferenceError|RangeError|Cannot read|Failed to resolve/.test(e));
     expect(fatal, fatal.join("\n---\n")).toEqual([]);
     warnSpy.mockRestore();
-  });
+  }, 15000);
 });

@@ -90,7 +90,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="visibleAsks.length > 0" class="mx-auto w-full max-w-[38.4rem] px-4 pb-3 sm:px-5" data-testid="ask-panel">
+  <div v-if="visibleAsks.length > 0" class="mx-auto w-full max-w-[46.4rem] px-4 pb-3 sm:px-5" data-testid="ask-panel">
     <div class="space-y-2">
       <div
         v-for="ask in visibleAsks"

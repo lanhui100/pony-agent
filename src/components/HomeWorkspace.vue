@@ -799,14 +799,24 @@ function agentTurnEvents(turn: TurnBucket): AgentTurnEvent[] {
       continue;
     }
     if (event.kind === "reasoning" && last?.kind === "reasoning") {
-      last.reasoningContent += "\n\n" + event.reasoningContent;
+      const sep = last.reasoningContent.endsWith("\n\n")
+        ? ""
+        : last.reasoningContent.endsWith("\n")
+          ? "\n"
+          : "\n\n";
+      last.reasoningContent += sep + event.reasoningContent;
       last.streaming = last.streaming || event.streaming;
       continue;
     }
     // 合并 content 事件：多 hop 内容累积到同一个 content 事件中，
     // 确保 key 始终为 content-${assistant.id}，避免 DOM 重建闪烁。
     if (event.kind === "content" && last?.kind === "content") {
-      last.content += "\n\n" + event.content;
+      const sep = last.content.endsWith("\n\n")
+        ? ""
+        : last.content.endsWith("\n")
+          ? "\n"
+          : "\n\n";
+      last.content += sep + event.content;
       last.streaming = last.streaming || event.streaming;
       continue;
     }
@@ -965,6 +975,35 @@ function shouldShowAgentArticle(turn: TurnBucket) {
 function isAssistantStreaming(message: ChatMessage | null) {
   return message?.status === "pending";
 }
+
+const isAgentStreamingContent = computed(() => {
+  const latestTurn = visibleTurns.value[visibleTurns.value.length - 1];
+  if (!latestTurn || !latestTurn.assistant) {
+    return false;
+  }
+  const isActive =
+    (runtimeStore.activeTurnId?.trim() ? runtimeStore.activeTurnId.trim() === latestTurn.turnId : false) ||
+    latestTurn.assistant.status === "pending";
+  if (!isActive) {
+    return false;
+  }
+  if (!isAssistantStreaming(latestTurn.assistant)) {
+    return false;
+  }
+  const events = turnEventsByTurnId.value.get(latestTurn.turnId) ?? [];
+  const hasStreamingContentEvent = events.some((event) => event.kind === "content" && event.streaming);
+  return hasStreamingContentEvent || assistantHasVisibleContent(latestTurn.assistant);
+});
+
+const shouldShowAgentRuntimeStatus = computed(() => {
+  if (!agentRuntimeStatus.value) {
+    return false;
+  }
+  if (isAgentStreamingContent.value) {
+    return false;
+  }
+  return true;
+});
 
 function hasPendingAssistantPresentationWork() {
   return messages.value.some((message) =>
@@ -1655,9 +1694,11 @@ watch(
             :assistant-displayed-reasoning-fade-key="assistantDisplayedReasoningFadeKey"
           />
         </TransitionGroup>
-        <div v-if="agentRuntimeStatus" class="pt-2 pb-1" data-testid="workspace-runtime-status-slot">
-          <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
-        </div>
+        <Transition name="status-fade">
+          <div v-if="shouldShowAgentRuntimeStatus && agentRuntimeStatus" class="pt-2 pb-1" data-testid="workspace-runtime-status-slot">
+            <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
+          </div>
+        </Transition>
         <AskPanel />
         <div :style="{ height: COMPOSER_BUFFER_PX + 'px' }" aria-hidden="true"></div>
         <div ref="scrollAnchorRef" aria-hidden="true" class="pointer-events-none" style="height:0;width:0"></div>
@@ -1800,5 +1841,16 @@ watch(
   to {
     transform: rotate(-360deg);
   }
+}
+
+:deep(.status-fade-enter-active),
+:deep(.status-fade-leave-active) {
+  transition: opacity 240ms cubic-bezier(0.2, 0, 0.2, 1), transform 240ms cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+:deep(.status-fade-enter-from),
+:deep(.status-fade-leave-to) {
+  opacity: 0;
+  transform: translateY(2px);
 }
 </style>
