@@ -875,7 +875,7 @@ function confirmPopoverProps(
 
               <div
                 v-if="!isGroupCollapsed(group.key)"
-                class="space-y-0.5 -mr-1.5 pl-3"
+                class="space-y-0.5 -mr-1.5 pl-6"
                 :data-testid="`workspace-sessions-${group.key}`"
               >
                 <div

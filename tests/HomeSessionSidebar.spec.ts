@@ -385,6 +385,9 @@ describe("HomeSessionSidebar（三级树结构契约）", () => {
     expect(otherRow.attributes("class")).toContain("hover:bg-[#f6dfb8]");
     expect(otherRow.attributes("class")).not.toContain("bg-[#f6dfb8] text-stone-900");
 
+    const sessionsContainer = wrapper.get('[data-testid="workspace-sessions-ws-b"]');
+    expect(sessionsContainer.classes()).toContain("pl-6");
+
     wrapper.unmount();
   });
 
