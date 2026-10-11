@@ -320,6 +320,7 @@ fn worker_loop(config: PonySentryConfig, receiver: mpsc::Receiver<SentryEvent>) 
             return;
         }
     };
+    let _guard = rt.enter();
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))

@@ -1120,6 +1120,11 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 platform::apply_icons(app);
                 platform::apply_window_style(&window);
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                #[cfg(debug_assertions)]
+                window.open_devtools();
             }
             if let Err(e) = platform::setup_tray(app) {
                 eprintln!("[tray-warning] failed to setup tray icon: {e}");

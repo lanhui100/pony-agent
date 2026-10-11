@@ -115,11 +115,7 @@ pub fn apply_icons(app: &tauri::App) {
 pub fn apply_window_style(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
-        use window_vibrancy::{apply_acrylic, apply_blur};
-
-        if apply_acrylic(window, Some((20, 24, 34, 135))).is_err() {
-            let _ = apply_blur(window, Some((20, 24, 34, 120)));
-        }
+        let _ = window;
     }
 
     #[cfg(target_os = "macos")]
