@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $workspaceNormalized = [System.IO.Path]::GetFullPath($workspace)
@@ -58,6 +58,18 @@ try {
   Write-Warning "process scan skipped (Get-CimInstance unavailable in this context): $($_.Exception.Message)"
 }
 
+# 兜底：直接按进程名扫描 pony-agent，避免 WMI 在权限或提权边界下 CommandLine 为空导致漏杀
+Get-Process -Name "pony-agent" -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | ForEach-Object {
+  $launcherPids += $_.Id
+}
+
+# 兜底：清理属于当前应用 EBWebView 的残留 msedgewebview2 进程，防止 WebView2 锁定用户数据目录导致崩溃
+try {
+  Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*com.pony.agent*" } |
+    ForEach-Object { $launcherPids += $_.ProcessId }
+} catch {}
+
 foreach ($process in $processRows) {
   $launcherPids += $process.ProcessId
 }
@@ -76,16 +88,15 @@ Start-Sleep -Seconds 1
 # 上一个 tauri dev 退出后，Vite 进程可能残留并继续占用 4176 端口。
 # 命令行模式匹配会漏掉它（进程名是 node.exe，不包含 "tauri" 或 "npm run dev"），
 # 这里通过端口号直杀，保证 beforeDevCommand 中的 vite 能正常启动。
-$portPid = $null
-$portConn = Get-NetTCPConnection -LocalPort 4176 -ErrorAction SilentlyContinue
-if ($portConn -and $portConn.State -in @("Listen", "Established", "Bound")) {
-  $portPid = $portConn.OwningProcess
-}
-if ($portPid) {
-  $procName = (Get-Process -Id $portPid -ErrorAction SilentlyContinue).ProcessName
-  Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
-  Write-Host "[port] freed port 4176 (killed $procName PID $portPid)"
-}
+Get-NetTCPConnection -LocalPort 4176 -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object {
+    if ($_ -and $_ -ne $PID) {
+      $procName = (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName
+      Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+      Write-Host "[port] freed port 4176 (killed $procName PID $_)"
+    }
+  }
 
 # 编译调优（jobs / incremental / debug）统一由工作区 .cargo/config.toml 提供，
 # 这里不再重复设置，避免两处漂移。

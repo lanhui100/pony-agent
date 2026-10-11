@@ -538,22 +538,22 @@ const toolIconByCanonicalName: Record<string, any> = {
         </button>
       </div>
     </article>
-  </section>
 
-  <Teleport to="body">
-    <Transition name="auto-copy-pill-fade">
-      <div
-        v-if="autoCopyPill"
-        class="auto-copy-pill-position pointer-events-none fixed z-[200] flex items-center gap-1 rounded-full bg-stone-800/92 px-2.5 py-1 text-[11px] leading-none text-stone-50 shadow-lg backdrop-blur-sm"
-        :style="{ left: `${autoCopyPill.x}px`, top: `${autoCopyPill.y}px` }"
-        role="status"
-        data-testid="auto-copy-feedback"
-      >
-        <Check class="h-3 w-3" />
-        已复制
-      </div>
-    </Transition>
-  </Teleport>
+    <Teleport to="body">
+      <Transition name="auto-copy-pill-fade">
+        <div
+          v-if="autoCopyPill"
+          class="auto-copy-pill-position pointer-events-none fixed z-[200] flex items-center gap-1 rounded-full bg-stone-800/92 px-2.5 py-1 text-[11px] leading-none text-stone-50 shadow-lg backdrop-blur-sm"
+          :style="{ left: `${autoCopyPill.x}px`, top: `${autoCopyPill.y}px` }"
+          role="status"
+          data-testid="auto-copy-feedback"
+        >
+          <Check class="h-3 w-3" />
+          已复制
+        </div>
+      </Transition>
+    </Teleport>
+  </section>
 </template>
 
 <style scoped>
