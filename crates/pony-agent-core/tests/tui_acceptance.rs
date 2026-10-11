@@ -505,4 +505,72 @@ fn test_add_provider_persistence_to_registry_store() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn test_tui_runtime_mode_state_transitions() {
+    let mut state = TuiState::default();
+
+    // 1. 初始状态为 Ready
+    assert_eq!(state.runtime_mode, tui::RuntimeMode::Ready);
+    assert_eq!(state.runtime_status_display(), "Ready");
+
+    // 2. Turn 启动 -> Connecting ("准备就绪中...")
+    state.transition_runtime_mode(tui::RuntimeMode::Connecting);
+    assert_eq!(state.runtime_mode, tui::RuntimeMode::Connecting);
+    assert!(state.runtime_status_display().contains("准备就绪中"));
+
+    // 3. 流式输出 delta -> Responding ("正在回复...")
+    state.transition_runtime_mode(tui::RuntimeMode::Responding);
+    assert_eq!(state.runtime_mode, tui::RuntimeMode::Responding);
+    assert!(state.runtime_status_display().contains("正在回复"));
+
+    // 4. 工具启动 -> ExecutingTool ("执行工具: 读取文件 (Read)...")
+    state.transition_runtime_mode(tui::RuntimeMode::ExecutingTool("读取文件 (Read)".to_string()));
+    match &state.runtime_mode {
+        tui::RuntimeMode::ExecutingTool(tool_name) => {
+            assert_eq!(tool_name, "读取文件 (Read)");
+        }
+        _ => panic!("Expected ExecutingTool mode"),
+    }
+    assert!(state.runtime_status_display().contains("读取文件 (Read)"));
+
+    // 5. 工具执行结束 -> 回切为 Responding ("正在回复...")
+    state.transition_runtime_mode(tui::RuntimeMode::Responding);
+    assert_eq!(state.runtime_mode, tui::RuntimeMode::Responding);
+    assert!(state.runtime_status_display().contains("正在回复"));
+
+    // 6. Turn completed -> Completed ("完成")
+    state.transition_runtime_mode(tui::RuntimeMode::Completed);
+    assert_eq!(state.runtime_mode, tui::RuntimeMode::Completed);
+    assert!(state.runtime_status_display().contains("完成"));
+
+    // 7. Turn failed -> Failed ("失败: ...")
+    state.transition_runtime_mode(tui::RuntimeMode::Failed("网络超时".to_string()));
+    match &state.runtime_mode {
+        tui::RuntimeMode::Failed(reason) => {
+            assert_eq!(reason, "网络超时");
+        }
+        _ => panic!("Expected Failed mode"),
+    }
+    assert!(state.runtime_status_display().contains("失败"));
+    assert!(state.runtime_status_display().contains("网络超时"));
+
+    // 8. 模式测试：Thinking & WaitingApproval
+    state.transition_runtime_mode(tui::RuntimeMode::Thinking);
+    assert_eq!(state.runtime_mode, tui::RuntimeMode::Thinking);
+    assert!(state.runtime_status_display().contains("思考"));
+
+    state.transition_runtime_mode(tui::RuntimeMode::WaitingApproval);
+    assert_eq!(state.runtime_mode, tui::RuntimeMode::WaitingApproval);
+    assert!(state.runtime_status_display().contains("等待确认"));
+}
+
+#[test]
+fn test_elapsed_seconds_formatting() {
+    assert_eq!(tui::format_elapsed_seconds(0), "0.0s");
+    assert_eq!(tui::format_elapsed_seconds(500), "0.5s");
+    assert_eq!(tui::format_elapsed_seconds(1250), "1.2s");
+    assert_eq!(tui::format_elapsed_seconds(65400), "65.4s");
+}
+
+
 
